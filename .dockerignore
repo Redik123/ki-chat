@@ -1,5 +1,21 @@
+# Ce qui n'a rien à faire dans le contexte de build : soit c'est recompilé
+# (target), soit c'est un secret d'exploitation (data : comptes, clé TLS),
+# soit ça n'appartient qu'au poste de développement.
 target
 data
 data-test
 *.log
+*.err
+*.out
+.git
+.github
+.vs
+.idea
+.vscode
 .claude
+installer
+
+# La documentation ne change pas le binaire : l'écarter garde le contexte de
+# build identique d'un commit de README à l'autre, donc le cache intact.
+**/*.md
+

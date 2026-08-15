@@ -162,6 +162,57 @@ reverse proxy TLS devant ce port reste donc possible si tu tiens à des liens
 en `https://` avec un vrai domaine — mais c'est facultatif et sans effet sur
 le chat ni sur la voix, qui ne passent plus par HTTP du tout.
 
+## Installer le serveur (Docker / Portainer)
+
+Rien à compiler : l'image du serveur est construite et publiée par GitHub
+Actions ([`docker.yml`](.github/workflows/docker.yml)) à chaque poussée sur
+`main`, pour **amd64 et arm64** — un VPS ordinaire comme un Raspberry Pi
+tirent la même étiquette.
+
+```
+ghcr.io/redik123/ki-chat-server:latest
+```
+
+Trois gestes, dans Portainer : *Stacks* → *Add stack* → *Web editor*, coller
+[`deploy/docker-compose.yml`](deploy/docker-compose.yml), ajouter la variable
+`KI_TOKEN` (le code d'invitation), déployer. En ligne de commande :
+
+```bash
+docker run -d --name ki-chat --restart unless-stopped \
+  -e KI_TOKEN=ton_code_secret \
+  -p 9987:9987/udp -p 8080:8080/tcp \
+  -v ki-chat-data:/data \
+  ghcr.io/redik123/ki-chat-server:latest
+```
+
+**Le port qui compte est 9987/udp.** Depuis la migration QUIC, l'auth, le chat
+et la voix y passent tous : sans UDP ouvert de bout en bout, personne ne se
+connecte — ce n'est plus « le chat marche, le vocal non ». Le 8080/tcp ne sert
+qu'à télécharger les fichiers partagés.
+
+### Mises à jour depuis GitHub
+
+La chaîne part du dépôt et se termine sur l'hôte sans intervention :
+`git push` → le workflow construit l'image et la publie sur GHCR → le serveur
+la récupère. Trois façons de fermer la boucle, au choix :
+
+- **Watchtower**, livré dans le compose : il sonde le registre toutes les cinq
+  minutes et recrée le conteneur. Contrepartie assumée — il faut lui prêter la
+  socket Docker ;
+- **Portainer branché sur le dépôt** (stack de type *Repository* + *GitOps
+  updates*), qui ne demande aucune socket ;
+- **un webhook Portainer** appelé par le workflow, pour un déploiement
+  quelques secondes après le build plutôt qu'au prochain sondage.
+
+Le volume `/data` n'est jamais touché par une mise à jour : comptes,
+historique, fichiers partagés, identité du serveur et clé privée TLS lui
+survivent. `KI_VERSION=0.1.1` épingle une version si tu préfères décider
+toi-même quand bouger.
+
+Le détail — ouverture des ports chez un hébergeur, image privée sur GHCR,
+sauvegarde du volume, dépannage — est dans
+[`deploy/DEPLOY-DOCKER.md`](deploy/DEPLOY-DOCKER.md).
+
 ## Installer (côté joueur)
 
 Télécharger **`ki-chat-setup.exe`** depuis la [dernière

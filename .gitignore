@@ -10,6 +10,10 @@
 /installer/Output
 /installer/*.ico
 
+# Variables de la stack Docker : c'est là que vit le code d'invitation.
+# Le modèle versionné est deploy/stack.env.example.
+/deploy/.env
+
 # Journaux d'exécution
 *.log
 *.err

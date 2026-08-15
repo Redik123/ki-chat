@@ -1,0 +1,97 @@
+# Construit l'image du serveur et la publie sur le registre de conteneurs de
+# GitHub (GHCR). C'est cette image que tire Portainer : une fois la stack en
+# place, mettre le serveur à jour ne demande plus rien d'autre que pousser
+# sur `main` (ou poser un tag).
+#
+# Étiquettes produites :
+#   :latest        dernier commit de main
+#   :0.1.1 :0.1    tags v0.1.1 (semver, pour épingler une version)
+#   :sha-abc1234   n'importe quel commit, pour revenir en arrière au besoin
+
+name: docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Pas de filtre `paths` : sur une poussée de tag, GitHub l'évalue sur un diff
+# qui peut être vide, et la version n'aurait alors jamais son image. Un commit
+# qui ne touche pas au serveur ne coûte pourtant presque rien — la
+# documentation est écartée par .dockerignore, le contexte de build est donc
+# identique et le cache répond à la place du compilateur.
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+
+    # Le contexte `secrets` n'est pas lisible dans le `if` d'une étape : on le
+    # fait passer par l'environnement du job pour pouvoir tester sa présence.
+    env:
+      PORTAINER_WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR n'accepte que des noms en minuscules, là où un compte GitHub peut
+      # porter des majuscules : on ne devine pas, on convertit.
+      - name: Établir le nom de l'image
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-server" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculer étiquettes et métadonnées
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      # amd64 et arm64 : un VPS ordinaire comme un Raspberry Pi ou un serveur
+      # ARM (souvent moins cher) tirent la même étiquette. La compilation est
+      # croisée dans le Dockerfile, pas émulée : pas de QEMU ici.
+      - name: Construire et publier
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Facultatif : prévenir Portainer tout de suite au lieu d'attendre son
+      # prochain sondage. Crée un webhook sur la stack (Portainer → Stack →
+      # Webhook), range l'URL dans le secret PORTAINER_WEBHOOK, et le
+      # déploiement suit la publication de quelques secondes.
+      - name: Notifier Portainer
+        if: ${{ env.PORTAINER_WEBHOOK != '' }}
+        run: curl -fsS -X POST "$PORTAINER_WEBHOOK"
+
+      - name: Récapitulatif
+        run: |
+          {
+            echo "### Image publiée"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

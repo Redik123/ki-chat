@@ -45,18 +45,22 @@ sur le seul port 9987/udp, déjà chiffré — aucun reverse proxy nécessaire.
 
 ## Route B — Docker
 
-Le `Dockerfile` fourni construit une image autonome :
+Plus rien à compiler : l'image est publiée par GitHub Actions à chaque
+poussée sur `main`, en amd64 et arm64.
 
 ```bash
-docker build -t ki-chat-server -f deploy/Dockerfile .
-docker run -d --name ki-chat \
+docker run -d --name ki-chat --restart unless-stopped \
   -e KI_TOKEN=ton_code_secret \
-  -p 8080:8080/tcp -p 9987:9987/udp \
-  -v ki-chat-data:/data ki-chat-server
+  -p 9987:9987/udp -p 8080:8080/tcp \
+  -v ki-chat-data:/data \
+  ghcr.io/redik123/ki-chat-server:latest
 ```
 
-Sur Jelastic : pousse l'image sur un registre (Docker Hub), crée un nœud
-Docker depuis l'image, attache l'IP publique, mappe les deux ports.
+Sur Jelastic : crée un nœud Docker depuis cette image, attache l'IP publique,
+mappe les deux ports — l'UDP reste la condition, comme au-dessus.
+
+Le guide complet (stack Portainer, mises à jour automatiques depuis GitHub,
+sauvegarde du volume) est dans [`DEPLOY-DOCKER.md`](DEPLOY-DOCKER.md).
 
 ## TLS
 

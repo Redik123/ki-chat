@@ -1,19 +1,60 @@
-# Stack Portainer / docker compose pour ki-chat.
-# Construis d'abord l'image sur l'hôte (ou pousse-la sur ton registre) :
-#   docker build -t ki-chat-server -f deploy/Dockerfile .
+# Stack ki-chat pour Portainer (ou `docker compose up -d`).
+#
+# Rien à compiler : l'image est construite et publiée par GitHub Actions à
+# chaque poussée sur `main`. Coller ce fichier dans Portainer → Stacks →
+# Add stack → Web editor, définir KI_TOKEN dans les variables, déployer.
+#
+# Guide complet, y compris les trois façons de recevoir les mises à jour :
+# deploy/DEPLOY-DOCKER.md
+
 services:
   ki-chat:
-    image: ki-chat-server:latest
+    image: ghcr.io/redik123/ki-chat-server:${KI_VERSION:-latest}
     container_name: ki-chat
     restart: unless-stopped
+
     environment:
-      # Code d'invitation (création de comptes) — change-le !
-      KI_TOKEN: change_moi_vraiment
+      # Code d'invitation : il suffit à créer un compte sur ton serveur.
+      # Le `:?` fait échouer le déploiement s'il n'est pas défini — mieux vaut
+      # une stack qui refuse de démarrer qu'un serveur ouvert à « changeme ».
+      KI_TOKEN: ${KI_TOKEN:?définis un code d invitation dans les variables de la stack}
+      # Verbosité : info par défaut, `debug` pour enquêter.
+      RUST_LOG: ${RUST_LOG:-info}
+
     ports:
-      - "8080:8080/tcp"   # HTTP : téléchargement des fichiers partagés
-      - "9987:9987/udp"   # voix (chiffrée applicativement)
+      # QUIC : authentification, chat ET voix. C'est le port qui compte —
+      # sans UDP ouvert de bout en bout, personne ne se connecte.
+      - "${KI_UDP_PORT:-9987}:9987/udp"
+      # HTTP : téléchargement des fichiers partagés, rien d'autre.
+      - "${KI_HTTP_PORT:-8080}:8080/tcp"
+
     volumes:
-      - ki-chat-data:/data   # comptes, historique, fichiers partagés
+      # Comptes (hachages Argon2id), historique, fichiers partagés, identité
+      # du serveur et clé privée TLS. Volume nommé plutôt que montage d'un
+      # dossier de l'hôte : le conteneur tourne en utilisateur 10001, et un
+      # dossier hôte appartenant à root le ferait échouer à l'écriture.
+      - ki-chat-data:/data
+
+    labels:
+      # Seuls les conteneurs portant ce label sont mis à jour par Watchtower.
+      com.centurylinklabs.watchtower.enable: "true"
+
+  # Mise à jour automatique : Watchtower interroge GHCR toutes les 5 minutes,
+  # et dès qu'une nouvelle image existe il l'installe et recrée le conteneur
+  # (le volume, lui, ne bouge pas). Contrepartie assumée : il faut lui prêter
+  # la socket Docker, ce qui équivaut à un accès root sur l'hôte. Si tu
+  # préfères déclencher les mises à jour toi-même, supprime ce service — les
+  # deux autres routes du guide ne demandent pas la socket.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: ki-chat-watchtower
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"    # ne touche qu'à ki-chat
+      WATCHTOWER_CLEANUP: "true"         # jette l'ancienne image
+      WATCHTOWER_POLL_INTERVAL: "300"    # 5 minutes
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   ki-chat-data:

@@ -44,11 +44,18 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState::new(token, &data_dir)?);
 
     // Transport QUIC : contrôle + voix sur une seule connexion chiffrée.
+    // Sans lui il ne reste qu'un serveur de fichiers : ni chat, ni voix, ni
+    // authentification. On s'arrête donc au lieu de survivre à moitié — sous
+    // systemd comme sous Docker, c'est ce qui déclenche le redémarrage (et ce
+    // qui évite un conteneur « healthy » où plus personne ne peut se
+    // connecter).
     let quic_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = quic::run(quic_state, udp_port).await {
-            tracing::error!("transport QUIC arrêté : {e:#}");
+        match quic::run(quic_state, udp_port).await {
+            Ok(()) => tracing::error!("transport QUIC terminé sans erreur — arrêt"),
+            Err(e) => tracing::error!("transport QUIC arrêté : {e:#}"),
         }
+        std::process::exit(1);
     });
 
     // HTTP : uniquement le partage de fichiers (les liens du chat doivent
