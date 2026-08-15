@@ -1,12 +1,13 @@
-//! Protocole partagé ki-chat : messages de contrôle (WebSocket, JSON)
-//! et format des paquets voix (UDP, binaire).
+//! Protocole partagé ki-chat : messages de contrôle (JSON, une ligne par
+//! message sur le flux QUIC fiable) et format des paquets voix (datagrammes
+//! QUIC, binaire).
 
 use serde::{Deserialize, Serialize};
 
 pub type UserId = u64;
 pub type ChannelId = u32;
 
-/// Messages envoyés par le client au serveur (WebSocket, JSON).
+/// Messages envoyés par le client au serveur (flux de contrôle, JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -72,7 +73,7 @@ pub enum ClientMsg {
     Ping,
 }
 
-/// Messages envoyés par le serveur au client (WebSocket, JSON).
+/// Messages envoyés par le serveur au client (flux de contrôle, JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
@@ -82,7 +83,8 @@ pub enum ServerMsg {
         voice_token: u64,
         udp_port: u16,
         /// Clé de chiffrement voix de la session (32 octets, hex).
-        /// Distribuée via le WebSocket — d'où l'intérêt du WSS en prod.
+        /// Distribuée sur le flux de contrôle, lui-même dans le tunnel
+        /// TLS 1.3 de QUIC.
         voice_key: String,
         /// Vrai si ce compte a le rôle admin.
         #[serde(default)]

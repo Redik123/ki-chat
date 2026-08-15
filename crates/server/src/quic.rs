@@ -359,7 +359,7 @@ fn load_or_create_cert(
 }
 
 // ---------------------------------------------------------------------------
-// Logique métier (identique à l'ancien transport WebSocket)
+// Logique métier, indépendante du transport
 // ---------------------------------------------------------------------------
 
 fn current_channel(state: &Arc<AppState>, user_id: UserId) -> Option<ki_protocol::ChannelId> {

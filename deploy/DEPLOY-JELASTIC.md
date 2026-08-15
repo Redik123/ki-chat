@@ -14,7 +14,7 @@ Ports à ouvrir (firewall Jelastic du nœud) :
 |------|-----------|------|
 | 9987 | UDP | QUIC : contrôle + voix, TLS 1.3 natif |
 | 8080 | TCP | HTTP : partage de fichiers uniquement |
-| 443  | TCP | optionnel, Caddy devant le 8080 pour des liens https |
+| 443  | TCP | optionnel, reverse proxy devant le 8080 pour des liens https |
 
 Depuis la migration QUIC, tout le trafic temps réel (auth, chat, voix) passe
 sur le seul port 9987/udp, déjà chiffré — aucun reverse proxy nécessaire.
@@ -58,19 +58,22 @@ docker run -d --name ki-chat \
 Sur Jelastic : pousse l'image sur un registre (Docker Hub), crée un nœud
 Docker depuis l'image, attache l'IP publique, mappe les deux ports.
 
-## TLS (optionnel mais recommandé)
+## TLS
 
-Avec un domaine pointé sur l'IP publique, mets Caddy devant le port 8080 :
+**Rien à faire.** Le chat et la voix passent tous deux par QUIC sur le port
+9987/udp, dans un tunnel TLS 1.3 dont le certificat auto-signé est généré au
+premier démarrage et conservé dans `data/`. Pas d'autorité de certification à
+solliciter, pas de reverse proxy à maintenir, pas de renouvellement.
 
-```
-ki.tondomaine.fr {
-    reverse_proxy 127.0.0.1:8080
-}
-```
+Les clients se connectent avec l'adresse du serveur (`hôte` ou `hôte:port`).
+Ils ne vérifient pas la chaîne du certificat — c'est un serveur privé — mais
+le transport reste chiffré contre l'écoute passive, et la voix porte en plus
+son propre chiffrement de bout en bout, que le serveur ne peut pas défaire.
 
-Les clients se connectent alors en `wss://ki.tondomaine.fr/ws`. Le port UDP
-9987 reste exposé en direct : la voix est déjà chiffrée (XChaCha20-Poly1305)
-et le serveur ne peut pas la déchiffrer.
+Seul le **port HTTP 8080** reste en clair : il ne sert qu'à télécharger les
+fichiers partagés, pour que les liens s'ouvrent dans un navigateur. Si tu
+veux des liens en `https://` avec un vrai domaine, un reverse proxy devant ce
+port suffit — sans effet sur le chat ni sur la voix.
 
 ## Côté clients (tes potes)
 

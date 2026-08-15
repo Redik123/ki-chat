@@ -10,7 +10,7 @@ services:
       # Code d'invitation (création de comptes) — change-le !
       KI_TOKEN: change_moi_vraiment
     ports:
-      - "8080:8080/tcp"   # WebSocket : chat, auth, fichiers
+      - "8080:8080/tcp"   # HTTP : téléchargement des fichiers partagés
       - "9987:9987/udp"   # voix (chiffrée applicativement)
     volumes:
       - ki-chat-data:/data   # comptes, historique, fichiers partagés

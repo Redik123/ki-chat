@@ -1,9 +1,10 @@
-//! ki-server : serveur ki-chat (chat texte WebSocket + relais vocal UDP).
+//! ki-server : serveur ki-chat (contrôle + relais vocal sur QUIC, partage
+//! de fichiers en HTTP).
 //!
 //! Configuration par variables d'environnement :
 //!   KI_TOKEN     jeton d'accès partagé (obligatoire en prod)
-//!   KI_HTTP_PORT port HTTP/WebSocket   (défaut 8080)
-//!   KI_UDP_PORT  port UDP voix         (défaut 9987)
+//!   KI_HTTP_PORT port HTTP (partage de fichiers, défaut 8080)
+//!   KI_UDP_PORT  port QUIC (contrôle + voix, défaut 9987)
 //!   KI_DATA_DIR  dossier de persistance (défaut ./data)
 
 mod accounts;

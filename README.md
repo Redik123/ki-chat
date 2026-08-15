@@ -58,17 +58,19 @@ reste fermé tant qu'on n'y est pas entré. La liste de droite montre **tout le
 monde sur le serveur**, avec le salon vocal occupé par chacun ; les occupants
 d'un vocal apparaissent aussi sous son intitulé, à gauche.
 
-**Chat texte** : WebSocket + JSON. Historique persisté en JSONL (un fichier
+**Chat texte** : JSON ligne à ligne sur le flux QUIC fiable. Historique
+persisté en JSONL (un fichier
 par salon textuel, les 1000 derniers messages en mémoire).
 
-**Voix** : protocole UDP maison (voir `protocol/src/lib.rs`). Le client encode
+**Voix** : format de paquet maison (voir `protocol/src/lib.rs`), transporté
+en datagrammes QUIC. Le client encode
 en Opus et envoie des trames de 20 ms. Le serveur ne décode (ni ne déchiffre)
 jamais : il authentifie le paquet par jeton, réécrit l'en-tête et relaie la
 trame aux autres membres du salon (mode SFU). C'est l'approche
 Mumble/TeamSpeak, pas la lourdeur WebRTC.
 
 **Relais optimisé** : le relais tourne sur un **thread système dédié** (jamais
-en concurrence avec le trafic WebSocket), route via une **table précalculée**
+en concurrence avec le trafic de contrôle), route via une **table précalculée**
 mise à jour aux join/leave (une seule lecture partagée par paquet), avec
 buffers socket de 1 Mo et **marquage DSCP EF** (les routeurs DiffServ
 priorisent la voix — appliqué aussi côté client). Le serveur mesure en plus
@@ -154,8 +156,11 @@ L'ancienne limite « jeton voix en clair dans l'en-tête UDP » a disparu avec
 le transport : un datagramme n'est accepté que sur la connexion authentifiée
 de son émetteur.
 
-Optionnel : un reverse proxy TLS (Caddy) devant le port HTTP 8080 si tu veux
-des liens de fichiers en `https://` avec un vrai domaine.
+Le seul morceau resté en clair est le **port HTTP 8080**, qui ne sert qu'au
+partage de fichiers (pour que les liens s'ouvrent dans un navigateur). Un
+reverse proxy TLS devant ce port reste donc possible si tu tiens à des liens
+en `https://` avec un vrai domaine — mais c'est facultatif et sans effet sur
+le chat ni sur la voix, qui ne passent plus par HTTP du tout.
 
 ## Lancer
 
@@ -272,7 +277,8 @@ Coûts réels pour ~30 personnes :
 - VPS 2 vCPU / 4 Go (Hetzner CX22, OVH, Contabo…) : **~5–8 €/mois** — très
   largement suffisant, le serveur ne décode pas l'audio.
 - Nom de domaine : ~10 €/an (optionnel, une IP suffit pour un serveur privé).
-- TLS : 0 € (Let's Encrypt via reverse proxy caddy/nginx).
+- TLS : 0 € — QUIC apporte son propre TLS 1.3 avec un certificat auto-signé
+  généré au premier démarrage. Ni autorité de certification, ni reverse proxy.
 - Auto-hébergement à la maison : 0 €/mois (prévoir ouverture de ports).
 
 ## Feuille de route
@@ -280,7 +286,7 @@ Coûts réels pour ~30 personnes :
 - [x] **M0** — fondations : protocole, serveur chat WS, relais vocal UDP, client CLI
 - [x] **M1** — client audio : capture/lecture (cpal), encodage Opus, jitter buffer, toggle micro
 - [x] **M2** — interface graphique egui : connexion mémorisée, salons, chat, présence, indicateurs "qui parle", push-to-talk global à touche configurable, niveau micro
-- [x] **M3** — sécurité : comptes Argon2id sur invitation, voix chiffrée XChaCha20-Poly1305, support WSS (déploiement Caddy documenté)
+- [x] **M3** — sécurité : comptes Argon2id sur invitation, voix chiffrée XChaCha20-Poly1305, WebSocket sécurisé derrière un reverse proxy *(rendu caduc par M5 : QUIC apporte son propre TLS)*
 - [x] **M4** — confort : suppression de bruit RNNoise (activable à chaud), choix des périphériques audio dans l'appli, rôles (1er compte = admin, expulsion au clic droit), partage de fichiers (25 Mo max, liens cliquables)
 - [x] **M4.5** — panneau admin : codes d'invitation à usage unique, réinitialisation de mot de passe, blocage/déblocage de comptes
 - [x] **M4.6** — mon compte (changement de son propre mdp) + volume par utilisateur (clic droit, mémorisé par compte côté client)
