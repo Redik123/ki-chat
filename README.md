@@ -162,6 +162,69 @@ reverse proxy TLS devant ce port reste donc possible si tu tiens à des liens
 en `https://` avec un vrai domaine — mais c'est facultatif et sans effet sur
 le chat ni sur la voix, qui ne passent plus par HTTP du tout.
 
+## Installer (côté joueur)
+
+Télécharger **`ki-chat-setup.exe`** depuis la [dernière
+release](https://github.com/Redik123/ki-chat/releases/latest) et le
+double-cliquer. C'est tout : ni compilateur, ni redistribuable, ni droits
+d'administrateur.
+
+**Rien à installer à côté.** L'exécutable est lié à la bibliothèque C
+statiquement : il ne réclame que des DLL livrées avec Windows. Pas de
+« Visual C++ Redistributable » à pousser, donc pas de poste où l'application
+refuse de démarrer sur un composant manquant. Le workflow de publication le
+vérifie à chaque release (`dumpbin -dependents`) plutôt que de l'espérer.
+
+**L'installation vit dans le profil de l'utilisateur**
+(`%LOCALAPPDATA%\Programs\ki-chat`), pas dans `Program Files`. Ce n'est pas
+un détail : c'est ce qui donne à l'application le droit d'écrire dans son
+propre dossier, donc de se mettre à jour toute seule. Posée dans
+`Program Files`, chaque mise à jour réclamerait un UAC — autant dire qu'elle
+n'aurait jamais lieu.
+
+> Le binaire n'est pas signé (un certificat coûte quelques centaines d'euros
+> par an). Au premier lancement, SmartScreen affiche « Windows a protégé
+> votre ordinateur » : *Informations complémentaires* → *Exécuter quand
+> même*. L'avertissement disparaît de lui-même à mesure que le fichier
+> circule.
+
+### Mise à jour automatique
+
+Au démarrage, le client demande à GitHub la dernière release publiée et
+compare son étiquette à sa propre version. S'il y a plus récent, il le
+**propose** — et ne touche à rien tant que personne n'a accepté. Un refus
+vaut pour cette version : on ne redemande qu'à la suivante, pour que « non »
+veuille dire non plutôt que « pas cette fois ». Accepté, il télécharge,
+remplace son binaire et redémarre seul.
+
+Le remplacement à chaud repose sur une propriété de Windows : on ne peut pas
+*supprimer* un exécutable chargé, mais on peut le *renommer*. L'ancien est
+donc écarté sous un autre nom, le nouveau prend sa place, et le résidu est
+balayé au démarrage suivant — moment où il n'est plus chargé. Un
+téléchargement tronqué (connexion coupée) est rejeté sur sa taille au lieu
+d'être installé : mieux vaut pas de mise à jour qu'un binaire à moitié écrit.
+
+La vérification part sur un fil séparé et ne retarde pas l'ouverture de la
+fenêtre ; sans réseau, elle échoue en silence.
+
+### Publier une version
+
+1. Monter `version` dans le `Cargo.toml` de la racine ;
+2. `git tag v0.2.0 && git push --tags`.
+
+Le workflow [`release.yml`](.github/workflows/release.yml) compile, fabrique
+l'installeur (Inno Setup) et publie `ki-chat.exe` + `ki-chat-setup.exe` sur la
+release. Il **refuse de publier si le tag et le `Cargo.toml` divergent** : un
+client à jour comparerait alors sa version à une étiquette plus haute et se
+croirait perpétuellement en retard, à proposer en boucle une mise à jour déjà
+installée.
+
+L'icône de l'application n'est pas un fichier du dépôt : elle est rendue par
+[`build.rs`](crates/client-gui/build.rs) aux sept tailles que réclame le shell,
+avec le code qui dessine déjà l'icône de fenêtre
+([`appicon.rs`](crates/client-gui/src/appicon.rs)). Un seul dessin, rien à
+régénérer à la main.
+
 ## Lancer
 
 ```bash
@@ -255,6 +318,10 @@ parler, `/stats` pour les statistiques voix, `/quit` pour sortir.
 > (le générateur suit le compilateur le plus récent installé) et fixe
 > `CMAKE_POLICY_VERSION_MINIMUM=3.5` pour la compatibilité cmake 4.x.
 > Rien à configurer : `cargo build` suffit, dans n'importe quel terminal.
+> Le chemin n'est volontairement pas `force`é : une variable `CMAKE` déjà
+> posée dans l'environnement l'emporte, ce qui laisse l'intégration continue
+> — où Visual Studio n'est ni au même endroit ni de la même année — utiliser
+> le sien sans qu'un fichier taillé pour une machine précise lui mente.
 
 Variables d'environnement du serveur :
 
@@ -301,4 +368,5 @@ Coûts réels pour ~30 personnes :
 - [x] **M6.4** — photos de profil : chacun choisit la sienne depuis « Mon compte », le serveur la range dans le compte (`data/users.json`) et la diffuse ; la liste des membres ne porte qu'une empreinte, le client ne réclame que les vignettes qui lui manquent
 - [x] **M6.3** — mots de passe mémorisés scellés par le coffre natif (DPAPI sur Windows), derrière une abstraction prête pour le Trousseau macOS/iOS et le Keystore Android ; les anciens mots de passe en clair sont chiffrés au chargement et effacés du fichier
 - [x] **M6.2** — identité de serveur : nom + logo persistés côté serveur (`data/server.json`), réglés par les admins et poussés à tous les membres ; vignette PNG 64×64 aux coins arrondis, monogramme coloré à défaut. Côté client, seul un **alias local** est modifiable — le logo ne l'est pas, pour qu'un serveur ne puisse pas en imiter un autre
+- [x] **M7** — livraison Windows : exécutable autonome (CRT statique, aucune dépendance à installer), icône et manifeste gravés dans le binaire, installeur Inno Setup sans droits d'administrateur, mise à jour automatique depuis les releases GitHub (proposée, jamais imposée), workflow de publication sur tag
 - [ ] **M5** — idées : overlay en jeu, chiffrement de l'en-tête voix, aperçu d'images dans le chat, plusieurs serveurs dans l'appli

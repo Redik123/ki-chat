@@ -1,0 +1,125 @@
+# Compile l'application de bureau et publie la release Windows.
+#
+# C'est cette release que le client interroge au démarrage : il télécharge
+# l'actif nommé exactement `ki-chat.exe` et compare l'étiquette du tag à la
+# version gravée dans son binaire. Les deux doivent donc coïncider, sans quoi
+# un client à jour se croirait indéfiniment en retard — d'où le contrôle qui
+# ouvre le travail.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Permet de vérifier que la chaîne complète compile sans rien publier.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Cible explicite : les scripts de compilation restent liés dynamiquement,
+  # seul l'exécutable livré prend la bibliothèque C en statique.
+  TARGET: x86_64-pc-windows-msvc
+  # `.cargo/config.toml` pointe vers le cmake d'une machine précise ; sans
+  # `force` de son côté, celui d'ici l'emporte.
+  CMAKE: cmake
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Établir la version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          $tagged = "${{ github.ref }}".StartsWith("refs/tags/")
+          if ($tagged) {
+            $tag = "${{ github.ref_name }}" -replace '^v', ''
+            if ($tag -ne $manifest) {
+              Write-Error "tag $tag mais Cargo.toml en $manifest : un client a jour se croirait perpetuellement en retard"
+              exit 1
+            }
+          }
+          "version=$manifest" >> $env:GITHUB_OUTPUT
+          Write-Host "version $manifest"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      # La liaison statique de la bibliothèque C est déclarée dans
+      # .cargo/config.toml : local et CI produisent le même binaire.
+      - name: Compiler
+        shell: pwsh
+        run: cargo build --release --locked --target $env:TARGET -p ki-client-gui
+
+      - name: Vérifier que le binaire est autonome
+        shell: pwsh
+        run: |
+          # Une dépendance au redistribuable Visual C++ ne se verrait qu'à
+          # l'exécution, sur le poste de quelqu'un qui n'a pas Visual Studio.
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue |
+            Select-Object -Last 1
+          if (-not $dumpbin) {
+            Write-Error "dumpbin introuvable : la garantie d'autonomie ne serait pas verifiee"
+            exit 1
+          }
+          $deps = & $dumpbin -dependents "target\$env:TARGET\release\ki-chat.exe"
+          if ($deps -match 'VCRUNTIME|MSVCP') {
+            Write-Error "le binaire reclame le redistribuable Visual C++"
+            exit 1
+          }
+
+      - name: Construire l'installeur
+        shell: pwsh
+        run: |
+          # L'icône est rendue par build.rs dans OUT_DIR, dont le nom porte un
+          # hachage : on la retrouve au lieu de la deviner.
+          $icon = Get-ChildItem target -Recurse -Filter ki-chat.ico | Select-Object -First 1
+          if ($icon) { Copy-Item $icon.FullName installer\ki-chat.ico }
+
+          $roots = @("${env:ProgramFiles(x86)}", "${env:ProgramFiles}", "$env:LOCALAPPDATA\Programs")
+          $iscc = $roots | ForEach-Object { Join-Path $_ "Inno Setup 6\ISCC.exe" } |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer\ki-chat.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Déposer les artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ki-chat-windows
+          path: |
+            target/x86_64-pc-windows-msvc/release/ki-chat.exe
+            installer/Output/ki-chat-setup.exe
+
+      - name: Publier la release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $files = @(
+            "target\$env:TARGET\release\ki-chat.exe",
+            "installer\Output\ki-chat-setup.exe"
+          )
+          # Le tag peut avoir été poussé après une release créée à la main.
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @files --clobber
+          } else {
+            gh release create $tag @files --title $tag --generate-notes
+          }

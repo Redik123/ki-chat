@@ -6,6 +6,10 @@
 # générée au premier démarrage. Rien de tout ça n'a sa place dans le dépôt.
 /data
 
+# Sorties de l'installeur, et l'icône que build.rs y dépose au passage
+/installer/Output
+/installer/*.ico
+
 # Journaux d'exécution
 *.log
 *.err

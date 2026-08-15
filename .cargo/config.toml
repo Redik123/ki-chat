@@ -2,8 +2,21 @@
 # Visual Studio (2022 et 2026) : le générateur choisi suit le compilateur le
 # plus récent (VS 18 2026), il faut donc le cmake de VS 2026 — celui de
 # VS 2022 (3.x) ne connaît pas ce générateur.
+#
+# Pas de `force` : une variable CMAKE déjà posée dans l'environnement l'emporte.
+# C'est ce qui permet à l'intégration continue — où Visual Studio n'est pas au
+# même endroit, ni de la même année — d'utiliser son propre cmake sans que ce
+# fichier, taillé pour une machine précise, lui mente.
 [env]
-CMAKE = { value = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe", force = true }
+CMAKE = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe"
 # Le libopus embarqué dans audiopus_sys déclare cmake_minimum_required < 3.5,
 # que cmake 4.x refuse par défaut. Cette variable rétablit la compatibilité.
 CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }
+
+# Bibliothèque C liée statiquement : l'exécutable livré ne réclame alors que
+# des DLL présentes dans Windows, et se lance sur une machine où le
+# « Visual C++ Redistributable » n'a jamais été installé. Le flag traverse
+# aussi cmake, via les CFLAGS que cc transmet : libopus est compilé /MT, sinon
+# on mélangerait deux exemplaires de la bibliothèque C dans le même binaire.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

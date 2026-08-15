@@ -32,6 +32,10 @@ ureq = { version = "2", features = ["json"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 
+# Icône, bloc de version et manifeste gravés dans l'exécutable (voir build.rs).
+[build-dependencies]
+winresource = "0.1"
+
 # Coffre à secrets natif : DPAPI protège les mots de passe mémorisés avec
 # une clé dérivée de la session Windows. Déjà tiré par eframe.
 [target.'cfg(windows)'.dependencies]

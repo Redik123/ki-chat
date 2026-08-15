@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appicon;
 mod icons;
 mod images;
 mod net;
@@ -11,6 +12,7 @@ mod secret;
 mod servers;
 mod theme;
 mod ui;
+mod update;
 
 use std::collections::HashMap;
 
@@ -77,11 +79,16 @@ fn main() -> eframe::Result {
             .with_icon(std::sync::Arc::new(theme::app_icon())),
         ..Default::default()
     };
-    eframe::run_native(
+    let outcome = eframe::run_native(
         "ki-chat",
         options,
         Box::new(|cc| Ok(Box::new(KiApp::new(cc)))),
-    )
+    );
+    // Une mise à jour installée ne prend effet qu'au prochain lancement : on
+    // le déclenche ici, la fenêtre fermée — donc après que les réglages ont
+    // été enregistrés et les périphériques audio rendus.
+    update::relaunch_if_requested();
+    outcome
 }
 
 /// Formulaire d'ajout ou de modification d'un serveur.
@@ -108,6 +115,9 @@ impl ServerDraft {
 }
 
 struct KiApp {
+    /// Sonde les releases GitHub au démarrage et applique la mise à jour si
+    /// l'utilisateur l'accepte.
+    updater: update::Updater,
     // Carnet de serveurs
     book: Vec<servers::Server>,
     /// Serveur sélectionné dans le lanceur.
@@ -263,7 +273,12 @@ impl KiApp {
             .map(|s| s.id);
         let active = selected.and_then(|id| book.iter().find(|s| s.id == id));
 
+        // La vérification part maintenant et répond quand elle répond : le
+        // lanceur s'affiche sans l'attendre.
+        let refused = Some(get("update_skipped", "")).filter(|v| !v.is_empty());
+
         Self {
+            updater: update::Updater::start(refused, cc.egui_ctx.clone()),
             url: active.map(|s| s.address.clone()).unwrap_or_default(),
             username: active
                 .map(|s| s.username.clone())
@@ -2425,6 +2440,102 @@ impl KiApp {
         }
     }
 
+    /// Fenêtre de mise à jour : proposée, jamais imposée.
+    ///
+    /// Elle se pose par-dessus l'écran courant, quel qu'il soit — la sonde
+    /// GitHub répond quand elle répond, et rien ne garantit qu'on soit encore
+    /// sur le lanceur à ce moment-là.
+    fn update_window(&mut self, ctx: &egui::Context) {
+        let status = self.updater.status();
+        if matches!(status, update::Status::Idle) {
+            return;
+        }
+
+        // Titre figé : le changer d'un état à l'autre ferait repartir la
+        // fenêtre au centre à chaque transition.
+        egui::Window::new("Mise à jour")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(380.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| match status {
+                update::Status::Idle => {}
+                update::Status::Available(release) => {
+                    ui.label(
+                        RichText::new(format!("Version {} disponible", release.version))
+                            .size(16.0)
+                            .strong(),
+                    );
+                    ui::hint(ui, &format!("Version installée : {}", update::current()));
+
+                    if !release.notes.is_empty() {
+                        ui.add_space(8.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(release.notes.as_str())
+                                        .color(TEXT_DIM)
+                                        .size(13.0),
+                                );
+                            });
+                    }
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui::primary_button(ui, Some(Icon::ArrowDown), "Mettre à jour", None)
+                            .clicked()
+                        {
+                            self.updater.accept(&release, ctx.clone());
+                        }
+                        // Libellé franc : le refus est mémorisé, on ne
+                        // redemandera qu'à la version suivante. « Plus tard »
+                        // promettrait une relance qui n'aura pas lieu.
+                        if ui::button(ui, Icon::Close, "Ignorer cette version").clicked() {
+                            self.updater.skip(&release.version);
+                        }
+                    });
+                    ui::hint(ui, "L'application redémarrera d'elle-même une fois à jour.");
+                }
+                update::Status::Downloading { done, total } => {
+                    ui.label(RichText::new("Téléchargement…").size(16.0).strong());
+                    ui.add_space(8.0);
+                    let ratio = if total > 0 {
+                        done as f32 / total as f32
+                    } else {
+                        0.0
+                    };
+                    ui::meter(ui, ratio, Vec2::new(ui.available_width(), 8.0), theme::ACCENT);
+                    ui::hint(
+                        ui,
+                        &format!("{:.1} Mo sur {:.1} Mo", megabytes(done), megabytes(total)),
+                    );
+                }
+                update::Status::Ready => {
+                    ui.label(RichText::new("Mise à jour installée").size(16.0).strong());
+                    ui::hint(ui, "Redémarrage…");
+                    // L'utilisateur a déjà dit oui : on ne lui redemande pas
+                    // s'il veut bien relancer. La fenêtre se ferme, eframe
+                    // enregistre, `main` relance.
+                    update::request_restart();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                update::Status::Failed(message) => {
+                    ui.label(RichText::new("Mise à jour impossible").size(16.0).strong());
+                    ui.label(RichText::new(message.as_str()).color(DANGER).size(13.0));
+                    ui.add_space(8.0);
+                    ui.hyperlink_to(
+                        "Télécharger depuis GitHub",
+                        update::Updater::releases_page(),
+                    );
+                    ui.add_space(8.0);
+                    if ui::button(ui, Icon::Close, "Fermer").clicked() {
+                        self.updater.dismiss();
+                    }
+                }
+            });
+    }
+
     /// Fenêtre « Mon compte » : changement de son propre mot de passe.
     fn account_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
@@ -3571,6 +3682,11 @@ fn compact(n: u64) -> String {
     }
 }
 
+/// Octets en méga-octets, pour l'affichage.
+fn megabytes(bytes: u64) -> f32 {
+    bytes as f32 / (1024.0 * 1024.0)
+}
+
 impl eframe::App for KiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events();
@@ -3591,6 +3707,7 @@ impl eframe::App for KiApp {
         } else {
             self.login_screen(ctx);
         }
+        self.update_window(ctx);
 
         // Repeint périodique : nécessaire pour le PTT global (poll clavier)
         // et les indicateurs temps réel, même fenêtre non focalisée.
@@ -3599,6 +3716,7 @@ impl eframe::App for KiApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         servers::save(storage, &self.book);
+        storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());
         storage.set_string("mic_mode", self.mode.id().into());

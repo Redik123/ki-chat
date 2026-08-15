@@ -255,57 +255,14 @@ fn visuals() -> egui::Visuals {
 // Icône de fenêtre
 // ---------------------------------------------------------------------
 
-/// Génère l'icône de l'application (barre des tâches, alt-tab) : le même
-/// pictogramme que le logo, rendu pixel par pixel — pas de fichier à
-/// embarquer, pas de carré blanc par défaut.
+/// Icône de fenêtre (barre des tâches, alt-tab) : le même pictogramme que
+/// celui gravé dans l'exécutable, rendu pixel par pixel par `appicon` — pas
+/// de fichier à embarquer, pas de carré blanc par défaut.
 pub fn app_icon() -> egui::IconData {
-    const S: i32 = 64;
-    let mut rgba = vec![0u8; (S * S * 4) as usize];
-
-    // Rectangle arrondi de fond, puis les barres d'égaliseur en creux.
-    let bars: [(f32, f32, f32); 4] = [
-        (14.0, 26.0, 38.0),
-        (25.0, 16.0, 48.0),
-        (36.0, 21.0, 43.0),
-        (47.0, 29.0, 35.0),
-    ];
-
-    for py in 0..S {
-        for px in 0..S {
-            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
-            let bg = coverage(x, y, 3.0, 3.0, 61.0, 61.0, 16.0);
-            if bg <= 0.0 {
-                continue;
-            }
-            // Creux : union des quatre barres.
-            let mut cut: f32 = 0.0;
-            for (cx, top, bottom) in bars {
-                cut = cut.max(coverage(x, y, cx - 2.5, top, cx + 2.5, bottom, 2.5));
-            }
-            let lit = bg * (1.0 - cut);
-            let i = ((py * S + px) * 4) as usize;
-            let c = mix(BG_DEEP, ACCENT, lit);
-            rgba[i] = c.r();
-            rgba[i + 1] = c.g();
-            rgba[i + 2] = c.b();
-            rgba[i + 3] = (bg * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
+    const S: u32 = 64;
     egui::IconData {
-        rgba,
-        width: S as u32,
-        height: S as u32,
+        rgba: crate::appicon::render(S),
+        width: S,
+        height: S,
     }
-}
-
-/// Couverture antialiasée d'un pixel par un rectangle arrondi.
-fn coverage(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
-    let (hx, hy) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
-    let r = r.min(hx).min(hy);
-    let dx = (x - (x0 + hx)).abs() - (hx - r);
-    let dy = (y - (y0 + hy)).abs() - (hy - r);
-    let outside = dx.max(0.0).hypot(dy.max(0.0));
-    let inside = dx.max(dy).min(0.0);
-    (0.5 - (outside + inside - r)).clamp(0.0, 1.0)
 }
