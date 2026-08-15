@@ -1,0 +1,20 @@
+# Artefacts de compilation
+/target
+
+# Données du serveur : comptes (hachages Argon2id), historique des salons,
+# fichiers partagés, identité du serveur — et surtout la CLÉ PRIVÉE TLS
+# générée au premier démarrage. Rien de tout ça n'a sa place dans le dépôt.
+/data
+
+# Journaux d'exécution
+*.log
+*.err
+*.out
+
+# État local des éditeurs
+/.vs
+.idea/
+.vscode/
+
+# Réglages locaux de l'outillage
+/.claude/settings.local.json

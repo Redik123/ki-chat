@@ -1,0 +1,21 @@
+# Unité systemd pour la route « Elastic VPS » (Ubuntu/Debian sur Jelastic).
+# À placer dans /etc/systemd/system/ki-server.service puis :
+#   systemctl daemon-reload && systemctl enable --now ki-server
+[Unit]
+Description=ki-chat server (chat + relais vocal)
+After=network.target
+
+[Service]
+# Change le code d'invitation ici (ou via un fichier EnvironmentFile).
+Environment=KI_TOKEN=CHANGE_MOI
+Environment=KI_HTTP_PORT=8080
+Environment=KI_UDP_PORT=9987
+Environment=KI_DATA_DIR=/opt/ki-chat/data
+ExecStart=/opt/ki-chat/ki-server
+WorkingDirectory=/opt/ki-chat
+User=kichat
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# Le build de libopus (audiopus_sys) passe par cmake. La machine a deux
+# Visual Studio (2022 et 2026) : le générateur choisi suit le compilateur le
+# plus récent (VS 18 2026), il faut donc le cmake de VS 2026 — celui de
+# VS 2022 (3.x) ne connaît pas ce générateur.
+[env]
+CMAKE = { value = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe", force = true }
+# Le libopus embarqué dans audiopus_sys déclare cmake_minimum_required < 3.5,
+# que cmake 4.x refuse par défaut. Cette variable rétablit la compatibilité.
+CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }

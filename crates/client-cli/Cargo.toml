@@ -1,0 +1,14 @@
+[package]
+name = "ki-client-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ki-protocol = { path = "../protocol" }
+ki-voice = { path = "../voice" }
+ki-client-quic = { path = "../client-quic" }
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true

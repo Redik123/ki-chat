@@ -1,0 +1,15 @@
+[package]
+name = "ki-client-quic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ki-protocol = { path = "../protocol" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+bytes = "1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

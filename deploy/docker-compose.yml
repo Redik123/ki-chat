@@ -1,0 +1,19 @@
+# Stack Portainer / docker compose pour ki-chat.
+# Construis d'abord l'image sur l'hôte (ou pousse-la sur ton registre) :
+#   docker build -t ki-chat-server -f deploy/Dockerfile .
+services:
+  ki-chat:
+    image: ki-chat-server:latest
+    container_name: ki-chat
+    restart: unless-stopped
+    environment:
+      # Code d'invitation (création de comptes) — change-le !
+      KI_TOKEN: change_moi_vraiment
+    ports:
+      - "8080:8080/tcp"   # WebSocket : chat, auth, fichiers
+      - "9987:9987/udp"   # voix (chiffrée applicativement)
+    volumes:
+      - ki-chat-data:/data   # comptes, historique, fichiers partagés
+
+volumes:
+  ki-chat-data:

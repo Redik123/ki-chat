@@ -1,0 +1,27 @@
+[package]
+name = "ki-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ki-protocol = { path = "../protocol" }
+axum = { version = "0.8", features = ["ws"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand = "0.9"
+futures-util = "0.3"
+argon2 = "0.5"
+# Le re-export rand_core::OsRng de password-hash exige cette feature.
+rand_core = { version = "0.6", features = ["getrandom"] }
+socket2 = "0.5"
+# Transport QUIC : chat (flux fiable) + voix (datagrammes) sur une connexion.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Certificat TLS auto-signé, généré et persisté au premier démarrage.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+bytes = "1"
