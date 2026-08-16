@@ -697,7 +697,15 @@ fn handle_msg(
             }
         }
         ClientMsg::Kick { user_id: target, reason } => {
-            if !require_admin(state, user_id, tx) {
+            if !require(state, user_id, tx, ki_protocol::perm::KICK) {
+                return;
+            }
+            // Le rang, en plus de la permission : c'est lui qui empêche
+            // d'atteindre quelqu'un d'aussi haut placé que soi.
+            if rank_of(state, target) >= rank_of(state, user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "cette personne est d'un rang égal ou supérieur au tien".into(),
+                });
                 return;
             }
             if target == user_id {
@@ -722,18 +730,18 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminListUsers => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::KICK) {
                 send_admin_info(state, tx);
             }
         }
         ClientMsg::AdminAuditLog { limit } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::VIEW_AUDIT_LOG) {
                 let limit = limit.clamp(1, 500) as usize;
                 let _ = tx.send(ServerMsg::AuditLog { records: state.audit.recent(limit) });
             }
         }
         ClientMsg::AdminCreateInvite { uses, label, ttl_secs } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::CREATE_INVITE) {
                 let label = ki_protocol::safe_display(&label, MAX_REASON);
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
@@ -760,7 +768,7 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminRevokeInvite { code } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::MANAGE_INVITES) {
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
                 tokio::task::spawn_blocking(move || {
@@ -780,7 +788,9 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminResetPassword { username: target, new_password } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::RESET_PASSWORD)
+                && (target == username || outranks_account(state, user_id, &target, tx))
+            {
                 // Un hachage Argon2id, volontairement lent, suivi de la
                 // réécriture de `users.json` : hors de la boucle asynchrone,
                 // sans quoi la voix de tout le monde hoquette pendant ce
@@ -814,7 +824,9 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminBan { username: target, reason, duration_secs } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::BAN)
+                && outranks_account(state, user_id, &target, tx)
+            {
                 let reason = ki_protocol::safe_display(&reason, MAX_REASON);
                 // `users.json` porte les photos de profil en base64 : sa
                 // réécriture pèse plusieurs mégaoctets sur un serveur bien
@@ -868,7 +880,7 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminUnban { username: target } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::BAN) {
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
                 tokio::task::spawn_blocking(move || {
@@ -887,7 +899,7 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminSetServerInfo { name, icon } => {
-            if require_admin(state, user_id, tx) {
+            if require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
                 let changed = describe_server_change(&name, &icon);
                 // Le logo est un PNG en base64 : `server.json` pèse jusqu'à
                 // une centaine de kilo-octets, réécrits en entier. Hors de la

@@ -326,6 +326,17 @@ async fn main() -> anyhow::Result<()> {
             continue;
         } else if line == "/roles" {
             ClientMsg::AdminListRoles
+        } else if let Some(rest) = line.strip_prefix("/setroles ") {
+            // `/setroles <pseudo> [id...]` — sans id, retire tous les rôles.
+            let mut parts = rest.trim().split(' ');
+            let Some(username) = parts.next().filter(|u| !u.is_empty()) else {
+                eprintln!("! usage : /setroles <pseudo> [id de rôle...]");
+                continue;
+            };
+            ClientMsg::AdminSetUserRoles {
+                username: username.to_string(),
+                roles: parts.filter_map(|p| p.parse().ok()).collect(),
+            }
         } else if let Some(rest) = line.strip_prefix("/mkchannel ") {
             // `/mkchannel <nom> [id de rôle...]` — sans rôle, salon public.
             let mut parts = rest.trim().split(' ');

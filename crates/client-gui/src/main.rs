@@ -357,6 +357,9 @@ struct KiApp {
     role_draft: Option<RoleDraft>,
     /// Salon en cours de création.
     channel_draft: Option<ChannelDraft>,
+    /// Compte dont on modifie les rôles, et la sélection en cours.
+    roles_target: Option<String>,
+    roles_draft: Vec<ki_protocol::RoleId>,
 
     // Mon compte
     show_account: bool,
@@ -518,6 +521,8 @@ impl KiApp {
             voice_prompt: None,
             role_draft: None,
             channel_draft: None,
+            roles_target: None,
+            roles_draft: Vec::new(),
             show_account: false,
             old_password: String::new(),
             new_password: String::new(),
@@ -4073,9 +4078,18 @@ impl KiApp {
                 let dot = if account.online { SPEAK } else { theme::BORDER };
                 ui::status_dot(ui, dot, "", 8.0);
 
-                let mut name = RichText::new(&account.username)
-                    .color(color_for(&account.username))
-                    .size(13.5);
+                // La couleur du compte vient de son rôle le mieux classé,
+                // comme partout ailleurs dans l'application.
+                let account_color = theme::member_color(
+                    self.roles
+                        .iter()
+                        .filter(|r| account.roles.contains(&r.id))
+                        .max_by_key(|r| r.rank)
+                        .and_then(|r| r.color),
+                    &account.username,
+                );
+                let mut name =
+                    RichText::new(&account.username).color(account_color).size(13.5);
                 if account.banned {
                     name = name.strikethrough();
                 }
@@ -4083,11 +4097,28 @@ impl KiApp {
                 if account.admin {
                     ui::glyph(ui, Icon::Crown, 13.0, ACCENT);
                 }
+                for role in self.roles.iter().filter(|r| account.roles.contains(&r.id)) {
+                    ui.label(
+                        RichText::new(&role.name)
+                            .color(theme::member_color(role.color, &role.name))
+                            .size(10.5),
+                    );
+                }
                 if account.banned {
                     ui.label(RichText::new(ban_summary(account)).color(DANGER).size(11.0));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Mêmes bornes que le serveur : la permission, et le
+                    // rang strictement supérieur. Le bouton n'apparaît que
+                    // s'il aboutirait.
+                    if self.can(ki_protocol::perm::MANAGE_ROLES)
+                        && self.outranks(account.rank)
+                        && ui::icon_button_ex(ui, Icon::Crown, 26.0, "Rôles…", None).clicked()
+                    {
+                        self.roles_target = Some(account.username.clone());
+                        self.roles_draft = account.roles.clone();
+                    }
                     if !account.admin {
                         if account.banned {
                             if ui::icon_button_ex(ui, Icon::Check, 26.0, "Annuler le ban", None)
@@ -4142,6 +4173,60 @@ impl KiApp {
                     ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.0));
                 });
             }
+        }
+
+        // --- Attribution des rôles ---
+        if let Some(target) = self.roles_target.clone() {
+            ui.add_space(10.0);
+            ui::hairline(ui);
+            ui.add_space(8.0);
+            ui::field_label(ui, &format!("Rôles de {target}"));
+            let roles = self.roles.clone();
+            let mine = self.my_rank;
+            let mut assignable = 0;
+            for role in &roles {
+                // `@everyone` est implicite : il n'est jamais stocké sur un
+                // compte, et le proposer laisserait croire qu'on peut le
+                // retirer à quelqu'un.
+                if role.id == ki_protocol::ROLE_EVERYONE {
+                    continue;
+                }
+                // On n'attribue qu'un rôle strictement sous son propre rang :
+                // sinon on se donnerait, par personne interposée, un pouvoir
+                // qu'on n'a pas.
+                if role.rank >= mine {
+                    continue;
+                }
+                assignable += 1;
+                let mut on = self.roles_draft.contains(&role.id);
+                let label = RichText::new(&role.name)
+                    .color(theme::member_color(role.color, &role.name));
+                if ui.checkbox(&mut on, label).changed() {
+                    if on {
+                        self.roles_draft.push(role.id);
+                    } else {
+                        self.roles_draft.retain(|r| *r != role.id);
+                    }
+                }
+            }
+            if assignable == 0 {
+                ui::hint(ui, "aucun rôle sous ton rang n'est attribuable");
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui::primary_button(ui, Some(Icon::Check), "Appliquer", None).clicked() {
+                    to_send.push(ClientMsg::AdminSetUserRoles {
+                        username: target.clone(),
+                        roles: self.roles_draft.clone(),
+                    });
+                    self.roles_target = None;
+                    self.roles_draft.clear();
+                }
+                if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    self.roles_target = None;
+                    self.roles_draft.clear();
+                }
+            });
         }
 
         // --- Formulaire de réinitialisation ---

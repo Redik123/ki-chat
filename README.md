@@ -371,8 +371,38 @@ plein jeu. Modes : micro ouvert ou push-to-talk, touche configurable.
 - **ping vocal en direct** dans la barre du bas, mesuré sur le vrai chemin UDP
   (keepalive horodaté, écho serveur) — vert < 30 ms, orange < 80, rouge au-delà ;
 - **vumètres par locuteur** dans la liste des membres pendant qu'ils parlent.
-**Rôles** : le premier compte créé sur le serveur est admin (badge ♛ dans la
-liste). **Fichiers** : bouton 📎 dans le chat (25 Mo max), upload authentifié
+**Rôles** : chaque rôle porte un nom, une **couleur de pseudo**, un **rang** et
+un jeu de **permissions** cochables (voir les salons, écrire, rejoindre le
+vocal, partager des fichiers, créer des invitations, expulser, bannir,
+réinitialiser les mots de passe, gérer les salons, les rôles, le serveur,
+consulter le journal). Trois rôles existent au départ : `@everyone`
+(implicite, jamais attribué — c'est le socle de tout le monde), `Propriétaire`
+(le premier compte créé) et `Modérateur`. Onglet **Rôles** du panneau admin
+pour les créer, **Membres** pour les attribuer.
+
+Deux règles gouvernent tout, et elles sont **distinctes à dessein** :
+
+- la **permission** dit ce qu'on peut faire ;
+- le **rang** dit *sur qui*. On n'agit que sur strictement plus bas que soi,
+  et le bit « administrateur » ne contourne **jamais** cette règle — sans
+  quoi un second administrateur bannirait le propriétaire.
+
+S'y ajoutent deux gardes contre l'escalade : on n'accorde pas une permission
+qu'on ne détient pas soi-même, et l'on ne touche pas à un rôle de son propre
+rang ou au-dessus. Sans elles, « gérer les rôles » suffirait à devenir
+administrateur en un clic. L'interface ne montre d'ailleurs que les actions
+qui aboutiraient : un bouton absent vaut mieux qu'un bouton grisé.
+
+**Salons** : créés à la volée depuis l'onglet **Salons** (textuels ou vocaux),
+et **privés** si on les réserve à certains rôles — ils sont alors invisibles
+pour les autres, qui reçoivent le message d'un salon inexistant s'ils tentent
+d'y entrer. Un salon vocal peut recevoir un **mot de passe éphémère** : il vit
+en mémoire, expire au délai choisi et de toute façon au redémarrage du
+serveur. Supprimer un salon **archive** son historique (`channel-N.deleted-….jsonl`)
+au lieu de l'effacer, et son numéro n'est jamais réattribué — le réutiliser
+ferait hériter un nouveau salon des messages de l'ancien.
+
+**Fichiers** : bouton 📎 dans le chat (25 Mo max), upload authentifié
 par le jeton de session, les liens sont cliquables dans le chat.
 
 **Modération** — clic droit sur un membre :
@@ -403,7 +433,9 @@ par le jeton de session, les liens sont cliquables dans le chat.
   du serveur. Persisté dans `data/audit.jsonl`, une entrée par ligne, lisible
   au `grep` sur le serveur sans y déployer d'outil.
 
-Commandes CLI équivalentes : `/admin`, `/audit`, `/invite`,
+Commandes CLI équivalentes : `/admin`, `/audit`, `/roles`,
+`/setroles <pseudo> [id...]`, `/mkchannel <nom> [rôles...]`,
+`/rmchannel <id>`, `/lock <id> <mdp> [minutes]`, `/invite`,
 `/invite-permanent`, `/revoke <code>`, `/resetpw <pseudo> <mdp>`,
 `/ban <pseudo> [minutes] [motif]`, `/unban <pseudo>`, `/kick <id> [motif]`,
 `/passwd <ancien> <nouveau>`.
