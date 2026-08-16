@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use chacha20poly1305::aead::{Aead, KeyInit};
+use ki_opus as opus;
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ki_protocol::{parse_voice_packet, write_voice_header, VOICE_HEADER_LEN, VOICE_MAX_PACKET};
@@ -95,6 +96,10 @@ impl VoiceConfig {
         }
     }
 }
+
+/// Valeur DRED « activé » à passer à set_dred : ~1 s de passé re-transmis
+/// dans chaque paquet (unités du CTL opus).
+pub const DRED_DEFAULT: i32 = 100;
 
 /// Modes de suppression de bruit.
 pub const NOISE_OFF: u8 = 0;
@@ -214,6 +219,9 @@ struct Shared {
     jitter_override: std::sync::atomic::AtomicUsize,
     /// Débit Opus demandé (appliqué à chaud par le thread de capture).
     bitrate: AtomicI32,
+    /// Durée de redondance neuronale DRED demandée (0 = désactivé),
+    /// dans les unités du CTL opus. Appliquée à chaud.
+    dred: AtomicI32,
     /// Retour local du micro (« s'écouter ») actif.
     loopback: AtomicBool,
     /// Échantillons locaux à mixer dans la sortie (test micro / son de test).
@@ -253,6 +261,7 @@ impl VoiceEngine {
             vad_hangover_ms: AtomicU32::new(cfg.vad_hangover_ms),
             jitter_override: std::sync::atomic::AtomicUsize::new(cfg.jitter_frames),
             bitrate: AtomicI32::new(cfg.bitrate),
+            dred: AtomicI32::new(0),
             loopback: AtomicBool::new(false),
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
             receivers: Mutex::new(HashMap::new()),
@@ -363,6 +372,12 @@ impl VoiceEngine {
     /// Débit Opus en bits/s, appliqué à chaud.
     pub fn set_bitrate(&self, bitrate: i32) {
         self.shared.bitrate.store(bitrate.clamp(8_000, 256_000), Ordering::Relaxed);
+    }
+
+    /// Redondance neuronale DRED : durée de passé re-transmis dans chaque
+    /// paquet (unités du CTL opus, 0 = désactivé), à chaud.
+    pub fn set_dred(&self, value: i32) {
+        self.shared.dred.store(value.max(0), Ordering::Relaxed);
     }
 
     /// Active/coupe le retour local du micro (« s'écouter »).
@@ -511,6 +526,7 @@ struct Sender {
     counter: u64,
     user_id: u64,
     bitrate: i32,
+    dred: i32,
     send: DatagramSend,
     opus_buf: [u8; VOICE_MAX_PACKET],
     out: [u8; VOICE_MAX_PACKET],
@@ -523,6 +539,31 @@ impl Sender {
             if self.encoder.set_bitrate(opus::Bitrate::Bits(bitrate)).is_ok() {
                 tracing::info!("débit Opus : {} kbps", bitrate / 1000);
                 self.bitrate = bitrate;
+            }
+        }
+    }
+
+    /// Applique une nouvelle durée de redondance DRED si différente.
+    /// Le budget DRED (en VBR) suit la perte annoncée à l'encodeur : quand
+    /// la protection s'engage — donc quand des pertes sont réellement
+    /// mesurées — on annonce une perte élevée pour un budget généreux.
+    fn apply_dred(&mut self, dred: i32) {
+        if dred != self.dred {
+            match self.encoder.set_dred_duration(dred) {
+                Ok(()) => {
+                    let _ = self
+                        .encoder
+                        .set_packet_loss_perc(if dred > 0 { 30 } else { 10 });
+                    tracing::info!(
+                        "DRED {}",
+                        if dred > 0 { "activé (protection contre les pertes)" } else { "désactivé" }
+                    );
+                    self.dred = dred;
+                }
+                Err(e) => {
+                    tracing::warn!("DRED indisponible : {e}");
+                    self.dred = dred; // ne pas réessayer à chaque trame
+                }
             }
         }
     }
@@ -540,6 +581,7 @@ impl Sender {
             counter: 1,
             user_id,
             bitrate,
+            dred: 0,
             send,
             opus_buf: [0; VOICE_MAX_PACKET],
             out: [0; VOICE_MAX_PACKET],
@@ -661,6 +703,7 @@ fn capture_loop(
             sh.sending.store(send, Ordering::Relaxed);
             if send {
                 sender.apply_bitrate(sh.bitrate.load(Ordering::Relaxed));
+                sender.apply_dred(sh.dred.load(Ordering::Relaxed));
                 sender.send_frame(&sh, &frame);
             }
             // 7. Retour local (« s'écouter ») : la trame passe par un VRAI

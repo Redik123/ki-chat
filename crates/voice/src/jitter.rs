@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
+use ki_opus as opus;
+
 use crate::{FRAME_SAMPLES, SAMPLE_RATE};
 
 /// Au-delà de ce nombre de paquets en attente derrière un trou, on déclare
@@ -20,8 +22,17 @@ const READY_CAP: usize = SAMPLE_RATE as usize;
 /// Durée nominale d'une trame, en millisecondes.
 const FRAME_MS: f32 = 20.0;
 
+/// Fenêtre de recherche DRED : jusqu'à 1 s (50 trames de 20 ms) de passé
+/// peut être resynthétisé depuis la redondance neuronale d'un paquet.
+const DRED_WINDOW: u16 = 50;
+
 pub struct Receiver {
     decoder: opus::Decoder,
+    /// Décodeur de redondance neuronale (None si libopus l'a refusé).
+    dred: Option<opus::Dred>,
+    /// Dernier paquet porteur analysé (évite de re-parser à chaque trame
+    /// d'un même trou).
+    dred_carrier: Option<u16>,
     pending: BTreeMap<u16, Vec<u8>>,
     next_seq: Option<u16>,
     ready: VecDeque<f32>,
@@ -38,9 +49,15 @@ pub struct Receiver {
 
 impl Receiver {
     pub fn new() -> Self {
+        let mut decoder = opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono)
+            .expect("création décodeur Opus");
+        // Complexité maximale : active le Deep PLC (masquage de perte
+        // neuronal) de libopus 1.6 sur les trames irrécupérables.
+        let _ = decoder.set_complexity(10);
         Self {
-            decoder: opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono)
-                .expect("création décodeur Opus"),
+            decoder,
+            dred: opus::Dred::new().ok(),
+            dred_carrier: None,
             pending: BTreeMap::new(),
             next_seq: None,
             ready: VecDeque::new(),
@@ -124,16 +141,19 @@ impl Receiver {
         loop {
             if let Some(p) = self.pending.remove(&next) {
                 self.decode_into_ready(&p, false);
+                self.dred_carrier = None;
             } else if self.pending.len() > MAX_PENDING {
-                // Trame perdue. Si la suivante est déjà là, ses données FEC
-                // permettent de la RECONSTRUIRE (bien mieux que le masquage).
+                // Trame perdue. Trois niveaux de secours, du meilleur au
+                // pis-aller : FEC LBRR (trame n+1), DRED (redondance
+                // neuronale d'un paquet jusqu'à 1 s plus tard), Deep PLC.
                 lost += 1;
-                match self.pending.get(&next.wrapping_add(1)).cloned() {
-                    Some(next_packet) => {
-                        self.decode_into_ready(&next_packet, true);
-                        recovered += 1;
-                    }
-                    None => self.decode_into_ready(&[], false), // PLC
+                if let Some(next_packet) = self.pending.get(&next.wrapping_add(1)).cloned() {
+                    self.decode_into_ready(&next_packet, true);
+                    recovered += 1;
+                } else if self.try_dred_recover(next) {
+                    recovered += 1;
+                } else {
+                    self.decode_into_ready(&[], false); // PLC neuronal
                 }
             } else {
                 break;
@@ -149,6 +169,47 @@ impl Receiver {
             self.ready.drain(..FRAME_SAMPLES.min(self.ready.len()));
         }
         (lost, recovered)
+    }
+
+    /// Tente de resynthétiser la trame manquante `missing` depuis la
+    /// redondance neuronale (DRED) du paquet futur le plus proche.
+    fn try_dred_recover(&mut self, missing: u16) -> bool {
+        let Some(dred) = self.dred.as_mut() else { return false };
+        // Cherche le porteur le plus proche (k=1 est déjà couvert par le FEC).
+        let mut carrier: Option<(u16, Vec<u8>)> = None;
+        for k in 2..=DRED_WINDOW {
+            let seq = missing.wrapping_add(k);
+            if let Some(p) = self.pending.get(&seq) {
+                carrier = Some((k, p.clone()));
+                break;
+            }
+        }
+        let Some((dist, packet)) = carrier else { return false };
+        let carrier_seq = missing.wrapping_add(dist);
+
+        // Ne re-parse le porteur que s'il change (un trou de N trames est
+        // typiquement couvert par le même paquet).
+        if self.dred_carrier != Some(carrier_seq) {
+            let max = DRED_WINDOW as i32 * FRAME_SAMPLES as i32;
+            match dred.parse(&packet, max, SAMPLE_RATE as i32) {
+                Ok(_) => self.dred_carrier = Some(carrier_seq),
+                Err(_) => return false,
+            }
+        }
+        // La redondance couvre `available` échantillons AVANT le porteur ;
+        // notre trame est à `dist` trames avant lui.
+        let offset = dist as i32 * FRAME_SAMPLES as i32;
+        if dred.available() < offset {
+            return false;
+        }
+        let mut pcm = [0f32; FRAME_SAMPLES];
+        match dred.decode_into(&mut self.decoder, offset, &mut pcm) {
+            Ok(n) if n > 0 => {
+                self.ready.extend(&pcm[..n]);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Décode un paquet vers le tampon de lecture. `fec` = reconstruire la
@@ -237,6 +298,51 @@ mod tests {
         assert_eq!(lost, 1);
         // La trame manquante a été reconstruite via le FEC du paquet suivant.
         assert_eq!(recovered, 1);
+        let mut out = [0f32; FRAME_SAMPLES];
+        assert!(rx.mix_into(&mut out, 1.0));
+    }
+
+    #[test]
+    fn dred_recovers_multi_frame_hole_beyond_fec() {
+        let mut enc = new_encoder();
+        // Configuration de production : le budget DRED (VBR) dépend de la
+        // perte annoncée — sans elle, l'encodeur n'embarque presque rien.
+        enc.set_bitrate(opus::Bitrate::Bits(64_000)).unwrap();
+        enc.set_inband_fec(true).unwrap();
+        enc.set_packet_loss_perc(30).unwrap();
+        enc.set_complexity(10).unwrap();
+        enc.set_dred_duration(crate::DRED_DEFAULT)
+            .expect("DRED refusé — libopus compilé sans OPUS_DRED ?");
+        let mut rx = Receiver::new();
+
+        // Un vrai signal continu (sinusoïde) : le DRED encode le passé.
+        let mut phase = 0f32;
+        let mut frames = Vec::new();
+        for _ in 0..60 {
+            let mut pcm = [0f32; FRAME_SAMPLES];
+            for s in pcm.iter_mut() {
+                *s = phase.sin() * 0.3;
+                phase += 0.05;
+            }
+            let mut out = vec![0u8; 4000];
+            let n = enc.encode_float(&pcm, &mut out).unwrap();
+            out.truncate(n);
+            frames.push(out);
+        }
+
+        // Trou de 4 trames (30..=33) : la 33 est récupérable par FEC (la 34
+        // existe), les 30-32 exigent le DRED du paquet 34.
+        let (mut lost, mut recovered) = (0u64, 0u64);
+        for seq in 0..60u16 {
+            if (30..=33).contains(&seq) {
+                continue;
+            }
+            let (l, r) = rx.push(seq, &frames[seq as usize]);
+            lost += l;
+            recovered += r;
+        }
+        assert_eq!(lost, 4);
+        assert_eq!(recovered, 4, "le DRED n'a pas tout reconstruit : {recovered}/4");
         let mut out = [0f32; FRAME_SAMPLES];
         assert!(rx.mix_into(&mut out, 1.0));
     }

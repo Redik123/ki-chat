@@ -18,6 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe = { version = "0.32", features = ["persistence"] }
 ki-client-quic = { path = "../client-quic" }
+ki-video = { path = "../video" }
 tokio.workspace = true
 chrono = "0.4"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne

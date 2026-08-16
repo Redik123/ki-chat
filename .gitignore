@@ -14,6 +14,11 @@
 # Le modèle versionné est deploy/stack.env.example.
 /deploy/.env
 
+# Effets sonores : fichiers audio tiers, dont les droits de redistribution
+# ne sont pas établis. Le dépôt étant public, ils restent en local en
+# attendant d'être remplacés par des sons sous licence libre.
+/sound effect/
+
 # Journaux d'exécution
 *.log
 *.err

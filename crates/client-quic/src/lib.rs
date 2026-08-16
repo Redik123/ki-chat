@@ -50,6 +50,14 @@ impl QuicClient {
         let mut transport = quinn::TransportConfig::default();
         transport.keep_alive_interval(Some(Duration::from_secs(5)));
         transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
+        // Anti-bufferbloat : 32 Kio ≈ 1 s de voix en file au maximum (le
+        // défaut d'1 Mio en autoriserait ~2 minutes sous congestion).
+        transport.datagram_send_buffer_size(32 * 1024);
+        // Borne la mémoire de réception (le défaut est illimité) tout en
+        // laissant de la place à la vidéo à venir.
+        transport.receive_window(quinn::VarInt::from_u32(16 * 1024 * 1024));
+        // Relais vidéo : plus de 100 trames peuvent être en vol.
+        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
         client_config.transport_config(Arc::new(transport));
 
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
@@ -60,7 +68,9 @@ impl QuicClient {
             .context("adresse invalide")?
             .await
             .context("connexion impossible")?;
-        let (send, recv) = conn.open_bi().await.context("flux de contrôle")?;
+        let (mut send, recv) = conn.open_bi().await.context("flux de contrôle")?;
+        // Le contrôle passe devant tout média (symétrique du serveur).
+        let _ = send.set_priority(10);
         Ok(Self {
             conn,
             send,

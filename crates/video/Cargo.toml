@@ -1,0 +1,22 @@
+[package]
+name = "ki-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Pipeline vidéo du partage d'écran (plan : PLAN-STREAM.md).
+# Pour l'instant : la porte de build S0.5 — openh264 compilé depuis les
+# sources (comme libopus), qui doit passer en release + crt-static.
+# ⚠ nasm requis pour l'encodage accéléré (~3× plus rapide) : présent en CI
+# (ilammy/setup-nasm) ; en local, `winget install nasm` recommandé.
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+openh264 = { version = "0.9", features = ["source"] }
+# Capture d'écran/fenêtre : Windows.Graphics.Capture (backend DXGI en secours).
+# API 2.x — les exemples web en 1.x (Settings à 5 paramètres) ne compilent pas.
+windows-capture = "2.0.1"
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

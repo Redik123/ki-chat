@@ -50,6 +50,10 @@ jobs:
           "version=$manifest" >> $env:GITHUB_OUTPUT
           Write-Host "version $manifest"
 
+      # nasm : sans lui, openh264 (partage d'écran) compile quand même mais
+      # encode ~3× plus lentement — dégradation silencieuse à interdire.
+      - uses: ilammy/setup-nasm@v1
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc

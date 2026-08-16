@@ -9,6 +9,10 @@
 # fichier, taillé pour une machine précise, lui mente.
 [env]
 CMAKE = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe"
+# nasm : l'assembleur qui accélère l'encodage openh264 (~3×). Installé par
+# winget, mais pas mis au PATH — on pointe le build dessus. La CI a le sien
+# (ilammy/setup-nasm) : pas de `force`, l'environnement l'emporte.
+NASM = "C:\\Users\\drion\\AppData\\Local\\bin\\NASM\\nasm.exe"
 # Le libopus embarqué dans audiopus_sys déclare cmake_minimum_required < 3.5,
 # que cmake 4.x refuse par défaut. Cette variable rétablit la compatibilité.
 CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }

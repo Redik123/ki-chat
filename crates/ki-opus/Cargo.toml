@@ -1,0 +1,17 @@
+[package]
+name = "ki-opus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Bindings maison vers libopus 1.6, compilé depuis les sources officielles.
+# Pourquoi pas le crate `opus` ? Il embarque libopus 1.3.1 (2019) : pas de
+# DRED (redondance neuronale), pas de Deep PLC. Le tarball est téléchargé et
+# vérifié (SHA-256) par build.rs, puis compilé via cmake — voir build.rs.
+
+[build-dependencies]
+cmake = "0.1"
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+ureq = { version = "2", features = ["tls"] }

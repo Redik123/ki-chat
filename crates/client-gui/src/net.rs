@@ -48,6 +48,8 @@ pub struct VoicePrefs {
     pub gate_threshold: f32,
     /// Tampon de gigue imposé en trames (0 = adaptatif).
     pub jitter_frames: usize,
+    /// Redondance neuronale DRED (0 = désactivée, sinon valeur du CTL).
+    pub dred: i32,
 }
 
 /// Identité voix reçue du serveur, conservée pour redémarrer le moteur
@@ -142,7 +144,9 @@ fn start_engine(
     cfg.agc_target = prefs.agc_target;
     cfg.gate_threshold = prefs.gate_threshold;
     cfg.jitter_frames = prefs.jitter_frames;
-    VoiceEngine::start(cfg, ki_client_quic::datagram_sender(conn), rx)
+    let engine = VoiceEngine::start(cfg, ki_client_quic::datagram_sender(conn), rx)?;
+    engine.set_dred(prefs.dred);
+    Ok(engine)
 }
 
 pub fn connect(
