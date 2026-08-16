@@ -105,7 +105,7 @@ impl QuicClient {
     /// écriture + connexion (envoi de contrôle, datagrammes voix, RTT).
     pub fn split(self) -> (ControlWriter, ControlReader) {
         (
-            ControlWriter { conn: self.conn.clone(), send: self.send, _endpoint: self._endpoint },
+            ControlWriter { conn: self.conn.clone(), send: self.send, endpoint: self._endpoint },
             ControlReader { conn: self.conn, lines: self.lines },
         )
     }
@@ -114,7 +114,7 @@ impl QuicClient {
 pub struct ControlWriter {
     pub conn: quinn::Connection,
     send: quinn::SendStream,
-    _endpoint: quinn::Endpoint,
+    endpoint: quinn::Endpoint,
 }
 
 impl ControlWriter {
@@ -123,6 +123,23 @@ impl ControlWriter {
         json.push('\n');
         self.send.write_all(json.as_bytes()).await?;
         Ok(())
+    }
+
+    /// Ferme la connexion et **attend que la trame de fermeture soit
+    /// réellement partie**.
+    ///
+    /// `close` ne fait que la mettre en file : si le processus s'arrête dans
+    /// la foulée, elle n'atteint jamais le serveur, qui garde alors la
+    /// session ouverte jusqu'à son expiration d'inactivité. `wait_idle`
+    /// rend cette fermeture effective. Le délai borne l'attente, pour qu'une
+    /// fermeture ne puisse jamais retenir l'application.
+    pub async fn close_gracefully(self) {
+        self.conn.close(0u32.into(), b"bye");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(600),
+            self.endpoint.wait_idle(),
+        )
+        .await;
     }
 
     /// Dernier RTT mesuré par QUIC, en ms.

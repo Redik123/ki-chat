@@ -228,11 +228,29 @@ impl AppState {
     /// Nettoyage complet à la déconnexion d'un client (ferme aussi sa
     /// connexion QUIC — utile pour kick/ban).
     pub fn disconnect(&self, user_id: UserId) {
+        self.remove_session(user_id, None);
+    }
+
+    /// Comme `disconnect`, mais seulement si la session enregistrée est bien
+    /// **celle-ci**, identifiée par son jeton.
+    ///
+    /// Sans cette garde, la tâche d'une connexion morte évincerait en
+    /// s'achevant la session qui vient de la remplacer : on se reconnecte,
+    /// et l'ancienne connexion nous éjecte une seconde plus tard.
+    pub fn disconnect_session(&self, user_id: UserId, voice_token: u64) {
+        self.remove_session(user_id, Some(voice_token));
+    }
+
+    fn remove_session(&self, user_id: UserId, only_if_token: Option<u64>) {
         {
             let mut users = self.users.lock().unwrap();
-            match users.remove(&user_id) {
-                Some(u) => u.conn.close(0u32.into(), b"bye"),
-                None => return,
+            match users.get(&user_id) {
+                Some(u) if only_if_token.is_none_or(|t| u.voice_token == t) => {
+                    let u = users.remove(&user_id).expect("présent à l'instant");
+                    u.conn.close(0u32.into(), b"bye");
+                }
+                // Personne, ou une session plus récente : rien à faire.
+                _ => return,
             }
         }
         self.rebuild_voice_routes();

@@ -757,7 +757,7 @@ impl KiApp {
     }
 
     fn disconnect(&mut self, error: Option<String>) {
-        if let Some(conn) = self.conn.take() {
+        if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }
         self.connecting = false;
@@ -4324,7 +4324,7 @@ impl eframe::App for KiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(conn) = self.conn.take() {
+        if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }
     }

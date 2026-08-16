@@ -205,13 +205,18 @@ async fn handle_connection(
             .audit
             .record("invite.use", &username, "", &format!("{code} depuis {peer}"));
     }
-    let already_connected = { state.users.lock().unwrap().contains_key(&user_id) };
-    if already_connected {
-        send_direct(&mut send, &ServerMsg::Error {
-            message: "ce compte est déjà connecté".into(),
-        })
-        .await;
-        return Ok(());
+    // Une session déjà ouverte sur ce compte cède la place à la nouvelle.
+    //
+    // Refuser était pire : quand l'application se ferme brutalement — ou
+    // plante, ou perd le réseau — aucune fermeture propre ne part, et le
+    // serveur gardait la session jusqu'à l'expiration d'inactivité de QUIC,
+    // 30 secondes pendant lesquelles se reconnecter était impossible. Aucune
+    // fermeture propre ne peut couvrir ces cas : c'est donc à l'ouverture
+    // que la question se règle. C'est aussi ce que font Discord et Mumble.
+    let previous = { state.users.lock().unwrap().contains_key(&user_id) };
+    if previous {
+        tracing::info!("{username} se reconnecte : la session précédente est fermée");
+        state.disconnect(user_id);
     }
 
     // --- Phase 2 : enregistrement + tâches ---
@@ -275,8 +280,10 @@ async fn handle_connection(
     }
 
     // --- Phase 3 : nettoyage ---
+    // Sous garde du jeton : si ce compte s'est déjà reconnecté ailleurs, la
+    // session en place n'est plus la nôtre et ne doit pas être touchée.
     tracing::info!("déconnexion : {username} (id {user_id})");
-    state.disconnect(user_id);
+    state.disconnect_session(user_id, voice_token);
     voice.abort();
     writer.abort();
     Ok(())

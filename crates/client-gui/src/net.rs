@@ -77,6 +77,9 @@ pub struct NetHandle {
     /// Où aiguiller les datagrammes voix entrants (remplacé à chaque
     /// redémarrage du moteur).
     voice_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    /// Fil réseau, pour pouvoir attendre qu'il ait vraiment fermé la
+    /// connexion avant que le processus ne s'arrête.
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NetHandle {
@@ -88,8 +91,19 @@ impl NetHandle {
         self.cmd_tx.clone()
     }
 
-    pub fn quit(&self) {
+    /// Ferme la connexion **et attend** que ce soit fait.
+    ///
+    /// Poster l'ordre sans attendre ne suffisait pas : le processus
+    /// s'arrêtait avant que le fil réseau ne se réveille, la trame de
+    /// fermeture QUIC ne partait jamais, et le serveur gardait la session
+    /// ouverte jusqu'à son expiration d'inactivité — trente secondes pendant
+    /// lesquelles on ne pouvait pas se reconnecter, et pendant lesquelles les
+    /// autres continuaient de nous voir dans la liste.
+    pub fn quit(&mut self) {
         let _ = self.cmd_tx.send(Cmd::Quit);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 
     /// RTT QUIC mesuré, en ms.
@@ -163,30 +177,33 @@ pub fn connect(
     let voice_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>> =
         Arc::new(Mutex::new(None));
 
-    let handle = NetHandle {
-        cmd_tx,
-        events: event_rx,
-        engine: engine.clone(),
-        voice_params: voice_params.clone(),
-        conn: conn.clone(),
-        voice_feed: voice_feed.clone(),
-    };
-
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => {
-                let _ = event_tx.send(Event::ConnectFailed(format!("runtime : {e}")));
-                ctx.request_repaint();
-                return;
-            }
-        };
-        rt.block_on(run(
-            url, creds, prefs, cmd_rx, event_tx, engine, voice_params, conn, voice_feed, ctx,
-        ));
+    let worker = std::thread::spawn({
+        let (engine, voice_params, conn, voice_feed) =
+            (engine.clone(), voice_params.clone(), conn.clone(), voice_feed.clone());
+        move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = event_tx.send(Event::ConnectFailed(format!("runtime : {e}")));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            rt.block_on(run(
+                url, creds, prefs, cmd_rx, event_tx, engine, voice_params, conn, voice_feed, ctx,
+            ));
+        }
     });
 
-    handle
+    NetHandle {
+        cmd_tx,
+        events: event_rx,
+        engine,
+        voice_params,
+        conn,
+        voice_feed,
+        worker: Some(worker),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -258,7 +275,7 @@ async fn run(
                 }
                 Some(Cmd::Quit) | None => {
                     cleanup(&engine_slot);
-                    writer.conn.close(0u32.into(), b"bye");
+                    writer.close_gracefully().await;
                     return;
                 }
             },
