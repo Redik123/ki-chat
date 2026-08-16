@@ -702,6 +702,77 @@ mod tests {
         assert_eq!(ttl_secs, 0);
     }
 
+    /// Le cas qui décide d'un déploiement échelonné : un client **resté en
+    /// arrière** doit continuer à comprendre un serveur à jour. Tout le
+    /// monde ne met pas à jour le même jour.
+    ///
+    /// Les formes d'avant sont reconstituées ici, puisque le code courant ne
+    /// les porte plus : `Kicked` était une variante sans champ, et
+    /// `InviteInfo.uses_left` un entier nu.
+    #[test]
+    fn an_older_client_still_understands_a_newer_server() {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldServerMsg {
+            Kicked,
+            AdminInfo { invites: Vec<OldInviteInfo> },
+        }
+        #[derive(Deserialize)]
+        struct OldInviteInfo {
+            code: String,
+            uses_left: u32,
+        }
+
+        // Le serveur envoie désormais un motif : l'ancienne variante sans
+        // champ doit l'ignorer, pas échouer.
+        let json = serde_json::to_string(&ServerMsg::Kicked { reason: "spam".into() }).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<OldServerMsg>(&json).unwrap(),
+            OldServerMsg::Kicked
+        ));
+
+        // Une invitation à usages limités reste lisible par l'ancien entier.
+        let bounded = ServerMsg::AdminInfo {
+            users: Vec::new(),
+            invites: vec![InviteInfo {
+                code: "ki-abc".into(),
+                uses_left: Some(3),
+                uses: 1,
+                label: "tournoi".into(),
+                created_by: "chef".into(),
+                created_at: 42,
+                expires_at: None,
+                revoked: false,
+            }],
+        };
+        let json = serde_json::to_string(&bounded).unwrap();
+        let OldServerMsg::AdminInfo { invites } = serde_json::from_str(&json).unwrap() else {
+            panic!("ce n'est pas un AdminInfo")
+        };
+        assert_eq!(invites[0].code, "ki-abc");
+        assert_eq!(invites[0].uses_left, 3);
+
+        // En revanche, un lien **permanent** sérialise `uses_left: null`, que
+        // l'ancien `u32` ne sait pas lire : son panneau d'administration
+        // n'affichera pas la liste. Limite connue et bornée — le reste de la
+        // session, chat et vocal compris, n'en dépend pas.
+        let permanent = ServerMsg::AdminInfo {
+            users: Vec::new(),
+            invites: vec![InviteInfo {
+                code: "ki-perm".into(),
+                uses_left: None,
+                uses: 0,
+                label: String::new(),
+                created_by: String::new(),
+                created_at: 0,
+                expires_at: None,
+                revoked: false,
+            }],
+        };
+        let json = serde_json::to_string(&permanent).unwrap();
+        assert!(serde_json::from_str::<OldServerMsg>(&json).is_err());
+    }
+
     /// Et dans l'autre sens : un serveur antérieur ne connaît ni le motif
     /// d'expulsion, ni le détail des bannissements et des invitations.
     #[test]
