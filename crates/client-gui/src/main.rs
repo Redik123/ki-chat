@@ -118,23 +118,67 @@ type PickedImage = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AdminTab {
     Server,
+    Channels,
+    Roles,
     Members,
     Invites,
     Audit,
 }
 
 impl AdminTab {
-    const ALL: [AdminTab; 4] =
-        [AdminTab::Server, AdminTab::Members, AdminTab::Invites, AdminTab::Audit];
+    const ALL: [AdminTab; 6] = [
+        AdminTab::Server,
+        AdminTab::Channels,
+        AdminTab::Roles,
+        AdminTab::Members,
+        AdminTab::Invites,
+        AdminTab::Audit,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             AdminTab::Server => "Serveur",
+            AdminTab::Channels => "Salons",
+            AdminTab::Roles => "Rôles",
             AdminTab::Members => "Membres",
             AdminTab::Invites => "Invitations",
             AdminTab::Audit => "Journal",
         }
     }
+
+    /// Permission qui donne accès à cet onglet. Un onglet hors de portée
+    /// est **caché**, pas grisé : un onglet vide n'apprend rien.
+    fn needs(self) -> ki_protocol::Perms {
+        use ki_protocol::perm::*;
+        match self {
+            AdminTab::Server => MANAGE_SERVER,
+            AdminTab::Channels => MANAGE_CHANNELS,
+            AdminTab::Roles => MANAGE_ROLES,
+            AdminTab::Members => KICK,
+            AdminTab::Invites => CREATE_INVITE,
+            AdminTab::Audit => VIEW_AUDIT_LOG,
+        }
+    }
+}
+
+/// Rôle en cours d'édition dans l'onglet Rôles.
+struct RoleDraft {
+    /// `None` = création.
+    id: Option<ki_protocol::RoleId>,
+    name: String,
+    color: egui::Color32,
+    colored: bool,
+    rank: u16,
+    perms: ki_protocol::Perms,
+}
+
+/// Salon en cours de création dans l'onglet Salons.
+struct ChannelDraft {
+    name: String,
+    kind: ChannelKind,
+    /// Vide = visible par tout le monde.
+    allowed_roles: Vec<ki_protocol::RoleId>,
+    restricted: bool,
 }
 
 /// Durées proposées pour un bannissement. Un menu court vaut mieux qu'un
@@ -146,6 +190,15 @@ const BAN_DURATIONS: &[(&str, u64)] = &[
     ("30 jours", 2_592_000),
     ("Définitif", 0),
 ];
+
+/// Saisie du mot de passe d'un salon vocal verrouillé.
+struct VoicePrompt {
+    channel: ChannelId,
+    password: String,
+    /// Vrai après un refus : on distingue « il en faut un » de « ce n'est
+    /// pas le bon », sinon on ne sait pas si l'on s'est trompé.
+    wrong: bool,
+}
 
 /// Bannissement en cours de saisie.
 struct BanDraft {
@@ -231,9 +284,15 @@ struct KiApp {
 
     // État serveur
     my_id: Option<UserId>,
-    my_admin: bool,
+    /// Permissions effectives, annoncées par le serveur. L'interface s'en
+    /// sert pour ne montrer que ce qui aboutira.
+    my_perms: ki_protocol::Perms,
+    /// Mon rang : on n'agit que sur strictement plus bas que soi.
+    my_rank: u16,
     voice_token: u64,
     channels: Vec<ChannelInfo>,
+    /// Tous les rôles du serveur, pour les couleurs et les badges.
+    roles: Vec<ki_protocol::RoleInfo>,
     /// Salon textuel ouvert.
     current: Option<ChannelId>,
     /// Salon vocal où l'on se trouve. `None` = connecté au serveur sans
@@ -292,6 +351,12 @@ struct KiApp {
     invite_label: String,
     /// Bannissement en cours de saisie : la cible, le motif, la durée.
     ban_draft: Option<BanDraft>,
+    /// Salon vocal verrouillé dont on attend le mot de passe.
+    voice_prompt: Option<VoicePrompt>,
+    /// Rôle en cours de création ou d'édition.
+    role_draft: Option<RoleDraft>,
+    /// Salon en cours de création.
+    channel_draft: Option<ChannelDraft>,
 
     // Mon compte
     show_account: bool,
@@ -416,7 +481,9 @@ impl KiApp {
             welcomed: false,
             error: None,
             my_id: None,
-            my_admin: false,
+            my_perms: 0,
+            my_rank: 0,
+            roles: Vec::new(),
             voice_token: 0,
             channels: Vec::new(),
             current: None,
@@ -448,6 +515,9 @@ impl KiApp {
             invite_uses: Some(1),
             invite_label: String::new(),
             ban_draft: None,
+            voice_prompt: None,
+            role_draft: None,
+            channel_draft: None,
             show_account: false,
             old_password: String::new(),
             new_password: String::new(),
@@ -761,6 +831,53 @@ impl KiApp {
         self.send(ClientMsg::History { limit: 100 });
     }
 
+    /// Ai-je cette permission ?
+    fn can(&self, need: ki_protocol::Perms) -> bool {
+        ki_protocol::perm::has(self.my_perms, need)
+    }
+
+    /// Puis-je agir sur cette personne ? Le rang tranche, jamais la
+    /// permission : c'est ce qui empêche un second administrateur de bannir
+    /// le propriétaire.
+    fn outranks(&self, member_rank: u16) -> bool {
+        member_rank < self.my_rank
+    }
+
+    /// Ai-je de quoi ouvrir le panneau d'administration ?
+    ///
+    /// **Une seule** de ces permissions suffit — d'où le `any` et non un
+    /// masque combiné : `perm::has` exige la totalité des bits qu'on lui
+    /// passe, ce qui n'aurait ouvert le panneau qu'aux tout-puissants.
+    fn any_admin_power(&self) -> bool {
+        use ki_protocol::perm::*;
+        [
+            MANAGE_SERVER,
+            MANAGE_CHANNELS,
+            MANAGE_ROLES,
+            KICK,
+            BAN,
+            CREATE_INVITE,
+            VIEW_AUDIT_LOG,
+        ]
+        .iter()
+        .any(|p| self.can(*p))
+    }
+
+    /// Couleur d'un membre : celle de son rôle, sinon son pseudo.
+    fn color_of(&self, member: &Member) -> egui::Color32 {
+        theme::member_color(member.color, &member.username)
+    }
+
+    /// Nom du rôle le mieux classé d'un membre, pour l'afficher en badge.
+    fn top_role_name(&self, member: &Member) -> Option<&str> {
+        member
+            .roles
+            .iter()
+            .filter_map(|id| self.roles.iter().find(|r| r.id == *id))
+            .max_by_key(|r| r.rank)
+            .map(|r| r.name.as_str())
+    }
+
     /// Joue un effet, s'il est présent et si les sons ne sont pas coupés.
     ///
     /// Silencieux quand le son n'existe pas : chacun dépose les fichiers
@@ -823,7 +940,7 @@ impl KiApp {
         // déjà peuplé jouerait un son d'arrivée par occupant.
         self.sfx_quiet_until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
         self.prev_voice_peers.clear();
-        self.send(ClientMsg::JoinVoice { channel });
+        self.send(ClientMsg::JoinVoice { channel, password: None });
     }
 
     /// Quitte le vocal, sans quitter le serveur.
@@ -851,7 +968,9 @@ impl KiApp {
         self.connecting = false;
         self.welcomed = false;
         self.my_id = None;
-        self.my_admin = false;
+        self.my_perms = 0;
+        self.my_rank = 0;
+        self.roles.clear();
         self.voice_token = 0;
         self.channels.clear();
         self.current = None;
@@ -1114,6 +1233,9 @@ impl KiApp {
                 user_id,
                 voice_token,
                 is_admin,
+                perms,
+                rank,
+                roles,
                 channels,
                 server,
                 ..
@@ -1127,7 +1249,19 @@ impl KiApp {
                     std::time::Instant::now() + std::time::Duration::from_secs(2);
                 self.remember_connection();
                 self.my_id = Some(user_id);
-                self.my_admin = is_admin;
+                // `is_admin` reste la réponse d'un serveur antérieur aux
+                // rôles : sans permissions annoncées, on lui accorde tout
+                // plutôt que rien, sans quoi son propre admin perdrait son
+                // panneau en mettant le client à jour.
+                self.my_perms = if perms == 0 && is_admin {
+                    ki_protocol::perm::ADMINISTRATOR
+                } else if perms == 0 {
+                    ki_protocol::perm::DEFAULT
+                } else {
+                    perms
+                };
+                self.my_rank = rank;
+                self.roles = roles;
                 self.voice_token = voice_token;
                 self.channels = channels;
                 // L'identité du serveur arrive **dès** le Welcome. L'ignorer
@@ -1243,6 +1377,48 @@ impl KiApp {
             }
             ServerMsg::AuditLog { records } => {
                 self.audit = records;
+            }
+            ServerMsg::Roles { roles } => {
+                self.roles = roles;
+            }
+            ServerMsg::ChannelsUpdated { channels } => {
+                self.channels = channels;
+                // Le salon lu a pu disparaître, ou m'être retiré : on se
+                // rabat sur le premier salon textuel encore visible plutôt
+                // que de laisser une vue morte.
+                let still_there =
+                    self.current.is_some_and(|c| self.channels.iter().any(|ch| ch.id == c));
+                if !still_there {
+                    let first = self
+                        .channels
+                        .iter()
+                        .find(|c| c.kind == ChannelKind::Text)
+                        .map(|c| c.id);
+                    match first {
+                        Some(id) => self.join(id),
+                        None => {
+                            self.current = None;
+                            self.messages.clear();
+                        }
+                    }
+                }
+                // Idem pour le vocal : on ne reste pas dans un salon qu'on
+                // ne voit plus, sinon on parle à des gens qu'on ne voit pas.
+                if self.voice_channel.is_some_and(|c| !self.channels.iter().any(|ch| ch.id == c))
+                {
+                    self.voice_channel = None;
+                    self.armed = false;
+                    self.transmitting = false;
+                    self.info = Some("le salon vocal a été fermé".into());
+                }
+            }
+            ServerMsg::VoiceLocked { channel, wrong } => {
+                self.voice_channel = None;
+                self.voice_prompt = Some(VoicePrompt {
+                    channel,
+                    password: String::new(),
+                    wrong,
+                });
             }
             ServerMsg::InviteCreated { code } => {
                 self.last_invite = Some(code);
@@ -1733,8 +1909,72 @@ impl KiApp {
         if self.ban_draft.is_some() {
             self.ban_window(ctx);
         }
+        if self.voice_prompt.is_some() {
+            self.voice_password_window(ctx);
+        }
         if self.labo.is_some() {
             self.labo_window(ctx);
+        }
+    }
+
+    /// Demande le mot de passe d'un salon vocal verrouillé.
+    fn voice_password_window(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.voice_prompt.as_mut() else { return };
+        let channel = prompt.channel;
+        let name = self
+            .channels
+            .iter()
+            .find(|c| c.id == channel)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let wrong = prompt.wrong;
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+
+        egui::Window::new(format!("Salon verrouillé — {name}"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                if wrong {
+                    ui::banner(ui, Tone::Danger, "Mot de passe incorrect", false);
+                    ui.add_space(6.0);
+                }
+                ui::field_label(ui, "Mot de passe du salon");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut prompt.password)
+                        .password(true)
+                        .margin(egui::Margin::symmetric(10, 7))
+                        .desired_width(f32::INFINITY),
+                );
+                response.request_focus();
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui::primary_button(ui, Some(Icon::Check), "Entrer", None).clicked() {
+                        submit = true;
+                    }
+                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if submit {
+            if let Some(prompt) = self.voice_prompt.take() {
+                self.voice_channel = Some(channel);
+                self.send(ClientMsg::JoinVoice {
+                    channel,
+                    password: Some(prompt.password),
+                });
+            }
+        } else if cancel || !open {
+            self.voice_prompt = None;
         }
     }
 
@@ -1915,7 +2155,7 @@ impl KiApp {
                             self.output_devices = outputs;
                         }
                     }
-                    if self.my_admin && ui::button(ui, Icon::Crown, "Admin").clicked() {
+                    if self.any_admin_power() && ui::button(ui, Icon::Crown, "Admin").clicked() {
                         self.show_admin = !self.show_admin;
                         if self.show_admin {
                             self.admin_name = self.server_info.name.clone();
@@ -2194,7 +2434,10 @@ impl KiApp {
         }
         response.context_menu(|ui| {
             ui.set_width(228.0);
-            ui.label(RichText::new(&m.username).color(color_for(&m.username)).strong());
+            ui.label(RichText::new(&m.username).color(self.color_of(m)).strong());
+            if let Some(role) = self.top_role_name(m) {
+                ui.label(RichText::new(role).color(TEXT_FAINT).size(11.0));
+            }
             ui.add_space(4.0);
             let mut pct = self.volume_of(m.user_id) * 100.0;
             if ui
@@ -2211,11 +2454,19 @@ impl KiApp {
             if ui::button(ui, Icon::Refresh, "Remettre à 100 %").clicked() {
                 self.set_volume(m.user_id, 1.0);
             }
-            if self.my_admin {
+            // Chaque action n'apparaît que si elle aboutirait : la permission
+            // ET le rang. Un bouton grisé n'invite qu'à un clic qui échoue,
+            // là où la hiérarchie se lit déjà dans les badges de rôle.
+            let can_moderate = self.outranks(m.rank);
+            let show_kick = can_moderate && self.can(ki_protocol::perm::KICK);
+            let show_ban = can_moderate && self.can(ki_protocol::perm::BAN);
+            if show_kick || show_ban {
                 ui.add_space(4.0);
                 ui::hairline(ui);
                 ui.add_space(4.0);
-                // Expulser met dehors ; la personne peut revenir aussitôt.
+            }
+            // Expulser met dehors ; la personne peut revenir aussitôt.
+            if show_kick {
                 if ui::tinted_button(ui, Some(Icon::Logout), "Expulser", Tone::Danger).clicked() {
                     self.send(ClientMsg::Kick {
                         user_id: m.user_id,
@@ -2223,16 +2474,18 @@ impl KiApp {
                     });
                     ui.close();
                 }
-                // Bannir l'empêche de revenir : motif et durée se saisissent
-                // dans une petite fenêtre, plutôt qu'au fond d'un menu.
-                if ui::tinted_button(ui, Some(Icon::Ban), "Bannir…", Tone::Danger).clicked() {
-                    self.ban_draft = Some(BanDraft {
-                        username: m.username.clone(),
-                        reason: String::new(),
-                        duration_secs: 86_400,
-                    });
-                    ui.close();
-                }
+            }
+            // Bannir l'empêche de revenir : motif et durée se saisissent
+            // dans une petite fenêtre, plutôt qu'au fond d'un menu.
+            if show_ban
+                && ui::tinted_button(ui, Some(Icon::Ban), "Bannir…", Tone::Danger).clicked()
+            {
+                self.ban_draft = Some(BanDraft {
+                    username: m.username.clone(),
+                    reason: String::new(),
+                    duration_secs: 86_400,
+                });
+                ui.close();
             }
         });
     }
@@ -2456,7 +2709,22 @@ impl KiApp {
                         user == msg.user_id && msg.ts.saturating_sub(ts) < GROUP_WINDOW_MS
                     });
                     let photo = self.avatars.get(&msg.user_id).map(|(_, t)| t.clone());
-                    message_block(ui, msg, !grouped, photo.as_ref(), &mut self.previews);
+                    // L'auteur peut avoir quitté le serveur : on retombe
+                    // alors sur son pseudo, plutôt que de perdre la couleur.
+                    let color = self
+                        .members
+                        .iter()
+                        .find(|m| m.user_id == msg.user_id)
+                        .map(|m| theme::member_color(m.color, &m.username))
+                        .unwrap_or_else(|| color_for(&msg.username));
+                    message_block(
+                        ui,
+                        msg,
+                        !grouped,
+                        photo.as_ref(),
+                        &mut self.previews,
+                        color,
+                    );
                     previous = Some((msg.user_id, msg.ts));
                 }
                 self.messages = messages;
@@ -3161,15 +3429,16 @@ impl KiApp {
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&me).color(color_for(&me)).size(16.0).strong());
-                        ui.label(
-                            RichText::new(if self.my_admin {
-                                "administrateur"
-                            } else {
-                                "membre"
-                            })
-                            .color(TEXT_FAINT)
-                            .size(12.0),
-                        );
+                        // Le rôle vaut mieux qu'un « administrateur/membre »
+                        // binaire : c'est lui que les autres voient.
+                        let role = self
+                            .members
+                            .iter()
+                            .find(|m| Some(m.user_id) == self.my_id)
+                            .and_then(|m| self.top_role_name(m))
+                            .unwrap_or("membre")
+                            .to_string();
+                        ui.label(RichText::new(role).color(TEXT_FAINT).size(12.0));
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             if ui::button(ui, Icon::Pencil, "Photo").clicked() {
@@ -3385,8 +3654,10 @@ impl KiApp {
                 // Onglets : tout tenait auparavant dans une seule colonne
                 // déroulante, qui ne se lisait plus une fois les
                 // bannissements et le journal ajoutés.
-                ui.horizontal(|ui| {
-                    for tab in AdminTab::ALL {
+                ui.horizontal_wrapped(|ui| {
+                    let tabs: Vec<AdminTab> =
+                        AdminTab::ALL.into_iter().filter(|t| self.can(t.needs())).collect();
+                    for tab in tabs {
                         if ui.selectable_label(self.admin_tab == tab, tab.label()).clicked() {
                             self.admin_tab = tab;
                             // Le journal ne se charge qu'à l'ouverture de
@@ -3405,8 +3676,18 @@ impl KiApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        // L'onglet ouvert peut être devenu hors de portée si
+                        // les rôles viennent de changer sous nos pieds.
+                        if !self.can(self.admin_tab.needs()) {
+                            self.admin_tab = AdminTab::ALL
+                                .into_iter()
+                                .find(|t| self.can(t.needs()))
+                                .unwrap_or(AdminTab::Server);
+                        }
                         match self.admin_tab {
                             AdminTab::Server => self.server_identity_section(ui, ctx, &mut to_send),
+                            AdminTab::Channels => self.admin_channels_tab(ui, &mut to_send),
+                            AdminTab::Roles => self.admin_roles_tab(ui, &mut to_send),
                             AdminTab::Members => self.admin_members_tab(ui, &mut to_send),
                             AdminTab::Invites => self.admin_invites_tab(ui, ctx, &mut to_send),
                             AdminTab::Audit => self.admin_audit_tab(ui),
@@ -3424,6 +3705,223 @@ impl KiApp {
         }
         if !open {
             self.close_admin();
+        }
+    }
+
+    /// Onglet « Salons » : créer, renommer, restreindre, supprimer.
+    fn admin_channels_tab(&mut self, ui: &mut egui::Ui, to_send: &mut Vec<ClientMsg>) {
+        ui::group_title(ui, Icon::Plus, "Nouveau salon");
+        let draft = self.channel_draft.get_or_insert_with(|| ChannelDraft {
+            name: String::new(),
+            kind: ChannelKind::Text,
+            allowed_roles: Vec::new(),
+            restricted: false,
+        });
+        ui.add(ui::text_field(&mut draft.name, "nom du salon", false));
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut draft.kind, ChannelKind::Text, "Textuel");
+            ui.selectable_value(&mut draft.kind, ChannelKind::Voice, "Vocal");
+        });
+        ui.checkbox(&mut draft.restricted, "Réservé à certains rôles");
+        if draft.restricted {
+            let roles = self.roles.clone();
+            ui.horizontal_wrapped(|ui| {
+                for role in &roles {
+                    // `@everyone` n'a pas de sens dans une restriction : le
+                    // cocher reviendrait à ne rien restreindre du tout.
+                    if role.id == ki_protocol::ROLE_EVERYONE {
+                        continue;
+                    }
+                    let mut on = draft.allowed_roles.contains(&role.id);
+                    if ui.checkbox(&mut on, &role.name).changed() {
+                        if on {
+                            draft.allowed_roles.push(role.id);
+                        } else {
+                            draft.allowed_roles.retain(|r| *r != role.id);
+                        }
+                    }
+                }
+            });
+            if draft.allowed_roles.is_empty() {
+                ui::hint(ui, "aucun rôle coché : le salon resterait invisible pour tous");
+            }
+        }
+        let ready = !draft.name.trim().is_empty()
+            && (!draft.restricted || !draft.allowed_roles.is_empty());
+        let create = ui
+            .add_enabled_ui(ready, |ui| ui::button(ui, Icon::Plus, "Créer le salon"))
+            .inner
+            .clicked();
+        if create {
+            to_send.push(ClientMsg::AdminCreateChannel {
+                name: draft.name.trim().to_string(),
+                kind: draft.kind,
+                allowed_roles: draft.restricted.then(|| draft.allowed_roles.clone()),
+            });
+            self.channel_draft = None;
+        }
+
+        ui.add_space(12.0);
+        ui::hairline(ui);
+        ui.add_space(10.0);
+        ui::group_title(ui, Icon::Hash, "Salons existants");
+        let channels = self.channels.clone();
+        for ch in &channels {
+            ui.horizontal(|ui| {
+                ui::glyph(
+                    ui,
+                    if ch.kind == ChannelKind::Voice { Icon::Volume } else { Icon::Hash },
+                    13.0,
+                    TEXT_DIM,
+                );
+                ui.label(RichText::new(&ch.name).color(TEXT).size(13.0));
+                if ch.allowed_roles.is_some() {
+                    ui.label(RichText::new("privé").color(ACCENT).size(11.0));
+                }
+                if ch.locked {
+                    ui.label(RichText::new("verrouillé").color(WARN).size(11.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
+                        to_send.push(ClientMsg::AdminDeleteChannel { channel: ch.id });
+                    }
+                });
+            });
+        }
+        ui::hint(
+            ui,
+            "supprimer un salon n'efface pas son historique : le fichier est archivé",
+        );
+    }
+
+    /// Onglet « Rôles » : couleur, rang, permissions.
+    fn admin_roles_tab(&mut self, ui: &mut egui::Ui, to_send: &mut Vec<ClientMsg>) {
+        let roles = self.roles.clone();
+        ui::group_title(ui, Icon::Crown, "Rôles");
+        for role in &roles {
+            ui.horizontal(|ui| {
+                let color = theme::member_color(role.color, &role.name);
+                ui::status_dot(ui, color, "", 10.0);
+                ui.label(RichText::new(&role.name).color(color).size(13.0).strong());
+                ui.label(RichText::new(format!("rang {}", role.rank)).color(TEXT_FAINT).size(11.0));
+                if role.system {
+                    ui.label(RichText::new("système").color(TEXT_FAINT).size(11.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // On ne touche qu'à ce qui est strictement sous son
+                    // propre rang : sinon on se donnerait des pouvoirs.
+                    if role.rank < self.my_rank && !role.system {
+                        if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
+                            to_send.push(ClientMsg::AdminDeleteRole { id: role.id });
+                        }
+                        if ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked() {
+                            self.role_draft = Some(RoleDraft {
+                                id: Some(role.id),
+                                name: role.name.clone(),
+                                color: theme::member_color(role.color, &role.name),
+                                colored: role.color.is_some(),
+                                rank: role.rank,
+                                perms: role.perms,
+                            });
+                        }
+                    }
+                });
+            });
+        }
+
+        ui.add_space(10.0);
+        if self.role_draft.is_none() && ui::button(ui, Icon::Plus, "Nouveau rôle").clicked() {
+            self.role_draft = Some(RoleDraft {
+                id: None,
+                name: String::new(),
+                color: ACCENT,
+                colored: true,
+                // Par défaut juste en dessous de soi : un rôle créé au même
+                // rang serait immédiatement hors de portée de son auteur.
+                rank: self.my_rank.saturating_sub(1),
+                perms: ki_protocol::perm::DEFAULT,
+            });
+        }
+
+        let Some(mut draft) = self.role_draft.take() else { return };
+        let mut keep = true;
+        ui.add_space(8.0);
+        ui::hairline(ui);
+        ui.add_space(8.0);
+        ui::field_label(ui, "Nom");
+        ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut draft.colored, "Couleur de pseudo");
+            if draft.colored {
+                ui.color_edit_button_srgba(&mut draft.color);
+            }
+        });
+        ui.add_space(6.0);
+        let ceiling = self.my_rank.saturating_sub(1);
+        ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
+        ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+        ui.add_space(6.0);
+        ui::field_label(ui, "Permissions");
+        for (bit, label, why) in ki_protocol::perm::ALL {
+            // On n'accorde pas ce qu'on n'a pas soi-même : sans cette borne,
+            // gérer les rôles suffirait à devenir administrateur.
+            if !self.can(*bit) {
+                continue;
+            }
+            let mut on = draft.perms & bit != 0;
+            let response = ui.checkbox(&mut on, *label);
+            if !why.is_empty() {
+                response.on_hover_text(*why);
+            }
+            if on {
+                draft.perms |= bit;
+            } else {
+                draft.perms &= !bit;
+            }
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let ready = !draft.name.trim().is_empty();
+            let save = ui
+                .add_enabled_ui(ready, |ui| {
+                    ui::primary_button(ui, Some(Icon::Check), "Enregistrer", None)
+                })
+                .inner
+                .clicked();
+            if save {
+                let color = draft.colored.then(|| {
+                    let c = draft.color;
+                    ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32
+                });
+                to_send.push(match draft.id {
+                    Some(id) => ClientMsg::AdminEditRole {
+                        role: ki_protocol::RoleInfo {
+                            id,
+                            name: draft.name.trim().to_string(),
+                            color,
+                            rank: draft.rank,
+                            perms: draft.perms,
+                            system: false,
+                        },
+                    },
+                    None => ClientMsg::AdminCreateRole {
+                        name: draft.name.trim().to_string(),
+                        color,
+                        rank: draft.rank,
+                        perms: draft.perms,
+                    },
+                });
+                keep = false;
+            }
+            if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                keep = false;
+            }
+        });
+        // Remis en place seulement si l'édition continue : enregistrer ou
+        // annuler referme le formulaire.
+        if keep {
+            self.role_draft = Some(draft);
         }
     }
 
@@ -4152,7 +4650,9 @@ fn member_row(
     );
     ui::paint_avatar(painter, avatar_rect, &member.username, speaking, photo, theme::BG_SIDE);
 
-    let color = color_for(&member.username);
+    // La couleur vient du rôle quand le serveur en donne une ; sinon
+    // c'est le hachage du pseudo, comme avant les rôles.
+    let color = theme::member_color(member.color, &member.username);
     let font = egui::FontId::proportional(13.5);
     let galley = ui.fonts(|f| f.layout_no_wrap(member.username.clone(), font, color));
     let name_width = galley.size().x;
@@ -4242,6 +4742,10 @@ fn message_block(
     with_header: bool,
     photo: Option<&egui::TextureHandle>,
     previews: &mut images::Previews,
+    // Couleur de l'auteur, résolue depuis son rôle par l'appelant. Elle
+    // n'est pas figée dans l'historique : changer un rôle doit recolorer les
+    // anciens messages, pas seulement les nouveaux.
+    color: egui::Color32,
 ) {
     const GUTTER: f32 = 36.0;
     let bg_slot = ui.painter().add(egui::Shape::Noop);
@@ -4263,7 +4767,7 @@ fn message_block(
                         ui.spacing_mut().item_spacing.x = 7.0;
                         ui.label(
                             RichText::new(&msg.username)
-                                .color(color_for(&msg.username))
+                                .color(color)
                                 .size(14.0)
                                 .strong(),
                         );

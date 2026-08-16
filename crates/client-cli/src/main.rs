@@ -174,6 +174,39 @@ async fn main() -> anyhow::Result<()> {
                         println!("* (début du salon)");
                     }
                 }
+                ServerMsg::Roles { roles } => {
+                    println!("* rôles :");
+                    for r in roles {
+                        println!(
+                            "    {} (id {}, rang {}){}",
+                            r.name,
+                            r.id,
+                            r.rank,
+                            if r.system { " [système]" } else { "" },
+                        );
+                    }
+                }
+                ServerMsg::ChannelsUpdated { channels } => {
+                    println!("* salons :");
+                    for c in channels {
+                        println!(
+                            "    {} : {}{}{}",
+                            c.id,
+                            c.name,
+                            if c.allowed_roles.is_some() { " [privé]" } else { "" },
+                            if c.locked { " [verrouillé]" } else { "" },
+                        );
+                    }
+                }
+                ServerMsg::VoiceLocked { channel, wrong } => {
+                    if wrong {
+                        eprintln!("! mot de passe incorrect pour le salon {channel}");
+                    } else {
+                        eprintln!(
+                            "! salon {channel} verrouillé — /voice {channel} <mot de passe>"
+                        );
+                    }
+                }
                 ServerMsg::AuditLog { records } => {
                     println!("* journal d'audit :");
                     for r in records {
@@ -231,8 +264,14 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         let msg = if let Some(rest) = line.strip_prefix("/voice ") {
-            match rest.trim().parse() {
-                Ok(channel) => ClientMsg::JoinVoice { channel },
+            // `/voice <id> [mot de passe]` — le mot de passe ne sert qu'aux
+            // salons vocaux verrouillés.
+            let mut parts = rest.trim().splitn(2, ' ');
+            match parts.next().unwrap_or_default().parse() {
+                Ok(channel) => ClientMsg::JoinVoice {
+                    channel,
+                    password: parts.next().map(|p| p.trim().to_string()),
+                },
                 Err(_) => {
                     eprintln!("! id de salon vocal invalide");
                     continue;
@@ -285,6 +324,45 @@ async fn main() -> anyhow::Result<()> {
                 None => eprintln!("! vocal indisponible"),
             }
             continue;
+        } else if line == "/roles" {
+            ClientMsg::AdminListRoles
+        } else if let Some(rest) = line.strip_prefix("/mkchannel ") {
+            // `/mkchannel <nom> [id de rôle...]` — sans rôle, salon public.
+            let mut parts = rest.trim().split(' ');
+            let name = parts.next().unwrap_or_default().to_string();
+            let allowed: Vec<u32> = parts.filter_map(|p| p.parse().ok()).collect();
+            ClientMsg::AdminCreateChannel {
+                name,
+                kind: ki_protocol::ChannelKind::Text,
+                allowed_roles: (!allowed.is_empty()).then_some(allowed),
+            }
+        } else if let Some(rest) = line.strip_prefix("/rmchannel ") {
+            match rest.trim().parse() {
+                Ok(channel) => ClientMsg::AdminDeleteChannel { channel },
+                Err(_) => {
+                    eprintln!("! usage : /rmchannel <id>");
+                    continue;
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("/lock ") {
+            // `/lock <id salon vocal> <mot de passe> [minutes]`
+            let mut parts = rest.trim().splitn(3, ' ');
+            let channel = parts.next().and_then(|c| c.parse().ok());
+            match channel {
+                Some(channel) => ClientMsg::AdminSetVoicePassword {
+                    channel,
+                    password: parts.next().map(str::to_string),
+                    ttl_secs: parts
+                        .next()
+                        .and_then(|m| m.parse::<u32>().ok())
+                        .unwrap_or(60)
+                        .saturating_mul(60),
+                },
+                None => {
+                    eprintln!("! usage : /lock <id> <mot de passe> [minutes]");
+                    continue;
+                }
+            }
         } else if line == "/admin" {
             ClientMsg::AdminListUsers
         } else if line == "/audit" {

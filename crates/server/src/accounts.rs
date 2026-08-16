@@ -12,8 +12,10 @@ use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, Pass
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
-use ki_protocol::{AccountInfo, InviteInfo, UserId};
+use ki_protocol::{perm, AccountInfo, InviteInfo, RoleId, UserId, ROLE_OWNER};
 use rand::Rng;
+
+use crate::roles::Roles;
 
 #[derive(Serialize, Deserialize, Default)]
 struct AccountsFile {
@@ -31,8 +33,17 @@ struct StoredUser {
     /// Hachage Argon2id au format PHC.
     hash: String,
     /// Le premier compte créé sur le serveur est admin.
+    ///
+    /// N'est plus la source de vérité depuis les rôles : le champ continue
+    /// d'être écrit pour qu'un retour à une version antérieure retrouve ses
+    /// admins, mais plus rien ici ne le consulte pour décider quoi que ce
+    /// soit — c'est `roles` qui commande.
     #[serde(default)]
     admin: bool,
+    /// Rôles attribués. `@everyone` n'y figure jamais : il est implicite,
+    /// et `Roles` l'ajoute à chaque calcul.
+    #[serde(default)]
+    roles: Vec<RoleId>,
     /// Un compte bloqué ne peut plus se connecter. Conservé pour rester
     /// lisible par une version antérieure : recalculé depuis `ban`.
     #[serde(default)]
@@ -131,10 +142,15 @@ impl Invite {
 }
 
 /// Résultat d'une authentification réussie.
+///
+/// Les rôles sont rendus bruts, sans « est-ce un admin ? » calculé au
+/// passage : les permissions ne se lisent que dans `Roles`, et un booléen
+/// figé ici redeviendrait une seconde source de vérité, à côté de la
+/// première.
 #[derive(Debug)]
 pub struct AuthOk {
     pub id: UserId,
-    pub admin: bool,
+    pub roles: Vec<RoleId>,
     /// Renseigné uniquement quand cette authentification vient de **créer**
     /// le compte : le code d'invitation consommé, pour le journal d'audit.
     pub created_with: Option<String>,
@@ -168,12 +184,33 @@ pub struct Accounts {
 impl Accounts {
     pub fn open(data_dir: &str) -> anyhow::Result<Self> {
         let path = PathBuf::from(data_dir).join("users.json");
-        let inner = if path.exists() {
+        let mut inner: AccountsFile = if path.exists() {
             serde_json::from_str(&std::fs::read_to_string(&path)?)?
         } else {
             AccountsFile { next_id: 1, users: HashMap::new(), invites: Vec::new() }
         };
-        Ok(Self { path, inner: Mutex::new(inner) })
+        // Migration : avant les rôles, `admin: true` tenait lieu de toute la
+        // hiérarchie. On la transpose une fois pour toutes, au chargement —
+        // sans quoi la première montée de version laisserait un serveur sans
+        // personne pour l'administrer. Le compte reçoit Propriétaire, qui
+        // porte ADMINISTRATOR.
+        let migrated: Vec<String> = inner
+            .users
+            .iter()
+            .filter(|(_, u)| u.admin && u.roles.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &migrated {
+            if let Some(user) = inner.users.get_mut(name) {
+                user.roles = vec![ROLE_OWNER];
+            }
+        }
+        let store = Self { path, inner: Mutex::new(inner) };
+        if !migrated.is_empty() {
+            tracing::info!("rôle Propriétaire attribué à {} compte(s) admin", migrated.len());
+            store.save(&store.inner.lock().unwrap());
+        }
+        Ok(store)
     }
 
     /// Authentifie (ou crée, si invitation valide) un compte.
@@ -213,7 +250,9 @@ impl Accounts {
             let parsed =
                 PasswordHash::new(&user.hash).map_err(|_| "compte corrompu".to_string())?;
             return match Argon2::default().verify_password(password.as_bytes(), &parsed) {
-                Ok(()) => Ok(AuthOk { id: user.id, admin: user.admin, created_with: None }),
+                Ok(()) => {
+                    Ok(AuthOk { id: user.id, roles: user.roles.clone(), created_with: None })
+                }
                 Err(_) => Err("mot de passe incorrect".into()),
             };
         }
@@ -250,21 +289,37 @@ impl Accounts {
             }
         }
         let id = inner.next_id;
-        // Le tout premier compte du serveur devient admin.
+        // Le tout premier compte du serveur devient propriétaire : sans lui,
+        // un serveur neuf n'aurait personne pour créer les rôles.
         let admin = inner.users.is_empty();
+        let roles = if admin { vec![ROLE_OWNER] } else { Vec::new() };
         inner.next_id += 1;
         inner.users.insert(
             username.to_string(),
-            StoredUser { id, hash, admin, banned: false, ban: None, avatar: None },
+            StoredUser {
+                id,
+                hash,
+                admin,
+                roles: roles.clone(),
+                banned: false,
+                ban: None,
+                avatar: None,
+            },
         );
         self.save(&inner);
-        tracing::info!("nouveau compte : {username} (id {id}, admin: {admin})");
-        Ok(AuthOk { id, admin, created_with: Some(code.to_string()) })
+        tracing::info!("nouveau compte : {username} (id {id}, propriétaire: {admin})");
+        Ok(AuthOk { id, roles, created_with: Some(code.to_string()) })
     }
 
     /// Tous les comptes, pour le panneau admin. `online` est complété par
     /// l'appelant (l'état des connexions vit dans AppState).
-    pub fn list(&self) -> Vec<AccountInfo> {
+    ///
+    /// Le magasin de rôles est demandé plutôt que déduit : `rank` et `admin`
+    /// se **calculent** depuis les rôles, et les laisser à l'appelant, comme
+    /// `online`, c'est accepter qu'un oubli renvoie un rang 0 silencieux —
+    /// donc un panneau qui propose des actions vouées au refus. Ce que la
+    /// liste peut remplir juste, elle le remplit.
+    pub fn list(&self, roles: &Roles) -> Vec<AccountInfo> {
         let now = crate::state::now_millis();
         let inner = self.inner.lock().unwrap();
         let mut users: Vec<AccountInfo> = inner
@@ -275,12 +330,14 @@ impl Accounts {
                 AccountInfo {
                     username: name.clone(),
                     user_id: u.id,
-                    admin: u.admin,
+                    admin: perm::has(roles.perms_of(&u.roles), perm::ADMINISTRATOR),
                     banned: ban.is_some() || (u.ban.is_none() && u.banned),
                     online: false,
                     ban_reason: ban.map(|b| b.reason.clone()).unwrap_or_default(),
                     ban_until: ban.and_then(|b| b.until),
                     ban_by: ban.map(|b| b.by.clone()).unwrap_or_default(),
+                    roles: u.roles.clone(),
+                    rank: roles.rank_of(&u.roles),
                 }
             })
             .collect();
@@ -359,8 +416,12 @@ impl Accounts {
         Ok(())
     }
 
-    /// Redéfinit le mot de passe d'un compte. Un admin ne peut pas modifier
-    /// un autre admin (mais peut se modifier lui-même).
+    /// Redéfinit le mot de passe d'un compte.
+    ///
+    /// Plus aucune hiérarchie ici : « qui peut agir sur qui » se tranche au
+    /// rang, dans `quic.rs`, avant l'appel. La règle câblée « un admin ne
+    /// touche pas à un autre admin » y perdait de toute façon son sens dès
+    /// qu'un modérateur existe. `requester` ne sert donc plus qu'à la trace.
     pub fn reset_password(
         &self,
         requester: &str,
@@ -373,9 +434,6 @@ impl Accounts {
         let Some(user) = inner.users.get_mut(target) else {
             return Err("compte inconnu".into());
         };
-        if user.admin && requester != target {
-            return Err("impossible de modifier le mot de passe d'un autre admin".into());
-        }
         user.hash = hash;
         self.save(&inner);
         tracing::info!("mot de passe de {target} réinitialisé par {requester}");
@@ -408,8 +466,12 @@ impl Accounts {
         Ok(())
     }
 
-    /// Bannit un compte, avec motif et durée. Les admins ne peuvent pas
-    /// l'être. `duration_secs` à 0 = définitif.
+    /// Bannit un compte, avec motif et durée. `duration_secs` à 0 = définitif.
+    ///
+    /// Le refus de bannir plus haut que soi a déménagé dans `quic.rs`, où le
+    /// rang se compare : ici on ne fait plus que poser la sanction. Reste la
+    /// seule règle qui ne dépende d'aucune hiérarchie — on ne se bannit pas
+    /// soi-même.
     pub fn ban(
         &self,
         requester: &str,
@@ -425,9 +487,6 @@ impl Accounts {
         let Some(user) = inner.users.get_mut(target) else {
             return Err("compte inconnu".into());
         };
-        if user.admin {
-            return Err("impossible de bannir un admin".into());
-        }
         user.ban = Some(Ban {
             until: (duration_secs > 0).then(|| now + duration_secs.saturating_mul(1000)),
             reason: reason.to_string(),
@@ -454,6 +513,58 @@ impl Accounts {
         self.save(&inner);
         tracing::info!("{target} débanni par {requester}");
         Ok(())
+    }
+
+    /// Les rôles d'un compte, hors `@everyone` (toujours implicite).
+    pub fn roles_of(&self, username: &str) -> Vec<RoleId> {
+        let inner = self.inner.lock().unwrap();
+        inner.users.get(username).map(|u| u.roles.clone()).unwrap_or_default()
+    }
+
+    /// Remplace la liste des rôles d'un compte.
+    ///
+    /// Remplacement complet, pas d'ajout ni de retrait unitaire : l'appelant
+    /// envoie l'état voulu, et deux admins qui règlent le même compte en même
+    /// temps ne composent pas un résultat que ni l'un ni l'autre n'a demandé.
+    /// La liste est supposée déjà passée par `Roles::sanitize` — ici on ne
+    /// sait pas quels identifiants existent.
+    pub fn set_roles(&self, username: &str, roles: Vec<RoleId>) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(user) = inner.users.get_mut(username) else {
+            return Err("compte inconnu".into());
+        };
+        user.roles = roles;
+        // `admin` suit, sans plus rien décider : il n'est là que pour qu'un
+        // retour à une version antérieure retrouve ses administrateurs.
+        user.admin = user.roles.contains(&ROLE_OWNER);
+        let count = user.roles.len();
+        self.save(&inner);
+        tracing::info!("rôles de {username} redéfinis ({count})");
+        Ok(())
+    }
+
+    /// Retire un rôle de **tous** les comptes, après sa suppression.
+    ///
+    /// À appeler juste après `Roles::delete` : un identifiant laissé dans un
+    /// compte n'accorde plus rien — `perms_of` ignore les inconnus — mais il
+    /// ressortirait tel quel dans la liste des membres, et reviendrait à la
+    /// vie le jour où le même identifiant serait recyclé. Renvoie le nombre
+    /// de comptes touchés, pour le journal d'audit.
+    pub fn remove_role(&self, role: RoleId) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let mut touched = 0;
+        for user in inner.users.values_mut() {
+            if user.roles.contains(&role) {
+                user.roles.retain(|r| *r != role);
+                user.admin = user.roles.contains(&ROLE_OWNER);
+                touched += 1;
+            }
+        }
+        if touched > 0 {
+            self.save(&inner);
+            tracing::info!("rôle {role} retiré de {touched} compte(s)");
+        }
+        touched
     }
 
     /// Photo de profil d'un compte, par identifiant.
@@ -516,12 +627,12 @@ mod tests {
         assert!(accounts.authenticate("alice", "secret99", None, "inv").is_err());
         // Mauvaise invitation : refusé.
         assert!(accounts.authenticate("alice", "secret99", Some("bad"), "inv").is_err());
-        // Bonne invitation : compte créé, premier compte = admin.
+        // Bonne invitation : compte créé, premier compte = propriétaire.
         let alice = accounts.authenticate("alice", "secret99", Some("inv"), "inv").unwrap();
-        assert!(alice.admin);
-        // Deuxième compte : pas admin.
+        assert_eq!(alice.roles, vec![ROLE_OWNER]);
+        // Deuxième compte : aucun rôle, donc @everyone et rien d'autre.
         let bob = accounts.authenticate("bob", "secret99", Some("inv"), "inv").unwrap();
-        assert!(!bob.admin);
+        assert!(bob.roles.is_empty());
         // Reconnexion : mot de passe seul suffit.
         assert_eq!(accounts.authenticate("alice", "secret99", None, "inv").unwrap().id, alice.id);
         // Mauvais mot de passe : refusé même avec invitation.
@@ -531,7 +642,7 @@ mod tests {
         let reloaded = Accounts::open(dir.to_str().unwrap()).unwrap();
         let again = reloaded.authenticate("alice", "secret99", None, "inv").unwrap();
         assert_eq!(again.id, alice.id);
-        assert!(again.admin);
+        assert_eq!(again.roles, vec![ROLE_OWNER]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -544,7 +655,7 @@ mod tests {
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
         let root = accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
-        assert!(root.admin);
+        assert_eq!(root.roles, vec![ROLE_OWNER]);
 
         // Invitation à usage unique : un compte, pas deux.
         let code = accounts.create_invite("root", Some(1), "", 0);
@@ -566,9 +677,11 @@ mod tests {
         accounts.reset_password("root", "ami", "nouveaupass").unwrap();
         assert!(accounts.authenticate("ami", "amipass", None, "inv").is_err());
         assert!(accounts.authenticate("ami", "nouveaupass", None, "inv").is_ok());
-        // Un admin ne peut pas modifier un autre admin, mais peut se modifier.
-        assert!(accounts.reset_password("ami", "root", "hackpass").is_err());
-        assert!(accounts.reset_password("root", "root", "rootpass2").is_ok());
+        // La règle « un admin ne touche pas à un autre admin » a déménagé :
+        // elle se décide au rang, dans quic.rs. Ici, plus rien ne s'y oppose
+        // — le magasin ne fait que stocker ce qu'on lui demande.
+        assert!(accounts.reset_password("ami", "root", "rootpass2").is_ok());
+        assert!(accounts.authenticate("root", "rootpass2", None, "inv").is_ok());
 
         // Bannissement définitif : login refusé, levée le rétablit.
         accounts.ban("root", "ami", "spam", 0).unwrap();
@@ -578,8 +691,11 @@ mod tests {
         assert!(refus.contains("spam"), "message inattendu : {refus}");
         accounts.unban("root", "ami").unwrap();
         assert!(accounts.authenticate("ami", "nouveaupass", None, "inv").is_ok());
-        // Ni un admin, ni soi-même.
-        assert!(accounts.ban("ami", "root", "", 0).is_err());
+        // Bannir le propriétaire n'est plus refusé ici : c'est le rang qui
+        // l'interdira, avant l'appel. Se bannir soi-même n'a en revanche
+        // aucun sens, quelle que soit la hiérarchie.
+        assert!(accounts.ban("ami", "root", "", 0).is_ok());
+        accounts.unban("ami", "root").unwrap();
         assert!(accounts.ban("root", "root", "", 0).is_err());
         // Débannir qui n'est pas banni n'a pas de sens silencieux.
         assert!(accounts.unban("root", "ami").is_err());
@@ -595,6 +711,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
+        let roles = Roles::open(dir.to_str().unwrap()).unwrap();
 
         accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
         accounts.authenticate("ami", "amipass", Some("inv"), "inv").unwrap();
@@ -602,12 +719,20 @@ mod tests {
         // Une heure : bloquant, et le compte est signalé banni.
         accounts.ban("root", "ami", "pause", 3600).unwrap();
         assert!(accounts.authenticate("ami", "amipass", None, "inv").is_err());
-        let listed = accounts.list();
+        let listed = accounts.list(&roles);
         let ami = listed.iter().find(|u| u.username == "ami").unwrap();
         assert!(ami.banned);
         assert_eq!(ami.ban_reason, "pause");
         assert_eq!(ami.ban_by, "root");
         assert!(ami.ban_until.is_some());
+        // Le rang et le drapeau admin sortent des rôles, pas du fichier des
+        // comptes : le propriétaire domine, le membre ordinaire est à zéro.
+        assert!(!ami.admin);
+        assert_eq!(ami.rank, 0);
+        let root = listed.iter().find(|u| u.username == "root").unwrap();
+        assert!(root.admin);
+        assert_eq!(root.rank, u16::MAX);
+        assert_eq!(root.roles, vec![ROLE_OWNER]);
 
         // Une durée déjà écoulée : le compte se reconnecte, et n'est plus
         // signalé banni.
@@ -617,7 +742,7 @@ mod tests {
             accounts.save(&inner);
         }
         assert!(accounts.authenticate("ami", "amipass", None, "inv").is_ok());
-        let listed = accounts.list();
+        let listed = accounts.list(&roles);
         assert!(!listed.iter().find(|u| u.username == "ami").unwrap().banned);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -667,6 +792,73 @@ mod tests {
             inner.invites[0].expires_at = Some(1);
         }
         assert!(accounts.authenticate("tard", "motdepasse", Some(&code), "inv").is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Un `users.json` d'avant les rôles : les admins d'alors doivent
+    /// ressortir propriétaires, sans quoi la montée de version laisserait un
+    /// serveur que plus personne ne peut administrer.
+    #[test]
+    fn the_old_admin_flag_becomes_the_owner_role() {
+        let dir = std::env::temp_dir().join(format!("ki-test-mig-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Écrit à la main : c'est exactement ce que produisait la version
+        // précédente, `roles` compris — c'est-à-dire absent.
+        std::fs::write(
+            dir.join("users.json"),
+            r#"{"next_id":3,"users":{
+                "root":{"id":1,"hash":"","admin":true},
+                "ami":{"id":2,"hash":"","admin":false}
+            },"invites":[]}"#,
+        )
+        .unwrap();
+
+        let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
+        assert_eq!(accounts.roles_of("root"), vec![ROLE_OWNER]);
+        assert!(accounts.roles_of("ami").is_empty());
+
+        // La migration est écrite, pas seulement tenue en mémoire — et
+        // `admin` reste dans le fichier : une version antérieure remise en
+        // service doit y retrouver ses administrateurs.
+        let written = std::fs::read_to_string(dir.join("users.json")).unwrap();
+        assert!(written.contains("\"admin\": true"), "fichier inattendu : {written}");
+        let reloaded = Accounts::open(dir.to_str().unwrap()).unwrap();
+        assert_eq!(reloaded.roles_of("root"), vec![ROLE_OWNER]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Attribuer, puis supprimer un rôle : le balayage des comptes est à la
+    /// charge de l'appelant, et il doit vraiment nettoyer.
+    #[test]
+    fn roles_can_be_assigned_and_swept_after_a_deletion() {
+        let dir = std::env::temp_dir().join(format!("ki-test-rol-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
+        let roles = Roles::open(dir.to_str().unwrap()).unwrap();
+
+        accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
+        accounts.authenticate("ami", "amipass", Some("inv"), "inv").unwrap();
+        let modo = roles.create("Renfort", None, 50, perm::KICK).unwrap();
+
+        accounts.set_roles("ami", roles.sanitize(&[modo.id])).unwrap();
+        let listed = accounts.list(&roles);
+        let ami = listed.iter().find(|u| u.username == "ami").unwrap();
+        assert_eq!(ami.rank, 50);
+        assert!(!ami.admin);
+        assert!(perm::has(roles.perms_of(&ami.roles), perm::KICK));
+        assert!(accounts.set_roles("fantôme", vec![]).is_err());
+
+        // Rôle supprimé : le balayage le retire partout, et ne touche que
+        // les comptes qui le portaient.
+        roles.delete(modo.id).unwrap();
+        assert_eq!(accounts.remove_role(modo.id), 1);
+        assert_eq!(accounts.remove_role(modo.id), 0);
+        assert!(accounts.roles_of("ami").is_empty());
+        assert_eq!(accounts.roles_of("root"), vec![ROLE_OWNER]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

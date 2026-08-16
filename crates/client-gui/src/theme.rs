@@ -68,6 +68,18 @@ pub fn color_for(name: &str) -> Color32 {
     PALETTE[(h % PALETTE.len() as u32) as usize]
 }
 
+/// Couleur d'un membre : celle que son rôle lui donne, sinon le hachage de
+/// son pseudo.
+///
+/// Le repli n'est pas un pis-aller : un serveur sans rôles colorés doit
+/// continuer à afficher des pseudos distincts, comme avant.
+pub fn member_color(color: Option<u32>, username: &str) -> Color32 {
+    match color {
+        Some(rgb) => Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8),
+        None => color_for(username),
+    }
+}
+
 /// Couleur d'identité d'un serveur : teinte **continue** dérivée du nom.
 ///
 /// Contrairement aux pseudos, on n'a ici que quelques vignettes côte à côte

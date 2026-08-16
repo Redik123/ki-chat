@@ -6,6 +6,69 @@ use serde::{Deserialize, Serialize};
 
 pub type UserId = u64;
 pub type ChannelId = u32;
+pub type RoleId = u32;
+
+/// Ensemble de permissions.
+///
+/// Un `u64` nu plutôt qu'un type dédié : aucune dépendance nouvelle, et
+/// surtout un client d'une version antérieure ignore simplement les bits
+/// qu'il ne connaît pas, au lieu d'échouer à désérialiser.
+pub type Perms = u64;
+
+/// Les permissions, une par bit.
+pub mod perm {
+    pub const VIEW_CHANNEL: u64 = 1 << 0;
+    pub const SEND_MESSAGE: u64 = 1 << 1;
+    pub const CONNECT_VOICE: u64 = 1 << 2;
+    pub const UPLOAD_FILE: u64 = 1 << 3;
+    pub const CREATE_INVITE: u64 = 1 << 4;
+    pub const MANAGE_INVITES: u64 = 1 << 5;
+    pub const KICK: u64 = 1 << 6;
+    pub const BAN: u64 = 1 << 7;
+    pub const RESET_PASSWORD: u64 = 1 << 8;
+    pub const MANAGE_CHANNELS: u64 = 1 << 9;
+    pub const MANAGE_ROLES: u64 = 1 << 10;
+    pub const MANAGE_SERVER: u64 = 1 << 11;
+    pub const VIEW_AUDIT_LOG: u64 = 1 << 12;
+    /// Tout permis. Placé au bit de poids fort pour que les permissions
+    /// futures remplissent le bas sans jamais entrer en collision.
+    pub const ADMINISTRATOR: u64 = 1 << 63;
+
+    /// Ce que reçoit tout membre, même sans rôle attribué.
+    pub const DEFAULT: u64 =
+        VIEW_CHANNEL | SEND_MESSAGE | CONNECT_VOICE | UPLOAD_FILE;
+
+    /// Liste ordonnée pour l'interface : (bit, intitulé, explication).
+    pub const ALL: &[(u64, &str, &str)] = &[
+        (VIEW_CHANNEL, "Voir les salons", "lire la liste et l'historique"),
+        (SEND_MESSAGE, "Écrire", "envoyer des messages"),
+        (CONNECT_VOICE, "Rejoindre le vocal", "entrer dans un salon vocal"),
+        (UPLOAD_FILE, "Partager des fichiers", "téléverser images et documents"),
+        (CREATE_INVITE, "Créer des invitations", "générer des codes d'accès"),
+        (MANAGE_INVITES, "Gérer les invitations", "révoquer les codes des autres"),
+        (KICK, "Expulser", "déconnecter quelqu'un, qui peut revenir"),
+        (BAN, "Bannir", "empêcher quelqu'un de revenir"),
+        (RESET_PASSWORD, "Réinitialiser les mots de passe", ""),
+        (MANAGE_CHANNELS, "Gérer les salons", "créer, renommer, supprimer, verrouiller"),
+        (MANAGE_ROLES, "Gérer les rôles", "créer des rôles et les attribuer"),
+        (MANAGE_SERVER, "Gérer le serveur", "nom et logo"),
+        (VIEW_AUDIT_LOG, "Voir le journal", "consulter les actions d'administration"),
+        (ADMINISTRATOR, "Administrateur", "toutes les permissions, présentes et futures"),
+    ];
+
+    /// Vrai si `held` accorde `need`.
+    ///
+    /// `ADMINISTRATOR` court-circuite la vérification de **permission**. Il
+    /// ne contourne jamais celle de **rang** : sans cette distinction, un
+    /// second administrateur pourrait bannir le propriétaire.
+    pub fn has(held: u64, need: u64) -> bool {
+        held & ADMINISTRATOR != 0 || held & need == need
+    }
+}
+
+/// Rôles créés au premier démarrage, jamais supprimables.
+pub const ROLE_EVERYONE: RoleId = 1;
+pub const ROLE_OWNER: RoleId = 2;
 
 /// Messages envoyés par le client au serveur (flux de contrôle, JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +88,15 @@ pub enum ClientMsg {
     Leave,
     /// Entrer dans un salon vocal. Se connecter au serveur n'y met plus
     /// personne d'office : on y entre quand on le décide.
-    JoinVoice { channel: ChannelId },
+    ///
+    /// `password` ne sert qu'aux salons verrouillés. Un client d'une version
+    /// antérieure n'en envoie pas et se voit refuser l'entrée d'un salon
+    /// protégé, ce qui est le comportement voulu.
+    JoinVoice {
+        channel: ChannelId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
     /// Sortir du vocal.
     LeaveVoice,
     /// Message texte dans le salon courant.
@@ -95,6 +166,47 @@ pub enum ClientMsg {
         #[serde(default)]
         limit: u32,
     },
+    /// Demande la liste des rôles.
+    AdminListRoles,
+    AdminCreateRole {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<u32>,
+        #[serde(default)]
+        rank: u16,
+        #[serde(default)]
+        perms: Perms,
+    },
+    /// Remplacement complet du rôle : pas d'ambiguïté sur ce qui est mis à
+    /// jour et ce qui est laissé tel quel.
+    AdminEditRole { role: RoleInfo },
+    AdminDeleteRole { id: RoleId },
+    /// Remplace la liste des rôles d'un compte.
+    AdminSetUserRoles { username: String, roles: Vec<RoleId> },
+    AdminCreateChannel {
+        name: String,
+        #[serde(default)]
+        kind: ChannelKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allowed_roles: Option<Vec<RoleId>>,
+    },
+    /// Remplacement complet ; l'identifiant est porté par la valeur.
+    AdminEditChannel { channel: ChannelInfo },
+    AdminDeleteChannel { channel: ChannelId },
+    /// Nouvel ordre d'affichage. Doit être une permutation exacte des
+    /// salons existants, sinon le serveur refuse — une liste tronquée
+    /// ferait disparaître des salons.
+    AdminReorderChannels { order: Vec<ChannelId> },
+    /// Pose ou retire le mot de passe éphémère d'un salon vocal.
+    /// `password: None` retire le verrou.
+    AdminSetVoicePassword {
+        channel: ChannelId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        /// Durée de vie en secondes. Bornée par le serveur.
+        #[serde(default)]
+        ttl_secs: u32,
+    },
     /// Redéfinit l'identité du serveur (nom, logo). Admin uniquement.
     ///
     /// C'est le serveur qui possède ces données : un membre ordinaire ne
@@ -137,9 +249,22 @@ pub enum ServerMsg {
         /// Distribuée sur le flux de contrôle, lui-même dans le tunnel
         /// TLS 1.3 de QUIC.
         voice_key: String,
-        /// Vrai si ce compte a le rôle admin.
+        /// Vrai si ce compte a toutes les permissions. Conservé : le client
+        /// en ligne de commande et les versions antérieures s'en servent.
         #[serde(default)]
         is_admin: bool,
+        /// Permissions effectives du destinataire, pour que l'interface
+        /// n'affiche que les boutons qui aboutiront.
+        #[serde(default)]
+        perms: Perms,
+        #[serde(default)]
+        rank: u16,
+        /// Tous les rôles du serveur : les couleurs et les badges en
+        /// dépendent, pas seulement l'administration.
+        #[serde(default)]
+        roles: Vec<RoleInfo>,
+        /// **Filtrée** pour ce destinataire : un salon restreint n'apparaît
+        /// pas dans la liste de qui n'y a pas accès.
         channels: Vec<ChannelInfo>,
         /// Identité du serveur (nom, logo), telle que ses admins l'ont réglée.
         #[serde(default)]
@@ -198,6 +323,20 @@ pub enum ServerMsg {
     },
     /// Journal d'audit, du plus récent au plus ancien.
     AuditLog { records: Vec<AuditRecord> },
+    /// Définition de tous les rôles, poussée à chaque changement.
+    Roles { roles: Vec<RoleInfo> },
+    /// La liste des salons a changé. **Calculée par destinataire** : elle
+    /// diffère d'une personne à l'autre selon ce qu'elle a le droit de voir.
+    ChannelsUpdated { channels: Vec<ChannelInfo> },
+    /// Entrée refusée dans un salon vocal verrouillé.
+    VoiceLocked {
+        channel: ChannelId,
+        /// Vrai si un mot de passe a été fourni mais qu'il est faux, faux
+        /// s'il n'y en avait pas — de quoi distinguer « il en faut un » de
+        /// « ce n'est pas le bon ».
+        #[serde(default)]
+        wrong: bool,
+    },
     /// Un code d'invitation vient d'être créé (réponse à AdminCreateInvite).
     InviteCreated { code: String },
     /// Message d'information (succès d'une action admin, ...).
@@ -492,6 +631,12 @@ pub struct AccountInfo {
     /// Qui a banni.
     #[serde(default)]
     pub ban_by: String,
+    #[serde(default)]
+    pub roles: Vec<RoleId>,
+    /// Rang le plus élevé : sert à masquer les actions qui seraient
+    /// refusées, plutôt que de les griser.
+    #[serde(default)]
+    pub rank: u16,
 }
 
 /// Nombre d'usages par défaut d'une invitation : un seul, comme avant les
@@ -566,6 +711,38 @@ pub struct ChannelInfo {
     /// pas ce champ, et ses salons se comportaient comme du texte.
     #[serde(default)]
     pub kind: ChannelKind,
+    /// Ordre d'affichage dans la barre latérale.
+    #[serde(default)]
+    pub position: u32,
+    /// Salon vocal protégé par un mot de passe éphémère. Le mot de passe
+    /// lui-même ne quitte jamais le serveur : ce drapeau suffit au client
+    /// pour savoir qu'il doit le demander.
+    #[serde(default)]
+    pub locked: bool,
+    /// `None` = visible par tout le monde. Sinon, réservé à ces rôles.
+    /// N'est renseigné que pour qui peut gérer les salons — les autres n'ont
+    /// pas à connaître la composition des restrictions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_roles: Option<Vec<RoleId>>,
+}
+
+/// Un rôle : une couleur de pseudo, un rang, un jeu de permissions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleInfo {
+    pub id: RoleId,
+    pub name: String,
+    /// Couleur du pseudo, 0xRRGGBB. `None` = couleur par défaut du thème.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// Autorité. On n'agit que sur strictement plus bas que soi, et l'on
+    /// n'attribue qu'un rôle de rang strictement inférieur au sien.
+    #[serde(default)]
+    pub rank: u16,
+    #[serde(default)]
+    pub perms: Perms,
+    /// Rôle du serveur : ni supprimable, ni renommable.
+    #[serde(default)]
+    pub system: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -583,6 +760,17 @@ pub struct Member {
     /// sans être en vocal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<ChannelId>,
+    #[serde(default)]
+    pub roles: Vec<RoleId>,
+    /// Couleur du pseudo, résolue par le serveur depuis le rôle le mieux
+    /// classé qui en porte une. `None` = le client retombe sur son hachage
+    /// de pseudo habituel, comme avant les rôles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// Rang le plus élevé. Le client s'en sert pour masquer les actions de
+    /// modération qui seraient refusées de toute façon.
+    #[serde(default)]
+    pub rank: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -790,6 +978,62 @@ mod tests {
         };
         let json = serde_json::to_string(&permanent).unwrap();
         assert!(serde_json::from_str::<OldServerMsg>(&json).is_err());
+    }
+
+    /// `ADMINISTRATOR` accorde toute permission, mais le rang reste une
+    /// affaire distincte : c'est ce qui empêche un second administrateur de
+    /// bannir le propriétaire.
+    #[test]
+    fn administrator_grants_every_permission() {
+        assert!(perm::has(perm::ADMINISTRATOR, perm::BAN));
+        assert!(perm::has(perm::ADMINISTRATOR, perm::MANAGE_ROLES | perm::KICK));
+        // Une permission future, inconnue d'aujourd'hui, est couverte aussi.
+        assert!(perm::has(perm::ADMINISTRATOR, 1 << 42));
+
+        assert!(!perm::has(perm::DEFAULT, perm::BAN));
+        assert!(perm::has(perm::DEFAULT, perm::SEND_MESSAGE));
+        // Exiger deux permissions demande bien de les avoir toutes les deux.
+        assert!(!perm::has(perm::KICK, perm::KICK | perm::BAN));
+        assert!(perm::has(perm::KICK | perm::BAN, perm::KICK | perm::BAN));
+    }
+
+    /// Aucun bit ne doit être attribué deux fois : une collision donnerait
+    /// silencieusement une permission qu'on n'a pas accordée.
+    #[test]
+    fn permission_bits_do_not_collide() {
+        let mut seen = 0u64;
+        for (bit, name, _) in perm::ALL {
+            assert_eq!(bit.count_ones(), 1, "{name} n'est pas un bit unique");
+            assert_eq!(seen & bit, 0, "{name} réutilise un bit déjà pris");
+            seen |= bit;
+        }
+    }
+
+    /// Les rôles et les salons restreints n'existent pas pour un serveur
+    /// d'une version antérieure : le client doit rester utilisable.
+    #[test]
+    fn members_and_channels_without_roles_still_parse() {
+        let member: Member = serde_json::from_str(
+            r#"{"user_id":1,"username":"alice","speaking":false}"#,
+        )
+        .unwrap();
+        assert!(member.roles.is_empty());
+        assert_eq!(member.color, None);
+        assert_eq!(member.rank, 0);
+
+        let channel: ChannelInfo =
+            serde_json::from_str(r#"{"id":1,"name":"général"}"#).unwrap();
+        assert_eq!(channel.kind, ChannelKind::Text);
+        assert_eq!(channel.position, 0);
+        assert!(!channel.locked);
+        assert_eq!(channel.allowed_roles, None);
+
+        // `JoinVoice` sans mot de passe : la forme qu'envoient les clients
+        // d'avant les salons verrouillés.
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"join_voice","channel":101}"#).unwrap();
+        let ClientMsg::JoinVoice { password, .. } = msg else { panic!("pas un JoinVoice") };
+        assert_eq!(password, None);
     }
 
     /// La pagination se distingue du chargement initial : `History` remplace

@@ -14,10 +14,12 @@
 
 mod accounts;
 mod audit;
+mod channels;
 mod files;
 mod history;
 mod meta;
 mod quic;
+mod roles;
 mod state;
 mod store;
 mod throttle;

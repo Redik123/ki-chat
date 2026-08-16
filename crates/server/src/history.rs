@@ -30,7 +30,7 @@ pub struct History {
     /// Vers le fil d'écriture. `Option` seulement pour pouvoir lâcher
     /// l'émetteur dans `Drop` avant d'attendre le fil : tant qu'un émetteur
     /// vit, le `recv` d'en face ne rend jamais la main.
-    writes: Option<Sender<(ChannelId, String)>>,
+    writes: Option<Sender<WriteCmd>>,
     writer: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -89,8 +89,36 @@ impl History {
         // faire attendre un `recent()`.
         if let Ok(line) = serde_json::to_string(rec) {
             if let Some(writes) = &self.writes {
-                let _ = writes.send((channel, line));
+                let _ = writes.send(WriteCmd::Line(channel, line));
             }
+        }
+    }
+
+    /// Ouvre le journal d'un salon créé en cours d'exécution.
+    ///
+    /// À appeler **avant** d'annoncer le salon : `append` ignore en silence
+    /// un salon qu'il ne connaît pas, et le premier message partirait dans
+    /// le vide sans que rien ne le signale.
+    pub fn open_channel(&self, data_dir: &str, channel: ChannelId) -> anyhow::Result<()> {
+        let path = PathBuf::from(data_dir).join(format!("channel-{channel}.jsonl"));
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        self.logs
+            .lock()
+            .unwrap()
+            .entry(channel)
+            .or_insert_with(|| VecDeque::with_capacity(MEM_CAP));
+        if let Some(writes) = &self.writes {
+            let _ = writes.send(WriteCmd::Open(channel, file));
+        }
+        Ok(())
+    }
+
+    /// Referme le journal d'un salon supprimé. Le fichier reste sur le
+    /// disque — c'est l'archivage, assuré par le magasin de salons.
+    pub fn close_channel(&self, channel: ChannelId) {
+        self.logs.lock().unwrap().remove(&channel);
+        if let Some(writes) = &self.writes {
+            let _ = writes.send(WriteCmd::Close(channel));
         }
     }
 
@@ -173,15 +201,36 @@ impl Drop for History {
 
 /// Sérialise les écritures : un seul fil, une seule file, donc les lignes
 /// d'un salon arrivent sur le disque dans l'ordre où elles ont été acceptées.
-fn writer_loop(mut files: HashMap<ChannelId, File>, rx: Receiver<(ChannelId, String)>) {
+fn writer_loop(mut files: HashMap<ChannelId, File>, rx: Receiver<WriteCmd>) {
     // `recv` continue de rendre ce qui est déjà en file après la fermeture du
     // canal : rien de ce qui a été accepté n'est perdu à l'arrêt.
-    while let Ok((channel, line)) = rx.recv() {
-        let Some(file) = files.get_mut(&channel) else { continue };
-        if let Err(e) = writeln!(file, "{line}") {
-            tracing::error!("écriture de l'historique du salon {channel} impossible : {e}");
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            WriteCmd::Line(channel, line) => {
+                let Some(file) = files.get_mut(&channel) else { continue };
+                if let Err(e) = writeln!(file, "{line}") {
+                    tracing::error!(
+                        "écriture de l'historique du salon {channel} impossible : {e}"
+                    );
+                }
+            }
+            // L'ouverture passe par la même file que les écritures : c'est
+            // ce qui garantit qu'aucune ligne ne peut la précéder.
+            WriteCmd::Open(channel, file) => {
+                files.insert(channel, file);
+            }
+            WriteCmd::Close(channel) => {
+                files.remove(&channel);
+            }
         }
     }
+}
+
+/// Ordres envoyés au fil d'écriture.
+enum WriteCmd {
+    Line(ChannelId, String),
+    Open(ChannelId, File),
+    Close(ChannelId),
 }
 
 #[cfg(test)]
@@ -196,7 +245,14 @@ mod tests {
     }
 
     fn text_channel(id: ChannelId) -> ChannelInfo {
-        ChannelInfo { id, name: format!("salon-{id}"), kind: ki_protocol::ChannelKind::Text }
+        ChannelInfo {
+            id,
+            name: format!("salon-{id}"),
+            kind: ki_protocol::ChannelKind::Text,
+            position: 0,
+            locked: false,
+            allowed_roles: None,
+        }
     }
 
     fn record(text: &str) -> ChatRecord {

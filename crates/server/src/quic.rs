@@ -223,6 +223,13 @@ async fn handle_connection(
     use rand::Rng;
     let voice_token: u64 = rand::rng().random();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
+    // Les permissions se déduisent des rôles une fois pour toutes ici, et
+    // sont rafraîchies à chaque changement : le chemin chaud n'a alors plus
+    // à reprendre le magasin de rôles.
+    let perms = state.roles.perms_of(&auth.roles);
+    let rank = state.roles.rank_of(&auth.roles);
+    let color = state.roles.color_of(&auth.roles);
+    let is_admin = ki_protocol::perm::has(perms, ki_protocol::perm::ADMINISTRATOR);
     {
         let mut users = state.users.lock().unwrap();
         users.insert(
@@ -232,7 +239,11 @@ async fn handle_connection(
                 channel: None,
                 voice: None,
                 speaking: false,
-                admin: auth.admin,
+                roles: auth.roles.clone(),
+                perms,
+                rank,
+                color,
+                admin: is_admin,
                 voice_token,
                 tx: tx.clone(),
                 conn: conn.clone(),
@@ -247,8 +258,13 @@ async fn handle_connection(
         voice_token,
         udp_port: 0, // transport unifié : plus de port voix séparé
         voice_key: ki_protocol::hex_encode(&state.voice_key),
-        is_admin: auth.admin,
-        channels: state.channels.clone(),
+        is_admin,
+        perms,
+        rank,
+        roles: state.roles.list(),
+        // Filtrée : un salon restreint ne doit pas seulement être
+        // inaccessible, il ne doit pas même se deviner.
+        channels: state.visible_channels(user_id),
         server: state.meta.get(),
     });
     tracing::info!("connexion : {username} (id {user_id})");
@@ -396,7 +412,12 @@ fn load_or_create_cert(
 // ---------------------------------------------------------------------------
 
 fn current_channel(state: &Arc<AppState>, user_id: UserId) -> Option<ki_protocol::ChannelId> {
-    state.users.lock().unwrap().get(&user_id).and_then(|u| u.channel)
+    let channel = state.users.lock().unwrap().get(&user_id).and_then(|u| u.channel)?;
+    // Revérifié à chaque usage, et pas seulement au `Join` : ce champ a été
+    // posé par un `Join` autrefois valide, qu'un changement de rôle ou une
+    // restriction posée depuis a pu périmer. C'est ce qui protège d'un coup
+    // l'écriture, la lecture de l'historique et la pagination.
+    state.can_view(user_id, channel).then_some(channel)
 }
 
 /// Vérifie que l'appelant est admin ; sinon envoie une erreur.
@@ -405,19 +426,58 @@ fn require_admin(
     user_id: UserId,
     tx: &mpsc::UnboundedSender<ServerMsg>,
 ) -> bool {
-    let is_admin = {
+    require(state, user_id, tx, ki_protocol::perm::ADMINISTRATOR)
+}
+
+/// Vérifie une permission, et prévient l'appelant en cas de refus.
+fn require(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    tx: &mpsc::UnboundedSender<ServerMsg>,
+    need: ki_protocol::Perms,
+) -> bool {
+    let ok = {
         let users = state.users.lock().unwrap();
-        users.get(&user_id).is_some_and(|u| u.admin)
+        users.get(&user_id).is_some_and(|u| ki_protocol::perm::has(u.perms, need))
     };
-    if !is_admin {
-        let _ = tx.send(ServerMsg::Error { message: "réservé aux admins".into() });
+    if !ok {
+        let _ = tx.send(ServerMsg::Error { message: "tu n'as pas cette permission".into() });
     }
-    is_admin
+    ok
+}
+
+/// Rang d'un connecté, et rang associé à un compte (même hors ligne).
+fn rank_of(state: &Arc<AppState>, user_id: UserId) -> u16 {
+    let users = state.users.lock().unwrap();
+    users.get(&user_id).map(|u| u.rank).unwrap_or(0)
+}
+
+fn rank_of_account(state: &Arc<AppState>, username: &str) -> u16 {
+    state.roles.rank_of(&state.accounts.roles_of(username))
+}
+
+/// La hiérarchie : on n'agit que sur strictement plus bas que soi.
+///
+/// `ADMINISTRATOR` ne la contourne **jamais** — c'est précisément ce qui
+/// empêche un second administrateur de bannir le propriétaire.
+fn outranks_account(
+    state: &Arc<AppState>,
+    actor: UserId,
+    target: &str,
+    tx: &mpsc::UnboundedSender<ServerMsg>,
+) -> bool {
+    let ok = rank_of_account(state, target) < rank_of(state, actor);
+    if !ok {
+        let _ = tx.send(ServerMsg::Error {
+            message: "cette personne est d'un rang égal ou supérieur au tien".into(),
+        });
+    }
+    ok
 }
 
 /// Envoie l'état admin complet (comptes avec statut en ligne + invitations).
 fn send_admin_info(state: &Arc<AppState>, tx: &mpsc::UnboundedSender<ServerMsg>) {
-    let mut users = state.accounts.list();
+    let mut users = state.accounts.list(&state.roles);
     {
         let connected = state.users.lock().unwrap();
         for u in &mut users {
@@ -489,7 +549,12 @@ fn handle_msg(
             // Ouvrir un salon textuel ne concerne que celui qui le lit :
             // aucune présence à annoncer, personne n'a « rejoint » quoi que
             // ce soit du point de vue des autres.
-            if !state.channel_is(channel, ki_protocol::ChannelKind::Text) {
+            // Un salon restreint répond **exactement** comme un salon qui
+            // n'existe pas : un message différent confirmerait son
+            // existence, ce qui est déjà une fuite.
+            if !state.channel_is(channel, ki_protocol::ChannelKind::Text)
+                || !state.can_view(user_id, channel)
+            {
                 let _ = tx.send(ServerMsg::Error { message: "salon textuel inconnu".into() });
                 return;
             }
@@ -504,9 +569,17 @@ fn handle_msg(
                 u.channel = None;
             }
         }
-        ClientMsg::JoinVoice { channel } => {
-            if !state.channel_is(channel, ki_protocol::ChannelKind::Voice) {
+        ClientMsg::JoinVoice { channel, password } => {
+            // Un salon qu'on ne voit pas doit répondre comme un salon qui
+            // n'existe pas : le message d'erreur ne doit rien confirmer.
+            if !state.channel_is(channel, ki_protocol::ChannelKind::Voice)
+                || !state.can_view(user_id, channel)
+            {
                 let _ = tx.send(ServerMsg::Error { message: "salon vocal inconnu".into() });
+                return;
+            }
+            if let Err(wrong) = state.check_voice_lock(user_id, channel, password.as_deref()) {
+                let _ = tx.send(ServerMsg::VoiceLocked { channel, wrong });
                 return;
             }
             {
@@ -893,8 +966,275 @@ fn handle_msg(
                 });
             });
         }
+        ClientMsg::AdminListRoles => {
+            let _ = tx.send(ServerMsg::Roles { roles: state.roles.list() });
+        }
+        ClientMsg::AdminCreateRole { name, color, rank, perms } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES) {
+                return;
+            }
+            // Deux gardes contre l'escalade en une étape : on ne crée pas un
+            // rôle à son propre rang ou au-dessus (on ne pourrait plus y
+            // toucher, et il pourrait agir sur nous), et l'on n'y met pas
+            // une permission qu'on n'a pas soi-même — sans quoi « gérer les
+            // rôles » suffirait à devenir administrateur.
+            if rank >= rank_of(state, user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "un rôle ne peut pas atteindre ton propre rang".into(),
+                });
+                return;
+            }
+            let Some(perms) = grantable(state, user_id, perms, tx) else { return };
+            match state.roles.create(&name, color, rank, perms) {
+                Ok(role) => {
+                    state.audit.record("role.create", username, &role.name, "");
+                    state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminEditRole { role } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES) {
+                return;
+            }
+            let mine = rank_of(state, user_id);
+            let current = state.roles.get(role.id).map(|r| r.rank).unwrap_or(0);
+            // Le rang **actuel** compte autant que le demandé : sinon on
+            // baisserait d'abord un rôle trop haut pour ensuite le reprendre.
+            if current >= mine || role.rank >= mine {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "ce rôle est à ton rang ou au-dessus".into(),
+                });
+                return;
+            }
+            let Some(perms) = grantable(state, user_id, role.perms, tx) else { return };
+            let name = role.name.clone();
+            match state.roles.edit(ki_protocol::RoleInfo { perms, ..role }) {
+                Ok(()) => {
+                    state.audit.record("role.edit", username, &name, "");
+                    state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
+                    refresh_everyone(state);
+                    state.reconcile_memberships();
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminDeleteRole { id } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES) {
+                return;
+            }
+            let current = state.roles.get(id).map(|r| r.rank).unwrap_or(0);
+            if current >= rank_of(state, user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "ce rôle est à ton rang ou au-dessus".into(),
+                });
+                return;
+            }
+            match state.roles.delete(id) {
+                Ok(role) => {
+                    // Le rôle disparaît de partout : des comptes, et des
+                    // restrictions de salon. Un identifiant mort qui traîne
+                    // dans un `allowed_roles` rendrait le salon inaccessible
+                    // sans qu'on comprenne pourquoi.
+                    state.accounts.remove_role(id);
+                    state.channels.forget_role(id);
+                    state.audit.record("role.delete", username, &role.name, "");
+                    state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
+                    refresh_everyone(state);
+                    state.reconcile_memberships();
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminSetUserRoles { username: target, roles } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES)
+                || !outranks_account(state, user_id, &target, tx)
+            {
+                return;
+            }
+            // On n'attribue que des rôles strictement sous son propre rang.
+            let mine = rank_of(state, user_id);
+            let wanted = state.roles.sanitize(&roles);
+            if wanted.iter().any(|id| state.roles.get(*id).is_some_and(|r| r.rank >= mine)) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "tu ne peux attribuer qu'un rôle sous ton rang".into(),
+                });
+                return;
+            }
+            match state.accounts.set_roles(&target, wanted.clone()) {
+                Ok(()) => {
+                    state.audit.record(
+                        "member.roles",
+                        username,
+                        &target,
+                        &format!("{} rôle(s)", wanted.len()),
+                    );
+                    refresh_everyone(state);
+                    state.reconcile_memberships();
+                    send_admin_info(state, tx);
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminCreateChannel { name, kind, allowed_roles } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            match state.channels.create(&name, kind, allowed_roles) {
+                Ok(channel) => {
+                    // Le journal du salon s'ouvre **avant** l'annonce :
+                    // `History::append` échoue en silence sur un salon
+                    // inconnu, et le premier message partirait dans le vide.
+                    if channel.kind == ki_protocol::ChannelKind::Text {
+                        if let Err(e) = state.history.open_channel(&state.data_dir, channel.id) {
+                            tracing::error!("journal du salon {} : {e:#}", channel.id);
+                        }
+                    }
+                    state.audit.record("channel.create", username, &channel.name, "");
+                    state.push_channels();
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminEditChannel { channel } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            let name = channel.name.clone();
+            match state.channels.edit(channel) {
+                Ok(()) => {
+                    state.audit.record("channel.edit", username, &name, "");
+                    state.reconcile_memberships();
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminDeleteChannel { channel } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            match state.channels.delete(&state.data_dir, channel) {
+                Ok(removed) => {
+                    state.history.close_channel(channel);
+                    state.voice_locks.lock().unwrap().remove(&channel);
+                    state.audit.record(
+                        "channel.delete",
+                        username,
+                        &removed.name,
+                        "journal archivé",
+                    );
+                    state.reconcile_memberships();
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminReorderChannels { order } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            match state.channels.reorder(&order) {
+                Ok(()) => state.push_channels(),
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                }
+            }
+        }
+        ClientMsg::AdminSetVoicePassword { channel, password, ttl_secs } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            if !state.channel_is(channel, ki_protocol::ChannelKind::Voice) {
+                let _ = tx.send(ServerMsg::Error { message: "salon vocal inconnu".into() });
+                return;
+            }
+            match password {
+                Some(password) if !password.is_empty() => {
+                    // Bornée : un verrou « éphémère » d'une semaine n'en est
+                    // plus un, et un verrou d'une seconde ne sert à rien.
+                    let ttl = ttl_secs.clamp(60, 86_400) as u64;
+                    state.voice_locks.lock().unwrap().insert(
+                        channel,
+                        crate::state::VoiceLock {
+                            password,
+                            expires_at: Instant::now() + Duration::from_secs(ttl),
+                        },
+                    );
+                    state.audit.record(
+                        "channel.voice_password",
+                        username,
+                        &state.channels.get(channel).map(|c| c.name).unwrap_or_default(),
+                        &format!("verrou posé pour {} min", ttl / 60),
+                    );
+                    let _ = tx.send(ServerMsg::Info {
+                        message: format!("salon verrouillé pour {} min", ttl / 60),
+                    });
+                }
+                _ => {
+                    state.voice_locks.lock().unwrap().remove(&channel);
+                    state.audit.record(
+                        "channel.voice_password",
+                        username,
+                        &state.channels.get(channel).map(|c| c.name).unwrap_or_default(),
+                        "verrou retiré",
+                    );
+                    let _ = tx.send(ServerMsg::Info { message: "verrou retiré".into() });
+                }
+            }
+            state.push_channels();
+        }
         ClientMsg::Ping => {
             let _ = tx.send(ServerMsg::Pong);
         }
+    }
+}
+
+/// Retire d'un masque les permissions que l'appelant ne détient pas.
+///
+/// `None` = il a tenté d'en accorder une qu'il n'a pas, on refuse au lieu de
+/// rogner en silence : mieux vaut un message clair qu'un rôle qui ne fait
+/// pas ce que son auteur croyait.
+fn grantable(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    wanted: ki_protocol::Perms,
+    tx: &mpsc::UnboundedSender<ServerMsg>,
+) -> Option<ki_protocol::Perms> {
+    let mine = {
+        let users = state.users.lock().unwrap();
+        users.get(&user_id).map(|u| u.perms).unwrap_or(0)
+    };
+    if ki_protocol::perm::has(mine, ki_protocol::perm::ADMINISTRATOR) || wanted & !mine == 0 {
+        return Some(wanted);
+    }
+    let _ = tx.send(ServerMsg::Error {
+        message: "tu ne peux pas accorder une permission que tu n'as pas".into(),
+    });
+    None
+}
+
+/// Recalcule les permissions de tous les connectés.
+///
+/// Un changement de rôle touche potentiellement tout le monde, et les
+/// permissions sont mises en cache sur chaque connexion : sans ce
+/// rafraîchissement, elles resteraient celles d'avant jusqu'à la
+/// reconnexion.
+fn refresh_everyone(state: &Arc<AppState>) {
+    let ids: Vec<UserId> = { state.users.lock().unwrap().keys().copied().collect() };
+    for id in ids {
+        state.refresh_member(id);
     }
 }
