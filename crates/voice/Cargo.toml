@@ -13,6 +13,9 @@ cpal = "0.16"
 dasp_sample = "0.11"
 # Suppression de bruit RNNoise, port Rust pur (mode léger).
 nnnoiseless = "0.5"
+# Décodage WAV des effets sonores : pur Rust, et déjà dans l'arbre via
+# nnnoiseless — l'exiger directement ne compile donc rien de neuf.
+hound = "3.5"
 # Suppression de bruit DeepFilterNet3 (mode studio) : réseau de neurones,
 # inférence tract 100 % Rust, modèle embarqué dans le binaire (~2 Mo).
 # La version crates.io est obsolète : dépendance git épinglée sur le tag.

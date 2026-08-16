@@ -18,6 +18,10 @@ services:
       # Le `:?` fait échouer le déploiement s'il n'est pas défini — mieux vaut
       # une stack qui refuse de démarrer qu'un serveur ouvert à « changeme ».
       KI_TOKEN: ${KI_TOKEN:?définis un code d invitation dans les variables de la stack}
+      # Bornes du partage de fichiers : sans elles le volume grandit jusqu'à
+      # saturer le disque. 0 lève la limite correspondante.
+      KI_FILES_MAX_BYTES: ${KI_FILES_MAX_BYTES:-2147483648}
+      KI_FILES_TTL_DAYS: ${KI_FILES_TTL_DAYS:-30}
       # Verbosité : info par défaut, `debug` pour enquêter.
       RUST_LOG: ${RUST_LOG:-info}
 

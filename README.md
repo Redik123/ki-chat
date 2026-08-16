@@ -59,12 +59,22 @@ monde sur le serveur**, avec le salon vocal occupé par chacun ; les occupants
 d'un vocal apparaissent aussi sous son intitulé, à gauche.
 
 **Chat texte** : JSON ligne à ligne sur le flux QUIC fiable. Historique
-persisté en JSONL (un fichier
-par salon textuel, les 1000 derniers messages en mémoire).
+persisté en JSONL (un fichier par salon textuel, les 1000 derniers messages
+en mémoire). Le fil **se remonte** : arrivé en haut, le client réclame la
+page précédente (`HistoryBefore`), qui vient s'ajouter au-dessus sans
+écraser ce qui est affiché — les messages antérieurs restaient jusqu'ici
+conservés sur disque mais inatteignables. Le serveur relit le fichier
+au-delà de ce qu'il garde en mémoire, et annonce quand le début du salon
+est atteint.
 
 **Voix** : format de paquet maison (voir `protocol/src/lib.rs`), transporté
 en datagrammes QUIC. Le client encode
-en Opus et envoie des trames de 20 ms. Le serveur ne décode (ni ne déchiffre)
+en Opus et envoie des trames de 20 ms. Les conversions de fréquence
+(44,1 ⇄ 48 kHz) passent par une interpolation **cubique de Hermite** et non
+linéaire : mesuré sur une sinusoïde à 1 kHz, l'erreur tombe d'un facteur ~53,
+et l'échantillon de passé conservé d'un bloc à l'autre supprime le
+craquement périodique que produisait le premier ordre. Le serveur ne décode
+(ni ne déchiffre)
 jamais : il authentifie le paquet par jeton, réécrit l'en-tête et relaie la
 trame aux autres membres du salon (mode SFU). C'est l'approche
 Mumble/TeamSpeak, pas la lourdeur WebRTC.
@@ -398,6 +408,33 @@ Commandes CLI équivalentes : `/admin`, `/audit`, `/invite`,
 `/ban <pseudo> [minutes] [motif]`, `/unban <pseudo>`, `/kick <id> [motif]`,
 `/passwd <ancien> <nouveau>`.
 
+**Effets sonores** : rien n'est embarqué dans le binaire — les fichiers audio
+sont affaire de goût, et souvent d'œuvres tierces. Chacun dépose donc les
+siens, au format **WAV** (n'importe quelle fréquence, mono ou stéréo : ils
+sont convertis en 48 kHz mono au chargement), dans un dossier `sons` placé à
+côté de l'exécutable ou dans `%APPDATA%\ki-chat\sons`. Le **nom du fichier**
+fait le lien avec l'événement :
+
+| Fichier | Joué quand |
+| :--- | :--- |
+| `rejoint-vocal.wav` | j'entre dans un salon vocal |
+| `quitte-vocal.wav` | j'en sors |
+| `arrivee.wav` | quelqu'un entre dans **mon** salon vocal |
+| `depart.wav` | quelqu'un en sort |
+| `message.wav` | message reçu (jamais pour les siens) |
+| `micro-coupe.wav` / `micro-actif.wav` | coupure et réactivation du micro |
+
+Un son absent ne manque à personne : il n'est simplement pas joué. Réglages
+dans **⚙ → Effets sonores** (interrupteur, volume, rechargement à chaud, et
+la liste de ce qui a été trouvé). Les sons passent par le volume de sortie
+général : baisser le son baisse aussi les notifications.
+
+Pour convertir un MP3 :
+
+```bash
+ffmpeg -i source.mp3 -ac 1 -ar 48000 -c:a pcm_s16le arrivee.wav
+```
+
 **Mon compte** : clic sur son propre pseudo (liste des membres ou coin bas
 gauche) → changement de son mot de passe (l'ancien est vérifié).
 
@@ -427,6 +464,16 @@ Variables d'environnement du serveur :
 | `KI_HTTP_PORT` | `8080`     | port HTTP (partage de fichiers) |
 | `KI_UDP_PORT`  | `9987`     | port QUIC (contrôle + voix)   |
 | `KI_DATA_DIR`  | `./data`   | persistance (comptes, historique, certificat TLS, identité du serveur) |
+| `KI_FILES_MAX_BYTES` | `2 Gio` | plafond global du partage de fichiers ; `0` = illimité |
+| `KI_FILES_TTL_DAYS`  | `30`    | âge au-delà duquel un fichier partagé est effacé ; `0` = jamais |
+
+Les deux dernières bornent le disque : sans elles, `data/files/` grandissait
+indéfiniment jusqu'à saturer la machine. Une purge passe au démarrage puis
+toutes les heures — elle efface d'abord ce qui a dépassé l'âge limite, puis,
+si le plafond reste franchi, les fichiers les plus anciens jusqu'à repasser
+dessous. Un envoi qui ferait déborder le plafond est refusé avant écriture.
+Le défaut n'est **pas** « illimité » à dessein : laisser le réglage de côté
+ne doit pas laisser le problème entier.
 
 Build de prod : `cargo build --release` (LTO fat, binaire strippé).
 

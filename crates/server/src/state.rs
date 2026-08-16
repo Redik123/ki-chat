@@ -96,6 +96,8 @@ pub struct AppState {
     pub meta: ServerMeta,
     /// Limiteur des tentatives d'authentification.
     pub throttle: Throttle,
+    /// Bornes du partage de fichiers (plafond global, durée de vie).
+    pub files_quota: crate::files::Quota,
     pub data_dir: String,
     pub users: Mutex<HashMap<UserId, ConnectedUser>>,
     pub voice_routes: std::sync::RwLock<RouteTable>,
@@ -105,7 +107,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(token: String, data_dir: &str) -> anyhow::Result<Self> {
+    pub fn new(
+        token: String,
+        data_dir: &str,
+        files_quota: crate::files::Quota,
+    ) -> anyhow::Result<Self> {
         // Salons par défaut, orientés gaming. Configurables plus tard.
         // Les identifiants 1 à 3 sont conservés : l'historique déjà écrit
         // sur disque porte ces numéros.
@@ -132,6 +138,7 @@ impl AppState {
             accounts,
             meta,
             throttle: Throttle::default(),
+            files_quota,
             data_dir: data_dir.to_string(),
             users: Mutex::new(HashMap::new()),
             voice_routes: std::sync::RwLock::new(RouteTable::default()),

@@ -32,6 +32,16 @@ pub enum ClientMsg {
     Chat { text: String },
     /// Demander l'historique du salon courant.
     History { limit: u32 },
+    /// Remonter le fil : les messages **antérieurs** à `before_ts`.
+    ///
+    /// Sans ça, seuls les derniers messages sont atteignables — tout ce que
+    /// contient le fichier du salon au-delà reste invisible, alors même
+    /// qu'il est conservé.
+    HistoryBefore {
+        /// Horodatage du plus ancien message déjà affiché (ms Unix).
+        before_ts: u64,
+        limit: u32,
+    },
     /// Le client annonce qu'il entre/sort du vocal du salon courant.
     VoiceState { speaking: bool },
     /// Expulse un utilisateur du serveur (admin uniquement). Il peut se
@@ -161,6 +171,15 @@ pub enum ServerMsg {
     },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
+    /// Page d'historique plus ancienne, à **ajouter au-dessus** de ce qui est
+    /// déjà affiché — au contraire de `History`, qui remplace tout.
+    HistoryPage {
+        messages: Vec<ChatRecord>,
+        /// Faux quand on a atteint le début du salon : le client cesse alors
+        /// de redemander à chaque défilement.
+        #[serde(default)]
+        more: bool,
+    },
     /// État vocal d'un membre du salon.
     VoiceState { user_id: UserId, speaking: bool },
     /// Liste des membres présents dans le salon rejoint.
@@ -771,6 +790,23 @@ mod tests {
         };
         let json = serde_json::to_string(&permanent).unwrap();
         assert!(serde_json::from_str::<OldServerMsg>(&json).is_err());
+    }
+
+    /// La pagination se distingue du chargement initial : `History` remplace
+    /// le fil affiché, `HistoryPage` s'ajoute au-dessus. Confondre les deux
+    /// effacerait la conversation à chaque remontée.
+    #[test]
+    fn history_page_carries_whether_more_remains() {
+        let page = ServerMsg::HistoryPage { messages: Vec::new(), more: true };
+        let json = serde_json::to_string(&page).unwrap();
+        assert!(json.contains("\"type\":\"history_page\""));
+
+        // `more` absent (serveur d'une version antérieure) vaut « plus rien
+        // à charger » : le client cesse de demander au lieu de boucler.
+        let msg: ServerMsg =
+            serde_json::from_str(r#"{"type":"history_page","messages":[]}"#).unwrap();
+        let ServerMsg::HistoryPage { more, .. } = msg else { panic!("pas un HistoryPage") };
+        assert!(!more);
     }
 
     /// Et dans l'autre sens : un serveur antérieur ne connaît ni le motif

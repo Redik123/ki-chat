@@ -2,10 +2,15 @@
 //! de fichiers en HTTP).
 //!
 //! Configuration par variables d'environnement :
-//!   KI_TOKEN     jeton d'accès partagé (obligatoire en prod)
-//!   KI_HTTP_PORT port HTTP (partage de fichiers, défaut 8080)
-//!   KI_UDP_PORT  port QUIC (contrôle + voix, défaut 9987)
-//!   KI_DATA_DIR  dossier de persistance (défaut ./data)
+//!   KI_TOKEN            jeton d'accès partagé (obligatoire en prod)
+//!   KI_HTTP_PORT        port HTTP (partage de fichiers, défaut 8080)
+//!   KI_UDP_PORT         port QUIC (contrôle + voix, défaut 9987)
+//!   KI_DATA_DIR         dossier de persistance (défaut ./data)
+//!   KI_FILES_MAX_BYTES  plafond global de data/files/ (défaut 2 Gio, 0 =
+//!                       illimité) — au-delà, les partages les plus anciens
+//!                       sont supprimés et les nouveaux envois refusés
+//!   KI_FILES_TTL_DAYS   durée de vie d'un fichier partagé (défaut 30 jours,
+//!                       0 = conservation sans limite d'âge)
 
 mod accounts;
 mod audit;
@@ -42,8 +47,33 @@ async fn main() -> anyhow::Result<()> {
     let http_port: u16 = env_port("KI_HTTP_PORT", 8080);
     let udp_port: u16 = env_port("KI_UDP_PORT", 9987);
     let data_dir = std::env::var("KI_DATA_DIR").unwrap_or_else(|_| "data".into());
+    let files_quota = files::Quota {
+        max_bytes: env_u64("KI_FILES_MAX_BYTES", files::DEFAULT_MAX_BYTES),
+        ttl_days: env_u64("KI_FILES_TTL_DAYS", files::DEFAULT_TTL_DAYS),
+    };
 
-    let state = Arc::new(AppState::new(token, &data_dir)?);
+    let state = Arc::new(AppState::new(token, &data_dir, files_quota)?);
+
+    // Purge du partage de fichiers. Sans elle, data/files/ ne fait que
+    // grandir : sur le petit VPS qui héberge le serveur, le disque finit par
+    // se remplir, et ce n'est pas seulement le partage qui tombe — plus
+    // d'historique écrit, plus de sauvegarde des comptes.
+    if files_quota.enabled() {
+        let root = std::path::PathBuf::from(&data_dir).join("files");
+        tokio::spawn(async move {
+            loop {
+                // Parcours de dossier et suppressions : sur le pool bloquant,
+                // jamais sur la boucle qui relaie la voix.
+                let dir = root.clone();
+                if let Err(e) =
+                    tokio::task::spawn_blocking(move || files::sweep(&dir, files_quota)).await
+                {
+                    tracing::error!("purge du partage interrompue : {e}");
+                }
+                tokio::time::sleep(files::SWEEP_INTERVAL).await;
+            }
+        });
+    }
 
     // Transport QUIC : contrôle + voix sur une seule connexion chiffrée.
     // Sans lui il ne reste qu'un serveur de fichiers : ni chat, ni voix, ni
@@ -85,6 +115,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn env_port(var: &str, default: u16) -> u16 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(var: &str, default: u64) -> u64 {
     std::env::var(var)
         .ok()
         .and_then(|v| v.parse().ok())

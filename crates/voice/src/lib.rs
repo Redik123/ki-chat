@@ -8,6 +8,7 @@
 //! Tout est en threads std : aucun runtime async requis, le moteur est
 //! indépendant du reste du client.
 
+pub mod effects;
 mod jitter;
 mod resample;
 
@@ -24,7 +25,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ki_protocol::{parse_voice_packet, write_voice_header, VOICE_HEADER_LEN, VOICE_MAX_PACKET};
 
 use jitter::Receiver;
-use resample::LinearResampler;
+use resample::CubicResampler;
 
 /// Fréquence interne du moteur (celle d'Opus).
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -226,6 +227,13 @@ struct Shared {
     loopback: AtomicBool,
     /// Échantillons locaux à mixer dans la sortie (test micro / son de test).
     loopback_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// Effets sonores en attente de lecture. File séparée du loopback :
+    /// celui-ci est vidé dès qu'on coupe le retour local, et le fil de
+    /// capture le rogne à 250 ms tant qu'il est actif — une notification
+    /// d'une seconde y serait tronquée ou effacée.
+    effects_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// Volume des effets sonores (bits f32), indépendant des voix.
+    effects_gain: AtomicU32,
     /// Le périphérique d'entrée a disparu et l'on tente de le rouvrir.
     /// Débrancher un micro USB, ou un casque sans fil qui s'endort, coupe le
     /// flux cpal sans que rien ne le relance : ces drapeaux permettent de le
@@ -271,6 +279,8 @@ impl VoiceEngine {
             dred: AtomicI32::new(0),
             loopback: AtomicBool::new(false),
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
+            effects_buf: Mutex::new(std::collections::VecDeque::new()),
+            effects_gain: AtomicU32::new(1.0f32.to_bits()),
             input_lost: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
             receivers: Mutex::new(HashMap::new()),
@@ -397,16 +407,32 @@ impl VoiceEngine {
         }
     }
 
+    /// Joue un effet sonore (PCM mono 48 kHz, cf. `effects::load_wav`).
+    /// Le son est mixé à ce qui reste en file : deux événements rapprochés
+    /// se superposent au lieu que le second coupe le premier.
+    pub fn play_effect(&self, pcm: &[f32], gain: f32) {
+        let mut buf = self.shared.effects_buf.lock().unwrap();
+        effects::queue(&mut buf, pcm, gain.clamp(0.0, 2.0));
+    }
+
+    /// Volume des effets sonores (1.0 = 100 %), à chaud. S'applique à la
+    /// lecture, donc aussi aux sons déjà en file.
+    pub fn set_effects_gain(&self, gain: f32) {
+        store_f32(&self.shared.effects_gain, gain.clamp(0.0, 2.0));
+    }
+
     /// Joue une tonalité de test (~0,5 s) sur la sortie.
     pub fn play_test_tone(&self) {
-        let mut buf = self.shared.loopback_buf.lock().unwrap();
         let step = 2.0 * std::f32::consts::PI * 440.0 / SAMPLE_RATE as f32;
         let n = SAMPLE_RATE as usize / 2;
-        for i in 0..n {
-            // Petite enveloppe pour éviter les clics au début/à la fin.
-            let env = (i.min(n - i) as f32 / 2400.0).min(1.0);
-            buf.push_back((i as f32 * step).sin() * 0.25 * env);
-        }
+        let tone: Vec<f32> = (0..n)
+            .map(|i| {
+                // Petite enveloppe pour éviter les clics au début/à la fin.
+                let env = (i.min(n - i) as f32 / 2400.0).min(1.0);
+                (i as f32 * step).sin() * 0.25 * env
+            })
+            .collect();
+        self.play_effect(&tone, 1.0);
     }
 
     /// Périphériques perdus : (micro, sortie). Vrai tant que la réouverture
@@ -675,7 +701,7 @@ fn capture_loop(
                 continue 'device;
             }
         };
-        let mut resampler = LinearResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
+        let mut resampler = CubicResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
         let mut last_chunk = Instant::now();
 
     while !is_shutdown(&sh) {
@@ -1196,7 +1222,7 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
     );
 
     // Rééchantillonne le mix 48 kHz vers la fréquence du périphérique.
-    let mut resampler = LinearResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
+    let mut resampler = CubicResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
     let sh_cb = sh.clone();
 
     // Compteur d'appels : c'est lui qui révèle un pilote devenu muet sans
@@ -1226,6 +1252,21 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
                     for o in mix.iter_mut() {
                         match loopback.pop_front() {
                             Some(s) => *o += s,
+                            None => break,
+                        }
+                    }
+                }
+            }
+            // Effets sonores (notifications, tonalité de test) : mixés avant
+            // le volume général, pour que baisser le son baisse aussi les
+            // notifications — et écrêtés avec le reste plutôt qu'après.
+            {
+                let mut fx = sh_cb.effects_buf.lock().unwrap();
+                if !fx.is_empty() {
+                    let gain = load_f32(&sh_cb.effects_gain);
+                    for o in mix.iter_mut() {
+                        match fx.pop_front() {
+                            Some(s) => *o += s * gain,
                             None => break,
                         }
                     }

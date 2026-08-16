@@ -586,6 +586,21 @@ fn handle_msg(
             let messages = state.history.recent(channel, limit.min(1000) as usize);
             let _ = tx.send(ServerMsg::History { messages });
         }
+        ClientMsg::HistoryBefore { before_ts, limit } => {
+            let Some(channel) = current_channel(state, user_id) else {
+                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                return;
+            };
+            // Remonter le fil peut demander de relire tout le fichier du
+            // salon : hors de la boucle asynchrone, comme les sauvegardes.
+            let (state, tx) = (state.clone(), tx.clone());
+            let limit = limit.clamp(1, 200) as usize;
+            tokio::task::spawn_blocking(move || {
+                let (messages, more) =
+                    state.history.before(&state.data_dir, channel, before_ts, limit);
+                let _ = tx.send(ServerMsg::HistoryPage { messages, more });
+            });
+        }
         ClientMsg::VoiceState { speaking } => {
             let changed = {
                 let mut users = state.users.lock().unwrap();
@@ -801,19 +816,27 @@ fn handle_msg(
         ClientMsg::AdminSetServerInfo { name, icon } => {
             if require_admin(state, user_id, tx) {
                 let changed = describe_server_change(&name, &icon);
-                match apply_server_info(state, name, icon) {
-                    Ok(()) => {
-                        state.audit.record("server.info", username, "", &changed);
-                        // L'identité est publique : tout le monde la reçoit.
-                        state.broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
-                        let _ = tx.send(ServerMsg::Info {
-                            message: "identité du serveur mise à jour".into(),
-                        });
+                // Le logo est un PNG en base64 : `server.json` pèse jusqu'à
+                // une centaine de kilo-octets, réécrits en entier. Hors de la
+                // boucle asynchrone, comme les autres écritures d'état.
+                let (state, tx) = (state.clone(), tx.clone());
+                let actor = username.to_string();
+                tokio::task::spawn_blocking(move || {
+                    match apply_server_info(&state, name, icon) {
+                        Ok(()) => {
+                            state.audit.record("server.info", &actor, "", &changed);
+                            // L'identité est publique : tout le monde la reçoit.
+                            state
+                                .broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
+                            let _ = tx.send(ServerMsg::Info {
+                                message: "identité du serveur mise à jour".into(),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ServerMsg::Error { message: e });
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(ServerMsg::Error { message: e });
-                    }
-                }
+                });
             }
         }
         ClientMsg::SetAvatar { avatar } => {

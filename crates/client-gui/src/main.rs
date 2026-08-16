@@ -242,6 +242,22 @@ struct KiApp {
     /// Tout le monde sur le serveur, pas seulement le salon courant.
     members: Vec<Member>,
     messages: Vec<ChatRecord>,
+    /// Effets sonores chargés au démarrage : nom court -> PCM 48 kHz mono.
+    sounds: HashMap<String, Vec<f32>>,
+    sfx_on: bool,
+    sfx_volume: f32,
+    /// Occupants du salon vocal à l'image précédente : c'est leur écart qui
+    /// révèle une arrivée ou un départ. Les messages `UserJoined`/`UserLeft`
+    /// portent sur le serveur entier, pas sur le salon vocal.
+    prev_voice_peers: std::collections::HashSet<UserId>,
+    /// Sons étouffés jusque-là : entrer dans un salon peuplé déclencherait
+    /// sinon six sons d'arrivée d'un coup.
+    sfx_quiet_until: std::time::Instant,
+    /// Reste-t-il du passé à remonter dans ce salon ?
+    history_more: bool,
+    /// Une page est déjà demandée : on n'en réclame pas une seconde à
+    /// chaque image tant que celle-ci n'est pas arrivée.
+    history_pending: bool,
 
     // UI
     input: String,
@@ -407,6 +423,13 @@ impl KiApp {
             voice_channel: None,
             members: Vec::new(),
             messages: Vec::new(),
+            sounds: load_sounds(),
+            sfx_on: get("sfx_on", "on") == "on",
+            sfx_volume: get("sfx_volume", "0.6").parse().unwrap_or(0.6),
+            prev_voice_peers: std::collections::HashSet::new(),
+            sfx_quiet_until: std::time::Instant::now(),
+            history_more: false,
+            history_pending: false,
             input: String::new(),
             focus_input: false,
             show_settings: false,
@@ -729,9 +752,64 @@ impl KiApp {
     fn join(&mut self, channel: ChannelId) {
         self.current = Some(channel);
         self.messages.clear();
+        // On repart du principe qu'il y a un passé à remonter : le serveur
+        // dira le contraire dès la première page s'il n'y en a pas.
+        self.history_more = true;
+        self.history_pending = false;
         self.focus_input = true;
         self.send(ClientMsg::Join { channel });
         self.send(ClientMsg::History { limit: 100 });
+    }
+
+    /// Joue un effet, s'il est présent et si les sons ne sont pas coupés.
+    ///
+    /// Silencieux quand le son n'existe pas : chacun dépose les fichiers
+    /// qu'il veut, et il ne manque rien à celui qui n'en met aucun.
+    fn play_sfx(&self, name: &str) {
+        if !self.sfx_on || std::time::Instant::now() < self.sfx_quiet_until {
+            return;
+        }
+        let Some(pcm) = self.sounds.get(name) else { return };
+        let Some(conn) = &self.conn else { return };
+        if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
+            engine.play_effect(pcm, self.sfx_volume);
+        }
+    }
+
+    /// Compare les occupants de mon salon vocal à ceux de l'image précédente
+    /// pour jouer les sons d'arrivée et de départ.
+    ///
+    /// C'est un écart qu'on mesure, et non `UserJoined`/`UserLeft` : ces
+    /// deux-là portent sur le serveur entier, alors que seul mon propre
+    /// salon vocal m'intéresse ici.
+    fn update_voice_peers(&mut self) {
+        let Some(mine) = self.voice_channel else {
+            self.prev_voice_peers.clear();
+            return;
+        };
+        let now: std::collections::HashSet<UserId> = self
+            .members
+            .iter()
+            .filter(|m| m.voice == Some(mine) && Some(m.user_id) != self.my_id)
+            .map(|m| m.user_id)
+            .collect();
+        if now.difference(&self.prev_voice_peers).next().is_some() {
+            self.play_sfx(sfx::PEER_JOIN);
+        }
+        if self.prev_voice_peers.difference(&now).next().is_some() {
+            self.play_sfx(sfx::PEER_LEAVE);
+        }
+        self.prev_voice_peers = now;
+    }
+
+    /// Demande la page d'historique précédant le plus ancien message affiché.
+    fn load_older_history(&mut self) {
+        if self.history_pending || !self.history_more {
+            return;
+        }
+        let Some(oldest) = self.messages.first().map(|m| m.ts) else { return };
+        self.history_pending = true;
+        self.send(ClientMsg::HistoryBefore { before_ts: oldest, limit: 100 });
     }
 
     /// Entre dans un salon vocal, ou en change.
@@ -740,6 +818,11 @@ impl KiApp {
             return;
         }
         self.voice_channel = Some(channel);
+        self.play_sfx(sfx::SELF_JOIN);
+        // Le roster arrive juste après : sans ce répit, entrer dans un salon
+        // déjà peuplé jouerait un son d'arrivée par occupant.
+        self.sfx_quiet_until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        self.prev_voice_peers.clear();
         self.send(ClientMsg::JoinVoice { channel });
     }
 
@@ -750,6 +833,8 @@ impl KiApp {
         }
         self.armed = false;
         self.transmitting = false;
+        self.play_sfx(sfx::SELF_LEAVE);
+        self.prev_voice_peers.clear();
         self.send(ClientMsg::LeaveVoice);
     }
 
@@ -1036,6 +1121,10 @@ impl KiApp {
                 self.welcomed = true;
                 self.connecting = false;
                 self.error = None;
+                // Le roster et l'historique arrivent dans la foulée : sans
+                // ce répit, se connecter déclencherait une salve de sons.
+                self.sfx_quiet_until =
+                    std::time::Instant::now() + std::time::Duration::from_secs(2);
                 self.remember_connection();
                 self.my_id = Some(user_id);
                 self.my_admin = is_admin;
@@ -1066,6 +1155,11 @@ impl KiApp {
                 text,
                 ts,
             } => {
+                // Jamais de son pour ses propres messages : on sait qu'on
+                // vient d'écrire.
+                if Some(user_id) != self.my_id {
+                    self.play_sfx(sfx::MESSAGE);
+                }
                 self.messages.push(ChatRecord {
                     user_id,
                     username,
@@ -1077,15 +1171,26 @@ impl KiApp {
                 }
             }
             ServerMsg::History { messages } => {
-                self.messages = messages
+                self.messages = messages.into_iter().map(clean_record).collect();
+            }
+            ServerMsg::HistoryPage { messages, more } => {
+                self.history_pending = false;
+                self.history_more = more;
+                if messages.is_empty() {
+                    return;
+                }
+                // En tête, et surtout sans doublon : une page peut recouvrir
+                // ce qui est déjà affiché si des messages sont arrivés entre
+                // la demande et la réponse.
+                let known: std::collections::HashSet<(UserId, u64)> =
+                    self.messages.iter().map(|m| (m.user_id, m.ts)).collect();
+                let mut older: Vec<ChatRecord> = messages
                     .into_iter()
-                    .map(|mut record| {
-                        record.username = safe_name(&record.username);
-                        record.text =
-                            ki_protocol::safe_display(&record.text, ki_protocol::MAX_CHAT_TEXT);
-                        record
-                    })
+                    .map(clean_record)
+                    .filter(|m| !known.contains(&(m.user_id, m.ts)))
                     .collect();
+                older.append(&mut self.messages);
+                self.messages = older;
             }
             ServerMsg::Members { members } => {
                 self.fetch_missing_avatars(&members);
@@ -1096,6 +1201,7 @@ impl KiApp {
                         member
                     })
                     .collect();
+                self.update_voice_peers();
             }
             ServerMsg::UserJoined { user_id, .. } => {
                 // La liste complète suit immédiatement dans un `Members` :
@@ -1743,6 +1849,7 @@ impl KiApp {
                     let clicked = ui::icon_button_ex(ui, icon, 38.0, tip, tint).clicked();
                     if clicked && in_voice {
                         self.muted = !self.muted;
+                        self.play_sfx(if self.muted { sfx::MUTE } else { sfx::UNMUTE });
                     }
                     ui.add_space(2.0);
                     ui.vertical(|ui| {
@@ -2292,13 +2399,47 @@ impl KiApp {
     }
 
     fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
-        egui::ScrollArea::vertical()
+        let mut want_older = false;
+        let out = egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink(false)
             .show(ui, |ui| {
                 if self.messages.is_empty() {
                     empty_state(ui, channel_name);
                     return;
+                }
+
+                // En-tête du fil : c'est là que se remonte le passé. Un
+                // bouton explicite en plus du chargement au défilement — le
+                // défilement seul laisse croire qu'on est au début alors
+                // qu'il reste des mois de conversation.
+                if self.history_pending {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Chargement des messages plus anciens…")
+                                .color(TEXT_FAINT)
+                                .size(11.5),
+                        );
+                        ui.add_space(6.0);
+                    });
+                } else if self.history_more {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(6.0);
+                        if ui
+                            .button(
+                                RichText::new("Charger les messages plus anciens")
+                                    .color(TEXT_DIM)
+                                    .size(11.5),
+                            )
+                            .clicked()
+                        {
+                            want_older = true;
+                        }
+                        ui.add_space(6.0);
+                    });
+                } else {
+                    day_separator(ui, &format!("Début de #{channel_name}"));
                 }
 
                 let mut last_day = i32::MIN;
@@ -2321,6 +2462,14 @@ impl KiApp {
                 self.messages = messages;
                 ui.add_space(10.0);
             });
+        // Arrivé tout en haut, on charge sans attendre le clic : c'est le
+        // geste naturel pour remonter une conversation.
+        if out.state.offset.y <= 24.0 && !self.messages.is_empty() {
+            want_older = true;
+        }
+        if want_older {
+            self.load_older_history();
+        }
     }
 
     // -----------------------------------------------------------------
@@ -2654,6 +2803,41 @@ impl KiApp {
                                     engine.play_test_tone();
                                 }
                             }
+                        }
+
+                        // --- Effets sonores ---
+                        ui.add_space(12.0);
+                        ui::hairline(ui);
+                        ui.add_space(10.0);
+                        ui::group_title(ui, Icon::Play, "Effets sonores");
+                        ui.checkbox(&mut self.sfx_on, "Jouer les sons");
+                        if self.sfx_on {
+                            let mut pct = self.sfx_volume * 100.0;
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut pct, 0.0..=100.0)
+                                        .suffix(" %")
+                                        .integer()
+                                        .text("volume des sons"),
+                                )
+                                .changed()
+                            {
+                                self.sfx_volume = pct / 100.0;
+                            }
+                        }
+                        if self.sounds.is_empty() {
+                            ui::hint(
+                                ui,
+                                "aucun son chargé — dépose des .wav dans le dossier « sons »",
+                            );
+                        } else {
+                            let mut names: Vec<&str> =
+                                self.sounds.keys().map(String::as_str).collect();
+                            names.sort_unstable();
+                            ui::hint(ui, &format!("chargés : {}", names.join(", ")));
+                        }
+                        if ui::button(ui, Icon::Refresh, "Recharger les sons").clicked() {
+                            self.sounds = load_sounds();
                         }
 
                         // --- Réseau & qualité ---
@@ -3559,6 +3743,59 @@ impl KiApp {
     }
 }
 
+/// Noms des sons reconnus. Chaque nom correspond au nom d'un fichier `.wav`
+/// (sans l'extension) déposé dans le dossier des sons.
+mod sfx {
+    pub const SELF_JOIN: &str = "rejoint-vocal";
+    pub const SELF_LEAVE: &str = "quitte-vocal";
+    pub const PEER_JOIN: &str = "arrivee";
+    pub const PEER_LEAVE: &str = "depart";
+    pub const MESSAGE: &str = "message";
+    pub const MUTE: &str = "micro-coupe";
+    pub const UNMUTE: &str = "micro-actif";
+}
+
+/// Où l'on cherche les sons, dans l'ordre : un dossier `sons/` à côté de
+/// l'exécutable, puis celui des réglages.
+///
+/// Rien n'est embarqué dans le binaire : les fichiers audio du dépôt sont
+/// des œuvres tierces, et le dépôt est public. Chacun dépose donc les siens.
+fn sound_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("sons"));
+        }
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        dirs.push(std::path::PathBuf::from(appdata).join("ki-chat").join("sons"));
+    }
+    dirs
+}
+
+fn load_sounds() -> HashMap<String, Vec<f32>> {
+    let mut found = HashMap::new();
+    for dir in sound_dirs() {
+        for (name, pcm) in ki_voice::effects::load_dir(&dir) {
+            // Le premier dossier gagne : celui à côté de l'exécutable
+            // l'emporte sur celui des réglages.
+            found.entry(name).or_insert(pcm);
+        }
+    }
+    if !found.is_empty() {
+        tracing::info!("{} effet(s) sonore(s) chargé(s)", found.len());
+    }
+    found
+}
+
+/// Assainit un message reçu avant affichage : pseudo et texte viennent
+/// d'autrui et passent par les mêmes règles que partout ailleurs.
+fn clean_record(mut record: ChatRecord) -> ChatRecord {
+    record.username = safe_name(&record.username);
+    record.text = ki_protocol::safe_display(&record.text, ki_protocol::MAX_CHAT_TEXT);
+    record
+}
+
 /// Étiquette courte d'un bannissement : « banni » ou le temps restant.
 fn ban_summary(account: &AccountInfo) -> String {
     let Some(until) = account.ban_until else { return "banni".into() };
@@ -4317,6 +4554,8 @@ impl eframe::App for KiApp {
         // laisse la position au système. On ne touche à rien d'autre — le
         // carnet de serveurs vit dans le même fichier.
         storage.set_string("window", String::new());
+        storage.set_string("sfx_on", if self.sfx_on { "on" } else { "off" }.into());
+        storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());
