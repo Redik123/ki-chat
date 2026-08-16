@@ -338,6 +338,8 @@ struct VoiceSnapshot {
     stats: ki_voice::VoiceStats,
     ping: Option<u32>,
     levels: HashMap<u64, f32>,
+    /// Périphérique audio perdu, en cours de réouverture : (micro, sortie).
+    device_trouble: (bool, bool),
 }
 
 impl KiApp {
@@ -675,6 +677,7 @@ impl KiApp {
                 stats: engine.stats(),
                 ping,
                 levels: engine.user_levels().into_iter().collect(),
+                device_trouble: engine.device_trouble(),
             },
             None => VoiceSnapshot {
                 ping,
@@ -1700,6 +1703,24 @@ impl KiApp {
                     .inner_margin(egui::Margin::symmetric(12, 9)),
             )
             .show(ctx, |ui| {
+                // Périphérique disparu : le dire franchement. Sans ça, on
+                // parle dans le vide sans comprendre pourquoi — le cas le
+                // plus courant étant un casque sans fil qui sort de veille.
+                let (mic_lost, out_lost) = voice.device_trouble;
+                if mic_lost || out_lost {
+                    let what = match (mic_lost, out_lost) {
+                        (true, true) => "Micro et sortie audio perdus",
+                        (true, false) => "Micro perdu",
+                        _ => "Sortie audio perdue",
+                    };
+                    ui::banner(
+                        ui,
+                        Tone::Warn,
+                        &format!("{what} — reconnexion automatique en cours…"),
+                        false,
+                    );
+                    ui.add_space(6.0);
+                }
                 ui.horizontal(|ui| {
                     // --- Micro : gros bouton d'état ---
                     let in_voice = self.voice_channel.is_some();

@@ -226,6 +226,13 @@ struct Shared {
     loopback: AtomicBool,
     /// Échantillons locaux à mixer dans la sortie (test micro / son de test).
     loopback_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// Le périphérique d'entrée a disparu et l'on tente de le rouvrir.
+    /// Débrancher un micro USB, ou un casque sans fil qui s'endort, coupe le
+    /// flux cpal sans que rien ne le relance : ces drapeaux permettent de le
+    /// dire à l'utilisateur au lieu de le laisser parler dans le vide.
+    input_lost: AtomicBool,
+    /// Idem pour la sortie.
+    output_lost: AtomicBool,
     receivers: Mutex<HashMap<u64, Receiver>>,
     /// user_id -> gain de mixage (1.0 = 100 %). Absent = 1.0.
     volumes: Mutex<HashMap<u64, f32>>,
@@ -264,6 +271,8 @@ impl VoiceEngine {
             dred: AtomicI32::new(0),
             loopback: AtomicBool::new(false),
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
+            input_lost: AtomicBool::new(false),
+            output_lost: AtomicBool::new(false),
             receivers: Mutex::new(HashMap::new()),
             volumes: Mutex::new(cfg.volumes.clone()),
             counters: Counters::default(),
@@ -398,6 +407,15 @@ impl VoiceEngine {
             let env = (i.min(n - i) as f32 / 2400.0).min(1.0);
             buf.push_back((i as f32 * step).sin() * 0.25 * env);
         }
+    }
+
+    /// Périphériques perdus : (micro, sortie). Vrai tant que la réouverture
+    /// n'a pas abouti — un casque débranché, ou qui sort de veille.
+    pub fn device_trouble(&self) -> (bool, bool) {
+        (
+            self.shared.input_lost.load(Ordering::Relaxed),
+            self.shared.output_lost.load(Ordering::Relaxed),
+        )
     }
 
     /// Vrai quand de la voix part réellement sur le réseau (après VAD).
@@ -620,29 +638,11 @@ fn capture_loop(
     device_name: Option<String>,
     send: DatagramSend,
 ) -> anyhow::Result<()> {
-    let host = cpal::default_host();
-    let device = pick_device(&host, device_name.as_deref(), true)
-        .context("aucun périphérique d'entrée (micro) trouvé")?;
-    let supported = device.default_input_config().context("config micro")?;
-    let in_rate = supported.sample_rate().0;
-    let channels = supported.channels() as usize;
-    tracing::info!(
-        "micro : {} ({} Hz, {} canaux)",
-        device.name().unwrap_or_default(),
-        in_rate,
-        channels
-    );
-
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
-
-    // Le callback cpal ne fait que convertir en mono et transmettre :
-    // tout le travail (rééchantillonnage, encodage, envoi) se fait
-    // dans ce thread-ci, hors du chemin temps réel.
-    let stream = build_input_stream(&device, &supported, channels, tx)?;
-    stream.play()?;
-
+    // Le compteur de paquets sert de nonce : il doit vivre plus longtemps
+    // que le périphérique. Le recréer à chaque rebranchement réutiliserait
+    // des nonces déjà employés avec la même clé — ce qui casserait le
+    // chiffrement. Il est donc construit ici, une seule fois.
     let mut sender = Sender::new(user_id, bitrate, send)?;
-    let mut resampler = LinearResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
     let mut frame = [0f32; FRAME_SAMPLES];
     let mut denoiser = Denoiser::new();
     let mut deep = LazyDeep::default();
@@ -653,10 +653,58 @@ fn capture_loop(
     // dernier franchissement du seuil, pour ne pas hacher les fins de mots.
     let mut last_voice = Instant::now() - Duration::from_secs(60);
 
+    // Boucle de surveillance : le périphérique peut disparaître à tout
+    // moment (débranchement, casque sans fil qui s'endort). On le rouvre
+    // alors sans relancer le moteur, donc sans perdre l'encodeur ni le
+    // compteur de nonces.
+    'device: while !is_shutdown(&sh) {
+        let opened = open_input(device_name.as_deref());
+        let (stream, rx, in_rate, alive) = match opened {
+            Ok(parts) => {
+                sh.input_lost.store(false, Ordering::Relaxed);
+                parts
+            }
+            Err(e) => {
+                // Le micro n'est pas là : on le signale et on réessaie.
+                // Rien d'autre à faire — il reviendra peut-être.
+                if !sh.input_lost.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("micro indisponible : {e:#} — nouvelle tentative en cours");
+                }
+                sh.sending.store(false, Ordering::Relaxed);
+                sleep_unless_shutdown(&sh, Duration::from_millis(1000));
+                continue 'device;
+            }
+        };
+        let mut resampler = LinearResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
+        let mut last_chunk = Instant::now();
+
     while !is_shutdown(&sh) {
         let chunk = match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(c) => c,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Ok(c) => {
+                last_chunk = Instant::now();
+                c
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // La capture tourne en continu, micro coupé ou non : un
+                // silence prolongé n'est pas un utilisateur qui se tait,
+                // c'est un périphérique parti. Certains pilotes ne signalent
+                // d'ailleurs aucune erreur — ils cessent juste de livrer,
+                // d'où ce garde-fou en plus du rappel d'erreur.
+                let dead = !alive.load(Ordering::Relaxed)
+                    || last_chunk.elapsed() > Duration::from_secs(2);
+                if !dead {
+                    continue;
+                }
+                // Une seule ligne par disparition : un périphérique
+                // durablement muet ferait sinon défiler le journal.
+                if !sh.input_lost.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("micro perdu — réouverture");
+                }
+                sh.sending.store(false, Ordering::Relaxed);
+                drop(stream);
+                sleep_unless_shutdown(&sh, Duration::from_millis(500));
+                continue 'device;
+            }
             Err(_) => break,
         };
         resampler.push(&chunk);
@@ -727,8 +775,54 @@ fn capture_loop(
             }
         }
     }
+        // Sortie de la boucle interne sans perte de périphérique : c'est un
+        // arrêt du moteur.
+        break 'device;
+    }
     sh.sending.store(false, Ordering::Relaxed);
+    sh.input_lost.store(false, Ordering::Relaxed);
     Ok(())
+}
+
+/// Ouvre le micro et rend de quoi le lire, plus un drapeau que le rappel
+/// d'erreur cpal abaisse si le flux tombe.
+type OpenedInput = (cpal::Stream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>);
+
+fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
+    // L'hôte est ré-interrogé à chaque tentative : c'est ce qui permet de
+    // voir réapparaître un périphérique rebranché.
+    let host = cpal::default_host();
+    let device = pick_device(&host, device_name, true)
+        .context("aucun périphérique d'entrée (micro) trouvé")?;
+    let supported = device.default_input_config().context("config micro")?;
+    let in_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    tracing::info!(
+        "micro : {} ({} Hz, {} canaux)",
+        device.name().unwrap_or_default(),
+        in_rate,
+        channels
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let alive = Arc::new(AtomicBool::new(true));
+    // Le callback cpal ne fait que convertir en mono et transmettre : tout
+    // le travail (rééchantillonnage, encodage, envoi) se fait dans le thread
+    // de capture, hors du chemin temps réel.
+    let stream = build_input_stream(&device, &supported, channels, tx, alive.clone())?;
+    stream.play()?;
+    Ok((stream, rx, in_rate, alive))
+}
+
+/// Attend, en écourtant si le moteur s'arrête entre-temps.
+fn sleep_unless_shutdown(sh: &Arc<Shared>, total: Duration) {
+    let step = Duration::from_millis(50);
+    let mut left = total;
+    while left > Duration::ZERO && !is_shutdown(sh) {
+        let nap = step.min(left);
+        std::thread::sleep(nap);
+        left -= nap;
+    }
 }
 
 /// Moniteur « s'écouter » : un aller-retour complet par le codec Opus,
@@ -989,12 +1083,14 @@ fn build_input_stream(
     supported: &cpal::SupportedStreamConfig,
     channels: usize,
     tx: std::sync::mpsc::Sender<Vec<f32>>,
+    alive: Arc<AtomicBool>,
 ) -> anyhow::Result<cpal::Stream> {
     fn build<T>(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         channels: usize,
         tx: std::sync::mpsc::Sender<Vec<f32>>,
+        alive: Arc<AtomicBool>,
     ) -> anyhow::Result<cpal::Stream>
     where
         T: cpal::SizedSample + dasp_sample::ToSample<f32>,
@@ -1005,7 +1101,13 @@ fn build_input_stream(
                 let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
                 tx.send(to_mono(&f, channels)).ok();
             },
-            |e| tracing::warn!("erreur flux micro : {e}"),
+            // Signaler la panne, et pas seulement l'écrire : sans ce
+            // drapeau, débrancher le micro le laissait mort jusqu'au
+            // redémarrage de l'application.
+            move |e| {
+                tracing::warn!("erreur flux micro : {e}");
+                alive.store(false, Ordering::Relaxed);
+            },
             None,
         )?;
         Ok(stream)
@@ -1013,14 +1115,15 @@ fn build_input_stream(
 
     use cpal::SampleFormat as SF;
     let config = supported.config();
+    let a = alive;
     match supported.sample_format() {
-        SF::F32 => build::<f32>(device, &config, channels, tx),
-        SF::I16 => build::<i16>(device, &config, channels, tx),
-        SF::I32 => build::<i32>(device, &config, channels, tx),
-        SF::U16 => build::<u16>(device, &config, channels, tx),
-        SF::F64 => build::<f64>(device, &config, channels, tx),
-        SF::I8 => build::<i8>(device, &config, channels, tx),
-        SF::U8 => build::<u8>(device, &config, channels, tx),
+        SF::F32 => build::<f32>(device, &config, channels, tx, a),
+        SF::I16 => build::<i16>(device, &config, channels, tx, a),
+        SF::I32 => build::<i32>(device, &config, channels, tx, a),
+        SF::U16 => build::<u16>(device, &config, channels, tx, a),
+        SF::F64 => build::<f64>(device, &config, channels, tx, a),
+        SF::I8 => build::<i8>(device, &config, channels, tx, a),
+        SF::U8 => build::<u8>(device, &config, channels, tx, a),
         fmt => bail!("format micro non géré : {fmt:?}"),
     }
 }
@@ -1030,8 +1133,57 @@ fn build_input_stream(
 // ---------------------------------------------------------------------------
 
 fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result<()> {
+    // Même surveillance qu'à la capture : un casque débranché, ou qui sort
+    // de veille, emporte le flux de sortie sans que rien ne le relance —
+    // on n'entendait alors plus personne jusqu'au redémarrage.
+    'device: while !is_shutdown(&sh) {
+        let (stream, alive, ticks) = match open_output(&sh, device_name.as_deref()) {
+            Ok(parts) => {
+                sh.output_lost.store(false, Ordering::Relaxed);
+                parts
+            }
+            Err(e) => {
+                if !sh.output_lost.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("sortie audio indisponible : {e:#} — nouvelle tentative");
+                }
+                sleep_unless_shutdown(&sh, Duration::from_millis(1000));
+                continue 'device;
+            }
+        };
+
+        // Le flux vit tant que la carte son réclame des échantillons. On
+        // surveille ces demandes : un pilote peut cesser d'appeler sans
+        // jamais signaler d'erreur.
+        let mut last_seen = ticks.load(Ordering::Relaxed);
+        let mut idle_rounds = 0u32;
+        while !is_shutdown(&sh) {
+            std::thread::sleep(Duration::from_millis(500));
+            let now = ticks.load(Ordering::Relaxed);
+            idle_rounds = if now == last_seen { idle_rounds + 1 } else { 0 };
+            last_seen = now;
+            if !alive.load(Ordering::Relaxed) || idle_rounds >= 4 {
+                if !sh.output_lost.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("sortie audio perdue — réouverture");
+                }
+                drop(stream);
+                sleep_unless_shutdown(&sh, Duration::from_millis(500));
+                continue 'device;
+            }
+        }
+        break 'device;
+    }
+    sh.output_lost.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Ouvre la sortie audio. Rend le flux, le drapeau de vie posé par le
+/// rappel d'erreur, et un compteur d'appels du rappel de données.
+type OpenedOutput = (cpal::Stream, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>);
+
+fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<OpenedOutput> {
+    let sh = sh.clone();
     let host = cpal::default_host();
-    let device = pick_device(&host, device_name.as_deref(), false)
+    let device = pick_device(&host, device_name, false)
         .context("aucun périphérique de sortie audio trouvé")?;
     let supported = device.default_output_config().context("config sortie")?;
     let out_rate = supported.sample_rate().0;
@@ -1047,7 +1199,13 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
     let mut resampler = LinearResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
     let sh_cb = sh.clone();
 
+    // Compteur d'appels : c'est lui qui révèle un pilote devenu muet sans
+    // le dire.
+    let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let ticks_cb = ticks.clone();
+
     let write_frames = move |mono_needed: usize| -> Vec<f32> {
+        ticks_cb.fetch_add(1, Ordering::Relaxed);
         // Tire du 48 kHz mixé tant que le rééchantillonneur en réclame.
         let mut out = vec![0f32; mono_needed];
         while !resampler.can_pull(mono_needed) {
@@ -1089,14 +1247,11 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
         out
     };
 
-    let stream = build_output_stream(&device, &supported, channels, write_frames)?;
+    let alive = Arc::new(AtomicBool::new(true));
+    let stream =
+        build_output_stream(&device, &supported, channels, write_frames, alive.clone())?;
     stream.play()?;
-
-    // Garde le flux en vie jusqu'à l'arrêt du moteur.
-    while !is_shutdown(&sh) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Ok(())
+    Ok((stream, alive, ticks))
 }
 
 /// Construit le flux de sortie quel que soit le format d'échantillons du
@@ -1106,12 +1261,14 @@ fn build_output_stream(
     supported: &cpal::SupportedStreamConfig,
     channels: usize,
     write_frames: impl FnMut(usize) -> Vec<f32> + Send + 'static,
+    alive: Arc<AtomicBool>,
 ) -> anyhow::Result<cpal::Stream> {
     fn build<T>(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         channels: usize,
         mut wf: impl FnMut(usize) -> Vec<f32> + Send + 'static,
+        alive: Arc<AtomicBool>,
     ) -> anyhow::Result<cpal::Stream>
     where
         T: cpal::SizedSample + dasp_sample::FromSample<f32>,
@@ -1127,7 +1284,11 @@ fn build_output_stream(
                     }
                 }
             },
-            |e| tracing::warn!("erreur flux sortie : {e}"),
+            // Comme pour le micro : signaler, pas seulement journaliser.
+            move |e| {
+                tracing::warn!("erreur flux sortie : {e}");
+                alive.store(false, Ordering::Relaxed);
+            },
             None,
         )?;
         Ok(stream)
@@ -1135,14 +1296,15 @@ fn build_output_stream(
 
     use cpal::SampleFormat as SF;
     let config = supported.config();
+    let a = alive;
     match supported.sample_format() {
-        SF::F32 => build::<f32>(device, &config, channels, write_frames),
-        SF::I16 => build::<i16>(device, &config, channels, write_frames),
-        SF::I32 => build::<i32>(device, &config, channels, write_frames),
-        SF::U16 => build::<u16>(device, &config, channels, write_frames),
-        SF::F64 => build::<f64>(device, &config, channels, write_frames),
-        SF::I8 => build::<i8>(device, &config, channels, write_frames),
-        SF::U8 => build::<u8>(device, &config, channels, write_frames),
+        SF::F32 => build::<f32>(device, &config, channels, write_frames, a),
+        SF::I16 => build::<i16>(device, &config, channels, write_frames, a),
+        SF::I32 => build::<i32>(device, &config, channels, write_frames, a),
+        SF::U16 => build::<u16>(device, &config, channels, write_frames, a),
+        SF::F64 => build::<f64>(device, &config, channels, write_frames, a),
+        SF::I8 => build::<i8>(device, &config, channels, write_frames, a),
+        SF::U8 => build::<u8>(device, &config, channels, write_frames, a),
         fmt => bail!("format sortie non géré : {fmt:?}"),
     }
 }
