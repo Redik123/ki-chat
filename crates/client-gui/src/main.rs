@@ -21,8 +21,8 @@ use device_query::{DeviceQuery, DeviceState};
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use icons::Icon;
 use ki_protocol::{
-    AccountInfo, ChannelId, ChannelInfo, ChannelKind, ChatRecord, ClientMsg, IconChange,
-    InviteInfo, Member, ServerInfo, ServerMsg, UserId,
+    AccountInfo, AuditRecord, ChannelId, ChannelInfo, ChannelKind, ChatRecord, ClientMsg,
+    IconChange, InviteInfo, Member, ServerInfo, ServerMsg, UserId,
 };
 use ptt::PttKey;
 use theme::{color_for, ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
@@ -63,6 +63,11 @@ const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 const SIDEBAR_WIDTH: f32 = 248.0;
 const ROSTER_WIDTH: f32 = 210.0;
 
+/// Au-dessus de ce niveau crête, on considère que la personne parle, même si
+/// son `VoiceState` ne nous est pas parvenu. Le niveau vient du tampon de
+/// gigue et décroît tout seul : l'indicateur s'éteint donc sans message.
+const SPEAK_LEVEL: f32 = 0.02;
+
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -77,6 +82,18 @@ fn main() -> eframe::Result {
             .with_min_inner_size([900.0, 560.0])
             .with_title("ki-chat")
             .with_icon(std::sync::Arc::new(theme::app_icon())),
+        // eframe mémorisait la géométrie et la remettait au lancement — y
+        // compris une origine sur un écran secondaire débranché depuis,
+        // auquel cas la fenêtre revenait minuscule en haut à gauche.
+        //
+        // Attention : ce drapeau ne gouverne que la **sauvegarde**. La
+        // relecture au démarrage n'est pas conditionnée par lui. C'est donc
+        // `save()` qui fait le vrai travail, en vidant la clé « window » ;
+        // sans valeur à relire, eframe laisse la position au système. Le
+        // drapeau est ici pour qu'eframe ne la réécrive pas derrière nous.
+        //
+        // Seul l'état « maximisée » est repris, par nos soins (`update`).
+        persist_window: false,
         ..Default::default()
     };
     let outcome = eframe::run_native(
@@ -89,6 +106,53 @@ fn main() -> eframe::Result {
     // été enregistrés et les périphériques audio rendus.
     update::relaunch_if_requested();
     outcome
+}
+
+/// Case où le thread du sélecteur de fichier dépose la vignette encodée,
+/// ou le message d'erreur si l'image est illisible.
+type PickedImage = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>;
+
+/// Onglets de la fenêtre d'administration. Tout tenait auparavant dans une
+/// seule colonne déroulante ; avec les bannissements et le journal, elle ne
+/// se lisait plus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminTab {
+    Server,
+    Members,
+    Invites,
+    Audit,
+}
+
+impl AdminTab {
+    const ALL: [AdminTab; 4] =
+        [AdminTab::Server, AdminTab::Members, AdminTab::Invites, AdminTab::Audit];
+
+    fn label(self) -> &'static str {
+        match self {
+            AdminTab::Server => "Serveur",
+            AdminTab::Members => "Membres",
+            AdminTab::Invites => "Invitations",
+            AdminTab::Audit => "Journal",
+        }
+    }
+}
+
+/// Durées proposées pour un bannissement. Un menu court vaut mieux qu'un
+/// champ libre : personne ne bannit « 137 minutes ».
+const BAN_DURATIONS: &[(&str, u64)] = &[
+    ("1 heure", 3600),
+    ("1 jour", 86_400),
+    ("7 jours", 604_800),
+    ("30 jours", 2_592_000),
+    ("Définitif", 0),
+];
+
+/// Bannissement en cours de saisie.
+struct BanDraft {
+    username: String,
+    reason: String,
+    /// Durée en secondes ; 0 = définitif.
+    duration_secs: u64,
 }
 
 /// Formulaire d'ajout ou de modification d'un serveur.
@@ -128,13 +192,20 @@ struct KiApp {
     /// Textures des logos, montées à la demande. `None` = pas de logo (ou
     /// vignette illisible) : on retient l'échec pour ne pas réessayer.
     icon_textures: HashMap<u64, Option<egui::TextureHandle>>,
-    /// Vignette rapportée par le sélecteur de fichier, sur son thread.
-    picked_icon: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    /// Logo de serveur rapporté par le sélecteur de fichier, sur son thread.
+    picked_icon: PickedImage,
+    /// Photo de profil rapportée par le sélecteur. Case distincte du logo :
+    /// les deux fenêtres peuvent être ouvertes en même temps.
+    picked_avatar: PickedImage,
     /// Aperçu de vignette, indexé par la vignette elle-même : sans ce cache
     /// on téléverserait une texture à chaque image rendue.
     preview_icon: Option<(String, egui::TextureHandle)>,
     /// Aperçus des images partagées dans le fil.
     previews: images::Previews,
+    /// Fenêtre maximisée : la seule géométrie qu'on mémorise. Cf. `main`.
+    maximized: bool,
+    /// Vrai tant que `maximized` n'a pas été réappliqué au démarrage.
+    restore_maximized: bool,
     /// Photos de profil montées : user_id -> (empreinte, texture).
     avatars: HashMap<UserId, (String, egui::TextureHandle)>,
     /// Vignettes (octets PNG) prêtes à monter, venues du réseau ou du
@@ -196,6 +267,15 @@ struct KiApp {
     last_invite: Option<String>,
     reset_target: Option<String>,
     reset_password: String,
+    /// Journal d'audit, du plus récent au plus ancien.
+    audit: Vec<AuditRecord>,
+    /// Onglet ouvert dans la fenêtre d'administration.
+    admin_tab: AdminTab,
+    /// Réglages du prochain code d'invitation à créer.
+    invite_uses: Option<u32>,
+    invite_label: String,
+    /// Bannissement en cours de saisie : la cible, le motif, la durée.
+    ban_draft: Option<BanDraft>,
 
     // Mon compte
     show_account: bool,
@@ -229,6 +309,10 @@ struct KiApp {
     good_reports: u8,
     /// Dernières pertes montantes signalées par le serveur (%).
     upstream_loss: Option<f32>,
+    /// Protection contre les pertes DRED : 0 = off, 1 = auto, 2 = toujours.
+    dred_mode: u8,
+    /// DRED actuellement engagé (mode auto).
+    dred_active: bool,
     agc: bool,
     agc_target: f32,
     gate_threshold: f32,
@@ -238,6 +322,11 @@ struct KiApp {
     loopback: bool,
     /// Calibration des seuils en cours : (départ, crête ambiante mesurée).
     calibrating: Option<(std::time::Instant, f32)>,
+    // Labo vidéo (S1a du partage d'écran) : boucle locale de test.
+    labo: Option<ki_video::LocalLoop>,
+    labo_frame: std::sync::Arc<std::sync::Mutex<Option<ki_video::RgbaFrame>>>,
+    labo_stats: std::sync::Arc<ki_video::StageStats>,
+    labo_texture: Option<egui::TextureHandle>,
     device: DeviceState,
 }
 
@@ -291,8 +380,11 @@ impl KiApp {
             draft: None,
             icon_textures: HashMap::new(),
             picked_icon: Default::default(),
+            picked_avatar: Default::default(),
             preview_icon: None,
             previews: images::Previews::default(),
+            maximized: get("window_maximized", "") == "on",
+            restore_maximized: get("window_maximized", "") == "on",
             avatars: HashMap::new(),
             incoming_avatars: HashMap::new(),
             account_avatar: IconChange::Keep,
@@ -326,6 +418,11 @@ impl KiApp {
             last_invite: None,
             reset_target: None,
             reset_password: String::new(),
+            audit: Vec::new(),
+            admin_tab: AdminTab::Server,
+            invite_uses: Some(1),
+            invite_label: String::new(),
+            ban_draft: None,
             show_account: false,
             old_password: String::new(),
             new_password: String::new(),
@@ -356,6 +453,8 @@ impl KiApp {
             auto_bitrate: 64_000,
             good_reports: 0,
             upstream_loss: None,
+            dred_mode: get("dred_mode", "1").parse().unwrap_or(1),
+            dred_active: false,
             agc: get("agc", "on") != "off",
             agc_target: get("agc_target", "0.30").parse().unwrap_or(0.30),
             gate_threshold: get("gate_threshold", "0").parse().unwrap_or(0.0),
@@ -364,7 +463,87 @@ impl KiApp {
             last_ptt_down: None,
             loopback: false,
             calibrating: None,
+            labo: None,
+            labo_frame: Default::default(),
+            labo_stats: Default::default(),
+            labo_texture: None,
             device: DeviceState::new(),
+        }
+    }
+
+    /// Démarre la boucle locale du labo vidéo (S1a) : capture de l'écran
+    /// principal, aller-retour H.264 complet, image déposée pour l'UI.
+    fn start_labo(&mut self, ctx: egui::Context) {
+        let stats = std::sync::Arc::new(ki_video::StageStats::default());
+        let frame_slot = self.labo_frame.clone();
+        let sink: ki_video::FrameSink = std::sync::Arc::new(move |frame| {
+            *frame_slot.lock().unwrap() = Some(frame);
+            // Seul moyen de peindre à 30 fps : le repeint périodique de
+            // l'app est plafonné à 20 fps par request_repaint_after(50 ms).
+            ctx.request_repaint();
+        });
+        match ki_video::LocalLoop::start(stats.clone(), sink) {
+            Ok(handle) => {
+                self.labo_stats = stats;
+                self.labo_texture = None;
+                self.labo = Some(handle);
+            }
+            Err(e) => self.error = Some(format!("labo vidéo : {e:#}")),
+        }
+    }
+
+    fn stop_labo(&mut self) {
+        if let Some(labo) = self.labo.take() {
+            labo.stop();
+        }
+        *self.labo_frame.lock().unwrap() = None;
+        self.labo_texture = None;
+    }
+
+    /// Fenêtre du labo : l'image décodée + les compteurs par étage.
+    fn labo_window(&mut self, ctx: &egui::Context) {
+        // Nouvelle image ? On met la texture à jour (allocation unique,
+        // `set` ensuite — le pattern egui pour la vidéo).
+        if let Some(frame) = self.labo_frame.lock().unwrap().take() {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [frame.width, frame.height],
+                &frame.rgba,
+            );
+            match &mut self.labo_texture {
+                Some(tex) if tex.size() == [frame.width, frame.height] => {
+                    tex.set(image, egui::TextureOptions::LINEAR);
+                }
+                _ => {
+                    self.labo_texture = Some(ctx.load_texture(
+                        "labo-video",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+            self.labo_stats.painted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        let mut open = true;
+        egui::Window::new("🧪 Labo vidéo — aller-retour H.264 local")
+            .open(&mut open)
+            .default_width(820.0)
+            .show(ctx, |ui| {
+                if let Some(tex) = &self.labo_texture {
+                    let [w, h] = tex.size();
+                    let avail = ui.available_width().max(320.0);
+                    let scale = (avail / w as f32).min(1.0);
+                    ui.image((tex.id(), egui::vec2(w as f32 * scale, h as f32 * scale)));
+                } else {
+                    ui.label("démarrage de la capture…");
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(self.labo_stats.summary()).weak().size(11.5).monospace(),
+                );
+            });
+        if !open {
+            self.stop_labo();
         }
     }
 
@@ -391,6 +570,19 @@ impl KiApp {
     /// fenêtres propres consécutives (15 s), plafonné à 64 kbps.
     fn on_net_quality(&mut self, loss_pct: f32) {
         self.upstream_loss = Some(loss_pct);
+        // Protection DRED automatique : engagée dès 2 % de pertes, relâchée
+        // après trois fenêtres propres (le débit adaptatif gère le reste).
+        if self.dred_mode == 1 {
+            let was = self.dred_active;
+            if loss_pct > 2.0 {
+                self.dred_active = true;
+            } else if loss_pct < 0.5 && self.good_reports >= 2 {
+                self.dred_active = false;
+            }
+            if was != self.dred_active {
+                self.apply_audio_settings();
+            }
+        }
         if self.bitrate != 0 {
             return; // débit manuel : on affiche l'info, on ne pilote pas
         }
@@ -430,6 +622,17 @@ impl KiApp {
             engine.set_agc_target(self.agc_target);
             engine.set_gate_threshold(self.gate_threshold);
             engine.set_jitter_frames(self.jitter_frames);
+            engine.set_dred(match self.dred_mode {
+                0 => 0,
+                2 => ki_voice::DRED_DEFAULT,
+                _ => {
+                    if self.dred_active {
+                        ki_voice::DRED_DEFAULT
+                    } else {
+                        0
+                    }
+                }
+            });
             engine.set_loopback(self.loopback);
         }
     }
@@ -453,6 +656,12 @@ impl KiApp {
             agc_target: self.agc_target,
             gate_threshold: self.gate_threshold,
             jitter_frames: self.jitter_frames,
+            dred: match self.dred_mode {
+                0 => 0,
+                2 => ki_voice::DRED_DEFAULT,
+                _ if self.dred_active => ki_voice::DRED_DEFAULT,
+                _ => 0,
+            },
         }
     }
 
@@ -681,12 +890,17 @@ impl KiApp {
 
     /// Ouvre le sélecteur de fichier dans un thread : le dialogue natif ne
     /// doit pas figer le rendu.
-    fn pick_server_icon(&self, ctx: &egui::Context) {
-        let slot = self.picked_icon.clone();
+    ///
+    /// Le logo du serveur et la photo de profil ont chacun leur case : avec
+    /// une case commune, la fenêtre qui la relevait en premier volait le
+    /// fichier choisi par l'autre.
+    fn pick_image(&self, ctx: &egui::Context, title: &str, slot: &PickedImage) {
+        let slot = slot.clone();
+        let title = title.to_string();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
-                .set_title("Logo du serveur")
+                .set_title(title)
                 .add_filter("Images", &["png", "jpg", "jpeg"])
                 .pick_file();
             let Some(path) = picked else { return };
@@ -813,6 +1027,7 @@ impl KiApp {
                 voice_token,
                 is_admin,
                 channels,
+                server,
                 ..
             } => {
                 self.welcomed = true;
@@ -823,6 +1038,14 @@ impl KiApp {
                 self.my_admin = is_admin;
                 self.voice_token = voice_token;
                 self.channels = channels;
+                // L'identité du serveur arrive **dès** le Welcome. L'ignorer
+                // ici laissait nom et logo invisibles jusqu'à ce qu'un admin
+                // les ré-enregistre, ce qui n'arrivait jamais.
+                self.server_info = safe_server_info(server);
+                self.cache_server_identity();
+                if !self.show_admin {
+                    self.admin_name = self.server_info.name.clone();
+                }
                 // On ouvre le premier salon textuel pour avoir de quoi lire,
                 // mais on n'entre dans aucun vocal : ça se décide.
                 let first_text = self
@@ -895,12 +1118,22 @@ impl KiApp {
                     self.error = Some(message);
                 }
             }
-            ServerMsg::Kicked => {
-                self.disconnect(Some("tu as été expulsé par un admin".into()));
+            ServerMsg::Kicked { reason } => {
+                // Le motif vient d'un autre membre : il passe par le même
+                // nettoyage que n'importe quel texte reçu avant affichage.
+                let reason = ki_protocol::safe_display(&reason, 300);
+                self.disconnect(Some(if reason.is_empty() {
+                    "tu as été expulsé par un admin".into()
+                } else {
+                    format!("expulsé par un admin : {reason}")
+                }));
             }
             ServerMsg::AdminInfo { users, invites } => {
                 self.admin_users = users;
                 self.admin_invites = invites;
+            }
+            ServerMsg::AuditLog { records } => {
+                self.audit = records;
             }
             ServerMsg::InviteCreated { code } => {
                 self.last_invite = Some(code);
@@ -1388,6 +1621,74 @@ impl KiApp {
         if self.show_account {
             self.account_window(ctx);
         }
+        if self.ban_draft.is_some() {
+            self.ban_window(ctx);
+        }
+        if self.labo.is_some() {
+            self.labo_window(ctx);
+        }
+    }
+
+    /// Saisie d'un bannissement : motif et durée.
+    ///
+    /// Une fenêtre plutôt qu'un menu : bannir se justifie, et le motif est
+    /// relu par la personne bannie comme par les autres admins dans le
+    /// journal. Lui demander de le taper à la volée dans un menu contextuel
+    /// donnerait des motifs vides.
+    fn ban_window(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.ban_draft.as_mut() else { return };
+        let username = draft.username.clone();
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+
+        egui::Window::new(format!("Bannir {username}"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui::field_label(ui, "Motif (visible par la personne bannie)");
+                ui.add(ui::text_field(&mut draft.reason, "ex. spam répété", false));
+                ui.add_space(8.0);
+
+                ui::field_label(ui, "Durée");
+                ui.horizontal_wrapped(|ui| {
+                    for (label, secs) in BAN_DURATIONS {
+                        if ui
+                            .selectable_label(draft.duration_secs == *secs, *label)
+                            .clicked()
+                        {
+                            draft.duration_secs = *secs;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui::hairline(ui);
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    if ui::tinted_button(ui, Some(Icon::Ban), "Bannir", Tone::Danger).clicked() {
+                        confirm = true;
+                    }
+                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if confirm {
+            if let Some(draft) = self.ban_draft.take() {
+                self.send(ClientMsg::AdminBan {
+                    username: draft.username,
+                    reason: draft.reason,
+                    duration_secs: draft.duration_secs,
+                });
+            }
+        } else if cancel || !open {
+            self.ban_draft = None;
+        }
     }
 
     /// Barre du bas : tout le contrôle vocal et la télémétrie réseau.
@@ -1736,12 +2037,16 @@ impl KiApp {
 
         for m in &members {
             let is_me = Some(m.user_id) == self.my_id;
-            let speaking = if is_me { self.transmitting } else { m.speaking };
             let level = if is_me {
                 voice.stats.mic_peak
             } else {
                 voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
             };
+            // Pour soi, l'état d'émission local fait foi. Pour les autres, le
+            // drapeau du serveur **ou** le niveau reçu : le second sert de
+            // filet si un `VoiceState` se perd, et retombe de lui-même.
+            let speaking =
+                if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
             let volume = self.volume_of(m.user_id);
             let photo = self.avatar_of(m.user_id);
             let response = member_row(ui, m, speaking, is_me, level, volume, photo);
@@ -1782,15 +2087,22 @@ impl KiApp {
                 ui.add_space(4.0);
                 ui::hairline(ui);
                 ui.add_space(4.0);
-                if ui::tinted_button(
-                    ui,
-                    Some(Icon::Ban),
-                    &format!("Expulser {}", m.username),
-                    Tone::Danger,
-                )
-                .clicked()
-                {
-                    self.send(ClientMsg::Kick { user_id: m.user_id });
+                // Expulser met dehors ; la personne peut revenir aussitôt.
+                if ui::tinted_button(ui, Some(Icon::Logout), "Expulser", Tone::Danger).clicked() {
+                    self.send(ClientMsg::Kick {
+                        user_id: m.user_id,
+                        reason: String::new(),
+                    });
+                    ui.close();
+                }
+                // Bannir l'empêche de revenir : motif et durée se saisissent
+                // dans une petite fenêtre, plutôt qu'au fond d'un menu.
+                if ui::tinted_button(ui, Some(Icon::Ban), "Bannir…", Tone::Danger).clicked() {
+                    self.ban_draft = Some(BanDraft {
+                        username: m.username.clone(),
+                        reason: String::new(),
+                        duration_secs: 86_400,
+                    });
                     ui.close();
                 }
             }
@@ -1824,7 +2136,6 @@ impl KiApp {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     for m in &members {
                         let is_me = Some(m.user_id) == self.my_id;
-                        let speaking = if is_me { self.transmitting } else { m.speaking };
                         // Le vumètre n'a de sens que si l'on partage le salon
                         // vocal de la personne : sinon on ne l'entend pas.
                         let audible = m.voice.is_some() && m.voice == self.voice_channel;
@@ -1835,6 +2146,8 @@ impl KiApp {
                         } else {
                             voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
                         };
+                        let speaking =
+                            if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
                         let volume = self.volume_of(m.user_id);
                         let photo = self.avatar_of(m.user_id);
                         let response =
@@ -2359,6 +2672,49 @@ impl KiApp {
                         ui::hint(ui, "Auto : s'adapte aux pertes mesurées par le serveur.");
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("protection pertes (DRED)")
+                                    .color(TEXT_DIM)
+                                    .size(12.5),
+                            );
+                            let dred_label = |m: u8| match m {
+                                0 => "Désactivée".to_string(),
+                                2 => "Toujours".to_string(),
+                                _ => "Auto (recommandé)".to_string(),
+                            };
+                            egui::ComboBox::from_id_salt("dred_mode")
+                                .width(150.0)
+                                .selected_text(
+                                    RichText::new(dred_label(self.dred_mode)).color(TEXT),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for mode in [1u8, 0, 2] {
+                                        if ui
+                                            .selectable_label(
+                                                self.dred_mode == mode,
+                                                dred_label(mode),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.dred_mode = mode;
+                                            apply = true;
+                                        }
+                                    }
+                                });
+                        });
+                        ui::hint(
+                            ui,
+                            match self.dred_mode {
+                                0 => "redondance neuronale coupée",
+                                2 => "≈1 s de voix re-transmise en continu dans chaque paquet",
+                                _ if self.dred_active => {
+                                    "ENGAGÉE — pertes détectées, la voix est protégée"
+                                }
+                                _ => "en veille : s'engage automatiquement dès 2 % de pertes",
+                            },
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
                             ui.label(RichText::new("tampon de gigue").color(TEXT_DIM).size(12.5));
                             let jitter_label = |frames: usize| match frames {
                                 0 => "Auto (adaptatif)".to_string(),
@@ -2408,6 +2764,29 @@ impl KiApp {
                                 ),
                             );
                         }
+
+                        // --- Labo vidéo (S1a du partage d'écran) ---
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("🧪 labo vidéo").color(TEXT_DIM).size(12.5),
+                            );
+                            let running = self.labo.is_some();
+                            let label = if running { "Arrêter le test" } else { "Se voir (test local)" };
+                            if ui.button(label).clicked() {
+                                if running {
+                                    self.stop_labo();
+                                } else {
+                                    self.start_labo(ctx.clone());
+                                }
+                            }
+                        });
+                        ui::hint(
+                            ui,
+                            "capture ton écran principal et l'affiche après un aller-retour \
+                             H.264 complet — zéro réseau, c'est le banc d'essai du stream",
+                        );
 
                         if let Some(info) = self.info.clone() {
                             ui.add_space(10.0);
@@ -2547,7 +2926,7 @@ impl KiApp {
             .default_width(300.0)
             .show(ctx, |ui| {
                 // Photo rapportée par le thread du sélecteur de fichier.
-                if let Some(outcome) = self.picked_icon.lock().unwrap().take() {
+                if let Some(outcome) = self.picked_avatar.lock().unwrap().take() {
                     match outcome {
                         Ok(data) => self.account_avatar = IconChange::Set { data },
                         Err(e) => self.error = Some(format!("image illisible : {e}")),
@@ -2589,7 +2968,7 @@ impl KiApp {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             if ui::button(ui, Icon::Pencil, "Photo").clicked() {
-                                self.pick_server_icon(ctx);
+                                self.pick_image(ctx, "Photo de profil", &self.picked_avatar);
                             }
                             if shown.is_some()
                                 && ui::button(ui, Icon::Trash, "Retirer").clicked()
@@ -2744,7 +3123,7 @@ impl KiApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui::button(ui, Icon::Pencil, "Choisir un logo").clicked() {
-                        self.pick_server_icon(ctx);
+                        self.pick_image(ctx, "Logo du serveur", &self.picked_icon);
                     }
                     if has_icon && ui::button(ui, Icon::Trash, "Retirer").clicked() {
                         self.admin_icon = IconChange::Clear;
@@ -2793,212 +3172,46 @@ impl KiApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(420.0)
+            .default_width(460.0)
             .default_height(roomy)
-            .min_width(340.0)
+            .min_width(360.0)
             .min_height(260.0)
             .show(ctx, |ui| {
+                // Onglets : tout tenait auparavant dans une seule colonne
+                // déroulante, qui ne se lisait plus une fois les
+                // bannissements et le journal ajoutés.
+                ui.horizontal(|ui| {
+                    for tab in AdminTab::ALL {
+                        if ui.selectable_label(self.admin_tab == tab, tab.label()).clicked() {
+                            self.admin_tab = tab;
+                            // Le journal ne se charge qu'à l'ouverture de
+                            // son onglet : inutile de le pousser à chaque
+                            // ouverture du panneau.
+                            if tab == AdminTab::Audit {
+                                to_send.push(ClientMsg::AdminAuditLog { limit: 200 });
+                            }
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui::hairline(ui);
+                ui.add_space(10.0);
+
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                self.server_identity_section(ui, ctx, &mut to_send);
-
-                ui.add_space(12.0);
-                ui::hairline(ui);
-                ui.add_space(10.0);
-
-                // --- Invitations ---
-                ui::group_title(ui, Icon::Plus, "Invitations");
-                if ui::button(ui, Icon::Plus, "Générer un code d'invitation").clicked() {
-                    to_send.push(ClientMsg::AdminCreateInvite);
-                }
-                if let Some(code) = self.last_invite.clone() {
-                    ui.add_space(8.0);
-                    egui::Frame::NONE
-                        .fill(theme::alpha(ACCENT, 24))
-                        .stroke(egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 80)))
-                        .corner_radius(egui::CornerRadius::same(9))
-                        .inner_margin(egui::Margin::symmetric(10, 8))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(&code)
-                                        .color(ACCENT)
-                                        .strong()
-                                        .monospace()
-                                        .size(15.0),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui::icon_button(
-                                            ui,
-                                            Icon::Copy,
-                                            "Copier « serveur + code »",
-                                        )
-                                        .clicked()
-                                        {
-                                            ctx.copy_text(format!(
-                                                "serveur : {}  |  code d'invitation : {code}",
-                                                self.url
-                                            ));
-                                        }
-                                        if ui::icon_button(ui, Icon::Key, "Copier le code")
-                                            .clicked()
-                                        {
-                                            ctx.copy_text(code.clone());
-                                        }
-                                    },
-                                );
-                            });
-                        });
-                }
-                let other_invites: Vec<InviteInfo> = self
-                    .admin_invites
-                    .iter()
-                    .filter(|i| Some(&i.code) != self.last_invite.as_ref())
-                    .cloned()
-                    .collect();
-                if !other_invites.is_empty() {
-                    ui.add_space(8.0);
-                    ui::section_label(ui, "Codes actifs");
-                    for invite in other_invites {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(&invite.code)
-                                    .color(TEXT_DIM)
-                                    .monospace()
-                                    .size(13.0),
-                            );
-                            if ui::icon_button_ex(ui, Icon::Copy, 24.0, "Copier", None).clicked() {
-                                ctx.copy_text(invite.code.clone());
+                        match self.admin_tab {
+                            AdminTab::Server => self.server_identity_section(ui, ctx, &mut to_send),
+                            AdminTab::Members => self.admin_members_tab(ui, &mut to_send),
+                            AdminTab::Invites => self.admin_invites_tab(ui, ctx, &mut to_send),
+                            AdminTab::Audit => self.admin_audit_tab(ui),
+                        }
+                        if let Some(info) = self.info.clone() {
+                            ui.add_space(10.0);
+                            if ui::banner(ui, Tone::Accent, &info, true) {
+                                self.info = None;
                             }
-                        });
-                    }
-                }
-
-                ui.add_space(12.0);
-                ui::hairline(ui);
-                ui.add_space(10.0);
-                ui::group_title(ui, Icon::User, "Comptes");
-
-                // --- Comptes ---
-                let users = self.admin_users.clone();
-                let my_name = users
-                    .iter()
-                    .find(|u| Some(u.user_id) == self.my_id)
-                    .map(|u| u.username.clone());
-                for account in &users {
-                    ui.horizontal(|ui| {
-                        let photo = self.avatars.get(&account.user_id);
-                        ui::avatar(
-                            ui,
-                            &account.username,
-                            26.0,
-                            false,
-                            photo.map(|(_, t)| t),
-                            theme::BG_RAISED,
-                        );
-                        let dot = if account.online { SPEAK } else { theme::BORDER };
-                        ui::status_dot(ui, dot, "", 8.0);
-
-                        let mut name = RichText::new(&account.username)
-                            .color(color_for(&account.username))
-                            .size(13.5);
-                        if account.banned {
-                            name = name.strikethrough();
                         }
-                        ui.label(name);
-                        if account.admin {
-                            ui::glyph(ui, Icon::Crown, 13.0, ACCENT);
-                        }
-                        if account.banned {
-                            ui.label(RichText::new("bloqué").color(DANGER).size(11.0));
-                        }
-
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if !account.admin {
-                                    let (icon, tip, target) = if account.banned {
-                                        (Icon::Check, "Débloquer", false)
-                                    } else {
-                                        (Icon::Ban, "Bloquer", true)
-                                    };
-                                    if ui::icon_button_ex(ui, icon, 26.0, tip, None)
-                                        .clicked()
-                                    {
-                                        to_send.push(ClientMsg::AdminSetBanned {
-                                            username: account.username.clone(),
-                                            banned: target,
-                                        });
-                                    }
-                                }
-                                let can_reset = !account.admin
-                                    || my_name.as_ref() == Some(&account.username);
-                                if can_reset
-                                    && ui::icon_button_ex(
-                                        ui,
-                                        Icon::Key,
-                                        26.0,
-                                        "Réinitialiser le mot de passe",
-                                        None,
-                                    )
-                                    .clicked()
-                                {
-                                    self.reset_target = Some(account.username.clone());
-                                    self.reset_password.clear();
-                                }
-                            },
-                        );
-                    });
-                }
-
-                // --- Formulaire de réinitialisation ---
-                if let Some(target) = self.reset_target.clone() {
-                    ui.add_space(10.0);
-                    ui::hairline(ui);
-                    ui.add_space(8.0);
-                    ui::field_label(ui, &format!("Nouveau mot de passe pour {target}"));
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.reset_password)
-                                .password(true)
-                                .margin(egui::Margin::symmetric(10, 7))
-                                .background_color(theme::BG_DEEP)
-                                .desired_width(170.0),
-                        );
-                        let ok = self.reset_password.len() >= 6;
-                        let clicked = ui
-                            .add_enabled_ui(ok, |ui| {
-                                ui::primary_button(ui, Some(Icon::Check), "Appliquer", None)
-                            })
-                            .inner
-                            .clicked();
-                        if clicked {
-                            to_send.push(ClientMsg::AdminResetPassword {
-                                username: target.clone(),
-                                new_password: self.reset_password.clone(),
-                            });
-                            self.reset_target = None;
-                            self.reset_password.clear();
-                        }
-                        if ui::button(ui, Icon::Close, "Annuler").clicked() {
-                            self.reset_target = None;
-                            self.reset_password.clear();
-                        }
-                    });
-                    if self.reset_password.len() < 6 && !self.reset_password.is_empty() {
-                        ui::hint(ui, "6 caractères minimum");
-                    }
-                }
-
-                if let Some(info) = self.info.clone() {
-                    ui.add_space(10.0);
-                    if ui::banner(ui, Tone::Accent, &info, true) {
-                        self.info = None;
-                    }
-                }
                     });
             });
         for msg in to_send {
@@ -3009,12 +3222,360 @@ impl KiApp {
         }
     }
 
+    /// Onglet « Invitations » : créer, copier, révoquer.
+    fn admin_invites_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        to_send: &mut Vec<ClientMsg>,
+    ) {
+        ui::group_title(ui, Icon::Plus, "Nouveau code");
+        ui::field_label(ui, "Étiquette (pour s'y retrouver plus tard)");
+        ui.add(ui::text_field(&mut self.invite_label, "ex. tournoi du samedi", false));
+        ui.add_space(8.0);
+
+        ui::field_label(ui, "Nombre d'utilisations");
+        ui.horizontal_wrapped(|ui| {
+            for (label, uses) in
+                [("1", Some(1u32)), ("5", Some(5)), ("25", Some(25)), ("Illimité", None)]
+            {
+                if ui.selectable_label(self.invite_uses == uses, label).clicked() {
+                    self.invite_uses = uses;
+                }
+            }
+        });
+        if self.invite_uses.is_none() {
+            ui::hint(ui, "lien permanent — chaque compte créé sera consigné au journal");
+        }
+        ui.add_space(8.0);
+        if ui::button(ui, Icon::Plus, "Générer le code").clicked() {
+            to_send.push(ClientMsg::AdminCreateInvite {
+                uses: self.invite_uses,
+                label: self.invite_label.trim().to_string(),
+                ttl_secs: 0,
+            });
+            self.invite_label.clear();
+        }
+
+        if let Some(code) = self.last_invite.clone() {
+            ui.add_space(8.0);
+            egui::Frame::NONE
+                .fill(theme::alpha(ACCENT, 24))
+                .stroke(egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 80)))
+                .corner_radius(egui::CornerRadius::same(9))
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(&code).color(ACCENT).strong().monospace().size(15.0),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui::icon_button(ui, Icon::Copy, "Copier « serveur + code »")
+                                .clicked()
+                            {
+                                ctx.copy_text(format!(
+                                    "serveur : {}  |  code d'invitation : {code}",
+                                    self.url
+                                ));
+                            }
+                            if ui::icon_button(ui, Icon::Key, "Copier le code").clicked() {
+                                ctx.copy_text(code.clone());
+                            }
+                        });
+                    });
+                });
+        }
+
+        let invites = self.admin_invites.clone();
+        if !invites.is_empty() {
+            ui.add_space(12.0);
+            ui::hairline(ui);
+            ui.add_space(10.0);
+            ui::group_title(ui, Icon::Key, "Codes émis");
+            for invite in &invites {
+                ui.horizontal(|ui| {
+                    let color = if invite.revoked { TEXT_FAINT } else { TEXT_DIM };
+                    let mut code = RichText::new(&invite.code).color(color).monospace().size(13.0);
+                    if invite.revoked {
+                        code = code.strikethrough();
+                    }
+                    ui.label(code);
+                    // Un lien permanent se signale : c'est l'information
+                    // qui décide s'il faut le révoquer.
+                    match invite.uses_left {
+                        None if !invite.revoked => {
+                            ui.label(RichText::new("permanent").color(ACCENT).size(11.0));
+                        }
+                        Some(left) if !invite.revoked => {
+                            ui.label(
+                                RichText::new(format!("{left} restant(s)"))
+                                    .color(TEXT_FAINT)
+                                    .size(11.0),
+                            );
+                        }
+                        _ => {
+                            ui.label(RichText::new("révoqué").color(DANGER).size(11.0));
+                        }
+                    }
+                    if invite.uses > 0 {
+                        ui.label(
+                            RichText::new(format!("· {} compte(s) créé(s)", invite.uses))
+                                .color(TEXT_FAINT)
+                                .size(11.0),
+                        );
+                    }
+                    if !invite.label.is_empty() {
+                        ui.label(
+                            RichText::new(format!("· {}", invite.label))
+                                .color(TEXT_FAINT)
+                                .size(11.0),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !invite.revoked
+                            && ui::icon_button_ex(ui, Icon::Ban, 24.0, "Révoquer", None).clicked()
+                        {
+                            to_send
+                                .push(ClientMsg::AdminRevokeInvite { code: invite.code.clone() });
+                        }
+                        if ui::icon_button_ex(ui, Icon::Copy, 24.0, "Copier", None).clicked() {
+                            ctx.copy_text(invite.code.clone());
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    /// Onglet « Membres » : bannir, débannir, réinitialiser un mot de passe.
+    fn admin_members_tab(&mut self, ui: &mut egui::Ui, to_send: &mut Vec<ClientMsg>) {
+        ui::group_title(ui, Icon::User, "Comptes");
+
+        let users = self.admin_users.clone();
+        let my_name = users
+            .iter()
+            .find(|u| Some(u.user_id) == self.my_id)
+            .map(|u| u.username.clone());
+        for account in &users {
+            ui.horizontal(|ui| {
+                let photo = self.avatars.get(&account.user_id);
+                ui::avatar(
+                    ui,
+                    &account.username,
+                    26.0,
+                    false,
+                    photo.map(|(_, t)| t),
+                    theme::BG_RAISED,
+                );
+                let dot = if account.online { SPEAK } else { theme::BORDER };
+                ui::status_dot(ui, dot, "", 8.0);
+
+                let mut name = RichText::new(&account.username)
+                    .color(color_for(&account.username))
+                    .size(13.5);
+                if account.banned {
+                    name = name.strikethrough();
+                }
+                ui.label(name);
+                if account.admin {
+                    ui::glyph(ui, Icon::Crown, 13.0, ACCENT);
+                }
+                if account.banned {
+                    ui.label(RichText::new(ban_summary(account)).color(DANGER).size(11.0));
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !account.admin {
+                        if account.banned {
+                            if ui::icon_button_ex(ui, Icon::Check, 26.0, "Annuler le ban", None)
+                                .clicked()
+                            {
+                                to_send.push(ClientMsg::AdminUnban {
+                                    username: account.username.clone(),
+                                });
+                            }
+                        } else if ui::icon_button_ex(ui, Icon::Ban, 26.0, "Bannir…", None)
+                            .clicked()
+                        {
+                            self.ban_draft = Some(BanDraft {
+                                username: account.username.clone(),
+                                reason: String::new(),
+                                duration_secs: 86_400,
+                            });
+                        }
+                    }
+                    let can_reset =
+                        !account.admin || my_name.as_ref() == Some(&account.username);
+                    if can_reset
+                        && ui::icon_button_ex(
+                            ui,
+                            Icon::Key,
+                            26.0,
+                            "Réinitialiser le mot de passe",
+                            None,
+                        )
+                        .clicked()
+                    {
+                        self.reset_target = Some(account.username.clone());
+                        self.reset_password.clear();
+                    }
+                });
+            });
+            // Motif et auteur sous la ligne : c'est ce qu'on cherche quand
+            // on revient sur un bannissement des semaines plus tard.
+            if account.banned && !(account.ban_reason.is_empty() && account.ban_by.is_empty()) {
+                ui.horizontal(|ui| {
+                    ui.add_space(34.0);
+                    let mut detail = String::new();
+                    if !account.ban_reason.is_empty() {
+                        detail.push_str(&safe_name(&account.ban_reason));
+                    }
+                    if !account.ban_by.is_empty() {
+                        if !detail.is_empty() {
+                            detail.push_str(" — ");
+                        }
+                        detail.push_str(&format!("par {}", safe_name(&account.ban_by)));
+                    }
+                    ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.0));
+                });
+            }
+        }
+
+        // --- Formulaire de réinitialisation ---
+        if let Some(target) = self.reset_target.clone() {
+            ui.add_space(10.0);
+            ui::hairline(ui);
+            ui.add_space(8.0);
+            ui::field_label(ui, &format!("Nouveau mot de passe pour {target}"));
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.reset_password)
+                        .password(true)
+                        .margin(egui::Margin::symmetric(10, 7))
+                        .background_color(theme::BG_DEEP)
+                        .desired_width(170.0),
+                );
+                let ok = self.reset_password.len() >= 6;
+                let clicked = ui
+                    .add_enabled_ui(ok, |ui| {
+                        ui::primary_button(ui, Some(Icon::Check), "Appliquer", None)
+                    })
+                    .inner
+                    .clicked();
+                if clicked {
+                    to_send.push(ClientMsg::AdminResetPassword {
+                        username: target.clone(),
+                        new_password: self.reset_password.clone(),
+                    });
+                    self.reset_target = None;
+                    self.reset_password.clear();
+                }
+                if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    self.reset_target = None;
+                    self.reset_password.clear();
+                }
+            });
+            if self.reset_password.len() < 6 && !self.reset_password.is_empty() {
+                ui::hint(ui, "6 caractères minimum");
+            }
+        }
+    }
+
+    /// Onglet « Journal » : les actions d'administration, du plus récent au
+    /// plus ancien. C'est ce qui rend un lien d'invitation permanent
+    /// acceptable — on sait toujours qui est entré par où.
+    fn admin_audit_tab(&mut self, ui: &mut egui::Ui) {
+        if self.audit.is_empty() {
+            ui::hint(ui, "aucune action consignée pour l'instant");
+            return;
+        }
+        let records = self.audit.clone();
+        for record in &records {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{} {}", day_label(record.ts), format_time(record.ts)))
+                        .color(TEXT_FAINT)
+                        .monospace()
+                        .size(11.0),
+                );
+                ui.label(
+                    RichText::new(audit_label(&record.action))
+                        .color(audit_tone(&record.action))
+                        .size(12.5)
+                        .strong(),
+                );
+                let actor = if record.actor.is_empty() {
+                    "le serveur".to_string()
+                } else {
+                    safe_name(&record.actor)
+                };
+                ui.label(RichText::new(format!("par {actor}")).color(TEXT_DIM).size(12.0));
+                if !record.target.is_empty() {
+                    ui.label(
+                        RichText::new(format!("→ {}", safe_name(&record.target)))
+                            .color(TEXT_DIM)
+                            .size(12.0),
+                    );
+                }
+                if !record.detail.is_empty() {
+                    ui.label(
+                        RichText::new(ki_protocol::safe_display(&record.detail, 200))
+                            .color(TEXT_FAINT)
+                            .size(11.5),
+                    );
+                }
+            });
+            ui.add_space(2.0);
+        }
+    }
+
     fn close_admin(&mut self) {
         self.show_admin = false;
         self.info = None;
         self.last_invite = None;
         self.admin_icon = IconChange::Keep;
         self.preview_icon = None;
+    }
+}
+
+/// Étiquette courte d'un bannissement : « banni » ou le temps restant.
+fn ban_summary(account: &AccountInfo) -> String {
+    let Some(until) = account.ban_until else { return "banni".into() };
+    let now = chrono::Local::now().timestamp_millis().max(0) as u64;
+    let minutes = until.saturating_sub(now) / 60_000;
+    match minutes {
+        0 => "banni — expire".into(),
+        1..=90 => format!("banni — {minutes} min"),
+        91..=2879 => format!("banni — {} h", minutes / 60),
+        _ => format!("banni — {} j", minutes / 1440),
+    }
+}
+
+/// Traduit un verbe du journal d'audit. Les verbes ne sont jamais traduits
+/// côté serveur — le fichier doit rester lisible et « greppable » — donc la
+/// traduction se fait ici. Un verbe inconnu (serveur plus récent que le
+/// client) s'affiche tel quel plutôt que de disparaître.
+fn audit_label(action: &str) -> String {
+    match action {
+        "invite.create" => "invitation créée".into(),
+        "invite.use" => "compte créé".into(),
+        "invite.revoke" => "invitation révoquée".into(),
+        "member.kick" => "expulsion".into(),
+        "member.ban" => "bannissement".into(),
+        "member.unban" => "ban annulé".into(),
+        "member.password_reset" => "mot de passe réinitialisé".into(),
+        "server.info" => "identité du serveur".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Couleur d'un verbe : rouge pour ce qui sanctionne, accent pour ce qui
+/// ouvre un accès. Le journal se parcourt à l'œil avant de se lire.
+fn audit_tone(action: &str) -> egui::Color32 {
+    match action {
+        "member.kick" | "member.ban" => DANGER,
+        "invite.create" | "invite.use" => ACCENT,
+        _ => TEXT_DIM,
     }
 }
 
@@ -3689,6 +4250,15 @@ fn megabytes(bytes: u64) -> f32 {
 
 impl eframe::App for KiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Géométrie : on ne restaure que « maximisée », et on suit l'état
+        // courant pour le réenregistrer. Cf. `main` pour le pourquoi.
+        if self.restore_maximized {
+            self.restore_maximized = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        let was_maximized = self.maximized;
+        self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(was_maximized));
+
         self.poll_events();
         self.update_voice();
 
@@ -3716,6 +4286,16 @@ impl eframe::App for KiApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         servers::save(storage, &self.book);
+        storage.set_string(
+            "window_maximized",
+            if self.maximized { "on" } else { "off" }.into(),
+        );
+        // Géométrie héritée des versions qui laissaient eframe la persister.
+        // La vider est ce qui corrige réellement la fenêtre minuscule : au
+        // démarrage suivant, eframe ne trouve plus rien à désérialiser et
+        // laisse la position au système. On ne touche à rien d'autre — le
+        // carnet de serveurs vit dans le même fichier.
+        storage.set_string("window", String::new());
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());
@@ -3731,6 +4311,7 @@ impl eframe::App for KiApp {
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
         storage.set_string("ptt_release_ms", format!("{}", self.ptt_release_ms));
         storage.set_string("noise_mode", format!("{}", self.noise_mode));
+        storage.set_string("dred_mode", format!("{}", self.dred_mode));
         storage.set_string("ptt_key", self.ptt_key.id().into());
         storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
         storage.set_string(

@@ -106,11 +106,26 @@ simultanés satureraient la machine sans la moindre chance de trouver le mot
 de passe. Les hachages tournent en outre sur le pool bloquant, pour ne pas
 figer la boucle réseau.
 
+**Anti-spam du chat** : un seau à jetons par connexion — 5 messages par
+seconde en régime établi, avec une réserve de 10 pour les rafales normales
+(coller cinq lignes d'affilée est un usage courant, en écrire cinquante ne
+l'est pas). Au-delà, le message est refusé sans être diffusé. Sans cette
+borne, un client modifié saturait d'un coup la mémoire glissante, le fichier
+d'historique et la bande passante de tout le monde.
+
+**Écritures atomiques** : `users.json`, `server.json` et les autres fichiers
+d'état sont écrits à côté puis renommés. `rename` étant atomique sur NTFS
+comme sur ext4, le chemin final désigne à tout instant soit l'ancien contenu
+complet, soit le nouveau. Une coupure de courant pendant une sauvegarde
+laissait auparavant un fichier à zéro octet — et le serveur refusait de
+redémarrer, tous les comptes avec.
+
 **Bornes sur les entrées** : tout ce qui vient du réseau est borné, à
 commencer par la ligne du flux de contrôle elle-même (160 Kio) — un lecteur
 de lignes ordinaire fait grandir son tampon sans limite, ce qui épuiserait la
 mémoire d'en face avant même l'authentification. Ensuite : messages
-(4000 caractères), pseudos, mots de passe, codes d'invitation. Les textes
+(4000 caractères), pseudos, mots de passe, codes d'invitation, motifs de
+modération (200 caractères). Les textes
 reçus perdent leurs caractères de contrôle et les **commandes
 bidirectionnelles** Unicode, qui inversent le sens d'affichage et permettent
 de faire lire à l'écran autre chose que ce qui est écrit. Les vignettes sont
@@ -330,28 +345,58 @@ plein jeu. Modes : micro ouvert ou push-to-talk, touche configurable.
 - **jitter buffer adaptatif** : la gigue d'arrivée est mesurée en continu
   (EWMA façon RFC 3550) et la latence de tampon s'ajuste seule, de 40 ms sur
   un réseau propre à 160 ms en Wi-Fi chaotique, avec rattrapage anti-dérive ;
+- **DRED (redondance neuronale, libopus 1.6.1)** : chaque paquet peut
+  re-transmettre jusqu'à ~1 s de passé compressé par réseau de neurones —
+  un trou de plusieurs trames est **resynthétisé** depuis n'importe quel
+  paquet suivant. Trois positions (⚙ réseau) : désactivé / **Auto**
+  (recommandé : s'engage dès 2 % de pertes signalées par le serveur, zéro
+  surcoût par beau temps) / toujours (~+32 kbps). Les trames irrécupérables
+  passent au **Deep PLC** (masquage de perte neuronal) au lieu de
+  l'interpolation classique. libopus 1.6.1 est compilé depuis les sources
+  officielles par `crates/ki-opus` (empreinte vérifiée) — l'écosystème Rust
+  étant figé sur libopus 1.3.1. ⚠ le format DRED est verrouillé par version :
+  tous les clients doivent embarquer le même libopus (garanti par nos builds).
 - **récupération FEC réelle** : une trame perdue est reconstruite à partir des
   données de redondance du paquet suivant (et non plus seulement masquée) ;
 - **ping vocal en direct** dans la barre du bas, mesuré sur le vrai chemin UDP
   (keepalive horodaté, écho serveur) — vert < 30 ms, orange < 80, rouge au-delà ;
 - **vumètres par locuteur** dans la liste des membres pendant qu'ils parlent.
-**Rôles** : le premier compte créé sur le serveur est admin — clic droit sur
-un membre pour l'expulser (badge ♛ dans la liste). **Fichiers** : bouton 📎
-dans le chat (25 Mo max), upload authentifié par le jeton de session, les
-liens sont cliquables dans le chat.
+**Rôles** : le premier compte créé sur le serveur est admin (badge ♛ dans la
+liste). **Fichiers** : bouton 📎 dans le chat (25 Mo max), upload authentifié
+par le jeton de session, les liens sont cliquables dans le chat.
 
-**Panneau admin** (bouton ♛ Admin, visible pour les admins) :
-- **Invitations** : génération de codes à usage unique (`ki-xxxxxxxxxx`) à
-  distribuer aux nouveaux — le code maître `KI_TOKEN` reste valable mais n'a
-  plus besoin de circuler. Boutons de copie (code seul ou avec l'adresse du
-  serveur).
-- **Comptes** : liste complète avec statut en ligne/bloqué, réinitialisation
-  de mot de passe (un admin ne peut pas modifier un autre admin, mais peut se
-  modifier lui-même), blocage/déblocage (un compte bloqué est expulsé sur le
-  champ et ne peut plus se connecter ; les admins ne sont pas blocables).
+**Modération** — clic droit sur un membre :
+- **Expulser** : la personne est déconnectée, mais peut revenir aussitôt.
+- **Bannir…** : ouvre une fenêtre avec un **motif** et une **durée** (1 heure,
+  1 jour, 7 jours, 30 jours, définitif). Le motif est renvoyé à la personne
+  bannie lors de sa prochaine tentative de connexion — sans lui, elle écrit à
+  l'admin et il faut traiter la question à la main. Un bannissement à durée se
+  lève tout seul : il n'y a aucune tâche de fond, l'expiration est constatée à
+  la première tentative de connexion.
 
-Commandes CLI équivalentes : `/admin`, `/invite`, `/resetpw <pseudo> <mdp>`,
-`/ban <pseudo>`, `/unban <pseudo>`, `/kick <id>`, `/passwd <ancien> <nouveau>`.
+**Panneau admin** (bouton ♛ Admin, visible pour les admins), en quatre onglets :
+- **Serveur** : nom et logo.
+- **Membres** : liste complète avec statut en ligne, motif et auteur des
+  bannissements en cours, bouton **Annuler le ban**, réinitialisation de mot de
+  passe (un admin ne peut pas modifier un autre admin, mais peut se modifier
+  lui-même ; les admins ne sont ni bannissables ni expulsables).
+- **Invitations** : génération de codes (`ki-xxxxxxxxxx`) avec un nombre
+  d'utilisations au choix — **1, 5, 25 ou illimité**. Un code illimité est un
+  lien permanent : il ne s'épuise pas, mais chaque compte qu'il crée est
+  consigné au journal, avec l'adresse d'origine. Une étiquette libre (« tournoi
+  du samedi ») aide à s'y retrouver. Les codes se révoquent d'un clic et
+  restent listés une fois révoqués ou épuisés — c'est l'historique des accès.
+  Le code maître `KI_TOKEN` reste valable mais n'a plus besoin de circuler.
+- **Journal** : les actions d'administration, de la plus récente à la plus
+  ancienne — invitations créées, révoquées et **utilisées**, expulsions,
+  bannissements et levées, mots de passe réinitialisés, changements d'identité
+  du serveur. Persisté dans `data/audit.jsonl`, une entrée par ligne, lisible
+  au `grep` sur le serveur sans y déployer d'outil.
+
+Commandes CLI équivalentes : `/admin`, `/audit`, `/invite`,
+`/invite-permanent`, `/revoke <code>`, `/resetpw <pseudo> <mdp>`,
+`/ban <pseudo> [minutes] [motif]`, `/unban <pseudo>`, `/kick <id> [motif]`,
+`/passwd <ancien> <nouveau>`.
 
 **Mon compte** : clic sur son propre pseudo (liste des membres ou coin bas
 gauche) → changement de son mot de passe (l'ancien est vérifié).
@@ -413,6 +458,7 @@ Coûts réels pour ~30 personnes :
 - [x] **M4.9** — DeepFilterNet3 (débruitage neuronal studio), porte de bruit, moniteur codec, cible AGC / maintien VAD / relâchement PTT / jitter réglables, stats réseau détaillées
 - [x] **M4.10** — serveur optimisé : table de routage précalculée, mesure des pertes montantes par émetteur, débit Opus adaptatif (mode Auto)
 - [x] **M5** — migration QUIC : une connexion unique TLS 1.3 (flux contrôle + datagrammes voix), certificat auto-signé persistant, RTT natif, reconnexion 0-RTT, migration réseau sans coupure, moteur audio découplé du transport
+- [x] **M5.1** — Opus 1.6.1 : bindings maison (`ki-opus`, build vérifié depuis les sources officielles), DRED (redondance neuronale ~1 s, mode Auto piloté par les pertes mesurées), Deep PLC (masquage neuronal), OSCE compilé
 - [x] **M6** — refonte de l'interface : thème maison (`theme.rs`), jeu d'icônes vectorielles dessinées (`icons.rs` — les polices d'egui ne couvrent pas `●`, `↑`, `✕` : ils sortaient en carrés vides), avatars par pseudo, messages groupés avec séparateurs de journée, barre vocale et panneaux redessinés, icône d'application générée
 - [x] **M6.1** — carnet de serveurs (`servers.rs`) : plusieurs serveurs nommés dans un seul client, identifiants (et mot de passe, si demandé) mémorisés par serveur, état et ping mesurés **avant** de se connecter par une poignée de main QUIC de test
 - [x] **M6.5** — salons textuels et vocaux distincts : le vocal se rejoint à la demande, plus à la connexion ; liste des connectés au serveur en colonne de droite, occupants affichés sous chaque salon vocal
@@ -420,4 +466,6 @@ Coûts réels pour ~30 personnes :
 - [x] **M6.3** — mots de passe mémorisés scellés par le coffre natif (DPAPI sur Windows), derrière une abstraction prête pour le Trousseau macOS/iOS et le Keystore Android ; les anciens mots de passe en clair sont chiffrés au chargement et effacés du fichier
 - [x] **M6.2** — identité de serveur : nom + logo persistés côté serveur (`data/server.json`), réglés par les admins et poussés à tous les membres ; vignette PNG 64×64 aux coins arrondis, monogramme coloré à défaut. Côté client, seul un **alias local** est modifiable — le logo ne l'est pas, pour qu'un serveur ne puisse pas en imiter un autre
 - [x] **M7** — livraison Windows : exécutable autonome (CRT statique, aucune dépendance à installer), icône et manifeste gravés dans le binaire, installeur Inno Setup sans droits d'administrateur, mise à jour automatique depuis les releases GitHub (proposée, jamais imposée), workflow de publication sur tag
-- [ ] **M5** — idées : overlay en jeu, chiffrement de l'en-tête voix, aperçu d'images dans le chat, plusieurs serveurs dans l'appli
+- [x] **M8** — modération et traçabilité : bannissement avec **motif et durée** (levée automatique à l'expiration, constatée à la connexion suivante), annulation d'un ban, expulsion motivée ; invitations à **usages multiples ou permanentes**, étiquetables et révocables, conservées une fois épuisées ; **journal d'audit** (`data/audit.jsonl`) consignant qui est entré par quel lien, et toute action d'administration ; panneau admin réorganisé en onglets. Robustesse au passage : écritures de fichiers atomiques, anti-spam du chat, sauvegardes sorties de la boucle asynchrone
+- [x] **M8.1** — corrections : l'indicateur « untel parle » ne s'allumait jamais pour les autres (la diffusion filtrait sur le salon **textuel** alors qu'on lui passait un identifiant de salon **vocal** — les deux jeux d'identifiants étant disjoints, la condition n'était jamais vraie) ; le nom et le logo du serveur n'apparaissaient qu'après qu'un admin les ait ré-enregistrés (le client jetait le champ pourtant présent dès le `Welcome`) ; la fenêtre revenait parfois minuscule en haut à gauche (géométrie restaurée sur un écran secondaire débranché depuis) ; le sélecteur d'image était partagé entre la photo de profil et le logo du serveur
+- [ ] **M9** — idées : overlay en jeu, rôles personnalisables avec couleur de pseudo, salons créés à la volée et salons privés, effets sonores, stockage S3 des médias

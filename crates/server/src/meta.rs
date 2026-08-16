@@ -48,7 +48,7 @@ impl ServerMeta {
             info.clone()
         };
         let json = serde_json::to_string_pretty(&snapshot)?;
-        std::fs::write(&self.path, json).context("écriture de server.json")
+        crate::store::write_atomic(&self.path, json.as_bytes()).context("écriture de server.json")
     }
 }
 

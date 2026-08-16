@@ -8,11 +8,13 @@
 //!   KI_DATA_DIR  dossier de persistance (défaut ./data)
 
 mod accounts;
+mod audit;
 mod files;
 mod history;
 mod meta;
 mod quic;
 mod state;
+mod store;
 mod throttle;
 
 use std::net::SocketAddr;

@@ -34,16 +34,57 @@ pub enum ClientMsg {
     History { limit: u32 },
     /// Le client annonce qu'il entre/sort du vocal du salon courant.
     VoiceState { speaking: bool },
-    /// Expulse un utilisateur du serveur (admin uniquement).
-    Kick { user_id: UserId },
+    /// Expulse un utilisateur du serveur (admin uniquement). Il peut se
+    /// reconnecter aussitôt : pour l'en empêcher, voir `AdminBan`.
+    Kick {
+        user_id: UserId,
+        #[serde(default)]
+        reason: String,
+    },
     /// Demande l'état admin (comptes + invitations). Admin uniquement.
     AdminListUsers,
-    /// Génère un code d'invitation à usage unique. Admin uniquement.
-    AdminCreateInvite,
+    /// Génère un code d'invitation. Admin uniquement.
+    ///
+    /// Variante struct depuis la version des invitations permanentes : un
+    /// client plus ancien envoie `{"type":"admin_create_invite"}`, qui
+    /// désérialise vers les valeurs par défaut ci-dessous — c'est-à-dire
+    /// l'ancien comportement, un code à usage unique et sans expiration.
+    AdminCreateInvite {
+        /// `None` = illimité, autrement dit un lien permanent.
+        #[serde(default = "default_invite_uses")]
+        uses: Option<u32>,
+        /// Étiquette libre, pour s'y retrouver (« tournoi du samedi »).
+        #[serde(default)]
+        label: String,
+        /// Durée de validité en secondes. 0 = pas d'expiration.
+        #[serde(default)]
+        ttl_secs: u64,
+    },
+    /// Révoque un code d'invitation. Il reste au journal, mais ne sert plus.
+    AdminRevokeInvite { code: String },
     /// Redéfinit le mot de passe d'un compte. Admin uniquement.
     AdminResetPassword { username: String, new_password: String },
     /// Bloque ou débloque un compte. Admin uniquement.
+    ///
+    /// Conservé pour les clients antérieurs à `AdminBan` : le serveur le
+    /// traite comme un bannissement définitif et sans motif.
     AdminSetBanned { username: String, banned: bool },
+    /// Bannit un compte, avec motif et durée. Admin uniquement.
+    AdminBan {
+        username: String,
+        #[serde(default)]
+        reason: String,
+        /// Durée en secondes. 0 = définitif.
+        #[serde(default)]
+        duration_secs: u64,
+    },
+    /// Lève un bannissement. Admin uniquement.
+    AdminUnban { username: String },
+    /// Demande le journal d'audit. Admin uniquement.
+    AdminAuditLog {
+        #[serde(default)]
+        limit: u32,
+    },
     /// Redéfinit l'identité du serveur (nom, logo). Admin uniquement.
     ///
     /// C'est le serveur qui possède ces données : un membre ordinaire ne
@@ -127,12 +168,17 @@ pub enum ServerMsg {
     /// Erreur (auth refusée, salon inconnu, ...).
     Error { message: String },
     /// Le destinataire vient d'être expulsé par un admin.
-    Kicked,
+    Kicked {
+        #[serde(default)]
+        reason: String,
+    },
     /// État admin : tous les comptes + les invitations actives.
     AdminInfo {
         users: Vec<AccountInfo>,
         invites: Vec<InviteInfo>,
     },
+    /// Journal d'audit, du plus récent au plus ancien.
+    AuditLog { records: Vec<AuditRecord> },
     /// Un code d'invitation vient d'être créé (réponse à AdminCreateInvite).
     InviteCreated { code: String },
     /// Message d'information (succès d'une action admin, ...).
@@ -418,12 +464,69 @@ pub struct AccountInfo {
     pub admin: bool,
     pub banned: bool,
     pub online: bool,
+    /// Motif du bannissement en cours, vide s'il n'y en a pas.
+    #[serde(default)]
+    pub ban_reason: String,
+    /// Fin du bannissement (ms Unix). `None` avec `banned` = définitif.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ban_until: Option<u64>,
+    /// Qui a banni.
+    #[serde(default)]
+    pub ban_by: String,
+}
+
+/// Nombre d'usages par défaut d'une invitation : un seul, comme avant les
+/// invitations permanentes. C'est ce que reçoit un client qui n'envoie pas
+/// le champ.
+fn default_invite_uses() -> Option<u32> {
+    Some(1)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InviteInfo {
     pub code: String,
-    pub uses_left: u32,
+    /// `None` = illimité. Un serveur antérieur envoyait un entier nu, que
+    /// serde lit toujours comme `Some(n)`.
+    #[serde(default = "default_invite_uses")]
+    pub uses_left: Option<u32>,
+    /// Nombre de comptes réellement créés avec ce code.
+    #[serde(default)]
+    pub uses: u32,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default)]
+    pub created_at: u64,
+    /// Expiration (ms Unix). `None` = jamais.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub revoked: bool,
+}
+
+/// Une entrée du journal d'audit.
+///
+/// `action` est une chaîne et non une énumération pour deux raisons : un
+/// client plus ancien doit pouvoir afficher une action qu'il ne connaît pas
+/// plutôt que d'échouer à désérialiser, et `data/audit.jsonl` reste lisible
+/// et « greppable » à la main.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditRecord {
+    /// Millisecondes depuis l'époque Unix.
+    pub ts: u64,
+    /// Verbe stable, jamais traduit : « invite.create », « member.ban »…
+    pub action: String,
+    /// Auteur de l'action. Vide = le serveur lui-même (expiration d'un ban).
+    #[serde(default)]
+    pub actor: String,
+    /// Compte visé, s'il y en a un.
+    #[serde(default)]
+    pub target: String,
+    /// Détail libre, dépendant de l'action : code d'invitation, motif de
+    /// bannissement, ancienne et nouvelle valeur.
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// Nature d'un salon. Un salon textuel se lit et s'écrit ; un salon vocal
@@ -573,6 +676,54 @@ mod tests {
         };
         assert!(is_admin);
         assert_eq!(server, ServerInfo::default());
+    }
+
+    /// Ce protocole n'a pas de champ de version : la compatibilité repose
+    /// entièrement sur `#[serde(default)]`. C'est donc *le* test à ne pas
+    /// laisser tomber — un client resté sur une version antérieure doit
+    /// continuer à se faire comprendre.
+    #[test]
+    fn messages_from_an_older_client_still_parse() {
+        // `Kick` sans motif.
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"kick","user_id":7}"#).unwrap();
+        let ClientMsg::Kick { user_id, reason } = msg else { panic!("ce n'est pas un Kick") };
+        assert_eq!(user_id, 7);
+        assert!(reason.is_empty());
+
+        // `AdminCreateInvite` était une variante sans champ : sa valeur par
+        // défaut doit rester l'ancien comportement, un code à usage unique
+        // et sans expiration — surtout pas un lien permanent par accident.
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"admin_create_invite"}"#).unwrap();
+        let ClientMsg::AdminCreateInvite { uses, label, ttl_secs } = msg else {
+            panic!("ce n'est pas un AdminCreateInvite")
+        };
+        assert_eq!(uses, Some(1));
+        assert!(label.is_empty());
+        assert_eq!(ttl_secs, 0);
+    }
+
+    /// Et dans l'autre sens : un serveur antérieur ne connaît ni le motif
+    /// d'expulsion, ni le détail des bannissements et des invitations.
+    #[test]
+    fn messages_from_an_older_server_still_parse() {
+        let msg: ServerMsg = serde_json::from_str(r#"{"type":"kicked"}"#).unwrap();
+        let ServerMsg::Kicked { reason } = msg else { panic!("ce n'est pas un Kicked") };
+        assert!(reason.is_empty());
+
+        // `uses_left` était un entier nu ; il devient `Option<u32>`, où
+        // `None` signifie « illimité ». Un entier doit donc rester borné.
+        let json = r#"{"type":"admin_info","users":[
+              {"username":"alice","user_id":1,"admin":true,"banned":false,"online":true}],
+            "invites":[{"code":"ki-abc","uses_left":3}]}"#;
+        let msg: ServerMsg = serde_json::from_str(json).unwrap();
+        let ServerMsg::AdminInfo { users, invites } = msg else {
+            panic!("ce n'est pas un AdminInfo")
+        };
+        assert_eq!(users[0].ban_reason, "");
+        assert_eq!(users[0].ban_until, None);
+        assert_eq!(invites[0].uses_left, Some(3));
+        assert_eq!(invites[0].uses, 0);
+        assert!(!invites[0].revoked);
     }
 
     #[test]

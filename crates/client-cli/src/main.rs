@@ -89,7 +89,10 @@ async fn main() -> anyhow::Result<()> {
                     for c in channels {
                         println!("  {} : {}", c.id, c.name);
                     }
-                    println!("tape /join <id> pour rejoindre un salon, /mic on pour parler");
+                    println!(
+                        "tape /join <id> pour lire un salon texte, /voice <id> pour \
+                         rejoindre un vocal, /mic on pour parler"
+                    );
                     let key: Option<[u8; 32]> = ki_protocol::hex_decode(&voice_key)
                         .and_then(|v| v.try_into().ok());
                     let Some(key) = key else {
@@ -124,8 +127,12 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 ServerMsg::Error { message } => eprintln!("! erreur : {message}"),
-                ServerMsg::Kicked => {
-                    println!("expulsé par un admin");
+                ServerMsg::Kicked { reason } => {
+                    if reason.is_empty() {
+                        println!("expulsé par un admin");
+                    } else {
+                        println!("expulsé par un admin : {reason}");
+                    }
                     std::process::exit(0);
                 }
                 ServerMsg::AdminInfo { users, invites } => {
@@ -136,15 +143,47 @@ async fn main() -> anyhow::Result<()> {
                             u.username,
                             u.user_id,
                             if u.admin { " [admin]" } else { "" },
-                            if u.banned { " [bloqué]" } else { "" },
+                            if u.banned { " [banni]" } else { "" },
                             if u.online { " [en ligne]" } else { "" },
                         );
                     }
                     if !invites.is_empty() {
-                        println!("* invitations actives :");
+                        println!("* invitations :");
                         for i in invites {
-                            println!("    {} ({} usage(s))", i.code, i.uses_left);
+                            println!(
+                                "    {} ({} restant(s), {} utilisé(s)){}{}",
+                                i.code,
+                                i.uses_left.map(|n| n.to_string()).unwrap_or_else(|| "∞".into()),
+                                i.uses,
+                                if i.label.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" « {} »", i.label)
+                                },
+                                if i.revoked { " [révoquée]" } else { "" },
+                            );
                         }
+                    }
+                }
+                ServerMsg::AuditLog { records } => {
+                    println!("* journal d'audit :");
+                    for r in records {
+                        println!(
+                            "    [{}] {} par {}{}{}",
+                            r.ts,
+                            r.action,
+                            if r.actor.is_empty() { "le serveur" } else { &r.actor },
+                            if r.target.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" sur {}", r.target)
+                            },
+                            if r.detail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {}", r.detail)
+                            },
+                        );
                     }
                 }
                 ServerMsg::InviteCreated { code } => println!("* invitation créée : {code}"),
@@ -182,7 +221,15 @@ async fn main() -> anyhow::Result<()> {
         if line.is_empty() {
             continue;
         }
-        let msg = if let Some(rest) = line.strip_prefix("/join ") {
+        let msg = if let Some(rest) = line.strip_prefix("/voice ") {
+            match rest.trim().parse() {
+                Ok(channel) => ClientMsg::JoinVoice { channel },
+                Err(_) => {
+                    eprintln!("! id de salon vocal invalide");
+                    continue;
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("/join ") {
             match rest.trim().parse() {
                 Ok(channel) => ClientMsg::Join { channel },
                 Err(_) => {
@@ -231,8 +278,14 @@ async fn main() -> anyhow::Result<()> {
             continue;
         } else if line == "/admin" {
             ClientMsg::AdminListUsers
+        } else if line == "/audit" {
+            ClientMsg::AdminAuditLog { limit: 40 }
         } else if line == "/invite" {
-            ClientMsg::AdminCreateInvite
+            ClientMsg::AdminCreateInvite { uses: Some(1), label: String::new(), ttl_secs: 0 }
+        } else if line == "/invite-permanent" {
+            ClientMsg::AdminCreateInvite { uses: None, label: String::new(), ttl_secs: 0 }
+        } else if let Some(rest) = line.strip_prefix("/revoke ") {
+            ClientMsg::AdminRevokeInvite { code: rest.trim().to_string() }
         } else if let Some(rest) = line.strip_prefix("/resetpw ") {
             let mut parts = rest.trim().splitn(2, ' ');
             match (parts.next(), parts.next()) {
@@ -258,14 +311,29 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("/ban ") {
-            ClientMsg::AdminSetBanned { username: rest.trim().to_string(), banned: true }
+            // `/ban <pseudo> [minutes] [motif]` — sans durée, définitif.
+            let mut parts = rest.trim().splitn(3, ' ');
+            let Some(username) = parts.next().filter(|u| !u.is_empty()) else {
+                eprintln!("! usage : /ban <pseudo> [minutes] [motif]");
+                continue;
+            };
+            let minutes: u64 = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+            ClientMsg::AdminBan {
+                username: username.to_string(),
+                reason: parts.next().unwrap_or_default().to_string(),
+                duration_secs: minutes * 60,
+            }
         } else if let Some(rest) = line.strip_prefix("/unban ") {
-            ClientMsg::AdminSetBanned { username: rest.trim().to_string(), banned: false }
+            ClientMsg::AdminUnban { username: rest.trim().to_string() }
         } else if let Some(rest) = line.strip_prefix("/kick ") {
-            match rest.trim().parse() {
-                Ok(user_id) => ClientMsg::Kick { user_id },
-                Err(_) => {
-                    eprintln!("! usage : /kick <id utilisateur>");
+            let mut parts = rest.trim().splitn(2, ' ');
+            match parts.next().map(str::parse) {
+                Some(Ok(user_id)) => ClientMsg::Kick {
+                    user_id,
+                    reason: parts.next().unwrap_or_default().to_string(),
+                },
+                _ => {
+                    eprintln!("! usage : /kick <id utilisateur> [motif]");
                     continue;
                 }
             }

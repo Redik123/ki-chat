@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use ki_protocol::{ChannelId, ChannelInfo, Member, ServerMsg, UserId};
 use rand::Rng;
@@ -27,6 +28,46 @@ pub struct ConnectedUser {
     pub tx: UnboundedSender<ServerMsg>,
     /// Connexion QUIC du client (datagrammes voix).
     pub conn: quinn::Connection,
+    /// Anti-spam du chat.
+    pub chat_budget: TokenBucket,
+}
+
+/// Seau à jetons : autorise une rafale courte, puis un débit soutenu.
+///
+/// Le chat n'avait aucune limite. Un client modifié pouvait donc émettre des
+/// milliers de messages par seconde, et saturer d'un coup la mémoire
+/// glissante, le fichier d'historique et la bande passante de tout le monde.
+/// La rafale reste généreuse : coller cinq lignes d'affilée est un usage
+/// normal, en écrire cinquante ne l'est pas.
+pub struct TokenBucket {
+    tokens: f32,
+    last: Instant,
+}
+
+impl TokenBucket {
+    /// Jetons regagnés par seconde.
+    const RATE: f32 = 5.0;
+    /// Réserve maximale, donc taille de la rafale tolérée.
+    const BURST: f32 = 10.0;
+
+    /// Consomme un jeton. `false` = trop rapide, le message est refusé.
+    pub fn take(&mut self) -> bool {
+        let now = Instant::now();
+        let gained = now.duration_since(self.last).as_secs_f32() * Self::RATE;
+        self.tokens = (self.tokens + gained).min(Self::BURST);
+        self.last = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
+impl Default for TokenBucket {
+    fn default() -> Self {
+        Self { tokens: Self::BURST, last: Instant::now() }
+    }
 }
 
 /// Table de routage voix, consultée sur le chemin chaud (chaque datagramme).
@@ -59,6 +100,8 @@ pub struct AppState {
     pub users: Mutex<HashMap<UserId, ConnectedUser>>,
     pub voice_routes: std::sync::RwLock<RouteTable>,
     pub history: History,
+    /// Journal des actions d'administration.
+    pub audit: crate::audit::Audit,
 }
 
 impl AppState {
@@ -81,6 +124,7 @@ impl AppState {
         let history = History::open(data_dir, &text_channels)?;
         let accounts = Accounts::open(data_dir)?;
         let meta = ServerMeta::open(data_dir)?;
+        let audit = crate::audit::Audit::open(data_dir)?;
         Ok(Self {
             token,
             voice_key: rand::rng().random(),
@@ -92,6 +136,7 @@ impl AppState {
             users: Mutex::new(HashMap::new()),
             voice_routes: std::sync::RwLock::new(RouteTable::default()),
             history,
+            audit,
         })
     }
 
@@ -134,6 +179,17 @@ impl AppState {
         let users = self.users.lock().unwrap();
         for u in users.values() {
             let _ = u.tx.send(msg.clone());
+        }
+    }
+
+    /// Comme `broadcast_all`, mais sans renvoyer à l'émetteur : celui-ci
+    /// connaît déjà son propre état, sans aller-retour réseau.
+    pub fn broadcast_all_except(&self, except: UserId, msg: &ServerMsg) {
+        let users = self.users.lock().unwrap();
+        for (id, u) in users.iter() {
+            if *id != except {
+                let _ = u.tx.send(msg.clone());
+            }
         }
     }
 
