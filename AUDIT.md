@@ -168,7 +168,7 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
   Aucun plafond sur `HistoryPage` (le plafond de 500 n'existe que sur `Chat`) → RAM sans borne.
   **Correctif :** compenser le scroll après préfixage + ne redéclencher que sur interaction réelle.
 
-- **M8 ✅ `Chat`/`History`/`HistoryPage` ne portent pas l'id du salon → page dans le mauvais salon**
+- **M8 ✅ CORRIGÉ (pour l'historique) — `Chat`/`History`/`HistoryPage` ne portent pas l'id du salon → page dans le mauvais salon**
   (trouvé par 3 revues). [`protocol/src/lib.rs:301`](crates/protocol/src/lib.rs:301),
   [`quic.rs:662`](crates/server/src/quic.rs:662) (réponse hors-ordre via `spawn_blocking`),
   [`main.rs:1315`](crates/client-gui/src/main.rs:1315) (préfixage aveugle). On remonte A, on
