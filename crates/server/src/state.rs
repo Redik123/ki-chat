@@ -6,12 +6,55 @@ use std::time::Instant;
 
 use ki_protocol::{ChannelId, ChannelInfo, Member, ServerMsg, UserId};
 use rand::Rng;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::accounts::Accounts;
 use crate::history::History;
 use crate::meta::ServerMeta;
 use crate::throttle::Throttle;
+
+/// Profondeur de la file d'envoi d'un client.
+///
+/// Large de quoi absorber une rafale légitime — l'arrivée d'un membre pousse
+/// un roster, une liste de salons et des photos — mais **finie**. Un client
+/// qui laisse 256 messages s'empiler ne lit plus son flux.
+pub const OUTBOX_CAP: usize = 256;
+
+/// File d'envoi vers un client, bornée.
+///
+/// Elle était non bornée. Comme `write_all` respecte le contrôle de flux de
+/// QUIC, un client qui cessait de lire son flux faisait grandir sa file sans
+/// aucune limite : quelques requêtes d'historique suffisaient alors à faire
+/// passer le serveur en gigaoctets, depuis un simple compte authentifié.
+/// Déposer ne bloque jamais ; si la file est pleine, c'est que le client ne
+/// suit plus, et sa connexion est fermée plutôt que de faire payer sa lenteur
+/// à la mémoire de tout le monde.
+#[derive(Clone)]
+pub struct Outbox {
+    tx: tokio::sync::mpsc::Sender<ServerMsg>,
+    conn: quinn::Connection,
+}
+
+impl Outbox {
+    pub fn new(tx: tokio::sync::mpsc::Sender<ServerMsg>, conn: quinn::Connection) -> Self {
+        Self { tx, conn }
+    }
+
+    /// Dépose un message. `Err` = le client ne le recevra pas (file saturée ou
+    /// session finie) — les appelants s'en désintéressent délibérément, la
+    /// déconnexion étant déjà engagée.
+    pub fn send(&self, msg: ServerMsg) -> Result<(), ()> {
+        match self.tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!("file d'envoi saturée : le client ne lit plus, connexion fermée");
+                self.conn.close(0u32.into(), b"file saturee");
+                Err(())
+            }
+            Err(TrySendError::Closed(_)) => Err(()),
+        }
+    }
+}
 
 pub struct ConnectedUser {
     pub username: String,
@@ -34,7 +77,7 @@ pub struct ConnectedUser {
     /// Jeton de session (authentifie les uploads HTTP de fichiers).
     pub voice_token: u64,
     /// Canal vers la tâche d'écriture du flux de contrôle de ce client.
-    pub tx: UnboundedSender<ServerMsg>,
+    pub tx: Outbox,
     /// Connexion QUIC du client (datagrammes voix).
     pub conn: quinn::Connection,
     /// Anti-spam du chat.
@@ -51,19 +94,22 @@ pub struct ConnectedUser {
 pub struct TokenBucket {
     tokens: f32,
     last: Instant,
+    /// Jetons regagnés par seconde.
+    rate: f32,
+    /// Réserve maximale, donc taille de la rafale tolérée.
+    burst: f32,
 }
 
 impl TokenBucket {
-    /// Jetons regagnés par seconde.
-    const RATE: f32 = 5.0;
-    /// Réserve maximale, donc taille de la rafale tolérée.
-    const BURST: f32 = 10.0;
+    pub fn new(rate: f32, burst: f32) -> Self {
+        Self { tokens: burst, last: Instant::now(), rate, burst }
+    }
 
     /// Consomme un jeton. `false` = trop rapide, le message est refusé.
     pub fn take(&mut self) -> bool {
         let now = Instant::now();
-        let gained = now.duration_since(self.last).as_secs_f32() * Self::RATE;
-        self.tokens = (self.tokens + gained).min(Self::BURST);
+        let gained = now.duration_since(self.last).as_secs_f32() * self.rate;
+        self.tokens = (self.tokens + gained).min(self.burst);
         self.last = now;
         if self.tokens < 1.0 {
             return false;
@@ -74,8 +120,9 @@ impl TokenBucket {
 }
 
 impl Default for TokenBucket {
+    /// Le budget du chat : cinq messages par seconde en régime, dix en rafale.
     fn default() -> Self {
-        Self { tokens: Self::BURST, last: Instant::now() }
+        Self::new(5.0, 10.0)
     }
 }
 
@@ -481,6 +528,31 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le flux de contrôle entier est désormais borné en débit, et pas
+    /// seulement le chat : une rafale normale doit passer, un flot doit être
+    /// coupé, et la réserve doit se reconstituer avec le temps.
+    #[test]
+    fn the_control_budget_absorbs_a_burst_but_stops_a_flood() {
+        let mut budget = TokenBucket::new(50.0, 100.0);
+        // La rafale tolérée passe en entier.
+        for i in 0..100 {
+            assert!(budget.take(), "le message {i} de la rafale aurait dû passer");
+        }
+        // Au-delà, tout de suite après, c'est refusé.
+        assert!(!budget.take(), "un flot ininterrompu doit être coupé");
+
+        // La réserve se reconstitue : après 100 ms à 50 jetons/s, ~5 jetons.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(budget.take(), "la réserve doit se reconstituer avec le temps");
+
+        // Le budget du chat reste celui d'avant : rafale de 10.
+        let mut chat = TokenBucket::default();
+        for _ in 0..10 {
+            assert!(chat.take());
+        }
+        assert!(!chat.take());
+    }
 
     /// La comparaison du mot de passe de salon doit rendre le bon verdict —
     /// et surtout ne pas s'arrêter au premier octet différent, sans quoi le

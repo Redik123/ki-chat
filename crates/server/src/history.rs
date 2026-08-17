@@ -33,6 +33,53 @@ const MEM_CAP: usize = 1000;
 /// tient dans une ligne ; le reste se récupère en remontant le fil.
 const MAX_HISTORY_BYTES: usize = ki_protocol::MAX_LINE - 8 * 1024;
 
+/// Ce qu'il faut faire d'une ligne rendue par `BufRead::lines`.
+enum LineOutcome {
+    Take(String),
+    Skip,
+    Stop,
+}
+
+/// Décide du sort d'une ligne de journal, et **c'est la seule règle** : les
+/// trois lecteurs de ce format doivent se comporter pareil.
+///
+/// Une ligne illisible est *sautée*. Un fichier tronqué par un disque plein ou
+/// une coupure de courant laisse souvent sa dernière ligne coupée au milieu
+/// d'un caractère accentué : refuser de démarrer pour ça ferait perdre tout
+/// l'historique, qui est par ailleurs parfaitement lisible.
+///
+/// Une vraie erreur d'entrée-sortie, elle, *arrête* la lecture. La distinction
+/// n'est pas cosmétique : une erreur matérielle ne fait pas avancer le curseur,
+/// et l'ignorer ferait tourner la boucle indéfiniment — un serveur figé, plus
+/// difficile à diagnostiquer qu'un serveur qui refuse de démarrer.
+fn keep_or_stop(line: std::io::Result<String>) -> LineOutcome {
+    match line {
+        Ok(line) => LineOutcome::Take(line),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => LineOutcome::Skip,
+        Err(e) => {
+            tracing::error!("lecture d'un journal interrompue : {e}");
+            LineOutcome::Stop
+        }
+    }
+}
+
+/// Tous les enregistrements lisibles d'un journal, selon `keep_or_stop`.
+fn records_of(reader: impl BufRead) -> Vec<ChatRecord> {
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        match keep_or_stop(line) {
+            LineOutcome::Take(line) => {
+                if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
+                    out.push(rec);
+                }
+            }
+            LineOutcome::Skip => continue,
+            LineOutcome::Stop => break,
+        }
+    }
+    out
+}
+
 /// Ne garde que les messages les plus **récents** dont la taille sérialisée
 /// cumulée tient dans [`MAX_HISTORY_BYTES`], l'ordre chronologique préservé.
 ///
@@ -82,18 +129,20 @@ impl History {
             let mut recent = VecDeque::with_capacity(MEM_CAP);
             if path.exists() {
                 let reader = BufReader::new(File::open(&path)?);
-                // Une ligne illisible est **sautée**, jamais propagée : un
-                // fichier tronqué par un disque plein ou une coupure de courant
-                // laisse souvent sa dernière ligne coupée au milieu d'un
-                // caractère (octets non-UTF-8). Propager l'erreur empêcherait
-                // le serveur de redémarrer pour une seule ligne abîmée, alors
-                // que tout le reste de l'historique est parfaitement lisible.
-                for line in reader.lines().filter_map(Result::ok) {
-                    if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
-                        if recent.len() == MEM_CAP {
-                            recent.pop_front();
+                // Lecture en flux, pour ne jamais tenir plus de MEM_CAP
+                // messages en mémoire, et selon la règle de `keep_or_stop`.
+                for line in reader.lines() {
+                    match keep_or_stop(line) {
+                        LineOutcome::Take(line) => {
+                            if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
+                                if recent.len() == MEM_CAP {
+                                    recent.pop_front();
+                                }
+                                recent.push_back(rec);
+                            }
                         }
-                        recent.push_back(rec);
+                        LineOutcome::Skip => continue,
+                        LineOutcome::Stop => break,
                     }
                 }
             }
@@ -224,13 +273,11 @@ impl History {
         // fait ~15 Mo — coûteux mais rare, et sans index il n'y a pas de
         // moyen honnête de faire mieux. C'est le moment de passer à SQLite
         // si les salons grossissent vraiment.
-        // `filter_map` et non `map_while` : une ligne illisible au milieu du
-        // fichier est sautée, pas prise pour une fin de fichier — sinon tout
-        // le passé qui la suit deviendrait injoignable.
-        let mut older: Vec<ChatRecord> = BufReader::new(file)
-            .lines()
-            .filter_map(Result::ok)
-            .filter_map(|l| serde_json::from_str::<ChatRecord>(&l).ok())
+        // Une ligne illisible au milieu du fichier est sautée, et non prise
+        // pour une fin de fichier — sinon tout le passé qui la suit
+        // deviendrait injoignable.
+        let mut older: Vec<ChatRecord> = records_of(BufReader::new(file))
+            .into_iter()
             .filter(|r| r.ts < before_ts)
             .collect();
         older.sort_by_key(|r| r.ts);

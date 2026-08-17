@@ -222,7 +222,8 @@ async fn handle_connection(
     // --- Phase 2 : enregistrement + tâches ---
     use rand::Rng;
     let voice_token: u64 = rand::rng().random();
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
+    let (raw_tx, mut rx) = mpsc::channel::<ServerMsg>(crate::state::OUTBOX_CAP);
+    let tx = crate::state::Outbox::new(raw_tx, conn.clone());
     // Les permissions se déduisent des rôles une fois pour toutes ici, et
     // sont rafraîchies à chaque changement : le chemin chaud n'a alors plus
     // à reprendre le magasin de rôles.
@@ -300,11 +301,27 @@ async fn handle_connection(
     let voice = tokio::spawn(voice_task(state.clone(), conn.clone(), user_id, tx.clone()));
 
     // Boucle de contrôle.
+    //
+    // Le débit de **tout** le flux est borné, et pas seulement celui du chat.
+    // Sans ça, un seul compte authentifié pouvait saturer le serveur avec des
+    // messages minuscules mais coûteux — une requête d'historique engendre des
+    // centaines de kilo-octets, un `request_avatars` plusieurs mégaoctets, une
+    // alternance `join_voice`/`leave_voice` un roster complet pour tout le
+    // monde. Généreux (50/s, rafale de 100) : aucun usage normal ne s'en
+    // approche, l'interface étant pilotée à la main.
+    let mut budget = crate::state::TokenBucket::new(50.0, 100.0);
     while let Ok(Some(line)) = read_line(&mut lines).await {
         let Ok(msg) = serde_json::from_str::<ClientMsg>(&line) else {
             let _ = tx.send(ServerMsg::Error { message: "message invalide".into() });
             continue;
         };
+        if !budget.take() {
+            tracing::warn!("{username} dépasse le débit du flux de contrôle : session fermée");
+            let _ = tx.send(ServerMsg::Error {
+                message: "trop de requêtes — connexion fermée".into(),
+            });
+            break;
+        }
         handle_msg(&state, user_id, &username, msg, &tx);
     }
 
@@ -324,7 +341,7 @@ async fn voice_task(
     state: Arc<AppState>,
     conn: quinn::Connection,
     user_id: UserId,
-    tx: mpsc::UnboundedSender<ServerMsg>,
+    tx: crate::state::Outbox,
 ) {
     let mut last_counter = 0u64;
     let mut expected = 0u64;
@@ -437,7 +454,7 @@ fn current_channel(state: &Arc<AppState>, user_id: UserId) -> Option<ki_protocol
 fn require_admin(
     state: &Arc<AppState>,
     user_id: UserId,
-    tx: &mpsc::UnboundedSender<ServerMsg>,
+    tx: &crate::state::Outbox,
 ) -> bool {
     require(state, user_id, tx, ki_protocol::perm::ADMINISTRATOR)
 }
@@ -446,7 +463,7 @@ fn require_admin(
 fn require(
     state: &Arc<AppState>,
     user_id: UserId,
-    tx: &mpsc::UnboundedSender<ServerMsg>,
+    tx: &crate::state::Outbox,
     need: ki_protocol::Perms,
 ) -> bool {
     let ok = {
@@ -477,7 +494,7 @@ fn outranks_account(
     state: &Arc<AppState>,
     actor: UserId,
     target: &str,
-    tx: &mpsc::UnboundedSender<ServerMsg>,
+    tx: &crate::state::Outbox,
 ) -> bool {
     let ok = rank_of_account(state, target) < rank_of(state, actor);
     if !ok {
@@ -489,7 +506,7 @@ fn outranks_account(
 }
 
 /// Envoie l'état admin complet (comptes avec statut en ligne + invitations).
-fn send_admin_info(state: &Arc<AppState>, tx: &mpsc::UnboundedSender<ServerMsg>) {
+fn send_admin_info(state: &Arc<AppState>, tx: &crate::state::Outbox) {
     let mut users = state.accounts.list(&state.roles);
     {
         let connected = state.users.lock().unwrap();
@@ -552,7 +569,7 @@ fn handle_msg(
     user_id: UserId,
     username: &str,
     msg: ClientMsg,
-    tx: &mpsc::UnboundedSender<ServerMsg>,
+    tx: &crate::state::Outbox,
 ) {
     match msg {
         ClientMsg::Auth { .. } => {
@@ -971,8 +988,14 @@ fn handle_msg(
             });
         }
         ClientMsg::RequestAvatars { user_ids } => {
-            // Bornée à la taille d'un salon : pas de moisson du carnet.
-            for target in user_ids.into_iter().take(64) {
+            // Bornée à la taille d'un salon : pas de moisson du carnet. Et
+            // **dédoublonnée** : la même identité répétée 64 fois renvoyait
+            // 64 copies d'une vignette pouvant peser 96 Kio, soit plusieurs
+            // mégaoctets engendrés par une requête de deux cents octets.
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<UserId> =
+                user_ids.into_iter().filter(|id| seen.insert(*id)).collect();
+            for target in unique.into_iter().take(64) {
                 let data = state.accounts.avatar_of(target);
                 let Some(hash) = ki_protocol::avatar_hash(data.as_deref()) else { continue };
                 let _ = tx.send(ServerMsg::Avatar { user_id: target, hash, data });
@@ -1236,7 +1259,7 @@ fn grantable(
     state: &Arc<AppState>,
     user_id: UserId,
     wanted: ki_protocol::Perms,
-    tx: &mpsc::UnboundedSender<ServerMsg>,
+    tx: &crate::state::Outbox,
 ) -> Option<ki_protocol::Perms> {
     let mine = {
         let users = state.users.lock().unwrap();
