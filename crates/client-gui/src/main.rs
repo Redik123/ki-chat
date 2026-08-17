@@ -317,6 +317,9 @@ struct KiApp {
     /// Une page est déjà demandée : on n'en réclame pas une seconde à
     /// chaque image tant que celle-ci n'est pas arrivée.
     history_pending: bool,
+    /// Empreinte du certificat du serveur courant, pour épingler le HTTPS
+    /// du partage de fichiers sur la même identité que le QUIC.
+    server_fingerprint: String,
     /// Ce qu'on veut du vocal : un salon, ou en sortir.
     ///
     /// L'affichage suit cette intention le temps que le serveur la traite,
@@ -521,6 +524,7 @@ impl KiApp {
             sfx_quiet_until: std::time::Instant::now(),
             history_more: false,
             history_pending: false,
+            server_fingerprint: String::new(),
             voice_intent: None,
             voice_intent_until: std::time::Instant::now(),
             chat_height: 0.0,
@@ -840,7 +844,21 @@ impl KiApp {
     fn http_base(&self) -> String {
         let trimmed = self.url.trim();
         let host = trimmed.rsplit_once(':').map(|(h, _)| h).unwrap_or(trimmed);
-        format!("http://{host}:8080")
+        // HTTPS : le partage de fichiers portait le jeton de session et le
+        // contenu des fichiers en clair, à côté d'un tunnel QUIC chiffré.
+        format!("https://{host}:8080")
+    }
+
+    /// Client HTTP épinglé sur l'empreinte du serveur courant.
+    ///
+    /// Le certificat étant celui du QUIC, la même empreinte fait foi : une
+    /// seule identité à vérifier, et rien qui parte vers un imposteur.
+    fn http_agent(&self) -> ureq::Agent {
+        let expected =
+            (!self.server_fingerprint.is_empty()).then_some(self.server_fingerprint.as_str());
+        ureq::AgentBuilder::new()
+            .tls_config(ki_client_quic::pinned_tls_config(expected))
+            .build()
     }
 
     fn send(&self, msg: ClientMsg) {
@@ -1053,6 +1071,14 @@ impl KiApp {
                 username: self.username.trim().to_string(),
                 password: self.password.clone(),
                 invite: (!invite.is_empty()).then(|| invite.to_string()),
+                // L'empreinte retenue pour ce serveur, s'il est au carnet :
+                // c'est elle qui fera refuser un imposteur.
+                fingerprint: self
+                    .book
+                    .iter()
+                    .find(|s| s.address == self.url.trim())
+                    .map(|s| s.cert_fingerprint.clone())
+                    .unwrap_or_default(),
             },
             self.voice_prefs(),
             ctx.clone(),
@@ -1216,6 +1242,7 @@ impl KiApp {
                     legacy_password: None,
                     last_used: 0,
                     server_name: String::new(),
+                    cert_fingerprint: String::new(),
                     icon: None,
                 });
                 id
@@ -1280,6 +1307,21 @@ impl KiApp {
                     self.disconnect(had_error.or_else(|| Some("déconnecté du serveur".into())));
                 }
                 net::Event::Msg(msg) => self.handle_server_msg(msg),
+                net::Event::Fingerprint(fp) => {
+                    // Première connexion à ce serveur : on retient son
+                    // identité. Les suivantes la compareront, et refuseront
+                    // quiconque se présenterait à sa place. Une empreinte
+                    // déjà connue ne change pas ici — la connexion aurait
+                    // échoué avant si elle avait différé.
+                    let address = self.url.trim().to_string();
+                    self.server_fingerprint = fp.clone();
+                    if let Some(s) = self.book.iter_mut().find(|s| s.address == address) {
+                        if s.cert_fingerprint.is_empty() {
+                            tracing::info!("empreinte de {address} retenue : {fp}");
+                            s.cert_fingerprint = fp;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1592,6 +1634,7 @@ impl KiApp {
         let Some(conn) = &self.conn else { return };
         let sender = conn.sender();
         let base = self.http_base();
+        let agent = self.http_agent();
         let token_hex = format!("{:x}", self.voice_token);
         let status = self.upload_status.clone();
         std::thread::spawn(move || {
@@ -1615,7 +1658,7 @@ impl KiApp {
                 if bytes.len() > 25 * 1024 * 1024 {
                     return Err("fichier trop gros (25 Mo max)".into());
                 }
-                let resp = ureq::post(&format!("{base}/upload?name={name}"))
+                let resp = agent.post(&format!("{base}/upload?name={name}"))
                     .set("x-ki-token", &token_hex)
                     .send_bytes(&bytes)
                     .map_err(|e| e.to_string())?;
@@ -2015,6 +2058,7 @@ impl KiApp {
     fn main_screen(&mut self, ctx: &egui::Context) {
         self.mount_avatars(ctx);
         self.previews.set_origin(self.http_base());
+        self.previews.set_agent(self.http_agent());
         self.previews.mount(ctx);
         let voice = self.voice_snapshot();
 

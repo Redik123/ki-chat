@@ -60,9 +60,18 @@ pub struct Previews {
     incoming: Arc<Mutex<Vec<Delivery>>>,
     /// Racine HTTP du serveur courant : seule origine autorisée.
     origin: Option<String>,
+    /// Client HTTP épinglé sur l'empreinte du serveur. Par défaut celui de
+    /// `ureq`, remplacé dès qu'on connaît l'empreinte : un aperçu ne doit pas
+    /// être l'occasion de parler à quelqu'un d'autre que le serveur.
+    agent: Option<ureq::Agent>,
 }
 
 impl Previews {
+    /// Fixe le client HTTP à utiliser (épinglé sur l'empreinte du serveur).
+    pub fn set_agent(&mut self, agent: ureq::Agent) {
+        self.agent = Some(agent);
+    }
+
     /// Fixe le serveur dont on accepte les images. Changer de serveur vide
     /// le cache : les adresses d'un autre serveur n'ont plus cours.
     pub fn set_origin(&mut self, origin: String) {
@@ -109,6 +118,10 @@ impl Previews {
         if let Some(state) = self.cache.get(url) {
             return Some(state.clone());
         }
+        // Rien n'est mis en cache tant qu'on n'a pas de quoi télécharger :
+        // marquer « en chargement » sans lancer la requête figerait l'aperçu
+        // dans cet état, l'entrée en cache empêchant tout nouvel essai.
+        let Some(agent) = self.agent.clone() else { return Some(Preview::Loading) };
         if self.order.len() >= MAX_CACHED {
             if let Some(oldest) = self.order.first().cloned() {
                 self.order.remove(0);
@@ -117,16 +130,24 @@ impl Previews {
         }
         self.cache.insert(url.to_string(), Preview::Loading);
         self.order.push(url.to_string());
-        fetch(url.to_string(), self.incoming.clone(), ctx.clone());
+        fetch(url.to_string(), self.incoming.clone(), ctx.clone(), agent);
         Some(Preview::Loading)
     }
 }
 
 /// Télécharge une image, en bornant son poids.
-fn fetch(url: String, slot: Arc<Mutex<Vec<Delivery>>>, ctx: egui::Context) {
+fn fetch(
+    url: String,
+    slot: Arc<Mutex<Vec<Delivery>>>,
+    ctx: egui::Context,
+    agent: ureq::Agent,
+) {
     std::thread::spawn(move || {
         let outcome = (|| -> Result<Vec<u8>, String> {
-            let response = ureq::get(&url).timeout(TIMEOUT).call().map_err(|e| e.to_string())?;
+            // Agent épinglé sur l'empreinte du serveur : un aperçu ne doit
+            // pas être l'occasion de parler à quelqu'un d'autre.
+            let response =
+                agent.get(&url).timeout(TIMEOUT).call().map_err(|e| e.to_string())?;
             let mut bytes = Vec::new();
             response
                 .into_reader()

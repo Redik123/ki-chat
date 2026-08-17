@@ -25,3 +25,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Certificat TLS auto-signé, généré et persisté au premier démarrage.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 bytes = "1"
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }

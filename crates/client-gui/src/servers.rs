@@ -42,6 +42,13 @@ pub struct Server {
     /// Le client ne fait que le recopier — il ne se règle pas ici.
     #[serde(default)]
     pub server_name: String,
+    /// Empreinte du certificat vue à la première connexion.
+    ///
+    /// C'est l'identité du serveur : on la retient pour refuser, ensuite,
+    /// quiconque se présenterait à sa place. Vide = jamais connecté, la
+    /// prochaine connexion la fixera.
+    #[serde(default)]
+    pub cert_fingerprint: String,
     /// Logo **du serveur** : vignette PNG base64, reçue à la connexion et
     /// mise en cache ici pour que le lanceur puisse l'afficher hors ligne.
     ///
@@ -126,6 +133,7 @@ pub fn load(storage: Option<&dyn eframe::Storage>) -> Vec<Server> {
         legacy_password: None,
         last_used: 0,
         server_name: String::new(),
+        cert_fingerprint: String::new(),
         icon: None,
     }]
 }
@@ -316,7 +324,9 @@ pub(crate) fn measure(address: &str) -> Reach {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
     let Ok(runtime) = runtime else { return Reach::Offline };
     runtime.block_on(async {
-        let connect = ki_client_quic::QuicClient::connect(address);
+        // Sonde d'accessibilité : on ne fait que mesurer le temps d'aller-
+        // retour, aucun secret ne part, l'empreinte n'a donc rien à vérifier.
+        let connect = ki_client_quic::QuicClient::connect(address, None);
         match tokio::time::timeout(TIMEOUT, connect).await {
             Ok(Ok(client)) => {
                 let rtt = client.conn.rtt();
@@ -387,6 +397,7 @@ mod tests {
             legacy_password: None,
             last_used: 42,
             server_name: "Chez Kévin (officiel)".into(),
+            cert_fingerprint: String::new(),
             icon: None,
         }];
         save(&mut storage, &book);
@@ -448,6 +459,7 @@ mod tests {
             legacy_password: None,
             last_used: 0,
             server_name: String::new(),
+            cert_fingerprint: String::new(),
             icon: None,
         };
         assert_eq!(server.label(), "127.0.0.1");
@@ -473,6 +485,7 @@ mod tests {
             legacy_password: None,
             last_used: 0,
             server_name: String::new(),
+            cert_fingerprint: String::new(),
             icon: None,
         }
     }

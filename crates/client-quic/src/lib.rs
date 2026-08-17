@@ -1,10 +1,16 @@
 //! Connexion QUIC cliente vers un serveur ki-chat : flux de contrôle
 //! (JSON ligne à ligne) + datagrammes voix, sur une connexion TLS 1.3.
 //!
-//! Le certificat du serveur (auto-signé sur un serveur privé) n'est pas
-//! vérifié : le transport reste chiffré contre l'écoute passive, et la voix
-//! porte en plus son propre chiffrement de bout en bout. Pour un serveur
-//! public avec domaine, une vraie vérification pourra être ajoutée.
+//! **Confiance au premier usage.** Un serveur privé s'authentifie avec un
+//! certificat auto-signé, qu'aucune autorité ne contresigne : il n'y a donc
+//! rien à valider au sens habituel. On mémorise en revanche son empreinte à
+//! la première connexion, et l'on refuse net toute connexion ultérieure qui
+//! n'en présente pas la même — c'est ce que fait SSH depuis toujours.
+//!
+//! Sans cela, n'importe qui sur le trajet pouvait se faire passer pour le
+//! serveur, terminer le TLS, et lire le tout premier message : celui qui
+//! porte le **mot de passe en clair**. Le chiffrement du transport ne protège
+//! que de l'écoute passive tant que personne ne vérifie à qui l'on parle.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -22,25 +28,67 @@ const ALPN: &[u8] = b"ki-chat";
 
 pub struct QuicClient {
     pub conn: quinn::Connection,
+    /// Empreinte du certificat présenté par le serveur, à mémoriser pour les
+    /// connexions suivantes.
+    pub fingerprint: String,
     send: quinn::SendStream,
     lines: BufReader<quinn::RecvStream>,
     /// Maintenu en vie tant que la connexion existe.
     _endpoint: quinn::Endpoint,
 }
 
+/// Configuration TLS cliente épinglée sur l'empreinte d'un serveur.
+///
+/// Sert au **partage de fichiers**, qui passe par HTTPS et non par QUIC : le
+/// certificat est le même des deux côtés, la vérification doit donc l'être
+/// aussi. Sans elle, le tunnel chiffrerait sans savoir à qui il parle — et
+/// c'est le jeton de session qui y voyage.
+pub fn pinned_tls_config(expected: Option<&str>) -> Arc<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("versions TLS")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinVerify {
+            provider,
+            expected: expected.map(str::to_string),
+            seen: Arc::new(std::sync::Mutex::new(None)),
+        }))
+        .with_no_client_auth();
+    Arc::new(config)
+}
+
+/// Empreinte SHA-256 d'un certificat, en hexadécimal groupé par octets.
+///
+/// Lisible à voix haute : c'est ainsi qu'on compare deux empreintes quand on
+/// veut être sûr, en la lisant à celui qui héberge le serveur.
+pub fn fingerprint_of(cert: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(cert);
+    digest.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+}
+
 impl QuicClient {
     /// Se connecte à `addr` (« hôte », « hôte:port », ou une ancienne URL
     /// « ws://hôte:port/ws » dont on extrait l'hôte) et ouvre le flux de
     /// contrôle. Le premier message envoyé doit être Auth.
-    pub async fn connect(addr: &str) -> anyhow::Result<Self> {
+    /// `expected` est l'empreinte mémorisée du serveur, si on le connaît
+    /// déjà. `None` = première connexion : on accepte et l'on rend
+    /// l'empreinte rencontrée, à conserver pour la prochaine fois.
+    pub async fn connect(addr: &str, expected: Option<&str>) -> anyhow::Result<Self> {
         let (host, sockaddr) = resolve(addr)?;
+        let seen = Arc::new(std::sync::Mutex::new(None));
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .context("TLS 1.3")?
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(SkipVerify(provider)))
+            .with_custom_certificate_verifier(Arc::new(PinVerify {
+                provider,
+                expected: expected.map(str::to_string),
+                seen: seen.clone(),
+            }))
             .with_no_client_auth();
         crypto.alpn_protocols = vec![ALPN.to_vec()];
 
@@ -71,8 +119,12 @@ impl QuicClient {
         let (mut send, recv) = conn.open_bi().await.context("flux de contrôle")?;
         // Le contrôle passe devant tout média (symétrique du serveur).
         let _ = send.set_priority(10);
+        // L'empreinte est renseignée par le vérificateur pendant la poignée
+        // de main : à ce stade elle est forcément là.
+        let fingerprint = seen.lock().unwrap().clone().unwrap_or_default();
         Ok(Self {
             conn,
+            fingerprint,
             send,
             lines: BufReader::new(recv),
             _endpoint: endpoint,
@@ -233,20 +285,44 @@ fn resolve(addr: &str) -> anyhow::Result<(String, SocketAddr)> {
     Ok((host, sockaddr))
 }
 
-/// Accepte n'importe quel certificat serveur (serveur privé auto-signé).
+/// Confiance au premier usage : mémorise l'empreinte, refuse qu'elle change.
+///
+/// Il n'y a pas de chaîne à valider — le certificat d'un serveur privé est
+/// auto-signé. Ce qui est vérifié, c'est la **continuité** : le serveur
+/// d'aujourd'hui est-il celui d'hier ?
 #[derive(Debug)]
-struct SkipVerify(Arc<rustls::crypto::CryptoProvider>);
+struct PinVerify {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    /// Empreinte connue, si l'on s'est déjà connecté à ce serveur.
+    expected: Option<String>,
+    /// Empreinte réellement présentée, remontée à l'appelant.
+    seen: Arc<std::sync::Mutex<Option<String>>>,
+}
 
-impl rustls::client::danger::ServerCertVerifier for SkipVerify {
+impl rustls::client::danger::ServerCertVerifier for PinVerify {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
         _intermediates: &[rustls::pki_types::CertificateDer<'_>],
         _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        let seen = fingerprint_of(end_entity.as_ref());
+        *self.seen.lock().unwrap() = Some(seen.clone());
+        match &self.expected {
+            // Première rencontre : on accepte et l'on retiendra.
+            None => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Some(known) if *known == seen => {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            // Changement d'identité : soit le serveur a été réinstallé, soit
+            // quelqu'un se glisse entre les deux. On ne peut pas trancher, et
+            // continuer livrerait le mot de passe : on refuse.
+            Some(_) => Err(rustls::Error::General(
+                "l'identité du serveur a changé depuis la dernière connexion".into(),
+            )),
+        }
     }
 
     fn verify_tls12_signature(
@@ -268,13 +344,56 @@ impl rustls::client::danger::ServerCertVerifier for SkipVerify {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le cœur de la confiance au premier usage : on accepte un serveur
+    /// inconnu, on le reconnaît ensuite, et l'on refuse quiconque se présente
+    /// à sa place — c'est ce refus qui protège le mot de passe.
+    #[test]
+    fn a_server_that_changes_identity_is_refused() {
+        use rustls::client::danger::ServerCertVerifier as _;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+        let cert = CertificateDer::from(vec![1, 2, 3, 4]);
+        let imposteur = CertificateDer::from(vec![9, 9, 9, 9]);
+        let name = ServerName::try_from("ki-chat").unwrap();
+        let now = UnixTime::now();
+        let verifier = |expected: Option<String>| PinVerify {
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+            expected,
+            seen: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        // Première connexion : rien de connu, on accepte et l'on retient.
+        let first = verifier(None);
+        assert!(first.verify_server_cert(&cert, &[], &name, &[], now).is_ok());
+        let learned = first.seen.lock().unwrap().clone().expect("empreinte relevée");
+        assert_eq!(learned, fingerprint_of(cert.as_ref()));
+
+        // Retour sur le même serveur : reconnu.
+        let known = verifier(Some(learned.clone()));
+        assert!(known.verify_server_cert(&cert, &[], &name, &[], now).is_ok());
+
+        // Quelqu'un d'autre au bout du fil : refusé.
+        let known = verifier(Some(learned));
+        assert!(known.verify_server_cert(&imposteur, &[], &name, &[], now).is_err());
+    }
+
+    #[test]
+    fn fingerprints_are_stable_and_distinguish() {
+        let a = fingerprint_of(b"certificat a");
+        assert_eq!(a, fingerprint_of(b"certificat a"));
+        assert_ne!(a, fingerprint_of(b"certificat b"));
+        // 32 octets en hexadécimal, séparés par des deux-points : lisible à
+        // voix haute pour comparer avec celui qui héberge le serveur.
+        assert_eq!(a.split(':').count(), 32);
+    }
 
     #[test]
     fn resolve_accepts_all_formats() {

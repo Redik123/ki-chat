@@ -1,5 +1,5 @@
 //! ki-server : serveur ki-chat (contrôle + relais vocal sur QUIC, partage
-//! de fichiers en HTTP).
+//! de fichiers en HTTPS).
 //!
 //! Configuration par variables d'environnement :
 //!   KI_TOKEN            jeton d'accès partagé (obligatoire en prod)
@@ -92,8 +92,13 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    // HTTP : uniquement le partage de fichiers (les liens du chat doivent
-    // rester ouvrables dans un navigateur).
+    // HTTPS : uniquement le partage de fichiers. Chiffré avec le **même**
+    // certificat que le QUIC, donc reconnu par la même empreinte : le client
+    // n'a qu'une identité de serveur à vérifier, et le contenu des fichiers
+    // comme le jeton de session cessent de voyager en clair.
+    //
+    // Un navigateur, lui, avertira une fois que le certificat est auto-signé —
+    // c'est le prix d'un serveur privé sans nom de domaine.
     let app = Router::new()
         .route("/", get(|| async { "ki-chat server" }))
         .route(
@@ -105,14 +110,17 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
     tracing::info!(
-        "ki-chat en écoute : QUIC {udp_port}/udp (contrôle + voix), fichiers HTTP {addr}"
+        "ki-chat en écoute : QUIC {udp_port}/udp (contrôle + voix), fichiers HTTPS {addr}"
     );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+    let (cert, key) = quic::load_or_create_cert(&data_dir)?;
+    let tls = axum_server::tls_rustls::RustlsConfig::from_der(
+        vec![cert.to_vec()],
+        key.secret_der().to_vec(),
     )
     .await?;
+    axum_server::bind_rustls(addr, tls)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
     Ok(())
 }
 

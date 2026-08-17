@@ -53,7 +53,10 @@ async fn main() -> anyhow::Result<()> {
     let tone = args.iter().any(|a| a == "--tone");
     let deaf = args.iter().any(|a| a == "--deaf");
 
-    let mut client = QuicClient::connect(server).await?;
+    // Pas de carnet de serveurs en ligne de commande : on accepte ce qui se
+    // présente, mais l'empreinte est affichée pour pouvoir la comparer.
+    let mut client = QuicClient::connect(server, None).await?;
+    println!("empreinte du serveur : {}", client.fingerprint);
     client
         .send_msg(&ClientMsg::Auth {
             username: username.clone(),

@@ -14,6 +14,8 @@ pub enum Event {
     Msg(ServerMsg),
     ConnectFailed(String),
     Disconnected,
+    /// Empreinte du certificat présentée par le serveur, à retenir.
+    Fingerprint(String),
 }
 
 pub enum Cmd {
@@ -64,6 +66,9 @@ pub struct Credentials {
     pub username: String,
     pub password: String,
     pub invite: Option<String>,
+    /// Empreinte du certificat retenue lors des connexions précédentes.
+    /// Vide = on ne connaît pas encore ce serveur.
+    pub fingerprint: String,
 }
 
 pub struct NetHandle {
@@ -229,13 +234,16 @@ async fn run(
         ctx.request_repaint();
     };
 
-    let mut client = match QuicClient::connect(&url).await {
+    let known = (!creds.fingerprint.is_empty()).then_some(creds.fingerprint.as_str());
+    let mut client = match QuicClient::connect(&url, known).await {
         Ok(c) => c,
         Err(e) => {
             emit(Event::ConnectFailed(format!("{e:#}")));
             return;
         }
     };
+    // Première connexion : l'empreinte est retenue pour les suivantes.
+    emit(Event::Fingerprint(client.fingerprint.clone()));
     let auth = ClientMsg::Auth {
         username: creds.username,
         password: creds.password,

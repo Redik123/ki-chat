@@ -439,7 +439,7 @@ async fn send_direct(send: &mut quinn::SendStream, msg: &ServerMsg) {
 }
 
 /// Certificat TLS auto-signé, généré une fois et persisté dans data/.
-fn load_or_create_cert(
+pub fn load_or_create_cert(
     data_dir: &str,
 ) -> anyhow::Result<(
     rustls::pki_types::CertificateDer<'static>,
