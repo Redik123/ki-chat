@@ -22,6 +22,11 @@ vérification directe dans le code des points les plus graves. `cargo test` (61 
 > le chemin du fil temps réel ; et un recalage de défilement non borné qui envoyait la
 > vue au-delà de la fin du fil.
 >
+> **Lot modération (branche `fix/moderation`) :** **M1 à M6 sont corrigés** — les quatre
+> permissions « membre » sont enfin appliquées, `@everyone` devient modifiable pour
+> qu'elles puissent mordre, un changement de rôle est poussé à l'intéressé, et les trois
+> gardes d'autorisation manquantes sont posées.
+>
 > Tous les autres majeurs et mineurs ci-dessous **ne sont pas corrigés**.
 
 **Verdict :** le socle est soigné (validation d'entrées, compatibilité de versions, tests
@@ -113,7 +118,7 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
 
 ### Permissions & rôles
 
-- **M1 ✅ Quatre permissions ne sont vérifiées nulle part** (trouvé par 3 revues).
+- **✅ CORRIGÉ — M1 ✅ Quatre permissions ne sont vérifiées nulle part** (trouvé par 3 revues).
   `SEND_MESSAGE`, `CONNECT_VOICE`, `UPLOAD_FILE`, `VIEW_CHANNEL` n'apparaissent dans aucun
   contrôle du serveur (grep exhaustif : une seule occurrence, dans un test). Les cases
   « Écrire / Rejoindre le vocal / Partager / Voir » de l'éditeur de rôles **ne font rien** :
@@ -125,30 +130,30 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
   [`files.rs:85`](crates/server/src/files.rs:85). **Correctif : demande un vrai modèle de
   « deny » par salon (surcharge à la Discord), pas juste un `require` en plus.**
 
-- **M2 🔎 Un changement de rôle n'est jamais repoussé à l'intéressé.** `perms`/`rank` ne
+- **✅ CORRIGÉ — M2 🔎 Un changement de rôle n'est jamais repoussé à l'intéressé.** `perms`/`rank` ne
   voyagent que dans `Welcome`, envoyé une seule fois. On promeut quelqu'un modérateur : chez
   lui, aucun bouton n'apparaît jusqu'au redémarrage de l'appli ; on le rétrograde : ses
   boutons restent et échouent tous. [`quic.rs:1247`](crates/server/src/quic.rs:1247),
   [`client-gui/src/main.rs:1261`](crates/client-gui/src/main.rs:1261).
   **Correctif :** un `ServerMsg` qui pousse perms/rank, ou recalcul client depuis `Members`+`Roles`.
 
-- **M3 ✅ Escalade : `AdminSetUserRoles` n'applique pas `grantable`.**
+- **✅ CORRIGÉ — M3 ✅ Escalade : `AdminSetUserRoles` n'applique pas `grantable`.**
   [`quic.rs:1067`](crates/server/src/quic.rs:1067). Contrairement à `AdminCreateRole`/`EditRole`,
   la seule garde est le rang. Un porteur de `MANAGE_ROLES` peut attribuer à un compte de rang
   inférieur un rôle portant des permissions **qu'il n'a pas lui-même** (ex. le « Modérateur »
   par défaut, rang 100, `KICK|BAN`). **Correctif :** passer les perms des rôles visés par `grantable`.
 
-- **M4 ✅ `AdminUnban` ne vérifie pas le rang.** [`quic.rs:882`](crates/server/src/quic.rs:882).
+- **✅ CORRIGÉ — M4 ✅ `AdminUnban` ne vérifie pas le rang.** [`quic.rs:882`](crates/server/src/quic.rs:882).
   Bannir exige `BAN` **et** de surclasser la cible ; débannir n'exige que `BAN`. Un modérateur
   peut donc lever un bannissement posé par le propriétaire. **Correctif :** ajouter `outranks_account`.
 
-- **M5 🔎 Panneau admin (onglet Membres) : boutons sans garde, et on peut se bannir soi-même.**
+- **✅ CORRIGÉ — M5 🔎 Panneau admin (onglet Membres) : boutons sans garde, et on peut se bannir soi-même.**
   [`client-gui/src/main.rs:4111`](crates/client-gui/src/main.rs:4111). « Bannir… » et
   « Réinitialiser le mot de passe » s'affichent sans vérifier `BAN`/`RESET_PASSWORD`, sans
   `outranks`, et sans exclure soi-même — les clics échouent côté serveur, mais l'UI ment.
   Contredit le principe posé ailleurs (« chaque action n'apparaît que si elle aboutirait »).
 
-- **M6 🔎 Modifier un rôle portant une perm qu'on n'a pas est refusé en bloc — même pour un
+- **✅ CORRIGÉ — M6 🔎 Modifier un rôle portant une perm qu'on n'a pas est refusé en bloc — même pour un
   simple renommage.** [`quic.rs:1024`](crates/server/src/quic.rs:1024) applique `grantable`
   au masque entier, mais le GUI **masque** les cases hors de portée tout en renvoyant le masque
   complet ([`main.rs:3829`](crates/client-gui/src/main.rs:3829)). Rien à décocher, donc rôle
