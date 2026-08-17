@@ -443,6 +443,8 @@ struct VoiceSnapshot {
     levels: HashMap<u64, f32>,
     /// Périphérique audio perdu, en cours de réouverture : (micro, sortie).
     device_trouble: (bool, bool),
+    /// Périphériques de repli en service : (micro, sortie).
+    device_fallback: (bool, bool),
 }
 
 impl KiApp {
@@ -799,6 +801,7 @@ impl KiApp {
                 ping,
                 levels: engine.user_levels().into_iter().collect(),
                 device_trouble: engine.device_trouble(),
+                device_fallback: engine.device_fallback(),
             },
             None => VoiceSnapshot {
                 ping,
@@ -2189,6 +2192,27 @@ impl KiApp {
                         ui,
                         Tone::Warn,
                         &format!("{what} — reconnexion automatique en cours…"),
+                        false,
+                    );
+                    ui.add_space(6.0);
+                }
+                // Le repli est une autre histoire : le son passe, simplement
+                // pas par le périphérique réglé. Annoncer une perte serait
+                // faux, et promettre une reconnexion, trompeur — c'est un
+                // avis, pas une alerte, et il dit quoi faire.
+                let (mic_back, out_back) = voice.device_fallback;
+                if (mic_back || out_back) && !mic_lost && !out_lost {
+                    let what = match (mic_back, out_back) {
+                        (true, true) => "Le micro et la sortie audio réglés",
+                        (true, false) => "Le micro réglé",
+                        _ => "La sortie audio réglée",
+                    };
+                    ui::banner(
+                        ui,
+                        Tone::Info,
+                        &format!(
+                            "{what} n'a pas été trouvé — on utilise le périphérique par                              défaut, et on le reprend dès son retour."
+                        ),
                         false,
                     );
                     ui.add_space(6.0);

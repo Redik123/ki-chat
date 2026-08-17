@@ -257,8 +257,13 @@ struct Shared {
     /// flux cpal sans que rien ne le relance : ces drapeaux permettent de le
     /// dire à l'utilisateur au lieu de le laisser parler dans le vide.
     input_lost: AtomicBool,
+    /// On capte, mais sur un périphérique de repli : celui qui est réglé n'a
+    /// pas été trouvé. C'est un état distinct de la perte — le son passe.
+    input_fallback: AtomicBool,
     /// Idem pour la sortie.
     output_lost: AtomicBool,
+    /// Idem pour la sortie.
+    output_fallback: AtomicBool,
     /// État de décodage par locuteur : fil réseau, et lectures d'information
     /// depuis l'interface. **Jamais** le rappel de sortie.
     receivers: Mutex<HashMap<u64, Receiver>>,
@@ -309,7 +314,9 @@ impl VoiceEngine {
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
             input_lost: AtomicBool::new(false),
+            input_fallback: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
+            output_fallback: AtomicBool::new(false),
             receivers: Mutex::new(HashMap::new()),
             playouts: Mutex::new(HashMap::new()),
             volumes: Mutex::new(cfg.volumes.clone()),
@@ -469,6 +476,15 @@ impl VoiceEngine {
         (
             self.shared.input_lost.load(Ordering::Relaxed),
             self.shared.output_lost.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Périphériques de repli en service : (micro, sortie). Le son passe, mais
+    /// pas par celui qui est réglé — typiquement un casque resté à la maison.
+    pub fn device_fallback(&self) -> (bool, bool) {
+        (
+            self.shared.input_fallback.load(Ordering::Relaxed),
+            self.shared.output_fallback.load(Ordering::Relaxed),
         )
     }
 
@@ -798,11 +814,12 @@ fn capture_loop(
         let opened = open_input(device_name.as_deref());
         let (stream, rx, in_rate, alive, fallback) = match opened {
             Ok(parts) => {
-                // Tourner sur un périphérique de repli n'est pas un état sain :
-                // c'est signalé comme une perte, sans quoi débrancher son micro
-                // pour le rebrancher laissait l'application capter en silence
-                // celui de la webcam, sans rien dire et pour toute la session.
-                sh.input_lost.store(parts.4, Ordering::Relaxed);
+                // Le repli est signalé — sans quoi débrancher son micro pour
+                // le rebrancher laissait capter celui de la webcam en silence,
+                // pour toute la session — mais comme un repli, pas comme une
+                // perte : on capte, et annoncer « micro perdu » serait faux.
+                sh.input_lost.store(false, Ordering::Relaxed);
+                sh.input_fallback.store(parts.4, Ordering::Relaxed);
                 parts
             }
             Err(e) => {
@@ -1299,7 +1316,8 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
             Ok(parts) => {
                 // Comme au micro : un repli est signalé, sinon le son sortait
                 // des haut-parleurs du portable sans que rien ne l'explique.
-                sh.output_lost.store(parts.3, Ordering::Relaxed);
+                sh.output_lost.store(false, Ordering::Relaxed);
+                sh.output_fallback.store(parts.3, Ordering::Relaxed);
                 parts
             }
             Err(e) => {
