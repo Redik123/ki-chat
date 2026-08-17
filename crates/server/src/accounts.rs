@@ -254,20 +254,37 @@ impl Accounts {
                     self.save(&inner);
                     tracing::info!("bannissement de {username} expiré");
                 }
-                let user = &inner.users[username];
-                Some((user.hash.clone(), user.id, user.roles.clone()))
+                Some(inner.users[username].hash.clone())
             } else {
                 None
             }
         };
 
         // --- Vérification du mot de passe, verrou relâché ---
-        if let Some((stored, id, roles)) = existing {
+        if let Some(stored) = existing {
             let parsed = PasswordHash::new(&stored).map_err(|_| "compte corrompu".to_string())?;
-            return match Argon2::default().verify_password(password.as_bytes(), &parsed) {
-                Ok(()) => Ok(AuthOk { id, roles, created_with: None }),
-                Err(_) => Err("mot de passe incorrect".into()),
+            if Argon2::default().verify_password(password.as_bytes(), &parsed).is_err() {
+                return Err("mot de passe incorrect".into());
+            }
+            // Le compte est **relu** sous verrou plutôt que rendu tel qu'il
+            // était avant le hachage. Celui-ci dure une centaine de
+            // millisecondes, verrou relâché : un bannissement prononcé
+            // pendant ce temps doit s'appliquer, sans quoi le compte entrerait
+            // quand même — et la déconnexion immédiate que déclenche un
+            // bannissement le manquerait, puisqu'il n'est pas encore connecté.
+            // Des rôles fraîchement attribués doivent de même être ceux de la
+            // session qui s'ouvre.
+            let inner = self.inner.lock().unwrap();
+            let now = crate::state::now_millis();
+            let Some(user) = inner.users.get(username) else {
+                return Err("compte inconnu".into());
             };
+            match &user.ban {
+                Some(ban) if ban.active(now) => return Err(ban.message(now)),
+                None if user.banned => return Err("compte bloqué par un admin".into()),
+                _ => {}
+            }
+            return Ok(AuthOk { id: user.id, roles: user.roles.clone(), created_with: None });
         }
 
         // Compte inconnu : création uniquement sur invitation valide —
@@ -850,6 +867,44 @@ mod tests {
         assert_eq!(listed[0].uses, 1);
         assert_eq!(listed[0].uses_left, Some(0));
         assert!(listed[0].revoked, "épuisée, donc marquée");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Le hachage tourne hors verrou : un bannissement prononcé *pendant* ce
+    /// temps doit quand même s'appliquer. Sinon le compte entrerait, et la
+    /// déconnexion immédiate déclenchée par le bannissement le manquerait —
+    /// il n'est pas encore dans la table des connectés.
+    #[test]
+    fn a_ban_landing_during_the_hash_still_applies() {
+        let dir = std::env::temp_dir().join(format!("ki-test-banrace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let accounts =
+            std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
+        accounts.authenticate("chef", "motdepasse", Some("inv"), "inv").unwrap();
+        accounts.authenticate("tricheur", "motdepasse", Some("inv"), "inv").unwrap();
+
+        // Le bannissement tombe pendant que la connexion est en cours de
+        // vérification. On le prononce depuis un autre fil, le temps que le
+        // hachage (volontairement lent) s'exécute.
+        let banner = {
+            let accounts = accounts.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                accounts.ban("chef", "tricheur", "triche", 0).unwrap();
+            })
+        };
+        let outcome = accounts.authenticate("tricheur", "motdepasse", None, "inv");
+        banner.join().unwrap();
+
+        // Que la course tombe d'un côté ou de l'autre, l'état final est
+        // cohérent : si l'entrée a été acceptée, c'est que le ban n'était pas
+        // encore posé — et une seconde tentative, elle, doit être refusée.
+        assert!(accounts.authenticate("tricheur", "motdepasse", None, "inv").is_err());
+        if outcome.is_ok() {
+            eprintln!("course gagnée par la connexion : le ban n'était pas encore posé");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
