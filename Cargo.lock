@@ -2686,6 +2686,7 @@ dependencies = [
  "ki-protocol",
  "ndarray",
  "nnnoiseless",
+ "rand 0.9.5",
  "tracing",
 ]
 

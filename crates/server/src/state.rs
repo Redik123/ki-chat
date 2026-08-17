@@ -96,6 +96,13 @@ pub struct ConnectedUser {
     pub conn: quinn::Connection,
     /// Anti-spam du chat.
     pub chat_budget: TokenBucket,
+    /// Anti-spam des entrées et sorties de salon vocal.
+    ///
+    /// Chaque bascule reconstruit la table de routage de la voix et rediffuse
+    /// la liste des membres à **tout** le serveur : quelques dizaines par
+    /// seconde suffisaient à étrangler le relais de tout le monde. Un humain
+    /// en fait deux ou trois d'affilée, jamais cinquante.
+    pub voice_budget: TokenBucket,
 }
 
 /// Seau à jetons : autorise une rafale courte, puis un débit soutenu.

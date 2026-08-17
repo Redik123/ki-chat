@@ -317,6 +317,16 @@ struct KiApp {
     /// Une page est déjà demandée : on n'en réclame pas une seconde à
     /// chaque image tant que celle-ci n'est pas arrivée.
     history_pending: bool,
+    /// Ce qu'on veut du vocal : un salon, ou en sortir.
+    ///
+    /// L'affichage suit cette intention le temps que le serveur la traite,
+    /// puis c'est la liste des membres qui fait foi. Sans cette fenêtre, une
+    /// liste produite avant notre clic nous remettait dans le salon qu'on
+    /// venait de quitter ; sans sa **péremption**, un refus jamais notifié
+    /// figeait l'affichage pour le reste de la session.
+    voice_intent: Option<Option<ChannelId>>,
+    /// Fin de la fenêtre pendant laquelle l'intention prime.
+    voice_intent_until: std::time::Instant,
     /// Hauteur du fil au rendu précédent, en points.
     ///
     /// Sert à recaler la vue quand une page s'ajoute **au-dessus** : sans ça
@@ -433,6 +443,8 @@ struct VoiceSnapshot {
     levels: HashMap<u64, f32>,
     /// Périphérique audio perdu, en cours de réouverture : (micro, sortie).
     device_trouble: (bool, bool),
+    /// Périphériques de repli en service : (micro, sortie).
+    device_fallback: (bool, bool),
 }
 
 impl KiApp {
@@ -509,6 +521,8 @@ impl KiApp {
             sfx_quiet_until: std::time::Instant::now(),
             history_more: false,
             history_pending: false,
+            voice_intent: None,
+            voice_intent_until: std::time::Instant::now(),
             chat_height: 0.0,
             history_anchor: None,
             input: String::new(),
@@ -787,6 +801,7 @@ impl KiApp {
                 ping,
                 levels: engine.user_levels().into_iter().collect(),
                 device_trouble: engine.device_trouble(),
+                device_fallback: engine.device_fallback(),
             },
             None => VoiceSnapshot {
                 ping,
@@ -960,7 +975,13 @@ impl KiApp {
             self.error = Some("tu n'as pas le droit de rejoindre le vocal".into());
             return;
         }
+        // L'entrée est affichée sans attendre — le retour immédiat compte —
+        // mais elle reste **en attente de confirmation** : le serveur peut
+        // refuser, et la liste des membres qu'il diffuse fait foi. Sans cette
+        // réconciliation, un refus laissait l'interface montrer le salon et
+        // armer le micro dans le vide, indéfiniment.
         self.voice_channel = Some(channel);
+        self.set_voice_intent(Some(channel));
         self.play_sfx(sfx::SELF_JOIN);
         // Le roster arrive juste après : sans ce répit, entrer dans un salon
         // déjà peuplé jouerait un son d'arrivée par occupant.
@@ -969,8 +990,17 @@ impl KiApp {
         self.send(ClientMsg::JoinVoice { channel, password: None });
     }
 
+    /// Annonce ce qu'on veut du vocal, et laisse à l'affichage le temps que le
+    /// serveur le confirme. Passé ce délai, c'est lui qui décide de nouveau.
+    fn set_voice_intent(&mut self, want: Option<ChannelId>) {
+        self.voice_intent = Some(want);
+        self.voice_intent_until =
+            std::time::Instant::now() + std::time::Duration::from_secs(3);
+    }
+
     /// Quitte le vocal, sans quitter le serveur.
     fn leave_voice(&mut self) {
+        self.set_voice_intent(None);
         if self.voice_channel.take().is_none() {
             return;
         }
@@ -1001,6 +1031,7 @@ impl KiApp {
         self.channels.clear();
         self.current = None;
         self.voice_channel = None;
+        self.voice_intent = None;
         self.members.clear();
         self.messages.clear();
         self.armed = false;
@@ -1377,6 +1408,31 @@ impl KiApp {
                         member
                     })
                     .collect();
+                // Le serveur fait foi sur notre propre présence en vocal.
+                //
+                // Sauf pendant la brève fenêtre qui suit un clic : la liste
+                // peut avoir été produite avant qu'il ne traite notre demande,
+                // et la suivre nous remettrait dans le salon qu'on vient de
+                // quitter. Dès qu'elle correspond à ce qu'on voulait, la
+                // fenêtre se referme ; si elle expire sans jamais correspondre
+                // — refus, message perdu — c'est le serveur qui reprend la
+                // main, ce qui évite tout affichage figé.
+                if let Some(me) = self.members.iter().find(|m| Some(m.user_id) == self.my_id) {
+                    let mine = me.voice;
+                    let waiting = self.voice_intent.is_some()
+                        && std::time::Instant::now() < self.voice_intent_until;
+                    match self.voice_intent {
+                        Some(want) if mine == want => {
+                            self.voice_intent = None;
+                            self.voice_channel = mine;
+                        }
+                        _ if waiting => {}
+                        _ => {
+                            self.voice_intent = None;
+                            self.voice_channel = mine;
+                        }
+                    }
+                }
                 self.update_voice_peers();
             }
             ServerMsg::UserJoined { user_id, .. } => {
@@ -1400,6 +1456,13 @@ impl KiApp {
                 if !self.welcomed {
                     self.disconnect(Some(message));
                 } else {
+                    // Rien n'est défait ici. Une erreur n'est pas rattachable
+                    // à la demande qui l'a provoquée — « tu écris trop vite »
+                    // arrive dans la même fenêtre qu'une entrée en vocal — et
+                    // s'en servir pour sortir du salon éjectait sur une erreur
+                    // sans rapport. Si le serveur a refusé l'entrée, il ne
+                    // nous listera pas dedans : la fenêtre d'intention expire,
+                    // et sa liste des membres nous remet d'aplomb.
                     self.error = Some(message);
                 }
             }
@@ -1471,6 +1534,7 @@ impl KiApp {
             }
             ServerMsg::VoiceLocked { channel, wrong } => {
                 self.voice_channel = None;
+                self.voice_intent = None;
                 self.voice_prompt = Some(VoicePrompt {
                     channel,
                     password: String::new(),
@@ -1636,10 +1700,15 @@ impl KiApp {
         let armed = !self.muted
             && self.voice_channel.is_some()
             && (matches!(self.mode, MicMode::Open | MicMode::Vad) || ptt_active);
-        if armed != self.armed {
-            self.armed = armed;
-            engine.set_transmit(armed);
-        }
+        // Le moteur est réglé **à chaque image**, et non sur la seule
+        // transition. `self.armed` était écrit hors d'ici — en quittant le
+        // vocal, sur une erreur, à la disparition d'un salon — si bien que
+        // l'état local et celui du moteur pouvaient diverger sans jamais se
+        // retrouver : le micro restait ouvert alors que l'interface le
+        // montrait fermé, et l'on continuait d'être entendu. L'écriture est
+        // un simple stockage atomique, la refaire à chaque image ne coûte rien.
+        self.armed = armed;
+        engine.set_transmit(armed);
 
         // Émission réelle (après VAD) : indicateur TX + diffusion aux autres.
         let sending = engine.is_sending();
@@ -2024,7 +2093,10 @@ impl KiApp {
 
         if submit {
             if let Some(prompt) = self.voice_prompt.take() {
+                // Même intention que par le clic ordinaire : sans elle, un
+                // refus laissait l'affichage dans un salon où l'on n'est pas.
                 self.voice_channel = Some(channel);
+                self.set_voice_intent(Some(channel));
                 self.send(ClientMsg::JoinVoice {
                     channel,
                     password: Some(prompt.password),
@@ -2120,6 +2192,27 @@ impl KiApp {
                         ui,
                         Tone::Warn,
                         &format!("{what} — reconnexion automatique en cours…"),
+                        false,
+                    );
+                    ui.add_space(6.0);
+                }
+                // Le repli est une autre histoire : le son passe, simplement
+                // pas par le périphérique réglé. Annoncer une perte serait
+                // faux, et promettre une reconnexion, trompeur — c'est un
+                // avis, pas une alerte, et il dit quoi faire.
+                let (mic_back, out_back) = voice.device_fallback;
+                if (mic_back || out_back) && !mic_lost && !out_lost {
+                    let what = match (mic_back, out_back) {
+                        (true, true) => "Le micro et la sortie audio réglés",
+                        (true, false) => "Le micro réglé",
+                        _ => "La sortie audio réglée",
+                    };
+                    ui::banner(
+                        ui,
+                        Tone::Info,
+                        &format!(
+                            "{what} n'a pas été trouvé — on utilise le périphérique par                              défaut, et on le reprend dès son retour."
+                        ),
                         false,
                     );
                     ui.add_space(6.0);

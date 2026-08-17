@@ -27,6 +27,10 @@ vérification directe dans le code des points les plus graves. `cargo test` (61 
 > qu'elles puissent mordre, un changement de rôle est poussé à l'intéressé, et les trois
 > gardes d'autorisation manquantes sont posées.
 >
+> **Lot vocal (branche `fix/vocal`) :** **M11 à M18 sont corrigés** — nonce de
+> chiffrement, trames escamotées, tampon de gigue, moteur orphelin, périphérique de
+> repli, bornes du relais, et l'entrée en vocal enfin réconciliée avec le serveur.
+>
 > Tous les autres majeurs et mineurs ci-dessous **ne sont pas corrigés**.
 
 **Verdict :** le socle est soigné (validation d'entrées, compatibilité de versions, tests
@@ -195,33 +199,33 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
 
 ### Vocal
 
-- **M11 ✅ Entrée en vocal optimiste, jamais réconciliée** (trouvé par 3 revues).
+- **✅ CORRIGÉ — M11 ✅ Entrée en vocal optimiste, jamais réconciliée** (trouvé par 3 revues).
   [`main.rs:938`](crates/client-gui/src/main.rs:938). `join_voice` pose `voice_channel` et
   arme le micro **avant** toute réponse ; un `Error` serveur ne le retire pas (seul `VoiceLocked`
   le fait). Résultat : « je suis affiché dans le salon, mon micro s'allume, personne ne
   m'entend ». **Correctif :** n'armer qu'après confirmation, et recaler sur `Member.voice`.
 
-- **M12 🔎 Moteur audio orphelin (pas de `Drop`) sur 2ᵉ `Welcome` ou `restart_voice` concurrent.**
+- **✅ CORRIGÉ — M12 🔎 Moteur audio orphelin (pas de `Drop`) sur 2ᵉ `Welcome` ou `restart_voice` concurrent.**
   [`net.rs:295`](crates/client-gui/src/net.rs:295), [`voice/src/lib.rs:250`](crates/voice/src/lib.rs:250).
   `*engine_slot = Some(engine)` écrase l'ancien, simplement droppé : ses threads audio gardent
   un `Arc<Shared>` avec `shutdown == false` et tournent pour toujours (double voix, CPU qui monte).
   **Correctif :** `impl Drop for VoiceEngine` qui appelle `shutdown`, ou `take()`+`shutdown` avant remplacement.
 
-- **M13 🔎 Le périphérique choisi est remplacé en silence par le défaut, jamais repris.**
+- **✅ CORRIGÉ — M13 🔎 Le périphérique choisi est remplacé en silence par le défaut, jamais repris.**
   [`voice/src/lib.rs:132`](crates/voice/src/lib.rs:132). Micro/casque introuvable → `warn!` +
   repli sur le défaut, `input_lost = false` (donc **aucune bannière**), et comme le repli
   fonctionne on ne re-teste jamais le retour du vrai périphérique. C'est exactement le cas que
   le commit « rebrancher un micro ne casse plus le vocal » n'a pas couvert. **Correctif :**
   re-tenter périodiquement le périphérique nommé, signaler le repli.
 
-- **M14 🔎 Une rafale `JoinVoice`/`LeaveVoice`, ou le relais voix sans plafond, étrangle le
+- **✅ CORRIGÉ — M14 🔎 Une rafale `JoinVoice`/`LeaveVoice`, ou le relais voix sans plafond, étrangle le
   vocal de tous.** [`quic.rs:572`](crates/server/src/quic.rs:572), [`:321`](crates/server/src/quic.rs:321).
   Chaque bascule prend le verrou d'écriture de `voice_routes` (celui que chaque datagramme lit)
   + un `roster()` complet diffusé à tous. Et le relais ne borne ni la cadence ni la taille
   (`VOICE_MAX_PACKET` n'est pas vérifié côté serveur). Un membre sature la liaison montante ×(N-1).
   **Correctif :** limiter le débit de ces messages, borner la taille des datagrammes relayés.
 
-- **M15 ✅ Réutilisation de nonce XChaCha20 (compteur remis à 1, clé inchangée).**
+- **✅ CORRIGÉ — M15 ✅ Réutilisation de nonce XChaCha20 (compteur remis à 1, clé inchangée).**
   [`voice/src/lib.rs:625`](crates/voice/src/lib.rs:625). Le nonce est `(user_id, counter)` ;
   `Sender::new` repart de `counter: 1`, alors que la clé ne change qu'au **redémarrage du
   serveur**. Le rebranchement à chaud est protégé, mais `restart_voice` (changement de micro
@@ -231,17 +235,17 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
   mais la promesse « chiffré de bout en bout » est cassée pour de bon. **Correctif :** persister
   le compteur à travers les redémarrages du moteur, ou dériver une clé par session.
 
-- **M16 🔎 Le tampon de gigue confond silences PTT/VAD et gigue réseau** →
+- **✅ CORRIGÉ — M16 🔎 Le tampon de gigue confond silences PTT/VAD et gigue réseau** →
   [`jitter.rs:111`](crates/voice/src/jitter.rs:111). L'émetteur cesse d'émettre en silence ;
   l'inter-arrivée après une pause de 2 s est lue comme 2000 ms de gigue → ~160 ms avalés au
   début de chaque phrase, même sur LAN. **Correctif :** ignorer les inter-arrivées qui suivent un silence connu.
 
-- **M17 🔎 La latence du jitter monte et ne redescend jamais sous ~140 ms.**
+- **✅ CORRIGÉ — M17 🔎 La latence du jitter monte et ne redescend jamais sous ~140 ms.**
   [`jitter.rs:167`](crates/voice/src/jitter.rs:167). Le rognage anti-dérive ne s'active qu'à
   7+ trames ; rien ne ramène le tampon vers sa cible (2 trames). Chaque micro-perte l'inflate,
   jamais l'inverse. **Correctif :** cible de latence adaptative qui redescend en régime propre.
 
-- **M18 ✅ Trames Opus > 1365 octets : jetées, mais sans trou de séquence** →
+- **✅ CORRIGÉ — M18 ✅ Trames Opus > 1365 octets : jetées, mais sans trou de séquence** →
   [`voice/src/lib.rs:648`](crates/voice/src/lib.rs:648). Le `return` précède l'incrément du
   compteur : pas de paquet émis **et** pas de trou → le récepteur n'applique ni FEC ni PLC,
   20 ms disparaissent, et toutes les stats affichent 0 % de perte. Déclenché par un transitoire

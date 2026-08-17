@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ki_opus as opus;
 
@@ -27,6 +27,19 @@ const READY_CAP: usize = SAMPLE_RATE as usize;
 const READY_PREALLOC: usize = 15 * FRAME_SAMPLES;
 /// Durée nominale d'une trame, en millisecondes.
 const FRAME_MS: f32 = 20.0;
+/// Au-delà de cet écart entre deux arrivées, ce n'est plus de la gigue : c'est
+/// que l'émetteur s'était tu. Large de dix trames — une vraie rafale réseau
+/// reste en dessous, un silence de parole largement au-dessus.
+const TALKSPURT_MS: f32 = 200.0;
+/// Marge tolérée au-dessus de la cible avant de rattraper la latence.
+///
+/// Le rattrapage jette de l'audio sans fondu : c'est un clic. Il ne doit donc
+/// se déclencher que sur une vraie dérive, jamais sur trois paquets qui
+/// arrivent groupés — ce qui est le quotidien du Wi-Fi. Quatre trames au-dessus
+/// de la cible laissent passer les rafales ordinaires tout en plafonnant la
+/// latence à 120 ms sur un réseau propre, là où elle pouvait s'installer à
+/// 140 ms et n'en jamais redescendre.
+const LATENCY_SLACK: usize = 4;
 
 /// Fenêtre de recherche DRED : jusqu'à 1 s (50 trames de 20 ms) de passé
 /// peut être resynthétisé depuis la redondance neuronale d'un paquet.
@@ -119,6 +132,16 @@ pub struct Receiver {
     /// Gigue réseau estimée (EWMA des écarts d'inter-arrivée, en ms).
     jitter_ms: f32,
     last_arrival: Option<Instant>,
+    /// Plus grosse rafale récente, en trames livrées d'un coup.
+    ///
+    /// L'écart entre deux arrivées ne dit pas tout : sur un lien qui livre par
+    /// paquets, les trames d'une même rafale arrivent quasiment ensemble, si
+    /// bien que la déviation mesurée reste minuscule quelle que soit la
+    /// **longueur** de la rafale. C'est pourtant elle qui dicte la taille du
+    /// tampon. Un silence de parole, lui, ne produit jamais de rafale : la
+    /// mesure distingue donc les deux là où l'horloge seule en est incapable.
+    burst_frames: usize,
+    last_burst_decay: Instant,
     /// Taille de tampon imposée par l'utilisateur (None = adaptatif).
     jitter_override: Option<usize>,
 }
@@ -141,6 +164,8 @@ impl Receiver {
             last_activity: Instant::now(),
             jitter_ms: 0.0,
             last_arrival: None,
+            burst_frames: 0,
+            last_burst_decay: Instant::now(),
             jitter_override: None,
         }
     }
@@ -172,7 +197,9 @@ impl Receiver {
             return fixed.clamp(2, 10);
         }
         let frames = (self.jitter_ms * 2.0 / FRAME_MS).ceil() as usize + 1;
-        frames.clamp(2, 8)
+        // Le tampon doit couvrir la plus grosse rafale récente : sur un lien
+        // qui livre par paquets, c'est elle qui décide, pas l'écart moyen.
+        frames.max(self.burst_frames).clamp(2, 8)
     }
 
     /// Insère un paquet reçu. Retourne (trames perdues, trames récupérées
@@ -183,10 +210,19 @@ impl Receiver {
 
         // Mesure de la gigue : écart entre le rythme d'arrivée réel et les
         // 20 ms nominales, lissé (à la RFC 3550).
+        //
+        // Une reprise de parole n'en est pas. L'émetteur cesse d'émettre
+        // pendant les silences — activation vocale ou touche de conversation —
+        // si bien que la première trame d'une phrase arrive des secondes après
+        // la précédente. Compter cet écart comme de la gigue faisait bondir
+        // l'estimation à plusieurs centaines de millisecondes sur un réseau
+        // parfait, et le tampon retenait alors le début de chaque phrase.
         if let Some(prev) = self.last_arrival {
             let delta_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
-            let deviation = (delta_ms - FRAME_MS).abs();
-            self.jitter_ms += (deviation - self.jitter_ms) / 8.0;
+            if delta_ms < TALKSPURT_MS {
+                let deviation = (delta_ms - FRAME_MS).abs();
+                self.jitter_ms += (deviation - self.jitter_ms) / 8.0;
+            }
         }
         self.last_arrival = Some(now);
 
@@ -243,6 +279,15 @@ impl Receiver {
         // Dépôt : la seule section sous verrou, et elle ne fait que recopier
         // des échantillons déjà décodés. Le rappel de sortie ne peut donc
         // attendre ici que quelques microsecondes, jamais un décodage.
+        // Profondeur de cette livraison, et oubli progressif : le tampon
+        // redescend quand le lien redevient régulier, au lieu de rester
+        // dimensionné pour la pire rafale de la session.
+        self.burst_frames = self.burst_frames.max(self.decoded.len() / FRAME_SAMPLES);
+        if self.last_burst_decay.elapsed() > Duration::from_secs(5) {
+            self.burst_frames = self.burst_frames.saturating_sub(1);
+            self.last_burst_decay = now;
+        }
+
         // Anti-dérive de latence : au-delà de la cible adaptative, on rattrape
         // en sautant de l'audio ancien. L'écrêtage se fait **avant** le
         // verrou : un trou réseau de plusieurs secondes fait décoder jusqu'à
@@ -251,7 +296,7 @@ impl Receiver {
         // recopie sur le chemin du rappel de sortie — ce que cette séparation
         // existe précisément pour éviter.
         let prime = self.prime_frames();
-        let cap = ((prime + 5) * FRAME_SAMPLES).min(READY_CAP);
+        let cap = ((prime + LATENCY_SLACK) * FRAME_SAMPLES).min(READY_CAP);
         if self.decoded.len() > cap {
             let excess = self.decoded.len() - cap;
             self.decoded.drain(..excess);

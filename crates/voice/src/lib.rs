@@ -122,27 +122,45 @@ pub fn list_devices() -> (Vec<String>, Vec<String>) {
 }
 
 /// Trouve un périphérique par nom, ou le défaut du système.
+/// Le périphérique demandé est-il présent ?
+///
+/// Sert à savoir quand un casque rebranché est de retour : tant qu'on tourne
+/// sur un repli, il faut bien reposer la question de temps en temps.
+fn device_present(host: &cpal::Host, name: &str, input: bool) -> bool {
+    let mut list = if input { host.input_devices().ok() } else { host.output_devices().ok() };
+    list.as_mut()
+        .is_some_and(|d| d.any(|d| d.name().is_ok_and(|n| n == name)))
+}
+
+/// Le périphérique demandé, ou le défaut à défaut.
+///
+/// Le second membre dit s'il a fallu se rabattre : l'appelant s'en sert pour
+/// prévenir l'utilisateur, et surtout pour reposer la question plus tard.
 fn pick_device(
     host: &cpal::Host,
     name: Option<&str>,
     input: bool,
-) -> Option<cpal::Device> {
+) -> (Option<cpal::Device>, bool) {
     if let Some(name) = name {
         let found = if input {
-            host.input_devices().ok()?.find(|d| d.name().is_ok_and(|n| n == name))
+            host.input_devices().ok().and_then(|mut d| {
+                d.find(|d| d.name().is_ok_and(|n| n == name))
+            })
         } else {
-            host.output_devices().ok()?.find(|d| d.name().is_ok_and(|n| n == name))
+            host.output_devices().ok().and_then(|mut d| {
+                d.find(|d| d.name().is_ok_and(|n| n == name))
+            })
         };
         if let Some(d) = found {
-            return Some(d);
+            return (Some(d), false);
         }
         tracing::warn!("périphérique « {name} » introuvable, retour au défaut");
+        let fallback =
+            if input { host.default_input_device() } else { host.default_output_device() };
+        return (fallback, true);
     }
-    if input {
-        host.default_input_device()
-    } else {
-        host.default_output_device()
-    }
+    let d = if input { host.default_input_device() } else { host.default_output_device() };
+    (d, false)
 }
 
 /// Nonce XChaCha20 (24 octets) dérivé de l'émetteur et du compteur de paquet.
@@ -239,8 +257,13 @@ struct Shared {
     /// flux cpal sans que rien ne le relance : ces drapeaux permettent de le
     /// dire à l'utilisateur au lieu de le laisser parler dans le vide.
     input_lost: AtomicBool,
+    /// On capte, mais sur un périphérique de repli : celui qui est réglé n'a
+    /// pas été trouvé. C'est un état distinct de la perte — le son passe.
+    input_fallback: AtomicBool,
     /// Idem pour la sortie.
     output_lost: AtomicBool,
+    /// Idem pour la sortie.
+    output_fallback: AtomicBool,
     /// État de décodage par locuteur : fil réseau, et lectures d'information
     /// depuis l'interface. **Jamais** le rappel de sortie.
     receivers: Mutex<HashMap<u64, Receiver>>,
@@ -291,7 +314,9 @@ impl VoiceEngine {
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
             input_lost: AtomicBool::new(false),
+            input_fallback: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
+            output_fallback: AtomicBool::new(false),
             receivers: Mutex::new(HashMap::new()),
             playouts: Mutex::new(HashMap::new()),
             volumes: Mutex::new(cfg.volumes.clone()),
@@ -454,6 +479,15 @@ impl VoiceEngine {
         )
     }
 
+    /// Périphériques de repli en service : (micro, sortie). Le son passe, mais
+    /// pas par celui qui est réglé — typiquement un casque resté à la maison.
+    pub fn device_fallback(&self) -> (bool, bool) {
+        (
+            self.shared.input_fallback.load(Ordering::Relaxed),
+            self.shared.output_fallback.load(Ordering::Relaxed),
+        )
+    }
+
     /// Vrai quand de la voix part réellement sur le réseau (après VAD).
     pub fn is_sending(&self) -> bool {
         self.shared.sending.load(Ordering::Relaxed)
@@ -505,10 +539,33 @@ impl VoiceEngine {
         }
     }
 
-    pub fn shutdown(self) {
+    pub fn shutdown(mut self) {
         self.shared.shutdown.store(true, Ordering::Relaxed);
-        for t in self.threads {
+        // Les fils sont retirés plutôt que déplacés : le `Drop` ci-dessous
+        // les voit alors déjà pris en charge, et n'a plus rien à faire.
+        for t in std::mem::take(&mut self.threads) {
             let _ = t.join();
+        }
+    }
+}
+
+/// Un moteur abandonné s'arrête, au lieu de continuer à tourner.
+///
+/// Ses fils de capture et de lecture détiennent chacun un `Arc<Shared>` : rien
+/// ne les arrête tant que le drapeau d'arrêt n'est pas levé, et lâcher le
+/// `VoiceEngine` ne suffisait pas à le lever. Le moteur remplacé — un second
+/// `Welcome`, deux changements de périphérique coup sur coup — gardait donc
+/// son micro ouvert et continuait d'encoder et d'émettre indéfiniment : on
+/// s'entendait en double, et la charge ne redescendait plus.
+///
+/// `shutdown` reste la voie normale, qui attend la fin des fils ; ici on lève
+/// seulement le drapeau, sans joindre — un `Drop` ne doit pas bloquer, et les
+/// fils s'arrêtent d'eux-mêmes au tour suivant.
+impl Drop for VoiceEngine {
+    fn drop(&mut self) {
+        if !self.threads.is_empty() {
+            tracing::debug!("moteur vocal abandonné sans arrêt explicite : on l'arrête");
+            self.shared.shutdown.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -650,7 +707,27 @@ impl Sender {
         encoder.set_packet_loss_perc(10)?;
         Ok(Self {
             encoder,
-            counter: 1,
+            // Départ **aléatoire**, et non 1.
+            //
+            // Le compteur est le nonce : la paire (émetteur, compteur) doit
+            // rester unique pour une clé donnée. Or la clé ne change qu'au
+            // redémarrage du serveur, tandis que ce moteur est recréé bien
+            // plus souvent — à chaque changement de micro ou de casque, à
+            // chaque reconnexion, à chaque relance de l'application. Repartir
+            // de 1 réutilisait donc des nonces déjà employés sous la même
+            // clé, ce qui casse le chiffrement : deux flux se retrouvent
+            // chiffrés avec le même flot, et la clé d'authentification à usage
+            // unique se retrouve exposée.
+            //
+            // Le tirage est borné à 48 bits pour laisser au compteur toute la
+            // place de monter sans jamais déborder — une session de mille ans
+            // n'en consommerait pas le millième. Deux sessions se recouvrent
+            // avec une probabilité de l'ordre de 10⁻⁸, là où la collision
+            // était certaine.
+            counter: {
+                use rand::Rng as _;
+                rand::rng().random::<u64>() >> 16
+            },
             user_id,
             bitrate,
             dred: 0,
@@ -661,19 +738,41 @@ impl Sender {
     }
 
     fn send_frame(&mut self, sh: &Shared, frame: &[f32]) {
-        let Ok(n) = self.encoder.encode_float(frame, &mut self.opus_buf) else {
+        // L'encodeur reçoit le budget **réellement transmissible**, et non la
+        // taille du tampon : il reste l'en-tête et le tag d'authentification à
+        // loger dans le paquet. Lui annoncer plus le laissait produire des
+        // trames qu'on ne pouvait plus envoyer — jetées plus bas, sans trou de
+        // séquence, donc sans que le récepteur ne dissimule quoi que ce soit :
+        // 20 ms de voix disparaissaient dans un silence que rien ne signalait.
+        const OVERHEAD: usize = VOICE_HEADER_LEN + 16;
+        let budget = VOICE_MAX_PACKET - OVERHEAD;
+        // Toute sortie prématurée fait quand même avancer le compteur : une
+        // trame escamotée sans trou de séquence ne serait pas dissimulée à
+        // l'autre bout, et produirait une soudure audible plutôt qu'une perte
+        // traitée comme telle.
+        let Ok(n) = self.encoder.encode_float(frame, &mut self.opus_buf[..budget]) else {
+            self.counter += 1;
             return;
         };
-        // Chiffré de bout en bout : le transport (QUIC/TLS) protège déjà le
-        // trajet client-serveur, cette couche empêche le SERVEUR d'écouter.
+        // Chiffrement de la charge : le transport (QUIC/TLS) protège déjà le
+        // trajet, et cette couche fait que le relais ne manipule que des
+        // octets opaques. Ce n'est pas du bout en bout au sens strict — la
+        // clé est distribuée par le serveur, qui pourrait donc déchiffrer —
+        // mais elle borne ce qu'un relais compromis après coup peut relire.
         let Ok(sealed) = sh
             .cipher
             .encrypt(&nonce_for(self.user_id, self.counter), &self.opus_buf[..n])
         else {
+            self.counter += 1;
             return;
         };
         let total = VOICE_HEADER_LEN + sealed.len();
         if total > VOICE_MAX_PACKET {
+            // Ne devrait plus arriver, le budget étant annoncé à l'encodeur.
+            // Le compteur avance quand même : un trou de séquence fait au
+            // moins dissimuler la perte à l'autre bout, là où une trame
+            // escamotée en silence produit une soudure audible.
+            self.counter += 1;
             return;
         }
         write_voice_header(&mut self.out, self.user_id, self.counter);
@@ -713,9 +812,14 @@ fn capture_loop(
     // compteur de nonces.
     'device: while !is_shutdown(&sh) {
         let opened = open_input(device_name.as_deref());
-        let (stream, rx, in_rate, alive) = match opened {
+        let (stream, rx, in_rate, alive, fallback) = match opened {
             Ok(parts) => {
+                // Le repli est signalé — sans quoi débrancher son micro pour
+                // le rebrancher laissait capter celui de la webcam en silence,
+                // pour toute la session — mais comme un repli, pas comme une
+                // perte : on capte, et annoncer « micro perdu » serait faux.
                 sh.input_lost.store(false, Ordering::Relaxed);
+                sh.input_fallback.store(parts.4, Ordering::Relaxed);
                 parts
             }
             Err(e) => {
@@ -731,8 +835,22 @@ fn capture_loop(
         };
         let mut resampler = CubicResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
         let mut last_chunk = Instant::now();
+        let mut last_probe = Instant::now();
 
     while !is_shutdown(&sh) {
+        // Sur un repli, on guette le retour du périphérique demandé. Sans
+        // cette veille, un casque rebranché n'était jamais repris : le repli
+        // fonctionnant, plus rien ne provoquait de réouverture.
+        if fallback && last_probe.elapsed() > Duration::from_secs(3) {
+            last_probe = Instant::now();
+            if let Some(wanted) = device_name.as_deref() {
+                if device_present(&cpal::default_host(), wanted, true) {
+                    tracing::info!("micro « {wanted} » de retour — reprise");
+                    drop(stream);
+                    continue 'device;
+                }
+            }
+        }
         let chunk = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(c) => {
                 last_chunk = Instant::now();
@@ -840,14 +958,17 @@ fn capture_loop(
 
 /// Ouvre le micro et rend de quoi le lire, plus un drapeau que le rappel
 /// d'erreur cpal abaisse si le flux tombe.
-type OpenedInput = (cpal::Stream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>);
+/// Le dernier membre dit qu'on tourne sur un périphérique de repli, le
+/// périphérique demandé étant absent.
+type OpenedInput =
+    (cpal::Stream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>, bool);
 
 fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
     // L'hôte est ré-interrogé à chaque tentative : c'est ce qui permet de
     // voir réapparaître un périphérique rebranché.
     let host = cpal::default_host();
-    let device = pick_device(&host, device_name, true)
-        .context("aucun périphérique d'entrée (micro) trouvé")?;
+    let (device, fallback) = pick_device(&host, device_name, true);
+    let device = device.context("aucun périphérique d'entrée (micro) trouvé")?;
     let supported = device.default_input_config().context("config micro")?;
     let in_rate = supported.sample_rate().0;
     let channels = supported.channels() as usize;
@@ -865,7 +986,7 @@ fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
     // de capture, hors du chemin temps réel.
     let stream = build_input_stream(&device, &supported, channels, tx, alive.clone())?;
     stream.play()?;
-    Ok((stream, rx, in_rate, alive))
+    Ok((stream, rx, in_rate, alive, fallback))
 }
 
 /// Attend, en écourtant si le moteur s'arrête entre-temps.
@@ -1191,9 +1312,12 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
     // de veille, emporte le flux de sortie sans que rien ne le relance —
     // on n'entendait alors plus personne jusqu'au redémarrage.
     'device: while !is_shutdown(&sh) {
-        let (stream, alive, ticks) = match open_output(&sh, device_name.as_deref()) {
+        let (stream, alive, ticks, fallback) = match open_output(&sh, device_name.as_deref()) {
             Ok(parts) => {
+                // Comme au micro : un repli est signalé, sinon le son sortait
+                // des haut-parleurs du portable sans que rien ne l'explique.
                 sh.output_lost.store(false, Ordering::Relaxed);
+                sh.output_fallback.store(parts.3, Ordering::Relaxed);
                 parts
             }
             Err(e) => {
@@ -1210,8 +1334,21 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
         // jamais signaler d'erreur.
         let mut last_seen = ticks.load(Ordering::Relaxed);
         let mut idle_rounds = 0u32;
+        let mut last_probe = Instant::now();
         while !is_shutdown(&sh) {
             std::thread::sleep(Duration::from_millis(500));
+            // Retour du casque demandé : on le reprend, le repli n'étant
+            // qu'un pis-aller que rien d'autre ne viendrait interrompre.
+            if fallback && last_probe.elapsed() > Duration::from_secs(3) {
+                last_probe = Instant::now();
+                if let Some(wanted) = device_name.as_deref() {
+                    if device_present(&cpal::default_host(), wanted, false) {
+                        tracing::info!("sortie « {wanted} » de retour — reprise");
+                        drop(stream);
+                        continue 'device;
+                    }
+                }
+            }
             let now = ticks.load(Ordering::Relaxed);
             idle_rounds = if now == last_seen { idle_rounds + 1 } else { 0 };
             last_seen = now;
@@ -1232,13 +1369,15 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
 
 /// Ouvre la sortie audio. Rend le flux, le drapeau de vie posé par le
 /// rappel d'erreur, et un compteur d'appels du rappel de données.
-type OpenedOutput = (cpal::Stream, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>);
+/// Le dernier membre dit qu'on tourne sur un périphérique de repli.
+type OpenedOutput =
+    (cpal::Stream, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>, bool);
 
 fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<OpenedOutput> {
     let sh = sh.clone();
     let host = cpal::default_host();
-    let device = pick_device(&host, device_name, false)
-        .context("aucun périphérique de sortie audio trouvé")?;
+    let (device, fallback) = pick_device(&host, device_name, false);
+    let device = device.context("aucun périphérique de sortie audio trouvé")?;
     let supported = device.default_output_config().context("config sortie")?;
     let out_rate = supported.sample_rate().0;
     let channels = supported.channels() as usize;
@@ -1324,7 +1463,7 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
     let stream =
         build_output_stream(&device, &supported, channels, write_frames, alive.clone())?;
     stream.play()?;
-    Ok((stream, alive, ticks))
+    Ok((stream, alive, ticks, fallback))
 }
 
 /// Construit le flux de sortie quel que soit le format d'échantillons du
@@ -1385,6 +1524,29 @@ fn build_output_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le compteur sert de nonce, et la clé de chiffrement ne change qu'au
+    /// redémarrage du serveur : deux moteurs successifs — un changement de
+    /// micro, une reconnexion — ne doivent pas repartir du même point, sous
+    /// peine de rejouer des nonces déjà employés sous la même clé.
+    #[test]
+    fn two_senders_never_start_from_the_same_counter() {
+        let noop: DatagramSend = Arc::new(|_: &[u8]| {});
+        let starts: Vec<u64> = (0..8)
+            .map(|_| Sender::new(42, 32_000, noop.clone()).unwrap().counter)
+            .collect();
+
+        // Aucun départ commun, et surtout jamais la valeur fixe d'avant.
+        for (i, a) in starts.iter().enumerate() {
+            assert_ne!(*a, 1, "un départ fixe rejouerait les nonces");
+            for b in &starts[i + 1..] {
+                assert_ne!(a, b, "deux moteurs sont partis du même compteur");
+            }
+        }
+        // Borné à 48 bits : le compteur a toute la place de monter sans
+        // jamais déborder, même sur une session interminable.
+        assert!(starts.iter().all(|c| *c < 1 << 48));
+    }
 
     #[test]
     fn agc_tames_loud_and_boosts_quiet() {

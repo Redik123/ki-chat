@@ -249,6 +249,7 @@ async fn handle_connection(
                 tx: tx.clone(),
                 conn: conn.clone(),
                 chat_budget: Default::default(),
+                voice_budget: crate::state::TokenBucket::new(3.0, 8.0),
             },
         );
     }
@@ -359,17 +360,41 @@ async fn voice_task(
     let mut received = 0u64;
     let mut last_report = Instant::now();
 
+    // Le relais amplifie : un paquet reçu repart vers chaque autre occupant du
+    // salon. Sans borne, un seul émetteur saturait la liaison montante du
+    // serveur et rendait la voix inaudible pour tout le monde. Un client normal
+    // émet 50 paquets de 20 ms par seconde ; le double laisse toute la marge
+    // utile, y compris à une rafale de rattrapage.
+    let mut relay_budget = crate::state::TokenBucket::new(100.0, 200.0);
+
     while let Ok(dat) = conn.read_datagram().await {
+        // `VOICE_MAX_PACKET` était déclaré par le protocole mais vérifié nulle
+        // part côté serveur : rien n'empêchait de faire relayer des
+        // datagrammes bien plus gros que ce que la voix produit.
+        if dat.len() > ki_protocol::VOICE_MAX_PACKET {
+            continue;
+        }
         let Some(pkt) = parse_voice_packet(&dat) else { continue };
         // Anti-usurpation : l'en-tête doit porter l'identité de la connexion.
         if pkt.id != user_id || pkt.payload.is_empty() {
             continue;
         }
+        if !relay_budget.take() {
+            continue;
+        }
 
-        if pkt.counter > last_counter && last_counter != 0 {
-            expected += pkt.counter - last_counter;
-        } else {
-            expected += 1;
+        // Un écart démesuré n'est pas une rafale de pertes : c'est que
+        // l'émetteur a recommencé à compter. Son compteur sert de nonce, il
+        // repart donc d'un tirage aléatoire à chaque nouveau moteur — un
+        // changement de micro en pleine conversation suffit. Compter cet écart
+        // comme des pertes annonçait 100 % au client, qui effondrait son débit
+        // pour rien. Au-delà du plausible, on se resynchronise sans rien
+        // conclure. Dix secondes de trames : bien au-delà d'une vraie coupure,
+        // bien en deçà d'un redémarrage de compteur.
+        const MAX_PLAUSIBLE_GAP: u64 = 500;
+        match pkt.counter.checked_sub(last_counter) {
+            Some(gap) if last_counter != 0 && gap <= MAX_PLAUSIBLE_GAP => expected += gap,
+            _ => expected += 1,
         }
         received += 1;
         last_counter = pkt.counter;
@@ -485,6 +510,12 @@ fn require(
         let _ = tx.send(ServerMsg::Error { message: "tu n'as pas cette permission".into() });
     }
     ok
+}
+
+/// Consomme un jeton du budget d'entrées et sorties de vocal.
+fn take_voice_budget(state: &Arc<AppState>, user_id: UserId) -> bool {
+    let mut users = state.users.lock().unwrap();
+    users.get_mut(&user_id).is_some_and(|u| u.voice_budget.take())
 }
 
 /// Rang d'un connecté, et rang associé à un compte (même hors ligne).
@@ -626,12 +657,27 @@ fn handle_msg(
                 let _ = tx.send(ServerMsg::VoiceLocked { channel, wrong });
                 return;
             }
+            // Déjà dans ce salon : rien à faire, et surtout aucun jeton à
+            // brûler. Le client s'est peut-être désynchronisé — on le recale
+            // avec la liste des membres plutôt que de le laisser attendre une
+            // confirmation qui ne viendrait jamais.
+            let already = {
+                let users = state.users.lock().unwrap();
+                users.get(&user_id).and_then(|u| u.voice) == Some(channel)
+            };
+            if already {
+                let _ = tx.send(ServerMsg::Members { members: state.roster() });
+                return;
+            }
+            if !take_voice_budget(state, user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "tu changes de salon vocal trop vite".into(),
+                });
+                return;
+            }
             {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else { return };
-                if u.voice == Some(channel) {
-                    return;
-                }
                 u.voice = Some(channel);
                 u.speaking = false;
             }
@@ -641,6 +687,11 @@ fn handle_msg(
             state.broadcast_all(&ServerMsg::Members { members: state.roster() });
         }
         ClientMsg::LeaveVoice => {
+            // **Jamais** limité. Refuser une sortie laissait la personne dans
+            // le salon côté serveur alors que son interface la montrait
+            // dehors : elle continuait d'être entendue sans le savoir. Et une
+            // rafale de sorties ne coûte rien — après la première, il n'y a
+            // plus de salon à quitter, donc plus de rediffusion.
             let was_in_voice = {
                 let mut users = state.users.lock().unwrap();
                 match users.get_mut(&user_id) {
