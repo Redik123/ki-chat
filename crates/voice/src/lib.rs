@@ -730,15 +730,24 @@ impl Sender {
         // 20 ms de voix disparaissaient dans un silence que rien ne signalait.
         const OVERHEAD: usize = VOICE_HEADER_LEN + 16;
         let budget = VOICE_MAX_PACKET - OVERHEAD;
+        // Toute sortie prématurée fait quand même avancer le compteur : une
+        // trame escamotée sans trou de séquence ne serait pas dissimulée à
+        // l'autre bout, et produirait une soudure audible plutôt qu'une perte
+        // traitée comme telle.
         let Ok(n) = self.encoder.encode_float(frame, &mut self.opus_buf[..budget]) else {
+            self.counter += 1;
             return;
         };
-        // Chiffré de bout en bout : le transport (QUIC/TLS) protège déjà le
-        // trajet client-serveur, cette couche empêche le SERVEUR d'écouter.
+        // Chiffrement de la charge : le transport (QUIC/TLS) protège déjà le
+        // trajet, et cette couche fait que le relais ne manipule que des
+        // octets opaques. Ce n'est pas du bout en bout au sens strict — la
+        // clé est distribuée par le serveur, qui pourrait donc déchiffrer —
+        // mais elle borne ce qu'un relais compromis après coup peut relire.
         let Ok(sealed) = sh
             .cipher
             .encrypt(&nonce_for(self.user_id, self.counter), &self.opus_buf[..n])
         else {
+            self.counter += 1;
             return;
         };
         let total = VOICE_HEADER_LEN + sealed.len();

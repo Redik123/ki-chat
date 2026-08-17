@@ -125,7 +125,12 @@ impl NetHandle {
         std::thread::spawn(move || {
             let Some(params) = *params_slot.lock().unwrap() else { return };
             let Some(conn) = conn_slot.lock().unwrap().clone() else { return };
-            if let Some(old) = engine_slot.lock().unwrap().take() {
+            // Le verrou est relâché **avant** l'arrêt : `shutdown` attend la
+            // fin des fils audio, et le fil de l'interface prend ce même
+            // verrou à chaque image — le tenir pendant l'attente figeait
+            // l'affichage le temps du changement de périphérique.
+            let old = engine_slot.lock().unwrap().take();
+            if let Some(old) = old {
                 old.shutdown();
             }
             let (tx, rx) = std_mpsc::channel();
@@ -258,7 +263,8 @@ async fn run(
     }
 
     let cleanup = |engine_slot: &Arc<Mutex<Option<VoiceEngine>>>| {
-        if let Some(e) = engine_slot.lock().unwrap().take() {
+        let old = engine_slot.lock().unwrap().take();
+        if let Some(e) = old {
             e.shutdown();
         }
     };

@@ -657,6 +657,18 @@ fn handle_msg(
                 let _ = tx.send(ServerMsg::VoiceLocked { channel, wrong });
                 return;
             }
+            // Déjà dans ce salon : rien à faire, et surtout aucun jeton à
+            // brûler. Le client s'est peut-être désynchronisé — on le recale
+            // avec la liste des membres plutôt que de le laisser attendre une
+            // confirmation qui ne viendrait jamais.
+            let already = {
+                let users = state.users.lock().unwrap();
+                users.get(&user_id).and_then(|u| u.voice) == Some(channel)
+            };
+            if already {
+                let _ = tx.send(ServerMsg::Members { members: state.roster() });
+                return;
+            }
             if !take_voice_budget(state, user_id) {
                 let _ = tx.send(ServerMsg::Error {
                     message: "tu changes de salon vocal trop vite".into(),
@@ -666,9 +678,6 @@ fn handle_msg(
             {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else { return };
-                if u.voice == Some(channel) {
-                    return;
-                }
                 u.voice = Some(channel);
                 u.speaking = false;
             }
@@ -678,9 +687,11 @@ fn handle_msg(
             state.broadcast_all(&ServerMsg::Members { members: state.roster() });
         }
         ClientMsg::LeaveVoice => {
-            if !take_voice_budget(state, user_id) {
-                return;
-            }
+            // **Jamais** limité. Refuser une sortie laissait la personne dans
+            // le salon côté serveur alors que son interface la montrait
+            // dehors : elle continuait d'être entendue sans le savoir. Et une
+            // rafale de sorties ne coûte rien — après la première, il n'y a
+            // plus de salon à quitter, donc plus de rediffusion.
             let was_in_voice = {
                 let mut users = state.users.lock().unwrap();
                 match users.get_mut(&user_id) {

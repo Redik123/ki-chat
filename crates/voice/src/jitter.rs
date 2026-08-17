@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ki_opus as opus;
 
@@ -33,11 +33,13 @@ const FRAME_MS: f32 = 20.0;
 const TALKSPURT_MS: f32 = 200.0;
 /// Marge tolérée au-dessus de la cible avant de rattraper la latence.
 ///
-/// Elle était de cinq trames, soit un plancher de rattrapage à 140 ms : entre
-/// la cible (40 ms sur un réseau propre) et ce plancher, rien ne redescendait
-/// jamais, et chaque à-coup réseau gonflait le tampon pour de bon. Deux trames
-/// laissent de quoi absorber une irrégularité sans installer la latence.
-const LATENCY_SLACK: usize = 2;
+/// Le rattrapage jette de l'audio sans fondu : c'est un clic. Il ne doit donc
+/// se déclencher que sur une vraie dérive, jamais sur trois paquets qui
+/// arrivent groupés — ce qui est le quotidien du Wi-Fi. Quatre trames au-dessus
+/// de la cible laissent passer les rafales ordinaires tout en plafonnant la
+/// latence à 120 ms sur un réseau propre, là où elle pouvait s'installer à
+/// 140 ms et n'en jamais redescendre.
+const LATENCY_SLACK: usize = 4;
 
 /// Fenêtre de recherche DRED : jusqu'à 1 s (50 trames de 20 ms) de passé
 /// peut être resynthétisé depuis la redondance neuronale d'un paquet.
@@ -130,6 +132,16 @@ pub struct Receiver {
     /// Gigue réseau estimée (EWMA des écarts d'inter-arrivée, en ms).
     jitter_ms: f32,
     last_arrival: Option<Instant>,
+    /// Plus grosse rafale récente, en trames livrées d'un coup.
+    ///
+    /// L'écart entre deux arrivées ne dit pas tout : sur un lien qui livre par
+    /// paquets, les trames d'une même rafale arrivent quasiment ensemble, si
+    /// bien que la déviation mesurée reste minuscule quelle que soit la
+    /// **longueur** de la rafale. C'est pourtant elle qui dicte la taille du
+    /// tampon. Un silence de parole, lui, ne produit jamais de rafale : la
+    /// mesure distingue donc les deux là où l'horloge seule en est incapable.
+    burst_frames: usize,
+    last_burst_decay: Instant,
     /// Taille de tampon imposée par l'utilisateur (None = adaptatif).
     jitter_override: Option<usize>,
 }
@@ -152,6 +164,8 @@ impl Receiver {
             last_activity: Instant::now(),
             jitter_ms: 0.0,
             last_arrival: None,
+            burst_frames: 0,
+            last_burst_decay: Instant::now(),
             jitter_override: None,
         }
     }
@@ -183,7 +197,9 @@ impl Receiver {
             return fixed.clamp(2, 10);
         }
         let frames = (self.jitter_ms * 2.0 / FRAME_MS).ceil() as usize + 1;
-        frames.clamp(2, 8)
+        // Le tampon doit couvrir la plus grosse rafale récente : sur un lien
+        // qui livre par paquets, c'est elle qui décide, pas l'écart moyen.
+        frames.max(self.burst_frames).clamp(2, 8)
     }
 
     /// Insère un paquet reçu. Retourne (trames perdues, trames récupérées
@@ -263,6 +279,15 @@ impl Receiver {
         // Dépôt : la seule section sous verrou, et elle ne fait que recopier
         // des échantillons déjà décodés. Le rappel de sortie ne peut donc
         // attendre ici que quelques microsecondes, jamais un décodage.
+        // Profondeur de cette livraison, et oubli progressif : le tampon
+        // redescend quand le lien redevient régulier, au lieu de rester
+        // dimensionné pour la pire rafale de la session.
+        self.burst_frames = self.burst_frames.max(self.decoded.len() / FRAME_SAMPLES);
+        if self.last_burst_decay.elapsed() > Duration::from_secs(5) {
+            self.burst_frames = self.burst_frames.saturating_sub(1);
+            self.last_burst_decay = now;
+        }
+
         // Anti-dérive de latence : au-delà de la cible adaptative, on rattrape
         // en sautant de l'audio ancien. L'écrêtage se fait **avant** le
         // verrou : un trou réseau de plusieurs secondes fait décoder jusqu'à
