@@ -186,6 +186,12 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                 }
+                ServerMsg::Perms { rank, is_admin, .. } => {
+                    println!(
+                        "* tes droits ont changé (rang {rank}{})",
+                        if is_admin { ", administrateur" } else { "" }
+                    );
+                }
                 ServerMsg::ChannelsUpdated { channels } => {
                     println!("* salons :");
                     for c in channels {

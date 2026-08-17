@@ -954,6 +954,12 @@ impl KiApp {
         if self.voice_channel == Some(channel) {
             return;
         }
+        // Le serveur refuserait : autant le dire tout de suite, plutôt que
+        // d'allumer le salon et le micro pour rien.
+        if !self.can(ki_protocol::perm::CONNECT_VOICE) {
+            self.error = Some("tu n'as pas le droit de rejoindre le vocal".into());
+            return;
+        }
         self.voice_channel = Some(channel);
         self.play_sfx(sfx::SELF_JOIN);
         // Le roster arrive juste après : sans ce répit, entrer dans un salon
@@ -1413,6 +1419,21 @@ impl KiApp {
             }
             ServerMsg::AuditLog { records } => {
                 self.audit = records;
+            }
+            ServerMsg::Perms { perms, rank, .. } => {
+                // Pas de repli sur DEFAULT ici, contrairement au Welcome : ce
+                // message n'existe que sur un serveur qui connaît les rôles,
+                // et `perms == 0` y est un état légitime — celui de qui vient
+                // de tout se faire retirer. S'accorder DEFAULT reviendrait à
+                // afficher des actions que le serveur refuse.
+                self.my_perms = perms;
+                self.my_rank = rank;
+                // Un panneau ouvert sur des actions qu'on vient de perdre
+                // n'aboutirait plus : on le referme plutôt que de le laisser
+                // proposer des boutons qui échouent.
+                if !self.any_admin_power() {
+                    self.close_admin();
+                }
             }
             ServerMsg::Roles { roles } => {
                 self.roles = roles;
@@ -2638,6 +2659,25 @@ impl KiApp {
 
     fn chat_input(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let mut submit = false;
+        // Sans le droit d'écrire, la zone de saisie n'est pas grisée : elle
+        // disparaît, remplacée par la raison. Un champ où l'on peut taper mais
+        // dont rien ne part est plus déroutant qu'une absence de champ.
+        if !self.can(ki_protocol::perm::SEND_MESSAGE) {
+            egui::Frame::NONE
+                .fill(theme::BG_RAISED)
+                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::symmetric(10, 10))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Tu n'as pas le droit d'écrire dans ce serveur.")
+                            .color(TEXT_DIM)
+                            .size(12.0),
+                    );
+                });
+            return;
+        }
+        let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
         egui::Frame::NONE
             .fill(theme::BG_RAISED)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
@@ -2645,8 +2685,9 @@ impl KiApp {
             .inner_margin(egui::Margin::symmetric(6, 5))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)")
-                        .clicked()
+                    if can_upload
+                        && ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)")
+                            .clicked()
                     {
                         self.start_upload();
                     }
@@ -3879,20 +3920,30 @@ impl KiApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // On ne touche qu'à ce qui est strictement sous son
                     // propre rang : sinon on se donnerait des pouvoirs.
-                    if role.rank < self.my_rank && !role.system {
-                        if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
-                            to_send.push(ClientMsg::AdminDeleteRole { id: role.id });
-                        }
-                        if ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked() {
-                            self.role_draft = Some(RoleDraft {
-                                id: Some(role.id),
-                                name: role.name.clone(),
-                                color: theme::member_color(role.color, &role.name),
-                                colored: role.color.is_some(),
-                                rank: role.rank,
-                                perms: role.perms,
-                            });
-                        }
+                    if role.rank < self.my_rank
+                        && !role.system
+                        && ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked()
+                    {
+                        to_send.push(ClientMsg::AdminDeleteRole { id: role.id });
+                    }
+                    // `@everyone` se modifie aussi, et c'est indispensable :
+                    // les permissions étant une union, c'est le seul endroit
+                    // d'où l'on peut retirer un droit à tout le monde. Son nom
+                    // et son rang restent figés, le serveur les refuse — seul
+                    // l'administrateur y touche, pour la même raison.
+                    let everyone = role.id == ki_protocol::ROLE_EVERYONE
+                        && self.can(ki_protocol::perm::ADMINISTRATOR);
+                    if ((role.rank < self.my_rank && !role.system) || everyone)
+                        && ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked()
+                    {
+                        self.role_draft = Some(RoleDraft {
+                            id: Some(role.id),
+                            name: role.name.clone(),
+                            color: theme::member_color(role.color, &role.name),
+                            colored: role.color.is_some(),
+                            rank: role.rank,
+                            perms: role.perms,
+                        });
                     }
                 });
             });
@@ -3917,8 +3968,13 @@ impl KiApp {
         ui.add_space(8.0);
         ui::hairline(ui);
         ui.add_space(8.0);
+        // `@everyone` : ni nom ni rang ne se changent, le serveur les refuse.
+        // On règle uniquement ce que reçoit tout le monde.
+        let everyone = draft.id == Some(ki_protocol::ROLE_EVERYONE);
         ui::field_label(ui, "Nom");
-        ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
+        ui.add_enabled_ui(!everyone, |ui| {
+            ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
+        });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.checkbox(&mut draft.colored, "Couleur de pseudo");
@@ -3927,15 +3983,25 @@ impl KiApp {
             }
         });
         ui.add_space(6.0);
-        let ceiling = self.my_rank.saturating_sub(1);
-        ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
-        ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+        if everyone {
+            ui::hint(ui, "ce que reçoit tout le monde, y compris les comptes sans rôle");
+        } else {
+            let ceiling = self.my_rank.saturating_sub(1);
+            ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
+            ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+        }
         ui.add_space(6.0);
         ui::field_label(ui, "Permissions");
         for (bit, label, why) in ki_protocol::perm::ALL {
             // On n'accorde pas ce qu'on n'a pas soi-même : sans cette borne,
             // gérer les rôles suffirait à devenir administrateur.
             if !self.can(*bit) {
+                continue;
+            }
+            // Et certaines n'ont pas de sens accordées à tout le monde : les
+            // poser sur `@everyone` mettrait le serveur à plat, sans retour
+            // possible. Le serveur les refuse, autant ne pas les proposer.
+            if everyone && ki_protocol::perm::NOT_FOR_EVERYONE & bit != 0 {
                 continue;
             }
             let mut on = draft.perms & bit != 0;
@@ -4183,7 +4249,16 @@ impl KiApp {
                         self.roles_target = Some(account.username.clone());
                         self.roles_draft = account.roles.clone();
                     }
-                    if !account.admin {
+                    // Mêmes bornes que le serveur, ici aussi : la permission
+                    // **et** le rang, et jamais sur soi-même. Sans elles, ces
+                    // boutons s'affichaient à qui n'avait que « Expulser »,
+                    // ouvraient une fenêtre, et le clic final se faisait
+                    // refuser — ou, pour le bannissement de soi, aboutissait.
+                    let myself = my_name.as_ref() == Some(&account.username);
+                    let can_ban = self.can(ki_protocol::perm::BAN)
+                        && self.outranks(account.rank)
+                        && !myself;
+                    if can_ban {
                         if account.banned {
                             if ui::icon_button_ex(ui, Icon::Check, 26.0, "Annuler le ban", None)
                                 .clicked()
@@ -4202,8 +4277,10 @@ impl KiApp {
                             });
                         }
                     }
-                    let can_reset =
-                        !account.admin || my_name.as_ref() == Some(&account.username);
+                    // On règle toujours son propre mot de passe ; celui d'un
+                    // autre demande la permission et le rang.
+                    let can_reset = self.can(ki_protocol::perm::RESET_PASSWORD)
+                        && (myself || self.outranks(account.rank));
                     if can_reset
                         && ui::icon_button_ex(
                             ui,
