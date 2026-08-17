@@ -28,8 +28,17 @@ use crate::state::{now_millis, AppState, ConnectedUser};
 /// nettoient comme n'importe quel texte reçu.
 const MAX_REASON: usize = 200;
 
-pub async fn run(state: Arc<AppState>, port: u16) -> anyhow::Result<()> {
-    let (cert, key) = load_or_create_cert(&state.data_dir)?;
+/// Le certificat est **reçu** et non chargé ici : il est aussi celui du
+/// partage de fichiers, et le charger de chaque côté en produisait deux
+/// différents au premier démarrage — les deux appels constatant l'absence
+/// avant que l'autre n'ait écrit. Le serveur présentait alors deux identités,
+/// puis refusait de redémarrer sur la paire incohérente restée sur le disque.
+pub async fn run(
+    state: Arc<AppState>,
+    port: u16,
+    cert: rustls::pki_types::CertificateDer<'static>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+) -> anyhow::Result<()> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut crypto = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])

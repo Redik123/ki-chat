@@ -320,6 +320,10 @@ struct KiApp {
     /// Empreinte du certificat du serveur courant, pour épingler le HTTPS
     /// du partage de fichiers sur la même identité que le QUIC.
     server_fingerprint: String,
+    /// Adresse d'un serveur dont l'identité vient de changer. Tant qu'elle est
+    /// posée, l'écran de connexion propose d'accepter la nouvelle — c'est la
+    /// seule façon de se reconnecter à un serveur réinstallé.
+    identity_alarm: Option<String>,
     /// Ce qu'on veut du vocal : un salon, ou en sortir.
     ///
     /// L'affichage suit cette intention le temps que le serveur la traite,
@@ -525,6 +529,7 @@ impl KiApp {
             history_more: false,
             history_pending: false,
             server_fingerprint: String::new(),
+            identity_alarm: None,
             voice_intent: None,
             voice_intent_until: std::time::Instant::now(),
             chat_height: 0.0,
@@ -1301,7 +1306,24 @@ impl KiApp {
         let events: Vec<net::Event> = conn.events.try_iter().collect();
         for event in events {
             match event {
-                net::Event::ConnectFailed(e) => self.disconnect(Some(e)),
+                net::Event::ConnectFailed(e) => {
+                    // Identité changée : c'est le seul échec où l'utilisateur
+                    // a une décision à prendre, et il lui faut de quoi la
+                    // prendre. On le dit en clair et l'on propose la sortie,
+                    // au lieu de laisser une erreur de bibliothèque et un
+                    // carnet qu'aucun écran ne permet de corriger.
+                    let changed = e.contains("ApplicationVerificationFailure")
+                        || e.contains("invalid peer certificate");
+                    if changed {
+                        self.identity_alarm = Some(self.url.trim().to_string());
+                        self.disconnect(Some(
+                            "l'identité du serveur a changé depuis la dernière connexion"
+                                .into(),
+                        ));
+                    } else {
+                        self.disconnect(Some(e));
+                    }
+                }
                 net::Event::Disconnected => {
                     let had_error = self.error.take();
                     self.disconnect(had_error.or_else(|| Some("déconnecté du serveur".into())));
@@ -1810,6 +1832,40 @@ impl KiApp {
                             if let Some(err) = self.error.clone() {
                                 ui.add_space(12.0);
                                 if ui::banner(ui, Tone::Danger, &err, true) {
+                                    self.error = None;
+                                }
+                            }
+                            // Identité changée : soit le serveur a été
+                            // réinstallé, soit quelqu'un se glisse au milieu.
+                            // Le client ne peut pas trancher — l'utilisateur,
+                            // lui, sait si l'hébergeur a refait son serveur.
+                            if let Some(address) = self.identity_alarm.clone() {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Si le serveur vient d'être réinstallé, c'est \
+                                         normal. Sinon, quelqu'un s'interpose : demande \
+                                         son empreinte à l'hébergeur avant d'accepter.",
+                                    )
+                                    .color(TEXT_DIM)
+                                    .size(11.5),
+                                );
+                                ui.add_space(6.0);
+                                if ui::button(
+                                    ui,
+                                    Icon::Key,
+                                    "Accepter la nouvelle identité du serveur",
+                                )
+                                .clicked()
+                                {
+                                    if let Some(s) = self
+                                        .book
+                                        .iter_mut()
+                                        .find(|s| s.address == address)
+                                    {
+                                        s.cert_fingerprint.clear();
+                                    }
+                                    self.identity_alarm = None;
                                     self.error = None;
                                 }
                             }
@@ -5212,7 +5268,12 @@ fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) 
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Ouvrir l'image");
             if response.clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                // Le port du partage n'écoute plus qu'en TLS : ouvrir un
+                // ancien lien en clair donnerait « connexion réinitialisée »
+                // dans le navigateur, sans que rien n'explique pourquoi.
+                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                    previews.pinned_url(url).unwrap_or_else(|| url.to_string()),
+                ));
             }
         }
     }

@@ -83,9 +83,12 @@ async fn main() -> anyhow::Result<()> {
     // systemd comme sous Docker, c'est ce qui déclenche le redémarrage (et ce
     // qui évite un conteneur « healthy » où plus personne ne peut se
     // connecter).
+    // Une seule identité pour les deux transports, chargée une seule fois.
+    let (cert, key) = quic::load_or_create_cert(&data_dir)?;
     let quic_state = state.clone();
+    let (quic_cert, quic_key) = (cert.clone(), key.clone_key());
     tokio::spawn(async move {
-        match quic::run(quic_state, udp_port).await {
+        match quic::run(quic_state, udp_port, quic_cert, quic_key).await {
             Ok(()) => tracing::error!("transport QUIC terminé sans erreur — arrêt"),
             Err(e) => tracing::error!("transport QUIC arrêté : {e:#}"),
         }
@@ -112,7 +115,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         "ki-chat en écoute : QUIC {udp_port}/udp (contrôle + voix), fichiers HTTPS {addr}"
     );
-    let (cert, key) = quic::load_or_create_cert(&data_dir)?;
     let tls = axum_server::tls_rustls::RustlsConfig::from_der(
         vec![cert.to_vec()],
         key.secret_der().to_vec(),

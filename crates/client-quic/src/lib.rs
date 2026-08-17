@@ -119,9 +119,15 @@ impl QuicClient {
         let (mut send, recv) = conn.open_bi().await.context("flux de contrôle")?;
         // Le contrôle passe devant tout média (symétrique du serveur).
         let _ = send.set_priority(10);
-        // L'empreinte est renseignée par le vérificateur pendant la poignée
-        // de main : à ce stade elle est forcément là.
-        let fingerprint = seen.lock().unwrap().clone().unwrap_or_default();
+        // Une empreinte absente n'est pas un cas anodin : elle ferait
+        // construire, plus loin, un client HTTPS qui n'épingle rien et
+        // accepterait n'importe quel certificat pour porter le jeton de
+        // session. On refuse la connexion plutôt que de céder en silence.
+        let fingerprint = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .context("le serveur n'a présenté aucun certificat")?;
         Ok(Self {
             conn,
             fingerprint,
@@ -319,28 +325,50 @@ impl rustls::client::danger::ServerCertVerifier for PinVerify {
             // Changement d'identité : soit le serveur a été réinstallé, soit
             // quelqu'un se glisse entre les deux. On ne peut pas trancher, et
             // continuer livrerait le mot de passe : on refuse.
-            Some(_) => Err(rustls::Error::General(
-                "l'identité du serveur a changé depuis la dernière connexion".into(),
+            Some(_) => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
             )),
         }
     }
 
+    // Ces deux-là sont **la** vérification qui compte, et elles doivent faire
+    // leur travail pour de bon.
+    //
+    // Un certificat est un document public : le serveur l'envoie en clair à
+    // qui le lui demande, et une simple sonde suffit à s'en procurer une
+    // copie. Reconnaître son empreinte ne prouve donc rien à soi seul. Ce qui
+    // prouve que l'on parle bien au serveur, c'est la signature qu'il appose
+    // sur la transcription de la poignée de main avec sa **clé privée**, que
+    // lui seul détient. Les accepter sans les regarder — ce que faisait le
+    // vérificateur d'origine, qui ne vérifiait rien du tout — laissait
+    // n'importe qui rejouer le certificat légitime et se glisser au milieu,
+    // empreinte parfaitement conforme à l'appui.
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -401,5 +429,45 @@ mod tests {
         assert_eq!(resolve("127.0.0.1:5000").unwrap().1.port(), 5000);
         assert_eq!(resolve("ws://127.0.0.1:8080/ws").unwrap().1.port(), 8080);
         assert_eq!(resolve("localhost").unwrap().0, "localhost");
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    /// Le test qui compte vraiment : un certificat est **public**, une simple
+    /// sonde suffit à s'en procurer une copie. Reconnaître son empreinte ne
+    /// prouve donc rien — ce qui prouve qu'on parle au bon serveur, c'est la
+    /// signature qu'il appose avec sa clé privée sur la poignée de main.
+    /// Accepter cette signature sans la vérifier laissait n'importe qui
+    /// rejouer le certificat légitime et se glisser au milieu.
+    #[test]
+    fn the_handshake_signature_is_actually_verified() {
+        use rustls::client::danger::ServerCertVerifier as _;
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = PinVerify {
+            provider: provider.clone(),
+            expected: None,
+            seen: Arc::new(std::sync::Mutex::new(None)),
+        };
+        // Un vrai certificat, et une signature qui ne vaut rien.
+        let cert = rcgen::generate_simple_self_signed(vec!["ki-chat".into()]).unwrap();
+        let der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+        // Construite par décodage : le constructeur direct n'est pas public.
+        // Format : schéma (u16), longueur (u16), puis la signature.
+        use rustls::internal::msgs::codec::{Codec, Reader};
+        let mut brut = vec![0x04, 0x03, 0x00, 0x40];
+        brut.extend_from_slice(&[0u8; 64]);
+        let bidon =
+            rustls::DigitallySignedStruct::read(&mut Reader::init(&brut)).unwrap();
+
+        // La signature est fausse : elle doit être rejetée. Le vérificateur
+        // d'origine renvoyait « j'atteste » sans rien regarder.
+        assert!(
+            verifier.verify_tls13_signature(b"transcription", &der, &bidon).is_err(),
+            "une signature invalide a été acceptée : l'épinglage ne protège de rien"
+        );
     }
 }

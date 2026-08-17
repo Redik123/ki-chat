@@ -85,10 +85,33 @@ impl Previews {
 
     /// Vrai si cette adresse est servie par notre serveur.
     fn is_ours(&self, url: &str) -> bool {
-        let Some(origin) = &self.origin else { return false };
+        self.to_pinned(url).is_some()
+    }
+
+    /// La même adresse, ramenée en TLS si elle vise notre serveur.
+    /// Sert aussi à l'ouverture dans le navigateur.
+    pub fn pinned_url(&self, url: &str) -> Option<String> {
+        self.to_pinned(url)
+    }
+
+    /// L'URL ramenée au serveur courant, en TLS, ou `None` si elle vise
+    /// ailleurs.
+    ///
+    /// Les liens déjà écrits dans l'historique commencent par `http://` : le
+    /// partage de fichiers a longtemps été en clair. Les rejeter ferait
+    /// disparaître toutes les images déjà partagées, sans un mot. On les
+    /// reconnaît donc, et on les récupère en TLS — c'est le même serveur, sur
+    /// le même port, et lui seul écoute désormais.
+    fn to_pinned(&self, url: &str) -> Option<String> {
+        let origin = self.origin.as_ref()?;
         // La barre oblique évite qu'un hôte du genre « monserveur.evil.com »
         // passe pour « monserveur ».
-        url.starts_with(&format!("{origin}/"))
+        let prefix = format!("{origin}/");
+        if url.starts_with(&prefix) {
+            return Some(url.to_string());
+        }
+        let clear = prefix.replacen("https://", "http://", 1);
+        url.starts_with(&clear).then(|| url.replacen("http://", "https://", 1))
     }
 
     /// Monte en textures les images arrivées depuis le dernier rendu.
@@ -122,6 +145,8 @@ impl Previews {
         // marquer « en chargement » sans lancer la requête figerait l'aperçu
         // dans cet état, l'entrée en cache empêchant tout nouvel essai.
         let Some(agent) = self.agent.clone() else { return Some(Preview::Loading) };
+        // Téléchargé en TLS, même si le lien du salon est resté en clair.
+        let target = self.to_pinned(url)?;
         if self.order.len() >= MAX_CACHED {
             if let Some(oldest) = self.order.first().cloned() {
                 self.order.remove(0);
@@ -130,13 +155,18 @@ impl Previews {
         }
         self.cache.insert(url.to_string(), Preview::Loading);
         self.order.push(url.to_string());
-        fetch(url.to_string(), self.incoming.clone(), ctx.clone(), agent);
+        fetch(target, url.to_string(), self.incoming.clone(), ctx.clone(), agent);
         Some(Preview::Loading)
     }
 }
 
 /// Télécharge une image, en bornant son poids.
+///
+/// `target` est l'adresse réellement interrogée, toujours en TLS ; `url` est
+/// celle qui figure dans le salon, et qui sert de clé de cache. Les deux ne
+/// coïncident pas pour un lien d'avant le passage en TLS.
 fn fetch(
+    target: String,
     url: String,
     slot: Arc<Mutex<Vec<Delivery>>>,
     ctx: egui::Context,
@@ -147,7 +177,7 @@ fn fetch(
             // Agent épinglé sur l'empreinte du serveur : un aperçu ne doit
             // pas être l'occasion de parler à quelqu'un d'autre.
             let response =
-                agent.get(&url).timeout(TIMEOUT).call().map_err(|e| e.to_string())?;
+                agent.get(&target).timeout(TIMEOUT).call().map_err(|e| e.to_string())?;
             let mut bytes = Vec::new();
             response
                 .into_reader()
