@@ -70,10 +70,13 @@ VOLUME /data
 USER kichat
 EXPOSE 8080/tcp 9987/udp
 
-# Sonde volontairement minimale : le port HTTP répond. Le transport QUIC, lui,
-# se surveille tout seul — le serveur s'arrête si son écoute meurt, et la
-# politique de redémarrage du conteneur fait le reste.
+# Sonde volontairement minimale : le port des fichiers répond. Le transport
+# QUIC, lui, se surveille tout seul — le serveur s'arrête si son écoute meurt,
+# et la politique de redémarrage du conteneur fait le reste.
+#
+# `-k` : le certificat est auto-signé, et la sonde parle au serveur sur sa
+# boucle locale. Ce qu'on vérifie ici est qu'il répond, pas à qui l'on parle.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${KI_HTTP_PORT}/" || exit 1
+  CMD curl -fsSk "https://127.0.0.1:${KI_HTTP_PORT}/" || exit 1
 
 ENTRYPOINT ["ki-server"]

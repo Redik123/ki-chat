@@ -27,7 +27,7 @@ crée le tien en premier.
 | Port | Protocole | Rôle |
 |------|-----------|------|
 | 9987 | **UDP** | QUIC : authentification, chat **et** voix, TLS 1.3 natif |
-| 8080 | TCP | HTTP : téléchargement des fichiers partagés, rien d'autre |
+| 8080 | TCP | HTTPS : téléchargement des fichiers partagés, rien d'autre |
 
 Depuis la migration QUIC, **tout passe par 9987/udp**. Ce n'est plus « le chat
 marchera, le vocal non » : sans UDP ouvert de bout en bout, personne ne se

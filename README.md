@@ -8,7 +8,7 @@ temps réel + vocal basse latence, pour ~30 personnes.
 ```
 crates/
   protocol/     types partagés : messages de contrôle (JSON) + format paquets voix
-  server/       ki-server : QUIC (contrôle + relais vocal SFU) + HTTP (fichiers)
+  server/       ki-server : QUIC (contrôle + relais vocal SFU) + HTTPS (fichiers)
   voice/        moteur audio client : cpal + Opus + jitter buffer (indépendant du transport)
   client-quic/  connexion QUIC cliente partagée (contrôle + datagrammes voix)
   client-cli/   client de test en ligne de commande (chat texte + vocal)
@@ -47,7 +47,7 @@ datagrammes non fiables — sur le même port 9987/udp. Certificat auto-signé
 généré au premier démarrage (persisté dans data/). Bénéfices : chiffrement
 transport natif (plus besoin de reverse proxy TLS), reconnexion 0-RTT,
 **migration de connexion** (changer de réseau sans être déconnecté), ping
-RTT mesuré par le protocole. Le HTTP (port 8080) ne sert plus qu'au partage
+RTT mesuré par le protocole. Le port 8080 (HTTPS) ne sert plus qu'au partage
 de fichiers, pour que les liens restent ouvrables dans un navigateur.
 
 **Salons textuels et salons vocaux, séparés.** Ouvrir un salon textuel ne
@@ -181,11 +181,22 @@ L'ancienne limite « jeton voix en clair dans l'en-tête UDP » a disparu avec
 le transport : un datagramme n'est accepté que sur la connexion authentifiée
 de son émetteur.
 
-Le seul morceau resté en clair est le **port HTTP 8080**, qui ne sert qu'au
-partage de fichiers (pour que les liens s'ouvrent dans un navigateur). Un
-reverse proxy TLS devant ce port reste donc possible si tu tiens à des liens
-en `https://` avec un vrai domaine — mais c'est facultatif et sans effet sur
-le chat ni sur la voix, qui ne passent plus par HTTP du tout.
+Le partage de fichiers (**port 8080**) est lui aussi en TLS, avec le même
+certificat que le QUIC : le contenu des fichiers et le jeton de session ne
+voyagent plus en clair. Le client vérifie la même empreinte des deux côtés.
+
+Cette empreinte est justement ce qui authentifie le serveur : un certificat
+auto-signé n'est contresigné par personne, alors le client la **retient à la
+première connexion** et refuse ensuite toute identité différente — comme SSH.
+Sans cela, quiconque sur le trajet pouvait se faire passer pour le serveur et
+lire le premier message, celui qui porte le mot de passe.
+
+Deux conséquences pratiques. Un navigateur avertit une fois que le certificat
+est auto-signé, quand on ouvre un lien de fichier à la main : c'est attendu,
+et un reverse proxy TLS avec un vrai domaine l'évite si tu y tiens. Et si tu
+réinstalles le serveur en perdant `data/quic-cert.der`, son empreinte change :
+les clients refuseront de se connecter tant que le serveur n'aura pas été
+retiré puis rajouté à leur carnet. Sauvegarde ce fichier avec le reste.
 
 ## Installer le serveur (Docker / Portainer)
 
@@ -493,7 +504,7 @@ Variables d'environnement du serveur :
 | Variable       | Défaut     | Rôle                          |
 |----------------|------------|-------------------------------|
 | `KI_TOKEN`     | `changeme` | code d'invitation (création de comptes) |
-| `KI_HTTP_PORT` | `8080`     | port HTTP (partage de fichiers) |
+| `KI_HTTP_PORT` | `8080`     | port HTTPS (partage de fichiers) |
 | `KI_UDP_PORT`  | `9987`     | port QUIC (contrôle + voix)   |
 | `KI_DATA_DIR`  | `./data`   | persistance (comptes, historique, certificat TLS, identité du serveur) |
 | `KI_FILES_MAX_BYTES` | `2 Gio` | plafond global du partage de fichiers ; `0` = illimité |
