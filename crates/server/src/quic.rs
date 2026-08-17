@@ -383,10 +383,18 @@ async fn voice_task(
             continue;
         }
 
-        if pkt.counter > last_counter && last_counter != 0 {
-            expected += pkt.counter - last_counter;
-        } else {
-            expected += 1;
+        // Un écart démesuré n'est pas une rafale de pertes : c'est que
+        // l'émetteur a recommencé à compter. Son compteur sert de nonce, il
+        // repart donc d'un tirage aléatoire à chaque nouveau moteur — un
+        // changement de micro en pleine conversation suffit. Compter cet écart
+        // comme des pertes annonçait 100 % au client, qui effondrait son débit
+        // pour rien. Au-delà du plausible, on se resynchronise sans rien
+        // conclure. Dix secondes de trames : bien au-delà d'une vraie coupure,
+        // bien en deçà d'un redémarrage de compteur.
+        const MAX_PLAUSIBLE_GAP: u64 = 500;
+        match pkt.counter.checked_sub(last_counter) {
+            Some(gap) if last_counter != 0 && gap <= MAX_PLAUSIBLE_GAP => expected += gap,
+            _ => expected += 1,
         }
         received += 1;
         last_counter = pkt.counter;
