@@ -276,6 +276,19 @@ async fn handle_connection(
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let Ok(mut json) = serde_json::to_string(&msg) else { continue };
+            // Garde-fou : ne jamais émettre une ligne que le client refusera de
+            // lire. Au-delà de MAX_LINE il ferme la connexion — une réponse
+            // trop grosse déconnecterait donc son destinataire. Les réponses
+            // d'historique sont déjà bornées à la source ; ceci couvre tout le
+            // reste (journal d'audit, état admin) plutôt que de risquer une
+            // déconnexion silencieuse.
+            if json.len() > ki_protocol::MAX_LINE {
+                tracing::error!(
+                    "message de contrôle trop long ({} octets), ignoré",
+                    json.len()
+                );
+                continue;
+            }
             json.push('\n');
             if send.write_all(json.as_bytes()).await.is_err() {
                 break;

@@ -7,22 +7,47 @@
 //! renomme : `rename` est atomique sur NTFS comme sur ext4, si bien qu'à tout
 //! instant le chemin final désigne soit l'ancien contenu complet, soit le
 //! nouveau, jamais un fichier à moitié écrit.
+//!
+//! Le renommage n'est atomique que pour les **métadonnées** : rien ne garantit
+//! que les octets du temporaire soient réellement sur le plateau avant que le
+//! renommage ne soit publié. Une coupure de courant peut alors laisser le
+//! fichier final pointer sur des données jamais écrites (des zéros). On force
+//! donc l'écriture du temporaire sur le disque (`sync_all`) **avant** de
+//! renommer, puis, là où la plateforme le permet, on synchronise le répertoire
+//! pour durabiliser le renommage lui-même.
 
+use std::io::Write;
 use std::path::Path;
 
-/// Écrit `bytes` dans `path` de façon atomique.
+/// Écrit `bytes` dans `path` de façon atomique **et durable**.
 ///
 /// Le fichier temporaire est un frère du fichier visé, pas un fichier de
 /// `TEMP` : `rename` entre volumes différents n'est pas atomique, et sous
 /// Windows il échoue purement et simplement.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    // Écriture puis `sync_all` : les données du temporaire sont garanties sur
+    // le disque avant le renommage. Sans ça, une coupure de courant juste
+    // après le `rename` publierait un fichier au contenu jamais écrit.
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
     // `rename` écrase la cible sur les deux plateformes visées. En cas
     // d'échec on retire le temporaire, sans quoi il resterait à traîner.
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
+    }
+    // Synchroniser le répertoire durabilise le renommage lui-même. Best-effort,
+    // et seulement là où c'est possible : sous Windows, ouvrir un répertoire
+    // comme un fichier échoue, et le serveur de production tourne sous Linux.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
     }
     Ok(())
 }
