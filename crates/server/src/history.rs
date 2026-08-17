@@ -474,21 +474,26 @@ mod tests {
             );
         }
 
+        // Ce qui est mesuré est le **message réellement émis**, enveloppe
+        // comprise, et non le tableau nu : c'est cette ligne-là que le client
+        // refuse au-delà de MAX_LINE, saut de ligne inclus.
+        let line_of = |msg: &ki_protocol::ServerMsg| serde_json::to_string(msg).unwrap().len() + 1;
+
         // 100 messages de 4000 caractères dépasseraient largement MAX_LINE.
         let page = history.recent(1, 100);
         assert!(page.len() < 100, "la réponse aurait dû être tronquée");
         assert!(!page.is_empty());
-        let line = serde_json::to_string(&page).unwrap();
-        assert!(line.len() <= ki_protocol::MAX_LINE, "réponse de {} octets", line.len());
         // Ce sont les plus récents qui sont conservés.
         assert_eq!(page.last().unwrap().ts, 100);
+        let sent = ki_protocol::ServerMsg::History { messages: page };
+        assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
 
         // Et en remontant le fil, la page reste elle aussi bornée, en signalant
         // honnêtement qu'il en reste avant.
         let (older, more) = history.before(&dir, 1, 101, 100);
-        let line = serde_json::to_string(&older).unwrap();
-        assert!(line.len() <= ki_protocol::MAX_LINE);
         assert!(more, "il reste des messages plus anciens à charger");
+        let sent = ki_protocol::ServerMsg::HistoryPage { messages: older, more };
+        assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
 
         std::fs::remove_dir_all(&dir).ok();
     }

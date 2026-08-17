@@ -283,7 +283,11 @@ async fn handle_connection(
             // d'historique sont déjà bornées à la source ; ceci couvre tout le
             // reste (journal d'audit, état admin) plutôt que de risquer une
             // déconnexion silencieuse.
-            if json.len() > ki_protocol::MAX_LINE {
+            // `>=` et non `>` : le saut de ligne ajouté juste après compte
+            // pour le lecteur d'en face, qui mesure le tampon **avant** de le
+            // retirer. Un JSON de très exactement MAX_LINE partirait donc à
+            // MAX_LINE + 1 octets et ferait tomber la connexion.
+            if json.len() >= ki_protocol::MAX_LINE {
                 tracing::error!(
                     "message de contrôle trop long ({} octets), ignoré",
                     json.len()

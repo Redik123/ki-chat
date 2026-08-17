@@ -41,13 +41,15 @@ impl ServerMeta {
         self.update(|info| info.icon = icon)
     }
 
+    /// Le verrou est tenu **pendant** l'écriture, comme dans les trois autres
+    /// magasins. Le relâcher avant permettait à deux admins simultanés de
+    /// publier chacun son instantané : la mémoire gardait le dernier
+    /// changement, le disque l'autre, et l'écart n'apparaissait qu'au
+    /// redémarrage suivant — le nom ou le logo revenu en arrière.
     fn update(&self, change: impl FnOnce(&mut ServerInfo)) -> anyhow::Result<()> {
-        let snapshot = {
-            let mut info = self.info.lock().unwrap();
-            change(&mut info);
-            info.clone()
-        };
-        let json = serde_json::to_string_pretty(&snapshot)?;
+        let mut info = self.info.lock().unwrap();
+        change(&mut info);
+        let json = serde_json::to_string_pretty(&*info)?;
         crate::store::write_atomic(&self.path, json.as_bytes()).context("écriture de server.json")
     }
 }
