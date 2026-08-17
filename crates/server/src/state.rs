@@ -261,11 +261,17 @@ impl AppState {
 
     /// Recalcule les permissions d'un connecté depuis ses rôles.
     pub fn refresh_member(&self, user_id: UserId) {
-        let roles = {
+        // Le pseudo est copié puis le verrou `users` est **relâché** avant de
+        // solliciter le magasin des comptes. Les tenir tous les deux, dans cet
+        // ordre, croisait l'ordre inverse pris ailleurs : une authentification
+        // en cours pouvait alors bloquer la table des connectés, qui est sur le
+        // chemin de tout — diffusion, permissions, routage de la voix.
+        let username = {
             let users = self.users.lock().unwrap();
             let Some(u) = users.get(&user_id) else { return };
-            self.accounts.roles_of(&u.username)
+            u.username.clone()
         };
+        let roles = self.accounts.roles_of(&username);
         let perms = self.roles.perms_of(&roles);
         let rank = self.roles.rank_of(&roles);
         let color = self.roles.color_of(&roles);
