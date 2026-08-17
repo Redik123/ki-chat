@@ -762,7 +762,14 @@ fn handle_msg(
                 Some((target_name, t)) => {
                     tracing::info!("expulsion de l'utilisateur {target} par {username}");
                     state.audit.record("member.kick", username, &target_name, &reason);
-                    let _ = t.send(ServerMsg::Kicked { reason });
+                    // Le motif ne se réémet pas : s'il n'a pas pu être déposé,
+                    // l'intéressé ne verra qu'une coupure sans explication, et
+                    // il faut au moins que le journal le dise.
+                    if t.send(ServerMsg::Kicked { reason }).is_err() {
+                        tracing::warn!(
+                            "motif d'expulsion non remis à {target_name} : sa session ne répondait plus"
+                        );
+                    }
                     state.disconnect(target);
                 }
                 None => {

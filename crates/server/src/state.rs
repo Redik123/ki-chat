@@ -15,10 +15,13 @@ use crate::throttle::Throttle;
 
 /// Profondeur de la file d'envoi d'un client.
 ///
-/// Large de quoi absorber une rafale légitime — l'arrivée d'un membre pousse
-/// un roster, une liste de salons et des photos — mais **finie**. Un client
-/// qui laisse 256 messages s'empiler ne lit plus son flux.
-pub const OUTBOX_CAP: usize = 256;
+/// Dimensionnée sur le pire cas **légitime** connu, avec de la marge : trente
+/// personnes qui se reconnectent d'un coup après un redémarrage produisent, en
+/// comptant les entrées en vocal et les photos qui suivent, de l'ordre de cent
+/// cinquante messages chez chacun. On garde de quoi encaisser plusieurs fois
+/// cela — un client au lien étroit vide sa file lentement, et une grosse photo
+/// en tête retient les petits messages derrière elle — tout en restant **fini**.
+pub const OUTBOX_CAP: usize = 512;
 
 /// File d'envoi vers un client, bornée.
 ///
@@ -33,22 +36,33 @@ pub const OUTBOX_CAP: usize = 256;
 pub struct Outbox {
     tx: tokio::sync::mpsc::Sender<ServerMsg>,
     conn: quinn::Connection,
+    /// Vrai dès que la saturation a été constatée. Une session est diffusée en
+    /// boucle : sans ce drapeau, chaque message suivant reprenait le journal et
+    /// refermait une connexion déjà fermée — le tout sous le verrou des
+    /// connectés, qui est sur le chemin de tout.
+    closing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Outbox {
     pub fn new(tx: tokio::sync::mpsc::Sender<ServerMsg>, conn: quinn::Connection) -> Self {
-        Self { tx, conn }
+        Self { tx, conn, closing: Default::default() }
     }
 
     /// Dépose un message. `Err` = le client ne le recevra pas (file saturée ou
-    /// session finie) — les appelants s'en désintéressent délibérément, la
-    /// déconnexion étant déjà engagée.
+    /// session finie). La plupart des appelants s'en désintéressent, la
+    /// déconnexion étant alors engagée ; ceux qui portent une information que
+    /// l'on ne peut pas réémettre — un motif d'expulsion — le consignent.
     pub fn send(&self, msg: ServerMsg) -> Result<(), ()> {
         match self.tx.try_send(msg) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                tracing::warn!("file d'envoi saturée : le client ne lit plus, connexion fermée");
-                self.conn.close(0u32.into(), b"file saturee");
+                use std::sync::atomic::Ordering;
+                if !self.closing.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "file d'envoi saturée : le client ne suit plus, connexion fermée"
+                    );
+                    self.conn.close(0u32.into(), b"file saturee");
+                }
                 Err(())
             }
             Err(TrySendError::Closed(_)) => Err(()),
