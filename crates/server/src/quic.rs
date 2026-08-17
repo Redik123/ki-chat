@@ -307,24 +307,31 @@ async fn handle_connection(
     // Boucle de contrôle.
     //
     // Le débit de **tout** le flux est borné, et pas seulement celui du chat.
-    // Sans ça, un seul compte authentifié pouvait saturer le serveur avec des
-    // messages minuscules mais coûteux — une requête d'historique engendre des
-    // centaines de kilo-octets, un `request_avatars` plusieurs mégaoctets, une
-    // alternance `join_voice`/`leave_voice` un roster complet pour tout le
-    // monde. Généreux (50/s, rafale de 100) : aucun usage normal ne s'en
-    // approche, l'interface étant pilotée à la main.
-    let mut budget = crate::state::TokenBucket::new(50.0, 100.0);
+    // Sans ça, un seul compte authentifié saturait le serveur avec des messages
+    // minuscules mais coûteux — une requête d'historique relit le fichier du
+    // salon sur le pool bloquant, un `request_avatars` engendre des
+    // mégaoctets, une alternance `join_voice`/`leave_voice` un roster complet
+    // pour tout le monde.
+    //
+    // Le dépassement **ne ferme pas la session** : la protection de la mémoire,
+    // c'est la file d'envoi bornée, qui ne se déclenche que sur un client qui
+    // ne lit réellement plus. Ce budget-ci ne protège que du coût de
+    // traitement, et fermer sur ce critère atteindrait des clients légitimes —
+    // remonter un fil enchaîne les requêtes au rythme des réponses, ce qui sur
+    // un réseau local va vite. On refuse donc la requête, et la session
+    // continue.
+    let mut budget = crate::state::TokenBucket::new(100.0, 200.0);
     while let Ok(Some(line)) = read_line(&mut lines).await {
         let Ok(msg) = serde_json::from_str::<ClientMsg>(&line) else {
             let _ = tx.send(ServerMsg::Error { message: "message invalide".into() });
             continue;
         };
         if !budget.take() {
-            tracing::warn!("{username} dépasse le débit du flux de contrôle : session fermée");
+            tracing::debug!("{username} dépasse le débit du flux de contrôle : requête ignorée");
             let _ = tx.send(ServerMsg::Error {
-                message: "trop de requêtes — connexion fermée".into(),
+                message: "trop de requêtes — ralentis un peu".into(),
             });
-            break;
+            continue;
         }
         handle_msg(&state, user_id, &username, msg, &tx);
     }

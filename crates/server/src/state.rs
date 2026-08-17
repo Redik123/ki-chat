@@ -534,9 +534,9 @@ mod tests {
     /// coupé, et la réserve doit se reconstituer avec le temps.
     #[test]
     fn the_control_budget_absorbs_a_burst_but_stops_a_flood() {
-        let mut budget = TokenBucket::new(50.0, 100.0);
+        let mut budget = TokenBucket::new(100.0, 200.0);
         // La rafale tolérée passe en entier.
-        for i in 0..100 {
+        for i in 0..200 {
             assert!(budget.take(), "le message {i} de la rafale aurait dû passer");
         }
         // Au-delà, tout de suite après, c'est refusé.
