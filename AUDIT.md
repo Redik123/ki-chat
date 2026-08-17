@@ -6,20 +6,21 @@ vérification directe dans le code des points les plus graves. `cargo test` (61 
 `cargo clippy` passent — les bugs ci-dessous ne sont donc **pas** attrapés par la CI actuelle.
 
 > **État au 2026-08-17 — branche `fix/audit-critiques` :** **les six critiques C1 à C6
-> sont corrigés**, plus **M7** (la pagination qui bouclait et faisait sauter l'écran).
-> 10 commits, 8 tests de non-régression ajoutés, 119 tests au vert sur l'espace de travail,
-> et le démarrage du serveur vérifié en conditions réelles — journal volontairement
-> corrompu compris.
+> sont corrigés**, plus **M7** (la pagination qui bouclait et faisait sauter l'écran) et
+> **M8** pour l'historique (le salon voyage désormais avec la page ; `Chat` ne le porte
+> toujours pas, mais il arrive dans l'ordre du flux, donc sans ce risque).
+> 14 commits, 10 tests de non-régression ajoutés, 120 tests au vert sur l'espace de
+> travail, et le démarrage du serveur vérifié en conditions réelles — journal
+> volontairement corrompu compris.
 >
-> Trois défauts supplémentaires ont été trouvés **pendant la relecture des correctifs
-> eux-mêmes** et corrigés dans la foulée : un garde-fou d'un octet trop permissif, une
-> course sur le fichier temporaire de `write_atomic`, et une fenêtre pendant laquelle un
-> bannissement prononcé durant la vérification du mot de passe ne s'appliquait pas. Un
-> quatrième a été évité de justesse : le limiteur de débit fermait la session, ce qui
-> aurait déconnecté quiconque remontait simplement une conversation.
->
-> **M8** est corrigé pour l'historique (le salon voyage avec la page ;  ne le
-> porte toujours pas, mais il arrive dans l'ordre du flux, donc sans ce risque).
+> **Six défauts ont été trouvés dans les correctifs eux-mêmes, en les relisant**, et
+> corrigés dans la foulée : un garde-fou d'un octet trop permissif ; une course sur le
+> fichier temporaire de `write_atomic` ; une fenêtre pendant laquelle un bannissement
+> prononcé durant la vérification du mot de passe ne s'appliquait pas ; un limiteur de
+> débit qui fermait la session, et aurait donc déconnecté quiconque remontait simplement
+> une conversation ; un dépôt d'échantillons non borné qui remettait une allocation sur
+> le chemin du fil temps réel ; et un recalage de défilement non borné qui envoyait la
+> vue au-delà de la fin du fil.
 >
 > Tous les autres majeurs et mineurs ci-dessous **ne sont pas corrigés**.
 
