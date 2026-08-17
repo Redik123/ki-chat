@@ -5,6 +5,15 @@
 vérification directe dans le code des points les plus graves. `cargo test` (61 tests) et
 `cargo clippy` passent — les bugs ci-dessous ne sont donc **pas** attrapés par la CI actuelle.
 
+> **État au 2026-08-17 — branche `fix/critiques-serveur` :** **C1 à C5 sont corrigés**
+> (7 commits, 6 tests de non-régression ajoutés, 118 tests au vert sur l'espace de travail).
+> **C6 ne l'est pas** : il relève du client audio, pas du serveur, et reste à traiter.
+> Trois défauts supplémentaires ont été trouvés **pendant la relecture des correctifs
+> eux-mêmes** et corrigés dans la foulée : un garde-fou d'un octet trop permissif, une
+> course sur le fichier temporaire de `write_atomic`, et une fenêtre pendant laquelle un
+> bannissement prononcé durant la vérification du mot de passe ne s'appliquait pas.
+> Tous les majeurs et mineurs ci-dessous **ne sont pas corrigés**.
+
 **Verdict :** le socle est soigné (validation d'entrées, compatibilité de versions, tests
 sérieux) mais il reste des défauts qui, en usage réel, cassent le service ou une
 fonctionnalité visible. Les plus graves tiennent en une phrase : **le serveur peut refuser
@@ -19,7 +28,7 @@ mécanisme cohérent avec le code lu.
 
 ## CRITIQUES — cassent le service, l'audio, ou les données
 
-### C1 ✅ Une seule ligne abîmée dans un journal de salon empêche le serveur de redémarrer, définitivement
+### ✅ CORRIGÉ — C1 ✅ Une seule ligne abîmée dans un journal de salon empêche le serveur de redémarrer, définitivement
 [`crates/server/src/history.rs:49`](crates/server/src/history.rs:49)
 `let line = line?;` **propage** l'erreur : dès qu'une ligne de `channel-N.jsonl` n'est pas
 de l'UTF-8 valide (fin de fichier tronquée par un disque plein, une coupure secteur, une
@@ -30,7 +39,7 @@ deux autres lecteurs du même format tolèrent la casse ([`audit.rs:48`](crates/
 `map_while(Result::ok)`). Trois comportements pour un même format : c'est un oubli.
 **Correctif :** `for line in reader.lines().map_while(Result::ok)` + sauter les lignes non désérialisables.
 
-### C2 ✅ `write_atomic` ne synchronise rien : l'atomicité promise ne survit pas à une coupure de courant
+### ✅ CORRIGÉ — C2 ✅ `write_atomic` ne synchronise rien : l'atomicité promise ne survit pas à une coupure de courant
 [`crates/server/src/store.rs:18`](crates/server/src/store.rs:18)
 `std::fs::write(&tmp, bytes)?` puis `std::fs::rename(...)` — **aucun `sync_all()`** sur le
 temporaire avant le renommage, ni sur le répertoire après. Le `rename` est atomique côté
@@ -41,7 +50,7 @@ démarrer (choix assumé, mais sans repli). L'en-tête du module promet pourtant
 fichier à moitié écrit » ; c'est vrai pour un crash process, faux pour une coupure secteur.
 **Correctif :** `File::sync_all()` sur le tmp avant `rename`, idéalement `fsync` du dossier après.
 
-### C3 ✅ Salon « piège » : une réponse `History` trop grosse déconnecte en boucle (trouvé par 2 revues)
+### ✅ CORRIGÉ — C3 ✅ Salon « piège » : une réponse `History` trop grosse déconnecte en boucle (trouvé par 2 revues)
 Émission : [`crates/server/src/quic.rs:659`](crates/server/src/quic.rs:659) ·
 Réception : [`crates/client-quic/src/lib.rs:198`](crates/client-quic/src/lib.rs:198)
 `MAX_LINE` (160 Kio) est appliqué **en lecture** des deux côtés, mais **jamais en écriture**.
@@ -54,7 +63,7 @@ ouvre d'office le premier salon textuel, si c'est ce salon qui est trop lourd, *
 Mêmes vecteurs : `AdminInfo` (toutes les invitations jamais purgées) et `AuditLog`.
 **Correctif :** paginer/borner la taille des réponses serveur, ou monter `MAX_LINE`, ou fragmenter `History`.
 
-### C4 ✅ Le verrou global des comptes est tenu pendant tout un Argon2, et réclamé depuis la boucle async → gel du serveur (voix comprise)
+### ✅ CORRIGÉ — C4 ✅ Le verrou global des comptes est tenu pendant tout un Argon2, et réclamé depuis la boucle async → gel du serveur (voix comprise)
 [`crates/server/src/accounts.rs:224`](crates/server/src/accounts.rs:224) (lock) →
 [`:252`](crates/server/src/accounts.rs:252) (`verify_password` **sous le lock**) ·
 [`crates/server/src/state.rs:404`](crates/server/src/state.rs:404) (`roster()` → `avatar_hashes()` reprend le même lock)
@@ -67,7 +76,7 @@ donc le relais des datagrammes vocaux. Aggravant : `refresh_member` tient le loc
 *pendant* qu'il attend le lock `accounts` ([`state.rs:264`](crates/server/src/state.rs:264)).
 **Correctif :** cloner le hash sous le lock, relâcher, puis `verify_password` hors lock.
 
-### C5 ✅ File d'envoi par client non bornée + aucune limite de débit après authentification → mémoire du serveur épuisée par un seul membre (trouvé par 3 revues)
+### ✅ CORRIGÉ — C5 ✅ File d'envoi par client non bornée + aucune limite de débit après authentification → mémoire du serveur épuisée par un seul membre (trouvé par 3 revues)
 [`crates/server/src/quic.rs:225`](crates/server/src/quic.rs:225) (`unbounded_channel`) ·
 [`:960`](crates/server/src/quic.rs:960) (`RequestAvatars` sans dédoublonnage) ·
 [`:654`](crates/server/src/quic.rs:654) (`History`)
@@ -78,7 +87,7 @@ de flux QUIC). Quelques secondes → plusieurs Gio → OOM. `ChangePassword` en 
 amplificateur (deux Argon2 de 19 Mio par message, cf. M26).
 **Correctif :** canal borné (drop ou déconnexion si plein) + seau à jetons global par connexion.
 
-### C6 🔎 Le décodage Opus (PLC neuronal, DRED) tourne sous le mutex dont dépend le callback audio de sortie
+### ⚠️ NON CORRIGÉ — C6 🔎 Le décodage Opus (PLC neuronal, DRED) tourne sous le mutex dont dépend le callback audio de sortie
 [`crates/voice/src/lib.rs:538`](crates/voice/src/lib.rs:538) (lock + `rx.push` lourd) ·
 [`:1242`](crates/voice/src/lib.rs:1242) (callback bloqué sur le même lock) ·
 [`crates/voice/src/jitter.rs:141`](crates/voice/src/jitter.rs:141) (drain jusqu'à ~200 trames)
