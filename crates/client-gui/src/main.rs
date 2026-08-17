@@ -1414,24 +1414,18 @@ impl KiApp {
             ServerMsg::AuditLog { records } => {
                 self.audit = records;
             }
-            ServerMsg::Perms { perms, rank, is_admin } => {
-                // Mêmes égards qu'au Welcome pour un serveur antérieur aux
-                // rôles, qui n'annonce pas de permissions.
-                self.my_perms = if perms == 0 && is_admin {
-                    ki_protocol::perm::ADMINISTRATOR
-                } else if perms == 0 {
-                    ki_protocol::perm::DEFAULT
-                } else {
-                    perms
-                };
+            ServerMsg::Perms { perms, rank, .. } => {
+                // Pas de repli sur DEFAULT ici, contrairement au Welcome : ce
+                // message n'existe que sur un serveur qui connaît les rôles,
+                // et `perms == 0` y est un état légitime — celui de qui vient
+                // de tout se faire retirer. S'accorder DEFAULT reviendrait à
+                // afficher des actions que le serveur refuse.
+                self.my_perms = perms;
                 self.my_rank = rank;
                 // Un panneau ouvert sur des actions qu'on vient de perdre
                 // n'aboutirait plus : on le referme plutôt que de le laisser
                 // proposer des boutons qui échouent.
-                if !self.can(ki_protocol::perm::KICK)
-                    && !self.can(ki_protocol::perm::MANAGE_ROLES)
-                    && !self.can(ki_protocol::perm::MANAGE_CHANNELS)
-                {
+                if !self.any_admin_power() {
                     self.close_admin();
                 }
             }
@@ -3900,20 +3894,30 @@ impl KiApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // On ne touche qu'à ce qui est strictement sous son
                     // propre rang : sinon on se donnerait des pouvoirs.
-                    if role.rank < self.my_rank && !role.system {
-                        if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
-                            to_send.push(ClientMsg::AdminDeleteRole { id: role.id });
-                        }
-                        if ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked() {
-                            self.role_draft = Some(RoleDraft {
-                                id: Some(role.id),
-                                name: role.name.clone(),
-                                color: theme::member_color(role.color, &role.name),
-                                colored: role.color.is_some(),
-                                rank: role.rank,
-                                perms: role.perms,
-                            });
-                        }
+                    if role.rank < self.my_rank
+                        && !role.system
+                        && ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked()
+                    {
+                        to_send.push(ClientMsg::AdminDeleteRole { id: role.id });
+                    }
+                    // `@everyone` se modifie aussi, et c'est indispensable :
+                    // les permissions étant une union, c'est le seul endroit
+                    // d'où l'on peut retirer un droit à tout le monde. Son nom
+                    // et son rang restent figés, le serveur les refuse — seul
+                    // l'administrateur y touche, pour la même raison.
+                    let everyone = role.id == ki_protocol::ROLE_EVERYONE
+                        && self.can(ki_protocol::perm::ADMINISTRATOR);
+                    if ((role.rank < self.my_rank && !role.system) || everyone)
+                        && ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked()
+                    {
+                        self.role_draft = Some(RoleDraft {
+                            id: Some(role.id),
+                            name: role.name.clone(),
+                            color: theme::member_color(role.color, &role.name),
+                            colored: role.color.is_some(),
+                            rank: role.rank,
+                            perms: role.perms,
+                        });
                     }
                 });
             });
@@ -3938,8 +3942,13 @@ impl KiApp {
         ui.add_space(8.0);
         ui::hairline(ui);
         ui.add_space(8.0);
+        // `@everyone` : ni nom ni rang ne se changent, le serveur les refuse.
+        // On règle uniquement ce que reçoit tout le monde.
+        let everyone = draft.id == Some(ki_protocol::ROLE_EVERYONE);
         ui::field_label(ui, "Nom");
-        ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
+        ui.add_enabled_ui(!everyone, |ui| {
+            ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
+        });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.checkbox(&mut draft.colored, "Couleur de pseudo");
@@ -3948,15 +3957,25 @@ impl KiApp {
             }
         });
         ui.add_space(6.0);
-        let ceiling = self.my_rank.saturating_sub(1);
-        ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
-        ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+        if everyone {
+            ui::hint(ui, "ce que reçoit tout le monde, y compris les comptes sans rôle");
+        } else {
+            let ceiling = self.my_rank.saturating_sub(1);
+            ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
+            ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+        }
         ui.add_space(6.0);
         ui::field_label(ui, "Permissions");
         for (bit, label, why) in ki_protocol::perm::ALL {
             // On n'accorde pas ce qu'on n'a pas soi-même : sans cette borne,
             // gérer les rôles suffirait à devenir administrateur.
             if !self.can(*bit) {
+                continue;
+            }
+            // Et certaines n'ont pas de sens accordées à tout le monde : les
+            // poser sur `@everyone` mettrait le serveur à plat, sans retour
+            // possible. Le serveur les refuse, autant ne pas les proposer.
+            if everyone && ki_protocol::perm::NOT_FOR_EVERYONE & bit != 0 {
                 continue;
             }
             let mut on = draft.perms & bit != 0;

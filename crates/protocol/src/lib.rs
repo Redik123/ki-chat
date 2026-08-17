@@ -38,6 +38,23 @@ pub mod perm {
     pub const DEFAULT: u64 =
         VIEW_CHANNEL | SEND_MESSAGE | CONNECT_VOICE | UPLOAD_FILE;
 
+    /// Ce qui ne s'accorde jamais à `@everyone`.
+    ///
+    /// Ces permissions n'existent que pour distinguer une autorité d'une
+    /// autre : les donner à tout le monde ne promeut personne, ça met le
+    /// serveur à plat. Et l'on ne pourrait pas revenir en arrière — le rôle
+    /// par défaut est au rang zéro, or l'on n'édite qu'un rôle strictement
+    /// sous son propre rang. La règle vit ici pour que le serveur la fasse
+    /// respecter et que l'interface cesse de proposer ce qui sera refusé.
+    pub const NOT_FOR_EVERYONE: u64 = ADMINISTRATOR
+        | MANAGE_ROLES
+        | MANAGE_CHANNELS
+        | MANAGE_SERVER
+        | MANAGE_INVITES
+        | BAN
+        | KICK
+        | RESET_PASSWORD;
+
     /// Liste ordonnée pour l'interface : (bit, intitulé, explication).
     pub const ALL: &[(u64, &str, &str)] = &[
         (VIEW_CHANNEL, "Voir les salons", "lire la liste et l'historique"),

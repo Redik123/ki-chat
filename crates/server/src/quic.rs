@@ -1080,6 +1080,16 @@ fn handle_msg(
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES) {
                 return;
             }
+            // Régler ce que reçoit **tout le monde** demande l'administration
+            // complète. Avec « gérer les rôles » seul, on pouvait retirer à
+            // `@everyone` les droits de base et se priver du même coup de
+            // celui de les rendre : `grantable` compare aux permissions
+            // effectives, qui incluent justement celles d'`@everyone`.
+            if role.id == ki_protocol::ROLE_EVERYONE
+                && !require(state, user_id, tx, ki_protocol::perm::ADMINISTRATOR)
+            {
+                return;
+            }
             let mine = rank_of(state, user_id);
             let existing = state.roles.get(role.id);
             let current = existing.as_ref().map(|r| r.rank).unwrap_or(0);
@@ -1098,8 +1108,13 @@ fn handle_msg(
             // masque entier, si bien qu'il n'y avait rien à décocher pour s'en
             // sortir. En garder un ne l'accorde à personne ; en retirer un
             // reste permis en toutes circonstances.
+            // Les bits inconnus sont écartés avant la comparaison : le magasin
+            // les jetterait de toute façon, et les compter ici ferait refuser
+            // l'édition d'un client d'une version future avec un message qui
+            // parle de permissions, ce qui n'aiderait personne.
             let held = existing.as_ref().map(|r| r.perms).unwrap_or(0);
-            if grantable(state, user_id, role.perms & !held, tx).is_none() {
+            let wanted = role.perms & crate::roles::known_perms();
+            if grantable(state, user_id, wanted & !held, tx).is_none() {
                 return;
             }
             let name = role.name.clone();
@@ -1109,6 +1124,10 @@ fn handle_msg(
                     state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
                     refresh_everyone(state);
                     state.reconcile_memberships();
+                    // Les rangs affichés dans le panneau viennent des comptes :
+                    // sans ce rafraîchissement, ils restent ceux d'avant, et
+                    // les boutons se décident sur une mesure périmée.
+                    send_admin_info(state, tx);
                 }
                 Err(e) => {
                     let _ = tx.send(ServerMsg::Error { message: e });
@@ -1138,6 +1157,7 @@ fn handle_msg(
                     state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
                     refresh_everyone(state);
                     state.reconcile_memberships();
+                    send_admin_info(state, tx);
                 }
                 Err(e) => {
                     let _ = tx.send(ServerMsg::Error { message: e });
@@ -1145,6 +1165,16 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminSetUserRoles { username: target, roles } => {
+            // Jamais sur soi-même. Le rang ne suffit pas à l'interdire : entre
+            // l'enregistrement d'une rétrogradation et le rafraîchissement des
+            // sessions, on se compare à une version périmée de soi et l'on
+            // passe. C'est la même règle explicite que pour l'expulsion.
+            if target == username {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "impossible de changer ses propres rôles".into(),
+                });
+                return;
+            }
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES)
                 || !outranks_account(state, user_id, &target, tx)
             {
@@ -1165,11 +1195,17 @@ fn handle_msg(
             // rôle portant des permissions qu'on ne détient pas, expulsion et
             // bannissement compris. C'est la même règle qu'à la création et à
             // l'édition d'un rôle, qui la vérifiaient déjà.
+            // Seul ce que l'attribution **ajoute** est contrôlé. Exiger que
+            // tout le lot soit à sa portée empêchait de toucher au moindre
+            // compte portant déjà un droit qu'on n'a pas — jusqu'à lui poser
+            // un simple rôle de couleur — alors que rien n'y est accordé de
+            // neuf. C'est la même règle qu'à l'édition d'un rôle.
             let granted = wanted
                 .iter()
                 .filter_map(|id| state.roles.get(*id))
                 .fold(0, |acc, r| acc | r.perms);
-            if grantable(state, user_id, granted, tx).is_none() {
+            let held_before = state.roles.perms_of(&state.accounts.roles_of(&target));
+            if grantable(state, user_id, granted & !held_before, tx).is_none() {
                 return;
             }
             match state.accounts.set_roles(&target, wanted.clone()) {

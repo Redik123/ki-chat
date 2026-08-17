@@ -86,9 +86,13 @@ fn initial_roles() -> RolesFile {
 /// Ce qu'un client envoie en dehors est écarté à l'entrée : un bit inconnu
 /// stocké aujourd'hui deviendrait une permission accordée en douce le jour
 /// où une version suivante lui donne un sens.
-fn known_perms() -> Perms {
+pub fn known_perms() -> Perms {
     perm::ALL.iter().fold(0, |acc, (bit, _, _)| acc | *bit)
 }
+
+/// Ce qui ne s'accorde pas à `@everyone` : la règle est portée par le
+/// protocole, pour que l'interface cesse de proposer ce qu'on refuse ici.
+use ki_protocol::perm::NOT_FOR_EVERYONE;
 
 fn clean_name(name: &str) -> Result<String, String> {
     let name = name.trim();
@@ -273,7 +277,13 @@ impl Roles {
                     );
                 }
             } else {
-                current.perms = role.perms & known_perms();
+                let wanted = role.perms & known_perms();
+                if wanted & NOT_FOR_EVERYONE != 0 {
+                    return Err(
+                        "ces permissions ne s'accordent pas à tout le monde".into()
+                    );
+                }
+                current.perms = wanted;
             }
             current.color = role.color;
         } else {
@@ -444,6 +454,22 @@ mod tests {
         // ...puis on le rend par un rôle, à qui doit l'avoir.
         let parle = roles.create("Membre", None, 10, perm::SEND_MESSAGE).unwrap();
         assert!(perm::has(roles.perms_of(&[parle.id]), perm::SEND_MESSAGE));
+
+        // En revanche, on n'accorde pas à tout le monde ce qui ne sert qu'à
+        // distinguer une autorité d'une autre : le serveur se retrouverait à
+        // plat, et personne ne pourrait revenir en arrière — @everyone est au
+        // rang zéro, et l'on n'édite qu'un rôle strictement sous son rang.
+        for interdit in [perm::ADMINISTRATOR, perm::BAN, perm::KICK, perm::MANAGE_ROLES] {
+            let mut everyone = roles.get(ROLE_EVERYONE).unwrap();
+            everyone.perms = perm::DEFAULT | interdit;
+            assert!(
+                roles.edit(everyone).is_err(),
+                "{interdit:#x} n'aurait pas dû être accordé à tout le monde"
+            );
+        }
+        // ...et le réglage précédent n'a pas bougé au passage.
+        assert!(!perm::has(roles.perms_of(&[]), perm::SEND_MESSAGE));
+        assert!(!perm::has(roles.perms_of(&[]), perm::ADMINISTRATOR));
 
         // Le nom et le rang restent verrouillés, eux.
         let mut everyone = roles.get(ROLE_EVERYONE).unwrap();

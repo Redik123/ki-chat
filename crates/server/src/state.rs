@@ -298,9 +298,14 @@ impl AppState {
 
     /// Les salons **tels que cette personne les voit**, verrous compris.
     pub fn visible_channels(&self, user_id: UserId) -> Vec<ChannelInfo> {
-        let mut list = self
-            .channels
-            .visible_to(&self.effective_roles(user_id), self.manages_channels(user_id));
+        // Même garde que `can_view`, sans quoi la liste annoncerait des salons
+        // que toute tentative d'ouverture refuserait — l'inverse exact de
+        // l'invariant recherché, où un salon inaccessible n'existe pas.
+        let manages = self.manages_channels(user_id);
+        if !manages && !self.holds(user_id, ki_protocol::perm::VIEW_CHANNEL) {
+            return Vec::new();
+        }
+        let mut list = self.channels.visible_to(&self.effective_roles(user_id), manages);
         let locks = self.voice_locks.lock().unwrap();
         let now = std::time::Instant::now();
         for channel in &mut list {
@@ -386,7 +391,13 @@ impl AppState {
                 }
             }
             if let Some(c) = voice {
-                if !self.can_view(id, c) {
+                // La permission de parler est relue ici, et pas seulement à
+                // l'entrée : sans quoi la retirer à quelqu'un déjà installé
+                // dans un salon vocal ne produisait rien du tout, et il y
+                // restait jusqu'à ce qu'il en sorte de lui-même.
+                if !self.can_view(id, c)
+                    || !self.holds(id, ki_protocol::perm::CONNECT_VOICE)
+                {
                     let mut users = self.users.lock().unwrap();
                     if let Some(u) = users.get_mut(&id) {
                         u.voice = None;
