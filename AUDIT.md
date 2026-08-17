@@ -31,6 +31,12 @@ vérification directe dans le code des points les plus graves. `cargo test` (61 
 > chiffrement, trames escamotées, tampon de gigue, moteur orphelin, périphérique de
 > repli, bornes du relais, et l'entrée en vocal enfin réconciliée avec le serveur.
 >
+> **Lot transport :** **M22 et M23 sont corrigés** — le partage de fichiers passe en
+> TLS, et le client vérifie l'identité du serveur par empreinte mémorisée à la première
+> connexion. La relecture y a trouvé deux failles, dont une qui rendait toute la
+> vérification décorative : les signatures de poignée de main étaient acceptées sans
+> être validées, ce qui laissait rejouer le certificat public sans en posséder la clé.
+>
 > Tous les autres majeurs et mineurs ci-dessous **ne sont pas corrigés**.
 
 **Verdict :** le socle est soigné (validation d'entrées, compatibilité de versions, tests
@@ -271,13 +277,13 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
 
 ### Sécurité transport & DoS
 
-- **M22 ✅ Fichiers partagés et jeton de session transitent en HTTP clair** (3 revues).
+- **✅ CORRIGÉ — M22 ✅ Fichiers partagés et jeton de session transitent en HTTP clair** (3 revues).
   [`main.rs:814`](crates/client-gui/src/main.rs:814), [`files.rs:85`](crates/server/src/files.rs:85).
   Tout le reste est dans le tunnel QUIC/TLS ; l'upload/download HTTP, lui, expose le contenu
   (y compris salons privés) et le `x-ki-token` — qui permet ensuite d'uploader sous l'identité
   de la victime. **Correctif :** servir les fichiers dans le même transport chiffré, ou TLS sur le port 8080.
 
-- **M23 ✅ Le certificat serveur n'est pas vérifié du tout, et l'argument du code est faux.**
+- **✅ CORRIGÉ — M23 ✅ Le certificat serveur n'est pas vérifié du tout, et l'argument du code est faux.**
   [`client-quic/src/lib.rs:43`](crates/client-quic/src/lib.rs:43). `SkipVerify` accepte tout,
   sans TOFU ni épinglage. Le commentaire justifie par « la voix a son propre chiffrement de
   bout en bout » — faux, la clé voix est distribuée par le serveur dans `Welcome`. Un MITM
