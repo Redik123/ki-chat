@@ -249,6 +249,7 @@ async fn handle_connection(
                 tx: tx.clone(),
                 conn: conn.clone(),
                 chat_budget: Default::default(),
+                voice_budget: crate::state::TokenBucket::new(3.0, 8.0),
             },
         );
     }
@@ -359,10 +360,26 @@ async fn voice_task(
     let mut received = 0u64;
     let mut last_report = Instant::now();
 
+    // Le relais amplifie : un paquet reçu repart vers chaque autre occupant du
+    // salon. Sans borne, un seul émetteur saturait la liaison montante du
+    // serveur et rendait la voix inaudible pour tout le monde. Un client normal
+    // émet 50 paquets de 20 ms par seconde ; le double laisse toute la marge
+    // utile, y compris à une rafale de rattrapage.
+    let mut relay_budget = crate::state::TokenBucket::new(100.0, 200.0);
+
     while let Ok(dat) = conn.read_datagram().await {
+        // `VOICE_MAX_PACKET` était déclaré par le protocole mais vérifié nulle
+        // part côté serveur : rien n'empêchait de faire relayer des
+        // datagrammes bien plus gros que ce que la voix produit.
+        if dat.len() > ki_protocol::VOICE_MAX_PACKET {
+            continue;
+        }
         let Some(pkt) = parse_voice_packet(&dat) else { continue };
         // Anti-usurpation : l'en-tête doit porter l'identité de la connexion.
         if pkt.id != user_id || pkt.payload.is_empty() {
+            continue;
+        }
+        if !relay_budget.take() {
             continue;
         }
 
@@ -485,6 +502,12 @@ fn require(
         let _ = tx.send(ServerMsg::Error { message: "tu n'as pas cette permission".into() });
     }
     ok
+}
+
+/// Consomme un jeton du budget d'entrées et sorties de vocal.
+fn take_voice_budget(state: &Arc<AppState>, user_id: UserId) -> bool {
+    let mut users = state.users.lock().unwrap();
+    users.get_mut(&user_id).is_some_and(|u| u.voice_budget.take())
 }
 
 /// Rang d'un connecté, et rang associé à un compte (même hors ligne).
@@ -626,6 +649,12 @@ fn handle_msg(
                 let _ = tx.send(ServerMsg::VoiceLocked { channel, wrong });
                 return;
             }
+            if !take_voice_budget(state, user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "tu changes de salon vocal trop vite".into(),
+                });
+                return;
+            }
             {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else { return };
@@ -641,6 +670,9 @@ fn handle_msg(
             state.broadcast_all(&ServerMsg::Members { members: state.roster() });
         }
         ClientMsg::LeaveVoice => {
+            if !take_voice_budget(state, user_id) {
+                return;
+            }
             let was_in_voice = {
                 let mut users = state.users.lock().unwrap();
                 match users.get_mut(&user_id) {

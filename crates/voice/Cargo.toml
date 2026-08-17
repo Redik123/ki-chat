@@ -9,6 +9,9 @@ ki-protocol = { path = "../protocol" }
 anyhow.workspace = true
 tracing.workspace = true
 chacha20poly1305 = "0.10"
+# Tirage du compteur de départ, qui sert de nonce : il doit être imprévisible
+# et surtout ne jamais se répéter sous une même clé.
+rand = "0.9"
 cpal = "0.16"
 dasp_sample = "0.11"
 # Suppression de bruit RNNoise, port Rust pur (mode léger).

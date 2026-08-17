@@ -27,6 +27,17 @@ const READY_CAP: usize = SAMPLE_RATE as usize;
 const READY_PREALLOC: usize = 15 * FRAME_SAMPLES;
 /// Durée nominale d'une trame, en millisecondes.
 const FRAME_MS: f32 = 20.0;
+/// Au-delà de cet écart entre deux arrivées, ce n'est plus de la gigue : c'est
+/// que l'émetteur s'était tu. Large de dix trames — une vraie rafale réseau
+/// reste en dessous, un silence de parole largement au-dessus.
+const TALKSPURT_MS: f32 = 200.0;
+/// Marge tolérée au-dessus de la cible avant de rattraper la latence.
+///
+/// Elle était de cinq trames, soit un plancher de rattrapage à 140 ms : entre
+/// la cible (40 ms sur un réseau propre) et ce plancher, rien ne redescendait
+/// jamais, et chaque à-coup réseau gonflait le tampon pour de bon. Deux trames
+/// laissent de quoi absorber une irrégularité sans installer la latence.
+const LATENCY_SLACK: usize = 2;
 
 /// Fenêtre de recherche DRED : jusqu'à 1 s (50 trames de 20 ms) de passé
 /// peut être resynthétisé depuis la redondance neuronale d'un paquet.
@@ -183,10 +194,19 @@ impl Receiver {
 
         // Mesure de la gigue : écart entre le rythme d'arrivée réel et les
         // 20 ms nominales, lissé (à la RFC 3550).
+        //
+        // Une reprise de parole n'en est pas. L'émetteur cesse d'émettre
+        // pendant les silences — activation vocale ou touche de conversation —
+        // si bien que la première trame d'une phrase arrive des secondes après
+        // la précédente. Compter cet écart comme de la gigue faisait bondir
+        // l'estimation à plusieurs centaines de millisecondes sur un réseau
+        // parfait, et le tampon retenait alors le début de chaque phrase.
         if let Some(prev) = self.last_arrival {
             let delta_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
-            let deviation = (delta_ms - FRAME_MS).abs();
-            self.jitter_ms += (deviation - self.jitter_ms) / 8.0;
+            if delta_ms < TALKSPURT_MS {
+                let deviation = (delta_ms - FRAME_MS).abs();
+                self.jitter_ms += (deviation - self.jitter_ms) / 8.0;
+            }
         }
         self.last_arrival = Some(now);
 
@@ -251,7 +271,7 @@ impl Receiver {
         // recopie sur le chemin du rappel de sortie — ce que cette séparation
         // existe précisément pour éviter.
         let prime = self.prime_frames();
-        let cap = ((prime + 5) * FRAME_SAMPLES).min(READY_CAP);
+        let cap = ((prime + LATENCY_SLACK) * FRAME_SAMPLES).min(READY_CAP);
         if self.decoded.len() > cap {
             let excess = self.decoded.len() - cap;
             self.decoded.drain(..excess);

@@ -317,6 +317,10 @@ struct KiApp {
     /// Une page est déjà demandée : on n'en réclame pas une seconde à
     /// chaque image tant que celle-ci n'est pas arrivée.
     history_pending: bool,
+    /// Salon vocal dont on attend la confirmation du serveur. Tant qu'il est
+    /// posé, c'est notre demande qui s'affiche ; une fois confirmé — ou
+    /// refusé — c'est la liste des membres du serveur qui fait foi.
+    voice_pending: Option<ChannelId>,
     /// Hauteur du fil au rendu précédent, en points.
     ///
     /// Sert à recaler la vue quand une page s'ajoute **au-dessus** : sans ça
@@ -509,6 +513,7 @@ impl KiApp {
             sfx_quiet_until: std::time::Instant::now(),
             history_more: false,
             history_pending: false,
+            voice_pending: None,
             chat_height: 0.0,
             history_anchor: None,
             input: String::new(),
@@ -960,7 +965,13 @@ impl KiApp {
             self.error = Some("tu n'as pas le droit de rejoindre le vocal".into());
             return;
         }
+        // L'entrée est affichée sans attendre — le retour immédiat compte —
+        // mais elle reste **en attente de confirmation** : le serveur peut
+        // refuser, et la liste des membres qu'il diffuse fait foi. Sans cette
+        // réconciliation, un refus laissait l'interface montrer le salon et
+        // armer le micro dans le vide, indéfiniment.
         self.voice_channel = Some(channel);
+        self.voice_pending = Some(channel);
         self.play_sfx(sfx::SELF_JOIN);
         // Le roster arrive juste après : sans ce répit, entrer dans un salon
         // déjà peuplé jouerait un son d'arrivée par occupant.
@@ -971,6 +982,7 @@ impl KiApp {
 
     /// Quitte le vocal, sans quitter le serveur.
     fn leave_voice(&mut self) {
+        self.voice_pending = None;
         if self.voice_channel.take().is_none() {
             return;
         }
@@ -1001,6 +1013,7 @@ impl KiApp {
         self.channels.clear();
         self.current = None;
         self.voice_channel = None;
+        self.voice_pending = None;
         self.members.clear();
         self.messages.clear();
         self.armed = false;
@@ -1377,6 +1390,30 @@ impl KiApp {
                         member
                     })
                     .collect();
+                // Le serveur fait foi sur notre propre présence en vocal.
+                // Tant qu'une demande est en attente, on garde l'affichage
+                // optimiste — la liste peut avoir été produite avant que le
+                // serveur ne la traite ; dès qu'elle la confirme, l'attente
+                // se referme et c'est lui qui décide ensuite.
+                if let Some(me) = self.members.iter().find(|m| Some(m.user_id) == self.my_id) {
+                    let mine = me.voice;
+                    match self.voice_pending {
+                        Some(want) if mine == Some(want) => {
+                            self.voice_pending = None;
+                            self.voice_channel = mine;
+                        }
+                        Some(_) => {}
+                        None => {
+                            if self.voice_channel != mine {
+                                self.voice_channel = mine;
+                                if mine.is_none() {
+                                    self.armed = false;
+                                    self.transmitting = false;
+                                }
+                            }
+                        }
+                    }
+                }
                 self.update_voice_peers();
             }
             ServerMsg::UserJoined { user_id, .. } => {
@@ -1400,6 +1437,16 @@ impl KiApp {
                 if !self.welcomed {
                     self.disconnect(Some(message));
                 } else {
+                    // Une entrée en vocal en attente était peut-être ce que le
+                    // serveur vient de refuser : on la défait plutôt que de
+                    // laisser l'interface montrer un salon où l'on n'est pas,
+                    // micro armé, sans que rien ne l'y reprenne jamais.
+                    if self.voice_pending.take().is_some() {
+                        self.voice_channel = None;
+                        self.armed = false;
+                        self.transmitting = false;
+                        self.prev_voice_peers.clear();
+                    }
                     self.error = Some(message);
                 }
             }
@@ -1471,6 +1518,7 @@ impl KiApp {
             }
             ServerMsg::VoiceLocked { channel, wrong } => {
                 self.voice_channel = None;
+                self.voice_pending = None;
                 self.voice_prompt = Some(VoicePrompt {
                     channel,
                     password: String::new(),
