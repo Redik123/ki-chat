@@ -18,6 +18,9 @@ vérification directe dans le code des points les plus graves. `cargo test` (61 
 > quatrième a été évité de justesse : le limiteur de débit fermait la session, ce qui
 > aurait déconnecté quiconque remontait simplement une conversation.
 >
+> **M8** est corrigé pour l'historique (le salon voyage avec la page ;  ne le
+> porte toujours pas, mais il arrive dans l'ordre du flux, donc sans ce risque).
+>
 > Tous les autres majeurs et mineurs ci-dessous **ne sont pas corrigés**.
 
 **Verdict :** le socle est soigné (validation d'entrées, compatibilité de versions, tests
