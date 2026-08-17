@@ -5,14 +5,20 @@
 vérification directe dans le code des points les plus graves. `cargo test` (61 tests) et
 `cargo clippy` passent — les bugs ci-dessous ne sont donc **pas** attrapés par la CI actuelle.
 
-> **État au 2026-08-17 — branche `fix/critiques-serveur` :** **C1 à C5 sont corrigés**
-> (7 commits, 6 tests de non-régression ajoutés, 118 tests au vert sur l'espace de travail).
-> **C6 ne l'est pas** : il relève du client audio, pas du serveur, et reste à traiter.
+> **État au 2026-08-17 — branche `fix/audit-critiques` :** **les six critiques C1 à C6
+> sont corrigés**, plus **M7** (la pagination qui bouclait et faisait sauter l'écran).
+> 10 commits, 8 tests de non-régression ajoutés, 119 tests au vert sur l'espace de travail,
+> et le démarrage du serveur vérifié en conditions réelles — journal volontairement
+> corrompu compris.
+>
 > Trois défauts supplémentaires ont été trouvés **pendant la relecture des correctifs
 > eux-mêmes** et corrigés dans la foulée : un garde-fou d'un octet trop permissif, une
 > course sur le fichier temporaire de `write_atomic`, et une fenêtre pendant laquelle un
-> bannissement prononcé durant la vérification du mot de passe ne s'appliquait pas.
-> Tous les majeurs et mineurs ci-dessous **ne sont pas corrigés**.
+> bannissement prononcé durant la vérification du mot de passe ne s'appliquait pas. Un
+> quatrième a été évité de justesse : le limiteur de débit fermait la session, ce qui
+> aurait déconnecté quiconque remontait simplement une conversation.
+>
+> Tous les autres majeurs et mineurs ci-dessous **ne sont pas corrigés**.
 
 **Verdict :** le socle est soigné (validation d'entrées, compatibilité de versions, tests
 sérieux) mais il reste des défauts qui, en usage réel, cassent le service ou une
@@ -87,7 +93,7 @@ de flux QUIC). Quelques secondes → plusieurs Gio → OOM. `ChangePassword` en 
 amplificateur (deux Argon2 de 19 Mio par message, cf. M26).
 **Correctif :** canal borné (drop ou déconnexion si plein) + seau à jetons global par connexion.
 
-### ⚠️ NON CORRIGÉ — C6 🔎 Le décodage Opus (PLC neuronal, DRED) tourne sous le mutex dont dépend le callback audio de sortie
+### ✅ CORRIGÉ — C6 🔎 Le décodage Opus (PLC neuronal, DRED) tourne sous le mutex dont dépend le callback audio de sortie
 [`crates/voice/src/lib.rs:538`](crates/voice/src/lib.rs:538) (lock + `rx.push` lourd) ·
 [`:1242`](crates/voice/src/lib.rs:1242) (callback bloqué sur le même lock) ·
 [`crates/voice/src/jitter.rs:141`](crates/voice/src/jitter.rs:141) (drain jusqu'à ~200 trames)
@@ -151,7 +157,7 @@ Résultat : **craquements et coupures précisément quand le réseau se dégrade
 
 ### Historique, pagination, chat
 
-- **M7 ✅/🔎 Remonter le fil charge tout l'historique d'un coup, en boucle** (trouvé par 2 revues).
+- **M7 ✅ CORRIGÉ — Remonter le fil charge tout l'historique d'un coup, en boucle** (trouvé par 2 revues).
   [`main.rs:2738`](crates/client-gui/src/main.rs:2738). `offset.y <= 24` déclenche une page ;
   `HistoryPage` **préfixe** sans compenser le décalage → la vue reste collée au sommet → la
   condition reste vraie à l'image suivante → une page toutes les 50 ms jusqu'à épuisement.
