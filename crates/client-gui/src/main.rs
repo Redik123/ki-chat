@@ -954,6 +954,12 @@ impl KiApp {
         if self.voice_channel == Some(channel) {
             return;
         }
+        // Le serveur refuserait : autant le dire tout de suite, plutôt que
+        // d'allumer le salon et le micro pour rien.
+        if !self.can(ki_protocol::perm::CONNECT_VOICE) {
+            self.error = Some("tu n'as pas le droit de rejoindre le vocal".into());
+            return;
+        }
         self.voice_channel = Some(channel);
         self.play_sfx(sfx::SELF_JOIN);
         // Le roster arrive juste après : sans ce répit, entrer dans un salon
@@ -2653,6 +2659,25 @@ impl KiApp {
 
     fn chat_input(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let mut submit = false;
+        // Sans le droit d'écrire, la zone de saisie n'est pas grisée : elle
+        // disparaît, remplacée par la raison. Un champ où l'on peut taper mais
+        // dont rien ne part est plus déroutant qu'une absence de champ.
+        if !self.can(ki_protocol::perm::SEND_MESSAGE) {
+            egui::Frame::NONE
+                .fill(theme::BG_RAISED)
+                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::symmetric(10, 10))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Tu n'as pas le droit d'écrire dans ce serveur.")
+                            .color(TEXT_DIM)
+                            .size(12.0),
+                    );
+                });
+            return;
+        }
+        let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
         egui::Frame::NONE
             .fill(theme::BG_RAISED)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
@@ -2660,8 +2685,9 @@ impl KiApp {
             .inner_margin(egui::Margin::symmetric(6, 5))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)")
-                        .clicked()
+                    if can_upload
+                        && ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)")
+                            .clicked()
                     {
                         self.start_upload();
                     }
