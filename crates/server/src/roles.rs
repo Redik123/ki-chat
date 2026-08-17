@@ -240,10 +240,19 @@ impl Roles {
 
     /// Remplace un rôle par la version fournie.
     ///
-    /// D'un rôle système, seule la couleur bouge : lui retirer ses
-    /// permissions, c'est ôter `ADMINISTRATOR` au propriétaire, et le serveur
-    /// n'a alors plus personne pour le lui rendre. Le refus vit ici, et pas
-    /// dans l'appelant, parce que c'est la raison d'être du drapeau.
+    /// D'un rôle système, ni le nom ni le rang ne bougent. Les permissions,
+    /// elles, se distinguent :
+    ///
+    /// - Celles du **propriétaire** sont verrouillées. Lui ôter
+    ///   `ADMINISTRATOR`, c'est laisser le serveur sans personne pour le lui
+    ///   rendre.
+    /// - Celles d'**`@everyone`** se règlent, et c'est indispensable : les
+    ///   permissions sont une union, si bien que ce que `@everyone` accorde
+    ///   est accordé à tout le monde, définitivement. Tant qu'il était figé,
+    ///   retirer à quelqu'un le droit d'écrire, de parler ou de partager était
+    ///   impossible — les cases correspondantes de l'éditeur de rôles ne
+    ///   faisaient donc rien. On règle ici ce que reçoit tout le monde, puis
+    ///   l'on rend le droit par un rôle à qui doit l'avoir.
     pub fn edit(&self, role: RoleInfo) -> Result<(), String> {
         let name = clean_name(&role.name)?;
         let mut inner = self.inner.lock().unwrap();
@@ -257,8 +266,14 @@ impl Roles {
             if role.rank != current.rank {
                 return Err("le rang d'un rôle du serveur ne change pas".into());
             }
-            if role.perms & known_perms() != current.perms & known_perms() {
-                return Err("les permissions d'un rôle du serveur ne changent pas".into());
+            if current.id == ROLE_OWNER {
+                if role.perms & known_perms() != current.perms & known_perms() {
+                    return Err(
+                        "les permissions du rôle Propriétaire ne changent pas".into()
+                    );
+                }
+            } else {
+                current.perms = role.perms & known_perms();
             }
             current.color = role.color;
         } else {
@@ -407,6 +422,38 @@ mod tests {
         roles.edit(owner).unwrap();
         assert_eq!(roles.get(ROLE_OWNER).unwrap().color, Some(0xff_a5_00));
         assert_eq!(roles.get(ROLE_OWNER).unwrap().perms, perm::ADMINISTRATOR);
+    }
+
+    /// Les permissions d'`@everyone`, elles, doivent se régler : c'est le seul
+    /// moyen de retirer un droit à tout le monde, puisque les permissions sont
+    /// une union. Sans cela, les cases « Écrire », « Rejoindre le vocal » et
+    /// « Partager des fichiers » de l'éditeur ne peuvent rien produire.
+    #[test]
+    fn everyone_permissions_can_be_tightened_unlike_the_owners() {
+        let roles = Roles::open(&scratch("everyone")).unwrap();
+        assert!(perm::has(roles.perms_of(&[]), perm::SEND_MESSAGE));
+
+        // On retire le droit d'écrire à tout le monde.
+        let mut everyone = roles.get(ROLE_EVERYONE).unwrap();
+        everyone.perms = perm::DEFAULT & !perm::SEND_MESSAGE;
+        roles.edit(everyone).unwrap();
+        assert!(!perm::has(roles.perms_of(&[]), perm::SEND_MESSAGE));
+        // Le reste de `DEFAULT` n'a pas bougé.
+        assert!(perm::has(roles.perms_of(&[]), perm::CONNECT_VOICE));
+
+        // ...puis on le rend par un rôle, à qui doit l'avoir.
+        let parle = roles.create("Membre", None, 10, perm::SEND_MESSAGE).unwrap();
+        assert!(perm::has(roles.perms_of(&[parle.id]), perm::SEND_MESSAGE));
+
+        // Le nom et le rang restent verrouillés, eux.
+        let mut everyone = roles.get(ROLE_EVERYONE).unwrap();
+        everyone.name = "@tout-le-monde".into();
+        assert!(roles.edit(everyone).is_err());
+        let mut everyone = roles.get(ROLE_EVERYONE).unwrap();
+        everyone.rank = 50;
+        assert!(roles.edit(everyone).is_err());
+        // Et il reste indestructible.
+        assert!(roles.delete(ROLE_EVERYONE).is_err());
     }
 
     #[test]

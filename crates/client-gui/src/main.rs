@@ -1414,6 +1414,27 @@ impl KiApp {
             ServerMsg::AuditLog { records } => {
                 self.audit = records;
             }
+            ServerMsg::Perms { perms, rank, is_admin } => {
+                // Mêmes égards qu'au Welcome pour un serveur antérieur aux
+                // rôles, qui n'annonce pas de permissions.
+                self.my_perms = if perms == 0 && is_admin {
+                    ki_protocol::perm::ADMINISTRATOR
+                } else if perms == 0 {
+                    ki_protocol::perm::DEFAULT
+                } else {
+                    perms
+                };
+                self.my_rank = rank;
+                // Un panneau ouvert sur des actions qu'on vient de perdre
+                // n'aboutirait plus : on le referme plutôt que de le laisser
+                // proposer des boutons qui échouent.
+                if !self.can(ki_protocol::perm::KICK)
+                    && !self.can(ki_protocol::perm::MANAGE_ROLES)
+                    && !self.can(ki_protocol::perm::MANAGE_CHANNELS)
+                {
+                    self.close_admin();
+                }
+            }
             ServerMsg::Roles { roles } => {
                 self.roles = roles;
             }
@@ -4183,7 +4204,16 @@ impl KiApp {
                         self.roles_target = Some(account.username.clone());
                         self.roles_draft = account.roles.clone();
                     }
-                    if !account.admin {
+                    // Mêmes bornes que le serveur, ici aussi : la permission
+                    // **et** le rang, et jamais sur soi-même. Sans elles, ces
+                    // boutons s'affichaient à qui n'avait que « Expulser »,
+                    // ouvraient une fenêtre, et le clic final se faisait
+                    // refuser — ou, pour le bannissement de soi, aboutissait.
+                    let myself = my_name.as_ref() == Some(&account.username);
+                    let can_ban = self.can(ki_protocol::perm::BAN)
+                        && self.outranks(account.rank)
+                        && !myself;
+                    if can_ban {
                         if account.banned {
                             if ui::icon_button_ex(ui, Icon::Check, 26.0, "Annuler le ban", None)
                                 .clicked()
@@ -4202,8 +4232,10 @@ impl KiApp {
                             });
                         }
                     }
-                    let can_reset =
-                        !account.admin || my_name.as_ref() == Some(&account.username);
+                    // On règle toujours son propre mot de passe ; celui d'un
+                    // autre demande la permission et le rang.
+                    let can_reset = self.can(ki_protocol::perm::RESET_PASSWORD)
+                        && (myself || self.outranks(account.rank));
                     if can_reset
                         && ui::icon_button_ex(
                             ui,

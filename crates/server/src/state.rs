@@ -275,20 +275,25 @@ impl AppState {
     }
 
     fn manages_channels(&self, user_id: UserId) -> bool {
-        let users = self.users.lock().unwrap();
-        users
-            .get(&user_id)
-            .is_some_and(|u| ki_protocol::perm::has(u.perms, ki_protocol::perm::MANAGE_CHANNELS))
+        self.holds(user_id, ki_protocol::perm::MANAGE_CHANNELS)
     }
 
     /// Ce salon est-il visible par cette personne ?
     pub fn can_view(&self, user_id: UserId, channel: ChannelId) -> bool {
         let Some(info) = self.channels.get(channel) else { return false };
-        crate::channels::can_view(
-            &info,
-            &self.effective_roles(user_id),
-            self.manages_channels(user_id),
-        )
+        // Qui gère les salons voit tout : c'est la porte de secours contre le
+        // salon rendu inaccessible par mégarde, et elle passe avant tout.
+        let manages = self.manages_channels(user_id);
+        if !manages && !self.holds(user_id, ki_protocol::perm::VIEW_CHANNEL) {
+            return false;
+        }
+        crate::channels::can_view(&info, &self.effective_roles(user_id), manages)
+    }
+
+    /// Cette personne détient-elle cette permission ?
+    pub fn holds(&self, user_id: UserId, need: ki_protocol::Perms) -> bool {
+        let users = self.users.lock().unwrap();
+        users.get(&user_id).is_some_and(|u| ki_protocol::perm::has(u.perms, need))
     }
 
     /// Les salons **tels que cette personne les voit**, verrous compris.
@@ -336,13 +341,21 @@ impl AppState {
         let perms = self.roles.perms_of(&roles);
         let rank = self.roles.rank_of(&roles);
         let color = self.roles.color_of(&roles);
+        let is_admin = ki_protocol::perm::has(perms, ki_protocol::perm::ADMINISTRATOR);
         let mut users = self.users.lock().unwrap();
         if let Some(u) = users.get_mut(&user_id) {
-            u.admin = ki_protocol::perm::has(perms, ki_protocol::perm::ADMINISTRATOR);
+            let changed = u.perms != perms || u.rank != rank;
+            u.admin = is_admin;
             u.roles = roles;
             u.perms = perms;
             u.rank = rank;
             u.color = color;
+            // L'intéressé est prévenu : son interface n'a aucun autre moyen
+            // d'apprendre qu'il vient d'être promu ou rétrogradé, `perms` et
+            // `rank` ne voyageant autrement que dans `Welcome`.
+            if changed {
+                let _ = u.tx.send(ServerMsg::Perms { perms, rank, is_admin });
+            }
         }
     }
 

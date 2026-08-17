@@ -96,6 +96,14 @@ pub async fn upload(
     let Some((user_id, username)) = token.and_then(|t| state.user_by_voice_token(t)) else {
         return (StatusCode::UNAUTHORIZED, "jeton invalide").into_response();
     };
+    // Le partage de fichiers est une permission comme une autre : elle
+    // s'affiche dans l'éditeur de rôles, elle doit donc être appliquée. Ce
+    // chemin passe par HTTP et non par le flux de contrôle, d'où le contrôle
+    // ici plutôt que dans `handle_msg`.
+    if !state.holds(user_id, ki_protocol::perm::UPLOAD_FILE) {
+        return (StatusCode::FORBIDDEN, "tu n'as pas le droit de partager des fichiers")
+            .into_response();
+    }
     if body.is_empty() {
         return (StatusCode::BAD_REQUEST, "fichier vide").into_response();
     }

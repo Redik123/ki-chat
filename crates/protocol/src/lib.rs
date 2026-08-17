@@ -339,6 +339,22 @@ pub enum ServerMsg {
     AuditLog { records: Vec<AuditRecord> },
     /// Définition de tous les rôles, poussée à chaque changement.
     Roles { roles: Vec<RoleInfo> },
+    /// Ce que le destinataire a désormais le droit de faire.
+    ///
+    /// Poussé dès que ses rôles changent. Sans ce message, `perms` et `rank`
+    /// ne voyageaient que dans `Welcome` : promouvoir quelqu'un ne changeait
+    /// rien chez lui jusqu'à ce qu'il relance l'application, et le
+    /// rétrograder lui laissait des boutons qui échouaient tous.
+    Perms {
+        #[serde(default)]
+        perms: Perms,
+        #[serde(default)]
+        rank: u16,
+        /// Vrai si ce compte a toutes les permissions. Comme dans `Welcome`,
+        /// pour les clients qui s'en servent encore.
+        #[serde(default)]
+        is_admin: bool,
+    },
     /// La liste des salons a changé. **Calculée par destinataire** : elle
     /// diffère d'une personne à l'autre selon ce qu'elle a le droit de voir.
     ChannelsUpdated { channels: Vec<ChannelInfo> },
