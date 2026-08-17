@@ -6,6 +6,7 @@
 //! remplacée par la dissimulation de perte d'Opus (PLC).
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ki_opus as opus;
@@ -19,12 +20,86 @@ const MAX_PENDING: usize = 3;
 const RESYNC_GAP: u16 = 200;
 /// Taille max du tampon décodé (1 s) — au-delà on jette le plus ancien.
 const READY_CAP: usize = SAMPLE_RATE as usize;
+/// Capacité réservée d'emblée au tampon de lecture : le plafond de latence le
+/// plus large possible (10 trames imposables + 5 de marge). Réservée une fois
+/// pour toutes, le fil réseau n'a plus jamais à réallouer sous le verrou que
+/// le rappel de sortie peut vouloir prendre.
+const READY_PREALLOC: usize = 15 * FRAME_SAMPLES;
 /// Durée nominale d'une trame, en millisecondes.
 const FRAME_MS: f32 = 20.0;
 
 /// Fenêtre de recherche DRED : jusqu'à 1 s (50 trames de 20 ms) de passé
 /// peut être resynthétisé depuis la redondance neuronale d'un paquet.
 const DRED_WINDOW: u16 = 50;
+
+/// Audio décodé, prêt à sortir vers la carte son.
+///
+/// **Séparé de l'état de décodage, et c'est tout l'intérêt.** Le rappel de
+/// sortie est un fil temps réel : s'il attend, la carte son se retrouve sans
+/// données et l'on entend un craquement. Or décoder coûte cher — Opus en
+/// complexité 10 fait tourner un masquage de perte neuronal, et la
+/// reconstruction DRED une synthèse complète — et un trou réseau peut demander
+/// des dizaines de trames d'affilée. Tant que le décodeur et le tampon de
+/// lecture partageaient un verrou, tout ce travail passait devant la carte son
+/// précisément quand le réseau allait mal. Ici, le fil réseau ne prend ce
+/// verrou que pour **déposer** des échantillons déjà décodés, et le rappel de
+/// sortie que pour les consommer : quelques microsecondes de chaque côté.
+pub struct Playout {
+    ready: VecDeque<f32>,
+    primed: bool,
+    /// Niveau crête récent de ce locuteur (pour les vumètres), avec décroissance.
+    level: f32,
+    /// Trames d'avance à accumuler avant de jouer. Calculée côté décodeur,
+    /// qui est le seul à mesurer la gigue.
+    prime_frames: usize,
+}
+
+impl Playout {
+    fn new() -> Self {
+        Self {
+            ready: VecDeque::with_capacity(READY_PREALLOC),
+            primed: false,
+            level: 0.0,
+            prime_frames: 2,
+        }
+    }
+
+    /// Niveau crête récent (0..1) de ce locuteur.
+    pub fn level(&self) -> f32 {
+        self.level
+    }
+
+    /// Additionne l'audio prêt dans `out`, pondéré par `gain` (1.0 = 100 %).
+    /// Retourne vrai si de l'audio a été mixé. Ne produit rien tant que
+    /// `prime_frames` trames ne sont pas accumulées (absorption du jitter),
+    /// et se re-tamponne après une famine. Un gain de 0 consomme quand même
+    /// le tampon (l'utilisateur est « muet » sans dériver en latence).
+    pub fn mix_into(&mut self, out: &mut [f32], gain: f32) -> bool {
+        if !self.primed {
+            if self.ready.len() >= self.prime_frames * FRAME_SAMPLES {
+                self.primed = true;
+            } else {
+                self.level *= 0.85;
+                return false;
+            }
+        }
+        if self.ready.is_empty() {
+            self.primed = false;
+            self.level *= 0.85;
+            return false;
+        }
+        let n = out.len().min(self.ready.len());
+        let mut peak = 0f32;
+        for o in out.iter_mut().take(n) {
+            let s = self.ready.pop_front().unwrap() * gain;
+            peak = peak.max(s.abs());
+            *o += s;
+        }
+        // Décroissance douce : le vumètre retombe naturellement.
+        self.level = peak.max(self.level * 0.85);
+        gain > 0.0
+    }
+}
 
 pub struct Receiver {
     decoder: opus::Decoder,
@@ -35,14 +110,15 @@ pub struct Receiver {
     dred_carrier: Option<u16>,
     pending: BTreeMap<u16, Vec<u8>>,
     next_seq: Option<u16>,
-    ready: VecDeque<f32>,
-    primed: bool,
+    /// Échantillons décodés du tour courant, **hors verrou**. Déposés dans le
+    /// `Playout` en une fois, à la fin de `push`.
+    decoded: Vec<f32>,
+    /// Le tampon de lecture, partagé avec le rappel de sortie.
+    playout: Arc<Mutex<Playout>>,
     last_activity: Instant,
     /// Gigue réseau estimée (EWMA des écarts d'inter-arrivée, en ms).
     jitter_ms: f32,
     last_arrival: Option<Instant>,
-    /// Niveau crête récent de ce locuteur (pour les vumètres), avec décroissance.
-    level: f32,
     /// Taille de tampon imposée par l'utilisateur (None = adaptatif).
     jitter_override: Option<usize>,
 }
@@ -60,14 +136,18 @@ impl Receiver {
             dred_carrier: None,
             pending: BTreeMap::new(),
             next_seq: None,
-            ready: VecDeque::new(),
-            primed: false,
+            decoded: Vec::with_capacity(FRAME_SAMPLES * 8),
+            playout: Arc::new(Mutex::new(Playout::new())),
             last_activity: Instant::now(),
             jitter_ms: 0.0,
             last_arrival: None,
-            level: 0.0,
             jitter_override: None,
         }
+    }
+
+    /// Le tampon de lecture de ce locuteur, à confier au rappel de sortie.
+    pub fn playout(&self) -> Arc<Mutex<Playout>> {
+        self.playout.clone()
     }
 
     /// Impose une taille de tampon fixe (en trames), ou None pour l'adaptatif.
@@ -82,11 +162,6 @@ impl Receiver {
 
     pub fn last_activity(&self) -> Instant {
         self.last_activity
-    }
-
-    /// Niveau crête récent (0..1) de ce locuteur.
-    pub fn level(&self) -> f32 {
-        self.level
     }
 
     /// Nombre de trames d'avance avant lecture, adapté à la gigue mesurée :
@@ -134,7 +209,10 @@ impl Receiver {
         }
         self.pending.insert(seq, payload.to_vec());
 
-        // Draine tout ce qui est décodable dans l'ordre.
+        // Draine tout ce qui est décodable dans l'ordre. Tout ce bloc décode
+        // vers `self.decoded`, sans tenir le moindre verrou : c'est la partie
+        // coûteuse, et le rappel de sortie ne doit jamais l'attendre.
+        self.decoded.clear();
         let mut lost = 0u64;
         let mut recovered = 0u64;
         let mut next = self.next_seq.unwrap();
@@ -162,12 +240,33 @@ impl Receiver {
         }
         self.next_seq = Some(next);
 
-        // Anti-dérive de latence : si le tampon dépasse nettement la cible
-        // adaptative, on rattrape en sautant de l'audio ancien.
-        let latency_cap = (self.prime_frames() + 5) * FRAME_SAMPLES;
-        while self.ready.len() > latency_cap.min(READY_CAP) {
-            self.ready.drain(..FRAME_SAMPLES.min(self.ready.len()));
+        // Dépôt : la seule section sous verrou, et elle ne fait que recopier
+        // des échantillons déjà décodés. Le rappel de sortie ne peut donc
+        // attendre ici que quelques microsecondes, jamais un décodage.
+        // Anti-dérive de latence : au-delà de la cible adaptative, on rattrape
+        // en sautant de l'audio ancien. L'écrêtage se fait **avant** le
+        // verrou : un trou réseau de plusieurs secondes fait décoder jusqu'à
+        // RESYNC_GAP trames d'un coup, et recopier ces ~750 Ko sous le verrou
+        // pour les jeter aussitôt aurait remis une allocation et une longue
+        // recopie sur le chemin du rappel de sortie — ce que cette séparation
+        // existe précisément pour éviter.
+        let prime = self.prime_frames();
+        let cap = ((prime + 5) * FRAME_SAMPLES).min(READY_CAP);
+        if self.decoded.len() > cap {
+            let excess = self.decoded.len() - cap;
+            self.decoded.drain(..excess);
         }
+        {
+            let mut playout = self.playout.lock().unwrap();
+            playout.prime_frames = prime;
+            // Ce que le dépôt va faire déborder est retiré d'abord : la
+            // section critique reste bornée par `cap`, sans réallocation.
+            let over = (playout.ready.len() + self.decoded.len()).saturating_sub(cap);
+            let drop = over.min(playout.ready.len());
+            playout.ready.drain(..drop);
+            playout.ready.extend(self.decoded.iter().copied());
+        }
+        self.decoded.clear();
         (lost, recovered)
     }
 
@@ -205,53 +304,23 @@ impl Receiver {
         let mut pcm = [0f32; FRAME_SAMPLES];
         match dred.decode_into(&mut self.decoder, offset, &mut pcm) {
             Ok(n) if n > 0 => {
-                self.ready.extend(&pcm[..n]);
+                self.decoded.extend_from_slice(&pcm[..n]);
                 true
             }
             _ => false,
         }
     }
 
-    /// Décode un paquet vers le tampon de lecture. `fec` = reconstruire la
-    /// trame PRÉCÉDENTE à partir des données de redondance de ce paquet.
-    /// Un paquet vide (sans fec) déclenche la dissimulation de perte (PLC).
+    /// Décode un paquet vers le tampon local (déposé plus tard, en une fois).
+    /// `fec` = reconstruire la trame PRÉCÉDENTE à partir des données de
+    /// redondance de ce paquet. Un paquet vide (sans fec) déclenche la
+    /// dissimulation de perte (PLC).
     fn decode_into_ready(&mut self, packet: &[u8], fec: bool) {
         let mut pcm = [0f32; FRAME_SAMPLES];
         match self.decoder.decode_float(packet, &mut pcm, fec) {
-            Ok(n) => self.ready.extend(&pcm[..n]),
-            Err(_) => self.ready.extend(&pcm), // silence en dernier recours
+            Ok(n) => self.decoded.extend_from_slice(&pcm[..n]),
+            Err(_) => self.decoded.extend_from_slice(&pcm), // silence en dernier recours
         }
-    }
-
-    /// Additionne l'audio prêt dans `out`, pondéré par `gain` (1.0 = 100 %).
-    /// Retourne vrai si de l'audio a été mixé. Ne produit rien tant que
-    /// `PRIME_FRAMES` trames ne sont pas accumulées (absorption du jitter),
-    /// et se re-tamponne après une famine. Un gain de 0 consomme quand même
-    /// le tampon (l'utilisateur est « muet » sans dériver en latence).
-    pub fn mix_into(&mut self, out: &mut [f32], gain: f32) -> bool {
-        if !self.primed {
-            if self.ready.len() >= self.prime_frames() * FRAME_SAMPLES {
-                self.primed = true;
-            } else {
-                self.level *= 0.85;
-                return false;
-            }
-        }
-        if self.ready.is_empty() {
-            self.primed = false;
-            self.level *= 0.85;
-            return false;
-        }
-        let n = out.len().min(self.ready.len());
-        let mut peak = 0f32;
-        for o in out.iter_mut().take(n) {
-            let s = self.ready.pop_front().unwrap() * gain;
-            peak = peak.max(s.abs());
-            *o += s;
-        }
-        // Décroissance douce : le vumètre retombe naturellement.
-        self.level = peak.max(self.level * 0.85);
-        gain > 0.0
     }
 }
 
@@ -280,7 +349,7 @@ mod tests {
             assert_eq!(lost, 0);
         }
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
     }
 
     #[test]
@@ -299,7 +368,7 @@ mod tests {
         // La trame manquante a été reconstruite via le FEC du paquet suivant.
         assert_eq!(recovered, 1);
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
     }
 
     #[test]
@@ -344,7 +413,74 @@ mod tests {
         assert_eq!(lost, 4);
         assert_eq!(recovered, 4, "le DRED n'a pas tout reconstruit : {recovered}/4");
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
+    }
+
+    /// Le rappel de sortie tient sa poignée de tampon **avant** que le fil
+    /// réseau ne décode quoi que ce soit : ce qui est décodé ensuite doit lui
+    /// parvenir par cette poignée-là. C'est tout le câblage de la séparation.
+    #[test]
+    fn what_the_decoder_produces_reaches_the_handle_taken_earlier() {
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        // La poignée est prise d'emblée, comme le fait le rappel de sortie.
+        let playout = rx.playout();
+        assert_eq!(playout.lock().unwrap().ready.len(), 0);
+
+        for seq in 0..4 {
+            rx.push(seq, &encoded_frame(&mut enc, 0.1));
+        }
+        assert_eq!(playout.lock().unwrap().ready.len(), 4 * FRAME_SAMPLES);
+
+        // Et consommer par cette poignée retire bien du tampon partagé.
+        let mut out = [0f32; FRAME_SAMPLES];
+        assert!(playout.lock().unwrap().mix_into(&mut out, 1.0));
+        assert_eq!(playout.lock().unwrap().ready.len(), 3 * FRAME_SAMPLES);
+    }
+
+    /// Le décodage ne doit pas se faire sous le verrou du tampon : c'est toute
+    /// la raison d'être de la séparation. On le vérifie en gardant ce verrou
+    /// depuis un autre fil pendant qu'une trame est décodée — `push` doit
+    /// travailler quand même, et n'attendre qu'au moment de déposer.
+    #[test]
+    fn decoding_does_not_happen_under_the_playout_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        let playout = rx.playout();
+        rx.push(0, &encoded_frame(&mut enc, 0.1));
+
+        let held = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let keeper = {
+            let (playout, held, release) = (playout.clone(), held.clone(), release.clone());
+            std::thread::spawn(move || {
+                let _guard = playout.lock().unwrap();
+                held.store(true, Ordering::SeqCst);
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            })
+        };
+        while !held.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        // Le verrou est tenu ailleurs. `push` décode malgré tout ; il ne peut
+        // se bloquer qu'au dépôt, que l'on débloque aussitôt.
+        let frame = encoded_frame(&mut enc, 0.2);
+        let pusher = std::thread::spawn(move || {
+            rx.push(1, &frame);
+            rx
+        });
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        release.store(true, Ordering::SeqCst);
+        keeper.join().unwrap();
+        let _rx = pusher.join().unwrap();
+
+        // Les deux trames ont atteint le tampon.
+        assert_eq!(playout.lock().unwrap().ready.len(), 2 * FRAME_SAMPLES);
     }
 
     #[test]
@@ -358,6 +494,6 @@ mod tests {
         assert_eq!(lost, 0);
         rx.push(3, &frames[3]);
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
     }
 }

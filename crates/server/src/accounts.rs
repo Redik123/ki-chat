@@ -214,6 +214,14 @@ impl Accounts {
     }
 
     /// Authentifie (ou crée, si invitation valide) un compte.
+    ///
+    /// **Aucun Argon2 ne tourne sous le verrou du magasin.** Il est
+    /// volontairement lent (~50 à 200 ms, 19 Mio) et ce verrou est sur le
+    /// chemin chaud : `roster()` le reprend à chaque entrée/sortie de vocal,
+    /// à chaque connexion et à chaque déconnexion. Le tenir pendant un
+    /// hachage figeait la boucle asynchrone du serveur — donc le relais des
+    /// datagrammes vocaux de tout le monde — à chaque tentative de connexion.
+    /// Le verrou ne sert donc plus qu'à lire, puis à écrire, jamais à calculer.
     pub fn authenticate(
         &self,
         username: &str,
@@ -221,40 +229,62 @@ impl Accounts {
         invite: Option<&str>,
         server_invite: &str,
     ) -> Result<AuthOk, String> {
-        let mut inner = self.inner.lock().unwrap();
-        let now = crate::state::now_millis();
-
-        if let Some(user) = inner.users.get(username) {
-            // Un bannissement à durée dépassée se lève ici, à la première
-            // tentative de connexion : pas de tâche de fond à faire tourner
-            // pour ça, et la levée est constatée au seul moment où elle
-            // change quelque chose.
-            let expired = match &user.ban {
-                Some(ban) if !ban.active(now) => true,
-                Some(ban) => return Err(ban.message(now)),
-                // `banned` sans `ban` : compte bloqué par une version
-                // antérieure, sans motif ni durée. Définitif.
-                None if user.banned => return Err("compte bloqué par un admin".into()),
-                None => false,
-            };
-            if expired {
-                if let Some(user) = inner.users.get_mut(username) {
-                    user.ban = None;
-                    user.banned = false;
+        // --- Phase 1, sous verrou : lecture seule (et levée d'un ban échu) ---
+        let existing = {
+            let mut inner = self.inner.lock().unwrap();
+            let now = crate::state::now_millis();
+            if let Some(user) = inner.users.get(username) {
+                // Un bannissement à durée dépassée se lève ici, à la première
+                // tentative de connexion : pas de tâche de fond à faire tourner
+                // pour ça, et la levée est constatée au seul moment où elle
+                // change quelque chose.
+                let expired = match &user.ban {
+                    Some(ban) if !ban.active(now) => true,
+                    Some(ban) => return Err(ban.message(now)),
+                    // `banned` sans `ban` : compte bloqué par une version
+                    // antérieure, sans motif ni durée. Définitif.
+                    None if user.banned => return Err("compte bloqué par un admin".into()),
+                    None => false,
+                };
+                if expired {
+                    if let Some(user) = inner.users.get_mut(username) {
+                        user.ban = None;
+                        user.banned = false;
+                    }
+                    self.save(&inner);
+                    tracing::info!("bannissement de {username} expiré");
                 }
-                self.save(&inner);
-                tracing::info!("bannissement de {username} expiré");
+                Some(inner.users[username].hash.clone())
+            } else {
+                None
             }
+        };
 
-            let user = &inner.users[username];
-            let parsed =
-                PasswordHash::new(&user.hash).map_err(|_| "compte corrompu".to_string())?;
-            return match Argon2::default().verify_password(password.as_bytes(), &parsed) {
-                Ok(()) => {
-                    Ok(AuthOk { id: user.id, roles: user.roles.clone(), created_with: None })
-                }
-                Err(_) => Err("mot de passe incorrect".into()),
+        // --- Vérification du mot de passe, verrou relâché ---
+        if let Some(stored) = existing {
+            let parsed = PasswordHash::new(&stored).map_err(|_| "compte corrompu".to_string())?;
+            if Argon2::default().verify_password(password.as_bytes(), &parsed).is_err() {
+                return Err("mot de passe incorrect".into());
+            }
+            // Le compte est **relu** sous verrou plutôt que rendu tel qu'il
+            // était avant le hachage. Celui-ci dure une centaine de
+            // millisecondes, verrou relâché : un bannissement prononcé
+            // pendant ce temps doit s'appliquer, sans quoi le compte entrerait
+            // quand même — et la déconnexion immédiate que déclenche un
+            // bannissement le manquerait, puisqu'il n'est pas encore connecté.
+            // Des rôles fraîchement attribués doivent de même être ceux de la
+            // session qui s'ouvre.
+            let inner = self.inner.lock().unwrap();
+            let now = crate::state::now_millis();
+            let Some(user) = inner.users.get(username) else {
+                return Err("compte inconnu".into());
             };
+            match &user.ban {
+                Some(ban) if ban.active(now) => return Err(ban.message(now)),
+                None if user.banned => return Err("compte bloqué par un admin".into()),
+                _ => {}
+            }
+            return Ok(AuthOk { id: user.id, roles: user.roles.clone(), created_with: None });
         }
 
         // Compte inconnu : création uniquement sur invitation valide —
@@ -262,6 +292,33 @@ impl Accounts {
         let Some(code) = invite else {
             return Err("compte inconnu — code d'invitation requis pour en créer un".into());
         };
+        // --- Phase 2 : l'invitation est validée une première fois sous verrou,
+        // avant de hacher. Sans ce contrôle préalable, présenter un code bidon
+        // suffirait à faire calculer un Argon2 au serveur, gratuitement. ---
+        {
+            let inner = self.inner.lock().unwrap();
+            let now = crate::state::now_millis();
+            if code != server_invite {
+                match inner.invites.iter().find(|i| i.code == code) {
+                    Some(i) if i.usable(now) => {}
+                    Some(_) => return Err("code d'invitation expiré ou révoqué".into()),
+                    None => return Err("code d'invitation invalide".into()),
+                }
+            }
+        }
+        // Toutes les validations AVANT de consommer l'invitation.
+        check_password(password)?;
+        let hash = hash_password(password)?;
+
+        // --- Phase 3, sous verrou : consommation et création, en un bloc ---
+        // L'invitation est **revérifiée** : le verrou a été relâché pour
+        // hacher, et une autre connexion a pu épuiser le code entre-temps.
+        // C'est ce qui garde le décompte des usages exact.
+        let mut inner = self.inner.lock().unwrap();
+        let now = crate::state::now_millis();
+        if inner.users.contains_key(username) {
+            return Err("ce compte vient d'être créé — reconnecte-toi".into());
+        }
         let one_shot = if code == server_invite {
             None
         } else {
@@ -271,9 +328,6 @@ impl Accounts {
                 None => return Err("code d'invitation invalide".into()),
             }
         };
-        // Toutes les validations AVANT de consommer l'invitation.
-        check_password(password)?;
-        let hash = hash_password(password)?;
         if let Some(pos) = one_shot {
             let used = &mut inner.invites[pos];
             used.uses = used.uses.saturating_add(1);
@@ -773,6 +827,84 @@ mod tests {
         assert!(accounts.authenticate("d", "motdepasse", Some(&code), "inv").is_err());
         assert!(accounts.revoke_invite(&code).is_err());
         assert!(accounts.invites()[0].revoked);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Le hachage Argon2 ne tourne plus sous le verrou du magasin, ce qui veut
+    /// dire que le verrou est **relâché puis repris** au milieu d'une création
+    /// de compte. Un code à usage unique doit malgré tout ne servir qu'une
+    /// fois, même si deux connexions le présentent exactement en même temps.
+    #[test]
+    fn a_single_use_invite_survives_two_simultaneous_signups() {
+        let dir = std::env::temp_dir().join(format!("ki-test-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let accounts =
+            std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
+        // Un premier compte pour que les suivants ne soient pas propriétaires.
+        accounts.authenticate("chef", "motdepasse", Some("inv"), "inv").unwrap();
+        let code = accounts.create_invite("chef", Some(1), "unique", 0);
+
+        // Deux inscriptions concurrentes avec le même code à usage unique.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["alice", "bob"]
+            .into_iter()
+            .map(|name| {
+                let (accounts, code, barrier) =
+                    (accounts.clone(), code.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    accounts.authenticate(name, "motdepasse", Some(&code), "inv").is_ok()
+                })
+            })
+            .collect();
+        let wins =
+            handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
+
+        assert_eq!(wins, 1, "un code à usage unique ne doit créer qu'un compte");
+        let listed = accounts.invites();
+        assert_eq!(listed[0].uses, 1);
+        assert_eq!(listed[0].uses_left, Some(0));
+        assert!(listed[0].revoked, "épuisée, donc marquée");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Le hachage tourne hors verrou : un bannissement prononcé *pendant* ce
+    /// temps doit quand même s'appliquer. Sinon le compte entrerait, et la
+    /// déconnexion immédiate déclenchée par le bannissement le manquerait —
+    /// il n'est pas encore dans la table des connectés.
+    #[test]
+    fn a_ban_landing_during_the_hash_still_applies() {
+        let dir = std::env::temp_dir().join(format!("ki-test-banrace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let accounts =
+            std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
+        accounts.authenticate("chef", "motdepasse", Some("inv"), "inv").unwrap();
+        accounts.authenticate("tricheur", "motdepasse", Some("inv"), "inv").unwrap();
+
+        // Le bannissement tombe pendant que la connexion est en cours de
+        // vérification. On le prononce depuis un autre fil, le temps que le
+        // hachage (volontairement lent) s'exécute.
+        let banner = {
+            let accounts = accounts.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                accounts.ban("chef", "tricheur", "triche", 0).unwrap();
+            })
+        };
+        let outcome = accounts.authenticate("tricheur", "motdepasse", None, "inv");
+        banner.join().unwrap();
+
+        // Que la course tombe d'un côté ou de l'autre, l'état final est
+        // cohérent : si l'entrée a été acceptée, c'est que le ban n'était pas
+        // encore posé — et une seconde tentative, elle, doit être refusée.
+        assert!(accounts.authenticate("tricheur", "motdepasse", None, "inv").is_err());
+        if outcome.is_ok() {
+            eprintln!("course gagnée par la connexion : le ban n'était pas encore posé");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -23,6 +23,90 @@ use ki_protocol::{ChannelId, ChannelInfo, ChatRecord};
 /// Nombre max de messages gardés en mémoire par salon.
 const MEM_CAP: usize = 1000;
 
+/// Budget d'octets d'une réponse d'historique, marge sous [`ki_protocol::MAX_LINE`].
+///
+/// Une réponse `History`/`HistoryPage` part sur le flux de contrôle en **une
+/// seule ligne**. Or le lecteur d'en face refuse toute ligne au-delà de
+/// `MAX_LINE` et **ferme la connexion** : sans borne à l'émission, quelques
+/// dizaines de longs messages suffisaient à rendre un salon impossible à
+/// ouvrir (déconnexion en boucle). On ne renvoie donc jamais plus que ce qui
+/// tient dans une ligne ; le reste se récupère en remontant le fil.
+const MAX_HISTORY_BYTES: usize = ki_protocol::MAX_LINE - 8 * 1024;
+
+/// Ce qu'il faut faire d'une ligne rendue par `BufRead::lines`.
+enum LineOutcome {
+    Take(String),
+    Skip,
+    Stop,
+}
+
+/// Décide du sort d'une ligne de journal, et **c'est la seule règle** : les
+/// trois lecteurs de ce format doivent se comporter pareil.
+///
+/// Une ligne illisible est *sautée*. Un fichier tronqué par un disque plein ou
+/// une coupure de courant laisse souvent sa dernière ligne coupée au milieu
+/// d'un caractère accentué : refuser de démarrer pour ça ferait perdre tout
+/// l'historique, qui est par ailleurs parfaitement lisible.
+///
+/// Une vraie erreur d'entrée-sortie, elle, *arrête* la lecture. La distinction
+/// n'est pas cosmétique : une erreur matérielle ne fait pas avancer le curseur,
+/// et l'ignorer ferait tourner la boucle indéfiniment — un serveur figé, plus
+/// difficile à diagnostiquer qu'un serveur qui refuse de démarrer.
+fn keep_or_stop(line: std::io::Result<String>) -> LineOutcome {
+    match line {
+        Ok(line) => LineOutcome::Take(line),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => LineOutcome::Skip,
+        Err(e) => {
+            tracing::error!("lecture d'un journal interrompue : {e}");
+            LineOutcome::Stop
+        }
+    }
+}
+
+/// Tous les enregistrements lisibles d'un journal, selon `keep_or_stop`.
+fn records_of(reader: impl BufRead) -> Vec<ChatRecord> {
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        match keep_or_stop(line) {
+            LineOutcome::Take(line) => {
+                if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
+                    out.push(rec);
+                }
+            }
+            LineOutcome::Skip => continue,
+            LineOutcome::Stop => break,
+        }
+    }
+    out
+}
+
+/// Ne garde que les messages les plus **récents** dont la taille sérialisée
+/// cumulée tient dans [`MAX_HISTORY_BYTES`], l'ordre chronologique préservé.
+///
+/// Renvoie aussi `true` si des messages plus anciens ont dû être retirés —
+/// l'appelant en a besoin pour dire au client qu'il en reste à charger.
+fn fit_within(messages: Vec<ChatRecord>) -> (Vec<ChatRecord>, bool) {
+    let mut total = 0usize;
+    let mut start = messages.len();
+    for (i, rec) in messages.iter().enumerate().rev() {
+        let size = serde_json::to_string(rec).map(|s| s.len() + 1).unwrap_or(usize::MAX);
+        if total + size > MAX_HISTORY_BYTES {
+            break;
+        }
+        total += size;
+        start = i;
+    }
+    // Toujours rendre au moins le dernier message : un message seul ne peut de
+    // toute façon pas dépasser le budget (texte borné à MAX_CHAT_TEXT), mais on
+    // ne veut en aucun cas renvoyer une page vide en prétendant qu'il reste à
+    // charger — le client bouclerait.
+    if start == messages.len() && !messages.is_empty() {
+        start = messages.len() - 1;
+    }
+    let truncated = start > 0;
+    (messages[start..].to_vec(), truncated)
+}
+
 pub struct History {
     /// Les N derniers messages de chaque salon. Le fichier correspondant est
     /// tenu par le fil d'écriture, lui seul y touche.
@@ -45,13 +129,20 @@ impl History {
             let mut recent = VecDeque::with_capacity(MEM_CAP);
             if path.exists() {
                 let reader = BufReader::new(File::open(&path)?);
+                // Lecture en flux, pour ne jamais tenir plus de MEM_CAP
+                // messages en mémoire, et selon la règle de `keep_or_stop`.
                 for line in reader.lines() {
-                    let line = line?;
-                    if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
-                        if recent.len() == MEM_CAP {
-                            recent.pop_front();
+                    match keep_or_stop(line) {
+                        LineOutcome::Take(line) => {
+                            if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
+                                if recent.len() == MEM_CAP {
+                                    recent.pop_front();
+                                }
+                                recent.push_back(rec);
+                            }
                         }
-                        recent.push_back(rec);
+                        LineOutcome::Skip => continue,
+                        LineOutcome::Stop => break,
                     }
                 }
             }
@@ -127,7 +218,10 @@ impl History {
         match logs.get(&channel) {
             Some(recent) => {
                 let skip = recent.len().saturating_sub(limit);
-                recent.iter().skip(skip).cloned().collect()
+                let msgs: Vec<ChatRecord> = recent.iter().skip(skip).cloned().collect();
+                // Borné à une ligne de contrôle. Le client complète en
+                // remontant le fil (`HistoryBefore`) si tout ne tient pas.
+                fit_within(msgs).0
             }
             None => Vec::new(),
         }
@@ -161,7 +255,10 @@ impl History {
             if !exhausted {
                 let skip = older.len().saturating_sub(limit);
                 let more = skip > 0 || recent.len() == MEM_CAP;
-                return (older[skip..].to_vec(), more);
+                // Tronqué à une ligne de contrôle si besoin : dans ce cas il
+                // reste forcément des messages à charger avant.
+                let (page, truncated) = fit_within(older[skip..].to_vec());
+                return (page, more || truncated);
             }
             older
         };
@@ -169,21 +266,24 @@ impl History {
         let path = PathBuf::from(data_dir).join(format!("channel-{channel}.jsonl"));
         let Ok(file) = File::open(&path) else {
             // Pas de fichier : le cache est tout ce qui existe.
-            return (from_memory, false);
+            let (page, truncated) = fit_within(from_memory);
+            return (page, truncated);
         };
         // Relecture complète puis fenêtrage. Un salon de 100 000 messages
         // fait ~15 Mo — coûteux mais rare, et sans index il n'y a pas de
         // moyen honnête de faire mieux. C'est le moment de passer à SQLite
         // si les salons grossissent vraiment.
-        let mut older: Vec<ChatRecord> = BufReader::new(file)
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|l| serde_json::from_str::<ChatRecord>(&l).ok())
+        // Une ligne illisible au milieu du fichier est sautée, et non prise
+        // pour une fin de fichier — sinon tout le passé qui la suit
+        // deviendrait injoignable.
+        let mut older: Vec<ChatRecord> = records_of(BufReader::new(file))
+            .into_iter()
             .filter(|r| r.ts < before_ts)
             .collect();
         older.sort_by_key(|r| r.ts);
         let skip = older.len().saturating_sub(limit);
-        (older[skip..].to_vec(), skip > 0)
+        let (page, truncated) = fit_within(older[skip..].to_vec());
+        (page, skip > 0 || truncated)
     }
 }
 
@@ -333,5 +433,68 @@ mod tests {
         let autre = history.recent(2, 10);
         assert_eq!(autre.len(), 1);
         assert_eq!(autre[0].text, "autre salon");
+    }
+
+    /// Une ligne abîmée (octets non-UTF-8 d'un fichier tronqué) ne doit pas
+    /// empêcher le serveur de démarrer : elle est sautée, le reste est lu.
+    #[test]
+    fn a_corrupt_line_does_not_stop_the_server_from_starting() {
+        let dir = scratch("corrupt-line");
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(serde_json::to_string(&stamped(1)).unwrap().as_bytes());
+        bytes.push(b'\n');
+        // Ligne coupée au milieu d'un caractère : octets non-UTF-8.
+        bytes.extend_from_slice(&[0xff, 0xfe, 0x00]);
+        bytes.push(b'\n');
+        bytes.extend_from_slice(serde_json::to_string(&stamped(3)).unwrap().as_bytes());
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Ne panique pas, et lit les deux lignes saines de part et d'autre.
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        let seen = history.recent(1, 10);
+        assert_eq!(seen.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![1, 3]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Une réponse d'historique ne doit jamais dépasser une ligne de contrôle :
+    /// au-delà, le client la refuse et se déconnecte. On en rend donc moins que
+    /// demandé plutôt que de produire un salon « piège ».
+    #[test]
+    fn a_history_response_stays_within_a_control_line() {
+        let dir = scratch("budget");
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        let big = "x".repeat(ki_protocol::MAX_CHAT_TEXT);
+        for n in 1..=100 {
+            history.append(
+                1,
+                &ChatRecord { user_id: 1, username: "k".into(), text: big.clone(), ts: n },
+            );
+        }
+
+        // Ce qui est mesuré est le **message réellement émis**, enveloppe
+        // comprise, et non le tableau nu : c'est cette ligne-là que le client
+        // refuse au-delà de MAX_LINE, saut de ligne inclus.
+        let line_of = |msg: &ki_protocol::ServerMsg| serde_json::to_string(msg).unwrap().len() + 1;
+
+        // 100 messages de 4000 caractères dépasseraient largement MAX_LINE.
+        let page = history.recent(1, 100);
+        assert!(page.len() < 100, "la réponse aurait dû être tronquée");
+        assert!(!page.is_empty());
+        // Ce sont les plus récents qui sont conservés.
+        assert_eq!(page.last().unwrap().ts, 100);
+        let sent = ki_protocol::ServerMsg::History { messages: page };
+        assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
+
+        // Et en remontant le fil, la page reste elle aussi bornée, en signalant
+        // honnêtement qu'il en reste avant.
+        let (older, more) = history.before(&dir, 1, 101, 100);
+        assert!(more, "il reste des messages plus anciens à charger");
+        let sent = ki_protocol::ServerMsg::HistoryPage { messages: older, more, channel: 1 };
+        assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

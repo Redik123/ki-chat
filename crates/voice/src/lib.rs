@@ -241,7 +241,16 @@ struct Shared {
     input_lost: AtomicBool,
     /// Idem pour la sortie.
     output_lost: AtomicBool,
+    /// État de décodage par locuteur : fil réseau, et lectures d'information
+    /// depuis l'interface. **Jamais** le rappel de sortie.
     receivers: Mutex<HashMap<u64, Receiver>>,
+    /// Tampons de lecture par locuteur, tenus à part de `receivers`.
+    ///
+    /// C'est la carte que consulte le rappel de sortie, et lui seul la partage
+    /// avec le fil réseau — qui n'y dépose que des échantillons déjà décodés.
+    /// Les faire cohabiter dans `receivers` mettait le décodage (masquage de
+    /// perte neuronal, reconstruction DRED) sur le chemin du fil temps réel.
+    playouts: Mutex<HashMap<u64, Arc<Mutex<crate::jitter::Playout>>>>,
     /// user_id -> gain de mixage (1.0 = 100 %). Absent = 1.0.
     volumes: Mutex<HashMap<u64, f32>>,
     counters: Counters,
@@ -284,6 +293,7 @@ impl VoiceEngine {
             input_lost: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
             receivers: Mutex::new(HashMap::new()),
+            playouts: Mutex::new(HashMap::new()),
             volumes: Mutex::new(cfg.volumes.clone()),
             counters: Counters::default(),
         });
@@ -456,12 +466,19 @@ impl VoiceEngine {
 
     /// Niveau crête récent de chaque locuteur distant (pour les vumètres).
     pub fn user_levels(&self) -> Vec<(u64, f32)> {
-        self.shared
-            .receivers
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, rx)| (*id, rx.level()))
+        // Le niveau est mesuré au mixage : il vit avec le tampon de lecture.
+        //
+        // Les poignées sont copiées puis le verrou de la carte est relâché
+        // avant de lire les tampons un à un. Tenir la carte pendant ces
+        // lectures, depuis le fil de l'interface appelé à chaque image,
+        // ferait attendre le rappel de sortie derrière elle.
+        let handles: Vec<(u64, Arc<Mutex<crate::jitter::Playout>>)> = {
+            let playouts = self.shared.playouts.lock().unwrap();
+            playouts.iter().map(|(id, p)| (*id, p.clone())).collect()
+        };
+        handles
+            .into_iter()
+            .map(|(id, p)| (id, p.lock().unwrap().level()))
             .collect()
     }
 
@@ -536,10 +553,14 @@ fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<Vec<u8>>) {
         sh.counters.received.fetch_add(1, Ordering::Relaxed);
 
         let mut receivers = sh.receivers.lock().unwrap();
+        let mut fresh = None;
         let rx = receivers.entry(pkt.id).or_insert_with(|| {
             let mut r = Receiver::new();
             let over = sh.jitter_override.load(Ordering::Relaxed);
             r.set_jitter_override(if over == 0 { None } else { Some(over) });
+            // Un locuteur qui apparaît doit être audible : son tampon de
+            // lecture rejoint la carte que consulte le rappel de sortie.
+            fresh = Some(r.playout());
             r
         });
         let (lost, recovered) = rx.push(pkt.counter as u16, &plain);
@@ -549,10 +570,17 @@ fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<Vec<u8>>) {
         if recovered > 0 {
             sh.counters.recovered.fetch_add(recovered, Ordering::Relaxed);
         }
+        if let Some(playout) = fresh {
+            sh.playouts.lock().unwrap().insert(pkt.id, playout);
+        }
 
         // Purge les émetteurs silencieux depuis > 5 s.
         if last_prune.elapsed() > Duration::from_secs(5) {
             receivers.retain(|_, r| r.last_activity().elapsed() < Duration::from_secs(5));
+            // Les deux cartes restent alignées : un tampon oublié ici
+            // continuerait d'être mixé alors que son locuteur est parti.
+            let mut playouts = sh.playouts.lock().unwrap();
+            playouts.retain(|id, _| receivers.contains_key(id));
             last_prune = Instant::now();
         }
     }
@@ -1238,11 +1266,15 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
             let mut mix = [0f32; FRAME_SAMPLES];
             let mut any = false;
             {
+                // Fil temps réel : on ne touche qu'aux tampons déjà décodés.
+                // Le verrou de la carte n'est tenu que le temps de la
+                // parcourir, et celui de chaque tampon que le temps d'y puiser
+                // des échantillons — jamais derrière un décodage.
                 let volumes = sh_cb.volumes.lock().unwrap();
-                let mut receivers = sh_cb.receivers.lock().unwrap();
-                for (id, rx) in receivers.iter_mut() {
+                let playouts = sh_cb.playouts.lock().unwrap();
+                for (id, playout) in playouts.iter() {
                     let gain = volumes.get(id).copied().unwrap_or(1.0);
-                    any |= rx.mix_into(&mut mix, gain);
+                    any |= playout.lock().unwrap().mix_into(&mut mix, gain);
                 }
             }
             // Retour local : test micro (« s'écouter ») et son de test.

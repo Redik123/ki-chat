@@ -317,6 +317,15 @@ struct KiApp {
     /// Une page est déjà demandée : on n'en réclame pas une seconde à
     /// chaque image tant que celle-ci n'est pas arrivée.
     history_pending: bool,
+    /// Hauteur du fil au rendu précédent, en points.
+    ///
+    /// Sert à recaler la vue quand une page s'ajoute **au-dessus** : sans ça
+    /// le contenu grandit vers le haut, la vue reste collée au sommet, et l'on
+    /// perd la ligne qu'on était en train de lire.
+    chat_height: f32,
+    /// Hauteur du fil juste avant qu'une page ne s'y ajoute en tête. Le
+    /// prochain rendu s'en sert pour rattraper le décalage, puis l'efface.
+    history_anchor: Option<f32>,
 
     // UI
     input: String,
@@ -500,6 +509,8 @@ impl KiApp {
             sfx_quiet_until: std::time::Instant::now(),
             history_more: false,
             history_pending: false,
+            chat_height: 0.0,
+            history_anchor: None,
             input: String::new(),
             focus_input: false,
             show_settings: false,
@@ -831,6 +842,9 @@ impl KiApp {
         // dira le contraire dès la première page s'il n'y en a pas.
         self.history_more = true;
         self.history_pending = false;
+        // L'ancre de défilement se rapporte à la hauteur du salon qu'on
+        // quitte : la garder ferait sauter la vue du nouveau.
+        self.history_anchor = None;
         self.focus_input = true;
         self.send(ClientMsg::Join { channel });
         self.send(ClientMsg::History { limit: 100 });
@@ -930,8 +944,9 @@ impl KiApp {
             return;
         }
         let Some(oldest) = self.messages.first().map(|m| m.ts) else { return };
+        let Some(channel) = self.current else { return };
         self.history_pending = true;
-        self.send(ClientMsg::HistoryBefore { before_ts: oldest, limit: 100 });
+        self.send(ClientMsg::HistoryBefore { before_ts: oldest, limit: 100, channel });
     }
 
     /// Entre dans un salon vocal, ou en change.
@@ -1312,7 +1327,16 @@ impl KiApp {
             ServerMsg::History { messages } => {
                 self.messages = messages.into_iter().map(clean_record).collect();
             }
-            ServerMsg::HistoryPage { messages, more } => {
+            ServerMsg::HistoryPage { messages, more, channel } => {
+                // Une page d'un autre salon est jetée : le serveur relit le
+                // fichier hors de l'ordre du flux, si bien qu'elle peut
+                // arriver après un changement de salon. L'appliquer collerait
+                // une conversation en tête d'une autre, et écraserait au
+                // passage le « reste-t-il du passé » du salon courant.
+                // `0` = serveur antérieur, qui ne renseigne pas ce champ.
+                if channel != 0 && self.current != Some(channel) {
+                    return;
+                }
                 self.history_pending = false;
                 self.history_more = more;
                 if messages.is_empty() {
@@ -1328,6 +1352,13 @@ impl KiApp {
                     .map(clean_record)
                     .filter(|m| !known.contains(&(m.user_id, m.ts)))
                     .collect();
+                if older.is_empty() {
+                    return;
+                }
+                // La hauteur d'avant est retenue : le contenu va grandir vers
+                // le haut, et le prochain rendu rattrapera le décalage pour
+                // que la ligne en cours de lecture ne bouge pas d'un pixel.
+                self.history_anchor = Some(self.chat_height);
                 older.append(&mut self.messages);
                 self.messages = older;
             }
@@ -2735,9 +2766,42 @@ impl KiApp {
                 self.messages = messages;
                 ui.add_space(10.0);
             });
+        // Une page vient de s'ajouter au-dessus : on décale la vue d'autant
+        // que le contenu a grandi. Sans ce rattrapage, la vue reste au sommet
+        // du nouveau bloc — l'écran saute, on perd sa ligne, et la condition
+        // « on est tout en haut » reste vraie, ce qui enchaînait les
+        // chargements jusqu'à épuiser le salon.
+        self.chat_height = out.content_size.y;
+        let mut offset_y = out.state.offset.y;
+        if let Some(before) = self.history_anchor.take() {
+            let grown = out.content_size.y - before;
+            if grown > 0.0 {
+                let mut state = out.state;
+                // Borné dès cette image, et pas seulement à la suivante par
+                // egui : un fil qui tenait entièrement dans la fenêtre est
+                // collé en bas, et ajouter `grown` par-dessus l'envoyait
+                // au-delà de la fin — un éclair de vide, puis un retour en bas,
+                // soit l'inverse de ce qu'on cherche.
+                let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                state.offset.y = (state.offset.y + grown).clamp(0.0, max);
+                offset_y = state.offset.y;
+                state.store(ui.ctx(), out.id);
+                ui.ctx().request_repaint();
+            }
+        }
+
         // Arrivé tout en haut, on charge sans attendre le clic : c'est le
-        // geste naturel pour remonter une conversation.
-        if out.state.offset.y <= 24.0 && !self.messages.is_empty() {
+        // geste naturel pour remonter une conversation. Mais seulement si l'on
+        // défile **réellement** : rester en haut ne doit pas suffire, sinon la
+        // demande repart à chaque image. Le bouton explicite couvre le cas où
+        // l'on est déjà en haut sans rien toucher.
+        let scrolling = ui.input(|i| {
+            i.raw_scroll_delta.y.abs() > 0.0 || i.smooth_scroll_delta.y.abs() > 0.0
+        });
+        // `offset_y` et non `out.state.offset.y` : sur l'image du recalage,
+        // ce dernier vaut encore la valeur d'avant correction, c'est-à-dire
+        // ~0 — et l'on redemanderait aussitôt une page de plus.
+        if offset_y <= 24.0 && !self.messages.is_empty() && scrolling {
             want_older = true;
         }
         if want_older {
