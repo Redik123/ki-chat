@@ -112,6 +112,11 @@ pub enum ClientMsg {
         /// Horodatage du plus ancien message déjà affiché (ms Unix).
         before_ts: u64,
         limit: u32,
+        /// Salon visé. Indicatif : le serveur fait autorité avec le salon
+        /// réellement ouvert, et se contente de le renvoyer dans la réponse.
+        /// Absent d'un client antérieur, d'où la valeur par défaut.
+        #[serde(default)]
+        channel: ChannelId,
     },
     /// Le client annonce qu'il entre/sort du vocal du salon courant.
     VoiceState { speaking: bool },
@@ -304,6 +309,15 @@ pub enum ServerMsg {
         /// de redemander à chaque défilement.
         #[serde(default)]
         more: bool,
+        /// Salon d'où vient cette page.
+        ///
+        /// La réponse est produite hors de l'ordre du flux — le serveur relit
+        /// le fichier du salon sur son pool bloquant — si bien qu'elle peut
+        /// arriver après un changement de salon. Sans ce champ, le client
+        /// collait les messages d'une conversation en tête d'une autre.
+        /// `0` = serveur antérieur, le client ne peut alors que faire confiance.
+        #[serde(default)]
+        channel: ChannelId,
     },
     /// État vocal d'un membre du salon.
     VoiceState { user_id: UserId, speaking: bool },
@@ -1041,16 +1055,33 @@ mod tests {
     /// effacerait la conversation à chaque remontée.
     #[test]
     fn history_page_carries_whether_more_remains() {
-        let page = ServerMsg::HistoryPage { messages: Vec::new(), more: true };
+        let page = ServerMsg::HistoryPage { messages: Vec::new(), more: true, channel: 7 };
         let json = serde_json::to_string(&page).unwrap();
         assert!(json.contains("\"type\":\"history_page\""));
 
         // `more` absent (serveur d'une version antérieure) vaut « plus rien
-        // à charger » : le client cesse de demander au lieu de boucler.
+        // à charger » : le client cesse de demander au lieu de boucler. Et
+        // `channel` absent vaut 0, que le client traite comme « je ne peux pas
+        // vérifier » plutôt que comme le salon numéro zéro — qui n'existe pas.
         let msg: ServerMsg =
             serde_json::from_str(r#"{"type":"history_page","messages":[]}"#).unwrap();
-        let ServerMsg::HistoryPage { more, .. } = msg else { panic!("pas un HistoryPage") };
+        let ServerMsg::HistoryPage { more, channel, .. } = msg else {
+            panic!("pas un HistoryPage")
+        };
         assert!(!more);
+        assert_eq!(channel, 0);
+
+        // Symétriquement, un client antérieur n'envoie pas le salon dans sa
+        // demande : le serveur fait de toute façon autorité avec le salon
+        // réellement ouvert, ce champ n'est qu'un écho.
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"history_before","before_ts":42,"limit":50}"#)
+                .unwrap();
+        let ClientMsg::HistoryBefore { channel, limit, .. } = msg else {
+            panic!("pas un HistoryBefore")
+        };
+        assert_eq!(channel, 0);
+        assert_eq!(limit, 50);
     }
 
     /// Et dans l'autre sens : un serveur antérieur ne connaît ni le motif

@@ -842,6 +842,9 @@ impl KiApp {
         // dira le contraire dès la première page s'il n'y en a pas.
         self.history_more = true;
         self.history_pending = false;
+        // L'ancre de défilement se rapporte à la hauteur du salon qu'on
+        // quitte : la garder ferait sauter la vue du nouveau.
+        self.history_anchor = None;
         self.focus_input = true;
         self.send(ClientMsg::Join { channel });
         self.send(ClientMsg::History { limit: 100 });
@@ -941,8 +944,9 @@ impl KiApp {
             return;
         }
         let Some(oldest) = self.messages.first().map(|m| m.ts) else { return };
+        let Some(channel) = self.current else { return };
         self.history_pending = true;
-        self.send(ClientMsg::HistoryBefore { before_ts: oldest, limit: 100 });
+        self.send(ClientMsg::HistoryBefore { before_ts: oldest, limit: 100, channel });
     }
 
     /// Entre dans un salon vocal, ou en change.
@@ -1323,7 +1327,16 @@ impl KiApp {
             ServerMsg::History { messages } => {
                 self.messages = messages.into_iter().map(clean_record).collect();
             }
-            ServerMsg::HistoryPage { messages, more } => {
+            ServerMsg::HistoryPage { messages, more, channel } => {
+                // Une page d'un autre salon est jetée : le serveur relit le
+                // fichier hors de l'ordre du flux, si bien qu'elle peut
+                // arriver après un changement de salon. L'appliquer collerait
+                // une conversation en tête d'une autre, et écraserait au
+                // passage le « reste-t-il du passé » du salon courant.
+                // `0` = serveur antérieur, qui ne renseigne pas ce champ.
+                if channel != 0 && self.current != Some(channel) {
+                    return;
+                }
                 self.history_pending = false;
                 self.history_more = more;
                 if messages.is_empty() {
@@ -2759,12 +2772,19 @@ impl KiApp {
         // « on est tout en haut » reste vraie, ce qui enchaînait les
         // chargements jusqu'à épuiser le salon.
         self.chat_height = out.content_size.y;
+        let mut offset_y = out.state.offset.y;
         if let Some(before) = self.history_anchor.take() {
             let grown = out.content_size.y - before;
             if grown > 0.0 {
                 let mut state = out.state;
-                state.offset.y += grown;
-                self.chat_height = out.content_size.y;
+                // Borné dès cette image, et pas seulement à la suivante par
+                // egui : un fil qui tenait entièrement dans la fenêtre est
+                // collé en bas, et ajouter `grown` par-dessus l'envoyait
+                // au-delà de la fin — un éclair de vide, puis un retour en bas,
+                // soit l'inverse de ce qu'on cherche.
+                let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                state.offset.y = (state.offset.y + grown).clamp(0.0, max);
+                offset_y = state.offset.y;
                 state.store(ui.ctx(), out.id);
                 ui.ctx().request_repaint();
             }
@@ -2778,7 +2798,10 @@ impl KiApp {
         let scrolling = ui.input(|i| {
             i.raw_scroll_delta.y.abs() > 0.0 || i.smooth_scroll_delta.y.abs() > 0.0
         });
-        if out.state.offset.y <= 24.0 && !self.messages.is_empty() && scrolling {
+        // `offset_y` et non `out.state.offset.y` : sur l'image du recalage,
+        // ce dernier vaut encore la valeur d'avant correction, c'est-à-dire
+        // ~0 — et l'on redemanderait aussitôt une page de plus.
+        if offset_y <= 24.0 && !self.messages.is_empty() && scrolling {
             want_older = true;
         }
         if want_older {

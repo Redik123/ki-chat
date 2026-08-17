@@ -700,7 +700,7 @@ fn handle_msg(
             let messages = state.history.recent(channel, limit.min(1000) as usize);
             let _ = tx.send(ServerMsg::History { messages });
         }
-        ClientMsg::HistoryBefore { before_ts, limit } => {
+        ClientMsg::HistoryBefore { before_ts, limit, .. } => {
             let Some(channel) = current_channel(state, user_id) else {
                 let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
                 return;
@@ -712,7 +712,10 @@ fn handle_msg(
             tokio::task::spawn_blocking(move || {
                 let (messages, more) =
                     state.history.before(&state.data_dir, channel, before_ts, limit);
-                let _ = tx.send(ServerMsg::HistoryPage { messages, more });
+                // Le salon voyage avec la page : la réponse sort d'ici hors de
+                // l'ordre du flux, et peut donc arriver après que le
+                // destinataire a changé de salon.
+                let _ = tx.send(ServerMsg::HistoryPage { messages, more, channel });
             });
         }
         ClientMsg::VoiceState { speaking } => {

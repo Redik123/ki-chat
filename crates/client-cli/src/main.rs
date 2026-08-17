@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                ServerMsg::HistoryPage { messages, more } => {
+                ServerMsg::HistoryPage { messages, more, .. } => {
                     println!("* {} message(s) plus anciens :", messages.len());
                     for m in messages {
                         println!("    [{}] {} : {}", m.ts, m.username, m.text);

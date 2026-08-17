@@ -20,6 +20,11 @@ const MAX_PENDING: usize = 3;
 const RESYNC_GAP: u16 = 200;
 /// Taille max du tampon décodé (1 s) — au-delà on jette le plus ancien.
 const READY_CAP: usize = SAMPLE_RATE as usize;
+/// Capacité réservée d'emblée au tampon de lecture : le plafond de latence le
+/// plus large possible (10 trames imposables + 5 de marge). Réservée une fois
+/// pour toutes, le fil réseau n'a plus jamais à réallouer sous le verrou que
+/// le rappel de sortie peut vouloir prendre.
+const READY_PREALLOC: usize = 15 * FRAME_SAMPLES;
 /// Durée nominale d'une trame, en millisecondes.
 const FRAME_MS: f32 = 20.0;
 
@@ -51,7 +56,12 @@ pub struct Playout {
 
 impl Playout {
     fn new() -> Self {
-        Self { ready: VecDeque::new(), primed: false, level: 0.0, prime_frames: 2 }
+        Self {
+            ready: VecDeque::with_capacity(READY_PREALLOC),
+            primed: false,
+            level: 0.0,
+            prime_frames: 2,
+        }
     }
 
     /// Niveau crête récent (0..1) de ce locuteur.
@@ -233,18 +243,28 @@ impl Receiver {
         // Dépôt : la seule section sous verrou, et elle ne fait que recopier
         // des échantillons déjà décodés. Le rappel de sortie ne peut donc
         // attendre ici que quelques microsecondes, jamais un décodage.
+        // Anti-dérive de latence : au-delà de la cible adaptative, on rattrape
+        // en sautant de l'audio ancien. L'écrêtage se fait **avant** le
+        // verrou : un trou réseau de plusieurs secondes fait décoder jusqu'à
+        // RESYNC_GAP trames d'un coup, et recopier ces ~750 Ko sous le verrou
+        // pour les jeter aussitôt aurait remis une allocation et une longue
+        // recopie sur le chemin du rappel de sortie — ce que cette séparation
+        // existe précisément pour éviter.
         let prime = self.prime_frames();
+        let cap = ((prime + 5) * FRAME_SAMPLES).min(READY_CAP);
+        if self.decoded.len() > cap {
+            let excess = self.decoded.len() - cap;
+            self.decoded.drain(..excess);
+        }
         {
             let mut playout = self.playout.lock().unwrap();
             playout.prime_frames = prime;
+            // Ce que le dépôt va faire déborder est retiré d'abord : la
+            // section critique reste bornée par `cap`, sans réallocation.
+            let over = (playout.ready.len() + self.decoded.len()).saturating_sub(cap);
+            let drop = over.min(playout.ready.len());
+            playout.ready.drain(..drop);
             playout.ready.extend(self.decoded.iter().copied());
-            // Anti-dérive de latence : si le tampon dépasse nettement la cible
-            // adaptative, on rattrape en sautant de l'audio ancien.
-            let latency_cap = ((prime + 5) * FRAME_SAMPLES).min(READY_CAP);
-            while playout.ready.len() > latency_cap {
-                let drop = FRAME_SAMPLES.min(playout.ready.len());
-                playout.ready.drain(..drop);
-            }
         }
         self.decoded.clear();
         (lost, recovered)
@@ -412,12 +432,55 @@ mod tests {
         }
         assert_eq!(playout.lock().unwrap().ready.len(), 4 * FRAME_SAMPLES);
 
-        // Et le décodage ne tient pas ce verrou : on peut le garder pendant
-        // qu'une trame de plus est décodée, sans se bloquer mutuellement — le
-        // dépôt attendra la fin de la section, sans avoir décodé sous verrou.
+        // Et consommer par cette poignée retire bien du tampon partagé.
         let mut out = [0f32; FRAME_SAMPLES];
         assert!(playout.lock().unwrap().mix_into(&mut out, 1.0));
         assert_eq!(playout.lock().unwrap().ready.len(), 3 * FRAME_SAMPLES);
+    }
+
+    /// Le décodage ne doit pas se faire sous le verrou du tampon : c'est toute
+    /// la raison d'être de la séparation. On le vérifie en gardant ce verrou
+    /// depuis un autre fil pendant qu'une trame est décodée — `push` doit
+    /// travailler quand même, et n'attendre qu'au moment de déposer.
+    #[test]
+    fn decoding_does_not_happen_under_the_playout_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        let playout = rx.playout();
+        rx.push(0, &encoded_frame(&mut enc, 0.1));
+
+        let held = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let keeper = {
+            let (playout, held, release) = (playout.clone(), held.clone(), release.clone());
+            std::thread::spawn(move || {
+                let _guard = playout.lock().unwrap();
+                held.store(true, Ordering::SeqCst);
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            })
+        };
+        while !held.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        // Le verrou est tenu ailleurs. `push` décode malgré tout ; il ne peut
+        // se bloquer qu'au dépôt, que l'on débloque aussitôt.
+        let frame = encoded_frame(&mut enc, 0.2);
+        let pusher = std::thread::spawn(move || {
+            rx.push(1, &frame);
+            rx
+        });
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        release.store(true, Ordering::SeqCst);
+        keeper.join().unwrap();
+        let _rx = pusher.join().unwrap();
+
+        // Les deux trames ont atteint le tampon.
+        assert_eq!(playout.lock().unwrap().ready.len(), 2 * FRAME_SAMPLES);
     }
 
     #[test]

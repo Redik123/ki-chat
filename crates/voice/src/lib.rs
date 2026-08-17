@@ -467,12 +467,18 @@ impl VoiceEngine {
     /// Niveau crête récent de chaque locuteur distant (pour les vumètres).
     pub fn user_levels(&self) -> Vec<(u64, f32)> {
         // Le niveau est mesuré au mixage : il vit avec le tampon de lecture.
-        self.shared
-            .playouts
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, p)| (*id, p.lock().unwrap().level()))
+        //
+        // Les poignées sont copiées puis le verrou de la carte est relâché
+        // avant de lire les tampons un à un. Tenir la carte pendant ces
+        // lectures, depuis le fil de l'interface appelé à chaque image,
+        // ferait attendre le rappel de sortie derrière elle.
+        let handles: Vec<(u64, Arc<Mutex<crate::jitter::Playout>>)> = {
+            let playouts = self.shared.playouts.lock().unwrap();
+            playouts.iter().map(|(id, p)| (*id, p.clone())).collect()
+        };
+        handles
+            .into_iter()
+            .map(|(id, p)| (id, p.lock().unwrap().level()))
             .collect()
     }
 

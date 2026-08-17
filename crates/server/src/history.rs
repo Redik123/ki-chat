@@ -492,7 +492,7 @@ mod tests {
         // honnêtement qu'il en reste avant.
         let (older, more) = history.before(&dir, 1, 101, 100);
         assert!(more, "il reste des messages plus anciens à charger");
-        let sent = ki_protocol::ServerMsg::HistoryPage { messages: older, more };
+        let sent = ki_protocol::ServerMsg::HistoryPage { messages: older, more, channel: 1 };
         assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
 
         std::fs::remove_dir_all(&dir).ok();
