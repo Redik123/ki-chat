@@ -500,6 +500,10 @@ impl AppState {
     /// voir qui est là, y compris ceux qui ne sont dans aucun vocal.
     pub fn roster(&self) -> Vec<Member> {
         let avatars = self.accounts.avatar_hashes();
+        let connected: std::collections::HashSet<UserId> = {
+            let users = self.users.lock().unwrap();
+            users.keys().copied().collect()
+        };
         let users = self.users.lock().unwrap();
         let mut members: Vec<Member> = users
             .iter()
@@ -513,8 +517,30 @@ impl AppState {
                 roles: u.roles.clone(),
                 color: u.color,
                 rank: u.rank,
+                online: true,
             })
             .collect();
+        drop(users);
+
+        // Les comptes hors ligne (non bannis) complètent le tableau : on voit
+        // toute la communauté, pas seulement qui est là en ce moment.
+        for account in self.accounts.list(&self.roles) {
+            if account.banned || connected.contains(&account.user_id) {
+                continue;
+            }
+            members.push(Member {
+                user_id: account.user_id,
+                username: account.username,
+                speaking: false,
+                admin: account.admin,
+                avatar: avatars.get(&account.user_id).cloned(),
+                voice: None,
+                roles: account.roles.clone(),
+                color: self.roles.color_of(&account.roles),
+                rank: account.rank,
+                online: false,
+            });
+        }
         members.sort_by(|a, b| a.username.to_lowercase().cmp(&b.username.to_lowercase()));
         members
     }

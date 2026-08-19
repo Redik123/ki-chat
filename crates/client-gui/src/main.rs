@@ -10,6 +10,7 @@ mod photos;
 mod ptt;
 mod secret;
 mod servers;
+mod sfxgen;
 mod theme;
 mod ui;
 mod update;
@@ -301,17 +302,28 @@ struct KiApp {
     /// Tout le monde sur le serveur, pas seulement le salon courant.
     members: Vec<Member>,
     messages: Vec<ChatRecord>,
-    /// Effets sonores chargés au démarrage : nom court -> PCM 48 kHz mono.
+    /// Effets sonores : nom court -> PCM 48 kHz mono. Les défauts synthétisés
+    /// sont toujours là ; un .wav déposé dans « sons » les remplace.
     sounds: HashMap<String, Vec<f32>>,
+    /// Événements dont le son vient d'un fichier (pour l'afficher).
+    custom_sfx: std::collections::HashSet<String>,
+    /// Événements coupés individuellement dans les réglages.
+    sfx_muted: std::collections::HashSet<String>,
     sfx_on: bool,
     sfx_volume: f32,
+    /// La fenêtre a-t-elle le focus ? (sons de message + notification)
+    window_focused: bool,
+    /// Demande de clignotement de la barre des tâches à honorer.
+    wants_attention: bool,
     /// Occupants du salon vocal à l'image précédente : c'est leur écart qui
     /// révèle une arrivée ou un départ. Les messages `UserJoined`/`UserLeft`
     /// portent sur le serveur entier, pas sur le salon vocal.
     prev_voice_peers: std::collections::HashSet<UserId>,
-    /// Sons étouffés jusque-là : entrer dans un salon peuplé déclencherait
-    /// sinon six sons d'arrivée d'un coup.
-    sfx_quiet_until: std::time::Instant,
+    /// Salon vocal de l'image précédente : quand il change, les occupants du
+    /// nouveau salon sont adoptés EN SILENCE (entrer dans un salon peuplé ne
+    /// déclenche pas six sons d'arrivée) — sans fenêtre temporelle, qui
+    /// mangeait les sons dès qu'on changeait de salon rapidement.
+    prev_voice_channel: Option<ChannelId>,
     /// Reste-t-il du passé à remonter dans ce salon ?
     history_more: bool,
     /// Une page est déjà demandée : on n'en réclame pas une seconde à
@@ -456,6 +468,8 @@ struct VoiceSnapshot {
 
 impl KiApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // (le littéral Self plus bas est affecté à `app` pour charger les
+        // sons juste après la construction)
         theme::install(&cc.egui_ctx);
         // Les photos s'accumulent au fil des changements : on borne le
         // dossier une fois par démarrage.
@@ -480,7 +494,7 @@ impl KiApp {
         // lanceur s'affiche sans l'attendre.
         let refused = Some(get("update_skipped", "")).filter(|v| !v.is_empty());
 
-        Self {
+        let mut app = Self {
             updater: update::Updater::start(refused, cc.egui_ctx.clone()),
             url: active.map(|s| s.address.clone()).unwrap_or_default(),
             username: active
@@ -521,11 +535,19 @@ impl KiApp {
             voice_channel: None,
             members: Vec::new(),
             messages: Vec::new(),
-            sounds: load_sounds(),
+            sounds: HashMap::new(),   // rempli par reload_sounds() ci-dessous
+            custom_sfx: std::collections::HashSet::new(),
+            sfx_muted: get("sfx_muted", "")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
             sfx_on: get("sfx_on", "on") == "on",
             sfx_volume: get("sfx_volume", "0.6").parse().unwrap_or(0.6),
+            window_focused: true,
+            wants_attention: false,
             prev_voice_peers: std::collections::HashSet::new(),
-            sfx_quiet_until: std::time::Instant::now(),
+            prev_voice_channel: None,
             history_more: false,
             history_pending: false,
             server_fingerprint: String::new(),
@@ -602,7 +624,24 @@ impl KiApp {
             labo_stats: Default::default(),
             labo_texture: None,
             device: DeviceState::new(),
-        }
+        };
+        app.reload_sounds();
+        app
+    }
+
+    /// (Re)charge les effets sonores : les défauts synthétisés d'abord, puis
+    /// les .wav du dossier « sons » qui remplacent ceux du même nom.
+    fn reload_sounds(&mut self) {
+        let disk = load_sounds();
+        self.custom_sfx = disk.keys().cloned().collect();
+        let mut sounds = sfxgen::defaults();
+        sounds.extend(disk);
+        tracing::info!(
+            "effets sonores : {} chargés dont {} personnalisés",
+            sounds.len(),
+            self.custom_sfx.len()
+        );
+        self.sounds = sounds;
     }
 
     /// Démarre la boucle locale du labo vidéo (S1a) : capture de l'écran
@@ -940,7 +979,7 @@ impl KiApp {
     /// Silencieux quand le son n'existe pas : chacun dépose les fichiers
     /// qu'il veut, et il ne manque rien à celui qui n'en met aucun.
     fn play_sfx(&self, name: &str) {
-        if !self.sfx_on || std::time::Instant::now() < self.sfx_quiet_until {
+        if !self.sfx_on || self.sfx_muted.contains(name) {
             return;
         }
         let Some(pcm) = self.sounds.get(name) else { return };
@@ -959,6 +998,7 @@ impl KiApp {
     fn update_voice_peers(&mut self) {
         let Some(mine) = self.voice_channel else {
             self.prev_voice_peers.clear();
+            self.prev_voice_channel = None;
             return;
         };
         let now: std::collections::HashSet<UserId> = self
@@ -967,6 +1007,13 @@ impl KiApp {
             .filter(|m| m.voice == Some(mine) && Some(m.user_id) != self.my_id)
             .map(|m| m.user_id)
             .collect();
+        // Je viens d'arriver dans CE salon : ses occupants sont adoptés en
+        // silence — seuls les mouvements ULTÉRIEURS feront du bruit.
+        if self.prev_voice_channel != Some(mine) {
+            self.prev_voice_channel = Some(mine);
+            self.prev_voice_peers = now;
+            return;
+        }
         if now.difference(&self.prev_voice_peers).next().is_some() {
             self.play_sfx(sfx::PEER_JOIN);
         }
@@ -1006,9 +1053,9 @@ impl KiApp {
         self.voice_channel = Some(channel);
         self.set_voice_intent(Some(channel));
         self.play_sfx(sfx::SELF_JOIN);
-        // Le roster arrive juste après : sans ce répit, entrer dans un salon
-        // déjà peuplé jouerait un son d'arrivée par occupant.
-        self.sfx_quiet_until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        // Le prochain passage d'update_voice_peers adoptera les occupants du
+        // nouveau salon en silence (voir prev_voice_channel).
+        self.prev_voice_channel = None;
         self.prev_voice_peers.clear();
         self.send(ClientMsg::JoinVoice { channel, password: None });
     }
@@ -1364,10 +1411,6 @@ impl KiApp {
                 self.welcomed = true;
                 self.connecting = false;
                 self.error = None;
-                // Le roster et l'historique arrivent dans la foulée : sans
-                // ce répit, se connecter déclencherait une salve de sons.
-                self.sfx_quiet_until =
-                    std::time::Instant::now() + std::time::Duration::from_secs(2);
                 self.remember_connection();
                 self.my_id = Some(user_id);
                 // `is_admin` reste la réponse d'un serveur antérieur aux
@@ -1410,10 +1453,14 @@ impl KiApp {
                 text,
                 ts,
             } => {
-                // Jamais de son pour ses propres messages : on sait qu'on
-                // vient d'écrire.
-                if Some(user_id) != self.my_id {
+                // Jamais de son pour ses propres messages ; et pour ceux des
+                // autres, seulement quand la fenêtre n'a pas le focus — en
+                // pleine conversation, un bip par message serait insupportable.
+                // La barre des tâches clignote en prime : le « quoi de neuf »
+                // se voit même en jeu.
+                if Some(user_id) != self.my_id && !self.window_focused {
                     self.play_sfx(sfx::MESSAGE);
+                    self.wants_attention = true;
                 }
                 self.messages.push(ChatRecord {
                     user_id,
@@ -2688,27 +2735,71 @@ impl KiApp {
             if let Some(role) = self.top_role_name(m) {
                 ui.label(RichText::new(role).color(TEXT_FAINT).size(11.0));
             }
-            ui.add_space(4.0);
-            let mut pct = self.volume_of(m.user_id) * 100.0;
-            if ui
-                .add(
-                    egui::Slider::new(&mut pct, 0.0..=200.0)
-                        .suffix(" %")
-                        .integer()
-                        .text("volume"),
-                )
-                .changed()
-            {
-                self.set_volume(m.user_id, pct / 100.0);
+            if !m.online {
+                ui.label(RichText::new("hors ligne").color(TEXT_FAINT).size(11.0));
             }
-            if ui::button(ui, Icon::Refresh, "Remettre à 100 %").clicked() {
-                self.set_volume(m.user_id, 1.0);
+            // Le volume ne concerne que quelqu'un qu'on peut entendre.
+            if m.online {
+                ui.add_space(4.0);
+                let mut pct = self.volume_of(m.user_id) * 100.0;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut pct, 0.0..=200.0)
+                            .suffix(" %")
+                            .integer()
+                            .text("volume"),
+                    )
+                    .changed()
+                {
+                    self.set_volume(m.user_id, pct / 100.0);
+                }
+                if ui::button(ui, Icon::Refresh, "Remettre à 100 %").clicked() {
+                    self.set_volume(m.user_id, 1.0);
+                }
             }
+
+            // Attribution de rôles : cocher/décocher, borné par son propre
+            // rang — on ne donne pas un rôle au-dessus de soi.
+            let can_roles = self.can(ki_protocol::perm::MANAGE_ROLES)
+                && self.outranks(m.rank)
+                && !self.roles.is_empty();
+            if can_roles {
+                ui.add_space(4.0);
+                ui::hairline(ui);
+                ui.add_space(4.0);
+                ui.menu_button("Rôles", |ui| {
+                    ui.set_width(200.0);
+                    let mut roles_sorted = self.roles.clone();
+                    roles_sorted.sort_by(|a, b| b.rank.cmp(&a.rank));
+                    for role in &roles_sorted {
+                        let assignable = self.outranks(role.rank);
+                        let mut has = m.roles.contains(&role.id);
+                        let label = RichText::new(&role.name)
+                            .color(theme::member_color(role.color, &role.name));
+                        if ui
+                            .add_enabled(assignable, egui::Checkbox::new(&mut has, label))
+                            .changed()
+                        {
+                            let mut new_roles = m.roles.clone();
+                            if has {
+                                new_roles.push(role.id);
+                            } else {
+                                new_roles.retain(|id| *id != role.id);
+                            }
+                            self.send(ClientMsg::AdminSetUserRoles {
+                                username: m.username.clone(),
+                                roles: new_roles,
+                            });
+                        }
+                    }
+                });
+            }
+
             // Chaque action n'apparaît que si elle aboutirait : la permission
             // ET le rang. Un bouton grisé n'invite qu'à un clic qui échoue,
             // là où la hiérarchie se lit déjà dans les badges de rôle.
             let can_moderate = self.outranks(m.rank);
-            let show_kick = can_moderate && self.can(ki_protocol::perm::KICK);
+            let show_kick = can_moderate && self.can(ki_protocol::perm::KICK) && m.online;
             let show_ban = can_moderate && self.can(ki_protocol::perm::BAN);
             if show_kick || show_ban {
                 ui.add_space(4.0);
@@ -2753,10 +2844,13 @@ impl KiApp {
             )
             .show(ctx, |ui| {
                 let members = self.members.clone();
+                let (online, offline): (Vec<&Member>, Vec<&Member>) =
+                    members.iter().partition(|m| m.online);
+
                 ui.horizontal(|ui| {
                     ui::section_label(ui, "En ligne");
                     ui.label(
-                        RichText::new(members.len().to_string())
+                        RichText::new(online.len().to_string())
                             .color(theme::BORDER_STRONG)
                             .size(11.0)
                             .strong(),
@@ -2765,7 +2859,7 @@ impl KiApp {
                 ui.add_space(2.0);
 
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    for m in &members {
+                    for m in &online {
                         let is_me = Some(m.user_id) == self.my_id;
                         // Le vumètre n'a de sens que si l'on partage le salon
                         // vocal de la personne : sinon on ne l'entend pas.
@@ -2784,6 +2878,29 @@ impl KiApp {
                         let response =
                             member_row(ui, m, speaking && audible, is_me, level, volume, photo);
                         self.member_menu(response, m, is_me);
+                    }
+
+                    // Toute la communauté, pas seulement les présents : les
+                    // hors-ligne en dessous, éteints mais bien là — et le
+                    // clic droit (rôles, bannir…) marche aussi sur eux.
+                    if !offline.is_empty() {
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui::section_label(ui, "Hors ligne");
+                            ui.label(
+                                RichText::new(offline.len().to_string())
+                                    .color(theme::BORDER_STRONG)
+                                    .size(11.0)
+                                    .strong(),
+                            );
+                        });
+                        ui.add_space(2.0);
+                        for m in &offline {
+                            let photo = self.avatar_of(m.user_id);
+                            let response =
+                                member_row(ui, m, false, false, 0.0, 1.0, photo);
+                            self.member_menu(response, m, false);
+                        }
                     }
                 });
             });
@@ -3380,7 +3497,22 @@ impl KiApp {
                         ui.add_space(12.0);
                         ui::hairline(ui);
                         ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Play, "Effets sonores");
+                        ui::group_title(ui, Icon::Play, "Sons & notifications");
+                        // L'état du système, en clair : si un jour « pas de
+                        // son », cette ligne dit immédiatement où chercher.
+                        let engine_ok = self
+                            .conn
+                            .as_ref()
+                            .is_some_and(|c| c.engine.lock().unwrap().is_some());
+                        ui::hint(
+                            ui,
+                            &format!(
+                                "{} sons chargés ({} perso) · sortie audio {}",
+                                self.sounds.len(),
+                                self.custom_sfx.len(),
+                                if engine_ok { "active" } else { "INACTIVE — connecte-toi" },
+                            ),
+                        );
                         ui.checkbox(&mut self.sfx_on, "Jouer les sons");
                         if self.sfx_on {
                             let mut pct = self.sfx_volume * 100.0;
@@ -3395,21 +3527,76 @@ impl KiApp {
                             {
                                 self.sfx_volume = pct / 100.0;
                             }
+                            ui.add_space(6.0);
+
+                            // Un réglage par événement : à couper, à écouter,
+                            // et l'étiquette dit si le son est personnalisé.
+                            for (name, label) in [
+                                (sfx::MESSAGE, "Message reçu (fenêtre à l'arrière-plan)"),
+                                (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
+                                (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
+                                (sfx::SELF_JOIN, "Je rejoins un vocal"),
+                                (sfx::SELF_LEAVE, "Je quitte le vocal"),
+                                (sfx::MUTE, "Micro coupé"),
+                                (sfx::UNMUTE, "Micro réactivé"),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    let mut enabled = !self.sfx_muted.contains(name);
+                                    if ui.checkbox(&mut enabled, label).changed() {
+                                        if enabled {
+                                            self.sfx_muted.remove(name);
+                                        } else {
+                                            self.sfx_muted.insert(name.to_string());
+                                        }
+                                    }
+                                    if self.custom_sfx.contains(name) {
+                                        ui.label(
+                                            RichText::new("perso")
+                                                .color(ACCENT)
+                                                .size(10.5),
+                                        );
+                                    }
+                                    if ui.small_button("▶").on_hover_text("écouter").clicked()
+                                    {
+                                        // La préécoute ignore la coupure de
+                                        // l'événement, pas le volume.
+                                        if let (Some(pcm), Some(conn)) =
+                                            (self.sounds.get(name), &self.conn)
+                                        {
+                                            if let Some(engine) =
+                                                conn.engine.lock().unwrap().as_ref()
+                                            {
+                                                engine.play_effect(pcm, self.sfx_volume);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            if self.conn.is_none() {
+                                ui::hint(ui, "connecte-toi pour la préécoute ▶");
+                            }
                         }
-                        if self.sounds.is_empty() {
-                            ui::hint(
-                                ui,
-                                "aucun son chargé — dépose des .wav dans le dossier « sons »",
-                            );
-                        } else {
-                            let mut names: Vec<&str> =
-                                self.sounds.keys().map(String::as_str).collect();
-                            names.sort_unstable();
-                            ui::hint(ui, &format!("chargés : {}", names.join(", ")));
-                        }
-                        if ui::button(ui, Icon::Refresh, "Recharger les sons").clicked() {
-                            self.sounds = load_sounds();
-                        }
+
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui::button(ui, Icon::Paperclip, "Dossier des sons").clicked() {
+                                if let Some(dir) = sound_dirs().into_iter().nth(1) {
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    let _ = std::process::Command::new("explorer")
+                                        .arg(&dir)
+                                        .spawn();
+                                }
+                            }
+                            if ui::button(ui, Icon::Refresh, "Recharger").clicked() {
+                                self.reload_sounds();
+                            }
+                        });
+                        ui::hint(
+                            ui,
+                            "les sons par défaut sont intégrés ; dépose des .wav (48 kHz \
+                             conseillé) nommés message, arrivee, depart, rejoint-vocal, \
+                             quitte-vocal, micro-coupe, micro-actif pour les remplacer",
+                        );
 
                         // --- Réseau & qualité ---
                         ui.add_space(12.0);
@@ -5070,8 +5257,13 @@ fn member_row(
     ui::paint_avatar(painter, avatar_rect, &member.username, speaking, photo, theme::BG_SIDE);
 
     // La couleur vient du rôle quand le serveur en donne une ; sinon
-    // c'est le hachage du pseudo, comme avant les rôles.
-    let color = theme::member_color(member.color, &member.username);
+    // c'est le hachage du pseudo, comme avant les rôles. Hors ligne, la
+    // couleur s'éteint : présent dans la liste, absent de la pièce.
+    let color = if member.online {
+        theme::member_color(member.color, &member.username)
+    } else {
+        theme::member_color(member.color, &member.username).gamma_multiply(0.45)
+    };
     let font = egui::FontId::proportional(13.5);
     let galley = ui.fonts(|f| f.layout_no_wrap(member.username.clone(), font, color));
     let name_width = galley.size().x;
@@ -5445,8 +5637,20 @@ impl eframe::App for KiApp {
         let was_maximized = self.maximized;
         self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(was_maximized));
 
+        // Focus : conditionne le son des messages et la notification.
+        self.window_focused = ctx.input(|i| i.focused);
+
         self.poll_events();
         self.update_voice();
+
+        // Un message est arrivé pendant que la fenêtre était à l'arrière-plan :
+        // la barre des tâches clignote (l'équivalent sobre d'une notification).
+        if self.wants_attention {
+            self.wants_attention = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
 
         if self.welcomed {
             // Échap ferme la fenêtre la plus « en avant ».
@@ -5484,6 +5688,10 @@ impl eframe::App for KiApp {
         storage.set_string("window", String::new());
         storage.set_string("sfx_on", if self.sfx_on { "on" } else { "off" }.into());
         storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
+        storage.set_string(
+            "sfx_muted",
+            self.sfx_muted.iter().cloned().collect::<Vec<_>>().join(","),
+        );
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());

@@ -1,5 +1,11 @@
 # Plan : partage d'écran « Go Live » — ki-chat
 
+> **⏸ CHANTIER EN PAUSE** (décision du 16/08/2026) : la vidéo reprendra quand
+> le reste de ki-chat sera jugé parfait. Acquis conservés : S0 (correctifs
+> transport, bénéfice vocal permanent), S0.5 (porte de build openh264 : GO)
+> et S1a (boucle locale + bouton labo dans ⚙) restent dans le dépôt, prêts
+> pour la reprise en S1b.
+
 *Version 2 du 16/08/2026 — nourrie par trois rapports de recherche (capture
 Windows, codec, transport QUIC lu dans les sources de quinn), puis passée au
 crible par une revue adversariale (15 amendements intégrés). Statut :

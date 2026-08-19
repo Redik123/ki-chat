@@ -16,6 +16,10 @@ pub type RoleId = u32;
 pub type Perms = u64;
 
 /// Les permissions, une par bit.
+fn default_true() -> bool {
+    true
+}
+
 pub mod perm {
     pub const VIEW_CHANNEL: u64 = 1 << 0;
     pub const SEND_MESSAGE: u64 = 1 << 1;
@@ -809,6 +813,11 @@ pub struct Member {
     pub voice: Option<ChannelId>,
     #[serde(default)]
     pub roles: Vec<RoleId>,
+    /// Vrai si la personne est connectée au serveur. Le roster liste AUSSI
+    /// les comptes hors ligne (non bannis) : c'est ce champ qui les sépare.
+    /// Défaut `true` : un vieux serveur n'envoie que des connectés.
+    #[serde(default = "default_true")]
+    pub online: bool,
     /// Couleur du pseudo, résolue par le serveur depuis le rôle le mieux
     /// classé qui en porte une. `None` = le client retombe sur son hachage
     /// de pseudo habituel, comme avant les rôles.
