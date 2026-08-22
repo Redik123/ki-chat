@@ -2335,10 +2335,21 @@ impl KiApp {
                         (true, false) => "Micro perdu",
                         _ => "Sortie audio perdue",
                     };
+                    // Le cas qui dure : un jeu (Valorant…) a pris le
+                    // périphérique en mode exclusif — Windows refusera nos
+                    // réouvertures tant qu'il le tient. La reconnexion seule
+                    // n'y peut rien : c'est une case à décocher côté Windows,
+                    // autant le dire ici plutôt que laisser mariner.
                     ui::banner(
                         ui,
                         Tone::Warn,
-                        &format!("{what} — reconnexion automatique en cours…"),
+                        &format!(
+                            "{what} — reconnexion automatique en cours… Si ça arrive \
+                             quand un jeu se lance et que ça dure : Paramètres son \
+                             Windows → ton micro → Propriétés → Avancé → décoche \
+                             « Autoriser les applications à prendre le contrôle \
+                             exclusif »."
+                        ),
                         false,
                     );
                     ui.add_space(6.0);
