@@ -3203,6 +3203,27 @@ impl KiApp {
                     .show(ui, |ui| {
                         // --- Périphériques ---
                         ui::group_title(ui, Icon::Headphones, "Périphériques");
+                        // Le remède logiciel au « il faut débrancher/rebrancher
+                        // le casque » : certains pilotes (Razer…) laissent un
+                        // flux zombie après le passage d'un jeu.
+                        if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
+                            if let Some(conn) = &self.conn {
+                                if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
+                                    engine.reset_audio_devices();
+                                    self.info = Some(
+                                        "micro et sortie rouverts — comme un \
+                                         débranchement/rebranchement du casque"
+                                            .into(),
+                                    );
+                                }
+                            }
+                        }
+                        ui::hint(
+                            ui,
+                            "si le son part en vrille quand un jeu se lance ou se ferme, \
+                             ce bouton rouvre tout sans toucher au câble",
+                        );
+                        ui.add_space(6.0);
                         let device_combo = |ui: &mut egui::Ui,
                                             id: &str,
                                             label: &str,

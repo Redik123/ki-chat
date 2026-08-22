@@ -256,6 +256,10 @@ struct Shared {
     /// Débrancher un micro USB, ou un casque sans fil qui s'endort, coupe le
     /// flux cpal sans que rien ne le relance : ces drapeaux permettent de le
     /// dire à l'utilisateur au lieu de le laisser parler dans le vide.
+    /// Génération de réinitialisation audio : quand elle change, les boucles
+    /// capture et lecture ferment et rouvrent leur périphérique — l'effet
+    /// d'un débranchement/rebranchement, sans toucher au câble.
+    audio_reset: std::sync::atomic::AtomicU64,
     input_lost: AtomicBool,
     /// On capte, mais sur un périphérique de repli : celui qui est réglé n'a
     /// pas été trouvé. C'est un état distinct de la perte — le son passe.
@@ -313,6 +317,7 @@ impl VoiceEngine {
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
+            audio_reset: std::sync::atomic::AtomicU64::new(0),
             input_lost: AtomicBool::new(false),
             input_fallback: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
@@ -435,6 +440,13 @@ impl VoiceEngine {
     }
 
     /// Active/coupe le retour local du micro (« s'écouter »).
+    /// Ferme et rouvre le micro ET la sortie — l'effet d'un débranchement/
+    /// rebranchement du casque, sans toucher au câble. Pour les pilotes
+    /// (Razer & co) qui laissent un flux zombie après le passage d'un jeu.
+    pub fn reset_audio_devices(&self) {
+        self.shared.audio_reset.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn set_loopback(&self, on: bool) {
         self.shared.loopback.store(on, Ordering::Relaxed);
         if !on {
@@ -836,19 +848,45 @@ fn capture_loop(
         let mut resampler = CubicResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
         let mut last_chunk = Instant::now();
         let mut last_probe = Instant::now();
+        // L'état du monde au moment de l'ouverture : générations de reset et
+        // empreinte du périphérique. Toute divergence ultérieure = réouverture.
+        let my_epoch = sh.audio_reset.load(Ordering::Relaxed);
+        let my_signature = device_signature(device_name.as_deref(), true);
 
     while !is_shutdown(&sh) {
-        // Sur un repli, on guette le retour du périphérique demandé. Sans
-        // cette veille, un casque rebranché n'était jamais repris : le repli
-        // fonctionnant, plus rien ne provoquait de réouverture.
-        if fallback && last_probe.elapsed() > Duration::from_secs(3) {
+        // Réinitialisation demandée (bouton « Réinitialiser l'audio ») :
+        // l'équivalent logiciel du débranchement/rebranchement du casque.
+        if sh.audio_reset.load(Ordering::Relaxed) != my_epoch {
+            tracing::info!("réinitialisation audio demandée — réouverture du micro");
+            drop(stream);
+            continue 'device;
+        }
+        if last_probe.elapsed() > Duration::from_secs(3) {
             last_probe = Instant::now();
-            if let Some(wanted) = device_name.as_deref() {
-                if device_present(&cpal::default_host(), wanted, true) {
-                    tracing::info!("micro « {wanted} » de retour — reprise");
-                    drop(stream);
-                    continue 'device;
+            // Sur un repli, on guette le retour du périphérique demandé. Sans
+            // cette veille, un casque rebranché n'était jamais repris : le
+            // repli fonctionnant, plus rien ne provoquait de réouverture.
+            if fallback {
+                if let Some(wanted) = device_name.as_deref() {
+                    if device_present(&cpal::default_host(), wanted, true) {
+                        tracing::info!("micro « {wanted} » de retour — reprise");
+                        drop(stream);
+                        continue 'device;
+                    }
                 }
+            }
+            // Le périphérique ou son format a changé sous nos pieds (un jeu
+            // qui se lance, Synapse qui rebrasse…) : le flux en cours peut
+            // être un zombie qui capte dans le vide. On le rouvre.
+            let now_sig = device_signature(device_name.as_deref(), true);
+            if now_sig != my_signature {
+                tracing::warn!(
+                    "micro : périphérique ou format modifié ({:?} -> {:?}) — réouverture",
+                    my_signature,
+                    now_sig
+                );
+                drop(stream);
+                continue 'device;
             }
         }
         let chunk = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -962,6 +1000,29 @@ fn capture_loop(
 /// périphérique demandé étant absent.
 type OpenedInput =
     (cpal::Stream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>, bool);
+
+/// Empreinte du périphérique tel qu'il se présenterait si on l'ouvrait
+/// maintenant : identité + format par défaut. Quand elle diverge de celle du
+/// flux en cours, c'est qu'un logiciel (Synapse, un jeu…) a rebrassé les
+/// périphériques ou changé le format — le flux ouvert peut alors être un
+/// zombie : il tourne, mais le son ne passe plus. On rouvre.
+fn device_signature(device_name: Option<&str>, input: bool) -> Option<String> {
+    let host = cpal::default_host();
+    let (device, fallback) = pick_device(&host, device_name, input);
+    let device = device?;
+    let cfg = if input {
+        device.default_input_config().ok()?
+    } else {
+        device.default_output_config().ok()?
+    };
+    Some(format!(
+        "{}|{}|{}|{}",
+        device.name().unwrap_or_default(),
+        cfg.sample_rate().0,
+        cfg.channels(),
+        fallback,
+    ))
+}
 
 fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
     // L'hôte est ré-interrogé à chaque tentative : c'est ce qui permet de
@@ -1335,18 +1396,42 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
         let mut last_seen = ticks.load(Ordering::Relaxed);
         let mut idle_rounds = 0u32;
         let mut last_probe = Instant::now();
+        let my_epoch = sh.audio_reset.load(Ordering::Relaxed);
+        let my_signature = device_signature(device_name.as_deref(), false);
         while !is_shutdown(&sh) {
             std::thread::sleep(Duration::from_millis(500));
-            // Retour du casque demandé : on le reprend, le repli n'étant
-            // qu'un pis-aller que rien d'autre ne viendrait interrompre.
-            if fallback && last_probe.elapsed() > Duration::from_secs(3) {
+            // Réinitialisation demandée : rouvrir, comme un rebranchement.
+            if sh.audio_reset.load(Ordering::Relaxed) != my_epoch {
+                tracing::info!("réinitialisation audio demandée — réouverture de la sortie");
+                drop(stream);
+                continue 'device;
+            }
+            if last_probe.elapsed() > Duration::from_secs(3) {
                 last_probe = Instant::now();
-                if let Some(wanted) = device_name.as_deref() {
-                    if device_present(&cpal::default_host(), wanted, false) {
-                        tracing::info!("sortie « {wanted} » de retour — reprise");
-                        drop(stream);
-                        continue 'device;
+                // Retour du casque demandé : on le reprend, le repli n'étant
+                // qu'un pis-aller que rien d'autre ne viendrait interrompre.
+                if fallback {
+                    if let Some(wanted) = device_name.as_deref() {
+                        if device_present(&cpal::default_host(), wanted, false) {
+                            tracing::info!("sortie « {wanted} » de retour — reprise");
+                            drop(stream);
+                            continue 'device;
+                        }
                     }
+                }
+                // Périphérique ou format modifié (jeu qui se lance ou se
+                // ferme, Synapse qui rebrasse) : le flux peut jouer dans le
+                // vide sans une erreur — le zombie qui obligeait à
+                // débrancher/rebrancher le casque. On rouvre nous-mêmes.
+                let now_sig = device_signature(device_name.as_deref(), false);
+                if now_sig != my_signature {
+                    tracing::warn!(
+                        "sortie : périphérique ou format modifié ({:?} -> {:?}) — réouverture",
+                        my_signature,
+                        now_sig
+                    );
+                    drop(stream);
+                    continue 'device;
                 }
             }
             let now = ticks.load(Ordering::Relaxed);
