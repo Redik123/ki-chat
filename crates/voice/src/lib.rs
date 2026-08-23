@@ -11,6 +11,8 @@
 pub mod effects;
 mod jitter;
 mod resample;
+#[cfg(windows)]
+mod wasapi;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -84,6 +86,13 @@ pub struct VoiceConfig {
     pub input_device: Option<String>,
     /// Périphérique de sortie à utiliser (nom cpal), None = défaut système.
     pub output_device: Option<String>,
+    /// Moteur audio Windows natif (WASAPI direct) : rôle communication,
+    /// conversion de format par Windows, notifications. Sans effet hors
+    /// Windows, et retombe sur cpal à la moindre erreur d'ouverture.
+    pub native_audio: bool,
+    /// Mode brut du micro : demande à Windows de court-circuiter les effets
+    /// tiers (Sonar, Nahimic…). Moteur natif seulement.
+    pub raw_mic: bool,
     /// Mode de suppression de bruit (NOISE_OFF / NOISE_RNNOISE).
     pub noise_mode: u8,
     /// Volumes par émetteur (user_id -> gain, 1.0 = 100 %), appliqués au mixage.
@@ -119,6 +128,8 @@ impl VoiceConfig {
             bitrate: 64_000,
             input_device: None,
             output_device: None,
+            native_audio: cfg!(windows),
+            raw_mic: false,
             noise_mode: NOISE_RNNOISE,
             volumes: HashMap::new(),
             input_gain: 1.0,
@@ -408,12 +419,16 @@ impl VoiceEngine {
             let user_id = cfg.user_id;
             let bitrate = cfg.bitrate;
             let input_device = cfg.input_device.clone();
+            let native = cfg.native_audio;
+            let raw = cfg.raw_mic;
             let send = send.clone();
             if cfg.tone {
                 threads.push(std::thread::spawn(move || tone_loop(sh, user_id, bitrate, send)));
             } else {
                 threads.push(std::thread::spawn(move || {
-                    if let Err(e) = capture_loop(sh, user_id, bitrate, input_device, send) {
+                    if let Err(e) =
+                        capture_loop(sh, user_id, bitrate, input_device, native, raw, send)
+                    {
                         tracing::error!("capture micro : {e:#}");
                     }
                 }));
@@ -424,8 +439,9 @@ impl VoiceEngine {
         if !cfg.no_playback {
             let sh = shared.clone();
             let output_device = cfg.output_device.clone();
+            let native = cfg.native_audio;
             threads.push(std::thread::spawn(move || {
-                if let Err(e) = playback_loop(sh, output_device) {
+                if let Err(e) = playback_loop(sh, output_device, native) {
                     tracing::error!("sortie audio : {e:#}");
                 }
             }));
@@ -875,8 +891,14 @@ fn capture_loop(
     user_id: u64,
     bitrate: i32,
     device_name: Option<String>,
+    native: bool,
+    raw: bool,
     send: DatagramSend,
 ) -> anyhow::Result<()> {
+    // Les notifications de périphériques accélèrent la sonde d'empreinte.
+    // Une seule écoute pour le processus ; l'appel est idempotent.
+    #[cfg(windows)]
+    wasapi::ensure_notifications();
     // Le compteur de paquets sert de nonce : il doit vivre plus longtemps
     // que le périphérique. Le recréer à chaque rebranchement réutiliserait
     // des nonces déjà employés avec la même clé — ce qui casserait le
@@ -902,7 +924,7 @@ fn capture_loop(
     // alors sans relancer le moteur, donc sans perdre l'encodeur ni le
     // compteur de nonces.
     'device: while !is_shutdown(&sh) {
-        let opened = open_input(device_name.as_deref());
+        let opened = open_input(device_name.as_deref(), native, raw);
         let (stream, rx, in_rate, alive, fallback) = match opened {
             Ok(parts) => {
                 // Le repli est signalé — sans quoi débrancher son micro pour
@@ -931,7 +953,8 @@ fn capture_loop(
         // L'état du monde au moment de l'ouverture : générations de reset et
         // empreinte du périphérique. Toute divergence ultérieure = réouverture.
         let my_epoch = sh.audio_reset.load(Ordering::Relaxed);
-        let my_signature = device_signature(device_name.as_deref(), true);
+        let my_signature = device_signature(device_name.as_deref(), true, native);
+        let mut my_gen = native_generation();
         // Début de l'épisode de zéros stricts en cours, s'il y en a un.
         let mut zero_since: Option<Instant> = None;
 
@@ -944,8 +967,19 @@ fn capture_loop(
             drop(stream);
             continue 'device;
         }
-        if last_probe.elapsed() > Duration::from_secs(3) {
+        // Sonde d'empreinte : toutes les 3 s en croisière, et dès ~300 ms
+        // après un événement de périphériques signalé par Windows — sans
+        // sonder à chaque rappel, un glissement de volume en émet des
+        // dizaines par seconde.
+        let gen_now = native_generation();
+        let probe_after = if gen_now != my_gen {
+            Duration::from_millis(300)
+        } else {
+            Duration::from_secs(3)
+        };
+        if last_probe.elapsed() > probe_after {
             last_probe = Instant::now();
+            my_gen = gen_now;
             // Sur un repli, on guette le retour du périphérique demandé. Sans
             // cette veille, un casque rebranché n'était jamais repris : le
             // repli fonctionnant, plus rien ne provoquait de réouverture.
@@ -962,7 +996,7 @@ fn capture_loop(
             // Le périphérique ou son format a changé sous nos pieds (un jeu
             // qui se lance, Synapse qui rebrasse…) : le flux en cours peut
             // être un zombie qui capte dans le vide. On le rouvre.
-            let now_sig = device_signature(device_name.as_deref(), true);
+            let now_sig = device_signature(device_name.as_deref(), true, native);
             if now_sig != my_signature {
                 tracing::warn!(
                     "micro : périphérique ou format modifié ({:?} -> {:?}) — réouverture",
@@ -1108,19 +1142,59 @@ fn capture_loop(
     Ok(())
 }
 
+/// Flux d'entrée, quel que soit le moteur. Les valeurs ne sont jamais
+/// *lues* : elles sont *tenues* — les lâcher ferme le flux, c'est tout leur
+/// rôle. D'où l'allow.
+#[allow(dead_code)]
+enum InputStream {
+    Cpal(cpal::Stream),
+    #[cfg(windows)]
+    Native(wasapi::NativeStream),
+}
+
+/// Flux de sortie, quel que soit le moteur. Même contrat de simple tenue.
+#[allow(dead_code)]
+enum OutputStream {
+    Cpal(cpal::Stream),
+    #[cfg(windows)]
+    Native(wasapi::NativeStream),
+}
+
 /// Ouvre le micro et rend de quoi le lire, plus un drapeau que le rappel
-/// d'erreur cpal abaisse si le flux tombe.
+/// d'erreur abaisse si le flux tombe.
 /// Le dernier membre dit qu'on tourne sur un périphérique de repli, le
 /// périphérique demandé étant absent.
 type OpenedInput =
-    (cpal::Stream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>, bool);
+    (InputStream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>, bool);
+
+/// Génération du parc de périphériques signalée par Windows. Hors Windows,
+/// constante : la sonde périodique reste le seul déclencheur.
+#[cfg(windows)]
+fn native_generation() -> u64 {
+    wasapi::device_generation()
+}
+#[cfg(not(windows))]
+fn native_generation() -> u64 {
+    0
+}
 
 /// Empreinte du périphérique tel qu'il se présenterait si on l'ouvrait
 /// maintenant : identité + format par défaut. Quand elle diverge de celle du
 /// flux en cours, c'est qu'un logiciel (Synapse, un jeu…) a rebrassé les
 /// périphériques ou changé le format — le flux ouvert peut alors être un
 /// zombie : il tourne, mais le son ne passe plus. On rouvre.
-fn device_signature(device_name: Option<&str>, input: bool) -> Option<String> {
+///
+/// L'empreinte suit le moteur : le natif voit l'identifiant d'endpoint (qui
+/// change à la ré-énumération USB) et le défaut *communication*, cpal le nom
+/// et le défaut console. Comparer des empreintes d'un même moteur suffit —
+/// elles ne se croisent jamais.
+fn device_signature(device_name: Option<&str>, input: bool, native: bool) -> Option<String> {
+    #[cfg(windows)]
+    if native {
+        return wasapi::device_signature(device_name, input);
+    }
+    #[cfg(not(windows))]
+    let _ = native;
     let host = cpal::default_host();
     let (device, fallback) = pick_device(&host, device_name, input);
     let device = device?;
@@ -1138,7 +1212,25 @@ fn device_signature(device_name: Option<&str>, input: bool) -> Option<String> {
     ))
 }
 
-fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
+fn open_input(device_name: Option<&str>, native: bool, raw: bool) -> anyhow::Result<OpenedInput> {
+    // Moteur natif d'abord, s'il est demandé ; toute erreur fait retomber
+    // sur cpal dans la foulée — au pire, on se comporte comme avant.
+    #[cfg(windows)]
+    if native {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let alive = Arc::new(AtomicBool::new(true));
+        match wasapi::open_input(device_name, raw, tx, alive.clone()) {
+            Ok((stream, in_rate, fallback)) => {
+                return Ok((InputStream::Native(stream), rx, in_rate, alive, fallback));
+            }
+            Err(e) => {
+                tracing::warn!("micro natif indisponible : {e:#} — repli sur cpal");
+                journal(format!("moteur natif indisponible (micro) : {e:#} — repli cpal"));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (native, raw);
     // L'hôte est ré-interrogé à chaque tentative : c'est ce qui permet de
     // voir réapparaître un périphérique rebranché.
     let host = cpal::default_host();
@@ -1173,7 +1265,7 @@ fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
     // de capture, hors du chemin temps réel.
     let stream = build_input_stream(&device, &supported, channels, tx, alive.clone())?;
     stream.play()?;
-    Ok((stream, rx, in_rate, alive, fallback))
+    Ok((InputStream::Cpal(stream), rx, in_rate, alive, fallback))
 }
 
 /// Attend, en écourtant si le moteur s'arrête entre-temps.
@@ -1497,12 +1589,19 @@ fn build_input_stream(
 // Lecture
 // ---------------------------------------------------------------------------
 
-fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result<()> {
+fn playback_loop(
+    sh: Arc<Shared>,
+    device_name: Option<String>,
+    native: bool,
+) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    wasapi::ensure_notifications();
     // Même surveillance qu'à la capture : un casque débranché, ou qui sort
     // de veille, emporte le flux de sortie sans que rien ne le relance —
     // on n'entendait alors plus personne jusqu'au redémarrage.
     'device: while !is_shutdown(&sh) {
-        let (stream, alive, ticks, fallback) = match open_output(&sh, device_name.as_deref()) {
+        let opened = open_output(&sh, device_name.as_deref(), native);
+        let (stream, alive, ticks, fallback) = match opened {
             Ok(parts) => {
                 // Comme au micro : un repli est signalé, sinon le son sortait
                 // des haut-parleurs du portable sans que rien ne l'explique.
@@ -1527,7 +1626,8 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
         let mut idle_rounds = 0u32;
         let mut last_probe = Instant::now();
         let my_epoch = sh.audio_reset.load(Ordering::Relaxed);
-        let my_signature = device_signature(device_name.as_deref(), false);
+        let my_signature = device_signature(device_name.as_deref(), false, native);
+        let mut my_gen = native_generation();
         while !is_shutdown(&sh) {
             std::thread::sleep(Duration::from_millis(500));
             // Réinitialisation demandée : rouvrir, comme un rebranchement.
@@ -1537,8 +1637,17 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
                 drop(stream);
                 continue 'device;
             }
-            if last_probe.elapsed() > Duration::from_secs(3) {
+            // Comme à la capture : sonde accélérée après un événement de
+            // périphériques signalé par Windows.
+            let gen_now = native_generation();
+            let probe_after = if gen_now != my_gen {
+                Duration::from_millis(300)
+            } else {
+                Duration::from_secs(3)
+            };
+            if last_probe.elapsed() > probe_after {
                 last_probe = Instant::now();
+                my_gen = gen_now;
                 // Retour du casque demandé : on le reprend, le repli n'étant
                 // qu'un pis-aller que rien d'autre ne viendrait interrompre.
                 if fallback {
@@ -1555,7 +1664,7 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
                 // ferme, Synapse qui rebrasse) : le flux peut jouer dans le
                 // vide sans une erreur — le zombie qui obligeait à
                 // débrancher/rebrancher le casque. On rouvre nous-mêmes.
-                let now_sig = device_signature(device_name.as_deref(), false);
+                let now_sig = device_signature(device_name.as_deref(), false, native);
                 if now_sig != my_signature {
                     tracing::warn!(
                         "sortie : périphérique ou format modifié ({:?} -> {:?}) — réouverture",
@@ -1594,10 +1703,41 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
 /// rappel d'erreur, et un compteur d'appels du rappel de données.
 /// Le dernier membre dit qu'on tourne sur un périphérique de repli.
 type OpenedOutput =
-    (cpal::Stream, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>, bool);
+    (OutputStream, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>, bool);
 
-fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<OpenedOutput> {
+fn open_output(
+    sh: &Arc<Shared>,
+    device_name: Option<&str>,
+    native: bool,
+) -> anyhow::Result<OpenedOutput> {
     let sh = sh.clone();
+    // Compteur d'appels du fournisseur d'échantillons : c'est lui qui révèle
+    // un pilote devenu muet sans le dire.
+    let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    // Moteur natif d'abord, s'il est demandé ; toute erreur fait retomber
+    // sur cpal dans la foulée — au pire, on se comporte comme avant.
+    #[cfg(windows)]
+    if native {
+        let alive = Arc::new(AtomicBool::new(true));
+        let sh_w = sh.clone();
+        let ticks_w = ticks.clone();
+        match wasapi::open_output(
+            device_name,
+            move |rate| output_writer(sh_w, ticks_w, rate),
+            alive.clone(),
+        ) {
+            Ok((stream, fallback)) => {
+                return Ok((OutputStream::Native(stream), alive, ticks, fallback));
+            }
+            Err(e) => {
+                tracing::warn!("sortie native indisponible : {e:#} — repli sur cpal");
+                journal(format!("moteur natif indisponible (sortie) : {e:#} — repli cpal"));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = native;
     let host = cpal::default_host();
     let (device, fallback) = pick_device(&host, device_name, false);
     if fallback {
@@ -1623,16 +1763,26 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
         if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
     ));
 
+    let write_frames = output_writer(sh.clone(), ticks.clone(), out_rate);
+    let alive = Arc::new(AtomicBool::new(true));
+    let stream =
+        build_output_stream(&device, &supported, channels, write_frames, alive.clone())?;
+    stream.play()?;
+    Ok((OutputStream::Cpal(stream), alive, ticks, fallback))
+}
+
+/// Fabrique le fournisseur d'échantillons de la sortie : `n` échantillons
+/// mono, tirés du mix 48 kHz puis rééchantillonnés vers `out_rate`. Une
+/// fabrique, et non une fermeture toute prête : la fréquence réelle du flux
+/// n'est connue qu'une fois le périphérique ouvert, quel que soit le moteur.
+fn output_writer(
+    sh_cb: Arc<Shared>,
+    ticks_cb: Arc<std::sync::atomic::AtomicU64>,
+    out_rate: u32,
+) -> impl FnMut(usize) -> Vec<f32> + Send + 'static {
     // Rééchantillonne le mix 48 kHz vers la fréquence du périphérique.
     let mut resampler = CubicResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
-    let sh_cb = sh.clone();
-
-    // Compteur d'appels : c'est lui qui révèle un pilote devenu muet sans
-    // le dire.
-    let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let ticks_cb = ticks.clone();
-
-    let write_frames = move |mono_needed: usize| -> Vec<f32> {
+    move |mono_needed: usize| -> Vec<f32> {
         ticks_cb.fetch_add(1, Ordering::Relaxed);
         // Tire du 48 kHz mixé tant que le rééchantillonneur en réclame.
         let mut out = vec![0f32; mono_needed];
@@ -1692,13 +1842,7 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
         }
         resampler.pull(&mut out);
         out
-    };
-
-    let alive = Arc::new(AtomicBool::new(true));
-    let stream =
-        build_output_stream(&device, &supported, channels, write_frames, alive.clone())?;
-    stream.play()?;
-    Ok((stream, alive, ticks, fallback))
+    }
 }
 
 /// Construit le flux de sortie quel que soit le format d'échantillons du

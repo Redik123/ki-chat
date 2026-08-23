@@ -361,6 +361,8 @@ struct KiApp {
     /// Redonner le focus à la zone de saisie au prochain rendu.
     focus_input: bool,
     show_settings: bool,
+    /// Journal audio déplié dans les réglages.
+    show_audio_journal: bool,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
     upload_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -418,6 +420,11 @@ struct KiApp {
     transmitting: bool,
     pref_input: Option<String>,
     pref_output: Option<String>,
+    /// Moteur audio Windows natif (WASAPI direct) — cpal si décoché.
+    native_audio: bool,
+    /// Mode brut du micro : demande à Windows d'ignorer les effets tiers
+    /// (Sonar, Nahimic…). Moteur natif seulement.
+    raw_mic: bool,
     noise_mode: u8,
     input_gain: f32,
     output_gain: f32,
@@ -559,6 +566,7 @@ impl KiApp {
             input: String::new(),
             focus_input: false,
             show_settings: false,
+            show_audio_journal: false,
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             upload_status: Default::default(),
@@ -598,6 +606,8 @@ impl KiApp {
             transmitting: false,
             pref_input: Some(get("input_device", "")).filter(|s| !s.is_empty()),
             pref_output: Some(get("output_device", "")).filter(|s| !s.is_empty()),
+            native_audio: get("native_audio", "on") != "off",
+            raw_mic: get("raw_mic", "off") == "on",
             noise_mode: get("noise_mode", "1")
                 .parse()
                 .unwrap_or(ki_voice::NOISE_RNNOISE),
@@ -814,6 +824,8 @@ impl KiApp {
         net::VoicePrefs {
             input_device: self.pref_input.clone(),
             output_device: self.pref_output.clone(),
+            native_audio: self.native_audio,
+            raw_mic: self.raw_mic,
             noise_mode: self.noise_mode,
             volumes: self
                 .all_volumes
@@ -3278,6 +3290,93 @@ impl KiApp {
                             self.input_devices = inputs;
                             self.output_devices = outputs;
                         }
+                        if cfg!(windows) {
+                            ui.add_space(8.0);
+                            if ui
+                                .checkbox(
+                                    &mut self.native_audio,
+                                    "Moteur audio natif (recommandé)",
+                                )
+                                .on_hover_text(
+                                    "parle à Windows comme Discord : suit le périphérique \
+                                     de communication, survit aux jeux qui changent le \
+                                     format audio. Décoche si le son se comporte moins \
+                                     bien qu'avant.",
+                                )
+                                .changed()
+                            {
+                                restart = true;
+                            }
+                            if self.native_audio
+                                && ui
+                                    .checkbox(
+                                        &mut self.raw_mic,
+                                        "Micro brut (ignorer les effets du casque)",
+                                    )
+                                    .on_hover_text(
+                                        "court-circuite les traitements tiers (Sonar, \
+                                         Nahimic, Synapse…) sur le micro. À essayer si le \
+                                         micro bugue quand un jeu se lance.",
+                                    )
+                                    .changed()
+                            {
+                                restart = true;
+                            }
+                        }
+
+                        // --- Journal audio ---
+                        // Ce que l'audio a vécu (ouvertures, pertes, replis,
+                        // réouvertures) : les bugs « au lancement d'un jeu »
+                        // varient d'un casque à l'autre, et ce journal
+                        // remplace la divination — on se le fait copier-coller.
+                        ui.add_space(8.0);
+                        let label = if self.show_audio_journal {
+                            "Masquer le journal audio"
+                        } else {
+                            "Journal audio"
+                        };
+                        if ui::button(ui, Icon::Info, label).clicked() {
+                            self.show_audio_journal = !self.show_audio_journal;
+                        }
+                        if self.show_audio_journal {
+                            let events = ki_voice::journal_snapshot();
+                            if events.is_empty() {
+                                ui::hint(ui, "rien à signaler pour l'instant");
+                            } else {
+                                if ui::button(ui, Icon::Copy, "Copier le journal").clicked() {
+                                    let text: String = events
+                                        .iter()
+                                        .map(|(ts, m)| {
+                                            format!("{} {m}\n", format_time_secs(*ts))
+                                        })
+                                        .collect();
+                                    ctx.copy_text(text);
+                                    self.info = Some("journal audio copié".into());
+                                }
+                                ui.add_space(4.0);
+                                // Les plus récents d'abord : c'est eux qu'on
+                                // vient voir quand ça vient de buguer.
+                                for (ts, msg) in events.iter().rev().take(12) {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            RichText::new(format_time_secs(*ts))
+                                                .color(TEXT_DIM)
+                                                .monospace()
+                                                .size(11.5),
+                                        );
+                                        ui.label(
+                                            RichText::new(msg.as_str()).color(TEXT).size(11.5),
+                                        );
+                                    });
+                                }
+                                if events.len() > 12 {
+                                    ui::hint(
+                                        ui,
+                                        "le bouton copie l'intégralité du journal",
+                                    );
+                                }
+                            }
+                        }
 
                         // --- Micro ---
                         ui.add_space(12.0);
@@ -5559,6 +5658,15 @@ fn format_time(ts_millis: u64) -> String {
         .unwrap_or_default()
 }
 
+/// Heure avec les secondes — le journal audio se joue à la seconde près.
+fn format_time_secs(ts_millis: u64) -> String {
+    chrono::Local
+        .timestamp_millis_opt(ts_millis as i64)
+        .single()
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 /// Numéro de jour absolu — sert à détecter le changement de date.
 fn day_key(ts_millis: u64) -> i32 {
     chrono::Local
@@ -5746,6 +5854,8 @@ impl eframe::App for KiApp {
             "output_device",
             self.pref_output.clone().unwrap_or_default(),
         );
+        storage.set_string("native_audio", if self.native_audio { "on" } else { "off" }.into());
+        storage.set_string("raw_mic", if self.raw_mic { "on" } else { "off" }.into());
         if let Ok(json) = serde_json::to_string(&self.all_volumes) {
             storage.set_string("user_volumes", json);
         }

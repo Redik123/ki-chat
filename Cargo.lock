@@ -2820,6 +2820,8 @@ dependencies = [
  "nnnoiseless",
  "rand 0.9.5",
  "tracing",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

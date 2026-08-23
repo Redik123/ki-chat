@@ -28,6 +28,10 @@ pub enum Cmd {
 pub struct VoicePrefs {
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    /// Moteur audio Windows natif (WASAPI direct) — cpal sinon.
+    pub native_audio: bool,
+    /// Mode brut du micro (effets tiers court-circuités). Natif seulement.
+    pub raw_mic: bool,
     /// Mode de suppression de bruit (ki_voice::NOISE_*).
     pub noise_mode: u8,
     /// Volumes par utilisateur (user_id -> gain, 1.0 = 100 %).
@@ -157,6 +161,8 @@ fn start_engine(
     let mut cfg = VoiceConfig::new(params.user_id, params.key);
     cfg.input_device = prefs.input_device.clone();
     cfg.output_device = prefs.output_device.clone();
+    cfg.native_audio = prefs.native_audio;
+    cfg.raw_mic = prefs.raw_mic;
     cfg.noise_mode = prefs.noise_mode;
     cfg.volumes = prefs.volumes.clone();
     cfg.input_gain = prefs.input_gain;
