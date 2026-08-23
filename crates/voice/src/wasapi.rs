@@ -9,15 +9,19 @@
 //!   et non celui des jeux (eConsole) ;
 //! - la conversion de format automatique (AUTOCONVERTPCM) : un jeu qui fait
 //!   basculer le périphérique de 44,1 à 48 kHz ne tue plus le flux ;
-//! - la catégorie « Communications » sur les deux sens. Sur la capture, elle
-//!   est décisive : un jeu dont la voix intégrée tient la voie de traitement
-//!   « communications » du micro (Valorant/Vivox sur un Kraken USB, vu sur le
-//!   terrain) laisse la voie « par défaut » s'ouvrir sans jamais la servir —
-//!   flux muet, réouvert en boucle. Demander la même voie que le jeu la
-//!   partage, comme Discord. Revers assumé : chez qui Windows est réglé sur
-//!   « réduire le volume des autres sons » (Panneau son → Communication),
-//!   le micro ouvert en continu peut atténuer le jeu — le remède est « Ne
-//!   rien faire » dans ce même panneau ;
+//! - la catégorie « Communications » sur la lecture, et sur la capture
+//!   **seulement quand il le faut**. Elle y est à double tranchant, le
+//!   terrain a tranché des deux côtés le même soir : nécessaire quand la
+//!   voix intégrée d'un jeu tient la voie de traitement « communications »
+//!   du micro (Valorant/Vivox sur un Kraken USB — la voie « par défaut »
+//!   s'ouvre alors sans jamais être servie, flux muet en boucle) ; mais un
+//!   micro ouvert en continu dans cette catégorie fait croire à Windows à
+//!   un appel permanent — volume des jeux réduit de 80 % chez tout le
+//!   monde, et gain automatique du pilote qui fait monter le bruit de fond.
+//!   D'où l'escalade : capture en catégorie standard par défaut, bascule en
+//!   communications quand le micro est détecté affamé (ou par réglage) —
+//!   les concernés règlent alors Panneau son → Communication → « Ne rien
+//!   faire » ;
 //! - le mode brut en option sur le micro : court-circuite les chaînes
 //!   d'effets tiers (Sonar, Nahimic, Synapse…), grandes pourvoyeuses de
 //!   micros zombies au lancement d'un jeu.
@@ -33,13 +37,14 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use windows::core::{implement, PCWSTR};
 use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    eCapture, eCommunications, eRender, AudioCategory_Communications,
+    eCapture, eCommunications, eRender, AudioCategory_Communications, AudioCategory_Other,
     EDataFlow, ERole, IAudioCaptureClient, IAudioClient2, IAudioRenderClient, IMMDevice,
     IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
     AudioClientProperties, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
@@ -371,24 +376,40 @@ impl Drop for OpenClient {
 /// Active et initialise un client sur `device`. Essaie d'abord le format du
 /// moteur (Windows convertit), puis le format de mixage du périphérique ;
 /// et si `raw` était demandé mais refusé, recommence sans.
-fn open_client(device: &IMMDevice, input: bool, raw: bool) -> anyhow::Result<OpenClient> {
+fn open_client(
+    device: &IMMDevice,
+    input: bool,
+    raw: bool,
+    comms: bool,
+) -> anyhow::Result<OpenClient> {
     // Chaque tentative repart d'un client neuf : un Initialize raté ne
     // laisse pas le client dans un état garanti réutilisable.
-    fn attempt(device: &IMMDevice, input: bool, raw: bool, mix: bool) -> anyhow::Result<OpenClient> {
+    fn attempt(
+        device: &IMMDevice,
+        input: bool,
+        raw: bool,
+        comms: bool,
+        mix: bool,
+    ) -> anyhow::Result<OpenClient> {
         unsafe {
             let client: IAudioClient2 = device
                 .Activate(CLSCTX_ALL, None)
                 .context("activation du client audio")?;
-            // Catégorie « Communications » partout, capture comprise : c'est
-            // la voie de traitement que tiennent les voix intégrées des jeux
-            // (Vivox…) — demander la même la partage au lieu d'affamer la
-            // nôtre (cf. l'en-tête du module). Le mode brut ne concerne que
-            // le micro : sur la sortie, les effets du casque restent un
+            // Catégorie « Communications » : toujours sur la lecture, et sur
+            // la capture seulement à la demande (`comms`) — c'est la voie de
+            // traitement que tiennent les voix intégrées des jeux, mais un
+            // micro qui y campe en continu déclenche l'« appel permanent »
+            // de Windows (cf. l'en-tête du module). Le mode brut ne concerne
+            // que le micro : sur la sortie, les effets du casque restent un
             // choix de l'usager.
             let props = AudioClientProperties {
                 cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
                 bIsOffload: false.into(),
-                eCategory: AudioCategory_Communications,
+                eCategory: if input && !comms {
+                    AudioCategory_Other
+                } else {
+                    AudioCategory_Communications
+                },
                 Options: if raw && input {
                     AUDCLNT_STREAMOPTIONS_RAW
                 } else {
@@ -440,7 +461,7 @@ fn open_client(device: &IMMDevice, input: bool, raw: bool) -> anyhow::Result<Ope
     };
     let mut last = None;
     for &(try_raw, mix) in plans {
-        match attempt(device, input, try_raw, mix) {
+        match attempt(device, input, try_raw, comms, mix) {
             Ok(c) => {
                 if raw && !try_raw {
                     tracing::warn!("mode brut refusé par le périphérique — ouvert sans");
@@ -480,6 +501,7 @@ impl Drop for NativeStream {
 pub fn open_input(
     device_name: Option<&str>,
     raw: bool,
+    comms: bool,
     tx: mpsc::Sender<Vec<f32>>,
     alive: Arc<AtomicBool>,
 ) -> anyhow::Result<(NativeStream, u32, bool)> {
@@ -497,21 +519,23 @@ pub fn open_input(
                 let enu = enumerator()?;
                 let (device, fallback) = pick(&enu, name.as_deref(), true)?;
                 let dev_name = friendly_name(&device).unwrap_or_default();
-                let open = open_client(&device, true, raw)?;
+                let open = open_client(&device, true, raw, comms)?;
                 let capture: IAudioCaptureClient =
                     unsafe { open.client.GetService() }.context("service de capture")?;
                 unsafe { open.client.Start() }.context("démarrage de la capture")?;
                 tracing::info!(
-                    "micro (natif) : {dev_name} ({} Hz, {} canaux{})",
-                    open.rate,
-                    open.channels,
-                    if raw { ", mode brut" } else { "" }
-                );
-                journal(format!(
-                    "micro ouvert (natif) : {dev_name} ({} Hz, {} canaux{}){}",
+                    "micro (natif) : {dev_name} ({} Hz, {} canaux{}{})",
                     open.rate,
                     open.channels,
                     if raw { ", mode brut" } else { "" },
+                    if comms { ", catégorie communications" } else { "" }
+                );
+                journal(format!(
+                    "micro ouvert (natif) : {dev_name} ({} Hz, {} canaux{}{}){}",
+                    open.rate,
+                    open.channels,
+                    if raw { ", mode brut" } else { "" },
+                    if comms { ", catégorie communications" } else { "" },
                     if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
                 ));
                 Ok((open, capture, fallback))
@@ -647,7 +671,7 @@ where
                 let enu = enumerator()?;
                 let (device, fallback) = pick(&enu, name.as_deref(), false)?;
                 let dev_name = friendly_name(&device).unwrap_or_default();
-                let open = open_client(&device, false, false)?;
+                let open = open_client(&device, false, false, true)?;
                 let render: IAudioRenderClient =
                     unsafe { open.client.GetService() }.context("service de lecture")?;
                 let buffer_frames =
@@ -675,7 +699,7 @@ where
             let mut write = make_writer(open.rate);
             // Remplir avant de démarrer : le moteur part sans blanc initial.
             let ok = unsafe {
-                fill_render(&open, &render, buffer_frames, buffer_frames, &mut write).is_ok()
+                fill_render(&open, &render, buffer_frames, &mut write).is_ok()
                     && open.client.Start().is_ok()
             };
             if !ok {
@@ -702,6 +726,14 @@ where
 }
 
 /// Boucle de lecture : à chaque réveil, comble l'espace libre du tampon.
+///
+/// Un silence prolongé **arrête** le flux au lieu de le nourrir de zéros.
+/// Vu sur le terrain dès la première soirée : certains pilotes (égalisation
+/// de sonie, DSP « voix » des casques) montent leur gain sur un silence
+/// continu jusqu'à rendre le souffle audible — un canal calme finissait par
+/// siffler chez tout le monde. À l'arrêt, le mix est sondé toutes les 20 ms ;
+/// au premier échantillon non nul, l'amorce sondée est pré-chargée puis le
+/// flux repart — rien n'est perdu, au prix de ~20 ms de latence au réveil.
 fn render_worker<W: FnMut(usize) -> Vec<f32>>(
     open: OpenClient,
     render: IAudioRenderClient,
@@ -710,53 +742,107 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
     write: &mut W,
     alive: &AtomicBool,
 ) {
+    /// Silence continu au-delà duquel la sortie est mise en veille.
+    const IDLE_STOP: Duration = Duration::from_secs(5);
+    /// Sonde à l'arrêt : une trame moteur, 20 ms.
+    const PROBE: usize = (SAMPLE_RATE / 50) as usize;
+
+    let mut last_audio = Instant::now();
+    let mut running = true;
     while !stop.load(Ordering::Relaxed) {
         unsafe {
-            let _ = WaitForSingleObject(open.event, 200);
-            let padding = match open.client.GetCurrentPadding() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("flux sortie natif : GetCurrentPadding : {e}");
-                    journal(format!("erreur du flux de sortie (natif) : {e}"));
-                    alive.store(false, Ordering::Relaxed);
-                    break;
+            if running {
+                let _ = WaitForSingleObject(open.event, 200);
+                let padding = match open.client.GetCurrentPadding() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("flux sortie natif : GetCurrentPadding : {e}");
+                        journal(format!("erreur du flux de sortie (natif) : {e}"));
+                        alive.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                };
+                let free = buffer_frames.saturating_sub(padding);
+                if free == 0 {
+                    continue;
                 }
-            };
-            let free = buffer_frames.saturating_sub(padding);
-            if free == 0 {
-                continue;
-            }
-            if let Err(e) = fill_render(&open, &render, buffer_frames, free, write) {
-                tracing::warn!("flux sortie natif : {e}");
-                journal(format!("erreur du flux de sortie (natif) : {e}"));
-                alive.store(false, Ordering::Relaxed);
-                break;
+                match fill_render(&open, &render, free, write) {
+                    Ok(silent) => {
+                        if !silent {
+                            last_audio = Instant::now();
+                        } else if last_audio.elapsed() > IDLE_STOP {
+                            // Plus rien à jouer : veille. Stop fige, Reset
+                            // vide — le réveil repartira d'un tampon propre.
+                            let _ = open.client.Stop();
+                            let _ = open.client.Reset();
+                            running = false;
+                            tracing::debug!("sortie en veille (silence prolongé)");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("flux sortie natif : {e}");
+                        journal(format!("erreur du flux de sortie (natif) : {e}"));
+                        alive.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            } else {
+                // En veille : l'événement ne bat plus, on cadence soi-même.
+                // La sonde consomme le mix — les compteurs (watchdog) vivent,
+                // et l'amorce du réveil est justement ce qu'elle a tiré.
+                std::thread::sleep(Duration::from_millis(20));
+                let probe = write(PROBE);
+                if probe.iter().any(|&s| s != 0.0) {
+                    let ok = write_block(&open, &render, &probe).is_ok()
+                        && open.client.Start().is_ok();
+                    if !ok {
+                        tracing::warn!("flux sortie natif : réveil impossible");
+                        journal("erreur du flux de sortie (natif) : réveil impossible".into());
+                        alive.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                    running = true;
+                    last_audio = Instant::now();
+                    tracing::debug!("sortie réveillée");
+                }
             }
         }
     }
 }
 
-/// Écrit `frames` trames dans le tampon de rendu, le mono dupliqué sur tous
-/// les canaux — la sortie voix est mono par nature.
+/// Tire `frames` échantillons mono du mix et les écrit dans le tampon.
+/// Rend vrai si tout était à zéro strict — le signal de mise en veille.
 unsafe fn fill_render<W: FnMut(usize) -> Vec<f32>>(
     open: &OpenClient,
     render: &IAudioRenderClient,
-    _buffer_frames: u32,
     frames: u32,
     write: &mut W,
+) -> anyhow::Result<bool> {
+    let mono = write(frames as usize);
+    let silent = mono.iter().all(|&s| s == 0.0);
+    write_block(open, render, &mono)?;
+    Ok(silent)
+}
+
+/// Écrit un bloc mono dans le tampon de rendu, dupliqué sur tous les canaux —
+/// la sortie voix est mono par nature.
+unsafe fn write_block(
+    open: &OpenClient,
+    render: &IAudioRenderClient,
+    mono: &[f32],
 ) -> anyhow::Result<()> {
+    let frames = mono.len() as u32;
     let channels = open.channels as usize;
     let data = render.GetBuffer(frames).context("GetBuffer")?;
-    let mono = write(frames as usize);
     match open.kind {
         SampleKind::F32 => {
-            let out = std::slice::from_raw_parts_mut(data as *mut f32, frames as usize * channels);
+            let out = std::slice::from_raw_parts_mut(data as *mut f32, mono.len() * channels);
             for (frame, &s) in out.chunks_exact_mut(channels).zip(mono.iter()) {
                 frame.fill(s.clamp(-1.0, 1.0));
             }
         }
         SampleKind::I16 => {
-            let out = std::slice::from_raw_parts_mut(data as *mut i16, frames as usize * channels);
+            let out = std::slice::from_raw_parts_mut(data as *mut i16, mono.len() * channels);
             for (frame, &s) in out.chunks_exact_mut(channels).zip(mono.iter()) {
                 frame.fill((s.clamp(-1.0, 1.0) * 32767.0) as i16);
             }

@@ -425,6 +425,9 @@ struct KiApp {
     /// Mode brut du micro : demande à Windows d'ignorer les effets tiers
     /// (Sonar, Nahimic…). Moteur natif seulement.
     raw_mic: bool,
+    /// Micro en catégorie « communications » dès l'ouverture (sinon le moteur
+    /// n'y bascule que s'il détecte un micro affamé).
+    comms_mic: bool,
     noise_mode: u8,
     input_gain: f32,
     output_gain: f32,
@@ -608,6 +611,7 @@ impl KiApp {
             pref_output: Some(get("output_device", "")).filter(|s| !s.is_empty()),
             native_audio: get("native_audio", "on") != "off",
             raw_mic: get("raw_mic", "off") == "on",
+            comms_mic: get("comms_mic", "off") == "on",
             noise_mode: get("noise_mode", "1")
                 .parse()
                 .unwrap_or(ki_voice::NOISE_RNNOISE),
@@ -826,6 +830,7 @@ impl KiApp {
             output_device: self.pref_output.clone(),
             native_audio: self.native_audio,
             raw_mic: self.raw_mic,
+            comms_mic: self.comms_mic,
             noise_mode: self.noise_mode,
             volumes: self
                 .all_volumes
@@ -3317,6 +3322,25 @@ impl KiApp {
                                         "court-circuite les traitements tiers (Sonar, \
                                          Nahimic, Synapse…) sur le micro. À essayer si le \
                                          micro bugue quand un jeu se lance.",
+                                    )
+                                    .changed()
+                            {
+                                restart = true;
+                            }
+                            if self.native_audio
+                                && ui
+                                    .checkbox(
+                                        &mut self.comms_mic,
+                                        "Partager le micro avec la voix du jeu",
+                                    )
+                                    .on_hover_text(
+                                        "ouvre le micro dans la voie « communications » de \
+                                         Windows, celle des voix intégrées des jeux — \
+                                         nécessaire quand elles affament le micro (le \
+                                         moteur le fait tout seul au besoin, cette case le \
+                                         rend permanent). Revers : Windows peut baisser le \
+                                         volume des autres sons pendant le vocal → Panneau \
+                                         son → Communication → « Ne rien faire ».",
                                     )
                                     .changed()
                             {
@@ -5856,6 +5880,7 @@ impl eframe::App for KiApp {
         );
         storage.set_string("native_audio", if self.native_audio { "on" } else { "off" }.into());
         storage.set_string("raw_mic", if self.raw_mic { "on" } else { "off" }.into());
+        storage.set_string("comms_mic", if self.comms_mic { "on" } else { "off" }.into());
         if let Ok(json) = serde_json::to_string(&self.all_volumes) {
             storage.set_string("user_volumes", json);
         }

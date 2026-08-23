@@ -93,6 +93,12 @@ pub struct VoiceConfig {
     /// Mode brut du micro : demande à Windows de court-circuiter les effets
     /// tiers (Sonar, Nahimic…). Moteur natif seulement.
     pub raw_mic: bool,
+    /// Micro en catégorie « communications » : partage la voie de traitement
+    /// avec la voix intégrée des jeux (nécessaire quand elle affame notre
+    /// capture), au prix de l'« appel permanent » côté Windows — volume des
+    /// autres sons réduit chez qui n'a pas réglé « Ne rien faire ». Faux par
+    /// défaut ; le moteur y bascule de lui-même s'il détecte la famine.
+    pub comms_mic: bool,
     /// Mode de suppression de bruit (NOISE_OFF / NOISE_RNNOISE).
     pub noise_mode: u8,
     /// Volumes par émetteur (user_id -> gain, 1.0 = 100 %), appliqués au mixage.
@@ -130,6 +136,7 @@ impl VoiceConfig {
             output_device: None,
             native_audio: cfg!(windows),
             raw_mic: false,
+            comms_mic: false,
             noise_mode: NOISE_RNNOISE,
             volumes: HashMap::new(),
             input_gain: 1.0,
@@ -421,13 +428,14 @@ impl VoiceEngine {
             let input_device = cfg.input_device.clone();
             let native = cfg.native_audio;
             let raw = cfg.raw_mic;
+            let comms = cfg.comms_mic;
             let send = send.clone();
             if cfg.tone {
                 threads.push(std::thread::spawn(move || tone_loop(sh, user_id, bitrate, send)));
             } else {
                 threads.push(std::thread::spawn(move || {
                     if let Err(e) =
-                        capture_loop(sh, user_id, bitrate, input_device, native, raw, send)
+                        capture_loop(sh, user_id, bitrate, input_device, native, raw, comms, send)
                     {
                         tracing::error!("capture micro : {e:#}");
                     }
@@ -886,6 +894,7 @@ impl Sender {
 const ZERO_WEDGE: Duration = Duration::from_secs(15);
 
 /// Capture micro réelle via cpal.
+#[allow(clippy::too_many_arguments)]
 fn capture_loop(
     sh: Arc<Shared>,
     user_id: u64,
@@ -893,6 +902,7 @@ fn capture_loop(
     device_name: Option<String>,
     native: bool,
     raw: bool,
+    comms_pref: bool,
     send: DatagramSend,
 ) -> anyhow::Result<()> {
     // Les notifications de périphériques accélèrent la sonde d'empreinte.
@@ -921,15 +931,19 @@ fn capture_loop(
     // Ouvertures consécutives où pas un seul bloc n'est arrivé : la signature
     // du micro affamé — il s'ouvre sans erreur, mais un autre logiciel tient
     // la voie de capture et la nôtre n'est jamais servie. Compté pour le
-    // nommer dans le journal au lieu d'égrener des « micro perdu ».
+    // nommer dans le journal, et surtout pour escalader.
     let mut starved_opens = 0u32;
+    // Catégorie « communications » du micro : celle du réglage, puis escaladée
+    // d'elle-même à la famine — la voix intégrée d'un jeu qui tient la voie
+    // de traitement ne la partage qu'avec un flux de la même catégorie.
+    let mut comms = comms_pref;
 
     // Boucle de surveillance : le périphérique peut disparaître à tout
     // moment (débranchement, casque sans fil qui s'endort). On le rouvre
     // alors sans relancer le moteur, donc sans perdre l'encodeur ni le
     // compteur de nonces.
     'device: while !is_shutdown(&sh) {
-        let opened = open_input(device_name.as_deref(), native, raw);
+        let opened = open_input(device_name.as_deref(), native, raw, comms);
         let (stream, rx, in_rate, alive, fallback) = match opened {
             Ok(parts) => {
                 // Le repli est signalé — sans quoi débrancher son micro pour
@@ -1047,7 +1061,9 @@ fn capture_loop(
                 // Trois ouvertures d'affilée sans le moindre bloc : ce n'est
                 // plus un accident, c'est un micro affamé — le flux s'ouvre,
                 // mais un autre logiciel (voix d'un jeu, pilote du casque)
-                // tient la voie de capture. Nommé une fois, pas égrené.
+                // tient la voie de capture. On escalade alors en catégorie
+                // « communications » : la même voie que lui, donc partagée.
+                // Nommé une fois par épisode, pas égrené.
                 if !got_any_chunk {
                     starved_opens += 1;
                     if starved_opens == 3 {
@@ -1055,9 +1071,21 @@ fn capture_loop(
                         journal(
                             "le micro s'ouvre mais ne livre rien (3 fois de suite) — un \
                              autre logiciel tient probablement la voie de capture (voix \
-                             intégrée d'un jeu, pilote du casque) ; réessais en continu"
+                             intégrée d'un jeu, pilote du casque)"
                                 .into(),
                         );
+                        if native && !comms {
+                            comms = true;
+                            starved_opens = 0;
+                            journal(
+                                "micro passé en catégorie communications — la voie de \
+                                 traitement est désormais partagée avec la voix du jeu. \
+                                 Si le volume de tes autres sons chute pendant le vocal : \
+                                 Panneau son Windows → onglet Communication → « Ne rien \
+                                 faire »"
+                                    .into(),
+                            );
+                        }
                     }
                 }
                 sh.sending.store(false, Ordering::Relaxed);
@@ -1238,14 +1266,19 @@ fn device_signature(device_name: Option<&str>, input: bool, native: bool) -> Opt
     ))
 }
 
-fn open_input(device_name: Option<&str>, native: bool, raw: bool) -> anyhow::Result<OpenedInput> {
+fn open_input(
+    device_name: Option<&str>,
+    native: bool,
+    raw: bool,
+    comms: bool,
+) -> anyhow::Result<OpenedInput> {
     // Moteur natif d'abord, s'il est demandé ; toute erreur fait retomber
     // sur cpal dans la foulée — au pire, on se comporte comme avant.
     #[cfg(windows)]
     if native {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
         let alive = Arc::new(AtomicBool::new(true));
-        match wasapi::open_input(device_name, raw, tx, alive.clone()) {
+        match wasapi::open_input(device_name, raw, comms, tx, alive.clone()) {
             Ok((stream, in_rate, fallback)) => {
                 return Ok((InputStream::Native(stream), rx, in_rate, alive, fallback));
             }
@@ -1256,7 +1289,7 @@ fn open_input(device_name: Option<&str>, native: bool, raw: bool) -> anyhow::Res
         }
     }
     #[cfg(not(windows))]
-    let _ = (native, raw);
+    let _ = (native, raw, comms);
     // L'hôte est ré-interrogé à chaque tentative : c'est ce qui permet de
     // voir réapparaître un périphérique rebranché.
     let host = cpal::default_host();

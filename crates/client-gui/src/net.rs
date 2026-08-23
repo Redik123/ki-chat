@@ -32,6 +32,10 @@ pub struct VoicePrefs {
     pub native_audio: bool,
     /// Mode brut du micro (effets tiers court-circuités). Natif seulement.
     pub raw_mic: bool,
+    /// Micro en catégorie « communications » dès l'ouverture (partage de la
+    /// voie de traitement avec la voix des jeux). Le moteur y bascule seul
+    /// en cas de micro affamé ; la case rend le choix permanent.
+    pub comms_mic: bool,
     /// Mode de suppression de bruit (ki_voice::NOISE_*).
     pub noise_mode: u8,
     /// Volumes par utilisateur (user_id -> gain, 1.0 = 100 %).
@@ -163,6 +167,7 @@ fn start_engine(
     cfg.output_device = prefs.output_device.clone();
     cfg.native_audio = prefs.native_audio;
     cfg.raw_mic = prefs.raw_mic;
+    cfg.comms_mic = prefs.comms_mic;
     cfg.noise_mode = prefs.noise_mode;
     cfg.volumes = prefs.volumes.clone();
     cfg.input_gain = prefs.input_gain;
