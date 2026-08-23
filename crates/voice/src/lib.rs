@@ -32,6 +32,43 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// Trames de 20 ms.
 pub const FRAME_SAMPLES: usize = 960;
 
+// ---------------------------------------------------------------------------
+// Journal audio
+// ---------------------------------------------------------------------------
+
+/// Nombre d'événements conservés dans le journal audio.
+const JOURNAL_CAP: usize = 200;
+
+/// Journal des événements audio, en mémoire, hors de tout moteur : les
+/// symptômes « le micro a bugué quand le jeu s'est lancé » varient d'un
+/// utilisateur à l'autre, et le moteur est recréé à chaque changement de
+/// périphérique — un journal porté par le moteur ne raconterait que la fin
+/// de l'histoire. Celui-ci couvre la session entière, et les réglages
+/// l'affichent : on se fait envoyer le journal au lieu de deviner.
+static JOURNAL: Mutex<std::collections::VecDeque<(u64, String)>> =
+    Mutex::new(std::collections::VecDeque::new());
+
+/// Consigne un événement audio, horodaté (epoch millis). Les appels doublent
+/// une trace `tracing` : le journal parle à l'utilisateur, la trace au
+/// développeur.
+fn journal(msg: String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let mut j = JOURNAL.lock().unwrap();
+    j.push_back((now, msg));
+    while j.len() > JOURNAL_CAP {
+        j.pop_front();
+    }
+}
+
+/// Les derniers événements audio : (epoch millis, message), du plus ancien au
+/// plus récent.
+pub fn journal_snapshot() -> Vec<(u64, String)> {
+    JOURNAL.lock().unwrap().iter().cloned().collect()
+}
+
 /// Émetteur de datagrammes voix : le moteur est indépendant du transport
 /// (QUIC aujourd'hui, autre chose demain). L'appel ne doit jamais bloquer.
 pub type DatagramSend = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>;
@@ -121,40 +158,68 @@ pub fn list_devices() -> (Vec<String>, Vec<String>) {
     )
 }
 
-/// Trouve un périphérique par nom, ou le défaut du système.
+/// Nom « stable » d'un périphérique : Windows préfixe d'un compteur le nom
+/// d'un périphérique ré-énuméré — « Microphone (2- HyperX QuadCast) » —
+/// typiquement quand un jeu au lancement secoue l'USB. Même matériel, nouveau
+/// nom : sans cette normalisation, le nom réglé ne correspondait plus et l'on
+/// se repliait en silence sur le défaut (souvent le micro de la webcam),
+/// jusqu'à la fin de la session.
+fn normalized_device_name(name: &str) -> String {
+    /// « 2- Casque » -> « Casque », en début de nom ou juste après « ( ».
+    fn strip_counter(s: &str) -> &str {
+        let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+        match s[digits..].strip_prefix("- ") {
+            Some(rest) if digits > 0 => rest,
+            _ => s,
+        }
+    }
+    let mut out = String::with_capacity(name.len());
+    let mut rest = strip_counter(name.trim());
+    while let Some(i) = rest.find('(') {
+        out.push_str(&rest[..=i]);
+        rest = strip_counter(&rest[i + 1..]);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Trouve un périphérique par nom : exact d'abord — deux exemplaires du même
+/// casque réellement branchés restent distincts — puis débarrassé du compteur
+/// de ré-énumération.
+fn find_by_name(host: &cpal::Host, name: &str, input: bool) -> Option<cpal::Device> {
+    let devices = |host: &cpal::Host| {
+        if input { host.input_devices().ok() } else { host.output_devices().ok() }
+    };
+    if let Some(d) = devices(host)?.find(|d| d.name().is_ok_and(|n| n == name)) {
+        return Some(d);
+    }
+    let want = normalized_device_name(name);
+    devices(host)?.find(|d| d.name().is_ok_and(|n| normalized_device_name(&n) == want))
+}
+
 /// Le périphérique demandé est-il présent ?
 ///
 /// Sert à savoir quand un casque rebranché est de retour : tant qu'on tourne
 /// sur un repli, il faut bien reposer la question de temps en temps.
 fn device_present(host: &cpal::Host, name: &str, input: bool) -> bool {
-    let mut list = if input { host.input_devices().ok() } else { host.output_devices().ok() };
-    list.as_mut()
-        .is_some_and(|d| d.any(|d| d.name().is_ok_and(|n| n == name)))
+    find_by_name(host, name, input).is_some()
 }
 
 /// Le périphérique demandé, ou le défaut à défaut.
 ///
 /// Le second membre dit s'il a fallu se rabattre : l'appelant s'en sert pour
 /// prévenir l'utilisateur, et surtout pour reposer la question plus tard.
+/// Aucune trace ici : la sonde périodique passe aussi par là, et
+/// journaliserait la même absence toutes les 3 secondes.
 fn pick_device(
     host: &cpal::Host,
     name: Option<&str>,
     input: bool,
 ) -> (Option<cpal::Device>, bool) {
     if let Some(name) = name {
-        let found = if input {
-            host.input_devices().ok().and_then(|mut d| {
-                d.find(|d| d.name().is_ok_and(|n| n == name))
-            })
-        } else {
-            host.output_devices().ok().and_then(|mut d| {
-                d.find(|d| d.name().is_ok_and(|n| n == name))
-            })
-        };
-        if let Some(d) = found {
+        if let Some(d) = find_by_name(host, name, input) {
             return (Some(d), false);
         }
-        tracing::warn!("périphérique « {name} » introuvable, retour au défaut");
         let fallback =
             if input { host.default_input_device() } else { host.default_output_device() };
         return (fallback, true);
@@ -328,6 +393,7 @@ impl VoiceEngine {
             counters: Counters::default(),
         });
 
+        journal("moteur vocal démarré".into());
         let mut threads = Vec::new();
 
         // --- Réception réseau (datagrammes remontés par le transport) ---
@@ -552,6 +618,7 @@ impl VoiceEngine {
     }
 
     pub fn shutdown(mut self) {
+        journal("moteur vocal arrêté".into());
         self.shared.shutdown.store(true, Ordering::Relaxed);
         // Les fils sont retirés plutôt que déplacés : le `Drop` ci-dessous
         // les voit alors déjà pris en charge, et n'a plus rien à faire.
@@ -795,6 +862,13 @@ impl Sender {
     }
 }
 
+/// Durée de zéros stricts avant de rouvrir un micro qui a déjà porté du
+/// signal. Large : quinze secondes de zéros *exacts* ne ressemblent à aucun
+/// silence réel — un micro capte toujours un fond — mais un pilote qui
+///« gate » numériquement sa sortie pourrait les produire ; on ne veut pas
+/// rouvrir à chaque blanc de conversation.
+const ZERO_WEDGE: Duration = Duration::from_secs(15);
+
 /// Capture micro réelle via cpal.
 fn capture_loop(
     sh: Arc<Shared>,
@@ -817,6 +891,11 @@ fn capture_loop(
     // Activation vocale : on continue d'émettre un court instant après le
     // dernier franchissement du seuil, pour ne pas hacher les fins de mots.
     let mut last_voice = Instant::now() - Duration::from_secs(60);
+    // Zombie à zéros : armé dès qu'un échantillon non nul passe, désarmé par
+    // la réouverture qu'il déclenche. Une seule réouverture par épisode : un
+    // casque coupé par son bouton mute matériel livre aussi des zéros
+    // stricts, et rouvrir en boucle ne lui rendrait pas la parole.
+    let mut zero_reopen_armed = false;
 
     // Boucle de surveillance : le périphérique peut disparaître à tout
     // moment (débranchement, casque sans fil qui s'endort). On le rouvre
@@ -839,6 +918,7 @@ fn capture_loop(
                 // Rien d'autre à faire — il reviendra peut-être.
                 if !sh.input_lost.swap(true, Ordering::Relaxed) {
                     tracing::warn!("micro indisponible : {e:#} — nouvelle tentative en cours");
+                    journal(format!("micro indisponible : {e:#} — tentatives en cours"));
                 }
                 sh.sending.store(false, Ordering::Relaxed);
                 sleep_unless_shutdown(&sh, Duration::from_millis(1000));
@@ -852,12 +932,15 @@ fn capture_loop(
         // empreinte du périphérique. Toute divergence ultérieure = réouverture.
         let my_epoch = sh.audio_reset.load(Ordering::Relaxed);
         let my_signature = device_signature(device_name.as_deref(), true);
+        // Début de l'épisode de zéros stricts en cours, s'il y en a un.
+        let mut zero_since: Option<Instant> = None;
 
     while !is_shutdown(&sh) {
         // Réinitialisation demandée (bouton « Réinitialiser l'audio ») :
         // l'équivalent logiciel du débranchement/rebranchement du casque.
         if sh.audio_reset.load(Ordering::Relaxed) != my_epoch {
             tracing::info!("réinitialisation audio demandée — réouverture du micro");
+            journal("réinitialisation demandée — réouverture du micro".into());
             drop(stream);
             continue 'device;
         }
@@ -870,6 +953,7 @@ fn capture_loop(
                 if let Some(wanted) = device_name.as_deref() {
                     if device_present(&cpal::default_host(), wanted, true) {
                         tracing::info!("micro « {wanted} » de retour — reprise");
+                        journal(format!("micro « {wanted} » de retour — reprise"));
                         drop(stream);
                         continue 'device;
                     }
@@ -885,6 +969,11 @@ fn capture_loop(
                     my_signature,
                     now_sig
                 );
+                journal(format!(
+                    "micro : périphérique ou format modifié ({} -> {}) — réouverture",
+                    my_signature.as_deref().unwrap_or("absent"),
+                    now_sig.as_deref().unwrap_or("absent"),
+                ));
                 drop(stream);
                 continue 'device;
             }
@@ -909,6 +998,7 @@ fn capture_loop(
                 // durablement muet ferait sinon défiler le journal.
                 if !sh.input_lost.swap(true, Ordering::Relaxed) {
                     tracing::warn!("micro perdu — réouverture");
+                    journal("micro perdu (le flux ne livre plus) — réouverture".into());
                 }
                 sh.sending.store(false, Ordering::Relaxed);
                 drop(stream);
@@ -917,6 +1007,30 @@ fn capture_loop(
             }
             Err(_) => break,
         };
+        // Zombie à zéros : après le passage d'un jeu, certains pilotes USB
+        // continuent de livrer des trames à l'heure — mais toutes à zéro
+        // strict, ce qu'aucun micro réel ne produit. Ni le rappel d'erreur
+        // ni le garde-fou de livraison ne voient rien : seul le contenu
+        // trahit la panne. Après du signal puis ZERO_WEDGE de zéros, on
+        // rouvre — une fois (voir zero_reopen_armed).
+        if chunk.iter().any(|&s| s != 0.0) {
+            zero_since = None;
+            zero_reopen_armed = true;
+        } else if zero_reopen_armed
+            && zero_since.get_or_insert_with(Instant::now).elapsed() > ZERO_WEDGE
+        {
+            tracing::warn!(
+                "micro muet ({} s de zéros stricts) — réouverture préventive",
+                ZERO_WEDGE.as_secs()
+            );
+            journal(format!(
+                "micro muet ({} s de zéros stricts après du signal) — réouverture",
+                ZERO_WEDGE.as_secs()
+            ));
+            zero_reopen_armed = false;
+            drop(stream);
+            continue 'device;
+        }
         resampler.push(&chunk);
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
@@ -1029,6 +1143,11 @@ fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
     // voir réapparaître un périphérique rebranché.
     let host = cpal::default_host();
     let (device, fallback) = pick_device(&host, device_name, true);
+    if fallback {
+        if let Some(name) = device_name {
+            tracing::warn!("micro « {name} » introuvable, retour au défaut");
+        }
+    }
     let device = device.context("aucun périphérique d'entrée (micro) trouvé")?;
     let supported = device.default_input_config().context("config micro")?;
     let in_rate = supported.sample_rate().0;
@@ -1039,6 +1158,13 @@ fn open_input(device_name: Option<&str>) -> anyhow::Result<OpenedInput> {
         in_rate,
         channels
     );
+    journal(format!(
+        "micro ouvert : {} ({} Hz, {} canaux){}",
+        device.name().unwrap_or_default(),
+        in_rate,
+        channels,
+        if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
+    ));
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let alive = Arc::new(AtomicBool::new(true));
@@ -1339,10 +1465,13 @@ fn build_input_stream(
             },
             // Signaler la panne, et pas seulement l'écrire : sans ce
             // drapeau, débrancher le micro le laissait mort jusqu'au
-            // redémarrage de l'application.
+            // redémarrage de l'application. Une seule entrée de journal par
+            // panne — le rappel peut se répéter tant que le flux agonise.
             move |e| {
-                tracing::warn!("erreur flux micro : {e}");
-                alive.store(false, Ordering::Relaxed);
+                if alive.swap(false, Ordering::Relaxed) {
+                    tracing::warn!("erreur flux micro : {e}");
+                    journal(format!("erreur du flux micro : {e}"));
+                }
             },
             None,
         )?;
@@ -1384,6 +1513,7 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
             Err(e) => {
                 if !sh.output_lost.swap(true, Ordering::Relaxed) {
                     tracing::warn!("sortie audio indisponible : {e:#} — nouvelle tentative");
+                    journal(format!("sortie indisponible : {e:#} — tentatives en cours"));
                 }
                 sleep_unless_shutdown(&sh, Duration::from_millis(1000));
                 continue 'device;
@@ -1403,6 +1533,7 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
             // Réinitialisation demandée : rouvrir, comme un rebranchement.
             if sh.audio_reset.load(Ordering::Relaxed) != my_epoch {
                 tracing::info!("réinitialisation audio demandée — réouverture de la sortie");
+                journal("réinitialisation demandée — réouverture de la sortie".into());
                 drop(stream);
                 continue 'device;
             }
@@ -1414,6 +1545,7 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
                     if let Some(wanted) = device_name.as_deref() {
                         if device_present(&cpal::default_host(), wanted, false) {
                             tracing::info!("sortie « {wanted} » de retour — reprise");
+                            journal(format!("sortie « {wanted} » de retour — reprise"));
                             drop(stream);
                             continue 'device;
                         }
@@ -1430,6 +1562,11 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
                         my_signature,
                         now_sig
                     );
+                    journal(format!(
+                        "sortie : périphérique ou format modifié ({} -> {}) — réouverture",
+                        my_signature.as_deref().unwrap_or("absent"),
+                        now_sig.as_deref().unwrap_or("absent"),
+                    ));
                     drop(stream);
                     continue 'device;
                 }
@@ -1440,6 +1577,7 @@ fn playback_loop(sh: Arc<Shared>, device_name: Option<String>) -> anyhow::Result
             if !alive.load(Ordering::Relaxed) || idle_rounds >= 4 {
                 if !sh.output_lost.swap(true, Ordering::Relaxed) {
                     tracing::warn!("sortie audio perdue — réouverture");
+                    journal("sortie perdue (la carte ne réclame plus) — réouverture".into());
                 }
                 drop(stream);
                 sleep_unless_shutdown(&sh, Duration::from_millis(500));
@@ -1462,6 +1600,11 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
     let sh = sh.clone();
     let host = cpal::default_host();
     let (device, fallback) = pick_device(&host, device_name, false);
+    if fallback {
+        if let Some(name) = device_name {
+            tracing::warn!("sortie « {name} » introuvable, retour au défaut");
+        }
+    }
     let device = device.context("aucun périphérique de sortie audio trouvé")?;
     let supported = device.default_output_config().context("config sortie")?;
     let out_rate = supported.sample_rate().0;
@@ -1472,6 +1615,13 @@ fn open_output(sh: &Arc<Shared>, device_name: Option<&str>) -> anyhow::Result<Op
         out_rate,
         channels
     );
+    journal(format!(
+        "sortie ouverte : {} ({} Hz, {} canaux){}",
+        device.name().unwrap_or_default(),
+        out_rate,
+        channels,
+        if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
+    ));
 
     // Rééchantillonne le mix 48 kHz vers la fréquence du périphérique.
     let mut resampler = CubicResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
@@ -1581,10 +1731,13 @@ fn build_output_stream(
                     }
                 }
             },
-            // Comme pour le micro : signaler, pas seulement journaliser.
+            // Comme pour le micro : signaler, pas seulement tracer — et une
+            // seule entrée de journal par panne.
             move |e| {
-                tracing::warn!("erreur flux sortie : {e}");
-                alive.store(false, Ordering::Relaxed);
+                if alive.swap(false, Ordering::Relaxed) {
+                    tracing::warn!("erreur flux sortie : {e}");
+                    journal(format!("erreur du flux de sortie : {e}"));
+                }
             },
             None,
         )?;
@@ -1631,6 +1784,45 @@ mod tests {
         // Borné à 48 bits : le compteur a toute la place de monter sans
         // jamais déborder, même sur une session interminable.
         assert!(starts.iter().all(|c| *c < 1 << 48));
+    }
+
+    /// Windows préfixe « N- » un périphérique ré-énuméré (lancement de jeu
+    /// qui secoue l'USB) : le même casque doit être reconnu sous son nouveau
+    /// nom, sans confondre pour autant des noms réellement différents.
+    #[test]
+    fn device_names_survive_usb_renumbering() {
+        assert_eq!(
+            normalized_device_name("Microphone (2- HyperX QuadCast S)"),
+            "Microphone (HyperX QuadCast S)"
+        );
+        assert_eq!(normalized_device_name("2- USB Audio Device"), "USB Audio Device");
+        assert_eq!(
+            normalized_device_name("Micro (12- Foo (3- Bar))"),
+            "Micro (Foo (Bar))"
+        );
+        // Sans compteur, rien ne bouge.
+        assert_eq!(
+            normalized_device_name("Casque (Arctis Nova 7)"),
+            "Casque (Arctis Nova 7)"
+        );
+        // Un tiret sans chiffres, ou des chiffres sans « -  », restent tels
+        // quels : « 7.1 » n'est pas un compteur de ré-énumération.
+        assert_eq!(normalized_device_name("Micro (A- B)"), "Micro (A- B)");
+        assert_eq!(
+            normalized_device_name("Haut-parleurs (7.1 Surround)"),
+            "Haut-parleurs (7.1 Surround)"
+        );
+    }
+
+    #[test]
+    fn journal_keeps_recent_events_bounded() {
+        for i in 0..(JOURNAL_CAP + 50) {
+            journal(format!("évt {i}"));
+        }
+        let snap = journal_snapshot();
+        assert_eq!(snap.len(), JOURNAL_CAP);
+        // Les plus anciens sont tombés, le plus récent est là.
+        assert_eq!(snap.last().unwrap().1, format!("évt {}", JOURNAL_CAP + 49));
     }
 
     #[test]
