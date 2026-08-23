@@ -9,19 +9,16 @@
 //!   et non celui des jeux (eConsole) ;
 //! - la conversion de format automatique (AUTOCONVERTPCM) : un jeu qui fait
 //!   basculer le périphérique de 44,1 à 48 kHz ne tue plus le flux ;
-//! - la catégorie « Communications » sur la lecture, et sur la capture
-//!   **seulement quand il le faut**. Elle y est à double tranchant, le
-//!   terrain a tranché des deux côtés le même soir : nécessaire quand la
-//!   voix intégrée d'un jeu tient la voie de traitement « communications »
-//!   du micro (Valorant/Vivox sur un Kraken USB — la voie « par défaut »
-//!   s'ouvre alors sans jamais être servie, flux muet en boucle) ; mais un
-//!   micro ouvert en continu dans cette catégorie fait croire à Windows à
-//!   un appel permanent — volume des jeux réduit de 80 % chez tout le
-//!   monde, et gain automatique du pilote qui fait monter le bruit de fond.
-//!   D'où l'escalade : capture en catégorie standard par défaut, bascule en
-//!   communications quand le micro est détecté affamé (ou par réglage) —
-//!   les concernés règlent alors Panneau son → Communication → « Ne rien
-//!   faire » ;
+//! - la catégorie « Communications » **nulle part par défaut**, leçon chère
+//!   du terrain : toute session déclarée communications — capture COMME
+//!   lecture — peut déclencher une baisse du volume des autres sons chez
+//!   l'utilisateur (l'atténuation « activité de communication » de Windows,
+//!   ou le « ChatMix » du DSP du casque, insensible aux réglages Windows).
+//!   La capture y bascule uniquement en escalade anti-famine : quand la
+//!   voix intégrée d'un jeu tient la voie de traitement du micro et que la
+//!   nôtre s'ouvre sans jamais être servie, demander la même voie la
+//!   partage. Les rares concernés règlent alors Panneau son →
+//!   Communication → « Ne rien faire » ;
 //! - le mode brut en option sur le micro : court-circuite les chaînes
 //!   d'effets tiers (Sonar, Nahimic, Synapse…), grandes pourvoyeuses de
 //!   micros zombies au lancement d'un jeu.
@@ -395,20 +392,24 @@ fn open_client(
             let client: IAudioClient2 = device
                 .Activate(CLSCTX_ALL, None)
                 .context("activation du client audio")?;
-            // Catégorie « Communications » : toujours sur la lecture, et sur
-            // la capture seulement à la demande (`comms`) — c'est la voie de
-            // traitement que tiennent les voix intégrées des jeux, mais un
-            // micro qui y campe en continu déclenche l'« appel permanent »
-            // de Windows (cf. l'en-tête du module). Le mode brut ne concerne
-            // que le micro : sur la sortie, les effets du casque restent un
-            // choix de l'usager.
+            // Catégorie « Communications » : nulle part, sauf sur la capture
+            // à la demande (`comms`, l'escalade anti-famine). Le terrain l'a
+            // retirée pièce par pièce : sur la capture, elle déclenchait
+            // l'« appel permanent » de Windows (volume des jeux -80 %) ; et
+            // une fois la capture repassée en standard, le volume baissait
+            // *encore* — la session de **lecture** déclarée communications
+            // suffit à déclencher l'atténuation chez certains (Windows ou le
+            // « ChatMix » du pilote du casque, qui baisse le jeu dès qu'une
+            // session d'appel existe sur l'endpoint, réglages Windows ou
+            // pas). Le mode brut ne concerne que le micro : sur la sortie,
+            // les effets du casque restent un choix de l'usager.
             let props = AudioClientProperties {
                 cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
                 bIsOffload: false.into(),
-                eCategory: if input && !comms {
-                    AudioCategory_Other
-                } else {
+                eCategory: if input && comms {
                     AudioCategory_Communications
+                } else {
+                    AudioCategory_Other
                 },
                 Options: if raw && input {
                     AUDCLNT_STREAMOPTIONS_RAW
@@ -679,7 +680,7 @@ where
                 let enu = enumerator()?;
                 let (device, fallback) = pick(&enu, name.as_deref(), false)?;
                 let dev_name = friendly_name(&device).unwrap_or_default();
-                let open = open_client(&device, false, false, true)?;
+                let open = open_client(&device, false, false, false)?;
                 let render: IAudioRenderClient =
                     unsafe { open.client.GetService() }.context("service de lecture")?;
                 let buffer_frames =
