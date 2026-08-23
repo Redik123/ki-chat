@@ -428,12 +428,20 @@ fn open_client(
                 (&engine as *const _, false)
             };
             let parsed = parse_format(fmt_ptr);
+            // Tampons explicites (unités de 100 ns), au lieu du minimum que
+            // choisit Windows (~20 ms) : un pic CPU — un jeu qui se lance,
+            // précisément — creusait un trou plus grand que le tampon, d'où
+            // craquements en sortie et échantillons perdus au micro. Large au
+            // micro (simple mémoire, la latence ne dépend que du rythme de
+            // lecture) ; en sortie l'allocation est une réserve — la latence
+            // réelle est bornée par la cible de remplissage du render_worker.
+            let buffer_100ns: i64 = if input { 2_000_000 } else { 600_000 };
             let init = client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK
                     | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
                     | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                0,
+                buffer_100ns,
                 0,
                 fmt_ptr,
                 None,
@@ -697,9 +705,12 @@ where
                 }
             };
             let mut write = make_writer(open.rate);
-            // Remplir avant de démarrer : le moteur part sans blanc initial.
+            // Amorcer à la cible avant de démarrer : le moteur part sans
+            // blanc initial, et sans non plus charger tout le tampon — la
+            // réserve au-delà de la cible n'est pas de la latence.
+            let target = target_padding(open.rate).min(buffer_frames);
             let ok = unsafe {
-                fill_render(&open, &render, buffer_frames, &mut write).is_ok()
+                fill_render(&open, &render, target, &mut write).is_ok()
                     && open.client.Start().is_ok()
             };
             if !ok {
@@ -725,7 +736,14 @@ where
     }
 }
 
-/// Boucle de lecture : à chaque réveil, comble l'espace libre du tampon.
+/// Niveau de remplissage visé du tampon de sortie : ~30 ms. C'est lui qui
+/// fixe la latence de lecture ET la marge avant craquement — la réserve
+/// allouée au-delà (60 ms) ne sert qu'aux réveils tardifs du fil.
+fn target_padding(rate: u32) -> u32 {
+    rate * 3 / 100
+}
+
+/// Boucle de lecture : à chaque réveil, complète le tampon jusqu'à la cible.
 ///
 /// Un silence prolongé **arrête** le flux au lieu de le nourrir de zéros.
 /// Vu sur le terrain dès la première soirée : certains pilotes (égalisation
@@ -747,6 +765,7 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
     /// Sonde à l'arrêt : une trame moteur, 20 ms.
     const PROBE: usize = (SAMPLE_RATE / 50) as usize;
 
+    let target = target_padding(open.rate).min(buffer_frames);
     let mut last_audio = Instant::now();
     let mut running = true;
     while !stop.load(Ordering::Relaxed) {
@@ -762,11 +781,14 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
                         break;
                     }
                 };
-                let free = buffer_frames.saturating_sub(padding);
-                if free == 0 {
+                // Compléter jusqu'à la cible seulement : remplir tout le
+                // tampon transformerait la réserve anti-craquement en
+                // latence pure.
+                let want = target.saturating_sub(padding);
+                if want == 0 {
                     continue;
                 }
-                match fill_render(&open, &render, free, write) {
+                match fill_render(&open, &render, want, write) {
                     Ok(silent) => {
                         if !silent {
                             last_audio = Instant::now();
@@ -793,7 +815,13 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
                 std::thread::sleep(Duration::from_millis(20));
                 let probe = write(PROBE);
                 if probe.iter().any(|&s| s != 0.0) {
-                    let ok = write_block(&open, &render, &probe).is_ok()
+                    // L'amorce ne peut pas dépasser le tampon : un GetBuffer
+                    // trop gourmand échouerait et, la veille revenant après
+                    // chaque réouverture, condamnerait la sortie à mourir en
+                    // boucle. Les trames en trop (quelques ms au pire) sont
+                    // sacrifiées à l'instant du réveil — inaudible.
+                    let n = (probe.len()).min(buffer_frames as usize);
+                    let ok = write_block(&open, &render, &probe[..n]).is_ok()
                         && open.client.Start().is_ok();
                     if !ok {
                         tracing::warn!("flux sortie natif : réveil impossible");

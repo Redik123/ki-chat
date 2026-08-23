@@ -50,10 +50,33 @@ const JOURNAL_CAP: usize = 200;
 static JOURNAL: Mutex<std::collections::VecDeque<(u64, String)>> =
     Mutex::new(std::collections::VecDeque::new());
 
+/// Dernier message passé par `journal_if_new` : sa mémoire de déduplication.
+/// Vidée par tout événement normal — seules les répétitions *immédiates*
+/// sont avalées.
+static LAST_DEDUP: Mutex<String> = Mutex::new(String::new());
+
 /// Consigne un événement audio, horodaté (epoch millis). Les appels doublent
 /// une trace `tracing` : le journal parle à l'utilisateur, la trace au
 /// développeur.
 fn journal(msg: String) {
+    LAST_DEDUP.lock().unwrap().clear();
+    journal_raw(msg);
+}
+
+/// Comme `journal`, mais avale les répétitions immédiates : les échecs
+/// réessayés à la seconde (micro débranché, moteur natif indisponible)
+/// rempliraient sinon le journal à eux seuls et en évinceraient l'histoire.
+fn journal_if_new(msg: String) {
+    let mut last = LAST_DEDUP.lock().unwrap();
+    if *last == msg {
+        return;
+    }
+    *last = msg.clone();
+    drop(last);
+    journal_raw(msg);
+}
+
+fn journal_raw(msg: String) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1090,7 +1113,16 @@ fn capture_loop(
                 }
                 sh.sending.store(false, Ordering::Relaxed);
                 drop(stream);
-                sleep_unless_shutdown(&sh, Duration::from_millis(500));
+                // Si même l'escalade n'a rien donné (matériel défaillant —
+                // un casque abîmé livre exactement ça), on continue d'essayer
+                // mais au pas : rouvrir toutes les demi-secondes ne ramène
+                // rien et noie le journal.
+                let nap = if starved_opens >= 6 {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_millis(500)
+                };
+                sleep_unless_shutdown(&sh, nap);
                 continue 'device;
             }
             Err(_) => break,
@@ -1284,7 +1316,7 @@ fn open_input(
             }
             Err(e) => {
                 tracing::warn!("micro natif indisponible : {e:#} — repli sur cpal");
-                journal(format!("moteur natif indisponible (micro) : {e:#} — repli cpal"));
+                journal_if_new(format!("moteur natif indisponible (micro) : {e:#} — repli cpal"));
             }
         }
     }
@@ -1791,7 +1823,9 @@ fn open_output(
             }
             Err(e) => {
                 tracing::warn!("sortie native indisponible : {e:#} — repli sur cpal");
-                journal(format!("moteur natif indisponible (sortie) : {e:#} — repli cpal"));
+                journal_if_new(format!(
+                    "moteur natif indisponible (sortie) : {e:#} — repli cpal"
+                ));
             }
         }
     }
