@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = [
     "crates/protocol",
@@ -24,27 +24,27 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Profil optimisÃ© pour la prod : binaire compact, LTO, une seule unitÃ© de codegen
+# Profil optimisé pour la prod : binaire compact, LTO, une seule unité de codegen
 [profile.release]
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
 
-# En dev, NOS crates compilent vite (opt 0) mais toutes les DÃ‰PENDANCES sont
-# optimisÃ©es : sans Ã§a, le pixel-par-pixel (egui, openh264, tract/DeepFilter)
-# tourne 10-50Ã— trop lentement â€” la vidÃ©o tombait Ã  2 fps en build debug.
-# CoÃ»t : une grosse compilation la premiÃ¨re fois, puis c'est en cache.
+# En dev, NOS crates compilent vite (opt 0) mais toutes les DÉPENDANCES sont
+# optimisées : sans ça, le pixel-par-pixel (egui, openh264, tract/DeepFilter)
+# tourne 10-50× trop lentement — la vidéo tombait à 2 fps en build debug.
+# Coût : une grosse compilation la première fois, puis c'est en cache.
 [profile.dev.package."*"]
 opt-level = 3
 
-# Le pipeline vidÃ©o lui-mÃªme touche aux pixels : optimisÃ© aussi en dev.
+# Le pipeline vidéo lui-même touche aux pixels : optimisé aussi en dev.
 [profile.dev.package.ki-video]
 opt-level = 3
 
-# debug=false : avec DEBUG=true, nasm reÃ§oit des flags de dÃ©bogage qu'il
-# refuse â†’ l'assembleur Ã©choue en silence et l'encodage H.264 est 4Ã— plus
-# lent. Aucune perte rÃ©elle : on ne dÃ©bogue pas le C d'openh264.
+# debug=false : avec DEBUG=true, nasm reçoit des flags de débogage qu'il
+# refuse → l'assembleur échoue en silence et l'encodage H.264 est 4× plus
+# lent. Aucune perte réelle : on ne débogue pas le C d'openh264.
 [profile.dev.package.openh264-sys2]
 opt-level = 3
 debug = false
