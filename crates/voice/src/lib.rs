@@ -918,6 +918,11 @@ fn capture_loop(
     // casque coupé par son bouton mute matériel livre aussi des zéros
     // stricts, et rouvrir en boucle ne lui rendrait pas la parole.
     let mut zero_reopen_armed = false;
+    // Ouvertures consécutives où pas un seul bloc n'est arrivé : la signature
+    // du micro affamé — il s'ouvre sans erreur, mais un autre logiciel tient
+    // la voie de capture et la nôtre n'est jamais servie. Compté pour le
+    // nommer dans le journal au lieu d'égrener des « micro perdu ».
+    let mut starved_opens = 0u32;
 
     // Boucle de surveillance : le périphérique peut disparaître à tout
     // moment (débranchement, casque sans fil qui s'endort). On le rouvre
@@ -949,6 +954,7 @@ fn capture_loop(
         };
         let mut resampler = CubicResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
         let mut last_chunk = Instant::now();
+        let mut got_any_chunk = false;
         let mut last_probe = Instant::now();
         // L'état du monde au moment de l'ouverture : générations de reset et
         // empreinte du périphérique. Toute divergence ultérieure = réouverture.
@@ -1015,6 +1021,10 @@ fn capture_loop(
         let chunk = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(c) => {
                 last_chunk = Instant::now();
+                if !got_any_chunk {
+                    got_any_chunk = true;
+                    starved_opens = 0;
+                }
                 c
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1033,6 +1043,22 @@ fn capture_loop(
                 if !sh.input_lost.swap(true, Ordering::Relaxed) {
                     tracing::warn!("micro perdu — réouverture");
                     journal("micro perdu (le flux ne livre plus) — réouverture".into());
+                }
+                // Trois ouvertures d'affilée sans le moindre bloc : ce n'est
+                // plus un accident, c'est un micro affamé — le flux s'ouvre,
+                // mais un autre logiciel (voix d'un jeu, pilote du casque)
+                // tient la voie de capture. Nommé une fois, pas égrené.
+                if !got_any_chunk {
+                    starved_opens += 1;
+                    if starved_opens == 3 {
+                        tracing::warn!("micro affamé : 3 ouvertures sans un seul bloc");
+                        journal(
+                            "le micro s'ouvre mais ne livre rien (3 fois de suite) — un \
+                             autre logiciel tient probablement la voie de capture (voix \
+                             intégrée d'un jeu, pilote du casque) ; réessais en continu"
+                                .into(),
+                        );
+                    }
                 }
                 sh.sending.store(false, Ordering::Relaxed);
                 drop(stream);

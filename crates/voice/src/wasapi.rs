@@ -9,10 +9,15 @@
 //!   et non celui des jeux (eConsole) ;
 //! - la conversion de format automatique (AUTOCONVERTPCM) : un jeu qui fait
 //!   basculer le périphérique de 44,1 à 48 kHz ne tue plus le flux ;
-//! - la catégorie « Communications » sur la lecture — Windows nous traite en
-//!   app d'appel. Pas sur la capture : un micro ouvert en continu dans cette
-//!   catégorie déclencherait l'atténuation « activité de communication »
-//!   (баisse de 80 % des autres sons) en permanence chez certains ;
+//! - la catégorie « Communications » sur les deux sens. Sur la capture, elle
+//!   est décisive : un jeu dont la voix intégrée tient la voie de traitement
+//!   « communications » du micro (Valorant/Vivox sur un Kraken USB, vu sur le
+//!   terrain) laisse la voie « par défaut » s'ouvrir sans jamais la servir —
+//!   flux muet, réouvert en boucle. Demander la même voie que le jeu la
+//!   partage, comme Discord. Revers assumé : chez qui Windows est réglé sur
+//!   « réduire le volume des autres sons » (Panneau son → Communication),
+//!   le micro ouvert en continu peut atténuer le jeu — le remède est « Ne
+//!   rien faire » dans ce même panneau ;
 //! - le mode brut en option sur le micro : court-circuite les chaînes
 //!   d'effets tiers (Sonar, Nahimic, Synapse…), grandes pourvoyeuses de
 //!   micros zombies au lancement d'un jeu.
@@ -34,7 +39,7 @@ use windows::core::{implement, PCWSTR};
 use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    eCapture, eCommunications, eRender, AudioCategory_Communications, AudioCategory_Other,
+    eCapture, eCommunications, eRender, AudioCategory_Communications,
     EDataFlow, ERole, IAudioCaptureClient, IAudioClient2, IAudioRenderClient, IMMDevice,
     IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
     AudioClientProperties, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
@@ -374,30 +379,25 @@ fn open_client(device: &IMMDevice, input: bool, raw: bool) -> anyhow::Result<Ope
             let client: IAudioClient2 = device
                 .Activate(CLSCTX_ALL, None)
                 .context("activation du client audio")?;
-            // Catégorie « Communications » sur la lecture seulement : sur une
-            // capture ouverte en continu, elle déclencherait l'atténuation
-            // « activité de communication » de Windows en permanence.
-            // Le mode brut ne concerne que le micro : sur la sortie, les
-            // effets du casque (virtualisation…) sont un choix de l'usager.
-            if !input || raw {
-                let props = AudioClientProperties {
-                    cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
-                    bIsOffload: false.into(),
-                    eCategory: if input {
-                        AudioCategory_Other
-                    } else {
-                        AudioCategory_Communications
-                    },
-                    Options: if raw && input {
-                        AUDCLNT_STREAMOPTIONS_RAW
-                    } else {
-                        AUDCLNT_STREAMOPTIONS_NONE
-                    },
-                };
-                client
-                    .SetClientProperties(&props)
-                    .context("propriétés du client audio")?;
-            }
+            // Catégorie « Communications » partout, capture comprise : c'est
+            // la voie de traitement que tiennent les voix intégrées des jeux
+            // (Vivox…) — demander la même la partage au lieu d'affamer la
+            // nôtre (cf. l'en-tête du module). Le mode brut ne concerne que
+            // le micro : sur la sortie, les effets du casque restent un
+            // choix de l'usager.
+            let props = AudioClientProperties {
+                cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
+                bIsOffload: false.into(),
+                eCategory: AudioCategory_Communications,
+                Options: if raw && input {
+                    AUDCLNT_STREAMOPTIONS_RAW
+                } else {
+                    AUDCLNT_STREAMOPTIONS_NONE
+                },
+            };
+            client
+                .SetClientProperties(&props)
+                .context("propriétés du client audio")?;
             let engine = engine_format(if input { 1 } else { 2 });
             let mix_fmt;
             let (fmt_ptr, owned): (*const WAVEFORMATEX, bool) = if mix {
