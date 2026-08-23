@@ -1573,9 +1573,10 @@ impl KiApp {
             ServerMsg::UserLeft { user_id } => {
                 self.members.retain(|m| m.user_id != user_id);
             }
-            ServerMsg::VoiceState { user_id, speaking } => {
+            ServerMsg::VoiceState { user_id, speaking, muted } => {
                 if let Some(m) = self.members.iter_mut().find(|m| m.user_id == user_id) {
                     m.speaking = speaking;
+                    m.muted = muted;
                 }
             }
             ServerMsg::Error { message } => {
@@ -1844,7 +1845,7 @@ impl KiApp {
         drop(engine_guard);
         if sending != self.transmitting {
             self.transmitting = sending;
-            self.send(ClientMsg::VoiceState { speaking: sending });
+            self.send(ClientMsg::VoiceState { speaking: sending, muted: self.muted });
         }
     }
 
@@ -2415,6 +2416,14 @@ impl KiApp {
                     if clicked && in_voice {
                         self.muted = !self.muted;
                         self.play_sfx(if self.muted { sfx::MUTE } else { sfx::UNMUTE });
+                        // Annoncer la bascule tout de suite : les autres voient
+                        // l'icône « muet » au lieu de se demander si l'on est
+                        // parti. Sans ça, seule la prochaine transition de
+                        // parole aurait porté l'information.
+                        self.send(ClientMsg::VoiceState {
+                            speaking: self.transmitting,
+                            muted: self.muted,
+                        });
                     }
                     ui.add_space(2.0);
                     ui.vertical(|ui| {
@@ -2742,7 +2751,11 @@ impl KiApp {
                 if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
             let volume = self.volume_of(m.user_id);
             let photo = self.avatar_of(m.user_id);
-            let response = member_row(ui, m, speaking, is_me, level, volume, photo);
+            // Cette liste ne contient que des occupants du vocal : l'icône
+            // « muet » s'y montre sans autre condition. Pour soi, l'état
+            // local fait foi — l'écho serveur peut être en retard d'un aller.
+            let muted = if is_me { self.muted } else { m.muted };
+            let response = member_row(ui, m, speaking, muted, is_me, level, volume, photo);
             self.member_menu(response, m, is_me);
         }
         ui.add_space(6.0);
@@ -2903,8 +2916,13 @@ impl KiApp {
                             if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
                         let volume = self.volume_of(m.user_id);
                         let photo = self.avatar_of(m.user_id);
-                        let response =
-                            member_row(ui, m, speaking && audible, is_me, level, volume, photo);
+                        // « Muet » n'a de sens qu'en vocal : hors salon, un
+                        // micro coupé résiduel n'apprend rien à personne.
+                        let muted =
+                            m.voice.is_some() && if is_me { self.muted } else { m.muted };
+                        let response = member_row(
+                            ui, m, speaking && audible, muted, is_me, level, volume, photo,
+                        );
                         self.member_menu(response, m, is_me);
                     }
 
@@ -2926,7 +2944,7 @@ impl KiApp {
                         for m in &offline {
                             let photo = self.avatar_of(m.user_id);
                             let response =
-                                member_row(ui, m, false, false, 0.0, 1.0, photo);
+                                member_row(ui, m, false, false, false, 0.0, 1.0, photo);
                             self.member_menu(response, m, false);
                         }
                     }
@@ -5389,6 +5407,7 @@ fn member_row(
     ui: &mut egui::Ui,
     member: &Member,
     speaking: bool,
+    muted: bool,
     is_me: bool,
     level: f32,
     volume: f32,
@@ -5437,8 +5456,18 @@ fn member_row(
         icons::draw(painter, badge, Icon::Crown, ACCENT);
     }
 
-    // Côté droit : volume personnalisé, puis vumètre pendant la parole.
+    // Côté droit : micro coupé, volume personnalisé, vumètre pendant la
+    // parole. L'icône « muet » d'abord, la plus à droite : c'est elle qui
+    // répond à « il est parti ou il s'est mute ? » d'un coup d'œil.
     let mut right = rect.right() - 10.0;
+    if muted {
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(right - 14.0, rect.center().y - 7.0),
+            Vec2::splat(14.0),
+        );
+        icons::draw(painter, badge, Icon::MicOff, DANGER);
+        right -= 20.0;
+    }
     if speaking {
         let meter = egui::Rect::from_min_size(
             egui::pos2(right - 34.0, rect.center().y - 3.0),

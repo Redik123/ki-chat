@@ -249,6 +249,7 @@ async fn handle_connection(
                 channel: None,
                 voice: None,
                 speaking: false,
+                muted: false,
                 roles: auth.roles.clone(),
                 perms,
                 rank,
@@ -784,17 +785,18 @@ fn handle_msg(
                 let _ = tx.send(ServerMsg::HistoryPage { messages, more, channel });
             });
         }
-        ClientMsg::VoiceState { speaking } => {
+        ClientMsg::VoiceState { speaking, muted } => {
             let changed = {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else { return };
                 // On ne « parle » que depuis un salon vocal. Et on ne relaie
                 // qu'un vrai changement : notre client ne transmet déjà que
                 // les transitions, mais rien n'oblige l'autre bout à être lui.
-                if u.voice.is_none() || u.speaking == speaking {
+                if u.voice.is_none() || (u.speaking == speaking && u.muted == muted) {
                     false
                 } else {
                     u.speaking = speaking;
+                    u.muted = muted;
                     true
                 }
             };
@@ -803,7 +805,10 @@ fn handle_msg(
             // allume leur anneau. Diffuser au salon aurait de toute façon été
             // sans effet, `broadcast` filtrant sur le salon **textuel** lu.
             if changed {
-                state.broadcast_all_except(user_id, &ServerMsg::VoiceState { user_id, speaking });
+                state.broadcast_all_except(
+                    user_id,
+                    &ServerMsg::VoiceState { user_id, speaking, muted },
+                );
             }
         }
         ClientMsg::Kick { user_id: target, reason } => {

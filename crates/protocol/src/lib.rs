@@ -139,8 +139,14 @@ pub enum ClientMsg {
         #[serde(default)]
         channel: ChannelId,
     },
-    /// Le client annonce qu'il entre/sort du vocal du salon courant.
-    VoiceState { speaking: bool },
+    /// Le client annonce son état vocal : émission en cours, et micro coupé
+    /// volontairement — pour que les autres distinguent « muet » de « parti ».
+    VoiceState {
+        speaking: bool,
+        /// Micro coupé par la personne. Absent d'un client antérieur : faux.
+        #[serde(default)]
+        muted: bool,
+    },
     /// Expulse un utilisateur du serveur (admin uniquement). Il peut se
     /// reconnecter aussitôt : pour l'en empêcher, voir `AdminBan`.
     Kick {
@@ -341,7 +347,13 @@ pub enum ServerMsg {
         channel: ChannelId,
     },
     /// État vocal d'un membre du salon.
-    VoiceState { user_id: UserId, speaking: bool },
+    VoiceState {
+        user_id: UserId,
+        speaking: bool,
+        /// Micro coupé volontairement. Absent d'un serveur antérieur : faux.
+        #[serde(default)]
+        muted: bool,
+    },
     /// Liste des membres présents dans le salon rejoint.
     Members { members: Vec<Member> },
     /// Erreur (auth refusée, salon inconnu, ...).
@@ -801,6 +813,11 @@ pub struct Member {
     pub user_id: UserId,
     pub username: String,
     pub speaking: bool,
+    /// Micro coupé volontairement — l'icône « muet » chez les autres, pour
+    /// distinguer qui s'est tu de qui est parti. Absent d'un serveur
+    /// antérieur : faux.
+    #[serde(default)]
+    pub muted: bool,
     #[serde(default)]
     pub admin: bool,
     /// Empreinte de la photo de profil, ou `None` s'il n'y en a pas. La

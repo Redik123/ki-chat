@@ -123,10 +123,16 @@ async fn main() -> anyhow::Result<()> {
                     let names: Vec<_> = members.iter().map(|m| m.username.as_str()).collect();
                     println!("* présents : {}", names.join(", "));
                 }
-                ServerMsg::VoiceState { user_id, speaking } => {
+                ServerMsg::VoiceState { user_id, speaking, muted } => {
                     println!(
                         "* utilisateur {user_id} {}",
-                        if speaking { "parle" } else { "silencieux" }
+                        if muted {
+                            "muet"
+                        } else if speaking {
+                            "parle"
+                        } else {
+                            "silencieux"
+                        }
                     );
                 }
                 ServerMsg::Error { message } => eprintln!("! erreur : {message}"),
@@ -309,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
             };
             engine.set_transmit(on);
             println!("* micro {}", if on { "activé" } else { "coupé" });
-            ClientMsg::VoiceState { speaking: on }
+            ClientMsg::VoiceState { speaking: on, muted: !on }
         } else if line == "/stats" {
             match &engine {
                 Some(e) => {

@@ -78,6 +78,8 @@ pub struct ConnectedUser {
     /// forcément y parler, et l'inverse.
     pub voice: Option<ChannelId>,
     pub speaking: bool,
+    /// Micro coupé volontairement (annoncé par le client, montré aux autres).
+    pub muted: bool,
     /// Rôles du compte, et ce qui s'en déduit. **Recalculés** à chaque
     /// changement de rôle (`AppState::refresh_member`) : les garder à jour
     /// ici évite de reprendre le magasin de rôles sur le chemin chaud.
@@ -511,6 +513,7 @@ impl AppState {
                 user_id: *id,
                 username: u.username.clone(),
                 speaking: u.speaking,
+                muted: u.muted,
                 admin: u.admin,
                 avatar: avatars.get(id).cloned(),
                 voice: u.voice,
@@ -532,6 +535,7 @@ impl AppState {
                 user_id: account.user_id,
                 username: account.username,
                 speaking: false,
+                muted: false,
                 admin: account.admin,
                 avatar: avatars.get(&account.user_id).cloned(),
                 voice: None,
