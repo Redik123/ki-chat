@@ -237,6 +237,14 @@ impl Receiver {
             if delta_ms < TALKSPURT_MS {
                 let deviation = (delta_ms - FRAME_MS).abs();
                 self.jitter_ms += (deviation - self.jitter_ms) / 8.0;
+            } else if !self.pending.is_empty() {
+                // Reprise de parole avec des restes en attente : c'est la
+                // queue de la phrase PRÉCÉDENTE, arrivée en retard et jamais
+                // drainée faute de paquets suivants. La décoder maintenant la
+                // ferait rejouer en tête de la nouvelle phrase. Du passé : on
+                // repart de la phrase qui commence.
+                self.pending.clear();
+                self.next_seq = Some(seq);
             }
         }
         self.last_arrival = Some(now);

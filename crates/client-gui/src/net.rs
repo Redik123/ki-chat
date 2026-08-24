@@ -93,6 +93,11 @@ pub struct NetHandle {
     /// Fil réseau, pour pouvoir attendre qu'il ait vraiment fermé la
     /// connexion avant que le processus ne s'arrête.
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Jeton de génération des (re)démarrages du moteur voix. Chaque
+    /// redémarrage prend un jeton ; seul le porteur du plus récent a le
+    /// droit d'installer son moteur. Le Welcome et la déconnexion
+    /// l'incrémentent aussi : un redémarrage parti juste avant est invalidé.
+    restart_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl NetHandle {
@@ -130,11 +135,21 @@ impl NetHandle {
 
     /// Redémarre le moteur voix avec de nouvelles préférences (périphérique,
     /// débruitage...). Fait dans un thread : l'arrêt peut prendre ~200 ms.
+    ///
+    /// Sérialisé par jeton : deux redémarrages rapprochés (deux réglages coup
+    /// sur coup) lançaient deux fils sans ordre — le perdant pouvait
+    /// réinstaller les ANCIENNES préférences, ou laisser l'aiguillage des
+    /// datagrammes branché sur un moteur déjà arrêté : surdité totale. Seul
+    /// le porteur du jeton le plus récent va au bout ; les autres renoncent
+    /// au premier point de contrôle, et leur moteur éventuel part au Drop.
     pub fn restart_voice(&self, prefs: VoicePrefs) {
+        use std::sync::atomic::Ordering;
         let engine_slot = self.engine.clone();
         let params_slot = self.voice_params.clone();
         let conn_slot = self.conn.clone();
         let feed_slot = self.voice_feed.clone();
+        let gen_slot = self.restart_gen.clone();
+        let gen = gen_slot.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
             let Some(params) = *params_slot.lock().unwrap() else { return };
             let Some(conn) = conn_slot.lock().unwrap().clone() else { return };
@@ -142,14 +157,34 @@ impl NetHandle {
             // fin des fils audio, et le fil de l'interface prend ce même
             // verrou à chaque image — le tenir pendant l'attente figeait
             // l'affichage le temps du changement de périphérique.
-            let old = engine_slot.lock().unwrap().take();
+            let old = {
+                let mut slot = engine_slot.lock().unwrap();
+                if gen_slot.load(Ordering::SeqCst) != gen {
+                    return; // un redémarrage plus récent est déjà passé
+                }
+                slot.take()
+            };
             if let Some(old) = old {
                 old.shutdown();
             }
+            // L'attente de shutdown (~200 ms) laisse tout le temps à un
+            // redémarrage plus récent d'arriver : on revérifie.
+            if gen_slot.load(Ordering::SeqCst) != gen {
+                return;
+            }
             let (tx, rx) = std_mpsc::channel();
-            *feed_slot.lock().unwrap() = Some(tx);
             match start_engine(params, &prefs, &conn, rx) {
-                Ok(engine) => *engine_slot.lock().unwrap() = Some(engine),
+                Ok(engine) => {
+                    let mut slot = engine_slot.lock().unwrap();
+                    if gen_slot.load(Ordering::SeqCst) == gen {
+                        // L'aiguillage et le moteur s'installent ensemble,
+                        // sous le même verrou de moteur : plus de fenêtre où
+                        // les datagrammes partent vers un moteur mort.
+                        *feed_slot.lock().unwrap() = Some(tx);
+                        *slot = Some(engine);
+                    }
+                    // Sinon : moteur obsolète, son Drop l'arrête.
+                }
                 Err(e) => tracing::error!("redémarrage vocal impossible : {e:#}"),
             }
         });
@@ -197,10 +232,12 @@ pub fn connect(
     let conn = Arc::new(Mutex::new(None));
     let voice_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>> =
         Arc::new(Mutex::new(None));
+    let restart_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let worker = std::thread::spawn({
         let (engine, voice_params, conn, voice_feed) =
             (engine.clone(), voice_params.clone(), conn.clone(), voice_feed.clone());
+        let restart_gen = restart_gen.clone();
         move || {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -211,7 +248,8 @@ pub fn connect(
                 }
             };
             rt.block_on(run(
-                url, creds, prefs, cmd_rx, event_tx, engine, voice_params, conn, voice_feed, ctx,
+                url, creds, prefs, cmd_rx, event_tx, engine, voice_params, conn, voice_feed,
+                restart_gen, ctx,
             ));
         }
     });
@@ -224,6 +262,7 @@ pub fn connect(
         conn,
         voice_feed,
         worker: Some(worker),
+        restart_gen,
     }
 }
 
@@ -238,8 +277,10 @@ async fn run(
     params_slot: Arc<Mutex<Option<VoiceParams>>>,
     conn_slot: Arc<Mutex<Option<quinn::Connection>>>,
     feed_slot: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    restart_gen: Arc<std::sync::atomic::AtomicU64>,
     ctx: eframe::egui::Context,
 ) {
+    use std::sync::atomic::Ordering;
     let emit = |e: Event| {
         let _ = event_tx.send(e);
         ctx.request_repaint();
@@ -281,7 +322,15 @@ async fn run(
         });
     }
 
-    let cleanup = |engine_slot: &Arc<Mutex<Option<VoiceEngine>>>| {
+    let cleanup = || {
+        // Invalider d'abord les redémarrages en vol : un restart_voice parti
+        // juste avant la déconnexion ne doit pas ressusciter un moteur sur
+        // cette connexion morte une fois le démontage fait. Vider les
+        // paramètres bloque aussi tout redémarrage tant qu'aucun nouveau
+        // Welcome n'est arrivé.
+        restart_gen.fetch_add(1, Ordering::SeqCst);
+        *params_slot.lock().unwrap() = None;
+        *feed_slot.lock().unwrap() = None;
         let old = engine_slot.lock().unwrap().take();
         if let Some(e) = old {
             e.shutdown();
@@ -293,13 +342,13 @@ async fn run(
             cmd = cmd_rx.recv() => match cmd {
                 Some(Cmd::Send(msg)) => {
                     if writer.send_msg(&msg).await.is_err() {
-                        cleanup(&engine_slot);
+                        cleanup();
                         emit(Event::Disconnected);
                         return;
                     }
                 }
                 Some(Cmd::Quit) | None => {
-                    cleanup(&engine_slot);
+                    cleanup();
                     writer.close_gracefully().await;
                     return;
                 }
@@ -313,6 +362,10 @@ async fn run(
                             Some(key) => {
                                 let params = VoiceParams { user_id: *user_id, key };
                                 *params_slot.lock().unwrap() = Some(params);
+                                // Invalide tout redémarrage encore en vol
+                                // (d'avant une reconnexion) : le moteur du
+                                // Welcome fait foi.
+                                restart_gen.fetch_add(1, Ordering::SeqCst);
                                 let (tx, rx) = std_mpsc::channel();
                                 *feed_slot.lock().unwrap() = Some(tx);
                                 match start_engine(params, &prefs, &writer.conn, rx) {
@@ -330,7 +383,7 @@ async fn run(
                     emit(Event::Msg(msg));
                 }
                 None => {
-                    cleanup(&engine_slot);
+                    cleanup();
                     emit(Event::Disconnected);
                     return;
                 }
