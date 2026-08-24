@@ -945,7 +945,13 @@ fn capture_loop(
     let mut monitor: Option<Monitor> = None;
     // Activation vocale : on continue d'émettre un court instant après le
     // dernier franchissement du seuil, pour ne pas hacher les fins de mots.
-    let mut last_voice = Instant::now() - Duration::from_secs(60);
+    // checked_sub : soustraire à un Instant trop proche du démarrage de la
+    // machine (lancement automatique avec Windows) déborde et panique. À
+    // défaut, « maintenant » laisse le maintien VAD actif ~400 ms au premier
+    // lancement — inoffensif.
+    let mut last_voice = Instant::now()
+        .checked_sub(Duration::from_secs(60))
+        .unwrap_or_else(Instant::now);
     // Zombie à zéros : armé dès qu'un échantillon non nul passe, désarmé par
     // la réouverture qu'il déclenche. Une seule réouverture par épisode : un
     // casque coupé par son bouton mute matériel livre aussi des zéros
@@ -1125,7 +1131,21 @@ fn capture_loop(
                 sleep_unless_shutdown(&sh, nap);
                 continue 'device;
             }
-            Err(_) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Le fournisseur est mort en emportant l'émetteur — en natif,
+                // c'est ce qui arrive quand le flux tombe en erreur : le fil
+                // de capture s'arrête et lâche `tx`. Ce n'est PAS un arrêt du
+                // moteur : traité comme une perte de périphérique, sinon le
+                // micro restait mort jusqu'au redémarrage de l'application.
+                if !sh.input_lost.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("capture interrompue (fil mort) — réouverture");
+                    journal("capture interrompue (fil de capture mort) — réouverture".into());
+                }
+                sh.sending.store(false, Ordering::Relaxed);
+                drop(stream);
+                sleep_unless_shutdown(&sh, Duration::from_millis(500));
+                continue 'device;
+            }
         };
         // Zombie à zéros : après le passage d'un jeu, certains pilotes USB
         // continuent de livrer des trames à l'heure — mais toutes à zéro
@@ -1438,32 +1458,71 @@ impl NoiseGate {
     }
 }
 
-/// Gain automatique : vise une crête de parole constante, avec une attaque
-/// rapide (anti-saturation) et une détente lente (anti-pompage).
+/// Gain automatique : vise une crête de parole constante — et ne s'ajuste
+/// que sur la **voix**. L'ancien seuil absolu prenait le bruit de fond d'un
+/// micro un peu chargé (clavier, souffle que RNNoise laisse passer) pour de
+/// la parole et le gonflait ×8 entre les phrases : le « souffle montant »
+/// entendu sur le terrain. Un plancher de bruit glissant sépare désormais
+/// les deux : il suit la crête vers le bas sans délai (une respiration
+/// suffit), remonte lentement, et la voix doit le dominer nettement.
+///
+/// Trois conséquences voulues : le bruit stable n'est plus jamais amplifié ;
+/// pendant les silences le gain reflue vers le neutre au lieu de rester
+/// gonflé (le premier mot n'écrête plus) ; et la remontée est d'autant plus
+/// vive que le gain est loin du compte — après un cri, une phrase douce
+/// retrouve son niveau en quelques trames, pas en une demi-seconde. Le tout
+/// écrêté doux : une attaque sur-amplifiée sature en douceur le temps que
+/// l'attaque du gain la rattrape, au lieu de craquer.
 struct Agc {
     gain: f32,
+    /// Plancher de bruit estimé (crête des moments les plus calmes).
+    floor: f32,
 }
 
 impl Agc {
-    /// En-dessous, on considère que c'est du silence : le gain ne bouge pas
-    /// (sinon l'AGC amplifierait le bruit de fond entre les phrases).
+    /// En-dessous, silence absolu : ni voix, ni bruit exploitable.
     const GATE: f32 = 0.015;
+    /// La voix doit dominer le plancher de bruit d'au moins ce facteur.
+    const VOICE_OVER_FLOOR: f32 = 3.0;
+    /// Le plancher ne descend jamais sous GATE/3 : sans ce garde-fou, un
+    /// vrai silence l'écrasait à zéro et le premier bruit venu redevenait
+    /// « de la voix ».
+    const FLOOR_MIN: f32 = Self::GATE / 3.0;
 
     fn new() -> Self {
-        Self { gain: 1.0 }
+        Self { gain: 1.0, floor: Self::FLOOR_MIN }
     }
 
     fn process(&mut self, frame: &mut [f32], target: f32) {
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
-        if peak >= Self::GATE {
+        // Plancher : tombe immédiatement sur une trame calme, remonte
+        // lentement (~2 % par trame) — il s'établit en une seconde ou deux,
+        // et une seule respiration le remet en place.
+        if peak < self.floor {
+            self.floor = peak.max(Self::FLOOR_MIN);
+        } else {
+            self.floor = (self.floor * 1.02).min(0.25);
+        }
+        let voiced = peak >= Self::GATE && peak >= self.floor * Self::VOICE_OVER_FLOOR;
+        if voiced {
             let desired = (target / peak).clamp(0.2, 8.0);
-            // Baisse vite (protège de la saturation), monte doucement.
-            let rate = if desired < self.gain { 0.5 } else { 0.02 };
+            // Baisse vite (anti-saturation) ; monte vite quand on est loin
+            // du compte, doucement près de lui (anti-pompage).
+            let rate = if desired < self.gain {
+                0.5
+            } else if desired > self.gain * 2.0 {
+                0.2
+            } else {
+                0.02
+            };
             self.gain += (desired - self.gain) * rate;
+        } else {
+            // Bruit ou silence : retour progressif au neutre.
+            self.gain += (1.0 - self.gain) * 0.005;
         }
         if (self.gain - 1.0).abs() > 0.001 {
             for s in frame.iter_mut() {
-                *s = (*s * self.gain).clamp(-1.0, 1.0);
+                *s = soft_clip(*s * self.gain);
             }
         }
     }
@@ -2075,11 +2134,21 @@ mod tests {
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!(peak < 0.5, "voix forte non atténuée : {peak}");
 
-        // Signal faible : le gain remonte progressivement au-dessus de 1.
+        // Signal faible mais VIVANT — des salves et des respirations, comme
+        // une voix : le gain remonte au-dessus de 1. Un signal faible et
+        // constant serait du bruit, et n'est plus amplifié (voir
+        // agc_stops_pumping_steady_noise) : les respirations remettent le
+        // plancher de bruit en place entre les salves.
         let mut agc = Agc::new();
-        for _ in 0..300 {
-            let mut frame = [0.05f32; FRAME_SAMPLES];
-            agc.process(&mut frame, 0.30);
+        for _ in 0..12 {
+            for _ in 0..20 {
+                let mut frame = [0.05f32; FRAME_SAMPLES];
+                agc.process(&mut frame, 0.30);
+            }
+            for _ in 0..5 {
+                let mut frame = [0.001f32; FRAME_SAMPLES];
+                agc.process(&mut frame, 0.30);
+            }
         }
         let mut frame = [0.05f32; FRAME_SAMPLES];
         agc.process(&mut frame, 0.30);
@@ -2093,6 +2162,29 @@ mod tests {
             agc.process(&mut frame, 0.30);
         }
         assert!((agc.gain - 1.0).abs() < 0.01, "l'AGC a pompé le silence");
+    }
+
+    /// Le bug du « souffle montant » : l'ancien AGC prenait un bruit de fond
+    /// constant au-dessus de son seuil pour de la voix et le gonflait ×8
+    /// entre les phrases. Le plancher glissant doit le reclasser en bruit et
+    /// ramener le gain au neutre — puis traiter la vraie voix normalement.
+    #[test]
+    fn agc_stops_pumping_steady_noise() {
+        let mut agc = Agc::new();
+        for _ in 0..800 {
+            let mut frame = [0.03f32; FRAME_SAMPLES];
+            agc.process(&mut frame, 0.30);
+        }
+        assert!(agc.gain < 2.0, "l'AGC pompe encore le bruit : gain {}", agc.gain);
+        // La voix qui suit domine le plancher : elle est bien normalisée.
+        for _ in 0..20 {
+            let mut frame = [0.3f32; FRAME_SAMPLES];
+            agc.process(&mut frame, 0.30);
+        }
+        let mut frame = [0.3f32; FRAME_SAMPLES];
+        agc.process(&mut frame, 0.30);
+        let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!((0.2..=0.5).contains(&peak), "voix mal normalisée après bruit : {peak}");
     }
 
     #[test]

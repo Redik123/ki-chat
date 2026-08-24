@@ -13,21 +13,51 @@
 use std::collections::VecDeque;
 
 pub struct CubicResampler {
-    /// Échantillons d'entrée consommés par échantillon de sortie.
+    /// Échantillons d'entrée consommés par échantillon de sortie,
+    /// **après** pré-moyennage.
     ratio: f64,
+    /// Pré-moyennage par blocs de `preavg` échantillons avant interpolation.
+    /// 1 = aucun. Voir `new` pour le pourquoi.
+    preavg: usize,
+    /// Échantillons d'entrée en attente d'un bloc de moyennage complet.
+    carry: Vec<f32>,
     buf: VecDeque<f32>,
     /// Position fractionnaire de lecture dans `buf`.
     pos: f64,
 }
 
 impl CubicResampler {
-    pub fn new(ratio: f64) -> Self {
+    pub fn new(mut ratio: f64) -> Self {
         assert!(ratio > 0.0);
-        Self { ratio, buf: VecDeque::new(), pos: 0.0 }
+        // Décimation forte (micros en 96 ou 192 kHz) : l'interpolation
+        // cubique seule ne filtre rien — elle lit quatre points autour d'une
+        // position et saute par-dessus le reste, si bien que l'ultrason se
+        // replie en pleine bande vocale. On moyenne d'abord par blocs de 2,
+        // autant de fois qu'il faut pour ramener le rapport sous 1,5 : un
+        // passe-bas grossier mais réel (zéro exact à la nouvelle fréquence de
+        // Nyquist, −14 dB là où les repliements font le plus mal), et le
+        // cubique travaille ensuite près du rapport 1, où il excelle.
+        let mut preavg = 1usize;
+        while ratio > 1.5 {
+            preavg *= 2;
+            ratio /= 2.0;
+        }
+        Self { ratio, preavg, carry: Vec::new(), buf: VecDeque::new(), pos: 0.0 }
     }
 
     pub fn push(&mut self, samples: &[f32]) {
-        self.buf.extend(samples);
+        if self.preavg == 1 {
+            self.buf.extend(samples);
+            return;
+        }
+        for &s in samples {
+            self.carry.push(s);
+            if self.carry.len() == self.preavg {
+                let avg = self.carry.iter().sum::<f32>() / self.preavg as f32;
+                self.buf.push_back(avg);
+                self.carry.clear();
+            }
+        }
     }
 
     /// Vrai si `out_len` échantillons de sortie peuvent être produits.
@@ -151,6 +181,23 @@ mod tests {
         r.push(&[0.0; 100]);
         assert!(!r.can_pull(99)); // il faut deux échantillons d'avance
         assert!(r.can_pull(98));
+    }
+
+    #[test]
+    fn strong_decimation_attenuates_ultrasound() {
+        // Un micro 96 kHz qui capte de l'ultrason (42 kHz) : sans pré-filtre,
+        // la décimation le repliait à 6 kHz, en pleine bande vocale, à
+        // pleine puissance (RMS ~0,7). Le pré-moyennage doit l'écraser.
+        let input = sine(42_000.0, 96_000.0, 9600);
+        let mut r = CubicResampler::new(96_000.0 / 48_000.0);
+        r.push(&input);
+        assert!(r.can_pull(2000));
+        let mut out = vec![0f32; 2000];
+        r.pull(&mut out);
+        let rms = (out.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>()
+            / out.len() as f64)
+            .sqrt();
+        assert!(rms < 0.25, "repliement insuffisamment atténué : RMS {rms:.3}");
     }
 
     #[test]

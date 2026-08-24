@@ -45,6 +45,18 @@ const LATENCY_SLACK: usize = 4;
 /// peut être resynthétisé depuis la redondance neuronale d'un paquet.
 const DRED_WINDOW: u16 = 50;
 
+/// Profondeur maximale de trou que l'on dissimule trame à trame. Au-delà,
+/// on saute au bord du trou : synthétiser des dizaines de trames Deep PLC
+/// coûteuses pour que l'écrêtage de latence les jette aussitôt, c'était tout
+/// ce travail devant le rappel de sortie au pire moment — et pour rien.
+const CONCEAL_MAX: u16 = 10;
+
+/// Paquets « très en retard » consécutifs avant de conclure que l'émetteur
+/// est reparti d'un compteur aléatoire juste derrière nous (le compteur sert
+/// de nonce et repart au hasard à chaque recréation du moteur d'en face) et
+/// de resynchroniser. Un vrai duplicata n'arrive jamais en série continue.
+const BEHIND_RESYNC: u8 = 5;
+
 /// Audio décodé, prêt à sortir vers la carte son.
 ///
 /// **Séparé de l'état de décodage, et c'est tout l'intérêt.** Le rappel de
@@ -142,6 +154,8 @@ pub struct Receiver {
     /// mesure distingue donc les deux là où l'horloge seule en est incapable.
     burst_frames: usize,
     last_burst_decay: Instant,
+    /// Paquets « très en retard » consécutifs (voir BEHIND_RESYNC).
+    behind_run: u8,
     /// Taille de tampon imposée par l'utilisateur (None = adaptatif).
     jitter_override: Option<usize>,
 }
@@ -166,6 +180,7 @@ impl Receiver {
             last_arrival: None,
             burst_frames: 0,
             last_burst_decay: Instant::now(),
+            behind_run: 0,
             jitter_override: None,
         }
     }
@@ -236,13 +251,25 @@ impl Receiver {
 
         let ahead = seq.wrapping_sub(next);
         if ahead > RESYNC_GAP && ahead < u16::MAX - RESYNC_GAP {
-            // Trop loin dans le futur ou le passé : on repart de là.
+            // Trop loin dans le futur : on repart de là.
             self.pending.clear();
             self.next_seq = Some(seq);
         } else if ahead >= u16::MAX - RESYNC_GAP {
-            // Duplicata ou paquet très en retard : ignoré.
-            return (0, 0);
+            // Duplicata ou paquet très en retard : ignoré — sauf si ça
+            // insiste. Un émetteur dont le moteur est recréé repart d'un
+            // compteur aléatoire ; s'il retombe juste derrière le nôtre,
+            // chaque paquet du nouveau flux passerait pour un retardataire
+            // pendant des secondes de mutisme. Une série ininterrompue de
+            // « retardataires » n'est pas une série de duplicatas : on
+            // resynchronise dessus.
+            self.behind_run += 1;
+            if self.behind_run < BEHIND_RESYNC {
+                return (0, 0);
+            }
+            self.pending.clear();
+            self.next_seq = Some(seq);
         }
+        self.behind_run = 0;
         self.pending.insert(seq, payload.to_vec());
 
         // Draine tout ce qui est décodable dans l'ordre. Tout ce bloc décode
@@ -251,12 +278,30 @@ impl Receiver {
         self.decoded.clear();
         let mut lost = 0u64;
         let mut recovered = 0u64;
+        let mut delivered = 0usize;
         let mut next = self.next_seq.unwrap();
         loop {
             if let Some(p) = self.pending.remove(&next) {
                 self.decode_into_ready(&p, false);
                 self.dred_carrier = None;
+                delivered += 1;
             } else if self.pending.len() > MAX_PENDING {
+                // Un trou plus profond que ce qu'on dissimule trame à trame ?
+                // On saute à son bord : ces trames sont perdues quoi qu'il
+                // arrive (l'écrêtage de latence les jetterait), autant ne pas
+                // les synthétiser une à une au Deep PLC.
+                let dist = self
+                    .pending
+                    .keys()
+                    .map(|s| s.wrapping_sub(next))
+                    .min()
+                    .unwrap_or(0);
+                if dist > CONCEAL_MAX {
+                    let skip = dist - CONCEAL_MAX;
+                    lost += skip as u64;
+                    next = next.wrapping_add(skip);
+                    continue;
+                }
                 // Trame perdue. Trois niveaux de secours, du meilleur au
                 // pis-aller : FEC LBRR (trame n+1), DRED (redondance
                 // neuronale d'un paquet jusqu'à 1 s plus tard), Deep PLC.
@@ -276,13 +321,13 @@ impl Receiver {
         }
         self.next_seq = Some(next);
 
-        // Dépôt : la seule section sous verrou, et elle ne fait que recopier
-        // des échantillons déjà décodés. Le rappel de sortie ne peut donc
-        // attendre ici que quelques microsecondes, jamais un décodage.
-        // Profondeur de cette livraison, et oubli progressif : le tampon
-        // redescend quand le lien redevient régulier, au lieu de rester
-        // dimensionné pour la pire rafale de la session.
-        self.burst_frames = self.burst_frames.max(self.decoded.len() / FRAME_SAMPLES);
+        // Profondeur de cette livraison — comptée sur les seuls paquets
+        // réellement reçus : les trames de dissimulation d'un trou réseau ne
+        // sont pas une rafale, et les compter épinglait le tampon au plafond
+        // pendant des minutes après une simple coupure de 2 s. Bornée au
+        // plafond utile de `prime_frames` (8), et oubli progressif : le
+        // tampon redescend quand le lien redevient régulier.
+        self.burst_frames = self.burst_frames.max(delivered.min(8));
         if self.last_burst_decay.elapsed() > Duration::from_secs(5) {
             self.burst_frames = self.burst_frames.saturating_sub(1);
             self.last_burst_decay = now;
@@ -526,6 +571,48 @@ mod tests {
 
         // Les deux trames ont atteint le tampon.
         assert_eq!(playout.lock().unwrap().ready.len(), 2 * FRAME_SAMPLES);
+    }
+
+    /// Le compteur d'émission repart au hasard (c'est un nonce) : s'il
+    /// retombe juste derrière notre séquence, l'ancien code ignorait chaque
+    /// paquet du nouveau flux comme un « retardataire » — des secondes de
+    /// mutisme. La série continue doit forcer la resynchronisation.
+    #[test]
+    fn sender_restarting_just_behind_resyncs() {
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        rx.push(1000, &encoded_frame(&mut enc, 0.1));
+        for i in 0..12u16 {
+            rx.push(950u16.wrapping_add(i), &encoded_frame(&mut enc, 0.2));
+        }
+        let mut out = [0f32; FRAME_SAMPLES];
+        let mut mixed = false;
+        for _ in 0..4 {
+            mixed |= rx.playout().lock().unwrap().mix_into(&mut out, 1.0);
+        }
+        assert!(mixed, "l'émetteur reparti juste derrière est resté muet");
+    }
+
+    /// Un trou de 2 s ne doit ni synthétiser 100 trames de Deep PLC (jetées
+    /// aussitôt par l'écrêtage de latence) ni épingler le tampon au plafond :
+    /// on saute au bord du trou, seule la couture est dissimulée.
+    #[test]
+    fn deep_gap_is_skipped_not_synthesized() {
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        rx.push(0, &encoded_frame(&mut enc, 0.1));
+        let mut total_lost = 0u64;
+        for seq in 100..108u16 {
+            let (l, _) = rx.push(seq, &encoded_frame(&mut enc, 0.1));
+            total_lost += l;
+        }
+        assert_eq!(total_lost, 99, "toutes les trames du trou comptent comme perdues");
+        let ready = rx.playout().lock().unwrap().ready.len();
+        assert!(
+            ready <= 25 * FRAME_SAMPLES,
+            "le trou a été synthétisé : {} trames en tampon",
+            ready / FRAME_SAMPLES
+        );
     }
 
     #[test]

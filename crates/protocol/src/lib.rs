@@ -854,25 +854,27 @@ pub struct ChatRecord {
     pub ts: u64,
 }
 
-/// --- Protocole voix (UDP), version 2 ---
+/// --- Protocole voix (datagrammes), version 2 ---
 ///
 /// Chaque paquet voix a un en-tête binaire fixe suivi de la trame Opus
 /// chiffrée (XChaCha20-Poly1305). Petit-boutiste (little-endian) partout.
+/// Le transport est aujourd'hui le datagramme QUIC (donc dans le tunnel TLS
+/// de la connexion) — l'en-tête ne suppose rien de plus qu'un datagramme.
 ///
-/// Client -> serveur :
+/// Dans les deux sens :
 ///   [0..2]  magic  "KV"
 ///   [2]     version (2)
-///   [3..11] voice_token (u64) — remis par le serveur dans Welcome
+///   [3..11] user_id de l'émetteur (u64)
 ///   [11..19] compteur (u64) — strictement croissant, sert de nonce
 ///   [19..]  trame Opus chiffrée (+16 octets de tag Poly1305)
 ///
-/// Serveur -> clients (mode SFU : le serveur relaie sans déchiffrer) :
-///   identique, mais [3..11] = user_id de l'émetteur.
+/// Le serveur relaie sans déchiffrer (mode SFU) et fait autorité sur
+/// l'identité : le user_id annoncé est celui de la connexion QUIC porteuse,
+/// pas une déclaration du client.
 ///
 /// Le nonce XChaCha20 (24 octets) est dérivé de (user_id, compteur) : il est
-/// donc unique par clé tant que la clé change à chaque démarrage du serveur.
-/// Un paquet sans charge (en-tête seul) est un keepalive : il enregistre
-/// l'adresse UDP du client auprès du serveur et n'est jamais relayé.
+/// donc unique par clé tant que la clé change à chaque démarrage du serveur
+/// et que les compteurs repartent d'un tirage aléatoire à chaque moteur.
 pub const VOICE_MAGIC: [u8; 2] = *b"KV";
 pub const VOICE_VERSION: u8 = 2;
 pub const VOICE_HEADER_LEN: usize = 19;

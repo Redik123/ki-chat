@@ -599,7 +599,11 @@ fn capture_worker(
     (|| {
         while !stop.load(Ordering::Relaxed) {
             unsafe {
-                let _ = WaitForSingleObject(open.event, 200);
+                // 50 ms de repli : si l'événement meurt sans bruit (pilote
+                // fantasque), on draine quand même à un rythme qui tient
+                // largement dans le tampon de 200 ms — à 200 ms de repli,
+                // c'était pile la limite, et ça débordait au premier retard.
+                let _ = WaitForSingleObject(open.event, 50);
                 loop {
                     let pending = match capture.GetNextPacketSize() {
                         Ok(n) => n,
@@ -772,7 +776,10 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
     while !stop.load(Ordering::Relaxed) {
         unsafe {
             if running {
-                let _ = WaitForSingleObject(open.event, 200);
+                // 10 ms de repli : un événement mort ne doit pas laisser le
+                // tampon (cible 30 ms) se vider entre deux réveils — à
+                // 200 ms, c'était une famine chronique invisible du watchdog.
+                let _ = WaitForSingleObject(open.event, 10);
                 let padding = match open.client.GetCurrentPadding() {
                     Ok(p) => p,
                     Err(e) => {
