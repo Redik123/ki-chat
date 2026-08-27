@@ -1004,6 +1004,38 @@ compare des octets, or la ligne du fichier n'est pas le texte.
 Hors de ces deux cas, on désérialise tout : plus lent, mais juste. Un faux
 négatif est exactement ce qu'un tamis n'a pas le droit de produire.
 
+### Un second défaut, trouvé par l'intégration continue
+
+Le dédoublonnage entre le fichier et le cache était **faux**, et il rendait
+les résultats les plus **anciens** au lieu des plus récents dès qu'il y en
+avait plus que la limite.
+
+Le cache mémoire est la queue du fichier : les mêmes messages s'y trouvent
+donc deux fois. J'écartais les doublons en comparant à ce qui avait *survécu*
+dans la fenêtre glissante — mais ce qui en était tombé n'était plus reconnu
+comme déjà vu, se faisait réinsérer, et chassait les récents.
+
+Le défaut ne se voyait que si le fil d'écriture avait eu le temps de vider sa
+file. Sur la machine de développement il ne l'avait pas : le fichier était
+vide, le cache fournissait tout, le résultat était juste. Sur le coureur Linux
+il l'avait. **Un test qui passe ici et échoue là-bas, sans que rien ne change
+dans le code.**
+
+La comparaison se fait désormais dans l'autre sens : on relève d'abord ce que
+le cache contient — borné à , donc seize kilooctets au pire — et l'on
+écarte du fichier ce qu'il redira. Le cache passe en dernier, puisqu'il porte
+les messages les plus récents.
+
+Deux tests le tiennent, et les deux ont été vérifiés en retirant la garde pour
+s'assurer qu'ils échouent : l'un sur l'ordre, l'autre sur les doublons — celui
+qui rendait  au lieu de . Le premier essai de
+test ne prouvait rien, il passait sans la garde ; il a fallu chercher la
+propriété que la garde protège vraiment.
+
+Les deux écrivent leur journal à la main plutôt que par  : sinon le
+recouvrement entre fichier et cache dépend de l'avance du fil d'écriture, et
+c'est précisément ce qui avait masqué le défaut.
+
 **Le test a d'abord passé pour la mauvaise raison.** Trois messages tenaient
 dans le cache mémoire, qui rattrapait le tamis : le trou restait invisible.
 Le test écrit maintenant son journal à la main, au-delà de `MEM_CAP`, les

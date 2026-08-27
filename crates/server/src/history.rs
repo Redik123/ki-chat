@@ -421,6 +421,38 @@ impl History {
             // pas rapatrier dix ans d'archives.
             let mut par_salon: VecDeque<ChatRecord> = VecDeque::with_capacity(limit);
 
+            // Le cache mémoire est la **queue du fichier** : les mêmes
+            // messages s'y trouvent deux fois. On relève donc d'abord ce
+            // qu'il contient, pour écarter du fichier ce qu'il redira.
+            //
+            // Le sens de la comparaison est tout l'enjeu. Dédoublonner
+            // contre ce qui a *survécu* dans la fenêtre était faux : ce qui
+            // en était tombé n'était plus reconnu comme déjà vu, se faisait
+            // réinsérer, et chassait les résultats récents — la recherche
+            // rendait alors les plus **anciens**. Le défaut ne se voyait que
+            // si le fil d'écriture avait eu le temps de vider sa file, ce qui
+            // dépend de la machine : passant ici, échouant en intégration.
+            //
+            // Le cache est borné à `MEM_CAP`, cet ensemble aussi : seize
+            // kilooctets au pire, quel que soit le nombre de correspondances.
+            let (frais, en_memoire) = {
+                let logs = self.logs.lock().unwrap();
+                match logs.get(&channel) {
+                    Some(recent) => (
+                        recent
+                            .iter()
+                            .filter(|r| r.text.to_lowercase().contains(&besoin))
+                            .cloned()
+                            .collect::<Vec<ChatRecord>>(),
+                        recent
+                            .iter()
+                            .map(|r| (r.user_id, r.ts))
+                            .collect::<std::collections::HashSet<_>>(),
+                    ),
+                    None => (Vec::new(), std::collections::HashSet::new()),
+                }
+            };
+
             let path = PathBuf::from(data_dir).join(format!("channel-{channel}.jsonl"));
             if let Ok(file) = File::open(&path) {
                 let mut reader = BufReader::new(file);
@@ -449,6 +481,11 @@ impl History {
                     // le pseudo, ou dans un nom de fichier. Seul le texte
                     // compte, et c'est ici qu'on le vérifie pour de bon.
                     if let Ok(rec) = serde_json::from_slice::<ChatRecord>(trim_eol(&buf)) {
+                        // Déjà en mémoire : le cache le redira, et en meilleur
+                        // ordre. On le laisse passer une seule fois.
+                        if en_memoire.contains(&(rec.user_id, rec.ts)) {
+                            continue;
+                        }
                         if rec.text.to_lowercase().contains(&besoin) {
                             garder(&mut par_salon, limit, rec, &mut deborde);
                         }
@@ -456,26 +493,12 @@ impl History {
                 }
             }
 
-            // Le cache mémoire par-dessus : le fil d'écriture a du retard sur
-            // ce qui vient d'être dit, et ne pas trouver le message envoyé
+            // Le cache par-dessus, donc en dernier : il porte les messages les
+            // plus récents — y compris ceux que le fil d'écriture n'a pas
+            // encore posés sur le disque. Ne pas trouver le message envoyé
             // trois secondes plus tôt ferait douter de toute la recherche.
-            let frais: Vec<ChatRecord> = {
-                let logs = self.logs.lock().unwrap();
-                match logs.get(&channel) {
-                    Some(recent) => recent
-                        .iter()
-                        .filter(|r| r.text.to_lowercase().contains(&besoin))
-                        .cloned()
-                        .collect(),
-                    None => Vec::new(),
-                }
-            };
-            let vus: std::collections::HashSet<(ki_protocol::UserId, u64)> =
-                par_salon.iter().map(|r| (r.user_id, r.ts)).collect();
             for rec in frais {
-                if !vus.contains(&(rec.user_id, rec.ts)) {
-                    garder(&mut par_salon, limit, rec, &mut deborde);
-                }
+                garder(&mut par_salon, limit, rec, &mut deborde);
             }
 
             trouves.extend(par_salon.into_iter().map(|r| (channel, r)));
@@ -784,17 +807,71 @@ mod tests {
         assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![20]);
     }
 
+    /// Un message présent **à la fois** dans le fichier et dans le cache ne
+    /// doit apparaître qu'une fois.
+    ///
+    /// C'est exactement la situation ordinaire : le cache est la queue du
+    /// fichier, les mêmes messages y sont donc deux fois. Le journal est
+    /// écrit à la main puis relu à l'ouverture pour que ce recouvrement soit
+    /// certain — l'écrire par `append` le ferait dépendre de l'avance du fil
+    /// d'écriture, et le test passerait ou non selon la machine.
+    #[test]
+    fn un_message_present_des_deux_cotes_ne_sort_qu_une_fois() {
+        let dir = scratch("doublon");
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        let mut bytes = Vec::new();
+        for n in 1..=3u64 {
+            bytes.extend_from_slice(
+                serde_json::to_string(&dit(1, n, "encore un test")).unwrap().as_bytes(),
+            );
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+
+        // Limite large : rien n'est écarté faute de place, donc tout doublon
+        // se voit.
+        let (hits, more) = history.search(&dir, &[1], "test", 50);
+        assert_eq!(
+            hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "chaque message une seule fois"
+        );
+        assert!(!more);
+    }
+
     /// Trop de résultats : on garde les plus **récents**, et on le dit.
+    ///
+    /// Le journal est écrit à la main puis relu à l'ouverture : le fichier
+    /// **et** le cache mémoire portent alors les dix messages. C'est le cas
+    /// du doublon, et il doit être déterministe — l'écrire par `append`
+    /// faisait dépendre le résultat de l'avance du fil d'écriture, si bien
+    /// que ce test passait sur une machine et échouait sur une autre. Il a
+    /// d'ailleurs fallu l'intégration continue pour le découvrir.
     #[test]
     fn la_recherche_garde_les_plus_recents_et_l_annonce() {
         let dir = scratch("trop");
-        let history = History::open(&dir, &[text_channel(1)]).unwrap();
-        for n in 1..=10 {
-            history.append(1, &dit(1, n, "encore un test"));
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        let mut bytes = Vec::new();
+        for n in 1..=10u64 {
+            bytes.extend_from_slice(
+                serde_json::to_string(&dit(1, n, "encore un test")).unwrap().as_bytes(),
+            );
+            bytes.push(b'\n');
         }
+        std::fs::write(&path, &bytes).unwrap();
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+
         let (hits, more) = history.search(&dir, &[1], "test", 3);
         assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![8, 9, 10]);
         assert!(more, "sept résultats ont été laissés de côté");
+
+        // Et un message qui n'a PAS encore atteint le disque compte quand
+        // même : c'est l'autre moitié du contrat, et elle ne doit pas se
+        // faire écraser par la correction du doublon.
+        history.append(1, &dit(1, 11, "encore un test"));
+        let (hits, _) = history.search(&dir, &[1], "test", 3);
+        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![9, 10, 11]);
     }
 
     /// Remonter le fil doit rendre les messages **antérieurs**, du plus
