@@ -417,7 +417,7 @@ impl Accounts {
                 revoked: i.revoked,
             })
             .collect();
-        invites.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        invites.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         invites
     }
 

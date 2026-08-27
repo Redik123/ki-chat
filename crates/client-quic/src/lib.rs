@@ -116,7 +116,7 @@ impl QuicClient {
             .context("adresse invalide")?
             .await
             .context("connexion impossible")?;
-        let (mut send, recv) = conn.open_bi().await.context("flux de contrôle")?;
+        let (send, recv) = conn.open_bi().await.context("flux de contrôle")?;
         // Le contrôle passe devant tout média (symétrique du serveur).
         let _ = send.set_priority(10);
         // Une empreinte absente n'est pas un cas anodin : elle ferait
@@ -206,12 +206,15 @@ impl ControlWriter {
     }
 }
 
+/// Émetteur de datagrammes voix, tel que l'attend le moteur audio.
+/// Le même contrat que `ki_voice::DatagramSend`, redit ici pour que ce crate
+/// n'ait pas à dépendre du moteur.
+pub type DatagramSend = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// Fabrique un émetteur de datagrammes voix (compatible avec le moteur
 /// audio) : l'appel ne bloque jamais, les erreurs sont ignorées (un
 /// datagramme perdu est un datagramme perdu).
-pub fn datagram_sender(
-    conn: &quinn::Connection,
-) -> Arc<dyn Fn(&[u8]) + Send + Sync> {
+pub fn datagram_sender(conn: &quinn::Connection) -> DatagramSend {
     let conn = conn.clone();
     Arc::new(move |pkt: &[u8]| {
         let _ = conn.send_datagram(bytes::Bytes::copy_from_slice(pkt));

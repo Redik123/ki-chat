@@ -152,11 +152,6 @@ impl Roles {
         inner.roles.iter().find(|r| r.id == id).cloned()
     }
 
-    pub fn exists(&self, id: RoleId) -> bool {
-        let inner = self.inner.lock().unwrap();
-        inner.roles.iter().any(|r| r.id == id)
-    }
-
     /// Permissions effectives : l'union des rôles portés, plus `@everyone`.
     ///
     /// Les identifiants inconnus sont ignorés plutôt que refusés — un compte
@@ -499,7 +494,7 @@ mod tests {
         // hériterait des attributions de l'ancien.
         let roles = Roles::open(&dir).unwrap();
         assert_eq!(roles.create("Encore", None, 5, 0).unwrap().id, 6);
-        assert!(!roles.exists(first.id));
+        assert!(roles.get(first.id).is_none());
     }
 
     #[test]

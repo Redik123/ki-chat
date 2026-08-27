@@ -545,7 +545,11 @@ impl AppState {
                 online: false,
             });
         }
-        members.sort_by(|a, b| a.username.to_lowercase().cmp(&b.username.to_lowercase()));
+        // `cached` et non `sort_by_key` : la clé est une String, donc une
+        // allocation. `sort_by_key` la recalculerait à chaque comparaison —
+        // O(n log n) allocations pour trier un roster diffusé à chaque
+        // entrée et sortie de vocal. Ici, une par membre.
+        members.sort_by_cached_key(|m| m.username.to_lowercase());
         members
     }
 

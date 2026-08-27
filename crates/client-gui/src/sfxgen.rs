@@ -40,7 +40,7 @@ fn seq(notes: &[(f32, u32)], gain: f32) -> Vec<f32> {
         tone_into(&mut out, freq, ms, gain);
     }
     // Petite queue de silence : évite qu'un périphérique coupe la fin.
-    out.extend(std::iter::repeat(0.0).take((RATE * 0.02) as usize));
+    out.extend(std::iter::repeat_n(0.0, (RATE * 0.02) as usize));
     out
 }
 

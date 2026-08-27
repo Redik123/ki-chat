@@ -60,7 +60,7 @@ impl GraphicsCaptureApiHandler for ScreenGrab {
         use std::sync::atomic::Ordering;
 
         let (w, h) = (frame.width(), frame.height());
-        let mut buffer = frame.buffer()?;
+        let buffer = frame.buffer()?;
         let bgra = buffer.as_nopadding_buffer(&mut self.scratch);
 
         self.flags.stats.captured.fetch_add(1, Ordering::Relaxed);

@@ -27,7 +27,17 @@ permissions:
   packages: write
 
 jobs:
+  # L'image publiée ici se déploie toute seule : Watchtower sonde le registre
+  # toutes les cinq minutes et recrée le conteneur. Un serveur cassé serait
+  # donc en production avant que quiconque l'ait constaté — d'où le filet,
+  # restreint à ce qui part réellement dans l'image.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      only_server: true
+
   image:
+    needs: ci
     runs-on: ubuntu-latest
 
     # Le contexte `secrets` n'est pas lisible dans le `if` d'une étape : on le

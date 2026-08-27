@@ -790,11 +790,11 @@ struct Sender {
 impl Sender {
     /// Applique un nouveau débit Opus si différent de l'actuel.
     fn apply_bitrate(&mut self, bitrate: i32) {
-        if bitrate != self.bitrate {
-            if self.encoder.set_bitrate(opus::Bitrate::Bits(bitrate)).is_ok() {
-                tracing::info!("débit Opus : {} kbps", bitrate / 1000);
-                self.bitrate = bitrate;
-            }
+        if bitrate != self.bitrate
+            && self.encoder.set_bitrate(opus::Bitrate::Bits(bitrate)).is_ok()
+        {
+            tracing::info!("débit Opus : {} kbps", bitrate / 1000);
+            self.bitrate = bitrate;
         }
     }
 
@@ -1557,7 +1557,7 @@ impl DeepDenoiser {
             .map_err(|e| anyhow::anyhow!("chargement DeepFilterNet : {e}"))?;
         anyhow::ensure!(model.sr as u32 == SAMPLE_RATE, "DeepFilterNet attend 48 kHz");
         let hop = model.hop_size;
-        anyhow::ensure!(FRAME_SAMPLES % hop == 0, "hop DeepFilterNet incompatible");
+        anyhow::ensure!(FRAME_SAMPLES.is_multiple_of(hop), "hop DeepFilterNet incompatible");
         Ok(Self {
             model,
             inp: ndarray::Array2::zeros((1, hop)),

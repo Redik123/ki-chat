@@ -328,7 +328,7 @@ unsafe fn parse_format(fmt: *const WAVEFORMATEX) -> anyhow::Result<(SampleKind, 
     let channels = (*fmt).nChannels;
     let kind = if tag == WAVE_FORMAT_IEEE_FLOAT && bits == 32 {
         SampleKind::F32
-    } else if tag == WAVE_FORMAT_PCM as u32 && bits == 16 {
+    } else if tag == WAVE_FORMAT_PCM && bits == 16 {
         SampleKind::I16
     } else if tag == WAVE_FORMAT_EXTENSIBLE {
         let ext = fmt as *const WAVEFORMATEXTENSIBLE;

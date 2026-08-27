@@ -496,15 +496,6 @@ fn current_channel(state: &Arc<AppState>, user_id: UserId) -> Option<ki_protocol
     state.can_view(user_id, channel).then_some(channel)
 }
 
-/// Vérifie que l'appelant est admin ; sinon envoie une erreur.
-fn require_admin(
-    state: &Arc<AppState>,
-    user_id: UserId,
-    tx: &crate::state::Outbox,
-) -> bool {
-    require(state, user_id, tx, ki_protocol::perm::ADMINISTRATOR)
-}
-
 /// Vérifie une permission, et prévient l'appelant en cas de refus.
 fn require(
     state: &Arc<AppState>,

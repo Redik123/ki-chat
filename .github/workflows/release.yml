@@ -27,7 +27,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Le filet, avant tout le reste. `needs: ci` en dessous fait que rien n'est
+  # compilé, empaqueté ni publié tant que clippy et les 132 tests ne sont pas
+  # au vert : jusqu'ici, une release ne prouvait que la compilation.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   windows:
+    needs: ci
     runs-on: windows-latest
 
     steps:

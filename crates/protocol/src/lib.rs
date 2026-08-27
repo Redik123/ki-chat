@@ -540,14 +540,12 @@ fn collapse_blank_lines(text: &str) -> String {
 /// on affiche au mieux, tronqué si besoin.
 pub fn safe_display(text: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(text.len().min(max_chars * 4));
-    let mut count = 0usize;
-    for c in text.chars().filter(|c| !is_dangerous(*c)) {
+    for (count, c) in text.chars().filter(|c| !is_dangerous(*c)).enumerate() {
         if count == max_chars {
             out.push('…');
             break;
         }
         out.push(c);
-        count += 1;
     }
     collapse_blank_lines(&out)
 }
@@ -909,14 +907,14 @@ pub fn write_voice_header(buf: &mut [u8], id: u64, counter: u64) {
     buf[11..19].copy_from_slice(&counter.to_le_bytes());
 }
 
-/// --- Petits utilitaires hex (clé voix dans Welcome) ---
+// --- Petits utilitaires hex (clé voix dans Welcome) ---
 
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())

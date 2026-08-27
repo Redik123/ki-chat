@@ -2755,7 +2755,10 @@ impl KiApp {
             // « muet » s'y montre sans autre condition. Pour soi, l'état
             // local fait foi — l'écho serveur peut être en retard d'un aller.
             let muted = if is_me { self.muted } else { m.muted };
-            let response = member_row(ui, m, speaking, muted, is_me, level, volume, photo);
+            let response = member_row(
+                ui,
+                MemberRow { member: m, speaking, muted, is_me, level, volume, photo },
+            );
             self.member_menu(response, m, is_me);
         }
         ui.add_space(6.0);
@@ -2811,7 +2814,7 @@ impl KiApp {
                 ui.menu_button("Rôles", |ui| {
                     ui.set_width(200.0);
                     let mut roles_sorted = self.roles.clone();
-                    roles_sorted.sort_by(|a, b| b.rank.cmp(&a.rank));
+                    roles_sorted.sort_by_key(|r| std::cmp::Reverse(r.rank));
                     for role in &roles_sorted {
                         let assignable = self.outranks(role.rank);
                         let mut has = m.roles.contains(&role.id);
@@ -2848,14 +2851,14 @@ impl KiApp {
                 ui.add_space(4.0);
             }
             // Expulser met dehors ; la personne peut revenir aussitôt.
-            if show_kick {
-                if ui::tinted_button(ui, Some(Icon::Logout), "Expulser", Tone::Danger).clicked() {
-                    self.send(ClientMsg::Kick {
-                        user_id: m.user_id,
-                        reason: String::new(),
-                    });
-                    ui.close();
-                }
+            if show_kick
+                && ui::tinted_button(ui, Some(Icon::Logout), "Expulser", Tone::Danger).clicked()
+            {
+                self.send(ClientMsg::Kick {
+                    user_id: m.user_id,
+                    reason: String::new(),
+                });
+                ui.close();
             }
             // Bannir l'empêche de revenir : motif et durée se saisissent
             // dans une petite fenêtre, plutôt qu'au fond d'un menu.
@@ -2921,7 +2924,16 @@ impl KiApp {
                         let muted =
                             m.voice.is_some() && if is_me { self.muted } else { m.muted };
                         let response = member_row(
-                            ui, m, speaking && audible, muted, is_me, level, volume, photo,
+                            ui,
+                            MemberRow {
+                                member: m,
+                                speaking: speaking && audible,
+                                muted,
+                                is_me,
+                                level,
+                                volume,
+                                photo,
+                            },
                         );
                         self.member_menu(response, m, is_me);
                     }
@@ -2943,8 +2955,7 @@ impl KiApp {
                         ui.add_space(2.0);
                         for m in &offline {
                             let photo = self.avatar_of(m.user_id);
-                            let response =
-                                member_row(ui, m, false, false, false, 0.0, 1.0, photo);
+                            let response = member_row(ui, MemberRow::offline(m, photo));
                             self.member_menu(response, m, false);
                         }
                     }
@@ -5402,17 +5413,42 @@ fn channel_row(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Ligne de membre : avatar, pseudo, badges, vumètre pendant qu'il parle.
-fn member_row(
-    ui: &mut egui::Ui,
-    member: &Member,
+/// Ce qu'une ligne de membre montre en plus du compte lui-même : l'état
+/// « ici et maintenant », qui ne vient pas du roster mais du moteur audio et
+/// des réglages locaux. Groupé, parce que huit paramètres positionnels
+/// donnaient des appels du genre `(m, false, false, false, 0.0, 1.0)`, où
+/// rien ne dit lequel est quoi.
+struct MemberRow<'a> {
+    member: &'a Member,
     speaking: bool,
     muted: bool,
     is_me: bool,
+    /// Niveau instantané, pour le vumètre (0..1).
     level: f32,
+    /// Volume personnalisé appliqué à cette personne (1.0 = 100 %).
     volume: f32,
-    photo: Option<&egui::TextureHandle>,
-) -> egui::Response {
+    photo: Option<&'a egui::TextureHandle>,
+}
+
+impl<'a> MemberRow<'a> {
+    /// Quelqu'un qui n'est pas là : rien à dire de son micro ni de son
+    /// niveau, seul le compte et sa photo subsistent.
+    fn offline(member: &'a Member, photo: Option<&'a egui::TextureHandle>) -> Self {
+        Self {
+            member,
+            speaking: false,
+            muted: false,
+            is_me: false,
+            level: 0.0,
+            volume: 1.0,
+            photo,
+        }
+    }
+}
+
+/// Ligne de membre : avatar, pseudo, badges, vumètre pendant qu'il parle.
+fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> egui::Response {
+    let MemberRow { member, speaking, muted, is_me, level, volume, photo } = row;
     let height = 38.0;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());

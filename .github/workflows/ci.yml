@@ -1,0 +1,131 @@
+# Le filet. Rien ne partait en release sans être compilé ; rien ne part plus
+# sans être testé.
+#
+# Jusqu'ici, `release.yml` compilait la GUI et `docker.yml` construisait
+# l'image du serveur — mais aucun des deux n'exécutait `cargo test` ni
+# `cargo clippy`. Les 132 tests du dépôt existaient, ils étaient bons, et ils
+# ne tournaient que quand quelqu'un y pensait. Une régression dans le tampon
+# de gigue, dans les rôles ou dans le rééchantillonneur pouvait donc être
+# publiée sans qu'aucun signal ne se lève.
+#
+# `release.yml` attend maintenant ce workflow (`workflow_call`) : la
+# publication n'est plus possible sur du rouge.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Appelé par release.yml avant de compiler l'installeur, et par docker.yml
+  # avant de publier l'image du serveur.
+  workflow_call:
+    inputs:
+      only_server:
+        description: >-
+          Ne vérifier que ce qui part sur le serveur. `docker.yml` s'en sert :
+          son image se déploie toute seule sur le VPS (Watchtower sonde toutes
+          les cinq minutes), elle doit donc être testée — mais la faire
+          attendre derrière la compilation d'openh264 et d'une interface
+          graphique Windows dont elle ne dépend pas serait absurde.
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # `.cargo/config.toml` pointe vers le cmake d'une machine précise (celui de
+  # Visual Studio 2026). Sans `force` de son côté, celui d'ici l'emporte —
+  # c'est exactement ce que ce fichier prévoit pour l'intégration continue.
+  CMAKE: cmake
+
+# Une poussée qui en suit une autre annule la précédente : sans ça, deux
+# commits à la minute occupent deux coureurs Windows pendant vingt minutes
+# chacun pour un résultat déjà périmé.
+#
+# `github.workflow` fait partie de la clé, et ce n'est pas décoratif : dans un
+# workflow appelé, il porte le nom de l'APPELANT. Sur une poussée de tag,
+# `release.yml` et `docker.yml` déclenchent tous les deux ce fichier avec le
+# même `github.ref` — sans cette moitié de clé, ils tomberaient dans le même
+# groupe et s'annuleraient mutuellement.
+#
+# Et l'on n'annule pas sur un tag : une release interrompue ne se rattrape pas
+# toute seule, il faudrait repousser le tag.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Windows : le seul système où TOUT compile. Le moteur audio natif
+  # (WASAPI) et le coffre à secrets (DPAPI) sont derrière un
+  # `#[cfg(windows)]` : ailleurs, ils ne sont même pas lus par le
+  # compilateur. C'est donc ici, et nulle part ailleurs, que l'espace de
+  # travail complet est vérifié.
+  # ---------------------------------------------------------------------
+  windows:
+    name: espace de travail complet (windows)
+    if: ${{ !inputs.only_server }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # nasm : sans lui, openh264 (partage d'écran) compile quand même mais
+      # encode ~3x plus lentement. Une dégradation silencieuse n'a pas sa
+      # place dans un filet.
+      - uses: ilammy/setup-nasm@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # libopus et openh264 sont compilés depuis leurs sources par nos
+          # propres crates de build : sans cache, chaque exécution repart de
+          # zéro pour du C qui n'a pas bougé.
+          cache-on-failure: true
+
+      # Clippy avant les tests : il compile de toute façon tout l'arbre, et
+      # une erreur de lint se lit mieux qu'un échec de test qu'elle explique.
+      #
+      # `-D warnings` : un avertissement toléré devient un avertissement
+      # permanent, puis cent. Les dix-sept que portait la version 0.1.11 ont
+      # été soldés pour que cette ligne puisse exister.
+      - name: Clippy (avertissements = erreurs)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  # ---------------------------------------------------------------------
+  # Linux : le serveur seul, parce que c'est là qu'il tourne pour de vrai.
+  #
+  # `docker.yml` le compile déjà, mais dans un conteneur, sans exécuter ses
+  # tests. Cette passe-ci attrape ce que Windows ne peut pas voir : un
+  # chemin de fichier écrit à la Windows, une supposition sur la casse du
+  # système de fichiers, un `#[cfg]` posé à l'envers.
+  # ---------------------------------------------------------------------
+  linux:
+    name: serveur (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `-p ki-server` et ses dépendances : ni la GUI (eframe réclamerait
+      # tout X11), ni le moteur audio, ni la vidéo. Le serveur n'en dépend
+      # pas — c'est justement ce que cette passe vérifie au passage.
+      - name: Clippy serveur (avertissements = erreurs)
+        run: cargo clippy -p ki-server -p ki-protocol --all-targets --locked -- -D warnings
+
+      - name: Tests serveur
+        run: cargo test -p ki-server -p ki-protocol --locked
