@@ -108,12 +108,45 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer\ki-chat.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Signature Ed25519 de l'exécutable publié.
+      #
+      # L'application remplace son propre exécutable : sans signature, la seule
+      # garantie d'intégrité est TLS jusqu'à GitHub, et quiconque obtient le
+      # droit de publier une release exécute du code arbitraire chez tout le
+      # monde. La clé publique correspondante se grave dans le client, qui
+      # refuse alors d'installer ce qu'il ne peut pas vérifier.
+      #
+      # Le signeur est un exemple du crate client (`examples/signer.rs`), donc
+      # il utilise exactement la même version d'ed25519-dalek que le code qui
+      # vérifie : une divergence entre signer et vérifier ne se verrait qu'en
+      # production, sur les machines des autres.
+      #
+      # Sans le secret, l'étape ne signe pas et le DIT — elle n'échoue pas.
+      # Tant que la clé publique n'est pas gravée côté client, une release non
+      # signée reste installable, et faire échouer la publication ici
+      # empêcherait justement de livrer la version qui active tout cela.
+      # Voir deploy/SIGNATURE.md.
+      - name: Signer l'exécutable
+        shell: pwsh
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if (-not $env:SIGNING_KEY) {
+            Write-Warning "RELEASE_SIGNING_KEY absent : release NON SIGNEE (deploy/SIGNATURE.md)"
+            exit 0
+          }
+          $exe = "target\$env:TARGET\release\ki-chat.exe"
+          cargo run --release --locked --target $env:TARGET -p ki-client-gui --example signer -- $exe "$exe.sig"
+          if ($LASTEXITCODE -ne 0) { Write-Error "signature impossible"; exit 1 }
+          if (-not (Test-Path "$exe.sig")) { Write-Error "signature non produite"; exit 1 }
+
       - name: Déposer les artefacts
         uses: actions/upload-artifact@v4
         with:
           name: ki-chat-windows
           path: |
             target/x86_64-pc-windows-msvc/release/ki-chat.exe
+            target/x86_64-pc-windows-msvc/release/ki-chat.exe.sig
             installer/Output/ki-chat-setup.exe
 
       - name: Publier la release
@@ -127,6 +160,9 @@ jobs:
             "target\$env:TARGET\release\ki-chat.exe",
             "installer\Output\ki-chat-setup.exe"
           )
+          # Le client la cherche sous ce nom exact, a cote de l'executable.
+          $sig = "target\$env:TARGET\release\ki-chat.exe.sig"
+          if (Test-Path $sig) { $files += $sig }
           # Le tag peut avoir été poussé après une release créée à la main.
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {

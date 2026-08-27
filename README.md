@@ -294,6 +294,25 @@ d'être installé : mieux vaut pas de mise à jour qu'un binaire à moitié écr
 La vérification part sur un fil séparé et ne retarde pas l'ouverture de la
 fenêtre ; sans réseau, elle échoue en silence.
 
+**Signature des mises à jour.** Une application qui remplace son propre
+exécutable ne peut pas se contenter de TLS : quiconque obtient le droit de
+publier une release — compte compromis, jeton d'action fuité, actif remplacé
+après coup — exécuterait du code arbitraire chez tout le monde. Chaque release
+porte donc une **signature Ed25519** (`ki-chat.exe.sig`), que le client vérifie
+avec une clé publique gravée dans son propre binaire avant de remplacer quoi
+que ce soit. La clé privée ne vit que dans le coffre de GitHub.
+
+Le signeur est un exemple du crate client (`cargo run -p ki-client-gui
+--example signer`), donc il partage exactement la même version de la
+bibliothèque de cryptographie que le code qui vérifie : une divergence entre
+signer et vérifier ne se verrait qu'en production, sur les machines des autres.
+
+> ⚠ **La vérification est en place mais pas encore armée** : tant qu'aucune clé
+> publique n'est gravée, le client le consigne dans ses traces et poursuit —
+> le comportement d'avant. L'armer demande trois gestes, décrits dans
+> [`deploy/SIGNATURE.md`](deploy/SIGNATURE.md), dont la génération d'une clé
+> privée qui ne doit passer par personne d'autre.
+
 ### Publier une version
 
 1. Monter `version` dans le `Cargo.toml` de la racine ;

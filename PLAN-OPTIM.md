@@ -806,21 +806,91 @@ vrai jeu et de vraies oreilles. Le compteur est en place pour ça.
 
 *Coût réel : une session.*
 
-## P6 — Compilation et livraison
+## P6 — Compilation et livraison ✅ (livré le 2026-08-27, deux points sur quatre)
 
-1. **`target-cpu=x86-64-v2`** dans `.cargo/config.toml`, validé par le banc de
-   P1. Décider explicitement pour `v3` (AVX2) — le gain sur le DSP est réel,
-   l'exclusion des machines d'avant 2013 aussi.
-2. **PGO en deux passes dans `release.yml`** : compilation instrumentée,
-   exécution de la charge de P1, recompilation avec le profil. Aucun changement
-   de code.
-3. **Signature Ed25519 des releases** (`ed25519-dalek`, 100 % Rust), clé
-   publique gravée dans le binaire, vérification avant `install()`. Plus un
-   délai d'expiration sur le téléchargement.
-4. **Mise à jour différentielle** (`bidiff` / `zstd`, tous deux en Rust) :
-   quelques centaines de kilo-octets au lieu de 31 Mo.
+1. ✅ **`target-cpu=x86-64-v2`.** Le binaire était compilé pour le x86-64
+   **d'origine** — celui de 1999 : ni SSE4, ni POPCNT, ni rien de ce que les
+   processeurs font depuis. Tout le calcul par échantillon s'exécutait en
+   scalaire.
 
-*Coût : une à deux sessions.*
+   **Mesuré**, machine au repos, contre les valeurs absolues de P4 :
+
+   | | Avant | `x86-64-v2` | |
+   |---|---|---|---|
+   | Mixage, 1 locuteur | 2,45 µs | 2,17 µs | −11 % |
+   | Mixage, 4 locuteurs | 9,89 µs | 8,34 µs | −16 % |
+   | Mixage, 10 locuteurs | 24,86 µs | 20,05 µs | **−19 %** |
+   | Rééchantillonnage 44,1 → 48 | 6,12 µs | 5,75 µs | −6 % |
+
+   **Le gain croît avec le nombre de locuteurs**, ce qui est la signature
+   d'une vectorisation : plus il y a d'échantillons à additionner, plus le
+   travail par instruction compte. Pour une ligne de configuration.
+
+   Le niveau **v3** (AVX2, Haswell 2013) donnerait davantage et se pose en
+   changeant un seul mot. On ne le prend pas : une machine d'avant 2013
+   refuserait alors de démarrer l'exécutable, avec un message de Windows que
+   personne ne sait interpréter. Un gain mesurable ne vaut pas un utilisateur
+   qui ne peut plus lancer l'application du tout.
+
+   > **Une mesure jetée en chemin.** La première série annonçait le
+   > rééchantillonnage **trois fois plus lent** — j'avais lancé une compilation
+   > pendant le banc. C'est exactement la discipline que P1 devait installer,
+   > et je l'ai enfreinte ; la mesure a été refaite à vide.
+
+2. ✅ **Signature Ed25519 des releases**, plus le délai de téléchargement qui
+   manquait.
+
+   L'application **remplace son propre exécutable**, et la seule garantie
+   d'intégrité était TLS jusqu'à GitHub : quiconque obtenait le droit de
+   publier une release — compte compromis, jeton d'action fuité, actif
+   remplacé après coup — exécutait du code arbitraire chez tout le monde. Le
+   contrôle de taille qui existait n'attrape qu'un téléchargement tronqué.
+
+   Le signeur est un **exemple du crate client** (`examples/signer.rs`), donc
+   il partage exactement la même version d'`ed25519-dalek` que le code qui
+   vérifie, dans le même `Cargo.lock` : une divergence entre signer et vérifier
+   ne se verrait qu'en production, sur les machines des autres. Il est relu
+   comme le reste et couvert par `clippy --all-targets`.
+
+   Le téléchargement, lui, n'avait **aucun délai** : un serveur qui accepte la
+   connexion puis cesse d'envoyer laissait le fil attendre pour toujours. Le
+   nouveau délai borne le *silence*, pas la durée — une ligne lente aboutit,
+   une ligne morte non.
+
+   > **La vérification est écrite mais pas encore armée**, et c'est délibéré.
+   > Tant que `RELEASE_PUBKEY_HEX` est vide, le client le dit dans ses traces
+   > et poursuit — l'état d'avant, ni meilleur ni pire. L'armer avant que la
+   > chaîne ne signe couperait toute mise à jour, y compris celle qui
+   > apporterait le correctif. Trois gestes pour l'activer, décrits dans
+   > `deploy/SIGNATURE.md` ; c'est **à toi** de les faire, la clé privée ne
+   > devant passer par personne d'autre.
+
+3. ❌ **PGO — écarté, et voici pourquoi.** L'optimisation guidée par le profil
+   demande d'exécuter une charge représentative entre deux compilations. Or ce
+   qu'il faudrait profiler, c'est un **client graphique** : l'arbre de widgets,
+   la mise en page, le rendu. Le faire tourner sans écran sur un coureur
+   d'intégration continue relève du bricolage, et un profil qui ne couvrirait
+   que le DSP porterait sur 0,12 % du budget audio (mesuré en P1).
+
+   S'ajoute un risque asymétrique : une chaîne de publication en deux passes
+   qui casse, c'est plus de release du tout. Le gain espéré — 5 à 15 % sur du
+   code dominé par des branches — ne vaut pas ça tant que rien ne montre que
+   l'application est limitée par là. À reconsidérer si le relevé de
+   performance (P1) désigne un jour un coupable précis.
+
+4. ❌ **Mise à jour différentielle — non faite, et ce n'est pas un oubli.**
+   Trente et un mégaoctets par mise à jour et par personne, c'est réel, mais ce
+   n'est ni de la performance ni de la correction : c'est du confort de
+   téléchargement, une fois par version. Le travail, lui, est sérieux —
+   génération du correctif en intégration continue, application côté client,
+   vérification du résultat, repli sur le téléchargement complet quand le
+   correctif ne s'applique pas — et il **s'articule avec la signature** : c'est
+   le binaire reconstruit qu'il faudrait vérifier, pas le correctif.
+
+   L'ordre juste est donc : armer la signature (P6.2), la laisser tourner sur
+   quelques versions, et seulement ensuite bâtir le différentiel par-dessus.
+
+*Coût réel : une session pour les deux points livrés.*
 
 ---
 
@@ -916,7 +986,9 @@ Ce qu'on doit pouvoir mesurer à la fin, et l'état de départ.
 | Contrôle sur le fil, 20 clients qui se connectent | ~~968 Kio~~ | **134 Kio** (7,2×) — atteint |
 | Page d'historique (salon de 100 k messages) | ~~relecture de ~15 Mo~~ | **recherche binaire + `seek`** — atteint |
 | Tests exécutés avant publication | 0 | 132 |
-| Poids d'une mise à jour | 31 Mo | quelques centaines de Ko |
+| Mixage, 10 locuteurs (`x86-64-v2`) | ~~24,86 µs~~ | **20,05 µs** (−19 %) — atteint |
+| Intégrité d'une mise à jour | ~~taille seule~~ | **signature Ed25519** — écrite, à armer |
+| Poids d'une mise à jour | 31 Mo | quelques centaines de Ko — *non fait, voir P6.4* |
 
 ---
 

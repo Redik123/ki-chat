@@ -28,6 +28,33 @@ use eframe::egui;
 const REPO: &str = "Redik123/ki-chat";
 /// Nom de l'exécutable attaché à chaque release.
 const ASSET: &str = "ki-chat.exe";
+/// Signature détachée de l'exécutable, publiée à côté de lui.
+const SIGNATURE_ASSET: &str = "ki-chat.exe.sig";
+
+/// Clé publique Ed25519 des releases, en hexadécimal (32 octets, 64
+/// caractères). Vide = vérification pas encore activée.
+///
+/// # Pourquoi une signature
+///
+/// L'application **remplace son propre exécutable**. Jusqu'ici, la seule
+/// garantie d'intégrité était TLS jusqu'à GitHub : quiconque obtenait le droit
+/// de publier une release — compte compromis, jeton d'action fuité, actif
+/// remplacé après coup — exécutait du code arbitraire sur les machines de tout
+/// le monde, sans que rien ne s'y oppose. Le contrôle de taille qui existait
+/// n'attrape qu'un téléchargement tronqué, pas un binaire hostile.
+///
+/// La clé **privée** ne vit ni dans le dépôt ni dans l'intégration continue
+/// autrement que comme secret ; la publique est gravée ici, dans le binaire
+/// déjà installé. Un attaquant qui contrôle les releases ne peut donc pas
+/// signer : il ne peut que faire échouer la mise à jour, ce qui se voit.
+///
+/// # Activation
+///
+/// Tant que cette constante est vide, la vérification est **annoncée comme
+/// absente** dans les traces et la mise à jour se poursuit — c'est l'état
+/// d'avant, ni meilleur ni pire. Y coller la clé publique suffit à la rendre
+/// obligatoire, et il n'y a rien d'autre à changer. Voir `deploy/SIGNATURE.md`.
+const RELEASE_PUBKEY_HEX: &str = "";
 /// GitHub refuse les requêtes sans agent identifié.
 const AGENT: &str = concat!("ki-chat/", env!("CARGO_PKG_VERSION"));
 /// La vérification ne doit pas retarder le démarrage : au-delà, on abandonne
@@ -35,6 +62,12 @@ const AGENT: &str = concat!("ki-chat/", env!("CARGO_PKG_VERSION"));
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Un exécutable de plus de 200 Mo n'est pas le nôtre.
 const MAX_BYTES: u64 = 200 * 1024 * 1024;
+/// Inactivité tolérée pendant le téléchargement du binaire.
+///
+/// Distinct de `TIMEOUT` : trente mégaoctets ne passent pas en dix secondes
+/// sur une ligne ordinaire. Ce délai-ci borne le **silence**, pas la durée
+/// totale — une connexion lente aboutit, une connexion morte non.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Version de l'application en cours d'exécution.
 pub fn current() -> &'static str {
@@ -50,6 +83,9 @@ pub struct Release {
     pub notes: String,
     /// Téléchargement direct de l'exécutable.
     url: String,
+    /// Téléchargement de la signature détachée. `None` = la release n'en
+    /// publie pas.
+    signature_url: Option<String>,
     /// Taille annoncée, pour la barre de progression.
     size: u64,
 }
@@ -121,10 +157,13 @@ impl Updater {
         *state.lock().unwrap() = Status::Downloading { done: 0, total: release.size };
         std::thread::spawn(move || {
             let outcome = download(&release, &state).and_then(|staged| {
-                let installed = install(&staged);
-                // Le fichier intermédiaire ne survit à rien.
+                // Vérifier AVANT d'installer, et effacer le fichier quoi
+                // qu'il arrive : un binaire non signé ne doit pas rester à
+                // traîner à côté de l'exécutable sous un nom presque
+                // identique.
+                let verdict = verify(&staged, &release).and_then(|()| install(&staged));
                 let _ = std::fs::remove_file(&staged);
-                installed
+                verdict
             });
             *state.lock().unwrap() = match outcome {
                 Ok(()) => Status::Ready,
@@ -222,10 +261,21 @@ fn fetch_latest() -> anyhow::Result<Option<Release>> {
     // redirection en clair suffirait sinon à substituer le binaire.
     anyhow::ensure!(url.starts_with("https://"), "lien de téléchargement non chiffré");
 
+    // La signature est un actif comme un autre, publié à côté de l'exécutable.
+    let signature_url = body["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets.iter().find(|a| a["name"].as_str() == Some(SIGNATURE_ASSET))
+        })
+        .and_then(|a| a["browser_download_url"].as_str())
+        .filter(|u| u.starts_with("https://"))
+        .map(str::to_string);
+
     Ok(Some(Release {
         version,
         notes: body["body"].as_str().unwrap_or_default().trim().to_string(),
         url,
+        signature_url,
         size: asset["size"].as_u64().unwrap_or(0),
     }))
 }
@@ -236,7 +286,17 @@ fn fetch_latest() -> anyhow::Result<Option<Release>> {
 fn download(release: &Release, state: &Arc<Mutex<Status>>) -> anyhow::Result<PathBuf> {
     let staged = std::env::current_exe()?.with_extension("new");
 
-    let response = ureq::get(&release.url).set("User-Agent", AGENT).call()?;
+    // `DOWNLOAD_TIMEOUT` et non `TIMEOUT` : trente mégaoctets ne passent pas
+    // en dix secondes sur une ligne ordinaire. Mais un délai il en faut un —
+    // il n'y en avait aucun, et un serveur qui accepte la connexion puis cesse
+    // d'envoyer laissait le fil de mise à jour attendre pour toujours.
+    let response = ureq::AgentBuilder::new()
+        .timeout_connect(TIMEOUT)
+        .timeout_read(DOWNLOAD_TIMEOUT)
+        .build()
+        .get(&release.url)
+        .set("User-Agent", AGENT)
+        .call()?;
     let total = response
         .header("Content-Length")
         .and_then(|v| v.parse().ok())
@@ -267,6 +327,87 @@ fn download(release: &Release, state: &Arc<Mutex<Status>>) -> anyhow::Result<Pat
     }
 
     Ok(staged)
+}
+
+/// Vérifie la signature Ed25519 du binaire téléchargé.
+///
+/// Trois cas, et c'est l'ordre qui compte.
+///
+/// **Aucune clé compilée** : la vérification n'est pas encore activée sur ce
+/// binaire. On le dit et on continue — c'est exactement l'état d'avant, et
+/// refuser ici enlèverait toute mise à jour à des gens qui n'y peuvent rien.
+///
+/// **Clé compilée, signature absente ou fausse** : on refuse. Un attaquant
+/// qui contrôle les releases ne peut alors que faire échouer la mise à jour,
+/// jamais en substituer une.
+///
+/// **Clé et signature valides** : on installe.
+fn verify(staged: &Path, release: &Release) -> anyhow::Result<()> {
+    let Some(pubkey) = release_pubkey()? else {
+        tracing::warn!(
+            "mise à jour non vérifiée : aucune clé de release n'est gravée dans ce \
+             binaire (voir deploy/SIGNATURE.md)"
+        );
+        return Ok(());
+    };
+
+    let url = release
+        .signature_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("la release ne publie pas de signature"))?;
+    let mut signature = Vec::new();
+    ureq::get(url)
+        .set("User-Agent", AGENT)
+        .timeout(TIMEOUT)
+        .call()?
+        .into_reader()
+        // Une signature Ed25519 fait 64 octets ; on lit un peu plus pour
+        // pouvoir distinguer « trop long » de « exactement bon ».
+        .take(256)
+        .read_to_end(&mut signature)?;
+    let signature = parse_signature(&signature)?;
+
+    let binaire = std::fs::read(staged)?;
+    pubkey
+        .verify_strict(&binaire, &signature)
+        .map_err(|_| anyhow::anyhow!("signature invalide — mise à jour refusée"))?;
+    tracing::info!("mise à jour {} : signature vérifiée", release.version);
+    Ok(())
+}
+
+/// La clé publique gravée, décodée. `None` = vérification pas encore activée.
+fn release_pubkey() -> anyhow::Result<Option<ed25519_dalek::VerifyingKey>> {
+    let hex = RELEASE_PUBKEY_HEX.trim();
+    if hex.is_empty() {
+        return Ok(None);
+    }
+    let bytes = ki_protocol::hex_decode(hex)
+        .ok_or_else(|| anyhow::anyhow!("clé de release illisible (hexadécimal attendu)"))?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("clé de release de longueur inattendue"))?;
+    Ok(Some(ed25519_dalek::VerifyingKey::from_bytes(&bytes)?))
+}
+
+/// Lit une signature, brute (64 octets) ou en hexadécimal.
+///
+/// L'hexadécimal est admis parce qu'un fichier de signature finit par passer
+/// entre des mains humaines — copié dans un ticket, recollé à la main — et
+/// qu'un format lisible évite d'y perdre des octets en chemin.
+fn parse_signature(raw: &[u8]) -> anyhow::Result<ed25519_dalek::Signature> {
+    if raw.len() == 64 {
+        let bytes: [u8; 64] = raw.try_into().expect("longueur vérifiée");
+        return Ok(ed25519_dalek::Signature::from_bytes(&bytes));
+    }
+    let texte = std::str::from_utf8(raw)
+        .map_err(|_| anyhow::anyhow!("signature de {} octets, illisible", raw.len()))?
+        .trim();
+    let bytes = ki_protocol::hex_decode(texte)
+        .ok_or_else(|| anyhow::anyhow!("signature ni brute ni hexadécimale"))?;
+    let bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signature de longueur inattendue"))?;
+    Ok(ed25519_dalek::Signature::from_bytes(&bytes))
 }
 
 /// Met le binaire téléchargé à la place du binaire courant.
@@ -312,7 +453,63 @@ fn parts(version: &str) -> [u32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::newer;
+    use super::{newer, parse_signature};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    /// Une clé de test, fixe : un test qui tire au sort n'échoue qu'une fois
+    /// sur mille et personne ne sait pourquoi.
+    fn cle() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    /// Le contrat qui compte : ce que signe la chaîne de publication, le
+    /// client l'accepte — et rien d'autre.
+    ///
+    /// Le vérificateur et le signeur (`examples/signer.rs`) partagent la même
+    /// version d'`ed25519-dalek`, dans le même `Cargo.lock` ; ce test le
+    /// vérifie sur les deux formats de signature que le signeur peut produire.
+    #[test]
+    fn une_signature_valide_passe_une_alteration_non() {
+        let cle = cle();
+        let binaire = b"MZ\x90\x00 un executable imaginaire";
+        let signature = cle.sign(binaire);
+        let publique = cle.verifying_key();
+
+        // Format hexadécimal — celui qu'écrit le signeur.
+        let hex: String = signature.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let relue = parse_signature(hex.as_bytes()).expect("hexadécimal accepté");
+        assert!(publique.verify_strict(binaire, &relue).is_ok());
+
+        // Format brut — accepté aussi, pour ne pas dépendre d'un
+        // copier-coller qui aurait transformé le fichier.
+        let brute = parse_signature(&signature.to_bytes()).expect("brut accepté");
+        assert!(publique.verify_strict(binaire, &brute).is_ok());
+
+        // Un octet changé dans le binaire, et c'est fini.
+        let mut altere = binaire.to_vec();
+        altere[3] ^= 0x01;
+        assert!(
+            publique.verify_strict(&altere, &relue).is_err(),
+            "un binaire modifié ne doit jamais passer"
+        );
+
+        // Une autre clé ne signe pas pour nous.
+        let intrus = SigningKey::from_bytes(&[9u8; 32]);
+        let usurpee = intrus.sign(binaire);
+        assert!(publique.verify_strict(binaire, &usurpee).is_err());
+    }
+
+    /// Ce qu'on peut recevoir de travers : tronqué, vide, ou pas de
+    /// l'hexadécimal du tout. Aucun de ces cas ne doit passer pour valide.
+    #[test]
+    fn une_signature_mal_formee_est_refusee() {
+        assert!(parse_signature(b"").is_err());
+        assert!(parse_signature(b"pas de l'hexadecimal").is_err());
+        // 63 caractères : un de moins qu'une moitié de signature.
+        assert!(parse_signature("ab".repeat(31).as_bytes()).is_err());
+        // 65 octets bruts : un de trop.
+        assert!(parse_signature(&[0u8; 65]).is_err());
+    }
 
     #[test]
     fn ordre_numerique_pas_lexicographique() {

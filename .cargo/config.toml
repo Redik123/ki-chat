@@ -22,5 +22,20 @@ CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }
 # « Visual C++ Redistributable » n'a jamais été installé. Le flag traverse
 # aussi cmake, via les CFLAGS que cc transmet : libopus est compilé /MT, sinon
 # on mélangerait deux exemplaires de la bibliothèque C dans le même binaire.
+#
+# `target-cpu=x86-64-v2` : le binaire était compilé pour le x86-64 **d'origine**
+# — celui de 1999. Ni SSE4, ni POPCNT, ni rien de ce que les processeurs font
+# depuis. Tout le calcul par échantillon (rééchantillonnage, mixage,
+# DeepFilterNet via tract) s'exécutait donc en scalaire.
+#
+# Le niveau v2 est le palier sûr : SSE4.2 et POPCNT, présents sur tout
+# processeur depuis Nehalem (2008) et Bulldozer (2011). Une machine capable de
+# lancer un jeu récent les a forcément.
+#
+# Le niveau **v3** (AVX2, Haswell 2013) donnerait davantage sur le DSP, et il
+# se pose en changeant un seul mot ci-dessous. On ne le prend pas par défaut :
+# une machine d'avant 2013 refuserait alors de démarrer l'exécutable, avec un
+# message de Windows que personne ne sait interpréter. Un gain mesurable ne
+# vaut pas un utilisateur qui ne peut plus lancer l'application du tout.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "target-cpu=x86-64-v2"]

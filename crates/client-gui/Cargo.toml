@@ -43,6 +43,14 @@ ureq = { version = "2", features = ["json"] }
 # Les deux formats sont déjà tirés par eframe, aucun téléchargement en plus.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+# Vérification de la signature des mises à jour. 100 % Rust, pas de
+# dépendance C : l'application remplace son propre exécutable, c'est le seul
+# endroit du projet où une bibliothèque de cryptographie tierce serait un
+# risque plus grand que ce qu'elle protège.
+# `std` : sans lui, l'erreur du crate n'implémente pas `std::error::Error`
+# et ne remonte pas par `?`. On ne prend rien d'autre — ni signature, ni
+# génération de clés : ce binaire ne fait que vérifier.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 # Icône, bloc de version et manifeste gravés dans l'exécutable (voir build.rs).
 [build-dependencies]
