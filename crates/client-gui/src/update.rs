@@ -50,11 +50,17 @@ const SIGNATURE_ASSET: &str = "ki-chat.exe.sig";
 ///
 /// # Activation
 ///
-/// Tant que cette constante est vide, la vérification est **annoncée comme
-/// absente** dans les traces et la mise à jour se poursuit — c'est l'état
-/// d'avant, ni meilleur ni pire. Y coller la clé publique suffit à la rendre
-/// obligatoire, et il n'y a rien d'autre à changer. Voir `deploy/SIGNATURE.md`.
-const RELEASE_PUBKEY_HEX: &str = "";
+/// **Armée depuis la version 0.1.12.** Tant que cette constante était vide, la
+/// vérification s'annonçait absente dans les traces et la mise à jour se
+/// poursuivait — l'état d'avant, ni meilleur ni pire. Elle porte désormais la
+/// clé publique du dépôt, et toute mise à jour non signée par la privée
+/// correspondante est refusée sans rien remplacer.
+///
+/// La changer, c'est condamner les installations existantes à refuser toutes
+/// les mises à jour suivantes : elles portent l'ancienne clé et n'ont aucun
+/// moyen d'apprendre la nouvelle. Voir `deploy/SIGNATURE.md`.
+const RELEASE_PUBKEY_HEX: &str =
+    "a739c476c6515dcb7937489e39753349ba2d878822565352ea8bd2328ba0e345";
 /// GitHub refuse les requêtes sans agent identifié.
 const AGENT: &str = concat!("ki-chat/", env!("CARGO_PKG_VERSION"));
 /// La vérification ne doit pas retarder le démarrage : au-delà, on abandonne

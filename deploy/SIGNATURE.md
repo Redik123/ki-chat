@@ -14,34 +14,40 @@ plus signer : il ne peut que faire échouer la mise à jour, ce qui se voit.
 
 ## État actuel
 
-**La vérification est écrite mais pas encore armée.** Tant que
-`RELEASE_PUBKEY_HEX` est vide dans `crates/client-gui/src/update.rs`, le client
-consigne « mise à jour non vérifiée » dans ses traces et poursuit — exactement
-le comportement d'avant, ni meilleur ni pire.
+**Armé depuis la version 0.1.12.** Le secret `RELEASE_SIGNING_KEY` est déposé
+dans le dépôt, la clé publique correspondante est gravée dans
+`crates/client-gui/src/update.rs`, et chaque release publie `ki-chat.exe.sig`
+à côté de l'exécutable.
 
-C'est délibéré : armer la vérification avant que la chaîne de publication ne
-signe couperait toute mise à jour, y compris celle qui apporterait le
-correctif.
+À partir de 0.1.12, un client refuse d'installer une mise à jour qu'il ne peut
+pas vérifier, et le dit. Les installations plus anciennes (0.1.11 et avant) ne
+portent pas la clé : elles continuent d'installer sans vérifier, jusqu'à ce
+qu'elles passent en 0.1.12.
 
-## Mettre en place, une fois
+> **La clé privée ne se retrouve pas.** Perdue, il faudrait graver une nouvelle
+> clé publique dans le client — donc publier une version que les installations
+> existantes refuseraient de vérifier, et qu'elles n'installeraient donc
+> jamais. Sauvegarde-la comme tu sauvegardes `data/quic-key.der`.
 
-### 1. Fabriquer la paire de clés
+## Comment cela a été mis en place
 
-Sur ta machine, hors du dépôt :
+Pour mémoire, et pour le jour où il faudra recommencer sur un autre dépôt.
 
-```bash
-# Clé privée : 32 octets aléatoires, en hexadécimal.
-openssl rand -hex 32 > ki-release.key
+### 1. Fabriquer la clé privée
+
+Sur ta machine, hors du dépôt. En PowerShell, sans outil externe — c'est le
+générateur cryptographique de Windows, celui qui sert à TLS :
+
+```powershell
+$b = New-Object byte[] 32
+(New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($b)
+(($b | ForEach-Object { $_.ToString('x2') }) -join '') |
+  Set-Content "$env:USERPROFILE\ki-release.key" -Encoding ascii -NoNewline
 ```
 
-La clé publique se déduit de la privée. Le plus simple est de la faire calculer
-par le même outil qui signera — voir l'étape 3, qui l'imprime.
-
-> **Cette clé privée ne se retrouve pas.** Perdue, il faut regraver une
-> nouvelle clé publique dans le client, donc publier une version que les
-> anciennes installations refuseront de vérifier… et qu'elles installeront
-> quand même, puisqu'elles portent l'ancienne clé. Sauvegarde-la comme tu
-> sauvegardes `data/quic-key.der`.
+Avec `openssl` sous la main, `openssl rand -hex 32` fait la même chose. Il
+n'est pas dans le `PATH` de `cmd.exe` sur une installation Git pour Windows
+ordinaire — d'où la variante ci-dessus.
 
 ### 2. La déposer dans GitHub
 
@@ -53,16 +59,26 @@ par le même outil qui signera — voir l'étape 3, qui l'imprime.
 
 ### 3. Graver la clé publique dans le client
 
-L'étape de signature de `release.yml` imprime la clé publique correspondante
-dans le journal du workflow, à chaque exécution. Lance-le une fois
-(*Actions* → *release* → *Run workflow*), relève la ligne
-`clé publique : …`, et colle-la dans `crates/client-gui/src/update.rs` :
+Le signeur imprime la clé publique à chaque exécution — inutile de la dériver à
+la main. En local :
+
+```powershell
+$env:SIGNING_KEY = (Get-Content "$env:USERPROFILE\ki-release.key" -Raw).Trim()
+cargo run -p ki-client-gui --example signer -- Cargo.toml "$env:TEMP\essai.sig"
+```
+
+Relève la ligne `clé publique : …` et colle-la dans
+`crates/client-gui/src/update.rs` :
 
 ```rust
 const RELEASE_PUBKEY_HEX: &str = "collée ici";
 ```
 
-Puis publie une version. **À partir de cette version**, les clients vérifient.
+**L'ordre compte.** Le secret doit être dans GitHub *avant* de publier la
+version qui porte la clé publique : dans le cas contraire, on livre des clients
+qui exigent une signature que la chaîne ne produit pas encore, et ils refusent
+alors toutes les mises à jour suivantes — y compris celle qui corrigerait le
+problème.
 
 ## Ce qui se passe ensuite
 

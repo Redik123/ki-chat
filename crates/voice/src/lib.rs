@@ -1886,7 +1886,14 @@ impl Denoiser {
     }
 
     fn process(&mut self, frame: &mut [f32; FRAME_SAMPLES]) {
-        for half in frame.chunks_exact_mut(RN_FRAME) {
+        // `as_chunks_mut` et non `chunks_exact_mut` : la taille étant connue à
+        // la compilation, chaque moitié arrive comme un tableau de taille
+        // fixe plutôt qu'une tranche. Le compilateur n'a donc plus de borne à
+        // vérifier, et le reste — vide ici, `FRAME_SAMPLES` étant un multiple
+        // de `RN_FRAME` — est rendu séparément au lieu d'être silencieusement
+        // ignoré.
+        let (moities, _reste) = frame.as_chunks_mut::<RN_FRAME>();
+        for half in moities {
             for (dst, &src) in self.scaled.iter_mut().zip(half.iter()) {
                 *dst = src * 32767.0;
             }
