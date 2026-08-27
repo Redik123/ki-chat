@@ -17,6 +17,8 @@ fn main() -> anyhow::Result<()> {
     let engine = ki_voice::VoiceEngine::start(cfg, send, rx)?;
     std::thread::sleep(std::time::Duration::from_millis(2500));
     let stats = engine.stats();
+    // Relevé avant l'arrêt : le moteur est encore là pour être interrogé.
+    let docteur = engine.docteur();
     engine.shutdown();
 
     println!("niveau micro (crête du dernier bloc) : {:.4}", stats.mic_peak);
@@ -28,6 +30,12 @@ fn main() -> anyhow::Result<()> {
         stats.underruns,
         if stats.underruns == 0 { "" } else { "  ← à signaler" }
     );
+    // Le docteur : ce qui s'interpose, ce que Windows autorise, et ce qu'il
+    // faut essayer. C'est la partie qu'on se fait copier-coller quand
+    // quelqu'un « a le bug ».
+    println!();
+    print!("{}", docteur.rapport());
+    println!();
     println!("--- journal audio ---");
     for (ts, msg) in ki_voice::journal_snapshot() {
         println!("[{ts}] {msg}");

@@ -8,6 +8,7 @@
 //! Tout est en threads std : aucun runtime async requis, le moteur est
 //! indépendant du reste du client.
 
+pub mod docteur;
 pub mod effects;
 // `jitter` et `resample` sont l'intérieur du moteur, et le resteraient
 // volontiers — mais un banc criterion est un crate EXTÉRIEUR : il ne voit que
@@ -277,6 +278,98 @@ fn pick_device(
     (d, false)
 }
 
+/// Le mode exclusif est-il autorisé sur le périphérique par défaut ?
+///
+/// `None` = on n'a pas pu le lire, et c'est un résultat comme un autre : la
+/// valeur est absente tant que personne n'a touché au réglage, et son format
+/// n'est garanti par aucune documentation. **Mieux vaut ne rien dire que dire
+/// faux** — le docteur conseille, et un conseil fondé sur une lecture
+/// hasardeuse ferait perdre du temps.
+///
+/// Lecture seule, et rien d'autre. Écrire ici demanderait des droits
+/// d'administrateur, toucherait une configuration qui ne nous appartient pas,
+/// et casserait en silence les logiciels qui dépendent du mode exclusif — une
+/// station audionumérique, un pilote ASIO.
+#[cfg(windows)]
+fn exclusif_autorise(input: bool) -> Option<bool> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegGetValueW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD,
+    };
+    use windows::Win32::System::Registry::RegOpenKeyExW;
+
+    /// Windows range le réglage des cases « mode exclusif » sous l'entrée du
+    /// périphérique, dans une valeur dont le nom est un identifiant de
+    /// propriété. Le bit 0 porte « autoriser les applications à prendre le
+    /// contrôle exclusif », le bit 1 « leur donner la priorité ».
+    const PROPRIETE: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},3";
+
+    // L'identifiant du périphérique courant nous vient du moteur natif : sans
+    // lui on ne saurait pas quelle sous-clé lire, et parcourir toutes les
+    // entrées rendrait un verdict sur un périphérique dont on ne se sert pas.
+    let id = wasapi::default_endpoint_id(input)?;
+    let flux = if input { "Capture" } else { "Render" };
+    let chemin = wide(&format!(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flux}\{id}\Properties"
+    ));
+    let propriete = wide(PROPRIETE);
+
+    // SAFETY: chemins et noms sont des chaînes larges terminées par un zéro,
+    // construites juste au-dessus ; la clé ouverte est refermée sur tous les
+    // chemins de sortie.
+    unsafe {
+        let mut cle = HKEY::default();
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(chemin.as_ptr()),
+            None,
+            KEY_READ,
+            &mut cle,
+        )
+        .ok()
+        .ok()?;
+
+        let mut valeur: u32 = 0;
+        let mut taille = std::mem::size_of::<u32>() as u32;
+        let lu = RegGetValueW(
+            cle,
+            None,
+            windows::core::PCWSTR(propriete.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut valeur as *mut u32 as *mut _),
+            Some(&mut taille),
+        );
+        let _ = RegCloseKey(cle);
+        lu.ok().ok()?;
+        Some(valeur & 1 != 0)
+    }
+}
+
+/// Une chaîne large terminée par un zéro, comme les fonctions Win32 les
+/// attendent.
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Le nom du périphérique réellement en service.
+#[cfg(windows)]
+fn peripherique_par_defaut(input: bool) -> Option<String> {
+    wasapi::default_endpoint_name(input)
+}
+
+#[cfg(not(windows))]
+fn peripherique_par_defaut(_input: bool) -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+fn exclusif_autorise(_input: bool) -> Option<bool> {
+    // Le mode exclusif est une notion propre à WASAPI : ailleurs, la question
+    // ne se pose pas.
+    None
+}
+
 /// Nonce XChaCha20 (24 octets) dérivé de l'émetteur et du compteur de paquet.
 /// Unique par clé : les user_id sont uniques et le compteur ne se répète pas.
 fn nonce_for(user_id: u64, counter: u64) -> XNonce {
@@ -321,6 +414,20 @@ struct Counters {
     /// des échantillons qu'aucun tampon de lecture n'avait. C'est la mesure
     /// du craquement, ramassée par le rappel de sortie.
     underruns: AtomicU64,
+    /// Le moteur natif est-il **réellement** en service ?
+    ///
+    /// Distinct du réglage `native_audio`, qui dit ce qu'on a demandé : toute
+    /// erreur d'ouverture fait retomber sur cpal, silencieusement et par
+    /// conception. Le docteur doit rapporter ce qui tourne, pas ce qu'on
+    /// espérait.
+    native_ok: AtomicBool,
+    /// Ouvertures du micro qui n'ont livré **aucun** bloc.
+    ///
+    /// La signature du micro affamé : le flux s'ouvre sans erreur, mais un
+    /// autre logiciel tient la voie de capture et la nôtre n'est jamais
+    /// servie. La boucle de capture s'en sert déjà pour escalader en
+    /// catégorie communications ; le docteur audio s'en sert pour le dire.
+    starved_opens: AtomicU64,
 }
 
 use std::sync::atomic::{AtomicI32, AtomicU32};
@@ -681,6 +788,25 @@ impl VoiceEngine {
         }
     }
 
+    /// Le diagnostic audio complet : ce qui s'interpose, ce que Windows
+    /// autorise, et ce que le moteur a vécu.
+    ///
+    /// Coûteux — il énumère les processus et interroge le registre — donc
+    /// appelé à la demande, jamais sur un chemin chaud.
+    pub fn docteur(&self) -> docteur::Diagnostic {
+        docteur::Diagnostic {
+            suites: docteur::suites_en_cours(),
+            exclusif_micro: exclusif_autorise(true),
+            exclusif_sortie: exclusif_autorise(false),
+            peripherique_micro: peripherique_par_defaut(true),
+            peripherique_sortie: peripherique_par_defaut(false),
+            ouvertures_affamees: self.shared.counters.starved_opens.load(Ordering::Relaxed)
+                as u32,
+            trames_incompletes: self.shared.counters.underruns.load(Ordering::Relaxed),
+            moteur_natif: self.shared.counters.native_ok.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn shutdown(mut self) {
         journal("moteur vocal arrêté".into());
         self.shared.shutdown.store(true, Ordering::Relaxed);
@@ -998,6 +1124,11 @@ fn capture_loop(
                 // perte : on capte, et annoncer « micro perdu » serait faux.
                 sh.input_lost.store(false, Ordering::Relaxed);
                 sh.input_fallback.store(parts.fallback, Ordering::Relaxed);
+                // Ce qui s'est réellement ouvert, et non ce qu'on a demandé.
+                sh.counters.native_ok.store(
+                    matches!(parts.stream, InputStream::Native(_)),
+                    Ordering::Relaxed,
+                );
                 parts
             }
             Err(e) => {
@@ -1112,6 +1243,7 @@ fn capture_loop(
                 // Nommé une fois par épisode, pas égrené.
                 if !got_any_chunk {
                     starved_opens += 1;
+                    sh.counters.starved_opens.fetch_add(1, Ordering::Relaxed);
                     if starved_opens == 3 {
                         tracing::warn!("micro affamé : 3 ouvertures sans un seul bloc");
                         journal(

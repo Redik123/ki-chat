@@ -394,6 +394,42 @@ n'a plus besoin de se repeindre pour savoir si l'on parle** : hors vocal, elle
 ne repeint plus du tout tant que rien ne bouge, au lieu de reconstruire vingt
 fois par seconde un écran identique — y compris réduite, pendant une partie.
 
+### Docteur audio
+
+« Mon micro bugue quand je lance Valorant » est le problème le plus tenace du
+projet, et il ne se reproduit jamais sur la machine de celui qui développe.
+Windows n'offre par ailleurs **aucune API de « priorité micro »** : quand un
+autre logiciel tient la voie de capture — la voix intégrée d'un jeu, la chaîne
+d'effets d'un casque, un pilote virtuel — on ne peut pas la lui reprendre. On
+peut seulement récupérer vite (ce que font les correctifs précédents) et
+**nommer la cause**.
+
+⚙ Audio → **Docteur audio** fait les deux dernières choses :
+
+- il **détecte les logiciels qui s'interposent** — SteelSeries Sonar et GG,
+  Nahimic, Razer Synapse, Logitech G HUB, NVIDIA Broadcast, Voicemeeter,
+  Valorant — et donne pour chacun le réglage précis qui rend la main ;
+- il **reconnaît un périphérique virtuel en service** (câble VB-Audio,
+  Voicemeeter, micro NVIDIA Broadcast). Ce sont des pilotes, pas des
+  processus : rien ne les signale, et pourtant parler dans un câble virtuel
+  est la cause la plus simple d'un micro muet ;
+- il rapporte ce que le moteur a **mesuré** : ouvertures du micro sans un seul
+  bloc reçu (la signature d'une voie de capture volée), trames incomplètes
+  parties vers la carte son (autant de craquements), et si le moteur natif
+  tourne vraiment ou si l'on est retombé sur le moteur de secours.
+
+Le tout se copie d'un bouton, comme le journal audio — c'est ce qu'on se fait
+envoyer par quelqu'un qui « a le bug » plutôt que de deviner.
+
+> **ki-chat ne touche à aucun réglage système.** Décocher « mode exclusif » à
+> la place de quelqu'un demanderait des droits d'administrateur, toucherait
+> une configuration qui ne nous appartient pas, et casserait en silence les
+> logiciels qui en dépendent — une station audionumérique, un pilote ASIO. Le
+> docteur dit quoi regarder ; c'est l'utilisateur qui décide.
+
+À distance, la même chose sans lancer l'interface :
+`cargo run -p ki-voice --example sonde-audio`.
+
 **Réglages audio** (bouton ⚙ Audio) — tout est appliqué à chaud et mémorisé :
 - périphériques d'entrée/sortie (avec actualisation de la liste) ;
 - vumètre micro en direct, gain d'entrée 0–200 % ;

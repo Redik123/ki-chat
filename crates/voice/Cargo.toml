@@ -48,6 +48,10 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Threading",
+    # Docteur audio : énumération des processus (suites qui s'interposent) et
+    # lecture — jamais écriture — du réglage de mode exclusif.
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
     "Win32_Security",
     "Win32_System_Variant",
     "Win32_Devices_Properties",

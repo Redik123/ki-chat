@@ -898,19 +898,52 @@ vrai jeu et de vraies oreilles. Le compteur est en place pour ça.
 
 Une fois le socle rapide et gardé, dans l'ordre de la valeur rendue.
 
-## F1 — Palier 3 du chantier audio : le « docteur audio »
+## F1 — Le docteur audio ✅ (livré le 2026-08-27)
 
-Le seul palier non commencé du chantier ouvert en août. Détecter au démarrage
-les suites logicielles qui s'interposent (Sonar, Synapse, G Hub, Nahimic,
-NVIDIA Broadcast, Voicemeeter), lire l'état « mode exclusif autorisé » de
-l'endpoint, et donner un conseil ciblé — désactiver la voix Vivox intégrée de
-Valorant, passer le jeu en fenêtré sans bordure.
+Le dernier palier du chantier ouvert en août, et le seul qui règle un problème
+que les trente utilisateurs vivent aujourd'hui.
 
-Pas d'écriture dans le registre : conseiller, jamais agir à la place de
-l'utilisateur.
+**Ce qu'il fait** (⚙ Audio → *Docteur audio*, et
+`cargo run -p ki-voice --example sonde-audio` à distance) :
 
-*C'est la fonctionnalité qui règle le problème le plus concret et le plus
-ancien des trente utilisateurs.*
+- **détecte les logiciels qui s'interposent** — Sonar, SteelSeries GG,
+  Nahimic, Razer Synapse, Logitech G HUB, NVIDIA Broadcast, Voicemeeter,
+  Valorant — avec pour chacun le réglage précis qui rend la main ;
+- **reconnaît un périphérique virtuel en service**. Ceux-là sont des *pilotes*,
+  pas des processus : l'énumération de la table des processus ne peut pas les
+  voir, alors qu'ils sont sous nos yeux — et parler dans un câble VB-Audio est
+  la cause la plus simple d'un micro muet ;
+- rapporte ce que le moteur a **mesuré** : ouvertures du micro sans un seul
+  bloc reçu, trames incomplètes, et si le moteur natif tourne vraiment ou si
+  l'on est retombé sur cpal ;
+- se copie d'un bouton, et voyage avec le relevé de performance.
+
+**La règle : on conseille, on n'agit jamais.** Pas d'écriture dans le registre,
+pas de réglage système modifié, pas de processus arrêté.
+
+### Trois défauts trouvés en le lançant pour de vrai
+
+Le module compilait et ses tests passaient ; c'est le premier essai sur une
+vraie machine qui a montré ce qui n'allait pas.
+
+1. **Il accusait `lghub_updater.exe`.** Un programme de mise à jour porte le
+   nom de sa suite sans en partager le comportement : il ne touche pas au
+   micro, et l'accuser envoie chercher au mauvais endroit. Les noms en
+   `_updater` sont désormais écartés.
+
+2. **La lecture du mode exclusif ne marchait pas** — et l'inspection du
+   registre a montré pourquoi : la valeur n'existe sur **aucun** des trois
+   micros de la machine. Windows ne l'écrit que si quelqu'un a ouvert le
+   panneau. Plutôt que de bâtir un conseil sur une lecture invérifiable, il est
+   maintenant déclenché par une **preuve mesurée** — la famine du micro — et le
+   drapeau ne fait que le préciser quand il existe. Un réglage mal lu enverrait
+   fouiller un panneau pour rien.
+
+3. **« Le sortie en service »**, et le conseil de sortie parlait du micro. Le
+   texte que trente personnes vont lire mérite d'être juste : le conseil dépend
+   désormais du sens, et un test le vérifie.
+
+*Coût réel : une session.*
 
 ## F2 — Le confort de chat qui manque
 

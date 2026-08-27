@@ -381,6 +381,11 @@ struct KiApp {
     show_settings: bool,
     /// Journal audio déplié dans les réglages.
     show_audio_journal: bool,
+    /// Docteur audio déplié dans les réglages.
+    show_docteur: bool,
+    /// Dernier diagnostic établi. Coûteux — il énumère les processus et
+    /// interroge le registre — donc calculé au clic, pas à chaque image.
+    docteur: Option<ki_voice::docteur::Diagnostic>,
     /// Relevé de performance déplié dans les réglages.
     show_perf: bool,
     /// Coût de l'interface, mesuré en continu (P1).
@@ -611,6 +616,8 @@ impl KiApp {
             focus_input: false,
             show_settings: false,
             show_audio_journal: false,
+            show_docteur: false,
+            docteur: None,
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
@@ -3763,6 +3770,73 @@ impl KiApp {
                             }
                         }
 
+                        // --- Docteur audio ---
+                        // Le journal ci-dessus raconte ce qui s'est passé ;
+                        // celui-ci dit ce qu'il faut FAIRE. Windows n'offre
+                        // aucune API de « priorité micro » : quand un autre
+                        // logiciel tient la voie de capture, on ne peut pas la
+                        // lui reprendre — seulement le nommer, et dire le
+                        // réglage qui rend la main.
+                        ui.add_space(8.0);
+                        let label = if self.show_docteur {
+                            "Masquer le docteur audio"
+                        } else {
+                            "Docteur audio — pourquoi mon micro bugue ?"
+                        };
+                        if ui::button(ui, Icon::Info, label).clicked() {
+                            self.show_docteur = !self.show_docteur;
+                            if self.show_docteur {
+                                // Établi au clic : l'énumération des processus
+                                // et la lecture du registre n'ont rien à faire
+                                // dans une boucle de rendu.
+                                self.docteur = self
+                                    .conn
+                                    .as_ref()
+                                    .and_then(|c| c.engine.lock().unwrap().as_ref().map(|e| e.docteur()));
+                            }
+                        }
+                        if self.show_docteur {
+                            match &self.docteur {
+                                None => ui::hint(
+                                    ui,
+                                    "le moteur audio n'est pas démarré — rejoins un \
+                                     salon vocal, puis reviens",
+                                ),
+                                Some(d) => {
+                                    if ui::button(ui, Icon::Copy, "Copier le diagnostic")
+                                        .clicked()
+                                    {
+                                        ctx.copy_text(d.rapport());
+                                        self.info = Some("diagnostic copié".into());
+                                    }
+                                    ui.add_space(4.0);
+                                    // Les conseils, numérotés, dans l'ordre où
+                                    // ils valent la peine d'être essayés.
+                                    for (i, conseil) in d.conseils().iter().enumerate() {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(format!("{}.", i + 1))
+                                                    .color(ACCENT)
+                                                    .strong()
+                                                    .size(11.5),
+                                            );
+                                            ui.label(
+                                                RichText::new(conseil.as_str())
+                                                    .color(TEXT)
+                                                    .size(11.5),
+                                            );
+                                        });
+                                        ui.add_space(3.0);
+                                    }
+                                    ui::hint(
+                                        ui,
+                                        "ki-chat ne touche à aucun réglage système : il \
+                                         te dit quoi regarder, tu décides.",
+                                    );
+                                }
+                            }
+                        }
+
                         // --- Relevé de performance ---
                         // Même usage que le journal au-dessus : on se le fait
                         // copier-coller. « Ça rame quand je joue » ne se
@@ -3792,6 +3866,12 @@ impl KiApp {
                                     "Trames incomplètes (audio) : {}\n",
                                     voice.stats.underruns
                                 ));
+                                // Le diagnostic voyage avec : celui qui reçoit
+                                // ce relevé n'a alors plus rien à demander.
+                                if let Some(d) = &self.docteur {
+                                    texte.push('\n');
+                                    texte.push_str(&d.rapport());
+                                }
                                 ctx.copy_text(texte);
                                 self.info = Some("relevé copié".into());
                             }

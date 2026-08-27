@@ -326,6 +326,31 @@ fn pick(
 
 /// Empreinte native : identifiant d'endpoint + format de mixage + repli.
 /// L'identifiant capte les ré-énumérations USB que le nom seul raterait.
+/// L'identifiant du périphérique par défaut, tel que Windows le range dans
+/// le registre.
+///
+/// Sert au docteur audio à trouver l'entrée du **bon** périphérique : lire le
+/// réglage de mode exclusif d'un autre rendrait un verdict sur du matériel
+/// dont on ne se sert pas.
+/// Le nom lisible du périphérique par défaut.
+///
+/// Le docteur audio s'en sert pour reconnaître un **périphérique virtuel** :
+/// VB-Audio Cable, Voicemeeter, le micro de NVIDIA Broadcast ne sont pas des
+/// processus, ce sont des pilotes. L'énumération des processus ne peut donc
+/// pas les voir, alors qu'ils sont la cause la plus simple d'un « micro qui
+/// ne capte rien » — on parle dans un câble qui ne va nulle part.
+pub fn default_endpoint_name(input: bool) -> Option<String> {
+    let enu = enumerator().ok()?;
+    let (device, _) = pick(&enu, None, input).ok()?;
+    friendly_name(&device).ok()
+}
+
+pub fn default_endpoint_id(input: bool) -> Option<String> {
+    let enu = enumerator().ok()?;
+    let (device, _) = pick(&enu, None, input).ok()?;
+    endpoint_id(&device).ok()
+}
+
 pub fn device_signature(name: Option<&str>, input: bool) -> Option<String> {
     let enu = enumerator().ok()?;
     let (device, fallback) = pick(&enu, name, input).ok()?;
