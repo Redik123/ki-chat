@@ -13,7 +13,7 @@
 //! que de l'écoute passive tant que personne ne vérifie à qui l'on parle.
 
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -96,8 +96,27 @@ impl QuicClient {
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
         ));
         let mut transport = quinn::TransportConfig::default();
-        transport.keep_alive_interval(Some(Duration::from_secs(5)));
-        transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
+        // Deux secondes de battement pour quinze d'inactivité tolérée.
+        //
+        // C'était cinq pour trente. Trente secondes à parler dans le vide
+        // avant même de s'apercevoir que le lien est mort, c'est long quand
+        // on compte sur la reprise automatique pour rendre les hoquets
+        // invisibles. Et le serveur gardait tout ce temps un fantôme dans la
+        // liste et dans le salon vocal.
+        //
+        // Le rapport des deux est ce qui compte : il dit combien de fois on
+        // peut se signaler avant d'être déclaré mort. Il passe de 6 à 7,5 —
+        // donc **plus** tolérant à la perte qu'avant, pour une détection deux
+        // fois plus rapide. Le prix est un paquet toutes les deux secondes au
+        // lieu de cinq : quinze par seconde pour trente joueurs, à comparer
+        // aux cinquante par seconde d'un seul locuteur.
+        //
+        // Ce réglage n'était pas tenable avant R2 : chaque coupure refermait
+        // le micro, et les rendre plus fréquentes aurait échangé une gêne
+        // rare contre une gêne régulière. Le moteur voix survivant désormais
+        // aux coupures, il ne coûte plus rien.
+        transport.keep_alive_interval(Some(Duration::from_secs(2)));
+        transport.max_idle_timeout(Some(Duration::from_secs(15).try_into()?));
         // Anti-bufferbloat : 32 Kio ≈ 1 s de voix en file au maximum (le
         // défaut d'1 Mio en autoriserait ~2 minutes sous congestion).
         transport.datagram_send_buffer_size(32 * 1024);
@@ -218,6 +237,30 @@ pub fn datagram_sender(conn: &quinn::Connection) -> DatagramSend {
     let conn = conn.clone();
     Arc::new(move |pkt: &[u8]| {
         let _ = conn.send_datagram(bytes::Bytes::copy_from_slice(pkt));
+    })
+}
+
+/// Un émetteur lié à un **emplacement** de connexion plutôt qu'à une
+/// connexion.
+///
+/// C'est ce qui permet au moteur voix de survivre à une coupure : il garde le
+/// même émetteur d'un bout à l'autre, et celui-ci suit la connexion du
+/// moment. Sans cette indirection, l'émetteur retenait une connexion morte,
+/// et il fallait reconstruire le moteur — donc rouvrir le micro et la sortie,
+/// exactement ce qu'on cherche à éviter.
+///
+/// Emplacement vide, pendant la coupure : la trame est jetée. C'est le bon
+/// comportement, il n'y a nulle part où la mettre, et le chemin audio ne doit
+/// jamais attendre — pas plus ici qu'ailleurs.
+///
+/// Le verrou est pris cinquante fois par seconde, sur le fil d'encodage et
+/// non dans le rappel temps réel du périphérique : la seule chose qui le
+/// dispute est la reconnexion, qui arrive une fois par heure au pire.
+pub fn datagram_sender_slot(slot: Arc<Mutex<Option<quinn::Connection>>>) -> DatagramSend {
+    Arc::new(move |pkt: &[u8]| {
+        if let Some(conn) = slot.lock().unwrap().as_ref() {
+            let _ = conn.send_datagram(bytes::Bytes::copy_from_slice(pkt));
+        }
     })
 }
 

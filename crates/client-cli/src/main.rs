@@ -295,7 +295,16 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = VoiceConfig::new(user_id, voice_key);
     cfg.tone = tone;
     cfg.no_playback = deaf;
-    let send = ki_client_quic::datagram_sender(&writer.conn);
+    // Le même émetteur que le client graphique, à travers un emplacement
+    // partagé — alors que la ligne de commande n'a rien à reconnecter et
+    // pourrait se contenter de la connexion.
+    //
+    // C'est délibéré : ce primitif est sur le chemin de la voix, et il n'est
+    // exercé nulle part ailleurs qu'à la main, dans une fenêtre. En le
+    // faisant porter la charge de test aussi, la voie éprouvée devient la
+    // voie livrée.
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(writer.conn.clone())));
+    let send = ki_client_quic::datagram_sender_slot(slot);
     let engine = match VoiceEngine::start(cfg, send, voice_rx) {
         Ok(e) => Some(e),
         Err(e) => {

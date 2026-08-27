@@ -1255,6 +1255,97 @@ C'est la même dépendance que celle de l'encadré précédent, et c'est ce qui 
 fait le prochain chantier naturel du client : **sortir le moteur voix de la
 connexion** débloque deux choses d'un coup.
 
+## R2 — Le moteur voix sort de la connexion ✅ (livré le 2026-08-27)
+
+Le chantier que R1 avait désigné, et dont il dépendait pour aller au bout.
+
+**Le moteur audio appartenait à la connexion.** Fermer l'une emportait l'autre :
+chaque coupure refermait le micro et la sortie, puis les rouvrait. Ce n'était
+pas neuf — toute déconnexion le faisait déjà — mais la reprise automatique, en
+rendant les coupures routinières et silencieuses, transformait un risque rare
+en risque régulier : entre la fermeture et la réouverture, un jeu peut prendre
+le micro en mode exclusif, et Windows ne le rend plus.
+
+Le moteur appartient désormais à l'application, qui le **prête** aux
+connexions successives (`net::VoiceLink`). Une connexion qui meurt ne prend
+plus le son avec elle.
+
+### Le joint : un émetteur lié à un emplacement
+
+L'émetteur de datagrammes retenait une connexion. Il retient maintenant
+l'**emplacement** où vit la connexion du moment (`datagram_sender_slot`) : le
+moteur garde le même émetteur d'un bout à l'autre, et celui-ci suit les
+reconnexions sans que rien ne soit reconstruit. Emplacement vide pendant la
+coupure : la trame est jetée — c'est le bon comportement, il n'y a nulle part
+où la mettre, et le chemin audio ne doit jamais attendre.
+
+Le verrou est pris cinquante fois par seconde, sur le **fil d'encodage** et non
+dans le rappel temps réel du périphérique. La seule chose qui le dispute est
+une reconnexion.
+
+### Ce qui décide de garder le moteur, ou de le refaire
+
+L'identifiant reçu au `Welcome` est celui du **compte** : il ne bouge pas d'une
+connexion à l'autre. La clé voix, elle, est tirée au sort à chaque démarrage du
+**processus** serveur. D'où la règle, qui tient en une comparaison :
+
+| Événement | Clé | Moteur |
+| --- | --- | --- |
+| Hoquet réseau, Wi-Fi, lien saturé | inchangée | **conservé** — rien n'est rouvert |
+| Redémarrage du serveur | nouvelle | refait, comme avant |
+
+Le cas fréquent — celui que R1 vise — ne touche donc plus aux périphériques du
+tout. Le cas rare se comporte comme auparavant, et ne tombe pas au milieu
+d'une partie.
+
+Effet de bord agréable : les réglages audio, le son de test, le docteur et le
+vumètre du micro **fonctionnent pendant la coupure**, et changer de
+périphérique n'attend plus la reconnexion.
+
+### Un défaut que le compilateur ne voyait pas
+
+Au redémarrage du serveur, l'ancien moteur se serait fait détruire **sous le
+verrou** que l'interface prend à chaque image — deux cents millisecondes de
+gel, sur le fil réseau de surcroît. Ce cas n'existait pas avant R2 : le moteur
+partait à la déconnexion, et le `Welcome` trouvait toujours la place vide. Il
+est désormais sorti du verrou avant d'être arrêté, comme `restart_voice` le
+faisait déjà pour la même raison.
+
+### Et maintenant, la détection peut se serrer
+
+C'était le second volet, gratuit une fois le premier posé : keep-alive à 2 s
+pour 15 s d'inactivité tolérée, des deux côtés, contre 5 s pour 30 s.
+
+**Correction d'une arithmétique fausse annoncée en R1.** J'avais écrit que le
+réglage d'alors laissait « deux occasions de se signaler » : il en laissait
+six (30 / 5). Ce qui compte est ce rapport, car il dit combien de fois on peut
+se manifester avant d'être déclaré mort. À 3 s / 15 s il serait tombé à cinq,
+donc **moins** tolérant qu'avant. À 2 s / 15 s il monte à 7,5 : détection deux
+fois plus rapide **et** meilleure tolérance à la perte. Le prix est un paquet
+toutes les deux secondes au lieu de cinq — quinze par seconde pour trente
+joueurs, à comparer aux cinquante par seconde d'un seul locuteur.
+
+Le serveur y gagne aussi, et ce n'est pas secondaire : un client parti
+brutalement restait trente secondes dans la liste des membres **et dans son
+salon vocal**, où les autres continuaient de le voir et de lui relayer de la
+voix.
+
+### Éprouvé
+
+Le nouvel émetteur n'était exercé que par le client graphique, qui ne se
+pilote pas d'ici — donc par personne, en pratique, avant une main humaine. Le
+client en ligne de commande passe maintenant par le **même** primitif, alors
+qu'il n'a rien à reconnecter : la voie éprouvée devient la voie livrée.
+
+Le banc de F3 rejoué avec lui, sur une vraie voix chiffrée à travers un vrai
+serveur, rend les mêmes chiffres qu'avant le remaniement : 347 paquets reçus,
+400 après la coupure du micro, **400 encore huit secondes plus tard**, 801
+après la levée. Zéro rejeté — le chiffrement traverse intact.
+
+Reste à éprouver à la main, et c'est le cas qui a motivé tout ceci : **couper
+la connexion pendant qu'un jeu tient le micro**, et vérifier qu'il est toujours
+là au retour.
+
 ## F4 — Partage d'écran
 
 `PLAN-STREAM.md` est un plan sérieux, déjà validé par une revue adversariale,

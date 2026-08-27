@@ -532,6 +532,9 @@ struct KiApp {
 
     /// Reprise automatique en cours. `None` = rien à reprendre.
     reprise: Option<Reprise>,
+    /// Le moteur voix et ses attaches. **Hors** de la connexion, exprès :
+    /// une coupure ne doit pas refermer le micro (voir `net::VoiceLink`).
+    link: net::VoiceLink,
 
     // Recherche dans l'historique
     show_search: bool,
@@ -759,6 +762,7 @@ impl KiApp {
             channel_edit: None,
             verrou_draft: None,
             reprise: None,
+            link: net::VoiceLink::default(),
             show_search: false,
             search_query: String::new(),
             search_ici: true,
@@ -979,8 +983,7 @@ impl KiApp {
 
     /// Pousse tous les réglages audio actuels vers le moteur, à chaud.
     fn apply_audio_settings(&self) {
-        let Some(conn) = &self.conn else { return };
-        if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
+        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             engine.set_noise_mode(self.noise_mode);
             engine.set_input_gain(self.input_gain);
             engine.set_output_gain(self.output_gain);
@@ -1039,9 +1042,11 @@ impl KiApp {
 
     /// Photo de l'état du moteur audio pour la frame en cours.
     fn voice_snapshot(&self) -> VoiceSnapshot {
-        let Some(conn) = &self.conn else { return VoiceSnapshot::default() };
-        let ping = conn.rtt_ms();
-        match conn.engine.lock().unwrap().as_ref() {
+        // Le ping n'existe que connecté ; le moteur, lui, tourne même
+        // pendant une coupure — et c'est voulu : le vumètre du micro
+        // continue de bouger, les réglages audio restent utilisables.
+        let ping = self.conn.as_ref().and_then(|c| c.rtt_ms());
+        match self.link.engine.lock().unwrap().as_ref() {
             Some(engine) => VoiceSnapshot {
                 engine_up: true,
                 stats: engine.stats(),
@@ -1088,10 +1093,8 @@ impl KiApp {
         } else {
             volumes.insert(user_id, gain);
         }
-        if let Some(conn) = &self.conn {
-            if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
-                engine.set_user_volume(user_id, gain);
-            }
+        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+            engine.set_user_volume(user_id, gain);
         }
     }
 
@@ -1198,8 +1201,7 @@ impl KiApp {
             return;
         }
         let Some(pcm) = self.sounds.get(name) else { return };
-        let Some(conn) = &self.conn else { return };
-        if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
+        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             engine.play_effect(pcm, self.sfx_volume);
         }
     }
@@ -1364,6 +1366,8 @@ impl KiApp {
             self.disconnect(error);
             return;
         }
+        // À partir d'ici, on garde le son : `fermer_session` et non
+        // `disconnect`.
         let essais = self.reprise.as_ref().map_or(0, |r| r.essais) + 1;
         // Relevés **avant** le nettoyage, qui les efface. Et repris de la
         // reprise en cours s'il y en a une : à la deuxième tentative, l'état
@@ -1372,8 +1376,11 @@ impl KiApp {
             Some(r) => (r.salon, r.vocal),
             None => (self.current, self.voice_channel),
         };
-        self.disconnect(error);
+        self.fermer_session(error);
         if essais > Reprise::MAX {
+            // On renonce : plus aucune raison de garder le micro ouvert, et
+            // le tenir priverait un jeu du périphérique sans contrepartie.
+            self.link.arreter();
             self.error = Some(
                 "connexion perdue — le serveur n'a pas répondu, reconnecte-toi quand il \
                  sera revenu"
@@ -1404,10 +1411,24 @@ impl KiApp {
         Some(r.quand.saturating_duration_since(std::time::Instant::now()))
     }
 
+    /// Sortie **définitive** : on ferme la session **et** on rend les
+    /// périphériques audio.
+    ///
+    /// C'est ici, et seulement ici, que le son s'arrête. Une coupure subie
+    /// passe par [`Self::connexion_perdue`], qui ne ferme que la session et
+    /// laisse le moteur debout, périphériques ouverts. Sans cette séparation,
+    /// tout hoquet du réseau refermait le micro — et un jeu pouvait s'en
+    /// emparer dans l'intervalle, en mode exclusif, pour ne plus le rendre.
     fn disconnect(&mut self, error: Option<String>) {
-        // Toute sortie **définitive** désarme la reprise : sans ça, cliquer
-        // « Se déconnecter » pendant une coupure nous y ramènerait tout seul.
-        // Les deux appelants qui la veulent la réarment après coup.
+        self.fermer_session(error);
+        self.link.arreter();
+    }
+
+    /// Défait la session sans toucher au son.
+    fn fermer_session(&mut self, error: Option<String>) {
+        // Toute sortie désarme la reprise : sans ça, cliquer « Se
+        // déconnecter » pendant une coupure nous y ramènerait tout seul.
+        // `connexion_perdue` la réarme après coup, elle seule.
         self.reprise = None;
         if let Some(mut conn) = self.conn.take() {
             conn.quit();
@@ -1597,6 +1618,7 @@ impl KiApp {
                     .unwrap_or_default(),
             },
             self.voice_prefs(),
+            self.link.clone(),
             ctx.clone(),
         ));
     }
@@ -2273,8 +2295,8 @@ impl KiApp {
     /// Lance la calibration : mesure le niveau ambiant (autres voix, bruit)
     /// pendant 5 s, micro « nu » (porte et AGC suspendus le temps de mesurer).
     fn start_calibration(&mut self) {
-        if let Some(conn) = &self.conn {
-            if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
+        {
+            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
                 engine.set_gate_threshold(0.0);
                 engine.set_agc(false);
             }
@@ -2315,8 +2337,7 @@ impl KiApp {
     // -----------------------------------------------------------------
 
     fn update_voice(&mut self) {
-        let Some(conn) = &self.conn else { return };
-        let engine_guard = conn.engine.lock().unwrap();
+        let engine_guard = self.link.engine.lock().unwrap();
         let Some(engine) = engine_guard.as_ref() else { return };
 
         // « Armé » : le micro a le droit d'émettre. En activation vocale,
@@ -2427,7 +2448,12 @@ impl KiApp {
                                     if ui::button(ui, Icon::Close, "Arrêter d'essayer")
                                         .clicked()
                                     {
+                                        // Renoncer rend aussi les
+                                        // périphériques : les tenir pour une
+                                        // connexion qu'on ne cherche plus
+                                        // n'apporte rien à personne.
                                         self.reprise = None;
+                                        self.link.arreter();
                                     }
                                 });
                             } else if let Some(err) = self.error.clone() {
@@ -4264,8 +4290,8 @@ impl KiApp {
                         // le casque » : certains pilotes (Razer…) laissent un
                         // flux zombie après le passage d'un jeu.
                         if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
-                            if let Some(conn) = &self.conn {
-                                if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
+                            {
+                                if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
                                     engine.reset_audio_devices();
                                     self.info = Some(
                                         "micro et sortie rouverts — comme un \
@@ -4461,10 +4487,8 @@ impl KiApp {
                                 // Établi au clic : l'énumération des processus
                                 // et la lecture du registre n'ont rien à faire
                                 // dans une boucle de rendu.
-                                self.docteur = self
-                                    .conn
-                                    .as_ref()
-                                    .and_then(|c| c.engine.lock().unwrap().as_ref().map(|e| e.docteur()));
+                                self.docteur =
+                                    self.link.engine.lock().unwrap().as_ref().map(|e| e.docteur());
                             }
                         }
                         if self.show_docteur {
@@ -4822,10 +4846,8 @@ impl KiApp {
                         }
                         ui.add_space(6.0);
                         if ui::button(ui, Icon::Play, "Jouer un son de test").clicked() {
-                            if let Some(conn) = &self.conn {
-                                if let Some(engine) = conn.engine.lock().unwrap().as_ref() {
-                                    engine.play_test_tone();
-                                }
+                            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                                engine.play_test_tone();
                             }
                         }
 
@@ -4836,10 +4858,7 @@ impl KiApp {
                         ui::group_title(ui, Icon::Play, "Sons & notifications");
                         // L'état du système, en clair : si un jour « pas de
                         // son », cette ligne dit immédiatement où chercher.
-                        let engine_ok = self
-                            .conn
-                            .as_ref()
-                            .is_some_and(|c| c.engine.lock().unwrap().is_some());
+                        let engine_ok = self.link.engine.lock().unwrap().is_some();
                         ui::hint(
                             ui,
                             &format!(
@@ -4896,11 +4915,9 @@ impl KiApp {
                                     {
                                         // La préécoute ignore la coupure de
                                         // l'événement, pas le volume.
-                                        if let (Some(pcm), Some(conn)) =
-                                            (self.sounds.get(name), &self.conn)
-                                        {
+                                        if let Some(pcm) = self.sounds.get(name) {
                                             if let Some(engine) =
-                                                conn.engine.lock().unwrap().as_ref()
+                                                self.link.engine.lock().unwrap().as_ref()
                                             {
                                                 engine.play_effect(pcm, self.sfx_volume);
                                             }
@@ -5100,8 +5117,8 @@ impl KiApp {
             self.apply_audio_settings();
         }
         if restart {
-            if let Some(conn) = &self.conn {
-                conn.restart_voice(self.voice_prefs());
+            {
+                self.link.restart_voice(self.voice_prefs());
             }
         }
         if !open {

@@ -53,8 +53,13 @@ pub async fn run(
     ));
     let transport = Arc::get_mut(&mut server_config.transport)
         .expect("transport config unique");
-    transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    // Quinze secondes d'inactivité tolérée, deux de battement — voir le
+    // client, qui porte le raisonnement. Ici l'enjeu est le **fantôme** : un
+    // client parti brutalement restait trente secondes dans la liste des
+    // membres et dans son salon vocal, où les autres continuaient de le voir
+    // et de lui relayer de la voix.
+    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into()?));
+    transport.keep_alive_interval(Some(Duration::from_secs(2)));
     // Anti-bufferbloat : le défaut d'1 Mio peut mettre ~2 minutes de voix en
     // file sous congestion. 32 Kio ≈ 1 s d'audio : au-delà, on jette du vieux.
     transport.datagram_send_buffer_size(32 * 1024);
