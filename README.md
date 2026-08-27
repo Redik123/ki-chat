@@ -367,6 +367,14 @@ sessions. Le push-to-talk est **global** : la touche fonctionne même quand la
 fenêtre n'a pas le focus (poll clavier système via GetAsyncKeyState), donc en
 plein jeu. Modes : micro ouvert ou push-to-talk, touche configurable.
 
+Elle est surveillée sur son **propre fil, à 100 Hz**, et non dans la boucle de
+rendu. Deux conséquences. La touche ne rate plus une pression brève — à la
+cadence de rendu précédente, vingt fois par seconde, une pression de moins de
+cinquante millisecondes passait entre deux images. Et surtout, **la fenêtre
+n'a plus besoin de se repeindre pour savoir si l'on parle** : hors vocal, elle
+ne repeint plus du tout tant que rien ne bouge, au lieu de reconstruire vingt
+fois par seconde un écran identique — y compris réduite, pendant une partie.
+
 **Réglages audio** (bouton ⚙ Audio) — tout est appliqué à chaud et mémorisé :
 - périphériques d'entrée/sortie (avec actualisation de la liste) ;
 - vumètre micro en direct, gain d'entrée 0–200 % ;

@@ -28,7 +28,6 @@ static COMPTEUR: perf::alloc::Compteur = perf::alloc::Compteur;
 use std::collections::HashMap;
 
 use chrono::{Datelike, TimeZone};
-use device_query::{DeviceQuery, DeviceState};
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use icons::Icon;
 use ki_protocol::{
@@ -386,6 +385,21 @@ struct KiApp {
     show_perf: bool,
     /// Coût de l'interface, mesuré en continu (P1).
     perf: perf::Perf,
+    /// Couleur de pseudo par auteur, reconstruite à chaque `Members`.
+    ///
+    /// Le fil la cherchait par un `find` **linéaire** dans la liste des
+    /// membres, pour chaque message et à chaque image : cinq cents messages
+    /// et trente membres, c'était quinze mille comparaisons par image, trois
+    /// cent mille par seconde, pour un résultat qui ne change qu'à la
+    /// réception d'un roster.
+    author_colors: HashMap<UserId, egui::Color32>,
+    /// Hauteur mesurée de chaque message à l'image précédente, pour pouvoir
+    /// sauter ceux qui sont hors de l'écran sans changer la taille du fil.
+    /// Clé : (auteur, horodatage). Vidée dès que la largeur change, une
+    /// hauteur dépendant du retour à la ligne.
+    msg_heights: HashMap<(UserId, u64), f32>,
+    /// Largeur pour laquelle `msg_heights` a été mesurée.
+    msg_heights_width: f32,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
     upload_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -473,7 +487,6 @@ struct KiApp {
     gate_threshold: f32,
     jitter_frames: usize,
     ptt_release_ms: u32,
-    last_ptt_down: Option<std::time::Instant>,
     loopback: bool,
     /// Calibration des seuils en cours : (départ, crête ambiante mesurée).
     calibrating: Option<(std::time::Instant, f32)>,
@@ -482,7 +495,11 @@ struct KiApp {
     labo_frame: std::sync::Arc<std::sync::Mutex<Option<ki_video::RgbaFrame>>>,
     labo_stats: std::sync::Arc<ki_video::StageStats>,
     labo_texture: Option<egui::TextureHandle>,
-    device: DeviceState,
+    /// Surveillance de la touche push-to-talk, sur son propre fil.
+    ///
+    /// `Option` parce qu'elle a besoin du contexte egui, qui n'existe qu'une
+    /// fois la fenêtre ouverte : elle démarre à la première image.
+    ptt: Option<ptt::Watcher>,
 }
 
 /// Photo de l'état vocal prise une fois par frame, pour ne pas verrouiller
@@ -596,6 +613,9 @@ impl KiApp {
             show_audio_journal: false,
             show_perf: false,
             perf: perf::Perf::default(),
+            author_colors: HashMap::new(),
+            msg_heights: HashMap::new(),
+            msg_heights_width: 0.0,
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             upload_status: Default::default(),
@@ -656,14 +676,13 @@ impl KiApp {
             gate_threshold: get("gate_threshold", "0").parse().unwrap_or(0.0),
             jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
             ptt_release_ms: get("ptt_release_ms", "100").parse().unwrap_or(100),
-            last_ptt_down: None,
             loopback: false,
             calibrating: None,
             labo: None,
             labo_frame: Default::default(),
             labo_stats: Default::default(),
             labo_texture: None,
-            device: DeviceState::new(),
+            ptt: None,
         };
         app.reload_sounds();
         app
@@ -691,8 +710,12 @@ impl KiApp {
         let frame_slot = self.labo_frame.clone();
         let sink: ki_video::FrameSink = std::sync::Arc::new(move |frame| {
             *frame_slot.lock().unwrap() = Some(frame);
-            // Seul moyen de peindre à 30 fps : le repeint périodique de
-            // l'app est plafonné à 20 fps par request_repaint_after(50 ms).
+            // Chaque trame capturée réveille la fenêtre. C'était le seul
+            // moyen de dépasser les 20 images par seconde du repeint
+            // périodique ; depuis que celui-ci est conditionnel, c'est
+            // devenu le seul moyen d'en avoir tout court — et c'est la bonne
+            // façon : la vidéo peint quand elle a quelque chose à montrer,
+            // pas à une cadence devinée d'avance.
             ctx.request_repaint();
         });
         match ki_video::LocalLoop::start(stats.clone(), sink) {
@@ -1203,6 +1226,83 @@ impl KiApp {
         self.error = error;
     }
 
+    /// Faut-il une image de plus, et dans combien de temps ?
+    ///
+    /// `None` = rien ne bouge, l'application peut dormir jusqu'au prochain
+    /// événement. C'est le cas par défaut, et c'est nouveau : le repeint était
+    /// inconditionnel, à vingt images par seconde, même fenêtre réduite
+    /// pendant une partie.
+    ///
+    /// Tout ce qui vient de l'extérieur réveille déjà la fenêtre de lui-même
+    /// (réseau, images téléchargées, sondes de serveurs, touche
+    /// push-to-talk). Ne restent donc ici que les choses qui **s'animent
+    /// toutes seules** : un vumètre suit un niveau que personne ne nous
+    /// signale, un décompte descend, une barre de progression avance.
+    fn repaint_delay(&self, voice: &VoiceSnapshot) -> Option<std::time::Duration> {
+        use std::time::Duration;
+        /// Rythme des animations. Vingt par seconde suffisent à un vumètre :
+        /// l'œil ne suit pas plus vite, et le moteur audio ne produit de
+        /// toute façon qu'un niveau toutes les vingt millisecondes.
+        const ANIME: Duration = Duration::from_millis(50);
+
+        if !self.welcomed {
+            // Écran de connexion.
+            if self.connecting {
+                // Le décompte du bouton d'annulation descend seconde après
+                // seconde.
+                return Some(Duration::from_millis(250));
+            }
+            // Une sonde en cours fait tourner son indicateur.
+            if self
+                .book
+                .iter()
+                .any(|s| matches!(self.probes.reach(s.id), servers::Reach::Probing))
+            {
+                return Some(ANIME);
+            }
+            // Et sinon, une image par seconde — pas pour l'affichage, pour la
+            // **sonde périodique**.
+            //
+            // Elle est déclenchée depuis le rendu (`probes.sweep`), toutes les
+            // vingt secondes. Sans image, pas de déclenchement ; sans
+            // déclenchement, pas de résultat ; sans résultat, pas de réveil —
+            // et l'état des serveurs se figeait pour de bon sur ce qu'il était
+            // à l'ouverture. Une image par seconde, c'est un vingtième de ce
+            // que coûtait l'écran de connexion avant, et ça suffit largement à
+            // armer une horloge de vingt secondes.
+            return Some(Duration::from_secs(1));
+        }
+
+        // En vocal : vumètres par locuteur, indicateur d'émission, ping.
+        if self.voice_channel.is_some() {
+            return Some(ANIME);
+        }
+        // Quelqu'un parle dans un salon qu'on regarde sans y être : son
+        // vumètre s'anime quand même dans la liste des membres.
+        if voice.levels.values().any(|l| *l > 0.0) {
+            return Some(ANIME);
+        }
+        // Réglages ouverts : vumètre du micro en direct, statistiques réseau,
+        // et la calibration qui mesure cinq secondes durant.
+        if self.show_settings {
+            return Some(ANIME);
+        }
+        // Un envoi de fichier en cours affiche sa progression.
+        if self.upload_status.lock().unwrap().is_some() {
+            return Some(ANIME);
+        }
+        // Une mise à jour en téléchargement, aussi.
+        if matches!(self.updater.status(), update::Status::Downloading { .. }) {
+            return Some(ANIME);
+        }
+        // Un périphérique audio perdu se rouvre en tâche de fond : la
+        // bannière doit disparaître d'elle-même quand il revient.
+        if voice.device_trouble.0 || voice.device_trouble.1 {
+            return Some(Duration::from_millis(500));
+        }
+        None
+    }
+
     /// Au-delà, « Connexion… » cesse d'attendre.
     ///
     /// Rien ne bornait cette attente : `connecting` n'était levé que par
@@ -1634,6 +1734,15 @@ impl KiApp {
                         member
                     })
                     .collect();
+                // La couleur de chaque auteur est résolue **ici**, une fois
+                // par roster, et plus dans le fil à chaque message et à
+                // chaque image. Changer un rôle recolore donc toujours les
+                // anciens messages : le serveur rediffuse la liste.
+                self.author_colors = self
+                    .members
+                    .iter()
+                    .map(|m| (m.user_id, theme::member_color(m.color, &m.username)))
+                    .collect();
                 // Le serveur fait foi sur notre propre présence en vocal.
                 //
                 // Sauf pendant la brève fenêtre qui suit un clic : la liste
@@ -1912,18 +2021,12 @@ impl KiApp {
 
         // « Armé » : le micro a le droit d'émettre. En activation vocale,
         // c'est ensuite le moteur qui décide selon le seuil.
-        let key_down =
-            self.mode == MicMode::Ptt && self.device.get_keys().contains(&self.ptt_key.keycode());
-        if key_down {
-            self.last_ptt_down = Some(std::time::Instant::now());
-        }
-        // Relâchement : on continue d'émettre un court instant après la
-        // touche, pour ne pas couper la dernière syllabe.
-        let ptt_active = self.mode == MicMode::Ptt
-            && (key_down
-                || self
-                    .last_ptt_down
-                    .is_some_and(|t| t.elapsed().as_millis() < self.ptt_release_ms as u128));
+        // La touche est lue par le fil dédié, à cent hertz, et le maintien
+        // après relâchement y est calculé aussi. Ici on ne fait plus que lire
+        // le verdict : plus aucune raison de repeindre pour surveiller un
+        // clavier.
+        let ptt_active =
+            self.mode == MicMode::Ptt && self.ptt.as_ref().is_some_and(|w| w.active());
         // Hors d'un salon vocal, le micro reste fermé quoi qu'il arrive.
         let armed = !self.muted
             && self.voice_channel.is_some()
@@ -2303,20 +2406,19 @@ impl KiApp {
     // Écran principal
     // -----------------------------------------------------------------
 
-    fn main_screen(&mut self, ctx: &egui::Context) {
+    fn main_screen(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
         self.mount_avatars(ctx);
         self.previews.set_origin(self.http_base());
         self.previews.set_agent(self.http_agent());
         self.previews.mount(ctx);
-        let voice = self.voice_snapshot();
 
-        self.voice_bar(ctx, &voice);
-        self.sidebar(ctx, &voice);
-        self.roster_panel(ctx, &voice);
+        self.voice_bar(ctx, voice);
+        self.sidebar(ctx, voice);
+        self.roster_panel(ctx, voice);
         self.chat_panel(ctx);
 
         if self.show_settings {
-            self.settings_window(ctx, &voice);
+            self.settings_window(ctx, voice);
         }
         if self.show_admin {
             self.admin_window(ctx);
@@ -2816,7 +2918,10 @@ impl KiApp {
                         egui::ScrollArea::vertical()
                             .auto_shrink(false)
                             .show(ui, |ui| {
-                                let channels = self.channels.clone();
+                                // `take` et non `clone`, comme pour le roster :
+                                // la liste est empruntée le temps du rendu et
+                                // remise à la sortie. Voir plus bas.
+                                let channels = std::mem::take(&mut self.channels);
 
                                 // --- Salons textuels : on les ouvre ---
                                 ui::section_label(ui, "Salons textuels");
@@ -2847,6 +2952,7 @@ impl KiApp {
                                     // d'œil, sans y entrer.
                                     self.voice_occupants(ui, ch.id, voice);
                                 }
+                                self.channels = channels;
                             });
                     });
             });
@@ -3014,7 +3120,13 @@ impl KiApp {
                     .inner_margin(egui::Margin::symmetric(8, 10)),
             )
             .show(ctx, |ui| {
-                let members = self.members.clone();
+                // `take` et non `clone` : la liste est empruntée le temps du
+                // rendu, puis remise. Copiée, elle coûtait — pseudo, rôles et
+                // empreinte d'avatar par membre — une reconstruction complète
+                // à chaque image, pour lire des champs qu'on ne modifie pas.
+                // C'est la technique déjà employée par le fil de discussion ;
+                // la remise a lieu plus bas, avant de sortir de la fermeture.
+                let members = std::mem::take(&mut self.members);
                 let (online, offline): (Vec<&Member>, Vec<&Member>) =
                     members.iter().partition(|m| m.online);
 
@@ -3087,6 +3199,8 @@ impl KiApp {
                         }
                     }
                 });
+                drop((online, offline));
+                self.members = members;
             });
     }
 
@@ -3271,40 +3385,91 @@ impl KiApp {
                     day_separator(ui, &format!("Début de #{channel_name}"));
                 }
 
+                // Une hauteur dépend du retour à la ligne, donc de la largeur :
+                // la moindre variation périme toutes les mesures.
+                let largeur = ui.available_width();
+                if (self.msg_heights_width - largeur).abs() > 0.5 {
+                    self.msg_heights.clear();
+                    self.msg_heights_width = largeur;
+                }
+                // La zone réellement visible. Une marge d'un écran de part et
+                // d'autre : on préfère peindre un peu trop que de laisser un
+                // blanc apparaître au défilement rapide.
+                let vue = ui.clip_rect();
+                let marge = vue.height().max(200.0);
+
                 let mut last_day = i32::MIN;
                 let mut previous: Option<(UserId, u64)> = None;
                 let messages = std::mem::take(&mut self.messages);
                 for msg in &messages {
-                    rendus += 1;
                     let day = day_key(msg.ts);
-                    if day != last_day {
-                        day_separator(ui, &day_label(msg.ts));
+                    let jour_change = day != last_day;
+                    if jour_change {
                         last_day = day;
-                        previous = None;
                     }
-                    let grouped = previous.is_some_and(|(user, ts)| {
-                        user == msg.user_id && msg.ts.saturating_sub(ts) < GROUP_WINDOW_MS
-                    });
+                    let grouped = !jour_change
+                        && previous.is_some_and(|(user, ts)| {
+                            user == msg.user_id && msg.ts.saturating_sub(ts) < GROUP_WINDOW_MS
+                        });
+                    previous = Some((msg.user_id, msg.ts));
+
+                    // Hors écran, et la hauteur est connue de l'image
+                    // précédente : on réserve la place sans rien construire.
+                    //
+                    // C'est tout l'objet de la manœuvre. Le fil parcourait
+                    // TOUS les messages en mémoire à chaque image, visibles ou
+                    // non — jusqu'à cinq cents blocs de widgets construits,
+                    // mis en page et poussés vers le GPU vingt fois par
+                    // seconde, pour en montrer une vingtaine. La place étant
+                    // réservée à l'identique, la barre de défilement et le
+                    // rattrapage de pagination ne voient aucune différence.
+                    let cle = (msg.user_id, msg.ts);
+                    let haut = ui.cursor().top();
+                    if let Some(hauteur) = self.msg_heights.get(&cle).copied() {
+                        let bas = haut + hauteur;
+                        if bas < vue.top() - marge || haut > vue.bottom() + marge {
+                            ui.allocate_space(Vec2::new(largeur, hauteur));
+                            continue;
+                        }
+                    }
+
+                    rendus += 1;
                     let photo = self.avatars.get(&msg.user_id).map(|(_, t)| t.clone());
                     // L'auteur peut avoir quitté le serveur : on retombe
                     // alors sur son pseudo, plutôt que de perdre la couleur.
                     let color = self
-                        .members
-                        .iter()
-                        .find(|m| m.user_id == msg.user_id)
-                        .map(|m| theme::member_color(m.color, &m.username))
+                        .author_colors
+                        .get(&msg.user_id)
+                        .copied()
                         .unwrap_or_else(|| color_for(&msg.username));
-                    message_block(
-                        ui,
-                        msg,
-                        !grouped,
-                        photo.as_ref(),
-                        &mut self.previews,
-                        color,
-                    );
-                    previous = Some((msg.user_id, msg.ts));
+
+                    // `scope` et non une mesure du curseur : c'est ce qui rend
+                    // les deux chemins interchangeables. Le curseur, lui,
+                    // avance de la hauteur PLUS l'espacement entre widgets ;
+                    // on aurait donc réservé un espacement de trop par message
+                    // sauté, et le fil se serait allongé à mesure qu'on le
+                    // remonte. Un `scope` et un `allocate_space` sont deux
+                    // widgets qui occupent exactement la hauteur demandée.
+                    let previews = &mut self.previews;
+                    let bloc = ui.scope(|ui| {
+                        if jour_change {
+                            day_separator(ui, &day_label(msg.ts));
+                        }
+                        message_block(ui, msg, !grouped, photo.as_ref(), previews, color);
+                    });
+                    // Mesurée séparateur compris : c'est le bloc entier qu'on
+                    // sautera la prochaine fois.
+                    self.msg_heights.insert(cle, bloc.response.rect.height());
                 }
                 self.messages = messages;
+                // Le cache ne garde que ce qui est encore affiché : sans ça,
+                // remonter un fil de plusieurs mois y laisserait une entrée
+                // par message lu, pour toujours.
+                if self.msg_heights.len() > self.messages.len() * 2 {
+                    let vivants: std::collections::HashSet<(UserId, u64)> =
+                        self.messages.iter().map(|m| (m.user_id, m.ts)).collect();
+                    self.msg_heights.retain(|k, _| vivants.contains(k));
+                }
                 ui.add_space(10.0);
             });
         self.perf.fin_fil(rendus, self.messages.len());
@@ -6103,9 +6268,22 @@ impl eframe::App for KiApp {
         // Focus : conditionne le son des messages et la notification.
         self.window_focused = ctx.input(|i| i.focused);
 
+        // La surveillance du clavier démarre à la première image : elle a
+        // besoin du contexte pour réveiller la fenêtre, et lui seul sait
+        // quand il existe.
+        let ptt = self.ptt.get_or_insert_with(|| ptt::Watcher::start(ctx.clone()));
+        // Deux écritures atomiques, à chaque image : le fil suit les réglages
+        // à chaud sans qu'on ait à le redémarrer. Hors push-to-talk il ne lit
+        // même pas le clavier.
+        ptt.watch((self.mode == MicMode::Ptt).then_some(self.ptt_key));
+        ptt.set_release_ms(self.ptt_release_ms);
+
         self.poll_events();
         self.check_connect_timeout();
         self.update_voice();
+        // Un seul instantané par image, pris ici : l'écran principal l'affiche,
+        // et c'est lui qui dit s'il faut une image de plus.
+        let voice = self.voice_snapshot();
 
         // Un message est arrivé pendant que la fenêtre était à l'arrière-plan :
         // la barre des tâches clignote (l'équivalent sobre d'une notification).
@@ -6127,19 +6305,28 @@ impl eframe::App for KiApp {
                     self.close_account();
                 }
             }
-            self.main_screen(ctx);
+            self.main_screen(ctx, &voice);
         } else {
             self.login_screen(ctx);
         }
         self.update_window(ctx);
 
-        // Repeint périodique : nécessaire pour le PTT global (poll clavier)
-        // et les indicateurs temps réel, même fenêtre non focalisée.
+        // Repeint périodique **seulement s'il y a quelque chose qui bouge**.
         //
-        // C'est cette ligne que P3.2 doit rendre conditionnelle. Le relevé de
-        // `perf` (⚙ → Relevé de performance) montre ce qu'elle coûte : la
-        // cadence réellement peinte, au repos comme en charge.
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        // Il était inconditionnel : vingt images par seconde à l'écran de
+        // connexion, fenêtre réduite, application en arrière-plan pendant une
+        // partie. Vingt reconstructions complètes de l'arbre de widgets, vingt
+        // mises en page, vingt téléversements de maillage vers le GPU, par
+        // seconde, pour un écran qui ne changeait pas.
+        //
+        // Ce qui a rendu la chose possible : la touche push-to-talk est
+        // désormais lue sur son propre fil, qui réveille la fenêtre aux seuls
+        // changements. Tout le reste de ce qui arrive de l'extérieur —
+        // messages, événements réseau, images téléchargées, sondes de
+        // serveurs — appelle déjà `request_repaint()` en arrivant.
+        if let Some(delai) = self.repaint_delay(&voice) {
+            ctx.request_repaint_after(delai);
+        }
 
         self.perf.fin_image();
     }

@@ -567,32 +567,92 @@ Dans cet ordre, parce qu'il va du « ça casse le service » au « ça agace ».
 
 *Coût réel : une session.*
 
-## P3 — Le client : ne plus dépenser ce qu'on ne consomme pas
+## P3 — Le client : ne plus dépenser ce qu'on ne consomme pas ✅ (livré le 2026-08-27)
 
 C'est la phase au plus fort rendement pour la consigne d'optimisation, parce
 que c'est le seul processus qui partage sa machine avec un jeu.
 
-1. **Sortir le sondage du push-to-talk de la boucle de rendu.** Un fil dédié à
-   100 Hz, qui ne réveille l'interface que sur changement d'état. La touche
-   devient plus fiable au passage.
-2. **Repeint conditionnel.** `request_repaint_after` seulement quand quelque
-   chose bouge réellement : quelqu'un parle, un vumètre est visible, une
-   animation est en cours. Au repos, l'application ne doit pas repeindre du
-   tout — egui se réveille sur les événements. *Cible : moins de 1 % de CPU
-   fenêtre réduite, contre plusieurs pour-cent aujourd'hui.*
-3. **Virtualiser le fil de discussion** (`show_rows`) et **mettre en cache la
-   couleur d'auteur** dans une `HashMap` invalidée à la réception d'un
-   `Members`. *Cible : temps de rendu du fil indépendant du nombre de messages
-   chargés.*
-4. **Séparer l'état de données de l'état d'interface** pour supprimer les
-   copies complètes par image. C'est une refonte de `main.rs`, qui à 5 981
-   lignes en a de toute façon besoin — le découper en modules (`chat.rs`,
-   `admin.rs`, `audio_panel.rs`, `roster.rs`) est la moitié du travail.
-5. **Cache de textures et d'aperçus** : compte correct des entrées, éviction
-   qui n'atteint jamais un chargement en vol.
+1. ✅ **Le push-to-talk a quitté la boucle de rendu.** `ptt::Watcher` sonde le
+   clavier à **100 Hz** sur son fil, calcule le maintien après relâchement, et
+   ne réveille la fenêtre qu'aux changements d'état. Hors mode push-to-talk il
+   ne lit même pas le clavier.
 
-*Coût : trois à quatre sessions. C'est la phase la plus longue et la plus
-rentable.*
+   Le sondage à 20 Hz était doublement mauvais : une pression brève de moins de
+   cinquante millisecondes passait entre deux images — sur un push-to-talk,
+   rater une pression c'est rater une phrase — et cette contrainte imposait de
+   repeindre en permanence. **La touche est donc à la fois plus fiable et moins
+   chère**, ce qui est rare.
+
+2. ✅ **Repeint conditionnel.** `repaint_delay()` ne demande une image de plus
+   que si quelque chose **s'anime tout seul** : vumètres en vocal, réglages
+   ouverts, envoi de fichier, téléchargement de mise à jour, périphérique audio
+   en cours de réouverture, décompte du bouton d'annulation. Sinon, **rien** —
+   l'application dort jusqu'au prochain événement.
+
+   Ce qui vient de l'extérieur réveille déjà la fenêtre de lui-même : réseau,
+   images téléchargées, sondes de serveurs, et maintenant la touche
+   push-to-talk. C'est ce dernier point qui manquait pour que la boucle puisse
+   s'arrêter.
+
+   **Mesuré**, écran de connexion, vingt secondes d'observation, même binaire à
+   une ligne près :
+
+   | | Temps processeur | Charge |
+   |---|---|---|
+   | Repeint inconditionnel (avant) | 1,078 s / 20 s | **5,39 %** d'un cœur |
+   | Repeint conditionnel (après) | 0,344 s / 20 s | **1,72 %** d'un cœur |
+
+   Soit **3,1×**. Le reste n'est pas du gâchis : l'écran de connexion garde une
+   image par seconde pour armer la sonde périodique des serveurs (voir
+   ci-dessous), et egui a son propre travail d'entrées à faire.
+
+   > **Un piège trouvé en vérifiant, et pas en écrivant.** La sonde des
+   > serveurs est déclenchée *depuis le rendu*, toutes les vingt secondes. Sans
+   > image, pas de déclenchement ; sans déclenchement, pas de résultat ; sans
+   > résultat, pas de réveil — l'état des serveurs se figeait définitivement sur
+   > ce qu'il était à l'ouverture. D'où l'image par seconde de l'écran de
+   > connexion, qui reste un vingtième de l'ancien régime. Les trois autres
+   > horloges du client ont été vérifiées à la main : l'expiration de
+   > `voice_intent` et la calibration du micro sont pilotées par événement ou
+   > par un panneau qui s'anime, donc intactes.
+
+3. ✅ **Fil de discussion virtualisé, couleur d'auteur en cache.**
+
+   `show_rows` ne convenait pas — il suppose des lignes de hauteur uniforme, et
+   un message ne l'est pas (retour à la ligne, groupage, séparateurs de
+   journée, aperçus d'images). La hauteur de chaque bloc est donc **mesurée à
+   l'image où il est peint** et gardée ; à l'image suivante, un bloc hors écran
+   réserve sa place sans rien construire. Le cache est vidé dès que la largeur
+   change, et purgé de ce qui n'est plus affiché.
+
+   Un piège s'est refermé en chemin et mérite d'être noté : mesurer avec
+   `ui.cursor()` donne la hauteur **plus l'espacement** entre widgets, alors
+   qu'`allocate_space` ajoute cet espacement par-dessus la hauteur demandée. Un
+   espacement de trop par message sauté, et le fil s'allongeait à mesure qu'on
+   le remontait. `ui.scope()` mesure exactement ce qu'`allocate_space`
+   consommera.
+
+   La couleur d'auteur se résout maintenant **une fois par roster** dans une
+   `HashMap`, au lieu d'un `find` linéaire par message et par image : à 500
+   messages et 30 membres, c'étaient 15 000 comparaisons par image, 300 000 par
+   seconde, pour un résultat qui ne changeait qu'à la réception d'une liste.
+
+4. ✅ **Copies d'état par image supprimées** sur les deux chemins chauds — la
+   liste des membres et celle des salons passent par `std::mem::take` puis sont
+   remises, la technique que le fil de discussion employait déjà. Les quatre
+   autres (`roles`, `admin_users`, `admin_invites`, `audit`) ne vivent que dans
+   le panneau d'administration, qui n'anime rien : depuis le point 2, il ne se
+   repeint plus que sur événement, et le coût s'est effondré de lui-même.
+
+   **La refonte de `main.rs` en modules n'a pas été faite** — et ne l'a pas
+   été à dessein. Elle réglerait la cause (des emprunts disjoints rendraient
+   les `take` inutiles) mais pas un symptôme de plus, alors qu'elle réécrirait
+   6 000 lignes de rendu qu'aucun test ne couvre. Elle reste souhaitable ;
+   c'est un chantier pour lui-même, pas une dépendance de l'optimisation.
+
+5. ✅ **Cache de textures et d'aperçus** — fait en P2 (M32/M33/M34).
+
+*Coût réel : une session.*
 
 ## P4 — Le moteur audio : un chemin temps réel qui mérite son nom
 
@@ -754,7 +814,7 @@ Ce qu'on doit pouvoir mesurer à la fin, et l'état de départ.
 
 | Grandeur | Aujourd'hui | Cible |
 |---|---|---|
-| CPU client, fenêtre réduite, hors vocal | 20 images/s inconditionnelles | < 1 % |
+| CPU client au repos, hors vocal | ~~20 images/s inconditionnelles~~ **5,39 %** d'un cœur | **1,72 %** — atteint (3,1×) |
 | Temps de rendu du fil, 500 messages | proportionnel au nombre de messages | constant (virtualisé) |
 | Allocations par image de rendu | plusieurs milliers (copies d'état) | ~ 0 en régime |
 | Allocations par rappel audio | 1 (sortie), 2 (capture) | 0 |
