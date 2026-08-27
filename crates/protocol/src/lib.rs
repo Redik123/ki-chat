@@ -34,6 +34,14 @@ pub mod perm {
     pub const MANAGE_ROLES: u64 = 1 << 10;
     pub const MANAGE_SERVER: u64 = 1 << 11;
     pub const VIEW_AUDIT_LOG: u64 = 1 << 12;
+    /// Couper le micro de quelqu'un, ou le rendre sourd, **côté serveur**.
+    ///
+    /// À ne pas confondre avec le micro qu'on coupe soi-même : celui-ci est
+    /// une sanction, elle survit à la reconnexion et le client ne peut pas la
+    /// contourner — c'est le relais qui la fait respecter.
+    pub const MUTE_MEMBERS: u64 = 1 << 13;
+    /// Déplacer quelqu'un d'un salon vocal à un autre, ou l'en sortir.
+    pub const MOVE_MEMBERS: u64 = 1 << 14;
     /// Tout permis. Placé au bit de poids fort pour que les permissions
     /// futures remplissent le bas sans jamais entrer en collision.
     pub const ADMINISTRATOR: u64 = 1 << 63;
@@ -57,7 +65,9 @@ pub mod perm {
         | MANAGE_INVITES
         | BAN
         | KICK
-        | RESET_PASSWORD;
+        | RESET_PASSWORD
+        | MUTE_MEMBERS
+        | MOVE_MEMBERS;
 
     /// Liste ordonnée pour l'interface : (bit, intitulé, explication).
     pub const ALL: &[(u64, &str, &str)] = &[
@@ -74,6 +84,8 @@ pub mod perm {
         (MANAGE_ROLES, "Gérer les rôles", "créer des rôles et les attribuer"),
         (MANAGE_SERVER, "Gérer le serveur", "nom et logo"),
         (VIEW_AUDIT_LOG, "Voir le journal", "consulter les actions d'administration"),
+        (MUTE_MEMBERS, "Couper le micro", "faire taire ou rendre sourd, en vocal"),
+        (MOVE_MEMBERS, "Déplacer en vocal", "changer quelqu'un de salon vocal, ou l'en sortir"),
         (ADMINISTRATOR, "Administrateur", "toutes les permissions, présentes et futures"),
     ];
 
@@ -169,6 +181,24 @@ pub enum ClientMsg {
         user_id: UserId,
         #[serde(default)]
         reason: String,
+    },
+    /// Coupe le micro de quelqu'un **côté serveur**, ou le lui rend.
+    ///
+    /// Rien à voir avec le micro qu'on coupe soi-même (`VoiceState`) : celui-ci
+    /// est décidé par un modérateur, survit à la reconnexion, et le relais
+    /// cesse de transmettre la voix — un client modifié n'y peut rien.
+    AdminVoiceMute { username: String, muted: bool },
+    /// Rend quelqu'un sourd côté serveur, ou lui rend l'écoute.
+    ///
+    /// **Indépendant** de la coupure de micro. Les deux se combinent parce
+    /// qu'un modérateur ne veut pas toujours les deux : faire taire quelqu'un
+    /// qui hurle n'oblige pas à le priver de la conversation.
+    AdminVoiceDeafen { username: String, deafened: bool },
+    /// Déplace quelqu'un de salon vocal. `channel: None` l'en sort.
+    AdminVoiceMove {
+        username: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<ChannelId>,
     },
     /// Demande l'état admin (comptes + invitations). Admin uniquement.
     AdminListUsers,
@@ -869,6 +899,13 @@ pub struct Member {
     /// antérieur : faux.
     #[serde(default)]
     pub muted: bool,
+    /// Micro coupé **par un modérateur**. Distinct de `muted`, et il faut que
+    /// ça se voie : l'un se défait d'un clic par l'intéressé, l'autre non.
+    #[serde(default)]
+    pub force_muted: bool,
+    /// Rendu sourd par un modérateur.
+    #[serde(default)]
+    pub force_deafened: bool,
     #[serde(default)]
     pub admin: bool,
     /// Empreinte de la photo de profil, ou `None` s'il n'y en a pas. La

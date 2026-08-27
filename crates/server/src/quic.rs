@@ -260,6 +260,11 @@ async fn handle_connection(
     let rank = state.roles.rank_of(&auth.roles);
     let color = state.roles.color_of(&auth.roles);
     let is_admin = ki_protocol::perm::has(perms, ki_protocol::perm::ADMINISTRATOR);
+    // Les sanctions vocales attendent leur destinataire dans son compte. Les
+    // relire ici est ce qui fait qu'un micro coupé le reste après un
+    // redémarrage du client — sans quoi la sanction ne durerait que jusqu'au
+    // prochain Alt+F4.
+    let (force_muted, force_deafened) = state.accounts.voice_sanctions(&username);
     {
         let mut users = state.users.lock().unwrap();
         users.insert(
@@ -270,6 +275,8 @@ async fn handle_connection(
                 voice: None,
                 speaking: false,
                 muted: false,
+                force_muted,
+                force_deafened,
                 roles: auth.roles.clone(),
                 perms,
                 rank,
@@ -566,6 +573,63 @@ fn outranks_account(
     ok
 }
 
+/// Identifiant d'un compte **connecté**, ou `None` s'il ne l'est pas.
+fn id_of_connected(state: &Arc<AppState>, target: &str) -> Option<UserId> {
+    let users = state.users.lock().unwrap();
+    users.iter().find(|(_, u)| u.username == target).map(|(id, _)| *id)
+}
+
+/// Pose ou lève une sanction vocale : sur le compte d'abord, en mémoire
+/// ensuite si la personne est là.
+///
+/// `None` laisse la sanction correspondante telle quelle — couper le micro de
+/// quelqu'un ne doit pas lui rendre l'ouïe au passage.
+///
+/// L'écriture du compte passe par le pool bloquant : `users.json` porte les
+/// photos de profil en base64, sa réécriture pèse plusieurs mégaoctets sur un
+/// serveur bien rempli, et le relais vocal partage cette boucle.
+fn sanctionner_la_voix(
+    state: &Arc<AppState>,
+    acteur: &str,
+    cible: &str,
+    muted: Option<bool>,
+    deafened: Option<bool>,
+    tx: &crate::state::Outbox,
+) {
+    let (state, tx) = (state.clone(), tx.clone());
+    let (acteur, cible) = (acteur.to_string(), cible.to_string());
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = state.accounts.set_voice_sanction(&cible, muted, deafened) {
+            let _ = tx.send(ServerMsg::Error { message: e });
+            return;
+        }
+        // Le compte fait foi, la mémoire le suit. Dans cet ordre : si
+        // l'écriture échoue, rien ne bouge — l'inverse laisserait quelqu'un
+        // muet jusqu'au redémarrage, sans trace de pourquoi.
+        {
+            let mut users = state.users.lock().unwrap();
+            if let Some(u) = users.values_mut().find(|u| u.username == cible) {
+                if let Some(m) = muted {
+                    u.force_muted = m;
+                }
+                if let Some(d) = deafened {
+                    u.force_deafened = d;
+                }
+            }
+        }
+        // C'est cette reconstruction qui applique la sanction : le relais ne
+        // teste rien, il suit la table.
+        state.rebuild_voice_routes();
+        let (quoi, pose) = match (muted, deafened) {
+            (Some(m), _) => ("voice.mute", m),
+            (_, Some(d)) => ("voice.deafen", d),
+            _ => return,
+        };
+        state.audit.record(quoi, &acteur, &cible, if pose { "posé" } else { "levé" });
+        state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+    });
+}
+
 /// Envoie l'état admin complet (comptes avec statut en ligne + invitations).
 fn send_admin_info(state: &Arc<AppState>, tx: &crate::state::Outbox) {
     let mut users = state.accounts.list(&state.roles);
@@ -794,6 +858,84 @@ fn handle_msg(
                 // destinataire a changé de salon.
                 let _ = tx.send(ServerMsg::HistoryPage { messages, more, channel });
             });
+        }
+        ClientMsg::AdminVoiceMute { username: target, muted } => {
+            if require(state, user_id, tx, ki_protocol::perm::MUTE_MEMBERS)
+                && outranks_account(state, user_id, &target, tx)
+            {
+                sanctionner_la_voix(state, username, &target, Some(muted), None, tx);
+            }
+        }
+        ClientMsg::AdminVoiceDeafen { username: target, deafened } => {
+            if require(state, user_id, tx, ki_protocol::perm::MUTE_MEMBERS)
+                && outranks_account(state, user_id, &target, tx)
+            {
+                sanctionner_la_voix(state, username, &target, None, Some(deafened), tx);
+            }
+        }
+        ClientMsg::AdminVoiceMove { username: target, channel } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MOVE_MEMBERS)
+                || !outranks_account(state, user_id, &target, tx)
+            {
+                return;
+            }
+            let Some(target_id) = id_of_connected(state, &target) else {
+                // Déplacer quelqu'un qui n'est pas là n'a pas de sens : le
+                // salon vocal occupé n'existe qu'en mémoire, il n'y a rien à
+                // écrire qui l'attendrait au retour.
+                let _ = tx.send(ServerMsg::Error {
+                    message: "cette personne n'est pas connectée".into(),
+                });
+                return;
+            };
+            if let Some(channel) = channel {
+                if !state.channel_is(channel, ki_protocol::ChannelKind::Voice) {
+                    let _ = tx.send(ServerMsg::Error { message: "salon vocal inconnu".into() });
+                    return;
+                }
+                // Le déplacer là où il serait aussitôt ressorti ne rendrait
+                // service à personne : `reconcile_memberships` le renverrait
+                // dans la seconde, et le modérateur verrait son geste défait
+                // sans comprendre pourquoi. On refuse en le disant.
+                if !state.can_view(target_id, channel) {
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "cette personne n'a pas accès à ce salon".into(),
+                    });
+                    return;
+                }
+                if !state.holds(target_id, ki_protocol::perm::CONNECT_VOICE) {
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "cette personne n'a pas le droit d'entrer en vocal".into(),
+                    });
+                    return;
+                }
+            }
+            // Le verrou du salon n'est pas consulté : il garde la porte de
+            // ceux qui entrent d'eux-mêmes, pas la main d'un modérateur qui
+            // range les gens.
+            let bouge = {
+                let mut users = state.users.lock().unwrap();
+                match users.get_mut(&target_id) {
+                    Some(u) if u.voice != channel => {
+                        u.voice = channel;
+                        u.speaking = false;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if !bouge {
+                return;
+            }
+            state.rebuild_voice_routes();
+            let ou = match channel {
+                Some(c) => state.channels.get(c).map(|c| c.name).unwrap_or_default(),
+                None => "hors du vocal".to_string(),
+            };
+            state.audit.record("voice.move", username, &target, &ou);
+            // Le client suit le roster pour savoir où il est : le diffuser
+            // suffit à ce que la personne déplacée change de salon chez elle.
+            state.broadcast_all(&ServerMsg::Members { members: state.roster() });
         }
         ClientMsg::Search { query, channel, limit } => {
             // Bornée avant tout le reste : une requête d'un mégaoctet ferait

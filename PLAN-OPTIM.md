@@ -1046,12 +1046,87 @@ disent, sans quoi on croirait le salon mort depuis ce jour-là.
   embarquée et un atlas de textures : le sujet est plus gros que tout le
   reste de F2 réuni, et il ne bloque personne.
 
-## F3 — Modération vocale
+## F3 — Modération vocale ✅ (livré le 2026-08-27)
 
 Couper le micro de quelqu'un côté serveur, le rendre sourd, le déplacer de
-salon vocal. Ce sont les trois gestes qu'un modérateur attend et qui n'existent
-pas. Les permissions et les rangs sont déjà en place : c'est du protocole et de
-l'interface, pas de l'architecture.
+salon vocal. Les trois gestes qu'un modérateur attend.
+
+Deux permissions nouvelles, `MUTE_MEMBERS` et `MOVE_MEMBERS` : sanctionner et
+ranger les gens sont des pouvoirs distincts, et tout le monde n'a pas à
+disposer des deux. Elles rejoignent `NOT_FOR_EVERYONE` — accordées à
+`@everyone`, elles ne promeuvent personne, elles mettent le serveur à plat. Le
+reste suit tout seul : la liste des permissions de l'interface se lit dans
+`perm::ALL`, elle n'a pas eu à changer.
+
+### Où vit la sanction, et pourquoi là
+
+Dans la **table de routage**, et nulle part ailleurs. C'est le seul choix qui
+comptait.
+
+Le relais lit cette table une fois par datagramme — cinquante fois par seconde
+et par émetteur. Y ajouter « et au fait, celui-ci est-il coupé ? » aurait
+demandé de reprendre la table des connectés sur ce chemin : un verrou de plus
+par paquet, sur le seul endroit du serveur où la latence s'entend.
+
+Alors on ne teste rien à l'exécution. Quelqu'un dont le micro est coupé n'a
+**pas d'entrée** dans `channel_of` : ses paquets ne trouvent aucun salon où
+aller. Quelqu'un de sourd n'apparaît dans **aucune** liste de `peers` : on ne
+lui envoie rien. La sanction ne coûte pas une instruction — et aucun client
+modifié ne la contourne, puisqu'elle s'applique du côté qui relaie, pas du
+côté qui parle.
+
+Le prix payé pour ça : `rebuild_voice_routes` construit désormais un vecteur
+intermédiaire. Elle ne tourne qu'aux entrées et sorties de vocal, déjà limitées
+par un seau à jetons, et elle clonait de toute façon chaque connexion. En
+échange, la règle est sortie dans une fonction pure, générique sur la
+connexion — ce qui la rend éprouvable **sans monter de lien QUIC**. C'est
+exactement le genre d'invariant qu'on ne veut pas croire sur parole.
+
+### Deux décisions qui auraient pu partir de travers
+
+**Les sanctions sont persistées** dans le compte. Une sanction qu'un
+redémarrage du client efface n'en est pas une : il suffirait d'un Alt+F4. Elles
+sont relues à la connexion, et un compte hors ligne les garde — le modérateur
+peut donc les lever sans attendre le retour de l'intéressé.
+
+**Couper le micro et rendre sourd sont indépendants.** Faire taire celui qui
+hurle n'oblige pas à le priver de la conversation. Les deux se combinent, et
+lever l'une ne lève pas l'autre — d'où un `Option<bool>` par sanction plutôt
+qu'un état unique.
+
+Un déplacement vers un salon que la personne ne peut pas voir, ou où elle n'a
+pas le droit d'entrer, est **refusé en le disant** : `reconcile_memberships`
+l'en aurait ressortie dans la seconde, et le modérateur aurait vu son geste
+défait sans comprendre pourquoi. Le verrou vocal, lui, n'est pas consulté : il
+garde la porte de qui entre de lui-même, pas la main de qui range.
+
+### Ce que l'interface devait absolument dire
+
+Être réduit au silence sans le savoir est la pire version de cette
+fonctionnalité : on croit son micro cassé et l'on part démonter ses réglages
+audio, ou son casque. Sa propre sanction s'affiche donc **à côté du micro**,
+dans la barre du haut, là où l'on regardera.
+
+Chez les autres, les badges de sanction reprennent les mêmes formes que l'état
+volontaire mais en **ambre** : c'est ce qui sépare « il s'est tu » de « on l'a
+fait taire ». Un rouge de plus n'aurait rien distingué. Les deux peuvent tenir
+en même temps sur la même personne.
+
+### Mesuré, pas supposé
+
+Deux clients réels sur un vrai serveur, l'un émettant une tonalité, l'autre
+comptant ses paquets :
+
+| Moment | Paquets reçus |
+| --- | --- |
+| bravo parle librement | 346 |
+| juste après la coupure | 398 |
+| **8 s plus tard, toujours coupé** | **398** — pas un paquet |
+| 8 s après la levée | 799 — soit 50/s, le débit nominal |
+
+Le journal d'audit porte les quatre gestes (`voice.mute` posé puis levé,
+`voice.move` vers *Gaming*, `voice.deafen` posé), et `users.json` a bien gardé
+la surdité après coup.
 
 ## F4 — Partage d'écran
 

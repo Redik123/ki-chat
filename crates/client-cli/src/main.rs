@@ -333,6 +333,38 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
             }
+        } else if let Some(rest) = line.strip_prefix("/mute ") {
+            match on_off(rest) {
+                Some((qui, on)) => ClientMsg::AdminVoiceMute { username: qui, muted: on },
+                None => {
+                    eprintln!("! usage : /mute <pseudo> on|off");
+                    continue;
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("/deafen ") {
+            match on_off(rest) {
+                Some((qui, on)) => ClientMsg::AdminVoiceDeafen { username: qui, deafened: on },
+                None => {
+                    eprintln!("! usage : /deafen <pseudo> on|off");
+                    continue;
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("/move ") {
+            // `/move <pseudo> <id>` ou `/move <pseudo> out` pour l'en sortir.
+            let mut parts = rest.trim().splitn(2, ' ');
+            let qui = parts.next().unwrap_or_default().trim().to_string();
+            let ou = parts.next().unwrap_or_default().trim();
+            let channel = match ou {
+                "out" => None,
+                autre => match autre.parse() {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        eprintln!("! usage : /move <pseudo> <id du salon vocal>|out");
+                        continue;
+                    }
+                },
+            };
+            ClientMsg::AdminVoiceMove { username: qui, channel }
         } else if let Some(rest) = line.strip_prefix("/search ") {
             // Sans salon : partout où l'on a le droit de lire. En ligne de
             // commande on n'a pas de fenêtre où restreindre la portée, et
@@ -512,4 +544,20 @@ async fn main() -> anyhow::Result<()> {
     }
     reader_task.abort();
     Ok(())
+}
+
+/// Découpe `<pseudo> on|off`, la forme commune aux sanctions vocales.
+///
+/// `None` = mal écrit. Refuser plutôt que de deviner : « /mute kevin » sans
+/// le mot final, interprété comme « on », couperait le micro de quelqu'un qui
+/// voulait justement qu'on le lui rende.
+fn on_off(rest: &str) -> Option<(String, bool)> {
+    let mut parts = rest.trim().splitn(2, ' ');
+    let qui = parts.next()?.trim();
+    let etat = match parts.next()?.trim() {
+        "on" => true,
+        "off" => false,
+        _ => return None,
+    };
+    (!qui.is_empty()).then(|| (qui.to_string(), etat))
 }

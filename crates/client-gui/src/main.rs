@@ -2883,6 +2883,28 @@ impl KiApp {
                         }
                     }
 
+                    // Une sanction vocale s'annonce là où l'on cherchera :
+                    // à côté du micro, pas au fond d'une liste. Sans ça on
+                    // croit son matériel en panne et l'on part démonter ses
+                    // réglages audio — ou son casque.
+                    if let Some(moi) = self.my_id.and_then(|id| {
+                        self.members.iter().find(|m| m.user_id == id)
+                    }) {
+                        let sanction = match (moi.force_muted, moi.force_deafened) {
+                            (true, true) => Some("micro coupé et sourd (modérateur)"),
+                            (true, false) => Some("micro coupé par un modérateur"),
+                            (false, true) => Some("rendu sourd par un modérateur"),
+                            (false, false) => None,
+                        };
+                        if let Some(texte) = sanction {
+                            ui.add_space(6.0);
+                            ui::glyph(ui, Icon::MicOff, 13.0, WARN);
+                            ui.label(RichText::new(texte).color(WARN).size(12.0)).on_hover_text(
+                                "ce n'est pas ton matériel : quelqu'un l'a décidé côté serveur",
+                            );
+                        }
+                    }
+
                     // --- Télémétrie, alignée à droite ---
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !voice.engine_up {
@@ -3157,11 +3179,29 @@ impl KiApp {
     /// modération. Le même comportement dans les deux listes.
     fn member_menu(&mut self, response: egui::Response, m: &Member, is_me: bool) {
         if is_me {
-            if response.on_hover_text("gérer mon compte").clicked() {
+            // Sa propre sanction se dit ici aussi. Être réduit au silence
+            // sans savoir pourquoi est la pire version de cette
+            // fonctionnalité : on croit son micro cassé et l'on va fouiller
+            // les réglages audio.
+            let quoi = match (m.force_muted, m.force_deafened) {
+                (true, true) => "un modérateur t'a coupé le micro et rendu sourd",
+                (true, false) => "un modérateur t'a coupé le micro",
+                (false, true) => "un modérateur t'a rendu sourd",
+                (false, false) => "gérer mon compte",
+            };
+            if response.on_hover_text(quoi).clicked() {
                 self.show_account = true;
             }
             return;
         }
+        // Une sanction se dit en toutes lettres au survol : l'ambre du
+        // badge attire l'œil, elle n'explique pas.
+        let response = match (m.force_muted, m.force_deafened) {
+            (true, true) => response.on_hover_text("micro coupé et rendu sourd par un modérateur"),
+            (true, false) => response.on_hover_text("micro coupé par un modérateur"),
+            (false, true) => response.on_hover_text("rendu sourd par un modérateur"),
+            (false, false) => response,
+        };
         response.context_menu(|ui| {
             ui.set_width(228.0);
             ui.label(RichText::new(&m.username).color(self.color_of(m)).strong());
@@ -3224,6 +3264,81 @@ impl KiApp {
                                 roles: new_roles,
                             });
                         }
+                    }
+                });
+            }
+
+            // Modération vocale. Sanctionner et déplacer sont deux pouvoirs
+            // distincts : faire taire celui qui hurle n'est pas ranger les
+            // gens par salon, et tout le monde n'a pas à pouvoir les deux.
+            let peut_sanctionner =
+                self.outranks(m.rank) && self.can(ki_protocol::perm::MUTE_MEMBERS);
+            let peut_deplacer = self.outranks(m.rank)
+                && self.can(ki_protocol::perm::MOVE_MEMBERS)
+                && m.online;
+            if peut_sanctionner || peut_deplacer {
+                ui.add_space(4.0);
+                ui::hairline(ui);
+                ui.add_space(4.0);
+            }
+            if peut_sanctionner {
+                // L'intitulé dit ce que le clic va faire, pas l'état courant :
+                // « Couper le micro » sur quelqu'un déjà coupé le rendrait
+                // muet une seconde fois, ce qui ne veut rien dire.
+                let (mute_txt, mute_ton) = if m.force_muted {
+                    ("Rendre le micro", Tone::Accent)
+                } else {
+                    ("Couper le micro", Tone::Danger)
+                };
+                if ui::tinted_button(ui, Some(Icon::MicOff), mute_txt, mute_ton).clicked() {
+                    self.send(ClientMsg::AdminVoiceMute {
+                        username: m.username.clone(),
+                        muted: !m.force_muted,
+                    });
+                    ui.close();
+                }
+                let (deaf_txt, deaf_ton) = if m.force_deafened {
+                    ("Lui rendre l'écoute", Tone::Accent)
+                } else {
+                    ("Rendre sourd", Tone::Danger)
+                };
+                if ui::tinted_button(ui, Some(Icon::HeadphonesOff), deaf_txt, deaf_ton).clicked() {
+                    self.send(ClientMsg::AdminVoiceDeafen {
+                        username: m.username.clone(),
+                        deafened: !m.force_deafened,
+                    });
+                    ui.close();
+                }
+            }
+            if peut_deplacer {
+                let vocaux: Vec<ki_protocol::ChannelInfo> = self
+                    .channels
+                    .iter()
+                    .filter(|c| c.kind == ChannelKind::Voice && Some(c.id) != m.voice)
+                    .cloned()
+                    .collect();
+                ui.menu_button("Déplacer en vocal", |ui| {
+                    ui.set_width(200.0);
+                    for c in &vocaux {
+                        if ui::button(ui, Icon::Volume, &c.name).clicked() {
+                            self.send(ClientMsg::AdminVoiceMove {
+                                username: m.username.clone(),
+                                channel: Some(c.id),
+                            });
+                            ui.close();
+                        }
+                    }
+                    // Sortir quelqu'un du vocal n'est proposé que s'il y est :
+                    // ailleurs, le bouton ne ferait rien de visible.
+                    if m.voice.is_some()
+                        && ui::tinted_button(ui, Some(Icon::Logout), "Sortir du vocal", Tone::Danger)
+                            .clicked()
+                    {
+                        self.send(ClientMsg::AdminVoiceMove {
+                            username: m.username.clone(),
+                            channel: None,
+                        });
+                        ui.close();
                     }
                 });
             }
@@ -6502,6 +6617,25 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> egui::Response {
     // parole. L'icône « muet » d'abord, la plus à droite : c'est elle qui
     // répond à « il est parti ou il s'est mute ? » d'un coup d'œil.
     let mut right = rect.right() - 10.0;
+
+    // Les sanctions d'abord, en ambre. Même forme que l'état volontaire,
+    // couleur différente : c'est ce qui sépare « il s'est tu » de « on l'a
+    // fait taire », et les deux peuvent tenir en même temps sur la même
+    // personne. Un rouge de plus n'aurait rien distingué du tout.
+    for (actif, icone) in [
+        (member.force_deafened, Icon::HeadphonesOff),
+        (member.force_muted, Icon::MicOff),
+    ] {
+        if actif {
+            let badge = egui::Rect::from_min_size(
+                egui::pos2(right - 14.0, rect.center().y - 7.0),
+                Vec2::splat(14.0),
+            );
+            icons::draw(painter, badge, icone, WARN);
+            right -= 20.0;
+        }
+    }
+
     if muted {
         let badge = egui::Rect::from_min_size(
             egui::pos2(right - 14.0, rect.center().y - 7.0),

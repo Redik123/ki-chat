@@ -55,6 +55,15 @@ struct StoredUser {
     /// titulaire du compte lui-même.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     avatar: Option<String>,
+    /// Micro coupé par un modérateur, et surdité imposée.
+    ///
+    /// Persistés, et c'est le point : une sanction que la reconnexion efface
+    /// n'en est pas une — il suffirait de relancer le client. Ils ne
+    /// concernent que le vocal, et un compte hors ligne les garde.
+    #[serde(default)]
+    voice_muted: bool,
+    #[serde(default)]
+    voice_deafened: bool,
 }
 
 /// Bannissement en cours sur un compte.
@@ -370,6 +379,8 @@ impl Accounts {
                 banned: false,
                 ban: None,
                 avatar: None,
+                voice_muted: false,
+                voice_deafened: false,
             },
         );
         // Propagé : un compte qui n'atteint pas le disque disparaît au
@@ -695,6 +706,40 @@ impl Accounts {
 
     /// Définit ou retire la photo d'un compte. Chacun ne modifie que la
     /// sienne : l'appelant a déjà été authentifié sous ce pseudo.
+    /// Les sanctions vocales d'un compte : (micro coupé, sourd).
+    ///
+    /// Rendues ensemble parce qu'elles se lisent ensemble — à la connexion,
+    /// une seule prise du verrou.
+    pub fn voice_sanctions(&self, username: &str) -> (bool, bool) {
+        let inner = self.inner.lock().unwrap();
+        match inner.users.get(username) {
+            Some(u) => (u.voice_muted, u.voice_deafened),
+            None => (false, false),
+        }
+    }
+
+    /// Pose ou lève une sanction vocale.  = laisser celle-ci telle
+    /// quelle, ce qui permet de couper le micro sans toucher à la surdité.
+    pub fn set_voice_sanction(
+        &self,
+        username: &str,
+        muted: Option<bool>,
+        deafened: Option<bool>,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(user) = inner.users.get_mut(username) else {
+            return Err("compte inconnu".into());
+        };
+        if let Some(m) = muted {
+            user.voice_muted = m;
+        }
+        if let Some(d) = deafened {
+            user.voice_deafened = d;
+        }
+        self.save(&inner)?;
+        Ok(())
+    }
+
     pub fn set_avatar(&self, username: &str, avatar: Option<String>) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
         let Some(user) = inner.users.get_mut(username) else {
@@ -724,6 +769,40 @@ impl Accounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une sanction vocale qu'''un redémarrage efface n'''en est pas une : il
+    /// suffirait de relancer le client. Elle doit être sur le disque.
+    #[test]
+    fn une_sanction_vocale_survit_au_redemarrage() {
+        let dir = std::env::temp_dir().join(format!("ki-sanction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let chemin = dir.to_str().unwrap();
+
+        let accounts = Accounts::open(chemin).unwrap();
+        accounts.authenticate("kevin", "secret99", Some("inv"), "inv").unwrap();
+        assert_eq!(accounts.voice_sanctions("kevin"), (false, false));
+
+        // Couper le micro ne rend pas sourd au passage : les deux sanctions
+        // sont indépendantes, et un modérateur qui fait taire quelqu'''un ne
+        // veut pas toujours le priver de la conversation.
+        accounts.set_voice_sanction("kevin", Some(true), None).unwrap();
+        assert_eq!(accounts.voice_sanctions("kevin"), (true, false));
+        accounts.set_voice_sanction("kevin", None, Some(true)).unwrap();
+        assert_eq!(accounts.voice_sanctions("kevin"), (true, true));
+
+        // Relu du disque : c'''est tout l'''enjeu.
+        let relu = Accounts::open(chemin).unwrap();
+        assert_eq!(relu.voice_sanctions("kevin"), (true, true));
+
+        // Et l'''on peut lever l'''une sans lever l'''autre.
+        relu.set_voice_sanction("kevin", Some(false), None).unwrap();
+        assert_eq!(Accounts::open(chemin).unwrap().voice_sanctions("kevin"), (false, true));
+
+        // Un compte inconnu se refuse plutôt que de créer une fiche vide.
+        assert!(relu.set_voice_sanction("personne", Some(true), None).is_err());
+        assert_eq!(relu.voice_sanctions("personne"), (false, false));
+    }
 
     #[test]
     fn register_then_login() {

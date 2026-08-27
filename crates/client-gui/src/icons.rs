@@ -41,6 +41,7 @@ pub enum Icon {
     Trash,
     Server,
     Loupe,
+    HeadphonesOff,
 }
 
 /// Dessine `icon` centrée dans `rect` (le carré inscrit est utilisé).
@@ -181,6 +182,15 @@ impl Pen<'_> {
                 self.arc((12.0, 13.0), 8.0, 180.0, 360.0);
                 self.rrect(3.0, 12.5, 7.6, 20.5, 2.0, true);
                 self.rrect(16.4, 12.5, 21.0, 20.5, 2.0, true);
+            }
+            // Le casque barré, comme le micro barré juste au-dessus : la
+            // même diagonale pour la même idée, sans quoi le lecteur doit
+            // apprendre deux vocabulaires.
+            Icon::HeadphonesOff => {
+                self.arc((12.0, 13.0), 8.0, 180.0, 360.0);
+                self.rrect(3.0, 12.5, 7.6, 20.5, 2.0, true);
+                self.rrect(16.4, 12.5, 21.0, 20.5, 2.0, true);
+                self.seg((3.5, 3.5), (20.5, 20.5));
             }
             Icon::Gear => {
                 let teeth = 8;

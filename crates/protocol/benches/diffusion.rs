@@ -26,6 +26,8 @@ fn roster(n: usize) -> Vec<Member> {
             username: format!("joueur_{i:02}_avec_un_pseudo_moyen"),
             speaking: i % 7 == 0,
             muted: i % 11 == 0,
+            force_muted: false,
+            force_deafened: false,
             admin: i == 0,
             // Une empreinte FNV-1a telle que la produit le serveur.
             avatar: (i % 4 != 0).then(|| format!("{:016x}", 0x811c_9dc5_u64 ^ i as u64)),

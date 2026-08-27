@@ -120,6 +120,52 @@ impl Outbox {
     }
 }
 
+/// Ce que le routage de la voix a besoin de savoir d'un connecté.
+///
+/// Générique sur la connexion pour une seule raison : pouvoir éprouver la
+/// règle sans monter un vrai lien QUIC. Ce n'est pas un détour gratuit — la
+/// règle porte les sanctions vocales, et c'est le genre d'invariant qu'on
+/// veut voir tenir dans un test plutôt que de le croire sur parole.
+pub struct Voix<C> {
+    pub id: UserId,
+    pub channel: Option<ChannelId>,
+    pub force_muted: bool,
+    pub force_deafened: bool,
+    pub conn: C,
+}
+
+/// Construit les deux tables du relais : où va la voix de chacun, et qui
+/// occupe chaque salon.
+///
+/// # Les sanctions vocales vivent ici, et nulle part ailleurs
+///
+/// Le relais lit ces tables une fois par datagramme, soit cinquante fois par
+/// seconde et par émetteur. Y ajouter « et au fait, celui-ci est-il coupé ? »
+/// aurait demandé de reprendre la table des connectés sur ce chemin : un
+/// verrou de plus par paquet, sur le seul endroit du serveur où la latence
+/// s'entend.
+///
+/// Alors on ne teste rien à l'exécution. Quelqu'un dont le micro est coupé
+/// n'a **pas d'entrée** dans `channel_of` : ses paquets ne trouvent aucun
+/// salon où aller. Quelqu'un de sourd n'apparaît dans **aucune** liste de
+/// `peers` : on ne lui envoie rien. La sanction ne coûte pas une instruction,
+/// et aucun client modifié ne la contourne — elle s'applique du côté qui
+/// relaie, pas du côté qui parle.
+fn router<C>(monde: Vec<Voix<C>>) -> Routes<C> {
+    let mut routes = Routes::default();
+    for v in monde {
+        // Le routage de la voix suit le salon **vocal**, pas le salon lu.
+        let Some(channel) = v.channel else { continue };
+        if !v.force_muted {
+            routes.channel_of.insert(v.id, channel);
+        }
+        if !v.force_deafened {
+            routes.peers.entry(channel).or_default().push((v.id, v.conn));
+        }
+    }
+    routes
+}
+
 pub struct ConnectedUser {
     pub username: String,
     /// Salon textuel ouvert : ce que la personne lit en ce moment.
@@ -130,6 +176,11 @@ pub struct ConnectedUser {
     pub speaking: bool,
     /// Micro coupé volontairement (annoncé par le client, montré aux autres).
     pub muted: bool,
+    /// Sanctions vocales posées par un modérateur, relues du compte à la
+    /// connexion. Elles ne sont **pas** annoncées par le client et ne peuvent
+    /// donc pas être désavouées par lui.
+    pub force_muted: bool,
+    pub force_deafened: bool,
     /// Rôles du compte, et ce qui s'en déduit. **Recalculés** à chaque
     /// changement de rôle (`AppState::refresh_member`) : les garder à jour
     /// ici évite de reprendre le magasin de rôles sur le chemin chaud.
@@ -290,15 +341,29 @@ impl Drop for JetonSas {
 /// Table de routage voix, consultée sur le chemin chaud (chaque datagramme).
 /// Reconstruite uniquement aux événements rares (connexion/join/leave),
 /// lue sous un simple verrou partagé : aucune contention avec le contrôle.
-#[derive(Default)]
-pub struct RouteTable {
+///
+/// Générique sur la connexion, et `RouteTable` en est l'instance réelle : le
+/// paramètre n'existe que pour éprouver `router` sans monter de vrai lien
+/// QUIC. La règle qu'il applique porte les sanctions vocales — c'est le genre
+/// d'invariant qu'on veut voir tenir dans un test.
+pub struct Routes<C> {
     /// user_id -> salon actuel.
     pub channel_of: HashMap<UserId, ChannelId>,
     /// salon -> destinataires (user_id, connexion QUIC) — précalculé.
     /// `quinn::Connection` est un handle clonable ; `send_datagram` ne
     /// bloque jamais.
-    pub peers: HashMap<ChannelId, Vec<(UserId, quinn::Connection)>>,
+    pub peers: HashMap<ChannelId, Vec<(UserId, C)>>,
 }
+
+/// `Default` à la main : celui que `derive` produirait exigerait `C: Default`,
+/// or une table vide ne contient aucun `C`.
+impl<C> Default for Routes<C> {
+    fn default() -> Self {
+        Self { channel_of: HashMap::new(), peers: HashMap::new() }
+    }
+}
+
+pub type RouteTable = Routes<quinn::Connection>;
 
 pub struct AppState {
     /// Code d'invitation (création de comptes).
@@ -372,19 +437,39 @@ impl AppState {
     /// Reconstruit la table de routage voix depuis l'état des connexions.
     /// À appeler après tout événement qui la change : connexion, join/leave,
     /// déconnexion. Coût négligeable (rare + ~30 users).
+    /// Recalcule la table de routage de la voix.
+    ///
+    /// # Où vivent les sanctions vocales
+    ///
+    /// Ici, et nulle part ailleurs — c'est le choix qui compte.
+    ///
+    /// Le relais lit cette table une fois par datagramme, soit cinquante fois
+    /// par seconde et par émetteur. Y ajouter « et au fait, celui-ci est-il
+    /// coupé ? » aurait demandé de reprendre la table des connectés sur ce
+    /// chemin : un verrou de plus par paquet, sur le seul chemin du serveur
+    /// où la latence s'entend.
+    ///
+    /// Alors on ne teste rien à l'exécution : quelqu'un dont le micro est
+    /// coupé n'a **pas d'entrée** dans `channel_of`, ses paquets ne trouvent
+    /// donc aucun salon où aller. Quelqu'un de sourd n'apparaît dans aucune
+    /// liste de `peers`, on ne lui envoie donc rien. La sanction ne coûte pas
+    /// une instruction, et aucun client modifié ne la contourne — elle
+    /// s'applique du côté du serveur qui relaie, pas de celui qui parle.
     pub fn rebuild_voice_routes(&self) {
-        let users = self.users.lock().unwrap();
-        let mut routes = self.voice_routes.write().unwrap();
-        // Le routage de la voix suit le salon **vocal**, pas le salon lu.
-        routes.channel_of = users
-            .iter()
-            .filter_map(|(id, u)| u.voice.map(|c| (*id, c)))
-            .collect();
-        routes.peers.clear();
-        for (id, u) in users.iter() {
-            let Some(channel) = u.voice else { continue };
-            routes.peers.entry(channel).or_default().push((*id, u.conn.clone()));
-        }
+        let monde: Vec<Voix<quinn::Connection>> = {
+            let users = self.users.lock().unwrap();
+            users
+                .iter()
+                .map(|(id, u)| Voix {
+                    id: *id,
+                    channel: u.voice,
+                    force_muted: u.force_muted,
+                    force_deafened: u.force_deafened,
+                    conn: u.conn.clone(),
+                })
+                .collect()
+        };
+        *self.voice_routes.write().unwrap() = router(monde);
     }
 
     /// Vrai si le salon existe **et** est de la nature attendue : on ne
@@ -655,6 +740,8 @@ impl AppState {
             username: u.username.clone(),
             speaking: u.speaking,
             muted: u.muted,
+            force_muted: u.force_muted,
+            force_deafened: u.force_deafened,
             admin: u.admin,
             avatar,
             voice: u.voice,
@@ -688,6 +775,8 @@ impl AppState {
                 username: u.username.clone(),
                 speaking: u.speaking,
                 muted: u.muted,
+                force_muted: u.force_muted,
+                force_deafened: u.force_deafened,
                 admin: u.admin,
                 avatar: avatars.get(id).cloned(),
                 voice: u.voice,
@@ -705,11 +794,17 @@ impl AppState {
             if account.banned || connected.contains(&account.user_id) {
                 continue;
             }
+            let sanctions = self.accounts.voice_sanctions(&account.username);
             members.push(Member {
                 user_id: account.user_id,
                 username: account.username,
                 speaking: false,
                 muted: false,
+                // Les sanctions d'un compte hors ligne se lisent quand même :
+                // elles l'attendent au retour, et le modérateur doit pouvoir
+                // les lever sans attendre qu'il revienne.
+                force_muted: sanctions.0,
+                force_deafened: sanctions.1,
                 admin: account.admin,
                 avatar: avatars.get(&account.user_id).cloned(),
                 voice: None,
@@ -801,6 +896,40 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn voix(id: UserId, channel: Option<ChannelId>, muet: bool, sourd: bool) -> Voix<u8> {
+        Voix { id, channel, force_muted: muet, force_deafened: sourd, conn: id as u8 }
+    }
+
+    /// Les deux sanctions vocales s'appliquent par **absence** dans la table,
+    /// et il faut que ça reste vrai : c'est ce qui fait qu'elles ne coûtent
+    /// rien au relais et qu'aucun client ne les contourne.
+    #[test]
+    fn les_sanctions_vocales_sortent_de_la_table_de_routage() {
+        let Routes { channel_of, peers } = router(vec![
+            voix(1, Some(7), false, false), // ordinaire
+            voix(2, Some(7), true, false),  // micro coupé
+            voix(3, Some(7), false, true),  // sourd
+            voix(4, Some(7), true, true),   // les deux
+            voix(5, None, false, false),    // pas en vocal du tout
+        ]);
+
+        // Micro coupé : aucune destination, donc aucun paquet relayé. C'est
+        // l'absence de clé qui fait la sanction, pas un test dans le relais.
+        assert!(channel_of.contains_key(&1));
+        assert!(!channel_of.contains_key(&2), "un micro coupé ne route nulle part");
+        assert!(channel_of.contains_key(&3), "être sourd n'empêche pas de parler");
+        assert!(!channel_of.contains_key(&4));
+        assert!(!channel_of.contains_key(&5), "hors du vocal, rien à router");
+
+        // Sourd : dans aucune liste d'occupants, donc destinataire de rien.
+        let salon: Vec<UserId> = peers[&7].iter().map(|(id, _)| *id).collect();
+        assert!(salon.contains(&1));
+        assert!(salon.contains(&2), "un micro coupé continue d'entendre");
+        assert!(!salon.contains(&3), "un sourd ne reçoit rien");
+        assert!(!salon.contains(&4));
+        assert_eq!(peers.len(), 1, "aucun salon fantôme pour qui n'est pas en vocal");
+    }
 
     /// Le plafond mord, et la place se rend toute seule.
     ///
