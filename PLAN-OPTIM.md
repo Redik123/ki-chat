@@ -1128,6 +1128,100 @@ Le journal d'audit porte les quatre gestes (`voice.mute` posé puis levé,
 `voice.move` vers *Gaming*, `voice.deafen` posé), et `users.json` a bien gardé
 la surdité après coup.
 
+## R1 — Reprendre une connexion perdue ✅ (livré le 2026-08-27)
+
+Ce point ne figurait pas dans l'audit, et c'est un défaut de l'audit. Il
+regardait ce que l'application dépense ; il n'a pas regardé ce qu'elle fait
+perdre.
+
+**Il n'y avait aucune reprise.** Sur `Disconnected`, le client renvoyait à
+l'écran de connexion. Le serveur redémarre, la box renumérote, un jeu sature
+le lien montant — et trente personnes se retrouvent dehors, en pleine partie,
+à se reconnecter à la main puis à retrouver leur salon vocal. Chaque fois.
+
+C'est le défaut le plus fréquent qui restait, et il ne coûte rien au chemin
+chaud. Il valait mieux que n'importe quelle fonctionnalité de la liste.
+
+### La dispersion n'est pas un raffinement
+
+L'attente double — une seconde, deux, quatre — plafonne à trente secondes, et
+se tire **au hasard entre la moitié et la totalité** du palier.
+
+Ce tirage est le cœur du dispositif. Trente clients qui perdent le serveur au
+même instant le retrouvent au même instant : sans dispersion, ils frappent
+tous ensemble, et chaque salve fait hacher trente Argon2id d'un coup —
+volontairement lent — sur une machine qui vient à peine de redémarrer. Ils
+échoueraient ensemble et recommenceraient ensemble, indéfiniment. C'est le
+troupeau classique, et il se soigne par le hasard, pas par un délai plus long.
+
+Le hasard n'a pas besoin d'être cryptographique : il suffit que deux machines
+ne tirent pas le même nombre. Les nanosecondes de l'horloge suffisent, et
+évitent une dépendance de plus.
+
+### Ce qu'on ne reprend jamais
+
+La distinction compte plus que la reprise elle-même. Sur les huit sorties de
+connexion du client, **trois** seulement s'arment :
+
+| Sortie | Reprise |
+| --- | --- |
+| Lien perdu après coup | ✅ le cas principal |
+| Échec de connexion pendant une reprise | ✅ c'est une tentative de plus |
+| Délai dépassé pendant une reprise | ✅ idem |
+| Premier essai qui échoue | ❌ adresse mal tapée, pas un hoquet |
+| Mot de passe ou invitation refusés | ❌ marteler un refus, et réveiller le limiteur |
+| Expulsé ou banni | ❌ |
+| Identité du serveur changée | ❌ **événement de sécurité** — on ne réessaie pas contre un imposteur possible |
+| Déconnexion volontaire ou annulée | ❌ |
+
+La règle générale : **on ne reprend qu'une connexion qui a déjà fonctionné.**
+Un premier essai qui échoue est une erreur de l'utilisateur, pas du réseau ;
+réessayer en boucle la masquerait derrière un décompte.
+
+Et la reprise rend la place occupée : salon lu **et** salon vocal. Se
+reconnecter tout seul pour se réveiller ailleurs, muet, en pleine partie, ne
+vaudrait guère mieux que de ne pas se reconnecter.
+
+### Le prérequis caché, vérifié
+
+Si le serveur régénérait son certificat au démarrage, chaque redémarrage
+aurait fait tomber les trente clients sur l'alarme d'identité — et la reprise
+n'aurait jamais servi à rien. Vérifié en le redémarrant pour de bon, même
+dossier de données : l'empreinte est identique avant et après
+(`db:c0:1d:ea:…:b8:3c`).
+
+### La conséquence qu'il faut nommer
+
+**Chaque coupure détruit et rouvre le moteur audio.** Il appartient à la
+connexion (`NetHandle`), et fermer l'une emporte l'autre. Ce n'était pas
+introduit ici — toute déconnexion le faisait déjà — mais cette fonctionnalité
+rend les coupures **routinières et silencieuses**, ce qui transforme un risque
+rare en risque récurrent : entre la fermeture et la réouverture du micro, un
+jeu peut le prendre en mode exclusif, et Windows ne nous le rendra plus.
+
+Le remède propre est de sortir le moteur de la connexion, pour qu'il survive à
+la coupure : le canal d'envoi est déjà un `Arc<dyn Fn>`, et la connexion vit
+déjà dans un emplacement partagé — le joint existe. Mais ce serait douze sites
+d'appel dans l'interface **et** le protocole de jetons de `restart_voice`,
+dont l'historique de bogues se résume à « surdité totale ». Le faire à
+l'aveugle, sur un défaut que j'ai déduit et non mesuré, serait exactement le
+pari que P1 existe pour interdire.
+
+Ce qui doit trancher : **est-ce que ça arrive ?** Le symptôme est déjà
+diagnostiqué — si le micro ne se rouvre pas après une reprise, la bannière de
+F1 le dit avec la marche à suivre Windows. Si elle apparaît en usage réel, le
+moteur sort de la connexion. Sinon, il reste où il est.
+
+### Ce qui reste à éprouver sur une vraie machine
+
+La boucle elle-même n'existe que dans le client graphique, qui ne se pilote
+pas d'ici. Le calcul d'attente est couvert par un test, le prérequis de
+l'empreinte par un redémarrage réel — mais le va-et-vient complet demande
+d'ouvrir l'application. Le geste : se connecter, entrer en vocal, arrêter le
+serveur, le relancer. Ce qui doit se produire — la bannière ambre qui décompte,
+la reconnexion seule, le retour dans le **même** salon vocal, et « connexion
+rétablie ».
+
 ## F4 — Partage d'écran
 
 `PLAN-STREAM.md` est un plan sérieux, déjà validé par une revue adversariale,

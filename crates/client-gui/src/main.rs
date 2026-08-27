@@ -192,6 +192,64 @@ struct ChannelDraft {
     restricted: bool,
 }
 
+/// Une connexion perdue que l'on tente de reprendre toute seule.
+///
+/// Sans ça, le moindre hoquet — le serveur qui redémarre, la box qui
+/// renumérote, un jeu qui sature le lien montant — renvoyait tout le monde à
+/// l'écran de connexion, en pleine partie, à retrouver son salon vocal à la
+/// main. Trente fois, chaque fois.
+struct Reprise {
+    /// Tentatives déjà faites. C'est elle qui espace les suivantes.
+    essais: u32,
+    /// Heure de la prochaine tentative.
+    quand: std::time::Instant,
+    /// Ce qu'on lisait, et où l'on parlait. Rendus après le `Welcome` : se
+    /// reconnecter pour se retrouver ailleurs, en pleine partie, ne vaut
+    /// guère mieux que de ne pas se reconnecter.
+    salon: Option<ChannelId>,
+    vocal: Option<ChannelId>,
+}
+
+impl Reprise {
+    /// Au-delà, on cesse et l'on rend la main. Avec le plafond ci-dessous,
+    /// cela fait une vingtaine de minutes : de quoi couvrir un redémarrage de
+    /// serveur, une mise à jour Windows, une box qui reboote. Au-delà, ce
+    /// n'est plus un hoquet, et marteler n'y changera rien.
+    const MAX: u32 = 40;
+    /// Plafond de l'attente entre deux essais.
+    const PLAFOND: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Attente avant la `n`-ième tentative : doublement, plafonné, puis tiré
+    /// **au hasard entre la moitié et la totalité**.
+    ///
+    /// Le tirage n'est pas un raffinement. Trente clients qui perdent le
+    /// serveur au même instant le retrouvent au même instant : sans
+    /// dispersion, ils frappent tous ensemble, et chaque salve fait hacher
+    /// trente Argon2id d'un coup — volontairement lent — sur une machine qui
+    /// vient à peine de redémarrer. Ils échoueraient ensemble et
+    /// recommenceraient ensemble, indéfiniment. C'est le troupeau classique,
+    /// et il se soigne par le hasard, pas par un délai plus long.
+    fn attente(essais: u32, alea: u64) -> std::time::Duration {
+        let doublements = essais.saturating_sub(1).min(5);
+        let base = std::time::Duration::from_secs(1 << doublements).min(Self::PLAFOND);
+        let plein = base.as_millis() as u64;
+        let moitie = plein / 2;
+        std::time::Duration::from_millis(moitie + alea % (plein - moitie + 1))
+    }
+}
+
+/// Une source de hasard qui n'a pas besoin d'en être une.
+///
+/// Disperser des reconnexions ne demande pas de cryptographie : il suffit que
+/// deux machines ne tirent pas le même nombre. Les nanosecondes de l'horloge
+/// suffisent, et évitent une dépendance de plus dans un client qui en compte
+/// déjà assez.
+fn alea() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()))
+}
+
 /// Salon en cours de modification, dans le panneau d'administration.
 ///
 /// Séparé du brouillon de création : les deux formulaires peuvent être
@@ -472,6 +530,9 @@ struct KiApp {
     channel_edit: Option<ChannelEdit>,
     verrou_draft: Option<VerrouDraft>,
 
+    /// Reprise automatique en cours. `None` = rien à reprendre.
+    reprise: Option<Reprise>,
+
     // Recherche dans l'historique
     show_search: bool,
     search_query: String,
@@ -697,6 +758,7 @@ impl KiApp {
             channel_draft: None,
             channel_edit: None,
             verrou_draft: None,
+            reprise: None,
             show_search: false,
             search_query: String::new(),
             search_ici: true,
@@ -1285,7 +1347,68 @@ impl KiApp {
     /// Toute donnée venue du réseau se remet donc à zéro ici. Ce qui reste est
     /// exactement ce qui appartient à la **machine** et non au serveur : les
     /// réglages audio, le carnet de serveurs, les volumes par personne.
+    /// Le lien a lâché tout seul : on arme la reprise plutôt que de rendre
+    /// l'écran de connexion.
+    ///
+    /// Distinct de [`Self::disconnect`], qui reste la sortie **définitive** —
+    /// on s'est déconnecté soi-même, on a été expulsé, le mot de passe est
+    /// faux, ou l'identité du serveur a changé. Confondre les deux ferait
+    /// marteler un serveur qui vient de nous refuser, ou reprendre une
+    /// connexion que l'on venait de fermer exprès.
+    fn connexion_perdue(&mut self, error: Option<String>) {
+        // On ne reprend qu'une connexion qui a **déjà fonctionné**. Un
+        // premier essai qui échoue, c'est une adresse mal tapée ou un serveur
+        // qu'on n'a jamais eu : réessayer en boucle n'y changerait rien et
+        // masquerait l'erreur derrière un décompte.
+        if !self.welcomed && self.reprise.is_none() {
+            self.disconnect(error);
+            return;
+        }
+        let essais = self.reprise.as_ref().map_or(0, |r| r.essais) + 1;
+        // Relevés **avant** le nettoyage, qui les efface. Et repris de la
+        // reprise en cours s'il y en a une : à la deuxième tentative, l'état
+        // courant est déjà vide.
+        let (salon, vocal) = match &self.reprise {
+            Some(r) => (r.salon, r.vocal),
+            None => (self.current, self.voice_channel),
+        };
+        self.disconnect(error);
+        if essais > Reprise::MAX {
+            self.error = Some(
+                "connexion perdue — le serveur n'a pas répondu, reconnecte-toi quand il \
+                 sera revenu"
+                    .into(),
+            );
+            return;
+        }
+        self.reprise = Some(Reprise {
+            essais,
+            quand: std::time::Instant::now() + Reprise::attente(essais, alea()),
+            salon,
+            vocal,
+        });
+    }
+
+    /// Relance la connexion quand son tour est venu.
+    fn tick_reprise(&mut self, ctx: &egui::Context) {
+        let Some(r) = &self.reprise else { return };
+        if self.connecting || std::time::Instant::now() < r.quand {
+            return;
+        }
+        self.connect(ctx);
+    }
+
+    /// Temps restant avant la prochaine tentative, pour l'afficher.
+    fn reprise_dans(&self) -> Option<std::time::Duration> {
+        let r = self.reprise.as_ref()?;
+        Some(r.quand.saturating_duration_since(std::time::Instant::now()))
+    }
+
     fn disconnect(&mut self, error: Option<String>) {
+        // Toute sortie **définitive** désarme la reprise : sans ça, cliquer
+        // « Se déconnecter » pendant une coupure nous y ramènerait tout seul.
+        // Les deux appelants qui la veulent la réarment après coup.
+        self.reprise = None;
         if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }
@@ -1447,7 +1570,7 @@ impl KiApp {
     fn check_connect_timeout(&mut self) {
         let Some(depuis) = self.connect_started else { return };
         if self.connecting && depuis.elapsed() >= Self::DELAI_CONNEXION {
-            self.disconnect(Some(
+            self.connexion_perdue(Some(
                 "le serveur n'a pas répondu — vérifie l'adresse, ou réessaie".into(),
             ));
         }
@@ -1709,12 +1832,14 @@ impl KiApp {
                                 .into(),
                         ));
                     } else {
-                        self.disconnect(Some(e));
+                        self.connexion_perdue(Some(e));
                     }
                 }
                 net::Event::Disconnected => {
                     let had_error = self.error.take();
-                    self.disconnect(had_error.or_else(|| Some("déconnecté du serveur".into())));
+                    self.connexion_perdue(
+                        had_error.or_else(|| Some("déconnecté du serveur".into())),
+                    );
                 }
                 net::Event::Msg(msg) => self.handle_server_msg(msg),
                 net::Event::Fingerprint(fp) => {
@@ -1777,6 +1902,31 @@ impl KiApp {
                 self.cache_server_identity();
                 if !self.show_admin {
                     self.admin_name = self.server_info.name.clone();
+                }
+                // Reprise réussie : on rend la place qu'on occupait, salon lu
+                // **et** salon vocal. Se reconnecter tout seul pour se
+                // réveiller ailleurs, muet, en pleine partie, ne vaudrait
+                // guère mieux que de ne pas se reconnecter.
+                //
+                // Le vocal est la seule exception au « on n'entre dans aucun
+                // vocal, ça se décide » d'en dessous : ici, c'était décidé —
+                // c'est le réseau qui en a décidé autrement.
+                if let Some(r) = self.reprise.take() {
+                    let salon = r.salon.filter(|c| self.channels.iter().any(|k| k.id == *c));
+                    let vocal = r.vocal.filter(|c| self.channels.iter().any(|k| k.id == *c));
+                    if let Some(c) = salon {
+                        self.join(c);
+                    }
+                    if let Some(c) = vocal {
+                        // Un salon devenu verrouillé pendant la coupure
+                        // refusera : le client demande alors le mot de passe,
+                        // comme pour une entrée ordinaire.
+                        self.join_voice(c);
+                    }
+                    self.info = Some("connexion rétablie".into());
+                    if salon.is_some() {
+                        return;
+                    }
                 }
                 // On ouvre le premier salon textuel pour avoir de quoi lire,
                 // mais on n'entre dans aucun vocal : ça se décide.
@@ -2245,7 +2395,42 @@ impl KiApp {
                                 }
                             });
 
-                            if let Some(err) = self.error.clone() {
+                            // Une coupure en cours de reprise n'est pas une
+                            // erreur à congédier : c'est un état, et il dit
+                            // ce qu'il attend. Le rouge est réservé à ce sur
+                            // quoi il faut agir.
+                            if let Some(dans) = self.reprise_dans() {
+                                let essais =
+                                    self.reprise.as_ref().map_or(0, |r| r.essais);
+                                ui.add_space(12.0);
+                                let quoi = if self.connecting {
+                                    format!("Connexion perdue — tentative {essais}…")
+                                } else {
+                                    format!(
+                                        "Connexion perdue — nouvelle tentative dans {} s \
+                                         (essai {essais})",
+                                        dans.as_secs() + 1
+                                    )
+                                };
+                                ui::banner(ui, Tone::Warn, &quoi, false);
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    if ui::button(ui, Icon::Refresh, "Réessayer maintenant")
+                                        .clicked()
+                                    {
+                                        if let Some(r) = &mut self.reprise {
+                                            r.quand = std::time::Instant::now();
+                                        }
+                                    }
+                                    // Renoncer rend la main sans rien perdre :
+                                    // le formulaire est déjà rempli.
+                                    if ui::button(ui, Icon::Close, "Arrêter d'essayer")
+                                        .clicked()
+                                    {
+                                        self.reprise = None;
+                                    }
+                                });
+                            } else if let Some(err) = self.error.clone() {
                                 ui.add_space(12.0);
                                 if ui::banner(ui, Tone::Danger, &err, true) {
                                     self.error = None;
@@ -7167,6 +7352,12 @@ impl eframe::App for KiApp {
 
         self.poll_events();
         self.check_connect_timeout();
+        // La reprise se déclenche depuis le rendu, comme la sonde des
+        // serveurs : c'est sans risque ici, l'écran de connexion se repeint
+        // au moins une fois par seconde de toute façon (voir
+        // `repaint_delay`). Ce serait faux ailleurs — une horloge que
+        // personne ne fait tourner ne sonne jamais.
+        self.tick_reprise(ctx);
         self.update_voice();
         // Un seul instantané par image, pris ici : l'écran principal l'affiche,
         // et c'est lui qui dit s'il faut une image de plus.
@@ -7328,5 +7519,38 @@ mod tests {
         assert_eq!(parts[2], (false, " puis dis-moi"));
         // Un message sans lien reste d'un seul bloc.
         assert_eq!(split_links("salut"), vec![(false, "salut")]);
+    }
+
+    /// L'attente entre deux tentatives double, plafonne, et surtout **se
+    /// disperse**. La dispersion est ce qui empêche trente clients de frapper
+    /// le serveur en même temps après un redémarrage : c'est la seule
+    /// propriété de cette fonction qui vaille d'être testée.
+    #[test]
+    fn la_reprise_double_plafonne_et_se_disperse() {
+        use std::time::Duration;
+
+        // Chaque essai vaut entre la moitié et la totalité de son palier.
+        for (essai, plein) in [(1u32, 1u64), (2, 2), (3, 4), (4, 8), (5, 16), (6, 30)] {
+            let plein = Duration::from_secs(plein);
+            for alea in [0u64, 1, 12_345, 999_999_999] {
+                let d = Reprise::attente(essai, alea);
+                assert!(d <= plein, "essai {essai} : {d:?} dépasse {plein:?}");
+                assert!(d >= plein / 2, "essai {essai} : {d:?} sous la moitié de {plein:?}");
+            }
+        }
+
+        // Plafonné : au-delà, on n'attend pas plus longtemps. Marteler moins
+        // souvent ne sert plus à rien, et l'attente ne doit pas devenir telle
+        // qu'on rate le retour du serveur.
+        for essai in [7u32, 20, Reprise::MAX] {
+            assert!(Reprise::attente(essai, 0) <= Reprise::PLAFOND);
+        }
+
+        // Et deux clients qui tirent deux nombres différents n'attendent pas
+        // la même chose. Sans ça, tout le reste ne sert à rien : ils
+        // repartiraient ensemble, échoueraient ensemble, et recommenceraient.
+        let a = Reprise::attente(4, 0);
+        let b = Reprise::attente(4, 3_999);
+        assert_ne!(a, b, "deux tirages doivent donner deux attentes");
     }
 }
