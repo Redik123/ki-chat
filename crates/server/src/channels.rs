@@ -110,7 +110,11 @@ impl Channels {
         // fixé sur disque qu'à la première modification, et un redémarrage
         // entre-temps repartirait d'un fichier absent.
         if fresh {
-            channels.save(&channels.inner.lock().unwrap());
+            // Même raison que pour les rôles : un premier démarrage qui
+            // n'arrive pas à écrire ses salons ne doit pas se poursuivre.
+            channels
+                .save(&channels.inner.lock().unwrap())
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(channels)
     }
@@ -181,7 +185,7 @@ impl Channels {
             .find(|c| c.id == id)
             .expect("ajouté à l'instant")
             .info();
-        self.save(&inner);
+        self.save(&inner)?;
         Ok(created)
     }
 
@@ -217,7 +221,7 @@ impl Channels {
         inner.channels.insert(dest, moved);
         renumber(&mut inner.channels);
 
-        self.save(&inner);
+        self.save(&inner)?;
         Ok(())
     }
 
@@ -234,7 +238,7 @@ impl Channels {
             };
             let removed = inner.channels.remove(at).info();
             compact_positions(&mut inner.channels);
-            self.save(&inner);
+            self.save(&inner)?;
             removed
         };
         archive_log(Path::new(data_dir), id);
@@ -270,7 +274,7 @@ impl Channels {
             }
         }
         compact_positions(&mut inner.channels);
-        self.save(&inner);
+        self.save(&inner)?;
         Ok(())
     }
 
@@ -280,7 +284,7 @@ impl Channels {
     /// Sans ce nettoyage, un salon resterait réservé à un rôle que plus
     /// personne ne peut porter : invisible pour tous, sauf pour qui gère les
     /// salons.
-    pub fn forget_role(&self, role: RoleId) -> bool {
+    pub fn forget_role(&self, role: RoleId) -> Result<bool, String> {
         let mut inner = self.inner.lock().unwrap();
         let mut changed = false;
         for channel in inner.channels.iter_mut() {
@@ -290,23 +294,24 @@ impl Channels {
             changed |= roles.len() != before;
         }
         if changed {
-            self.save(&inner);
+            self.save(&inner)?;
         }
-        changed
+        Ok(changed)
     }
 
-    fn save(&self, inner: &ChannelsFile) {
-        match serde_json::to_string_pretty(inner) {
-            Ok(json) => {
-                // Écriture atomique : une coupure de courant pendant la
-                // sauvegarde laisserait sinon un `channels.json` vide, donc
-                // un serveur qui refuse de démarrer.
-                if let Err(e) = crate::store::write_atomic(&self.path, json.as_bytes()) {
-                    tracing::error!("sauvegarde des salons impossible : {e}");
-                }
-            }
-            Err(e) => tracing::error!("sérialisation des salons impossible : {e}"),
-        }
+    /// Écrit `channels.json`. Renvoie l'échec — voir `Roles::save` pour le
+    /// pourquoi : un salon créé que le disque a refusé ne doit pas être
+    /// annoncé comme créé.
+    fn save(&self, inner: &ChannelsFile) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(inner)
+            .map_err(|e| format!("sérialisation des salons impossible : {e}"))?;
+        // Écriture atomique : une coupure de courant pendant la sauvegarde
+        // laisserait sinon un `channels.json` vide, donc un serveur qui
+        // refuse de démarrer.
+        crate::store::write_atomic(&self.path, json.as_bytes()).map_err(|e| {
+            tracing::error!("sauvegarde des salons impossible : {e}");
+            format!("sauvegarde impossible : {e}")
+        })
     }
 }
 
@@ -628,8 +633,8 @@ mod tests {
 
         // Le rôle supprimé s'efface partout ; le salon devient alors le
         // domaine des seuls gestionnaires, pas celui de tout le monde.
-        assert!(channels.forget_role(7));
-        assert!(!channels.forget_role(7), "rien à refaire au second passage");
+        assert!(channels.forget_role(7).unwrap());
+        assert!(!channels.forget_role(7).unwrap(), "rien à refaire au second passage");
         assert_eq!(channels.get(prive.id).unwrap().allowed_roles.as_deref(), Some(&[][..]));
         assert!(!channels.visible_to(&[7], false).iter().any(|c| c.id == prive.id));
         assert!(channels.visible_to(&[], true).iter().any(|c| c.id == prive.id));

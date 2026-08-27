@@ -50,7 +50,14 @@ pub enum Preview {
     Failed,
 }
 
-type Delivery = (String, Result<Vec<u8>, String>);
+/// Ce que le fil de téléchargement rend : l'adresse, et l'image **déjà
+/// décodée**. `None` = illisible, trop lourde, ou serveur injoignable.
+///
+/// Le décodage se faisait dans `mount()`, donc sur le fil de l'interface :
+/// borné à 8000 px et 64 Mio d'allocation, il pouvait figer la fenêtre
+/// plusieurs secondes à l'arrivée d'une photo un peu grande. Le fil qui a
+/// téléchargé, lui, n'a plus rien à faire — c'est là que ça se passe.
+type Delivery = (String, Option<egui::ColorImage>);
 
 #[derive(Default)]
 pub struct Previews {
@@ -115,18 +122,25 @@ impl Previews {
     }
 
     /// Monte en textures les images arrivées depuis le dernier rendu.
+    ///
+    /// Ne fait plus que téléverser vers le GPU : le décodage a eu lieu sur le
+    /// fil de téléchargement.
     pub fn mount(&mut self, ctx: &egui::Context) {
         let arrived = std::mem::take(&mut *self.incoming.lock().unwrap());
-        for (url, outcome) in arrived {
-            let state = match outcome.ok().and_then(|bytes| decode(&bytes)) {
-                Some(image) => {
-                    let texture = ctx.load_texture(
-                        format!("apercu-{url}"),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    Preview::Ready(texture)
-                }
+        for (url, image) in arrived {
+            // Une livraison dont l'entrée a disparu du cache est une livraison
+            // orpheline : on a changé de serveur pendant le téléchargement.
+            // L'insérer créerait une texture que rien ne compte, donc que rien
+            // n'évincera jamais — une fuite de mémoire graphique.
+            if !self.cache.contains_key(&url) {
+                continue;
+            }
+            let state = match image {
+                Some(image) => Preview::Ready(ctx.load_texture(
+                    format!("apercu-{url}"),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                )),
                 None => Preview::Failed,
             };
             self.cache.insert(url, state);
@@ -148,10 +162,27 @@ impl Previews {
         // Téléchargé en TLS, même si le lien du salon est resté en clair.
         let target = self.to_pinned(url)?;
         if self.order.len() >= MAX_CACHED {
-            if let Some(oldest) = self.order.first().cloned() {
-                self.order.remove(0);
-                self.cache.remove(&oldest);
-            }
+            // On n'évince **jamais** un chargement en vol.
+            //
+            // C'était le défaut : l'aperçu est demandé pour chaque message du
+            // fil, visible ou non, vingt fois par seconde. Passé une
+            // quarantaine d'images, l'éviction retirait des entrées encore en
+            // `Loading` ; l'image redevenait inconnue, on relançait un
+            // `thread::spawn`, qui évinçait à son tour — une tempête de fils
+            // et de téléchargements, et des textures que plus rien ne
+            // comptait.
+            let Some(pos) = self
+                .order
+                .iter()
+                .position(|u| !matches!(self.cache.get(u), Some(Preview::Loading)))
+            else {
+                // Tout est en cours de chargement : on ne lance rien de plus.
+                // Le nombre de fils en vol est ainsi borné par MAX_CACHED, et
+                // la demande repassera à la prochaine image sans rien coûter.
+                return Some(Preview::Loading);
+            };
+            let evincee = self.order.remove(pos);
+            self.cache.remove(&evincee);
         }
         self.cache.insert(url.to_string(), Preview::Loading);
         self.order.push(url.to_string());
@@ -173,7 +204,7 @@ fn fetch(
     agent: ureq::Agent,
 ) {
     std::thread::spawn(move || {
-        let outcome = (|| -> Result<Vec<u8>, String> {
+        let octets = (|| -> Result<Vec<u8>, String> {
             // Agent épinglé sur l'empreinte du serveur : un aperçu ne doit
             // pas être l'occasion de parler à quelqu'un d'autre.
             let response =
@@ -189,7 +220,11 @@ fn fetch(
             }
             Ok(bytes)
         })();
-        slot.lock().unwrap().push((url, outcome));
+        // Le décodage a lieu ICI, et plus dans `mount()` : ce fil a fini son
+        // téléchargement et ne fait plus rien, là où le fil de l'interface a
+        // une image à peindre dans les seize millisecondes.
+        let image = octets.ok().and_then(|bytes| decode(&bytes));
+        slot.lock().unwrap().push((url, image));
         ctx.request_repaint();
     });
 }

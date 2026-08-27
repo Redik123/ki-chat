@@ -132,7 +132,13 @@ impl Roles {
         // qui cherche à comprendre d'où sortent ces trois rôles ne trouve
         // rien dans `data/`.
         if fresh {
-            store.save(&store.inner.lock().unwrap());
+            // Si le disque refuse cette première écriture, mieux vaut ne pas
+            // démarrer du tout : le serveur tournerait avec des rôles que
+            // rien ne conserve, et le prochain redémarrage les inventerait à
+            // nouveau — en écrasant ce qu'un admin aurait réglé entre-temps.
+            store
+                .save(&store.inner.lock().unwrap())
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(store)
     }
@@ -232,7 +238,7 @@ impl Roles {
         };
         inner.next_id += 1;
         inner.roles.push(role.clone());
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("rôle créé : {} (id {}, rang {})", role.name, role.id, role.rank);
         Ok(role)
     }
@@ -287,7 +293,7 @@ impl Roles {
             current.rank = role.rank.min(MAX_RANK);
             current.perms = role.perms & known_perms();
         }
-        self.save(&inner);
+        self.save(&inner)?;
         Ok(())
     }
 
@@ -309,23 +315,27 @@ impl Roles {
         }
         let removed = inner.roles.remove(pos);
         // `next_id` ne recule pas : l'identifiant libéré reste mort.
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("rôle supprimé : {} (id {})", removed.name, removed.id);
         Ok(removed)
     }
 
-    fn save(&self, inner: &RolesFile) {
-        match serde_json::to_string_pretty(inner) {
-            Ok(json) => {
-                // Écriture atomique : une coupure en pleine sauvegarde
-                // laisserait sinon un `roles.json` à zéro octet, et le
-                // serveur refuserait de redémarrer.
-                if let Err(e) = crate::store::write_atomic(&self.path, json.as_bytes()) {
-                    tracing::error!("sauvegarde des rôles impossible : {e}");
-                }
-            }
-            Err(e) => tracing::error!("sérialisation des rôles impossible : {e}"),
-        }
+    /// Écrit `roles.json`.
+    ///
+    /// Renvoie l'échec au lieu de se contenter de le tracer. L'appelant
+    /// confirmait jusqu'ici la réussite d'un rôle que le disque n'avait pas
+    /// accepté : la décision tenait en mémoire jusqu'au redémarrage, puis
+    /// disparaissait sans que personne l'ait su.
+    fn save(&self, inner: &RolesFile) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(inner)
+            .map_err(|e| format!("sérialisation des rôles impossible : {e}"))?;
+        // Écriture atomique : une coupure en pleine sauvegarde laisserait
+        // sinon un `roles.json` à zéro octet, et le serveur refuserait de
+        // redémarrer.
+        crate::store::write_atomic(&self.path, json.as_bytes()).map_err(|e| {
+            tracing::error!("sauvegarde des rôles impossible : {e}");
+            format!("sauvegarde impossible : {e}")
+        })
     }
 }
 

@@ -120,8 +120,29 @@ async fn handle_connection(
     incoming: quinn::Incoming,
 ) -> anyhow::Result<()> {
     let conn = incoming.await.context("poignée de main QUIC")?;
+    let peer = conn.remote_address().ip();
+
+    // Le sas : place réservée le temps de s'authentifier, rendue par le
+    // `Drop` du jeton — donc sur TOUS les chemins de sortie de la phase 1,
+    // refus et erreurs compris. Sans plafond, une seule adresse pouvait
+    // garer autant de connexions non authentifiées qu'elle voulait.
+    let Some(jeton) = state.sas.entrer(peer) else {
+        tracing::warn!("sas plein pour {peer} : connexion refusée");
+        conn.close(0u32.into(), b"trop de connexions en attente");
+        return Ok(());
+    };
+
     // Le client ouvre le flux de contrôle et parle en premier (Auth).
-    let (mut send, recv) = conn.accept_bi().await.context("flux de contrôle")?;
+    //
+    // Le délai porte sur l'OUVERTURE, et pas seulement sur la première ligne
+    // qu'elle transporte. C'est toute la question : le délai de dix secondes
+    // plus bas ne couvrait que la lecture, si bien qu'une connexion qui ne
+    // demandait jamais de flux attendait ici pour toujours — les keep-alives
+    // de QUIC tenant l'expiration d'inactivité en échec.
+    let (mut send, recv) = tokio::time::timeout(Duration::from_secs(10), conn.accept_bi())
+        .await
+        .context("délai d'ouverture du flux de contrôle dépassé")?
+        .context("flux de contrôle")?;
     // Le contrôle passe devant tout média : un KeyframeRequest ne doit
     // jamais attendre derrière 200 Ko de trame vidéo.
     let _ = send.set_priority(10);
@@ -167,7 +188,6 @@ async fn handle_connection(
     // Anti-force brute. Le refus intervient **avant** le hachage : une
     // tentative bloquée ne coûte alors qu'une recherche dans une table,
     // là où un Argon2id coûte de la mémoire et du temps par essai.
-    let peer = conn.remote_address().ip();
     if let Err(wait) = state.throttle.check(peer, &username) {
         send_direct(&mut send, &ServerMsg::Error {
             message: format!(
@@ -264,6 +284,10 @@ async fn handle_connection(
         );
     }
     state.rebuild_voice_routes();
+    // Entré : la place du sas est rendue tout de suite. Le plafond borne ce
+    // qu'une adresse peut faire ATTENDRE, pas combien de gens elle héberge —
+    // trente joueurs derrière une même box ne doivent rien se disputer.
+    drop(jeton);
 
     let _ = tx.send(ServerMsg::Welcome {
         user_id,
@@ -859,7 +883,17 @@ fn handle_msg(
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
                 tokio::task::spawn_blocking(move || {
-                    let code = state.accounts.create_invite(&actor, uses, &label, ttl_secs);
+                    // Une invitation que le disque n'a pas acceptée est un
+                    // lien qui meurt au prochain redémarrage : mieux vaut le
+                    // dire tout de suite que le laisser circuler.
+                    let code = match state.accounts.create_invite(&actor, uses, &label, ttl_secs)
+                    {
+                        Ok(code) => code,
+                        Err(e) => {
+                            let _ = tx.send(ServerMsg::Error { message: e });
+                            return;
+                        }
+                    };
                     tracing::info!("invitation {code} créée par {actor}");
                     state.audit.record(
                         "invite.create",
@@ -1207,8 +1241,22 @@ fn handle_msg(
                     // restrictions de salon. Un identifiant mort qui traîne
                     // dans un `allowed_roles` rendrait le salon inaccessible
                     // sans qu'on comprenne pourquoi.
-                    state.accounts.remove_role(id);
-                    state.channels.forget_role(id);
+                    // Le balayage peut échouer là où la suppression a réussi
+                    // (disque plein entre les deux) : on le signale sans
+                    // défaire ce qui est fait. Le rôle n'existe plus, mais son
+                    // identifiant traîne encore dans des comptes ou des
+                    // restrictions — `perms_of` ignore les inconnus, donc
+                    // c'est sans danger, et un second essai le nettoiera.
+                    let balayage = state
+                        .accounts
+                        .remove_role(id)
+                        .err()
+                        .or_else(|| state.channels.forget_role(id).err());
+                    if let Some(e) = balayage {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: format!("rôle supprimé, nettoyage incomplet : {e}"),
+                        });
+                    }
                     state.audit.record("role.delete", username, &role.name, "");
                     state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
                     refresh_everyone(state);

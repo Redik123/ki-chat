@@ -208,7 +208,12 @@ impl Accounts {
         let store = Self { path, inner: Mutex::new(inner) };
         if !migrated.is_empty() {
             tracing::info!("rôle Propriétaire attribué à {} compte(s) admin", migrated.len());
-            store.save(&store.inner.lock().unwrap());
+            // Une migration qui ne s'écrit pas se rejouerait à chaque
+            // démarrage — sans dommage, mais sans jamais aboutir non plus.
+            // Autant s'arrêter et le dire.
+            store
+                .save(&store.inner.lock().unwrap())
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(store)
     }
@@ -251,7 +256,14 @@ impl Accounts {
                         user.ban = None;
                         user.banned = false;
                     }
-                    self.save(&inner);
+                    // Volontairement NON propagé, contrairement au reste :
+                    // la levée se reconstate à la tentative suivante, et
+                    // refuser la connexion parce que le disque est plein
+                    // enfermerait dehors quelqu'un dont le bannissement est
+                    // justement terminé.
+                    if let Err(e) = self.save(&inner) {
+                        tracing::error!("levée de bannissement non persistée : {e}");
+                    }
                     tracing::info!("bannissement de {username} expiré");
                 }
                 Some(inner.users[username].hash.clone())
@@ -360,7 +372,10 @@ impl Accounts {
                 avatar: None,
             },
         );
-        self.save(&inner);
+        // Propagé : un compte qui n'atteint pas le disque disparaît au
+        // redémarrage, mot de passe compris. Mieux vaut refuser la création
+        // que promettre un compte fantôme.
+        self.save(&inner)?;
         tracing::info!("nouveau compte : {username} (id {id}, propriétaire: {admin})");
         Ok(AuthOk { id, roles, created_with: Some(code.to_string()) })
     }
@@ -432,7 +447,7 @@ impl Accounts {
         uses: Option<u32>,
         label: &str,
         ttl_secs: u64,
-    ) -> String {
+    ) -> Result<String, String> {
         const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
         let mut rng = rand::rng();
         let code: String = (0..10)
@@ -452,8 +467,8 @@ impl Accounts {
             expires_at: (ttl_secs > 0).then(|| now + ttl_secs.saturating_mul(1000)),
             revoked: false,
         });
-        self.save(&inner);
-        code
+        self.save(&inner)?;
+        Ok(code)
     }
 
     /// Révoque un code. Il reste listé, marqué, mais ne crée plus de compte.
@@ -466,7 +481,7 @@ impl Accounts {
             return Err("code déjà révoqué".into());
         }
         invite.revoked = true;
-        self.save(&inner);
+        self.save(&inner)?;
         Ok(())
     }
 
@@ -489,12 +504,32 @@ impl Accounts {
             return Err("compte inconnu".into());
         };
         user.hash = hash;
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("mot de passe de {target} réinitialisé par {requester}");
         Ok(())
     }
 
     /// Change son propre mot de passe, après vérification de l'ancien.
+    ///
+    /// Trois précautions, dans cet ordre, et chacune corrige un vrai défaut de
+    /// la version précédente.
+    ///
+    /// **On ne hache le nouveau mot de passe qu'une fois l'ancien vérifié.**
+    /// L'ordre inverse offrait un amplificateur de déni de service : chaque
+    /// message coûtait un Argon2id complet — volontairement lent et gourmand
+    /// en mémoire — même avec un ancien mot de passe faux. Le seau à jetons du
+    /// flux de contrôle bornait le débit sans supprimer l'amplification.
+    ///
+    /// **Aucun des deux Argon2id ne tourne sous le verrou des comptes.**
+    /// C'était pourtant le cas : la vérification s'exécutait le verrou en
+    /// main, donc toute connexion, tout bannissement, toute sauvegarde
+    /// attendaient derrière. C'est exactement le défaut soldé pour
+    /// `authenticate`, resté ici.
+    ///
+    /// **Le compte est relu avant l'écriture.** Le verrou est relâché le temps
+    /// de deux hachages, soit des centaines de millisecondes : un admin a pu
+    /// réinitialiser ce mot de passe entre-temps, et le nôtre effacerait sa
+    /// décision en silence.
     pub fn change_password(
         &self,
         username: &str,
@@ -502,20 +537,38 @@ impl Accounts {
         new_password: &str,
     ) -> Result<(), String> {
         check_password(new_password)?;
-        let hash = hash_password(new_password)?;
-        let mut inner = self.inner.lock().unwrap();
-        let Some(user) = inner.users.get_mut(username) else {
-            return Err("compte inconnu".into());
+
+        // --- Phase 1, sous verrou : lecture seule ---
+        let stored = {
+            let inner = self.inner.lock().unwrap();
+            let Some(user) = inner.users.get(username) else {
+                return Err("compte inconnu".into());
+            };
+            user.hash.clone()
         };
-        let parsed = PasswordHash::new(&user.hash).map_err(|_| "compte corrompu".to_string())?;
+
+        // --- Vérification puis hachage, verrou relâché ---
+        let parsed = PasswordHash::new(&stored).map_err(|_| "compte corrompu".to_string())?;
         if Argon2::default()
             .verify_password(old_password.as_bytes(), &parsed)
             .is_err()
         {
             return Err("ancien mot de passe incorrect".into());
         }
+        let hash = hash_password(new_password)?;
+
+        // --- Phase 2, sous verrou : écriture ---
+        let mut inner = self.inner.lock().unwrap();
+        let Some(user) = inner.users.get_mut(username) else {
+            return Err("compte inconnu".into());
+        };
+        if user.hash != stored {
+            return Err(
+                "le mot de passe a changé entre-temps — recommence avec le nouveau".into()
+            );
+        }
         user.hash = hash;
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("{username} a changé son mot de passe");
         Ok(())
     }
@@ -548,7 +601,7 @@ impl Accounts {
             at: now,
         });
         user.banned = true;
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("{target} banni par {requester} ({duration_secs} s) : {reason}");
         Ok(())
     }
@@ -564,7 +617,7 @@ impl Accounts {
         }
         user.ban = None;
         user.banned = false;
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("{target} débanni par {requester}");
         Ok(())
     }
@@ -592,7 +645,7 @@ impl Accounts {
         // retour à une version antérieure retrouve ses administrateurs.
         user.admin = user.roles.contains(&ROLE_OWNER);
         let count = user.roles.len();
-        self.save(&inner);
+        self.save(&inner)?;
         tracing::info!("rôles de {username} redéfinis ({count})");
         Ok(())
     }
@@ -604,7 +657,7 @@ impl Accounts {
     /// ressortirait tel quel dans la liste des membres, et reviendrait à la
     /// vie le jour où le même identifiant serait recyclé. Renvoie le nombre
     /// de comptes touchés, pour le journal d'audit.
-    pub fn remove_role(&self, role: RoleId) -> usize {
+    pub fn remove_role(&self, role: RoleId) -> Result<usize, String> {
         let mut inner = self.inner.lock().unwrap();
         let mut touched = 0;
         for user in inner.users.values_mut() {
@@ -615,10 +668,10 @@ impl Accounts {
             }
         }
         if touched > 0 {
-            self.save(&inner);
+            self.save(&inner)?;
             tracing::info!("rôle {role} retiré de {touched} compte(s)");
         }
-        touched
+        Ok(touched)
     }
 
     /// Photo de profil d'un compte, par identifiant.
@@ -648,22 +701,23 @@ impl Accounts {
             return Err("compte inconnu".into());
         };
         user.avatar = avatar;
-        self.save(&inner);
+        self.save(&inner)?;
         Ok(())
     }
 
-    fn save(&self, inner: &AccountsFile) {
-        match serde_json::to_string_pretty(inner) {
-            Ok(json) => {
-                // Écriture atomique : une coupure pendant la sauvegarde
-                // laissait sinon `users.json` à zéro octet, et le serveur
-                // refusait de redémarrer — tous les comptes avec.
-                if let Err(e) = crate::store::write_atomic(&self.path, json.as_bytes()) {
-                    tracing::error!("sauvegarde des comptes impossible : {e}");
-                }
-            }
-            Err(e) => tracing::error!("sérialisation des comptes impossible : {e}"),
-        }
+    /// Écrit `users.json`. Renvoie l'échec — voir `Roles::save` : un
+    /// bannissement que le disque a refusé tenait jusqu'au redémarrage puis
+    /// disparaissait, l'interface ayant confirmé.
+    fn save(&self, inner: &AccountsFile) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(inner)
+            .map_err(|e| format!("sérialisation des comptes impossible : {e}"))?;
+        // Écriture atomique : une coupure pendant la sauvegarde laissait
+        // sinon `users.json` à zéro octet, et le serveur refusait de
+        // redémarrer — tous les comptes avec.
+        crate::store::write_atomic(&self.path, json.as_bytes()).map_err(|e| {
+            tracing::error!("sauvegarde des comptes impossible : {e}");
+            format!("sauvegarde impossible : {e}")
+        })
     }
 }
 
@@ -712,7 +766,7 @@ mod tests {
         assert_eq!(root.roles, vec![ROLE_OWNER]);
 
         // Invitation à usage unique : un compte, pas deux.
-        let code = accounts.create_invite("root", Some(1), "", 0);
+        let code = accounts.create_invite("root", Some(1), "", 0).unwrap();
         assert!(code.starts_with("ki-"));
         let ami = accounts.authenticate("ami", "amipass", Some(&code), "inv").unwrap();
         // Le code consommé remonte à l'appelant : c'est ce qui permet de
@@ -793,7 +847,7 @@ mod tests {
         {
             let mut inner = accounts.inner.lock().unwrap();
             inner.users.get_mut("ami").unwrap().ban.as_mut().unwrap().until = Some(1);
-            accounts.save(&inner);
+            accounts.save(&inner).unwrap();
         }
         assert!(accounts.authenticate("ami", "amipass", None, "inv").is_ok());
         let listed = accounts.list(&roles);
@@ -811,7 +865,7 @@ mod tests {
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
         accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
-        let code = accounts.create_invite("root", None, "tournoi", 0);
+        let code = accounts.create_invite("root", None, "tournoi", 0).unwrap();
 
         for name in ["a", "b", "c"] {
             assert!(accounts.authenticate(name, "motdepasse", Some(&code), "inv").is_ok());
@@ -844,7 +898,7 @@ mod tests {
             std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
         // Un premier compte pour que les suivants ne soient pas propriétaires.
         accounts.authenticate("chef", "motdepasse", Some("inv"), "inv").unwrap();
-        let code = accounts.create_invite("chef", Some(1), "unique", 0);
+        let code = accounts.create_invite("chef", Some(1), "unique", 0).unwrap();
 
         // Deux inscriptions concurrentes avec le même code à usage unique.
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -918,7 +972,7 @@ mod tests {
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
         accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
-        let code = accounts.create_invite("root", None, "", 3600);
+        let code = accounts.create_invite("root", None, "", 3600).unwrap();
         {
             let mut inner = accounts.inner.lock().unwrap();
             inner.invites[0].expires_at = Some(1);
@@ -987,8 +1041,8 @@ mod tests {
         // Rôle supprimé : le balayage le retire partout, et ne touche que
         // les comptes qui le portaient.
         roles.delete(modo.id).unwrap();
-        assert_eq!(accounts.remove_role(modo.id), 1);
-        assert_eq!(accounts.remove_role(modo.id), 0);
+        assert_eq!(accounts.remove_role(modo.id).unwrap(), 1);
+        assert_eq!(accounts.remove_role(modo.id).unwrap(), 0);
         assert!(accounts.roles_of("ami").is_empty());
         assert_eq!(accounts.roles_of("root"), vec![ROLE_OWNER]);
 

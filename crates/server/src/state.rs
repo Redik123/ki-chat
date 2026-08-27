@@ -1,7 +1,7 @@
 //! État partagé du serveur : utilisateurs connectés, salons, registre voix.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ki_protocol::{ChannelId, ChannelInfo, Member, ServerMsg, UserId};
@@ -167,6 +167,76 @@ pub fn secret_eq(a: &str, b: &str) -> bool {
         && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Connexions arrivées mais pas encore authentifiées, comptées par adresse.
+///
+/// Le délai de dix secondes de la phase d'authentification ne couvrait que la
+/// **première ligne** — pas l'ouverture du flux qui la porte. Une connexion
+/// qui ne demandait jamais de flux bidirectionnel restait donc parquée
+/// indéfiniment, et les keep-alives de QUIC empêchaient l'expiration
+/// d'inactivité de jouer. Des dizaines de milliers de connexions sans
+/// authentification, pour le prix d'autant de poignées de main.
+///
+/// Deux verrous répondent, et ils sont complémentaires : un délai autour de
+/// l'ouverture du flux (voir `quic.rs`), et ce plafond-ci, qui borne ce qu'une
+/// seule adresse peut faire attendre en même temps.
+#[derive(Default)]
+pub struct Sas {
+    en_attente: Mutex<HashMap<std::net::IpAddr, u32>>,
+}
+
+/// Connexions non authentifiées tolérées d'une même adresse, en même temps.
+///
+/// Généreux à dessein : trente joueurs derrière la box d'un même foyer ou
+/// d'un cybercafé partagent une adresse publique, et le client ouvre en plus
+/// une poignée de main de test vers chaque serveur de son carnet. Ce plafond
+/// ne vise pas l'usage — il vise les dizaines de milliers.
+///
+/// Il ne borne que la traversée du sas, qui dure au plus le délai
+/// d'authentification : une fois entré, on ne compte plus.
+const SAS_MAX_PAR_IP: u32 = 32;
+
+impl Sas {
+    /// Fait entrer une connexion, ou refuse si l'adresse en fait déjà trop
+    /// attendre. Le jeton rendu libère la place en tombant — c'est ce qui
+    /// garantit que tous les chemins de sortie de l'authentification, y
+    /// compris les refus et les erreurs, rendent leur place.
+    pub fn entrer(self: &Arc<Self>, ip: std::net::IpAddr) -> Option<JetonSas> {
+        let mut en_attente = self.en_attente.lock().unwrap();
+        let place = en_attente.entry(ip).or_insert(0);
+        if *place >= SAS_MAX_PAR_IP {
+            return None;
+        }
+        *place += 1;
+        Some(JetonSas { sas: self.clone(), ip })
+    }
+
+    #[cfg(test)]
+    fn en_attente(&self, ip: std::net::IpAddr) -> u32 {
+        self.en_attente.lock().unwrap().get(&ip).copied().unwrap_or(0)
+    }
+}
+
+/// Place occupée dans le sas, rendue à la destruction.
+pub struct JetonSas {
+    sas: Arc<Sas>,
+    ip: std::net::IpAddr,
+}
+
+impl Drop for JetonSas {
+    fn drop(&mut self) {
+        let mut en_attente = self.sas.en_attente.lock().unwrap();
+        if let Some(place) = en_attente.get_mut(&self.ip) {
+            *place = place.saturating_sub(1);
+            // L'entrée disparaît avec la dernière connexion : sans ça, la
+            // table garderait une ligne par adresse ayant jamais touché le
+            // serveur, ce qui est une fuite lente mais sûre.
+            if *place == 0 {
+                en_attente.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// Table de routage voix, consultée sur le chemin chaud (chaque datagramme).
 /// Reconstruite uniquement aux événements rares (connexion/join/leave),
 /// lue sous un simple verrou partagé : aucune contention avec le contrôle.
@@ -198,6 +268,8 @@ pub struct AppState {
     pub meta: ServerMeta,
     /// Limiteur des tentatives d'authentification.
     pub throttle: Throttle,
+    /// Plafond des connexions non authentifiées, par adresse.
+    pub sas: Arc<Sas>,
     /// Bornes du partage de fichiers (plafond global, durée de vie).
     pub files_quota: crate::files::Quota,
     pub data_dir: String,
@@ -237,6 +309,7 @@ impl AppState {
             accounts,
             meta,
             throttle: Throttle::default(),
+            sas: Arc::new(Sas::default()),
             files_quota,
             data_dir: data_dir.to_string(),
             users: Mutex::new(HashMap::new()),
@@ -607,6 +680,31 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le plafond mord, et la place se rend toute seule.
+    ///
+    /// C'est le `Drop` qui compte : la phase d'authentification sort par une
+    /// douzaine de chemins — pseudo invalide, mot de passe trop long, refus du
+    /// limiteur, flux fermé — et pas un seul ne doit laisser sa place occupée,
+    /// sous peine de fermer le serveur à cette adresse pour de bon.
+    #[test]
+    fn le_sas_borne_une_adresse_et_rend_les_places() {
+        let sas = Arc::new(Sas::default());
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+
+        let jetons: Vec<_> = (0..SAS_MAX_PAR_IP).filter_map(|_| sas.entrer(ip)).collect();
+        assert_eq!(jetons.len() as u32, SAS_MAX_PAR_IP);
+        assert!(sas.entrer(ip).is_none(), "le plafond doit refuser au-delà");
+
+        // Une autre adresse n'est pas concernée : le plafond est par adresse,
+        // sans quoi un seul acharné fermerait le serveur à tout le monde.
+        let autre: std::net::IpAddr = "198.51.100.1".parse().unwrap();
+        assert!(sas.entrer(autre).is_some());
+
+        drop(jetons);
+        assert_eq!(sas.en_attente(ip), 0, "la table ne doit rien retenir");
+        assert!(sas.entrer(ip).is_some(), "la place est rendue");
+    }
 
     /// Le flux de contrôle entier est désormais borné en débit, et pas
     /// seulement le chat : une rafale normale doit passer, un flot doit être

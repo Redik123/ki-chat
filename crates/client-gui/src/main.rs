@@ -263,7 +263,13 @@ struct KiApp {
     picked_avatar: PickedImage,
     /// Aperçu de vignette, indexé par la vignette elle-même : sans ce cache
     /// on téléverserait une texture à chaque image rendue.
-    preview_icon: Option<(String, egui::TextureHandle)>,
+    /// Aperçus de vignettes, **un par emplacement**.
+    ///
+    /// C'était un seul créneau partagé par « Mon compte » et Admin ▸ Serveur.
+    /// Les deux panneaux ouverts en même temps se le disputaient : chaque
+    /// image, la clé changeait, donc décodage PNG et téléversement GPU deux
+    /// fois par image, indéfiniment.
+    preview_icons: HashMap<Apercu, (String, egui::TextureHandle)>,
     /// Aperçus des images partagées dans le fil.
     previews: images::Previews,
     /// Fenêtre maximisée : la seule géométrie qu'on mémorise. Cf. `main`.
@@ -290,6 +296,9 @@ struct KiApp {
     show_invite: bool,
     conn: Option<net::NetHandle>,
     connecting: bool,
+    /// Début de la tentative en cours, pour la borner (voir
+    /// `DELAI_CONNEXION`). `None` = pas de tentative en vol.
+    connect_started: Option<std::time::Instant>,
     welcomed: bool,
     error: Option<String>,
 
@@ -533,7 +542,7 @@ impl KiApp {
             icon_textures: HashMap::new(),
             picked_icon: Default::default(),
             picked_avatar: Default::default(),
-            preview_icon: None,
+            preview_icons: HashMap::new(),
             previews: images::Previews::default(),
             maximized: get("window_maximized", "") == "on",
             restore_maximized: get("window_maximized", "") == "on",
@@ -547,6 +556,7 @@ impl KiApp {
             show_invite: false,
             conn: None,
             connecting: false,
+            connect_started: None,
             welcomed: false,
             error: None,
             my_id: None,
@@ -1120,23 +1130,70 @@ impl KiApp {
         self.channels.iter().find(|c| c.id == id).map(|c| c.name.as_str())
     }
 
+    /// Referme la connexion et **efface tout ce qui appartenait au serveur
+    /// quitté**.
+    ///
+    /// L'exhaustivité n'est pas du zèle : les identifiants d'utilisateur sont
+    /// attribués **par serveur**, si bien que la moindre table indexée par
+    /// `user_id` qui survivait montrait, sur le serveur suivant, la photo et
+    /// le nom de quelqu'un d'autre. Le reste était du même ordre : une fenêtre
+    /// « Bannir untel » ressurgissait ailleurs, le panneau d'administration
+    /// affichait les comptes d'un serveur auquel on n'était plus connecté, et
+    /// l'empreinte retenue servait à vérifier une identité qui n'était plus la
+    /// bonne.
+    ///
+    /// Toute donnée venue du réseau se remet donc à zéro ici. Ce qui reste est
+    /// exactement ce qui appartient à la **machine** et non au serveur : les
+    /// réglages audio, le carnet de serveurs, les volumes par personne.
     fn disconnect(&mut self, error: Option<String>) {
         if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }
         self.connecting = false;
+        self.connect_started = None;
         self.welcomed = false;
+
+        // --- Identité et droits ---
         self.my_id = None;
         self.my_perms = 0;
         self.my_rank = 0;
         self.roles.clear();
         self.voice_token = 0;
+        self.server_fingerprint.clear();
+
+        // --- Salons, présence, conversation ---
         self.channels.clear();
         self.current = None;
         self.voice_channel = None;
         self.voice_intent = None;
         self.members.clear();
         self.messages.clear();
+        self.history_more = false;
+        self.history_pending = false;
+        self.history_anchor = None;
+
+        // --- Vignettes : indexées par user_id, donc par serveur ---
+        self.avatars.clear();
+        self.incoming_avatars.clear();
+        self.account_avatar = IconChange::Keep;
+        self.preview_icons.clear();
+        self.previews = images::Previews::default();
+
+        // --- Identité du serveur et panneau d'administration ---
+        self.server_info = ServerInfo::default();
+        self.admin_name.clear();
+        self.admin_icon = IconChange::Keep;
+        self.admin_users.clear();
+        self.admin_invites.clear();
+        self.last_invite = None;
+        self.audit.clear();
+        self.roles_draft.clear();
+
+        // --- Fenêtres et brouillons en cours ---
+        self.ban_draft = None;
+        self.voice_prompt = None;
+        *self.upload_status.lock().unwrap() = None;
+
         self.armed = false;
         self.transmitting = false;
         self.loopback = false;
@@ -1146,9 +1203,33 @@ impl KiApp {
         self.error = error;
     }
 
+    /// Au-delà, « Connexion… » cesse d'attendre.
+    ///
+    /// Rien ne bornait cette attente : `connecting` n'était levé que par
+    /// `Welcome`, `ConnectFailed` ou `Disconnected`, et le keep-alive de cinq
+    /// secondes tenait l'expiration d'inactivité de QUIC en échec. Un serveur
+    /// qui accepte la connexion puis ne répond plus — surchargé, ou arrêté
+    /// entre la poignée de main et l'authentification — laissait donc l'écran
+    /// figé pour toujours.
+    ///
+    /// Vingt secondes : bien au-delà d'un Argon2id sur un VPS chargé, bien en
+    /// deçà de la patience de qui que ce soit.
+    const DELAI_CONNEXION: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// Abandonne une connexion qui n'aboutit pas.
+    fn check_connect_timeout(&mut self) {
+        let Some(depuis) = self.connect_started else { return };
+        if self.connecting && depuis.elapsed() >= Self::DELAI_CONNEXION {
+            self.disconnect(Some(
+                "le serveur n'a pas répondu — vérifie l'adresse, ou réessaie".into(),
+            ));
+        }
+    }
+
     fn connect(&mut self, ctx: &egui::Context) {
         self.error = None;
         self.connecting = true;
+        self.connect_started = Some(std::time::Instant::now());
         let invite = self.invite.trim();
         self.conn = Some(net::connect(
             self.url.trim().to_string(),
@@ -1443,6 +1524,7 @@ impl KiApp {
             } => {
                 self.welcomed = true;
                 self.connecting = false;
+                self.connect_started = None;
                 self.error = None;
                 self.remember_connection();
                 self.my_id = Some(user_id);
@@ -2174,12 +2256,41 @@ impl KiApp {
         }
 
         ui.add_space(16.0);
+
+        // Pendant une tentative, le bouton devient une **annulation**.
+        //
+        // Attendre était la seule option offerte, et l'attente n'était pas
+        // bornée : quand le serveur accepte la connexion puis ne répond plus,
+        // l'écran restait figé sur « Connexion… » sans rien à cliquer. Le
+        // délai de `DELAI_CONNEXION` finit par trancher, mais vingt secondes
+        // sans pouvoir revenir en arrière, c'est vingt secondes de trop quand
+        // on vient de taper la mauvaise adresse.
+        if self.connecting {
+            let reste = self
+                .connect_started
+                .map(|d| Self::DELAI_CONNEXION.saturating_sub(d.elapsed()).as_secs() + 1)
+                .unwrap_or(0);
+            let annule = ui
+                .add_sized(
+                    [ui.available_width(), 38.0],
+                    egui::Button::new(
+                        RichText::new(format!("Connexion…  ✕  ({reste} s)")).size(14.0),
+                    ),
+                )
+                .on_hover_text("Annuler la connexion")
+                .clicked();
+            if annule {
+                self.disconnect(None);
+            }
+            // Jamais « se connecter » : la tentative est déjà en cours.
+            return false;
+        }
+
         // Le bouton nomme sa destination : avec plusieurs serveurs, ça évite
         // de se connecter au mauvais sans s'en rendre compte.
-        let label = match (self.connecting, self.active_server()) {
-            (true, _) => "Connexion…".to_string(),
-            (false, Some(server)) => format!("Se connecter à {}", ellipsize(server.label(), 26)),
-            (false, None) => "Se connecter".to_string(),
+        let label = match self.active_server() {
+            Some(server) => format!("Se connecter à {}", ellipsize(server.label(), 26)),
+            None => "Se connecter".to_string(),
         };
         ui.add_enabled_ui(ready, |ui| {
             ui::primary_button(ui, None, &label, Some(ui.available_width()))
@@ -4177,7 +4288,7 @@ impl KiApp {
                     IconChange::Clear => None,
                     IconChange::Keep => None,
                 };
-                let staged = self.preview_texture(ctx, pending.as_deref());
+                let staged = self.preview_texture(ctx, Apercu::Avatar, pending.as_deref());
                 let mine = self
                     .my_id
                     .and_then(|id| self.avatars.get(&id))
@@ -4228,7 +4339,7 @@ impl KiApp {
                         to_send = Some(ClientMsg::SetAvatar {
                             avatar: std::mem::take(&mut self.account_avatar),
                         });
-                        self.preview_icon = None;
+                        self.preview_icons.remove(&Apercu::Avatar);
                     }
                 } else {
                     ui.add_space(4.0);
@@ -4295,28 +4406,46 @@ impl KiApp {
         self.new_password.clear();
         self.info = None;
         self.account_avatar = IconChange::Keep;
-        self.preview_icon = None;
+        self.preview_icons.remove(&Apercu::Avatar);
     }
 
     /// Fenêtre d'administration : invitations, comptes, blocages, mots de passe.
     /// Texture d'aperçu d'une vignette, reconstruite seulement si elle change.
+    ///
+    /// `emplacement` distingue les deux aperçus possibles. Sans lui, ouvrir
+    /// « Mon compte » et Admin ▸ Serveur ensemble faisait alterner la clé à
+    /// chaque image : un décodage PNG et un téléversement GPU par panneau et
+    /// par image, pour deux vignettes qui ne changeaient pas.
     fn preview_texture(
         &mut self,
         ctx: &egui::Context,
+        emplacement: Apercu,
         data: Option<&str>,
     ) -> Option<egui::TextureHandle> {
         let Some(data) = data else {
-            self.preview_icon = None;
+            self.preview_icons.remove(&emplacement);
             return None;
         };
-        if !self.preview_icon.as_ref().is_some_and(|(key, _)| key == data) {
-            self.preview_icon = servers::decode_icon(data).map(|image| {
-                let texture =
-                    ctx.load_texture("icon-preview", image, egui::TextureOptions::LINEAR);
-                (data.to_string(), texture)
-            });
+        let a_jour = self
+            .preview_icons
+            .get(&emplacement)
+            .is_some_and(|(key, _)| key == data);
+        if !a_jour {
+            match servers::decode_icon(data) {
+                Some(image) => {
+                    let texture = ctx.load_texture(
+                        format!("icon-preview-{emplacement:?}"),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.preview_icons.insert(emplacement, (data.to_string(), texture));
+                }
+                None => {
+                    self.preview_icons.remove(&emplacement);
+                }
+            }
         }
-        self.preview_icon.as_ref().map(|(_, texture)| texture.clone())
+        self.preview_icons.get(&emplacement).map(|(_, texture)| texture.clone())
     }
 
     /// Identité du serveur : nom et logo, que seuls les admins règlent.
@@ -4343,7 +4472,7 @@ impl KiApp {
             IconChange::Clear => None,
             IconChange::Keep => self.server_info.icon.clone(),
         };
-        let preview = self.preview_texture(ctx, pending.as_deref());
+        let preview = self.preview_texture(ctx, Apercu::LogoServeur, pending.as_deref());
         let has_icon = pending.is_some();
 
         ui.horizontal_top(|ui| {
@@ -5118,7 +5247,7 @@ impl KiApp {
         self.info = None;
         self.last_invite = None;
         self.admin_icon = IconChange::Keep;
-        self.preview_icon = None;
+        self.preview_icons.remove(&Apercu::LogoServeur);
     }
 }
 
@@ -5502,6 +5631,15 @@ fn channel_row(
         );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Les deux vignettes dont on peut afficher un aperçu, et qui peuvent l'être
+/// **en même temps** : la photo de profil dans « Mon compte », le logo du
+/// serveur dans Admin ▸ Serveur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Apercu {
+    Avatar,
+    LogoServeur,
 }
 
 /// Ce qu'une ligne de membre montre en plus du compte lui-même : l'état
@@ -5966,6 +6104,7 @@ impl eframe::App for KiApp {
         self.window_focused = ctx.input(|i| i.focused);
 
         self.poll_events();
+        self.check_connect_timeout();
         self.update_voice();
 
         // Un message est arrivé pendant que la fenêtre était à l'arrière-plan :

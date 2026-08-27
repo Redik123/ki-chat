@@ -507,25 +507,65 @@ Optimiser sans mesure produit du code plus compliqué et pas plus rapide.
 
 *Coût réel : une session.*
 
-## P2 — Solder la dette vérifiée
+## P2 — Solder la dette vérifiée ✅ (livré le 2026-08-27)
 
 Dans cet ordre, parce qu'il va du « ça casse le service » au « ça agace ».
 
-1. **M24** — délai autour de `accept_bi`, plafond de connexions par IP.
-2. **M26** — vérifier l'ancien mot de passe **avant** de hacher le nouveau.
-3. **M28** — `spawn_blocking` sur les chemins rôles et salons ; `audit.record`
-   sur un fil d'écriture dédié avec canal (le même patron que `History`).
-4. **M27** — propager les échecs de `save()` jusqu'au client. Une modération
-   qui échoue doit se voir.
-5. **M31** — vérifier la taille du journal d'audit **à l'écriture**, purger les
-   archives.
-6. **M29** — écrire `server.json` sous le verrou, fichier temporaire unique.
-7. **M19 / M21** — délai et annulation sur « Connexion… » ; réinitialisation
-   exhaustive à la déconnexion (ou reconstruction de `KiApp`, plus sûr).
-8. **M32 / M33 / M34** — ne jamais évincer une entrée `Loading`, décoder dans
-   le fil de téléchargement, deux entrées de cache distinctes.
+1. ✅ **M24** — délai autour de `accept_bi` **et** plafond par adresse. Les
+   deux, parce qu'ils ne couvrent pas la même chose : le délai de dix secondes
+   ne portait que sur la première *ligne*, pas sur l'ouverture du *flux* qui la
+   transporte, si bien qu'une connexion ne demandant jamais de flux
+   bidirectionnel attendait indéfiniment — les keep-alives de QUIC tenant
+   l'expiration d'inactivité en échec. Le `Sas` (`state.rs`) borne à 32 les
+   connexions **non authentifiées** simultanées d'une même adresse ; la place
+   est rendue par le `Drop` d'un jeton, donc sur tous les chemins de sortie de
+   l'authentification, refus compris, et libérée dès l'entrée — trente joueurs
+   derrière une même box ne se disputent rien.
+2. ✅ **M26** — et c'étaient **deux** défauts, pas un. L'ordre d'abord : le
+   nouveau mot de passe était haché *avant* que l'ancien soit vérifié, donc un
+   Argon2id complet par tentative fausse. Mais la vérification elle-même
+   tournait **sous le verrou des comptes** — exactement le défaut C4 soldé pour
+   `authenticate` et resté ici : toute connexion, tout bannissement attendaient
+   derrière. Les deux hachages sont maintenant hors verrou, et le compte est
+   relu avant écriture (un admin a pu réinitialiser ce mot de passe pendant les
+   centaines de millisecondes du hachage).
+3. ✅ **M28** — `audit.record` part sur un fil d'écriture dédié, patron de
+   `History` : la mémoire glissante — celle que lit le panneau
+   d'administration — est à jour immédiatement, la ligne va au disque
+   ailleurs. Les chemins rôles et salons remontent désormais leurs échecs
+   (voir M27), ce qui les sort du même coup du « on écrit et on ne sait pas ».
+4. ✅ **M27** — `save()` renvoie son verdict dans les trois magasins, et 21
+   sites d'appel le propagent. Trois exceptions **assumées et commentées** :
+   la levée d'un bannissement échu n'échoue pas la connexion (elle se
+   reconstate à la tentative suivante, et refuser d'entrer parce que le disque
+   est plein enfermerait dehors quelqu'un dont la sanction est terminée) ; les
+   premières écritures au démarrage arrêtent le serveur ; le balayage d'un rôle
+   supprimé signale sans défaire. `create_invite`, `remove_role` et
+   `forget_role` ont changé de signature au passage — une invitation que le
+   disque a refusée est un lien qui meurt au redémarrage.
+5. ✅ **M31** — taille vérifiée **à l'écriture**, plus seulement à l'ouverture,
+   et purge des archives au-delà de cinq. Un serveur qui ne redémarre pas — le
+   but — ne passait jamais par la rotation.
+6. ⚠️ **M29 — déjà corrigé, mon audit le listait à tort.** `ServerMeta::update`
+   tient le verrou pendant l'écriture, et `write_atomic` porte un compteur de
+   séquence qui rend chaque temporaire unique. Vérifié dans le code, et le
+   commentaire de `meta.rs` explique déjà pourquoi.
+7. ✅ **M19 / M21** — délai de vingt secondes sur « Connexion… », **et** le
+   bouton devient une annulation pendant la tentative, avec le décompte : le
+   délai seul laissait vingt secondes sans rien à cliquer après avoir tapé la
+   mauvaise adresse. `disconnect()` efface maintenant tout ce qui venait du
+   réseau — vignettes, panneau admin, journal, brouillons, empreinte — et rien
+   d'autre : les réglages audio, le carnet et les volumes appartiennent à la
+   machine, pas au serveur.
+8. ✅ **M32 / M33 / M34** — une entrée `Loading` n'est plus jamais évincée (et
+   quand tout est en chargement, on ne lance rien de plus : le nombre de fils
+   en vol est borné par la taille du cache) ; le décodage PNG a quitté le fil
+   de l'interface pour celui qui vient de télécharger ; une livraison orpheline
+   — changement de serveur en cours de route — est jetée au lieu de créer une
+   texture que rien n'évincera ; et les deux aperçus de vignette ont chacun
+   leur créneau.
 
-*Coût : deux à trois sessions.*
+*Coût réel : une session.*
 
 ## P3 — Le client : ne plus dépenser ce qu'on ne consomme pas
 
