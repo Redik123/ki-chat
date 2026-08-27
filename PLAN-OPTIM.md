@@ -746,28 +746,65 @@ vrai jeu et de vraies oreilles. Le compteur est en place pour ça.
 
 *Coût réel : une session.*
 
-## P5 — Le serveur : payer une fois ce qu'on paie N fois
+## P5 — Le serveur : payer une fois ce qu'on paie N fois ✅ (livré le 2026-08-27)
 
-1. **Sérialiser une fois par message, pas une fois par destinataire.** Le canal
-   porte des `Arc<[u8]>` prêts à écrire. *Gain : d'un facteur N sur le coût de
-   diffusion, avec N = nombre de connectés.*
-2. **Indexer l'historique.** Deux options honnêtes :
-   - **Index d'offsets** en mémoire (`Vec<(ts, offset)>` par salon, construit au
-     démarrage, maintenu à l'écriture) : `before()` devient une recherche
-     binaire plus un `seek`. Reste du Rust pur, aucune dépendance, aucun
-     changement de format sur disque, aucune migration.
-   - **SQLite** (`rusqlite`, libsqlite3 embarquée) : plus de travail, mais ouvre
-     la **recherche plein texte** et les réactions, éditions et réponses sans
-     réinventer un moteur.
+1. ✅ **Sérialiser une fois par message, pas par destinataire.** Le canal
+   porte des `Arc<[u8]>` — du JSON, saut de ligne compris, prêt à écrire. Le
+   garde-fou de longueur (`MAX_LINE`) vivait dans chaque tâche d'écriture ; il
+   est désormais à l'endroit unique où la ligne naît.
 
-   *Recommandation : l'index d'offsets d'abord (une session, gain immédiat,
-   zéro risque), SQLite quand la recherche deviendra une fonctionnalité
-   décidée.*
-3. **Diffusion différentielle du roster** : `MemberUpdate { user_id, … }` au
-   lieu d'un `Members` complet à chaque entrée et sortie de vocal. Le protocole
-   gère déjà les variantes inconnues, donc l'ajout est compatible.
+   **Mesuré : 224,9 µs → 8,6 µs à 30 destinataires, soit 26×**, cohérent avec
+   les 29,7× de P1 (les deux mesures encadrent le bruit de la machine).
 
-*Coût : deux sessions.*
+2. ✅ **Historique indexé.** Un `(horodatage, position)` par message, construit
+   par la lecture que le démarrage faisait déjà, complété par le fil
+   d'écriture — seul à connaître la position d'une ligne qu'il vient d'écrire.
+   `before()` fait une recherche binaire puis lit **les cinquante lignes de la
+   page**, au lieu de relire les quinze mégaoctets du fichier, de désérialiser
+   chaque ligne, de trier et de tout jeter sauf une page.
+
+   Seize octets par message : cent mille messages tiennent dans 1,6 Mo.
+   L'index est **trié**, et ce n'est pas cosmétique — l'horloge murale peut
+   reculer (NTP, machine virtuelle qui se réveille), si bien que le fichier
+   n'est pas nécessairement dans l'ordre du temps.
+
+   > **Un défaut trouvé en écrivant le test, pas le code.** Le cache mémoire,
+   > lui, restait dans l'ordre du *fichier* : une horloge qui recule mélangeait
+   > la pagination des mille derniers messages. C'est un « mineur » de
+   > `AUDIT.md` qui traînait ; `append` insère maintenant au bon endroit, et le
+   > cache est trié au démarrage comme l'index.
+
+   > **Une régression que j'ai introduite puis corrigée.** `read_line` échoue
+   > sur de l'UTF-8 invalide **sans dire combien d'octets il a consommés** : ma
+   > première version abandonnait donc tout le fichier après une ligne abîmée,
+   > là où l'ancien code la sautait. Un test existant l'a attrapée. `read_until`
+   > sur des octets bruts, puis `from_slice` qui valide l'UTF-8 lui-même, fait
+   > les deux : on saute la ligne **et** on sait de combien avancer.
+
+3. ✅ **Roster différentiel.** `MemberUpdate { member }` remplace la liste
+   complète partout où une seule fiche change : connexion, déconnexion, entrée
+   et sortie de vocal. La liste entière ne part plus qu'à la connexion de son
+   destinataire, et aux remaniements qui touchent tout le monde.
+
+   **Mesuré sur `ki-load`** — 20 clients, 14 auditeurs, 20 secondes, trois fois
+   le même essai :
+
+   | | Contrôle reçu | Rosters complets |
+   |---|---|---|
+   | Avant | 968 Kio | 504 |
+   | Fiches sur le vocal seulement | 358 Kio | 117 |
+   | Fiches sur la déconnexion aussi | **134 Kio** | **20** |
+
+   Soit **7,2×**, et exactement un roster par client — celui de sa propre
+   connexion. Le compteur de `ki-load` sert désormais de garde-fou : plus de
+   rosters que de connectés, c'est qu'une diffusion complète subsiste quelque
+   part.
+
+   Un client antérieur ignore `MemberUpdate` — tous les `match` du protocole
+   sont exhaustifs et tolèrent l'inconnu — et voit simplement la présence se
+   rafraîchir moins souvent.
+
+*Coût réel : une session.*
 
 ## P6 — Compilation et livraison
 
@@ -875,8 +912,9 @@ Ce qu'on doit pouvoir mesurer à la fin, et l'état de départ.
 | Verrous pris par le rappel de sortie | 4 à 5 par trame | 0 — *non fait, en attente de la mesure terrain* |
 | Sous-alimentations pendant une partie | ~~non mesuré~~ **mesuré** (⚙ → Relevé) | 0 |
 | Mixage, 10 locuteurs | 23,4 µs/trame — **0,12 % du budget** | *inchangé : rien à gagner* |
-| Diffusion d'un `Members` (30 connectés) | 30 copies + 30 sérialisations | 1 sérialisation |
-| Page d'historique (salon de 100 k messages) | relecture de ~15 Mo | recherche binaire + `seek` |
+| Diffusion d'un `Members` (30 connectés) | ~~30 copies + 30 sérialisations~~ 224,9 µs | **8,6 µs** (26×) — atteint |
+| Contrôle sur le fil, 20 clients qui se connectent | ~~968 Kio~~ | **134 Kio** (7,2×) — atteint |
+| Page d'historique (salon de 100 k messages) | ~~relecture de ~15 Mo~~ | **recherche binaire + `seek`** — atteint |
 | Tests exécutés avant publication | 0 | 132 |
 | Poids d'une mise à jour | 31 Mo | quelques centaines de Ko |
 

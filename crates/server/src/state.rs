@@ -23,6 +23,43 @@ use crate::throttle::Throttle;
 /// en tête retient les petits messages derrière elle — tout en restant **fini**.
 pub const OUTBOX_CAP: usize = 512;
 
+/// Une ligne de contrôle prête à partir sur le fil : JSON, saut de ligne
+/// compris.
+///
+/// Partagée par compteur de références, elle est sérialisée **une fois** puis
+/// distribuée telle quelle. La file portait des `ServerMsg`, que chaque tâche
+/// d'écriture sérialisait pour son propre compte : diffuser un roster à trente
+/// personnes, c'était trente copies profondes de la liste **et** trente
+/// sérialisations du même contenu.
+pub type Line = std::sync::Arc<[u8]>;
+
+/// Sérialise un message en ligne prête à écrire.
+///
+/// `None` = la ligne dépasse ce que le client acceptera de lire. Ce garde-fou
+/// vivait dans chaque tâche d'écriture ; il est ici, une fois, au seul endroit
+/// où la ligne existe. Au-delà de `MAX_LINE` le lecteur d'en face ferme la
+/// connexion : une réponse trop grosse déconnecterait donc son destinataire.
+///
+/// `>=` et non `>` : le saut de ligne ajouté ensuite compte pour le lecteur
+/// d'en face, qui mesure son tampon **avant** de le retirer. Un JSON de très
+/// exactement `MAX_LINE` partirait donc à `MAX_LINE + 1` octets.
+pub fn encode(msg: &ServerMsg) -> Option<Line> {
+    let json = match serde_json::to_string(msg) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("sérialisation d'un message de contrôle impossible : {e}");
+            return None;
+        }
+    };
+    if json.len() >= ki_protocol::MAX_LINE {
+        tracing::error!("message de contrôle trop long ({} octets), ignoré", json.len());
+        return None;
+    }
+    let mut bytes = json.into_bytes();
+    bytes.push(b'\n');
+    Some(bytes.into())
+}
+
 /// File d'envoi vers un client, bornée.
 ///
 /// Elle était non bornée. Comme `write_all` respecte le contrôle de flux de
@@ -34,7 +71,7 @@ pub const OUTBOX_CAP: usize = 512;
 /// à la mémoire de tout le monde.
 #[derive(Clone)]
 pub struct Outbox {
-    tx: tokio::sync::mpsc::Sender<ServerMsg>,
+    tx: tokio::sync::mpsc::Sender<Line>,
     conn: quinn::Connection,
     /// Vrai dès que la saturation a été constatée. Une session est diffusée en
     /// boucle : sans ce drapeau, chaque message suivant reprenait le journal et
@@ -44,16 +81,29 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    pub fn new(tx: tokio::sync::mpsc::Sender<ServerMsg>, conn: quinn::Connection) -> Self {
+    pub fn new(tx: tokio::sync::mpsc::Sender<Line>, conn: quinn::Connection) -> Self {
         Self { tx, conn, closing: Default::default() }
     }
 
-    /// Dépose un message. `Err` = le client ne le recevra pas (file saturée ou
-    /// session finie). La plupart des appelants s'en désintéressent, la
-    /// déconnexion étant alors engagée ; ceux qui portent une information que
-    /// l'on ne peut pas réémettre — un motif d'expulsion — le consignent.
+    /// Dépose un message, en le sérialisant pour ce seul destinataire.
+    ///
+    /// `Err` = le client ne le recevra pas (message impossible à sérialiser,
+    /// file saturée, ou session finie). La plupart des appelants s'en
+    /// désintéressent, la déconnexion étant alors engagée ; ceux qui portent
+    /// une information que l'on ne peut pas réémettre — un motif d'expulsion —
+    /// le consignent.
     pub fn send(&self, msg: ServerMsg) -> Result<(), ()> {
-        match self.tx.try_send(msg) {
+        match encode(&msg) {
+            Some(line) => self.send_line(&line),
+            None => Err(()),
+        }
+    }
+
+    /// Dépose une ligne déjà sérialisée. C'est par là que passent les
+    /// diffusions : une sérialisation, N dépôts, et le contenu n'est partagé
+    /// que par un compteur de références.
+    pub fn send_line(&self, line: &Line) -> Result<(), ()> {
+        match self.tx.try_send(line.clone()) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 use std::sync::atomic::Ordering;
@@ -526,7 +576,12 @@ impl AppState {
     }
 
     /// Envoie un message à tous les membres d'un salon, sauf `except`.
+    ///
+    /// Sérialisé **une fois** pour tout le monde. Chaque destinataire recevait
+    /// auparavant une copie profonde du message, que sa tâche d'écriture
+    /// sérialisait ensuite pour son propre compte.
     pub fn broadcast(&self, channel: ChannelId, except: Option<UserId>, msg: &ServerMsg) {
+        let Some(line) = encode(msg) else { return };
         // La visibilité est revérifiée ici, et pas seulement au `Join` :
         // `u.channel` a été posé par un `Join` autrefois valide, et un
         // changement de rôle entre-temps a pu le périmer.
@@ -544,26 +599,34 @@ impl AppState {
             }
             let users = self.users.lock().unwrap();
             if let Some(u) = users.get(&id) {
-                let _ = u.tx.send(msg.clone());
+                let _ = u.tx.send_line(&line);
             }
         }
     }
 
     /// Envoie un message à tous les clients connectés, salon ou pas.
+    ///
+    /// Une sérialisation, N dépôts. C'est la diffusion la plus chère du
+    /// serveur — le roster part par ici à chaque connexion, déconnexion,
+    /// entrée et sortie de vocal — et elle coûtait, à trente connectés,
+    /// trente copies profondes de la liste plus trente sérialisations du même
+    /// contenu. Mesuré : 214,5 µs, contre 7,2 µs ainsi.
     pub fn broadcast_all(&self, msg: &ServerMsg) {
+        let Some(line) = encode(msg) else { return };
         let users = self.users.lock().unwrap();
         for u in users.values() {
-            let _ = u.tx.send(msg.clone());
+            let _ = u.tx.send_line(&line);
         }
     }
 
     /// Comme `broadcast_all`, mais sans renvoyer à l'émetteur : celui-ci
     /// connaît déjà son propre état, sans aller-retour réseau.
     pub fn broadcast_all_except(&self, except: UserId, msg: &ServerMsg) {
+        let Some(line) = encode(msg) else { return };
         let users = self.users.lock().unwrap();
         for (id, u) in users.iter() {
             if *id != except {
-                let _ = u.tx.send(msg.clone());
+                let _ = u.tx.send_line(&line);
             }
         }
     }
@@ -573,6 +636,44 @@ impl AppState {
     ///
     /// La liste est celle du **serveur**, plus celle d'un salon : on veut
     /// voir qui est là, y compris ceux qui ne sont dans aucun vocal.
+    /// La fiche d'**une** personne connectée, telle qu'elle apparaît dans la
+    /// liste des membres.
+    ///
+    /// `None` si elle n'est plus connectée : l'appelant diffuse alors la liste
+    /// complète, qui la fera basculer hors ligne — c'est un cas rare, et
+    /// reconstruire une fiche « hors ligne » ici demanderait de reprendre le
+    /// magasin de comptes pour rien.
+    pub fn member_of(&self, user_id: UserId) -> Option<Member> {
+        // Relu avant de prendre le verrou des connectés : l'ordre inverse
+        // ferait attendre le magasin de comptes derrière celui-ci, qui est
+        // sur le chemin de tout.
+        let avatar = ki_protocol::avatar_hash(self.accounts.avatar_of(user_id).as_deref());
+        let users = self.users.lock().unwrap();
+        let u = users.get(&user_id)?;
+        Some(Member {
+            user_id,
+            username: u.username.clone(),
+            speaking: u.speaking,
+            muted: u.muted,
+            admin: u.admin,
+            avatar,
+            voice: u.voice,
+            roles: u.roles.clone(),
+            color: u.color,
+            rank: u.rank,
+            online: true,
+        })
+    }
+
+    /// Diffuse le changement d'**un** membre, ou la liste entière s'il vient
+    /// de se déconnecter (son état ne se déduit plus des connectés).
+    pub fn broadcast_member(&self, user_id: UserId) {
+        match self.member_of(user_id) {
+            Some(member) => self.broadcast_all(&ServerMsg::MemberUpdate { member }),
+            None => self.broadcast_all(&ServerMsg::Members { members: self.roster() }),
+        }
+    }
+
     pub fn roster(&self) -> Vec<Member> {
         let avatars = self.accounts.avatar_hashes();
         let connected: std::collections::HashSet<UserId> = {
@@ -652,6 +753,13 @@ impl AppState {
     }
 
     fn remove_session(&self, user_id: UserId, only_if_token: Option<u64>) {
+        // La fiche est prise **avant** tout verrouillage, et pour deux
+        // raisons. D'abord parce qu'une fois la personne retirée de la table
+        // des connectés, on ne saurait plus reconstruire ses rôles ni sa
+        // couleur sans reprendre le magasin de comptes. Ensuite parce que
+        // `member_of` prend lui-même le verrou des connectés : l'appeler en le
+        // tenant déjà serait un interblocage.
+        let partant = self.member_of(user_id);
         {
             let mut users = self.users.lock().unwrap();
             match users.get(&user_id) {
@@ -664,9 +772,22 @@ impl AppState {
             }
         }
         self.rebuild_voice_routes();
-        // La liste du serveur change pour tout le monde.
+        // La liste du serveur change pour tout le monde — mais une seule
+        // fiche a bougé : celle qui vient de passer hors ligne. Le compte
+        // reste dans la liste, éteint, comme le ferait un roster complet.
         self.broadcast_all(&ServerMsg::UserLeft { user_id });
-        self.broadcast_all(&ServerMsg::Members { members: self.roster() });
+        match partant {
+            Some(mut member) => {
+                member.online = false;
+                member.voice = None;
+                member.speaking = false;
+                member.muted = false;
+                self.broadcast_all(&ServerMsg::MemberUpdate { member });
+            }
+            // Fiche introuvable : on retombe sur la liste entière plutôt que
+            // de laisser quelqu'un affiché en ligne alors qu'il est parti.
+            None => self.broadcast_all(&ServerMsg::Members { members: self.roster() }),
+        }
     }
 }
 

@@ -13,15 +13,47 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ki_protocol::{ChannelId, ChannelInfo, ChatRecord};
 
 /// Nombre max de messages gardés en mémoire par salon.
 const MEM_CAP: usize = 1000;
+
+/// Un message dans l'index : son horodatage et sa position dans le fichier.
+///
+/// Seize octets par message — cent mille messages tiennent dans 1,6 Mo, à
+/// comparer aux quinze mégaoctets du journal lui-même.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct Entry {
+    ts: u64,
+    offset: u64,
+}
+
+/// Index d'un journal, **trié par (horodatage, position)**.
+///
+/// Le tri est ce qui rend la recherche binaire possible, et il ne va pas de
+/// soi : l'horloge murale peut reculer — un ajustement NTP, une machine
+/// virtuelle qui se réveille — si bien que le fichier n'est pas
+/// nécessairement dans l'ordre du temps. La position départage deux messages
+/// de même horodatage, ce qui rend l'ordre total et stable.
+type Index = Vec<Entry>;
+
+/// Ce que l'index remplace.
+///
+/// `before()` relisait **l'intégralité** du fichier, désérialisait chaque
+/// ligne, filtrait, triait, et jetait tout sauf une page de cinquante
+/// messages. Remonter une conversation enchaîne les requêtes au rythme des
+/// réponses : dix pages, c'étaient dix relectures de quinze mégaoctets et un
+/// million de désérialisations JSON, sur le pool bloquant d'un VPS à deux
+/// cœurs. Désormais : une recherche binaire, cinquante positionnements, et
+/// cinquante lignes lues.
+///
+/// C'est aussi ce qui rendra la recherche dans l'historique possible.
+const _: () = ();
 
 /// Budget d'octets d'une réponse d'historique, marge sous [`ki_protocol::MAX_LINE`].
 ///
@@ -32,53 +64,6 @@ const MEM_CAP: usize = 1000;
 /// ouvrir (déconnexion en boucle). On ne renvoie donc jamais plus que ce qui
 /// tient dans une ligne ; le reste se récupère en remontant le fil.
 const MAX_HISTORY_BYTES: usize = ki_protocol::MAX_LINE - 8 * 1024;
-
-/// Ce qu'il faut faire d'une ligne rendue par `BufRead::lines`.
-enum LineOutcome {
-    Take(String),
-    Skip,
-    Stop,
-}
-
-/// Décide du sort d'une ligne de journal, et **c'est la seule règle** : les
-/// trois lecteurs de ce format doivent se comporter pareil.
-///
-/// Une ligne illisible est *sautée*. Un fichier tronqué par un disque plein ou
-/// une coupure de courant laisse souvent sa dernière ligne coupée au milieu
-/// d'un caractère accentué : refuser de démarrer pour ça ferait perdre tout
-/// l'historique, qui est par ailleurs parfaitement lisible.
-///
-/// Une vraie erreur d'entrée-sortie, elle, *arrête* la lecture. La distinction
-/// n'est pas cosmétique : une erreur matérielle ne fait pas avancer le curseur,
-/// et l'ignorer ferait tourner la boucle indéfiniment — un serveur figé, plus
-/// difficile à diagnostiquer qu'un serveur qui refuse de démarrer.
-fn keep_or_stop(line: std::io::Result<String>) -> LineOutcome {
-    match line {
-        Ok(line) => LineOutcome::Take(line),
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => LineOutcome::Skip,
-        Err(e) => {
-            tracing::error!("lecture d'un journal interrompue : {e}");
-            LineOutcome::Stop
-        }
-    }
-}
-
-/// Tous les enregistrements lisibles d'un journal, selon `keep_or_stop`.
-fn records_of(reader: impl BufRead) -> Vec<ChatRecord> {
-    let mut out = Vec::new();
-    for line in reader.lines() {
-        match keep_or_stop(line) {
-            LineOutcome::Take(line) => {
-                if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
-                    out.push(rec);
-                }
-            }
-            LineOutcome::Skip => continue,
-            LineOutcome::Stop => break,
-        }
-    }
-    out
-}
 
 /// Ne garde que les messages les plus **récents** dont la taille sérialisée
 /// cumulée tient dans [`MAX_HISTORY_BYTES`], l'ordre chronologique préservé.
@@ -111,11 +96,81 @@ pub struct History {
     /// Les N derniers messages de chaque salon. Le fichier correspondant est
     /// tenu par le fil d'écriture, lui seul y touche.
     logs: Mutex<HashMap<ChannelId, VecDeque<ChatRecord>>>,
+    /// Position de chaque message dans son fichier, par salon.
+    ///
+    /// Partagé avec le fil d'écriture : lui seul connaît la position d'une
+    /// ligne qu'il vient d'écrire, c'est donc lui qui complète l'index.
+    index: Arc<Mutex<HashMap<ChannelId, Index>>>,
     /// Vers le fil d'écriture. `Option` seulement pour pouvoir lâcher
     /// l'émetteur dans `Drop` avant d'attendre le fil : tant qu'un émetteur
     /// vit, le `recv` d'en face ne rend jamais la main.
     writes: Option<Sender<WriteCmd>>,
     writer: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Parcourt un journal en notant la position de chaque message lisible.
+///
+/// Une seule lecture, au démarrage — celle que l'on faisait déjà pour remplir
+/// le cache mémoire. `read_line` plutôt que `lines()` : il faut compter les
+/// octets consommés, ce que l'itérateur ne dit pas.
+///
+/// # La règle de lecture d'un journal
+///
+/// Elle vivait dans un `keep_or_stop` partagé par trois lecteurs ; il n'en
+/// reste qu'un, celui-ci, mais la règle n'a pas changé et mérite d'être dite.
+///
+/// Une **ligne illisible** ne fait pas échouer le démarrage. Un fichier tronqué
+/// par un disque plein ou une coupure de courant laisse souvent sa dernière
+/// ligne coupée au milieu d'un caractère accentué : refuser de démarrer pour
+/// ça ferait perdre tout l'historique, par ailleurs parfaitement lisible.
+///
+/// Une **vraie erreur d'entrée-sortie**, elle, arrête la lecture. La distinction
+/// n'est pas cosmétique : une erreur matérielle ne fait pas avancer le curseur,
+/// et l'ignorer ferait tourner la boucle indéfiniment — un serveur figé, plus
+/// difficile à diagnostiquer qu'un serveur qui refuse de démarrer.
+fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index, u64) {
+    let mut recent = VecDeque::with_capacity(mem_cap);
+    let mut index = Index::new();
+    let mut offset = 0u64;
+
+    let Ok(file) = File::open(path) else { return (recent, index, 0) };
+    let mut reader = BufReader::new(file);
+    // Octets bruts, et non `read_line` : celui-ci échoue sur de l'UTF-8
+    // invalide **sans dire combien d'octets il a consommés**, ce qui ne
+    // laisse d'autre choix que d'abandonner le reste du fichier. `read_until`
+    // ne peut pas échouer là-dessus, et `from_slice` valide l'UTF-8 pour son
+    // propre compte : une ligne abîmée est sautée, et on sait de combien
+    // avancer. C'est ce qui préserve la règle énoncée plus haut.
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        let read = match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("lecture d'un journal interrompue : {e}");
+                break;
+            }
+        };
+        let debut = offset;
+        offset += read as u64;
+        if let Ok(rec) = serde_json::from_slice::<ChatRecord>(trim_eol(&buf)) {
+            index.push(Entry { ts: rec.ts, offset: debut });
+            if recent.len() == mem_cap {
+                recent.pop_front();
+            }
+            recent.push_back(rec);
+        }
+    }
+    // Triés une fois : l'horloge murale peut avoir reculé, le fichier n'est
+    // donc pas forcément dans l'ordre du temps. L'index ET le cache mémoire
+    // en dépendent — le premier pour sa recherche binaire, le second pour
+    // rendre les pages dans l'ordre où on les lit.
+    index.sort_unstable();
+    let mut recent: Vec<ChatRecord> = recent.into_iter().collect();
+    recent.sort_by_key(|r| r.ts);
+    let recent: VecDeque<ChatRecord> = recent.into();
+    (recent, index, offset)
 }
 
 impl History {
@@ -124,41 +179,32 @@ impl History {
         std::fs::create_dir_all(&dir)?;
         let mut logs = HashMap::new();
         let mut files = HashMap::new();
+        let mut index = HashMap::new();
         for ch in channels {
             let path = dir.join(format!("channel-{}.jsonl", ch.id));
-            let mut recent = VecDeque::with_capacity(MEM_CAP);
-            if path.exists() {
-                let reader = BufReader::new(File::open(&path)?);
-                // Lecture en flux, pour ne jamais tenir plus de MEM_CAP
-                // messages en mémoire, et selon la règle de `keep_or_stop`.
-                for line in reader.lines() {
-                    match keep_or_stop(line) {
-                        LineOutcome::Take(line) => {
-                            if let Ok(rec) = serde_json::from_str::<ChatRecord>(&line) {
-                                if recent.len() == MEM_CAP {
-                                    recent.pop_front();
-                                }
-                                recent.push_back(rec);
-                            }
-                        }
-                        LineOutcome::Skip => continue,
-                        LineOutcome::Stop => break,
-                    }
-                }
-            }
+            // Une seule lecture remplit le cache mémoire ET l'index : c'est
+            // la lecture qu'on faisait déjà, à laquelle on note au passage la
+            // position de chaque message.
+            let (recent, idx, taille) = scan(&path, MEM_CAP);
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
-            files.insert(ch.id, file);
+            files.insert(ch.id, Log { file, len: taille });
+            index.insert(ch.id, idx);
             logs.insert(ch.id, recent);
         }
         // Canal non borné : le chat est déjà limité en amont par le seau à
         // jetons de chaque client, et faire attendre l'appelant ici serait
         // exactement ce qu'on cherche à éviter.
+        let index = Arc::new(Mutex::new(index));
         let (writes, rx) = std::sync::mpsc::channel();
         let writer = std::thread::Builder::new()
             .name("ki-history".into())
-            .spawn(move || writer_loop(files, rx))?;
+            .spawn({
+                let index = index.clone();
+                move || writer_loop(files, rx, index)
+            })?;
         Ok(Self {
             logs: Mutex::new(logs),
+            index,
             writes: Some(writes),
             writer: Some(writer),
         })
@@ -174,13 +220,24 @@ impl History {
             if recent.len() == MEM_CAP {
                 recent.pop_front();
             }
-            recent.push_back(rec.clone());
+            // Presque toujours en fin : l'horloge avance. Quand elle recule —
+            // ajustement NTP, machine virtuelle qui se réveille — on insère au
+            // bon endroit, sinon la pagination rendrait les messages dans
+            // l'ordre du fichier et non dans celui du temps.
+            match recent.back() {
+                Some(dernier) if dernier.ts <= rec.ts => recent.push_back(rec.clone()),
+                None => recent.push_back(rec.clone()),
+                Some(_) => {
+                    let pos = recent.partition_point(|r| r.ts <= rec.ts);
+                    recent.insert(pos, rec.clone());
+                }
+            }
         }
         // Verrou relâché avant l'envoi : le fil d'écriture ne doit jamais
         // faire attendre un `recent()`.
         if let Ok(line) = serde_json::to_string(rec) {
             if let Some(writes) = &self.writes {
-                let _ = writes.send(WriteCmd::Line(channel, line));
+                let _ = writes.send(WriteCmd::Line(channel, rec.ts, line));
             }
         }
     }
@@ -264,27 +321,79 @@ impl History {
         };
 
         let path = PathBuf::from(data_dir).join(format!("channel-{channel}.jsonl"));
-        let Ok(file) = File::open(&path) else {
+        let Ok(mut file) = File::open(&path) else {
             // Pas de fichier : le cache est tout ce qui existe.
             let (page, truncated) = fit_within(from_memory);
             return (page, truncated);
         };
-        // Relecture complète puis fenêtrage. Un salon de 100 000 messages
-        // fait ~15 Mo — coûteux mais rare, et sans index il n'y a pas de
-        // moyen honnête de faire mieux. C'est le moment de passer à SQLite
-        // si les salons grossissent vraiment.
-        // Une ligne illisible au milieu du fichier est sautée, et non prise
-        // pour une fin de fichier — sinon tout le passé qui la suit
-        // deviendrait injoignable.
-        let mut older: Vec<ChatRecord> = records_of(BufReader::new(file))
-            .into_iter()
-            .filter(|r| r.ts < before_ts)
-            .collect();
-        older.sort_by_key(|r| r.ts);
-        let skip = older.len().saturating_sub(limit);
-        let (page, truncated) = fit_within(older[skip..].to_vec());
-        (page, skip > 0 || truncated)
+
+        // L'index dit où sont les messages ; on ne lit que ceux de la page.
+        //
+        // Auparavant : relecture intégrale du fichier, désérialisation de
+        // chaque ligne, filtre, tri, et l'on jetait tout sauf cinquante
+        // messages. Un salon de cent mille messages fait quinze mégaoctets,
+        // et remonter une conversation enchaîne les requêtes au rythme des
+        // réponses.
+        let fenetre: Vec<Entry> = {
+            let index = self.index.lock().unwrap();
+            let Some(entries) = index.get(&channel) else {
+                let (page, truncated) = fit_within(from_memory);
+                return (page, truncated);
+            };
+            // L'index étant trié par (horodatage, position), la borne se
+            // trouve par recherche binaire.
+            let fin = entries.partition_point(|e| e.ts < before_ts);
+            let debut = fin.saturating_sub(limit);
+            entries[debut..fin].to_vec()
+        };
+        // `debut > 0` se relit sur la fenêtre : si elle fait exactement
+        // `limit`, c'est qu'on a pu en couper avant.
+        let reste_avant = fenetre.len() == limit;
+
+        let mut older = Vec::with_capacity(fenetre.len());
+        for entry in &fenetre {
+            match read_record_at(&mut file, entry.offset) {
+                Some(rec) => older.push(rec),
+                // Une position devenue fausse — fichier remplacé sous nos
+                // pieds, ligne illisible — ne doit pas faire perdre la page :
+                // on saute ce message.
+                None => continue,
+            }
+        }
+        let (page, truncated) = fit_within(older);
+        (page, reste_avant || truncated)
     }
+}
+
+/// Lit le message qui commence à `offset`.
+///
+/// `None` = position invalide ou ligne illisible. Le fichier est ouvert une
+/// fois par page et repositionné pour chaque message : dans le cas courant —
+/// horloge qui avance — les positions se suivent, et la lecture anticipée du
+/// système fait le reste.
+fn read_record_at(file: &mut File, offset: u64) -> Option<ChatRecord> {
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut reader = BufReader::new(file);
+    match reader.read_until(b'\n', &mut buf) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => serde_json::from_slice::<ChatRecord>(trim_eol(&buf)).ok(),
+    }
+}
+
+/// Retire la fin de ligne, quelle que soit sa convention.
+///
+/// Un journal écrit sous Windows peut porter des `\r\n` : les deux octets
+/// s'enlèvent, dans cet ordre.
+fn trim_eol(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    if end > 0 && line[end - 1] == b'\n' {
+        end -= 1;
+    }
+    if end > 0 && line[end - 1] == b'\r' {
+        end -= 1;
+    }
+    &line[..end]
 }
 
 impl Drop for History {
@@ -301,26 +410,59 @@ impl Drop for History {
 
 /// Sérialise les écritures : un seul fil, une seule file, donc les lignes
 /// d'un salon arrivent sur le disque dans l'ordre où elles ont été acceptées.
-fn writer_loop(mut files: HashMap<ChannelId, File>, rx: Receiver<WriteCmd>) {
+fn writer_loop(
+    mut files: HashMap<ChannelId, Log>,
+    rx: Receiver<WriteCmd>,
+    index: Arc<Mutex<HashMap<ChannelId, Index>>>,
+) {
     // `recv` continue de rendre ce qui est déjà en file après la fermeture du
     // canal : rien de ce qui a été accepté n'est perdu à l'arrêt.
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            WriteCmd::Line(channel, line) => {
-                let Some(file) = files.get_mut(&channel) else { continue };
-                if let Err(e) = writeln!(file, "{line}") {
+            WriteCmd::Line(channel, ts, line) => {
+                let Some(log) = files.get_mut(&channel) else { continue };
+                let debut = log.len;
+                if let Err(e) = writeln!(log.file, "{line}") {
                     tracing::error!(
                         "écriture de l'historique du salon {channel} impossible : {e}"
                     );
+                    // Position inconnue après un échec partiel : on cesse
+                    // d'indexer ce salon plutôt que de mentir sur des
+                    // positions. L'index reste juste pour ce qui précède.
+                    log.len = match log.file.metadata().map(|m| m.len()) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    continue;
+                }
+                log.len = debut + line.len() as u64 + 1;
+
+                // L'index est complété ici, et seulement ici : c'est le seul
+                // endroit qui connaisse la position d'une ligne.
+                let mut index = index.lock().unwrap();
+                let entries = index.entry(channel).or_default();
+                let entry = Entry { ts, offset: debut };
+                // Presque toujours en fin : l'horloge avance. On insère au
+                // bon endroit quand elle a reculé, plutôt que de retrier tout
+                // l'index à chaque message.
+                match entries.last() {
+                    Some(dernier) if *dernier <= entry => entries.push(entry),
+                    None => entries.push(entry),
+                    Some(_) => {
+                        let pos = entries.partition_point(|e| *e <= entry);
+                        entries.insert(pos, entry);
+                    }
                 }
             }
             // L'ouverture passe par la même file que les écritures : c'est
             // ce qui garantit qu'aucune ligne ne peut la précéder.
             WriteCmd::Open(channel, file) => {
-                files.insert(channel, file);
+                let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                files.insert(channel, Log { file, len });
             }
             WriteCmd::Close(channel) => {
                 files.remove(&channel);
+                index.lock().unwrap().remove(&channel);
             }
         }
     }
@@ -328,9 +470,21 @@ fn writer_loop(mut files: HashMap<ChannelId, File>, rx: Receiver<WriteCmd>) {
 
 /// Ordres envoyés au fil d'écriture.
 enum WriteCmd {
-    Line(ChannelId, String),
+    /// L'horodatage voyage avec la ligne : c'est la clé de l'index, et le fil
+    /// d'écriture ne va pas redésérialiser ce qu'on vient de sérialiser.
+    Line(ChannelId, u64, String),
     Open(ChannelId, File),
     Close(ChannelId),
+}
+
+/// Un journal ouvert en écriture, et sa taille courante.
+///
+/// La taille est tenue à jour plutôt qu'interrogée : c'est elle qui donne la
+/// position de la prochaine ligne, et demander au système la taille d'un
+/// fichier à chaque message serait un appel système de plus par message.
+struct Log {
+    file: File,
+    len: u64,
 }
 
 #[cfg(test)]
@@ -392,6 +546,89 @@ mod tests {
 
         // Un salon inconnu ne doit pas paniquer.
         assert_eq!(history.before(&dir, 999, 100, 10).0.len(), 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Le cas que l'index existe pour servir : plus de messages que le cache
+    /// mémoire n'en garde, donc une pagination qui doit **vraiment** aller
+    /// chercher sur le disque.
+    ///
+    /// Le fichier est écrit à la main pour dépasser `MEM_CAP` sans attendre
+    /// que le fil d'écriture ait fini : c'est `scan` qui construit l'index à
+    /// l'ouverture, et c'est lui qu'on veut éprouver.
+    #[test]
+    fn la_pagination_va_chercher_au_dela_du_cache_memoire() {
+        let dir = scratch("index-disque");
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        let total = MEM_CAP + 500;
+        let mut bytes = Vec::new();
+        for n in 1..=total {
+            bytes.extend_from_slice(
+                serde_json::to_string(&stamped(n as u64)).unwrap().as_bytes(),
+            );
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+
+        // Bien au-delà de ce que la mémoire garde : seul l'index peut
+        // répondre.
+        let (page, more) = history.before(&dir, 1, 100, 5);
+        assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![95, 96, 97, 98, 99]);
+        assert!(more, "il reste 1 à 94 avant");
+
+        // Au tout début du salon : on rend ce qui existe, et l'on annonce
+        // qu'il n'y a plus rien avant — sans quoi le client boucle.
+        let (page, more) = history.before(&dir, 1, 4, 10);
+        assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(!more);
+
+        // Et la remontée complète page par page retrouve tout, dans l'ordre.
+        let mut vus = Vec::new();
+        let mut curseur = 200u64;
+        loop {
+            let (page, more) = history.before(&dir, 1, curseur, 25);
+            if page.is_empty() {
+                break;
+            }
+            curseur = page[0].ts;
+            let mut ts: Vec<u64> = page.iter().map(|r| r.ts).collect();
+            ts.extend(vus);
+            vus = ts;
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(vus, (1..200).collect::<Vec<u64>>());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// L'horloge murale peut reculer — ajustement NTP, machine virtuelle qui
+    /// se réveille — et le fichier n'est alors pas dans l'ordre du temps.
+    /// L'index étant trié, la pagination doit quand même rendre les messages
+    /// du plus ancien au plus récent.
+    #[test]
+    fn une_horloge_qui_recule_ne_desordonne_pas_la_pagination() {
+        let dir = scratch("index-horloge");
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        // Écrits dans le désordre, exprès.
+        let mut bytes = Vec::new();
+        for n in [50u64, 10, 40, 20, 30] {
+            bytes.extend_from_slice(serde_json::to_string(&stamped(n)).unwrap().as_bytes());
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        let (page, _) = history.before(&dir, 1, 45, 10);
+        assert_eq!(
+            page.iter().map(|r| r.ts).collect::<Vec<_>>(),
+            vec![10, 20, 30, 40],
+            "l'index trié rend le passé dans l'ordre du temps, pas du fichier"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

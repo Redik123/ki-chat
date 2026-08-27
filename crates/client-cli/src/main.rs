@@ -128,6 +128,19 @@ async fn main() -> anyhow::Result<()> {
                     let names: Vec<_> = members.iter().map(|m| m.username.as_str()).collect();
                     println!("* présents : {}", names.join(", "));
                 }
+                ServerMsg::MemberUpdate { member } => {
+                    // La CLI ne tient pas de liste : elle annonce le
+                    // changement et passe. La liste complète, elle, arrive à
+                    // la connexion et aux remaniements de rôles.
+                    println!(
+                        "* {} : {}",
+                        member.username,
+                        match member.voice {
+                            Some(c) => format!("vocal {c}"),
+                            None => "hors vocal".into(),
+                        }
+                    );
+                }
                 ServerMsg::VoiceState { user_id, speaking, muted } => {
                     println!(
                         "* utilisateur {user_id} {}",

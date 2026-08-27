@@ -1061,6 +1061,36 @@ impl KiApp {
     /// C'est un écart qu'on mesure, et non `UserJoined`/`UserLeft` : ces
     /// deux-là portent sur le serveur entier, alors que seul mon propre
     /// salon vocal m'intéresse ici.
+    /// Ce qui suit tout changement de la liste des membres, qu'il vienne
+    /// d'un roster complet ou d'une seule fiche.
+    ///
+    /// **Le serveur fait foi sur notre propre présence en vocal**, sauf
+    /// pendant la brève fenêtre qui suit un clic : la liste peut avoir été
+    /// produite avant qu'il ne traite notre demande, et la suivre nous
+    /// remettrait dans le salon qu'on vient de quitter. Dès qu'elle
+    /// correspond à ce qu'on voulait, la fenêtre se referme ; si elle expire
+    /// sans jamais correspondre — refus, message perdu — c'est le serveur qui
+    /// reprend la main, ce qui évite tout affichage figé.
+    fn after_roster_change(&mut self) {
+        if let Some(me) = self.members.iter().find(|m| Some(m.user_id) == self.my_id) {
+            let mine = me.voice;
+            let waiting = self.voice_intent.is_some()
+                && std::time::Instant::now() < self.voice_intent_until;
+            match self.voice_intent {
+                Some(want) if mine == want => {
+                    self.voice_intent = None;
+                    self.voice_channel = mine;
+                }
+                _ if waiting => {}
+                _ => {
+                    self.voice_intent = None;
+                    self.voice_channel = mine;
+                }
+            }
+        }
+        self.update_voice_peers();
+    }
+
     fn update_voice_peers(&mut self) {
         let Some(mine) = self.voice_channel else {
             self.prev_voice_peers.clear();
@@ -1743,32 +1773,35 @@ impl KiApp {
                     .iter()
                     .map(|m| (m.user_id, theme::member_color(m.color, &m.username)))
                     .collect();
-                // Le serveur fait foi sur notre propre présence en vocal.
-                //
-                // Sauf pendant la brève fenêtre qui suit un clic : la liste
-                // peut avoir été produite avant qu'il ne traite notre demande,
-                // et la suivre nous remettrait dans le salon qu'on vient de
-                // quitter. Dès qu'elle correspond à ce qu'on voulait, la
-                // fenêtre se referme ; si elle expire sans jamais correspondre
-                // — refus, message perdu — c'est le serveur qui reprend la
-                // main, ce qui évite tout affichage figé.
-                if let Some(me) = self.members.iter().find(|m| Some(m.user_id) == self.my_id) {
-                    let mine = me.voice;
-                    let waiting = self.voice_intent.is_some()
-                        && std::time::Instant::now() < self.voice_intent_until;
-                    match self.voice_intent {
-                        Some(want) if mine == want => {
-                            self.voice_intent = None;
-                            self.voice_channel = mine;
-                        }
-                        _ if waiting => {}
-                        _ => {
-                            self.voice_intent = None;
-                            self.voice_channel = mine;
-                        }
+                self.after_roster_change();
+            }
+            ServerMsg::MemberUpdate { member } => {
+                // Une seule fiche a changé : on la fusionne au lieu de
+                // remplacer la liste. Le serveur envoyait le roster entier —
+                // tous les comptes non bannis, pas seulement les connectés —
+                // à chaque entrée et sortie de vocal.
+                let mut member = member;
+                member.username = safe_name(&member.username);
+                self.fetch_missing_avatars(std::slice::from_ref(&member));
+                self.author_colors.insert(
+                    member.user_id,
+                    theme::member_color(member.color, &member.username),
+                );
+                match self.members.iter_mut().find(|m| m.user_id == member.user_id) {
+                    Some(place) => *place = member,
+                    None => {
+                        // Nouveau venu : inséré à sa place, la liste étant
+                        // triée par pseudo comme le serveur la produit. La
+                        // retrier entièrement ferait le travail qu'on vient
+                        // d'éviter.
+                        let cle = member.username.to_lowercase();
+                        let pos = self
+                            .members
+                            .partition_point(|m| m.username.to_lowercase() < cle);
+                        self.members.insert(pos, member);
                     }
                 }
-                self.update_voice_peers();
+                self.after_roster_change();
             }
             ServerMsg::UserJoined { user_id, .. } => {
                 // La liste complète suit immédiatement dans un `Members` :

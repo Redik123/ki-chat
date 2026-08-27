@@ -251,7 +251,7 @@ async fn handle_connection(
     // --- Phase 2 : enregistrement + tâches ---
     use rand::Rng;
     let voice_token: u64 = rand::rng().random();
-    let (raw_tx, mut rx) = mpsc::channel::<ServerMsg>(crate::state::OUTBOX_CAP);
+    let (raw_tx, mut rx) = mpsc::channel::<crate::state::Line>(crate::state::OUTBOX_CAP);
     let tx = crate::state::Outbox::new(raw_tx, conn.clone());
     // Les permissions se déduisent des rôles une fois pour toutes ici, et
     // sont rafraîchies à chaque changement : le chemin chaud n'a alors plus
@@ -306,31 +306,25 @@ async fn handle_connection(
     tracing::info!("connexion : {username} (id {user_id})");
     // La liste du serveur vient de changer, pour tout le monde.
     state.broadcast_all(&ServerMsg::UserJoined { user_id, username: username.clone() });
-    state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+    // Le nouveau venu reçoit la liste **entière** : il n'a rien à mettre à
+    // jour, il part de rien. Les autres n'ont besoin que de la fiche qui
+    // change — la leur n'a pas bougé, ni celle des deux cents comptes hors
+    // ligne que porte le roster.
+    let _ = tx.send(ServerMsg::Members { members: state.roster() });
+    if let Some(member) = state.member_of(user_id) {
+        state.broadcast_all_except(user_id, &ServerMsg::MemberUpdate { member });
+    }
 
-    // Tâche d'écriture : sérialise les ServerMsg vers le flux de contrôle.
+    // Tâche d'écriture : verse sur le flux de contrôle des lignes **déjà
+    // prêtes**.
+    //
+    // Elle sérialisait chaque message pour son propre compte, si bien qu'une
+    // diffusion à trente personnes produisait trente fois le même JSON. La
+    // sérialisation — et le garde-fou de longueur qui l'accompagne — a
+    // déménagé dans `state::encode`, à l'endroit unique où la ligne naît.
     let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let Ok(mut json) = serde_json::to_string(&msg) else { continue };
-            // Garde-fou : ne jamais émettre une ligne que le client refusera de
-            // lire. Au-delà de MAX_LINE il ferme la connexion — une réponse
-            // trop grosse déconnecterait donc son destinataire. Les réponses
-            // d'historique sont déjà bornées à la source ; ceci couvre tout le
-            // reste (journal d'audit, état admin) plutôt que de risquer une
-            // déconnexion silencieuse.
-            // `>=` et non `>` : le saut de ligne ajouté juste après compte
-            // pour le lecteur d'en face, qui mesure le tampon **avant** de le
-            // retirer. Un JSON de très exactement MAX_LINE partirait donc à
-            // MAX_LINE + 1 octets et ferait tomber la connexion.
-            if json.len() >= ki_protocol::MAX_LINE {
-                tracing::error!(
-                    "message de contrôle trop long ({} octets), ignoré",
-                    json.len()
-                );
-                continue;
-            }
-            json.push('\n');
-            if send.write_all(json.as_bytes()).await.is_err() {
+        while let Some(line) = rx.recv().await {
+            if send.write_all(&line).await.is_err() {
                 break;
             }
         }
@@ -707,9 +701,10 @@ fn handle_msg(
                 u.speaking = false;
             }
             state.rebuild_voice_routes();
-            // La présence vocale intéresse tout le serveur : chacun voit
-            // qui est où dans la liste de droite.
-            state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+            // La présence vocale intéresse tout le serveur : chacun voit qui
+            // est où dans la liste de droite. Mais **une seule** personne a
+            // bougé — inutile de rediffuser tous les comptes du serveur.
+            state.broadcast_member(user_id);
         }
         ClientMsg::LeaveVoice => {
             // **Jamais** limité. Refuser une sortie laissait la personne dans
@@ -729,7 +724,7 @@ fn handle_msg(
             };
             if was_in_voice {
                 state.rebuild_voice_routes();
-                state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+                state.broadcast_member(user_id);
             }
         }
         ClientMsg::Chat { text } => {

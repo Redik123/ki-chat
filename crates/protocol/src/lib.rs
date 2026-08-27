@@ -354,8 +354,25 @@ pub enum ServerMsg {
         #[serde(default)]
         muted: bool,
     },
-    /// Liste des membres présents dans le salon rejoint.
+    /// Liste complète des membres. Envoyée à la connexion, et chaque fois
+    /// qu'un changement touche potentiellement tout le monde (rôles remaniés,
+    /// salon supprimé).
     Members { members: Vec<Member> },
+    /// **Un seul** membre a changé : il vient de se connecter, de se
+    /// déconnecter, d'entrer ou de sortir d'un vocal. Le client l'insère ou
+    /// le remplace dans sa liste, sur la foi de `user_id`.
+    ///
+    /// C'est la raison d'être de ce message. La liste entière partait à
+    /// chaque bascule, et elle porte **tous les comptes non bannis** — pas
+    /// seulement les connectés. Un serveur de trente habitués qui a vu passer
+    /// deux cents personnes en un an rediffusait donc deux cents membres,
+    /// trente fois, à chaque entrée en vocal. Mesuré à vingt clients qui se
+    /// connectent : 504 rosters, près d'un mégaoctet de contrôle.
+    ///
+    /// Un client antérieur ignore ce message — tous les `match` du protocole
+    /// sont exhaustifs et tolèrent l'inconnu — et il verra simplement la
+    /// présence se rafraîchir un peu moins souvent, aux `Members` complets.
+    MemberUpdate { member: Member },
     /// Erreur (auth refusée, salon inconnu, ...).
     Error { message: String },
     /// Le destinataire vient d'être expulsé par un admin.

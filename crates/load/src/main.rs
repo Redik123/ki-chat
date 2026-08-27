@@ -22,10 +22,11 @@
 //!
 //! # Ce qu'on regarde
 //!
-//! - **le contrôle reçu** : c'est le chiffre de P5.1. Chaque entrée en vocal
-//!   fait rediffuser le roster complet à tout le monde ; à trente, la
-//!   montée en charge se paie en N². Les octets de JSON comptés ici sont
-//!   exactement ce que `broadcast_all` produit.
+//! - **le contrôle reçu** : chaque entrée en vocal fait rediffuser le roster
+//!   complet à tout le monde ; à trente, la montée en charge se paie en N².
+//!   Le serveur ne le sérialise plus qu'une fois (P5.1), mais les octets
+//!   comptés ici partent toujours N fois sur le fil : c'est le chiffre que
+//!   le roster différentiel (P5.3) doit faire tomber.
 //! - **les pertes montantes** que le serveur signale à chaque émetteur
 //!   (`NetQuality`) : si elles montent, le relais ne suit plus.
 //! - **le RTT** mesuré par QUIC, avant et pendant la charge.
@@ -255,8 +256,11 @@ fn bilan(c: &Compteurs, opts: &Options) {
     );
     if rosters > 0 {
         println!(
-            "                   soit {} o par roster en moyenne — c'est ce que\n\
-             \x20                  `broadcast_all` sérialise une fois PAR destinataire (P5.1)",
+            "                   soit {} o pièce. Un roster complet par client à la\n\
+             \x20                  connexion, et rien de plus : les changements partent\n\
+             \x20                  en fiches individuelles (P5.3). Plus que ce nombre de\n\
+             \x20                  connectés, c'est qu'une diffusion complète subsiste\n\
+             \x20                  quelque part.",
             octets / rosters.max(1)
         );
     }
