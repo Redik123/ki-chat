@@ -20,6 +20,14 @@ fn main() -> anyhow::Result<()> {
     engine.shutdown();
 
     println!("niveau micro (crête du dernier bloc) : {:.4}", stats.mic_peak);
+    // La grandeur qui juge P4 : chaque trame incomplète est un trou parti vers
+    // la carte son. Zéro est la seule bonne valeur — et sur une sonde à vide,
+    // sans locuteur distant, il n'y a rien à jouer, donc rien à manquer.
+    println!(
+        "trames incomplètes (sous-alimentations) : {}{}",
+        stats.underruns,
+        if stats.underruns == 0 { "" } else { "  ← à signaler" }
+    );
     println!("--- journal audio ---");
     for (ts, msg) in ki_voice::journal_snapshot() {
         println!("[{ts}] {msg}");

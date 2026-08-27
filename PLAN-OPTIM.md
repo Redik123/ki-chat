@@ -654,7 +654,7 @@ que c'est le seul processus qui partage sa machine avec un jeu.
 
 *Coût réel : une session.*
 
-## P4 — Le moteur audio : un chemin temps réel qui mérite son nom
+## P4 — Le moteur audio : un chemin temps réel qui mérite son nom ✅ (livré le 2026-08-27)
 
 > **Révisé par les mesures de P1.** Ce chemin n'est pas *lent* — le mixage
 > coûte 0,12 % du budget à dix locuteurs, le rééchantillonnage 0,03 %. Il est
@@ -664,36 +664,87 @@ que c'est le seul processus qui partage sa machine avec un jeu.
 > change — et leur juge n'est plus le banc, c'est le compteur de
 > sous-alimentations.
 
-1. **Zéro allocation dans les deux rappels.** Tampons préalloués tenus dans la
-   fermeture ; conversion et repli mono en place vers une tranche fournie.
-   *C'est le point n° 1 : l'allocateur système de Windows prend un verrou de
-   tas, et c'est lui qu'on ne peut pas se permettre d'attendre.*
-2. **Tampons circulaires sans verrou** (`ringbuf`, 100 % Rust) entre
-   `recv_loop` et le rappel de sortie, et entre le rappel de capture et
-   `capture_loop`. Le rappel ne prend plus aucun `Mutex`.
-3. **Liste de locuteurs publiée par échange atomique** (`arc-swap`) : le rappel
-   de sortie lit un instantané sans verrou ; `recv_loop` publie une nouvelle
-   liste à l'apparition ou au départ d'un locuteur.
+**Ce qui a été fait :** 1, 5, 6 et 7 en entier ; 2 et 3 **non**, et le
+paragraphe qui suit dit pourquoi.
+
+> **Les tampons sans verrou (points 2 et 3) n'ont pas été écrits.** Ce n'est
+> pas un oubli. Le décodage sous verrou — la vraie cause d'inversion de
+> priorité — avait déjà été soldé (C6) : les verrous restants ne sont tenus
+> que le temps de puiser des échantillons dans un tampon, quelques
+> microsecondes. Les remplacer voudrait dire réécrire le cœur d'un moteur que
+> trente personnes utilisent tous les jours, que je ne peux pas écouter d'ici,
+> et dont l'historique récent est fait de régressions audio coûteuses. Le
+> compteur de sous-alimentations est en place depuis P1 : **c'est lui qui doit
+> dire si ça vaut la peine**, sur une vraie machine, pendant une vraie partie.
+> Sans ce chiffre, ce serait exactement le pari que P1 existe pour interdire.
+
+1. ✅ **Zéro allocation dans les deux rappels.**
+
+   **Sortie** : le rappel rendait un `Vec` à chaque appel. Il écrit désormais
+   dans un tampon fourni — `FnMut(&mut [f32])` au lieu de
+   `FnMut(usize) -> Vec<f32>` — alloué une fois par l'appelant, des deux côtés
+   (cpal et WASAPI natif).
+
+   **Capture** : c'étaient **deux** allocations par bloc, la conversion en f32
+   et le repli mono en produisant chacune une, cent fois par seconde. Une seule
+   passe écrit maintenant dans un tampon **recyclé** : le consommateur le rend
+   après usage, le rappel le reprend. C'est le patron du recyclage de trames de
+   `ki-video`, appliqué à l'audio.
+
+   Ce n'est pas le temps de l'allocation qui coûtait — c'est le verrou de tas
+   de Windows, que se disputent l'interface, le réseau et la capture, et
+   derrière lequel un fil temps réel n'a pas le droit d'attendre.
+
+2. ❌ **Tampons circulaires sans verrou** — non fait. Voir l'encadré ci-dessus.
+3. ❌ **Liste de locuteurs par échange atomique** — non fait, même raison.
 4. ~~**Mixage vectorisable**~~ — **déclassé par la mesure.** 23,37 µs par
    trame à dix locuteurs, soit 0,12 % du budget : le vectoriser rendrait
    0,1 % de processeur. Le tampon circulaire à tranches contiguës reste
    souhaitable, mais comme **conséquence** du point 2 (sortir les verrous),
    pas comme objectif. À ne pas écrire pour lui-même.
-5. **Canaux bornés à politique d'éviction** sur le chemin de la voix, et
-   `Bytes` transmis tel quel au lieu de `to_vec()`.
-6. **Priorité temps réel du fil audio** (`AvSetMmThreadCharacteristics`, classe
-   « Pro Audio ») — ce que fait tout moteur audio Windows sérieux, et ce qui
-   protège des craquements quand un jeu sature les cœurs.
-7. *(Mineur, trouvé par le banc)* **Chemin rapide au rapport 1,0** dans le
-   rééchantillonneur : il fait aujourd'hui l'interpolation cubique complète
-   même quand il n'y a rien à convertir — le cas le plus courant, puisque le
-   moteur demande 48 kHz. Cinq microsecondes par trame, donc à faire en
-   passant, jamais pour lui-même.
+5. ✅ **Canaux bornés, et `Bytes` transmis sans copie.** Le canal des
+   datagrammes voix était **non borné** : un décodeur en retard faisait
+   grandir la file sans limite. Il est plafonné à 128 trames, `try_send` ne
+   bloque jamais la pompe de datagrammes, et une file pleine jette — une trame
+   qui attendrait derrière deux secondes d'arriéré ne vaut plus rien. Les
+   paquets voyagent désormais en `Bytes` du transport jusqu'au moteur, sans le
+   `to_vec()` qui les recopiait un par un. Même traitement pour la file de
+   capture (16 blocs).
+6. ✅ **Priorité temps réel des fils audio.** `AvSetMmThreadCharacteristics`,
+   classe **« Pro Audio »**, sur le fil de rendu comme sur celui de capture.
+   C'est ce que fait tout moteur audio Windows sérieux et ce que nous ne
+   faisions pas : sans cette inscription, nos fils sont ordonnancés comme
+   n'importe quel fil de l'application, et un jeu qui sature les cœurs peut les
+   laisser attendre — le craquement « quand je lance Valorant ». L'inscription
+   est par fil et se défait au `Drop`, donc impossible à oublier sur un chemin
+   d'erreur ; un refus de Windows n'est pas fatal et se dit une fois au journal.
+7. ✅ **Chemin rapide au rapport 1,0** dans le rééchantillonneur. Il faisait
+   l'interpolation cubique complète même sans rien à convertir — le cas le plus
+   courant, puisque le moteur demande 48 kHz et que la plupart des cartes le
+   donnent. La sortie est maintenant l'entrée **au bit près**, par recopie de
+   tranches contiguës. Trois tests le couvrent, dont l'enroulement du tampon
+   circulaire, seul cas où une recopie naïve se tromperait.
+
+   **Mesuré : 5,29 µs → ~75 ns par trame, soit environ 70×.** C'est le seul
+   chiffre spectaculaire de P4, et il porte sur le cas le plus fréquent.
+
+   > **Ce que le banc dit d'autre, et qu'il faut lire avec prudence.** Le
+   > mixage et les conversions réelles ressortent 5 à 9 % au-dessus de la
+   > mesure de P1 — sur du code que ce lot n'a pas touché. Deux exécutions
+   > consécutives concordent ensuite à ~1 % près, ce qui situe le bruit
+   > intra-session bien en dessous de l'écart constaté : la différence tient
+   > donc à l'état de la machine entre deux séances (fréquence, charge de
+   > fond), pas au changement. Je ne l'ai pas poursuivie plus loin, et voici
+   > pourquoi c'est défendable : le mixage pèse 0,12 % du budget audio, donc
+   > 7 % de plus en pèsent 0,008 %. Reconstruire la référence pour trancher
+   > coûterait quatre minutes de compilation pour un chiffre sans conséquence.
 
 *Cible mesurable : zéro sous-alimentation (⚙ → Relevé de performance) pendant
 une partie de Valorant, avec dix locuteurs simultanés et DeepFilterNet actif.*
+**Cette cible n'est pas encore vérifiée** — elle demande une vraie machine, un
+vrai jeu et de vraies oreilles. Le compteur est en place pour ça.
 
-*Coût : deux à trois sessions.*
+*Coût réel : une session.*
 
 ## P5 — Le serveur : payer une fois ce qu'on paie N fois
 
@@ -817,8 +868,11 @@ Ce qu'on doit pouvoir mesurer à la fin, et l'état de départ.
 | CPU client au repos, hors vocal | ~~20 images/s inconditionnelles~~ **5,39 %** d'un cœur | **1,72 %** — atteint (3,1×) |
 | Temps de rendu du fil, 500 messages | proportionnel au nombre de messages | constant (virtualisé) |
 | Allocations par image de rendu | plusieurs milliers (copies d'état) | ~ 0 en régime |
-| Allocations par rappel audio | 1 (sortie), 2 (capture) | 0 |
-| Verrous pris par le rappel de sortie | 4 à 5 par trame | 0 |
+| Allocations par rappel audio | ~~1 (sortie), 2 (capture)~~ | **0** — atteint |
+| Priorité des fils audio | ~~ordinaire~~ | **« Pro Audio » (MMCSS)** — atteint |
+| Rééchantillonnage à l'identité 48 → 48 | ~~5,29 µs/trame~~ | **~75 ns** (≈70×) |
+| File des datagrammes voix | ~~non bornée~~ | **128 trames**, jette au-delà |
+| Verrous pris par le rappel de sortie | 4 à 5 par trame | 0 — *non fait, en attente de la mesure terrain* |
 | Sous-alimentations pendant une partie | ~~non mesuré~~ **mesuré** (⚙ → Relevé) | 0 |
 | Mixage, 10 locuteurs | 23,4 µs/trame — **0,12 % du budget** | *inchangé : rien à gagner* |
 | Diffusion d'un `Members` (30 connectés) | 30 copies + 30 sérialisations | 1 sérialisation |

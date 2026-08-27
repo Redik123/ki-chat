@@ -2815,6 +2815,7 @@ name = "ki-client-cli"
 version = "0.1.11"
 dependencies = [
  "anyhow",
+ "bytes",
  "ki-client-quic",
  "ki-protocol",
  "ki-voice",
@@ -2829,6 +2830,7 @@ version = "0.1.11"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "chrono",
  "device_query",
  "eframe",
@@ -2941,6 +2943,7 @@ name = "ki-voice"
 version = "0.1.11"
 dependencies = [
  "anyhow",
+ "bytes",
  "chacha20poly1305",
  "cpal",
  "criterion",

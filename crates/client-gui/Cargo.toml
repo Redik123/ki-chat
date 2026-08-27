@@ -26,6 +26,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe = { version = "0.32", features = ["persistence"] }
 ki-client-quic = { path = "../client-quic" }
+# Les datagrammes voix voyagent en `Bytes` du transport jusqu'au moteur,
+# sans jamais être recopiés.
+bytes = "1"
 ki-video = { path = "../video" }
 tokio.workspace = true
 chrono = "0.4"

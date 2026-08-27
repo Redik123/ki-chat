@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 ki-protocol = { path = "../protocol" }
+# Les datagrammes voix arrivent en `Bytes` (compteur de références) : les
+# recopier pour traverser un canal serait une allocation par paquet, cinquante
+# fois par seconde et par locuteur, pour rien.
+bytes = "1"
 anyhow.workspace = true
 tracing.workspace = true
 chacha20poly1305 = "0.10"

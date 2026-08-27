@@ -74,7 +74,7 @@ fn journal(msg: String) {
 /// Comme `journal`, mais avale les répétitions immédiates : les échecs
 /// réessayés à la seconde (micro débranché, moteur natif indisponible)
 /// rempliraient sinon le journal à eux seuls et en évinceraient l'histoire.
-fn journal_if_new(msg: String) {
+pub(crate) fn journal_if_new(msg: String) {
     let mut last = LAST_DEDUP.lock().unwrap();
     if *last == msg {
         return;
@@ -417,7 +417,7 @@ impl VoiceEngine {
     pub fn start(
         cfg: VoiceConfig,
         send: DatagramSend,
-        incoming: std::sync::mpsc::Receiver<Vec<u8>>,
+        incoming: std::sync::mpsc::Receiver<bytes::Bytes>,
     ) -> anyhow::Result<Self> {
         let shared = Arc::new(Shared {
             cipher: XChaCha20Poly1305::new(&cfg.key.into()),
@@ -721,7 +721,7 @@ fn is_shutdown(sh: &Shared) -> bool {
 // Réseau
 // ---------------------------------------------------------------------------
 
-fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<Vec<u8>>) {
+fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<bytes::Bytes>) {
     let mut last_prune = Instant::now();
     loop {
         let dat = match incoming.recv_timeout(Duration::from_millis(200)) {
@@ -990,14 +990,14 @@ fn capture_loop(
     // compteur de nonces.
     'device: while !is_shutdown(&sh) {
         let opened = open_input(device_name.as_deref(), native, raw, comms);
-        let (stream, rx, in_rate, alive, fallback) = match opened {
+        let OpenedInput { stream, chunks, rate: in_rate, alive, fallback } = match opened {
             Ok(parts) => {
                 // Le repli est signalé — sans quoi débrancher son micro pour
                 // le rebrancher laissait capter celui de la webcam en silence,
                 // pour toute la session — mais comme un repli, pas comme une
                 // perte : on capte, et annoncer « micro perdu » serait faux.
                 sh.input_lost.store(false, Ordering::Relaxed);
-                sh.input_fallback.store(parts.4, Ordering::Relaxed);
+                sh.input_fallback.store(parts.fallback, Ordering::Relaxed);
                 parts
             }
             Err(e) => {
@@ -1078,7 +1078,7 @@ fn capture_loop(
                 continue 'device;
             }
         }
-        let chunk = match rx.recv_timeout(Duration::from_millis(200)) {
+        let chunk = match chunks.recv_timeout(Duration::from_millis(200)) {
             Ok(c) => {
                 last_chunk = Instant::now();
                 if !got_any_chunk {
@@ -1189,6 +1189,10 @@ fn capture_loop(
             continue 'device;
         }
         resampler.push(&chunk);
+        // Le tampon repart aussitôt au rappel de capture, qui le reprendra au
+        // lieu d'en allouer un : c'est ce qui rend le chemin temps réel muet
+        // vis-à-vis de l'allocateur.
+        chunks.recycle(chunk);
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
 
@@ -1287,8 +1291,101 @@ enum OutputStream {
 /// d'erreur abaisse si le flux tombe.
 /// Le dernier membre dit qu'on tourne sur un périphérique de repli, le
 /// périphérique demandé étant absent.
-type OpenedInput =
-    (InputStream, std::sync::mpsc::Receiver<Vec<f32>>, u32, Arc<AtomicBool>, bool);
+/// Datagrammes voix en attente de décodage. Au-delà, le transport jette :
+/// une trame qui attend derrière deux secondes d'arriéré ne vaut plus rien, et
+/// une file non bornée finit par coûter la mémoire — elle ne l'était pas.
+pub const VOICE_QUEUE: usize = 128;
+
+/// Blocs capturés en attente de traitement. Au-delà, on jette le plus récent
+/// plutôt que de laisser la file grandir : un bloc de micro en retard ne vaut
+/// rien, et une file non bornée finit par coûter la mémoire — c'était le cas.
+///
+/// Seize blocs, c'est déjà entre 160 et 500 ms selon la carte : bien plus que
+/// tout retard normal du fil de capture.
+const CAPTURE_QUEUE: usize = 16;
+
+/// Le bout producteur du chemin de capture : ce que tient le rappel temps
+/// réel.
+///
+/// Les tampons **font l'aller-retour**. Le rappel en reprenait un neuf à
+/// chaque bloc — deux, même, la conversion et le repli mono en produisant
+/// chacun un — soit deux prises du verrou de tas de Windows par bloc, cent
+/// fois par seconde, sur un fil qui n'a pas le droit d'attendre. Le
+/// consommateur les rend maintenant après usage, et le rappel les reprend :
+/// en régime établi, plus une seule allocation.
+///
+/// C'est le patron du recyclage de trames de `ki-video`, appliqué à l'audio.
+pub(crate) struct ChunkTx {
+    out: std::sync::mpsc::SyncSender<Vec<f32>>,
+    back: std::sync::mpsc::Receiver<Vec<f32>>,
+}
+
+/// Le bout consommateur, tenu par `capture_loop`.
+pub(crate) struct ChunkRx {
+    inbox: std::sync::mpsc::Receiver<Vec<f32>>,
+    back: std::sync::mpsc::Sender<Vec<f32>>,
+}
+
+pub(crate) fn chunk_channel() -> (ChunkTx, ChunkRx) {
+    let (out, inbox) = std::sync::mpsc::sync_channel(CAPTURE_QUEUE);
+    let (back_tx, back_rx) = std::sync::mpsc::channel();
+    (ChunkTx { out, back: back_rx }, ChunkRx { inbox, back: back_tx })
+}
+
+impl ChunkTx {
+    /// Un tampon vide d'au moins `n` échantillons, recyclé si possible.
+    pub(crate) fn take(&self, n: usize) -> Vec<f32> {
+        let mut buf = self.back.try_recv().unwrap_or_default();
+        buf.clear();
+        if buf.capacity() < n {
+            buf.reserve(n - buf.len());
+        }
+        buf
+    }
+
+    /// Livre un bloc. `Err` = le consommateur est parti, il faut s'arrêter.
+    ///
+    /// Une file pleine n'est **pas** une erreur : c'est un bloc qu'on jette,
+    /// et son tampon repart aussitôt dans le circuit de recyclage.
+    pub(crate) fn send(&self, buf: Vec<f32>) -> Result<(), ()> {
+        use std::sync::mpsc::TrySendError;
+        match self.out.try_send(buf) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => Err(()),
+        }
+    }
+}
+
+impl ChunkRx {
+    pub(crate) fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<f32>, std::sync::mpsc::RecvTimeoutError> {
+        self.inbox.recv_timeout(timeout)
+    }
+
+    /// Rend un tampon au producteur. Sans effet s'il est déjà parti.
+    pub(crate) fn recycle(&self, buf: Vec<f32>) {
+        let _ = self.back.send(buf);
+    }
+}
+
+/// Ce que rend l'ouverture d'un micro.
+///
+/// Une structure et non un n-uplet : à cinq membres il fallait déjà relire la
+/// définition pour savoir lequel était lequel, et il en faut six désormais.
+pub(crate) struct OpenedInput {
+    /// Tenu, jamais lu : le lâcher ferme le flux, c'est tout son rôle.
+    stream: InputStream,
+    chunks: ChunkRx,
+    rate: u32,
+    /// Abaissé par le rappel d'erreur quand le flux tombe.
+    alive: Arc<AtomicBool>,
+    /// Vrai si l'on tourne sur un périphérique de repli, le demandé étant
+    /// absent.
+    fallback: bool,
+}
 
 /// Génération du parc de périphériques signalée par Windows. Hors Windows,
 /// constante : la sonde périodique reste le seul déclencheur.
@@ -1345,11 +1442,17 @@ fn open_input(
     // sur cpal dans la foulée — au pire, on se comporte comme avant.
     #[cfg(windows)]
     if native {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let (tx, chunks) = chunk_channel();
         let alive = Arc::new(AtomicBool::new(true));
         match wasapi::open_input(device_name, raw, comms, tx, alive.clone()) {
             Ok((stream, in_rate, fallback)) => {
-                return Ok((InputStream::Native(stream), rx, in_rate, alive, fallback));
+                return Ok(OpenedInput {
+                    stream: InputStream::Native(stream),
+                    chunks,
+                    rate: in_rate,
+                    alive,
+                    fallback,
+                });
             }
             Err(e) => {
                 tracing::warn!("micro natif indisponible : {e:#} — repli sur cpal");
@@ -1386,14 +1489,20 @@ fn open_input(
         if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
     ));
 
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let (tx, chunks) = chunk_channel();
     let alive = Arc::new(AtomicBool::new(true));
     // Le callback cpal ne fait que convertir en mono et transmettre : tout
     // le travail (rééchantillonnage, encodage, envoi) se fait dans le thread
     // de capture, hors du chemin temps réel.
     let stream = build_input_stream(&device, &supported, channels, tx, alive.clone())?;
     stream.play()?;
-    Ok((InputStream::Cpal(stream), rx, in_rate, alive, fallback))
+    Ok(OpenedInput {
+        stream: InputStream::Cpal(stream),
+        chunks,
+        rate: in_rate,
+        alive,
+        fallback,
+    })
 }
 
 /// Attend, en écourtant si le moteur s'arrête entre-temps.
@@ -1688,7 +1797,10 @@ fn tone_loop(sh: Arc<Shared>, user_id: u64, bitrate: i32, send: DatagramSend) {
     }
 }
 
-fn to_mono(data: &[f32], channels: usize) -> Vec<f32> {
+/// Replie en mono, en allouant. Réservé aux chemins **froids** — le
+/// chargement des effets sonores, une fois au démarrage. Le chemin temps réel
+/// passe par `fold_mono_into`, qui n'alloue pas.
+pub(crate) fn to_mono(data: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
         return data.to_vec();
     }
@@ -1697,20 +1809,40 @@ fn to_mono(data: &[f32], channels: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Convertit et replie en mono **dans un tampon fourni**, en une passe.
+///
+/// C'étaient deux fonctions et deux allocations : une pour convertir en f32,
+/// une pour replier. Sur le fil temps réel de la capture, cent fois par
+/// seconde. Ici, ni l'une ni l'autre — le tampon vient du recyclage.
+fn fold_mono_into<T>(data: &[T], channels: usize, out: &mut Vec<f32>)
+where
+    T: cpal::SizedSample + dasp_sample::ToSample<f32>,
+{
+    out.clear();
+    if channels <= 1 {
+        out.extend(data.iter().map(|s| s.to_sample::<f32>()));
+        return;
+    }
+    out.extend(
+        data.chunks_exact(channels)
+            .map(|c| c.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / channels as f32),
+    );
+}
+
 /// Construit le flux d'entrée quel que soit le format d'échantillons du
 /// périphérique, en convertissant vers f32.
 fn build_input_stream(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
     channels: usize,
-    tx: std::sync::mpsc::Sender<Vec<f32>>,
+    tx: ChunkTx,
     alive: Arc<AtomicBool>,
 ) -> anyhow::Result<cpal::Stream> {
     fn build<T>(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         channels: usize,
-        tx: std::sync::mpsc::Sender<Vec<f32>>,
+        tx: ChunkTx,
         alive: Arc<AtomicBool>,
     ) -> anyhow::Result<cpal::Stream>
     where
@@ -1719,8 +1851,9 @@ fn build_input_stream(
         let stream = device.build_input_stream(
             config,
             move |data: &[T], _: &_| {
-                let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-                tx.send(to_mono(&f, channels)).ok();
+                let mut buf = tx.take(data.len() / channels.max(1));
+                fold_mono_into(data, channels, &mut buf);
+                let _ = tx.send(buf);
             },
             // Signaler la panne, et pas seulement l'écrire : sans ce
             // drapeau, débrancher le micro le laissait mort jusqu'au
@@ -1944,17 +2077,25 @@ fn open_output(
 /// mono, tirés du mix 48 kHz puis rééchantillonnés vers `out_rate`. Une
 /// fabrique, et non une fermeture toute prête : la fréquence réelle du flux
 /// n'est connue qu'une fois le périphérique ouvert, quel que soit le moteur.
+/// Fabrique le producteur du mix de sortie.
+///
+/// Il **écrit dans un tampon fourni** et n'en rend aucun. Il rendait un
+/// `Vec` : une allocation par rappel, donc une prise du verrou de tas de
+/// Windows sur un fil temps réel, que se disputent l'interface, le réseau et
+/// la capture. Ce n'est pas le temps de l'allocation qui coûte — c'est
+/// l'attente possible derrière quelqu'un d'autre, et une attente sur le fil
+/// de sortie s'entend.
 fn output_writer(
     sh_cb: Arc<Shared>,
     ticks_cb: Arc<std::sync::atomic::AtomicU64>,
     out_rate: u32,
-) -> impl FnMut(usize) -> Vec<f32> + Send + 'static {
+) -> impl FnMut(&mut [f32]) + Send + 'static {
     // Rééchantillonne le mix 48 kHz vers la fréquence du périphérique.
     let mut resampler = CubicResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
-    move |mono_needed: usize| -> Vec<f32> {
+    move |out: &mut [f32]| {
+        let mono_needed = out.len();
         ticks_cb.fetch_add(1, Ordering::Relaxed);
         // Tire du 48 kHz mixé tant que le rééchantillonneur en réclame.
-        let mut out = vec![0f32; mono_needed];
         while !resampler.can_pull(mono_needed) {
             let mut mix = [0f32; FRAME_SAMPLES];
             let mut any = false;
@@ -2020,8 +2161,7 @@ fn output_writer(
             }
             resampler.push(&mix);
         }
-        resampler.pull(&mut out);
-        out
+        resampler.pull(out);
     }
 }
 
@@ -2031,23 +2171,33 @@ fn build_output_stream(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
     channels: usize,
-    write_frames: impl FnMut(usize) -> Vec<f32> + Send + 'static,
+    write_frames: impl FnMut(&mut [f32]) + Send + 'static,
     alive: Arc<AtomicBool>,
 ) -> anyhow::Result<cpal::Stream> {
     fn build<T>(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         channels: usize,
-        mut wf: impl FnMut(usize) -> Vec<f32> + Send + 'static,
+        mut wf: impl FnMut(&mut [f32]) + Send + 'static,
         alive: Arc<AtomicBool>,
     ) -> anyhow::Result<cpal::Stream>
     where
         T: cpal::SizedSample + dasp_sample::FromSample<f32>,
     {
+        // Tampon de travail alloué une fois, ici, et réutilisé à chaque
+        // rappel. cpal ne garantit pas une taille de bloc constante : on ne
+        // grandit que si l'on n'a pas assez, ce qui n'arrive qu'aux premiers
+        // rappels puis plus jamais.
+        let mut mono: Vec<f32> = Vec::new();
         let stream = device.build_output_stream(
             config,
             move |data: &mut [T], _: &_| {
-                let mono = wf(data.len() / channels);
+                let frames = data.len() / channels;
+                if mono.len() < frames {
+                    mono.resize(frames, 0.0);
+                }
+                let mono = &mut mono[..frames];
+                wf(mono);
                 for (frame, &s) in data.chunks_exact_mut(channels).zip(mono.iter()) {
                     let v = T::from_sample_(s.clamp(-1.0, 1.0));
                     for c in frame.iter_mut() {

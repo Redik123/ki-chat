@@ -56,8 +56,57 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Threading::{AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW};
 
-use crate::{journal, normalized_device_name, SAMPLE_RATE};
+use crate::{journal, journal_if_new, normalized_device_name, SAMPLE_RATE};
+
+// ---------------------------------------------------------------------------
+// Priorité temps réel
+// ---------------------------------------------------------------------------
+
+/// Inscrit le fil courant au service de planification multimédia de Windows,
+/// classe « Pro Audio », le temps de sa vie.
+///
+/// C'est ce que fait tout moteur audio sérieux, et ce que ni cpal ni nous ne
+/// faisions. Sans cette inscription, les fils de capture et de rendu sont
+/// ordonnancés comme n'importe quel fil de l'application : un jeu qui sature
+/// les cœurs peut les laisser attendre, et une attente sur le fil de rendu
+/// s'entend — c'est exactement le craquement « quand je lance Valorant ».
+///
+/// L'inscription est **par fil** et se défait au `Drop`, ce qui la rend
+/// impossible à oublier sur un chemin d'erreur. Un échec n'est pas fatal :
+/// on tourne alors comme avant, et on le dit une fois.
+struct ProAudio(Option<HANDLE>);
+
+impl ProAudio {
+    fn claim(quoi: &str) -> Self {
+        let mut index: u32 = 0;
+        // « Pro Audio » plutôt que « Audio » : la classe destinée aux flux à
+        // faible latence, celle qu'emploient les stations audionumériques.
+        let handle = unsafe {
+            AvSetMmThreadCharacteristicsW(windows::core::w!("Pro Audio"), &mut index)
+        };
+        match handle {
+            Ok(h) if !h.is_invalid() => Self(Some(h)),
+            _ => {
+                journal_if_new(format!(
+                    "priorité audio refusée par Windows ({quoi}) — le service MMCSS                      est peut-être arrêté ; le son fonctionne, mais reste sensible                      à une machine chargée"
+                ));
+                Self(None)
+            }
+        }
+    }
+}
+
+impl Drop for ProAudio {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            unsafe {
+                let _ = AvRevertMmThreadCharacteristics(h);
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // COM
@@ -511,7 +560,7 @@ pub fn open_input(
     device_name: Option<&str>,
     raw: bool,
     comms: bool,
-    tx: mpsc::Sender<Vec<f32>>,
+    tx: crate::ChunkTx,
     alive: Arc<AtomicBool>,
 ) -> anyhow::Result<(NativeStream, u32, bool)> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -557,6 +606,9 @@ pub fn open_input(
                 }
             };
             let _ = ready_tx.send(Ok((open.rate, fallback)));
+            // Priorité temps réel, tenue jusqu'à la fin du fil. Un bloc de
+            // micro livré en retard finit en trou chez ceux qui écoutent.
+            let _priorite = ProAudio::claim("capture");
             capture_worker(open, capture, &stop_thread, &tx, &alive);
         })
         .context("création du fil de capture natif")?;
@@ -587,7 +639,7 @@ fn capture_worker(
     open: OpenClient,
     capture: IAudioCaptureClient,
     stop: &AtomicBool,
-    tx: &mpsc::Sender<Vec<f32>>,
+    tx: &crate::ChunkTx,
     alive: &AtomicBool,
 ) {
     let channels = open.channels as usize;
@@ -622,11 +674,15 @@ fn capture_worker(
                     }
                     if frames > 0 {
                         let n = frames as usize;
-                        let mono = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                        // Tampon recyclé : ce fil est temps réel, il n'alloue
+                        // pas. Voir `crate::ChunkTx`.
+                        let mut mono = tx.take(n);
+                        if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
                             // Silence déclaré : livrer des zéros garde la
                             // cadence (les garde-fous de lib.rs comptent
                             // dessus).
-                            vec![0f32; n]
+                            mono.clear();
+                            mono.resize(n, 0.0);
                         } else {
                             match open.kind {
                                 SampleKind::F32 => {
@@ -634,17 +690,17 @@ fn capture_worker(
                                         data as *const f32,
                                         n * channels,
                                     );
-                                    fold_mono_f32(s, channels)
+                                    fold_mono_into_f32(s, channels, &mut mono);
                                 }
                                 SampleKind::I16 => {
                                     let s = std::slice::from_raw_parts(
                                         data as *const i16,
                                         n * channels,
                                     );
-                                    fold_mono_i16(s, channels)
+                                    fold_mono_into_i16(s, channels, &mut mono);
                                 }
                             }
-                        };
+                        }
                         if tx.send(mono).is_err() {
                             // Plus personne n'écoute : le moteur est parti.
                             let _ = capture.ReleaseBuffer(frames);
@@ -670,7 +726,7 @@ pub fn open_output<F, W>(
 ) -> anyhow::Result<(NativeStream, bool)>
 where
     F: FnOnce(u32) -> W + Send + 'static,
-    W: FnMut(usize) -> Vec<f32> + Send,
+    W: FnMut(&mut [f32]) + Send,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
@@ -709,13 +765,21 @@ where
                     return;
                 }
             };
+            // Priorité temps réel, tenue par ce fil jusqu'à sa fin.
+            let _priorite = ProAudio::claim("rendu");
             let mut write = make_writer(open.rate);
+            // Tampon de travail du fil de rendu, alloué une fois ici. Le
+            // rappel écrit dedans au lieu de rendre un `Vec` : un chemin
+            // temps réel n'alloue pas — pas pour le temps de l'allocation,
+            // mais pour le verrou de tas qu'elle prend, et derrière lequel il
+            // faudrait parfois attendre.
+            let mut scratch: Vec<f32> = Vec::new();
             // Amorcer à la cible avant de démarrer : le moteur part sans
             // blanc initial, et sans non plus charger tout le tampon — la
             // réserve au-delà de la cible n'est pas de la latence.
             let target = target_padding(open.rate).min(buffer_frames);
             let ok = unsafe {
-                fill_render(&open, &render, target, &mut write).is_ok()
+                fill_render(&open, &render, target, &mut write, &mut scratch).is_ok()
                     && open.client.Start().is_ok()
             };
             if !ok {
@@ -723,7 +787,15 @@ where
                 return;
             }
             let _ = ready_tx.send(Ok(fallback));
-            render_worker(open, render, buffer_frames, &stop_thread, &mut write, &alive);
+            render_worker(
+                open,
+                render,
+                buffer_frames,
+                &stop_thread,
+                &mut write,
+                &mut scratch,
+                &alive,
+            );
         })
         .context("création du fil de lecture natif")?;
 
@@ -757,12 +829,13 @@ fn target_padding(rate: u32) -> u32 {
 /// siffler chez tout le monde. À l'arrêt, le mix est sondé toutes les 20 ms ;
 /// au premier échantillon non nul, l'amorce sondée est pré-chargée puis le
 /// flux repart — rien n'est perdu, au prix de ~20 ms de latence au réveil.
-fn render_worker<W: FnMut(usize) -> Vec<f32>>(
+fn render_worker<W: FnMut(&mut [f32])>(
     open: OpenClient,
     render: IAudioRenderClient,
     buffer_frames: u32,
     stop: &AtomicBool,
     write: &mut W,
+    scratch: &mut Vec<f32>,
     alive: &AtomicBool,
 ) {
     /// Silence continu au-delà duquel la sortie est mise en veille.
@@ -796,7 +869,7 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
                 if want == 0 {
                     continue;
                 }
-                match fill_render(&open, &render, want, write) {
+                match fill_render(&open, &render, want, write, scratch) {
                     Ok(silent) => {
                         if !silent {
                             last_audio = Instant::now();
@@ -821,14 +894,18 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
                 // La sonde consomme le mix — les compteurs (watchdog) vivent,
                 // et l'amorce du réveil est justement ce qu'elle a tiré.
                 std::thread::sleep(Duration::from_millis(20));
-                let probe = write(PROBE);
+                if scratch.len() < PROBE {
+                    scratch.resize(PROBE, 0.0);
+                }
+                let probe = &mut scratch[..PROBE];
+                write(probe);
                 if probe.iter().any(|&s| s != 0.0) {
                     // L'amorce ne peut pas dépasser le tampon : un GetBuffer
                     // trop gourmand échouerait et, la veille revenant après
                     // chaque réouverture, condamnerait la sortie à mourir en
                     // boucle. Les trames en trop (quelques ms au pire) sont
                     // sacrifiées à l'instant du réveil — inaudible.
-                    let n = (probe.len()).min(buffer_frames as usize);
+                    let n = PROBE.min(buffer_frames as usize);
                     let ok = write_block(&open, &render, &probe[..n]).is_ok()
                         && open.client.Start().is_ok();
                     if !ok {
@@ -848,15 +925,24 @@ fn render_worker<W: FnMut(usize) -> Vec<f32>>(
 
 /// Tire `frames` échantillons mono du mix et les écrit dans le tampon.
 /// Rend vrai si tout était à zéro strict — le signal de mise en veille.
-unsafe fn fill_render<W: FnMut(usize) -> Vec<f32>>(
+///
+/// `scratch` est le tampon de travail du fil de rendu, alloué une fois par
+/// l'appelant : ce chemin est temps réel, il n'alloue pas.
+unsafe fn fill_render<W: FnMut(&mut [f32])>(
     open: &OpenClient,
     render: &IAudioRenderClient,
     frames: u32,
     write: &mut W,
+    scratch: &mut Vec<f32>,
 ) -> anyhow::Result<bool> {
-    let mono = write(frames as usize);
+    let frames = frames as usize;
+    if scratch.len() < frames {
+        scratch.resize(frames, 0.0);
+    }
+    let mono = &mut scratch[..frames];
+    write(mono);
     let silent = mono.iter().all(|&s| s == 0.0);
-    write_block(open, render, &mono)?;
+    unsafe { write_block(open, render, mono)? };
     Ok(silent)
 }
 
@@ -888,21 +974,29 @@ unsafe fn write_block(
     Ok(())
 }
 
-fn fold_mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
+/// Replie en mono **dans un tampon fourni**. Ce fil est temps réel : il ne
+/// rend pas de `Vec`, donc il n'alloue pas.
+fn fold_mono_into_f32(data: &[f32], channels: usize, out: &mut Vec<f32>) {
+    out.clear();
     if channels <= 1 {
-        return data.to_vec();
+        out.extend_from_slice(data);
+        return;
     }
-    data.chunks_exact(channels)
-        .map(|c| c.iter().sum::<f32>() / channels as f32)
-        .collect()
+    out.extend(
+        data.chunks_exact(channels)
+            .map(|c| c.iter().sum::<f32>() / channels as f32),
+    );
 }
 
-fn fold_mono_i16(data: &[i16], channels: usize) -> Vec<f32> {
+fn fold_mono_into_i16(data: &[i16], channels: usize, out: &mut Vec<f32>) {
+    out.clear();
     if channels <= 1 {
-        return data.iter().map(|&s| s as f32 / 32768.0).collect();
+        out.extend(data.iter().map(|&s| s as f32 / 32768.0));
+        return;
     }
-    data.chunks_exact(channels)
-        .map(|c| c.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32)
-        .collect()
+    out.extend(
+        data.chunks_exact(channels)
+            .map(|c| c.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32),
+    );
 }
 

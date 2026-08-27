@@ -24,6 +24,8 @@ pub struct CubicResampler {
     buf: VecDeque<f32>,
     /// Position fractionnaire de lecture dans `buf`.
     pos: f64,
+    /// Rapport exactement 1 et aucun pré-moyennage : la sortie est l'entrée.
+    passthrough: bool,
 }
 
 impl CubicResampler {
@@ -42,7 +44,21 @@ impl CubicResampler {
             preavg *= 2;
             ratio /= 2.0;
         }
-        Self { ratio, preavg, carry: Vec::new(), buf: VecDeque::new(), pos: 0.0 }
+        // Rapport exactement 1 : rien à convertir. C'est le cas le PLUS
+        // courant — le moteur demande 48 kHz et la plupart des cartes le
+        // donnent — et il coûtait pourtant une interpolation cubique
+        // complète, soit autant qu'une vraie conversion (mesuré : 5,29 µs
+        // par trame contre 5,68 pour un 44,1 → 48). On le reconnaît une fois,
+        // à la construction, et `pull` se contente alors de recopier.
+        let passthrough = preavg == 1 && ratio == 1.0;
+        Self {
+            ratio,
+            preavg,
+            passthrough,
+            carry: Vec::new(),
+            buf: VecDeque::new(),
+            pos: 0.0,
+        }
     }
 
     pub fn push(&mut self, samples: &[f32]) {
@@ -65,6 +81,10 @@ impl CubicResampler {
         if out_len == 0 {
             return true;
         }
+        if self.passthrough {
+            // Aucune marge d'avance à réserver : on ne lit qu'un point.
+            return self.buf.len() >= out_len;
+        }
         // Le dernier échantillon produit lit jusqu'à `i + 2` ; sans cette
         // marge de deux, `pull` retomberait sur ses valeurs de repli en fin
         // de tampon et l'on entendrait la couture.
@@ -76,6 +96,24 @@ impl CubicResampler {
     /// Appeler `can_pull` d'abord ; sinon la dernière valeur connue est
     /// maintenue (un zéro, lui, ferait un clic).
     pub fn pull(&mut self, out: &mut [f32]) {
+        if self.passthrough {
+            // Recopie directe. `as_slices` donne les deux moitiés contiguës
+            // du tampon circulaire : de quoi laisser le compilateur vectoriser
+            // ce que `pop_front()` échantillon par échantillon lui interdit.
+            let n = out.len().min(self.buf.len());
+            let (a, b) = self.buf.as_slices();
+            let pris_a = a.len().min(n);
+            out[..pris_a].copy_from_slice(&a[..pris_a]);
+            out[pris_a..n].copy_from_slice(&b[..n - pris_a]);
+            // À sec : on tient la dernière valeur plutôt que de plonger à
+            // zéro, exactement comme le chemin cubique.
+            if n < out.len() {
+                let tenue = out[..n].last().copied().unwrap_or(0.0);
+                out[n..].fill(tenue);
+            }
+            self.buf.drain(..n);
+            return;
+        }
         for o in out.iter_mut() {
             let i = self.pos as usize;
             let t = (self.pos - i as f64) as f32;
@@ -118,6 +156,56 @@ impl CubicResampler {
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    /// Au rapport 1, la sortie doit être l'entrée **au bit près** — pas
+    /// « à peu près ». C'est tout l'intérêt du chemin rapide : le cubique,
+    /// lui, recalculait une valeur interpolée qui ne tombait pas exactement
+    /// sur l'échantillon d'origine.
+    #[test]
+    fn a_l_identite_la_sortie_est_l_entree() {
+        let entree: Vec<f32> = (0..960).map(|i| (i as f32 * 0.017).sin()).collect();
+        let mut r = CubicResampler::new(1.0);
+        assert!(r.passthrough, "48 -> 48 doit prendre le chemin rapide");
+
+        r.push(&entree);
+        assert!(r.can_pull(entree.len()));
+        let mut sortie = vec![0f32; entree.len()];
+        r.pull(&mut sortie);
+        assert_eq!(sortie, entree);
+    }
+
+    /// Le chemin rapide doit survivre au tampon circulaire enroulé : c'est
+    /// justement le cas que `as_slices` rend en deux morceaux, et le seul où
+    /// une recopie naïve se tromperait.
+    #[test]
+    fn le_chemin_rapide_survit_a_l_enroulement() {
+        let mut r = CubicResampler::new(1.0);
+        // Assez grand pour le plus gros bloc produit plus bas.
+        let mut sortie = vec![0f32; 200];
+        // Des blocs de tailles inégales, poussés et tirés en alternance : le
+        // tampon circulaire finit forcément par s'enrouler, et c'est le seul
+        // cas où une recopie naïve d'`as_slices` se tromperait.
+        for tour in 0..40u32 {
+            let n = 60 + (tour as usize % 7) * 20;
+            let bloc: Vec<f32> = (0..n).map(|i| (tour * 1000 + i as u32) as f32).collect();
+            r.push(&bloc);
+            assert!(r.can_pull(n));
+            let sortie = &mut sortie[..n];
+            r.pull(sortie);
+            assert_eq!(sortie, &bloc[..], "tour {tour}");
+        }
+    }
+
+    /// À sec, on tient la dernière valeur au lieu de plonger à zéro — un zéro
+    /// franc s'entendrait comme un clic. Même contrat que le chemin cubique.
+    #[test]
+    fn a_sec_le_chemin_rapide_tient_la_derniere_valeur() {
+        let mut r = CubicResampler::new(1.0);
+        r.push(&[0.5, 0.5, 0.5]);
+        let mut sortie = vec![0f32; 6];
+        r.pull(&mut sortie);
+        assert_eq!(sortie, vec![0.5; 6], "la valeur tenue, pas du silence");
+    }
 
     /// L'ancienne interpolation du premier ordre, gardée comme étalon : elle
     /// sert à prouver que le cubique apporte vraiment quelque chose.
@@ -177,10 +265,24 @@ mod tests {
 
     #[test]
     fn cannot_pull_without_enough_input() {
+        // Un rapport non unitaire : c'est le chemin cubique, celui qui lit
+        // deux points au-delà de sa position et réclame donc de l'avance.
+        // Au rapport 1 exact, le chemin rapide ne lit qu'un point et n'a rien
+        // à réserver — vérifié juste en dessous.
+        let mut r = CubicResampler::new(44_100.0 / 48_000.0);
+        assert!(!r.passthrough);
+        r.push(&[0.0; 100]);
+        assert!(!r.can_pull(110));
+        assert!(r.can_pull(98));
+    }
+
+    #[test]
+    fn le_chemin_rapide_ne_reserve_aucune_avance() {
         let mut r = CubicResampler::new(1.0);
         r.push(&[0.0; 100]);
-        assert!(!r.can_pull(99)); // il faut deux échantillons d'avance
-        assert!(r.can_pull(98));
+        // Tout ce qui est entré peut sortir, jusqu'au dernier échantillon.
+        assert!(r.can_pull(100));
+        assert!(!r.can_pull(101));
     }
 
     #[test]

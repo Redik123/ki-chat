@@ -89,7 +89,7 @@ pub struct NetHandle {
     conn: Arc<Mutex<Option<quinn::Connection>>>,
     /// Où aiguiller les datagrammes voix entrants (remplacé à chaque
     /// redémarrage du moteur).
-    voice_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    voice_feed: Arc<Mutex<Option<std_mpsc::SyncSender<bytes::Bytes>>>>,
     /// Fil réseau, pour pouvoir attendre qu'il ait vraiment fermé la
     /// connexion avant que le processus ne s'arrête.
     worker: Option<std::thread::JoinHandle<()>>,
@@ -172,7 +172,7 @@ impl NetHandle {
             if gen_slot.load(Ordering::SeqCst) != gen {
                 return;
             }
-            let (tx, rx) = std_mpsc::channel();
+            let (tx, rx) = std_mpsc::sync_channel(ki_voice::VOICE_QUEUE);
             match start_engine(params, &prefs, &conn, rx) {
                 Ok(engine) => {
                     let mut slot = engine_slot.lock().unwrap();
@@ -195,7 +195,7 @@ fn start_engine(
     params: VoiceParams,
     prefs: &VoicePrefs,
     conn: &quinn::Connection,
-    rx: std_mpsc::Receiver<Vec<u8>>,
+    rx: std_mpsc::Receiver<bytes::Bytes>,
 ) -> anyhow::Result<VoiceEngine> {
     let mut cfg = VoiceConfig::new(params.user_id, params.key);
     cfg.input_device = prefs.input_device.clone();
@@ -230,7 +230,7 @@ pub fn connect(
     let engine = Arc::new(Mutex::new(None));
     let voice_params = Arc::new(Mutex::new(None));
     let conn = Arc::new(Mutex::new(None));
-    let voice_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>> =
+    let voice_feed: Arc<Mutex<Option<std_mpsc::SyncSender<bytes::Bytes>>>> =
         Arc::new(Mutex::new(None));
     let restart_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -276,7 +276,7 @@ async fn run(
     engine_slot: Arc<Mutex<Option<VoiceEngine>>>,
     params_slot: Arc<Mutex<Option<VoiceParams>>>,
     conn_slot: Arc<Mutex<Option<quinn::Connection>>>,
-    feed_slot: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    feed_slot: Arc<Mutex<Option<std_mpsc::SyncSender<bytes::Bytes>>>>,
     restart_gen: Arc<std::sync::atomic::AtomicU64>,
     ctx: eframe::egui::Context,
 ) {
@@ -316,7 +316,12 @@ async fn run(
             while let Ok(dat) = conn.read_datagram().await {
                 let feed = feed.lock().unwrap();
                 if let Some(tx) = feed.as_ref() {
-                    let _ = tx.send(dat.to_vec());
+                    // `dat` est un `Bytes` : le transmettre ne copie rien, là
+                    // où `to_vec()` recopiait chaque paquet. Et `try_send` ne
+                    // bloque jamais la pompe de datagrammes — file pleine, on
+                    // jette : une trame qui attendrait derrière deux secondes
+                    // d'arriéré ne vaut plus rien de toute façon.
+                    let _ = tx.try_send(dat);
                 }
             }
         });
@@ -366,7 +371,8 @@ async fn run(
                                 // (d'avant une reconnexion) : le moteur du
                                 // Welcome fait foi.
                                 restart_gen.fetch_add(1, Ordering::SeqCst);
-                                let (tx, rx) = std_mpsc::channel();
+                                let (tx, rx) =
+                                    std_mpsc::sync_channel(ki_voice::VOICE_QUEUE);
                                 *feed_slot.lock().unwrap() = Some(tx);
                                 match start_engine(params, &prefs, &writer.conn, rx) {
                                     Ok(engine) => {

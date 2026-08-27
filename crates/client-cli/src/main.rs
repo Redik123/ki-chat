@@ -71,12 +71,17 @@ async fn main() -> anyhow::Result<()> {
     let (welcome_tx, welcome_rx) = tokio::sync::oneshot::channel::<(u64, [u8; 32])>();
 
     // Datagrammes voix entrants -> moteur audio (canal std).
-    let (voice_tx, voice_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (voice_tx, voice_rx) = std::sync::mpsc::sync_channel::<bytes::Bytes>(
+        ki_voice::VOICE_QUEUE,
+    );
     {
         let conn = reader.conn.clone();
         tokio::spawn(async move {
             while let Ok(dat) = conn.read_datagram().await {
-                if voice_tx.send(dat.to_vec()).is_err() {
+                // `Bytes` transmis tel quel, et `try_send` : file pleine, on jette
+                // plutôt que de bloquer la pompe de datagrammes.
+                if matches!(voice_tx.try_send(dat), Err(std::sync::mpsc::TrySendError::Disconnected(_)))
+                {
                     break;
                 }
             }
