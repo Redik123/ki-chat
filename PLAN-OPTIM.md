@@ -1212,15 +1212,48 @@ diagnostiqué — si le micro ne se rouvre pas après une reprise, la bannière 
 F1 le dit avec la marche à suivre Windows. Si elle apparaît en usage réel, le
 moteur sort de la connexion. Sinon, il reste où il est.
 
-### Ce qui reste à éprouver sur une vraie machine
+### Éprouvé sur machine réelle ✅
 
-La boucle elle-même n'existe que dans le client graphique, qui ne se pilote
-pas d'ici. Le calcul d'attente est couvert par un test, le prérequis de
-l'empreinte par un redémarrage réel — mais le va-et-vient complet demande
-d'ouvrir l'application. Le geste : se connecter, entrer en vocal, arrêter le
-serveur, le relancer. Ce qui doit se produire — la bannière ambre qui décompte,
-la reconnexion seule, le retour dans le **même** salon vocal, et « connexion
-rétablie ».
+Le va-et-vient complet ne se pilote pas d'ici : il a été joué à la main, en
+vocal, serveur arrêté puis relancé. Tout s'est produit comme prévu — la
+bannière ambre qui décompte, la reconnexion seule, le retour dans le **même**
+salon vocal, « connexion rétablie ». Le journal du serveur porte la preuve du
+côté opposé : `connexion : redik (id 6)`, **800 ms** après son démarrage. Le
+client attendait, et il est rentré au premier créneau.
+
+Et **aucune bannière de périphérique perdu** : le moteur audio, détruit puis
+rouvert pendant la coupure, a repris le micro sans difficulté. Le risque nommé
+plus haut ne s'est donc pas manifesté sur ce cas — machine au repos, aucun jeu
+lancé. Le cas qui tranchera vraiment reste celui-là même : une coupure pendant
+qu'un jeu tient le périphérique.
+
+### Dix secondes avant de s'en apercevoir, et pourquoi on les garde
+
+La bannière n'apparaît pas dans la seconde mais **une dizaine** après la
+coupure. Ce n'est pas la reprise qui traîne, c'est la détection : un serveur
+tué net n'envoie pas de trame de fermeture, le client doit constater le
+silence. Keep-alive toutes les 5 s, inactivité tolérée 30 s, des deux côtés —
+sur une coupure franche Windows abrège en signalant le port fermé, d'où la
+dizaine de secondes ; sur une perte silencieuse (Wi-Fi qui décroche), ce
+serait jusqu'à trente.
+
+Le remède est à portée de main : inactivité à 15 s et keep-alive à 3 s
+donneraient une détection en 7 à 15 s, avec **plus** de marge contre la perte
+qu'aujourd'hui — cinq occasions de se signaler dans la fenêtre au lieu de
+deux. Le serveur y gagnerait aussi : il garde actuellement un client fantôme
+dans la liste et dans le salon vocal jusqu'à trente secondes.
+
+**Et pourtant on ne le fait pas maintenant.** Raccourcir le délai rend les
+déconnexions plus fréquentes, et chaque déconnexion détruit et rouvre le
+moteur audio. Tant qu'il appartient à la connexion, accélérer la détection
+échangerait une gêne rare — dix secondes de flottement — contre une gêne plus
+fréquente : le micro relâché puis repris, avec un jeu qui rôde. L'ordre juste
+est de sortir d'abord le moteur de la connexion ; à ce moment-là, serrer la
+détection ne coûte plus rien.
+
+C'est la même dépendance que celle de l'encadré précédent, et c'est ce qui en
+fait le prochain chantier naturel du client : **sortir le moteur voix de la
+connexion** débloque deux choses d'un coup.
 
 ## F4 — Partage d'écran
 
