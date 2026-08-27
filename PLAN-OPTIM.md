@@ -1342,9 +1342,36 @@ serveur, rend les mêmes chiffres qu'avant le remaniement : 347 paquets reçus,
 400 après la coupure du micro, **400 encore huit secondes plus tard**, 801
 après la levée. Zéro rejeté — le chiffrement traverse intact.
 
-Reste à éprouver à la main, et c'est le cas qui a motivé tout ceci : **couper
-la connexion pendant qu'un jeu tient le micro**, et vérifier qu'il est toujours
-là au retour.
+### Le cas qui a motivé tout ceci, éprouvé ✅
+
+Couper la connexion pendant qu'un **jeu** tient l'audio, et regarder si le
+micro revient. Fait, à la main, horodatages à l'appui :
+
+| | |
+| --- | --- |
+| Client lancé | 20:32:18 |
+| **Valorant lancé** | **20:35:29** |
+| Serveur coupé puis relancé | 20:41:01 |
+| Reconnexion, micro et sortie rouverts | **20:41:03** |
+
+Valorant tournait depuis cinq minutes et demie. Et c'est le chemin **dur** qui
+a été emprunté : un redémarrage du serveur change la clé vocale, donc le
+moteur est bel et bien détruit et les périphériques rouverts — exactement ce
+que R2 cherche à éviter dans le cas fréquent. Les deux se sont rouverts sans
+une erreur, et plus rien n'a été journalisé ensuite : ni micro perdu, ni
+réouverture préventive.
+
+Le pire cas passe donc. Ce qui **relativise l'urgence** de tout ce chantier :
+le risque nommé en R1 — un jeu qui s'empare du micro dans l'intervalle — ne
+s'est pas manifesté ici. Il reste théoriquement ouvert (une autre machine, une
+autre suite audio, un autre moment), mais R2 le ramène de « à chaque hoquet
+réseau » à « aux seuls redémarrages du serveur », et ceux-là se voient venir.
+
+Ce qui n'a **pas** été observé faute de pouvoir le provoquer d'ici : le chemin
+où le moteur est conservé. Il demande une coupure **réseau** avec le serveur
+toujours vivant — couper le Wi-Fi vingt secondes. La preuve serait l'absence
+de toute nouvelle ligne « micro (natif) » dans le journal, et la présence de
+« le moteur voix en place est conservé ».
 
 ## F4 — Partage d'écran
 
