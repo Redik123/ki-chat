@@ -795,6 +795,41 @@ fn handle_msg(
                 let _ = tx.send(ServerMsg::HistoryPage { messages, more, channel });
             });
         }
+        ClientMsg::Search { query, channel, limit } => {
+            // Bornée avant tout le reste : une requête d'un mégaoctet ferait
+            // parcourir tous les journaux avec une aiguille absurde.
+            let query: String = query.chars().take(ki_protocol::MAX_SEARCH_QUERY).collect();
+            if query.trim().is_empty() {
+                let _ = tx.send(ServerMsg::SearchResults { query, hits: Vec::new(), more: false });
+                return;
+            }
+            // **La** garde de cette fonctionnalité : on ne cherche que dans ce
+            // que le demandeur a le droit de lire. Sans elle, la recherche
+            // serait le moyen le plus simple de lire un salon privé — il
+            // suffirait d'en deviner un mot.
+            let salons: Vec<ki_protocol::ChannelId> = state
+                .visible_channels(user_id)
+                .into_iter()
+                .filter(|c| c.kind == ki_protocol::ChannelKind::Text)
+                .map(|c| c.id)
+                // Un salon nommé qu'on n'a pas le droit de lire disparaît
+                // ici : la réponse est alors vide, et non refusée. Refuser
+                // aurait confirmé son existence.
+                .filter(|id| channel.is_none_or(|voulu| voulu == *id))
+                .collect();
+            let limit = (limit as usize).clamp(1, ki_protocol::MAX_SEARCH_HITS);
+            // Relire les journaux, c'est du disque : hors de la boucle
+            // asynchrone, comme la pagination.
+            let (state, tx) = (state.clone(), tx.clone());
+            tokio::task::spawn_blocking(move || {
+                let (trouves, more) = state.history.search(&state.data_dir, &salons, &query, limit);
+                let hits = trouves
+                    .into_iter()
+                    .map(|(channel, record)| ki_protocol::SearchHit { channel, record })
+                    .collect();
+                let _ = tx.send(ServerMsg::SearchResults { query, hits, more });
+            });
+        }
         ClientMsg::VoiceState { speaking, muted } => {
             let changed = {
                 let mut users = state.users.lock().unwrap();

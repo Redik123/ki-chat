@@ -945,20 +945,106 @@ vraie machine qui a montré ce qui n'allait pas.
 
 *Coût réel : une session.*
 
-## F2 — Le confort de chat qui manque
+## F2 — Le confort de chat qui manque ✅ (livré le 2026-08-27, sauf les réponses)
 
 Chacun de ces points est petit ; ensemble ils font la différence entre « ça
 marche » et « on l'utilise ».
 
-- **Saisie multi-ligne** (Maj+Entrée) — le protocole la gère déjà, seule
-  l'interface l'interdit.
-- **Mentions `@pseudo`** avec surlignage et notification.
-- **Réponses** (citer un message) et **édition / suppression** de ses propres
-  messages.
-- **Recherche dans l'historique** — dépend directement de P5.2.
-- **Rendu Markdown léger** (gras, italique, code, blocs) et émojis.
-- **Renommer / réordonner un salon, poser un mot de passe vocal** depuis
-  l'interface : ces trois actions n'existent aujourd'hui qu'en CLI.
+### Livré
+
+- **Saisie multi-ligne** (Maj+Entrée) ✅ — le protocole l'acceptait depuis
+  toujours ; c'était l'interface qui la refusait, si bien que Maj+Entrée
+  envoyait le message au lieu d'aller à la ligne. La zone grandit avec le
+  texte, d'une à six lignes. Le plafond n'est pas cosmétique : sans lui,
+  coller cent lignes mange la conversation.
+- **Rendu Markdown léger** ✅ — gras, italique, code en ligne, blocs de code
+  clôturés. Le découpage vit dans `markup.rs`, **hors** du rendu : il se teste
+  sans ouvrir de fenêtre, et treize tests l'éprouvent. Deux d'entre eux ont
+  trouvé de vrais défauts — une boucle infinie sur une balise en tête de
+  message, et une ligne vide parasite de part et d'autre de chaque bloc de
+  code.
+- **Mentions `@pseudo`** ✅ — un `@` n'est une mention que suivi d'un pseudo
+  **connu du serveur**, sans quoi toute adresse électronique en deviendrait
+  une. Sa propre mention est surlignée à l'inverse de celle des autres, et
+  elle notifie **même fenêtre au premier plan** : être nommé appelle une
+  réponse, un message ordinaire non.
+- **Renommer / réordonner un salon, poser un mot de passe vocal** ✅ — le
+  serveur savait déjà tout faire (`AdminEditChannel`, `AdminReorderChannels`,
+  `AdminSetVoicePassword`) ; il ne manquait que l'interface. Monter/descendre
+  plutôt qu'un glisser-déposer : sur une dizaine de salons c'est aussi rapide
+  et ça ne dépend pas de la précision de la souris. La position est renvoyée
+  telle quelle au serveur — la taire aurait fait remonter en tête de liste
+  tout salon renommé.
+- **Recherche dans l'historique** ✅ — `ClientMsg::Search` / `SearchResults`,
+  portée « ce salon » ou « partout », clic sur un résultat pour y aller.
+
+### La recherche : ce que l'audit avait mal prévu
+
+Le plan annonçait qu'elle « dépend directement de P5.2 ». C'est faux, et il
+faut le dire : **l'index de P5.2 ne sert à rien ici**. Il situe un message par
+son horodatage, or une recherche ne sait pas d'avance dans quelle tranche de
+temps regarder — elle doit voir chaque message. Une lecture du fichier d'un
+bout à l'autre bat largement cent mille repositionnements.
+
+Ce qui coûte cher n'est pas la lecture mais la **désérialisation** :
+reconstruire cent mille `ChatRecord` pour en garder trois. D'où le tamis —
+chercher d'abord la chaîne dans la ligne JSON brute, en octets, et ne
+désérialiser que ce qui survit.
+
+Le tamis a failli mentir deux fois, et les deux trous se ressemblent : il
+compare des octets, or la ligne du fichier n'est pas le texte.
+
+1. La comparaison ramène aux minuscules **ASCII**. Sur une aiguille ASCII
+   c'est sans faille — aucun octet ASCII n'apparaît jamais à l'intérieur d'une
+   séquence UTF-8 multi-octets. Avec un accent, « É » et « é » ne se ramènent
+   pas l'un à l'autre à ce niveau.
+2. `serde_json` échappe : le fichier porte `\"`, `\\`, `\n`. Chercher un
+   guillemet dans une ligne où il s'écrit en deux octets ne trouve rien.
+
+Hors de ces deux cas, on désérialise tout : plus lent, mais juste. Un faux
+négatif est exactement ce qu'un tamis n'a pas le droit de produire.
+
+**Le test a d'abord passé pour la mauvaise raison.** Trois messages tenaient
+dans le cache mémoire, qui rattrapait le tamis : le trou restait invisible.
+Le test écrit maintenant son journal à la main, au-delà de `MEM_CAP`, les
+pièges au début — hors de portée du cache. Affaiblir la garde le fait bien
+échouer, vérification faite.
+
+Deux gardes valent d'être notées :
+
+- **Les permissions.** On ne cherche que dans les salons que le demandeur a le
+  droit de lire. Sans cela, la recherche serait le moyen le plus simple de
+  lire un salon privé : il suffirait d'en deviner un mot. Un salon nommé mais
+  interdit disparaît de la liste plutôt que d'être refusé — refuser aurait
+  confirmé son existence.
+- **La taille de la réponse.** Elle part en une seule ligne sur le flux de
+  contrôle, comme une page d'historique : cent résultats de quatre mille
+  caractères ne tiendraient pas, et une ligne trop longue fait fermer la
+  connexion d'en face. La recherche serait devenue un moyen de se déconnecter
+  soi-même.
+
+Le clic sur un résultat n'appelle pas `join` — celui-ci demande les
+**derniers** messages, alors qu'on veut la page qui **se termine** par le
+message trouvé. Le résultat arrive donc en bas de l'écran sans calcul de
+défilement. En contrepartie, ce qui a suivi n'est pas affiché : un pied de fil
+« tu regardes un message retrouvé » et un bouton « revenir au présent » le
+disent, sans quoi on croirait le salon mort depuis ce jour-là.
+
+### Reporté, et pourquoi
+
+- **Réponses, édition, suppression.** Ce n'est pas un travail d'interface :
+  l'historique est un journal **append-only**, un `.jsonl` par salon, et c'est
+  ce qui le rend simple et sûr. Éditer ou supprimer demande de trancher
+  d'abord : réécrire le fichier (perd la propriété qui protège d'une coupure
+  de courant), écrire des enregistrements de rature relus au chargement
+  (l'historique grossit de ce qu'on efface), ou marquer en place à position
+  fixe (l'index de P5.2 le permet, mais fige le format). La décision précède
+  le code, et elle n'est pas prise. Les **réponses** seules — citer sans
+  modifier — n'ont pas ce problème et resteraient additives ; elles suivront
+  la même décision pour ne pas ouvrir deux fois le format d'enregistrement.
+- **Émojis.** Une palette et un rendu couleur, c'est une police d'emoji
+  embarquée et un atlas de textures : le sujet est plus gros que tout le
+  reste de F2 réuni, et il ne bloque personne.
 
 ## F3 — Modération vocale
 

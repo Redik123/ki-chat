@@ -124,6 +124,22 @@ pub enum ClientMsg {
     Chat { text: String },
     /// Demander l'historique du salon courant.
     History { limit: u32 },
+    /// Chercher un texte dans l'historique.
+    ///
+    /// La casse est ignorée. Le serveur ne cherche que dans les salons que
+    /// le demandeur a le droit de lire — sans quoi la recherche deviendrait
+    /// le moyen le plus simple de lire un salon privé.
+    Search {
+        query: String,
+        /// `None` = tous les salons visibles. Restreindre coûte moins cher,
+        /// et c'est le cas le plus fréquent : on sait dans quel salon on a
+        /// vu passer la chose.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<ChannelId>,
+        /// Nombre de résultats voulu. Borné par le serveur.
+        #[serde(default)]
+        limit: u32,
+    },
     /// Remonter le fil : les messages **antérieurs** à `before_ts`.
     ///
     /// Sans ça, seuls les derniers messages sont atteignables — tout ce que
@@ -328,6 +344,21 @@ pub enum ServerMsg {
     },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
+    /// Résultats d'une recherche, du plus ancien au plus récent.
+    SearchResults {
+        /// La requête, rappelée telle qu'elle a été reçue.
+        ///
+        /// On tape vite et le serveur relit des fichiers : deux réponses
+        /// peuvent revenir dans le désordre. Sans ce rappel, une réponse
+        /// périmée écraserait la bonne — le classique de toute recherche
+        /// au fil de la frappe.
+        query: String,
+        hits: Vec<SearchHit>,
+        /// Vrai s'il y avait plus de résultats que la limite : ceux rendus
+        /// sont alors les plus récents.
+        #[serde(default)]
+        more: bool,
+    },
     /// Page d'historique plus ancienne, à **ajouter au-dessus** de ce qui est
     /// déjà affiché — au contraire de `History`, qui remplace tout.
     HistoryPage {
@@ -495,6 +526,11 @@ pub const MAX_USERNAME: usize = 32;
 pub const MAX_PASSWORD: usize = 256;
 /// Longueur maximale d'un code d'invitation, en octets.
 pub const MAX_INVITE: usize = 64;
+/// Longueur maximale d'une requête de recherche, en caractères.
+pub const MAX_SEARCH_QUERY: usize = 128;
+/// Résultats de recherche rendus au plus. Au-delà, on ne lit plus une liste :
+/// on affine sa requête.
+pub const MAX_SEARCH_HITS: usize = 100;
 /// Sauts de ligne consécutifs tolérés dans un message.
 const MAX_BLANK_LINES: usize = 3;
 
@@ -859,6 +895,16 @@ pub struct Member {
     /// modération qui seraient refusées de toute façon.
     #[serde(default)]
     pub rank: u16,
+}
+
+/// Un résultat de recherche : le message, et le salon d'où il vient.
+///
+/// Le salon est indispensable : une recherche traverse plusieurs salons, et
+/// un message sans son salon ne se retrouve plus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub channel: ChannelId,
+    pub record: ChatRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

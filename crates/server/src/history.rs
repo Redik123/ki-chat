@@ -363,6 +363,182 @@ impl History {
         let (page, truncated) = fit_within(older);
         (page, reste_avant || truncated)
     }
+
+    /// Cherche `query` dans les salons donnés, casse ignorée.
+    ///
+    /// Rend au plus `limit` résultats, les **plus récents**, du plus ancien
+    /// au plus récent ; le booléen dit s'il en a été laissé de côté.
+    ///
+    /// # Pourquoi une lecture séquentielle, et pas l'index
+    ///
+    /// L'index de `before` ne sert à rien ici, et il faut le dire : il situe
+    /// un message par son horodatage, or une recherche ne sait pas d'avance
+    /// dans quelle tranche de temps regarder. Elle doit voir chaque message,
+    /// donc lire tout le fichier — et une lecture d'un bout à l'autre bat
+    /// largement cent mille repositionnements.
+    ///
+    /// Ce qui coûte cher n'est pas la lecture mais la **désérialisation** :
+    /// reconstruire cent mille `ChatRecord` pour en garder trois. D'où le
+    /// tamis : on cherche d'abord la chaîne dans la ligne JSON brute, en
+    /// octets, et l'on ne déserialise que ce qui a survécu.
+    pub fn search(
+        &self,
+        data_dir: &str,
+        channels: &[ChannelId],
+        query: &str,
+        limit: usize,
+    ) -> (Vec<(ChannelId, ChatRecord)>, bool) {
+        let besoin = query.trim().to_lowercase();
+        if besoin.is_empty() || limit == 0 {
+            return (Vec::new(), false);
+        }
+        // Le tamis ne s'utilise que là où il ne peut **rien manquer**. Deux
+        // conditions, et les deux ont été apprises en les manquant :
+        //
+        // 1. Requête en ASCII pur. La comparaison se fait en octets ramenés
+        //    aux minuscules ASCII : c'est sans faille tant que l'aiguille est
+        //    ASCII, aucun octet ASCII n'apparaissant jamais à l'intérieur
+        //    d'une séquence UTF-8 multi-octets. Avec un accent, en revanche,
+        //    « É » et « é » ne se ramènent pas l'un à l'autre à ce niveau.
+        //
+        // 2. Aucun caractère que JSON échappe. La ligne du journal n'est pas
+        //    le texte : `serde_json` y écrit `\"`, `\\`, `\n`. Chercher un
+        //    guillemet dans une ligne où il s'écrit en deux octets ne trouve
+        //    rien — un faux négatif, c'est-à-dire exactement ce qu'un tamis
+        //    n'a pas le droit de produire.
+        //
+        // Hors de ces deux cas, on désérialise tout : plus lent, mais juste.
+        let tamisable = besoin.is_ascii()
+            && !besoin.chars().any(|c| c == '"' || c == '\\' || c.is_control());
+        let tamis = tamisable.then(|| besoin.as_bytes().to_vec());
+
+        let mut trouves: Vec<(ChannelId, ChatRecord)> = Vec::new();
+        let mut deborde = false;
+        for &channel in channels {
+            // Fenêtre glissante sur les `limit` derniers résultats du salon :
+            // c'est ce qui borne la mémoire quel que soit le nombre de
+            // correspondances. Chercher « le » dans dix ans d'archives ne doit
+            // pas rapatrier dix ans d'archives.
+            let mut par_salon: VecDeque<ChatRecord> = VecDeque::with_capacity(limit);
+
+            let path = PathBuf::from(data_dir).join(format!("channel-{channel}.jsonl"));
+            if let Ok(file) = File::open(&path) {
+                let mut reader = BufReader::new(file);
+                let mut buf: Vec<u8> = Vec::new();
+                let mut minuscules: Vec<u8> = Vec::new();
+                loop {
+                    buf.clear();
+                    // Même règle que `scan` : une ligne illisible se saute,
+                    // une erreur matérielle arrête la lecture.
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("recherche interrompue : {e}");
+                            break;
+                        }
+                    }
+                    if let Some(tamis) = &tamis {
+                        minuscules.clear();
+                        minuscules.extend(buf.iter().map(u8::to_ascii_lowercase));
+                        if !contient(&minuscules, tamis) {
+                            continue;
+                        }
+                    }
+                    // Le tamis peut se tromper — le mot cherché peut être dans
+                    // le pseudo, ou dans un nom de fichier. Seul le texte
+                    // compte, et c'est ici qu'on le vérifie pour de bon.
+                    if let Ok(rec) = serde_json::from_slice::<ChatRecord>(trim_eol(&buf)) {
+                        if rec.text.to_lowercase().contains(&besoin) {
+                            garder(&mut par_salon, limit, rec, &mut deborde);
+                        }
+                    }
+                }
+            }
+
+            // Le cache mémoire par-dessus : le fil d'écriture a du retard sur
+            // ce qui vient d'être dit, et ne pas trouver le message envoyé
+            // trois secondes plus tôt ferait douter de toute la recherche.
+            let frais: Vec<ChatRecord> = {
+                let logs = self.logs.lock().unwrap();
+                match logs.get(&channel) {
+                    Some(recent) => recent
+                        .iter()
+                        .filter(|r| r.text.to_lowercase().contains(&besoin))
+                        .cloned()
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+            let vus: std::collections::HashSet<(ki_protocol::UserId, u64)> =
+                par_salon.iter().map(|r| (r.user_id, r.ts)).collect();
+            for rec in frais {
+                if !vus.contains(&(rec.user_id, rec.ts)) {
+                    garder(&mut par_salon, limit, rec, &mut deborde);
+                }
+            }
+
+            trouves.extend(par_salon.into_iter().map(|r| (channel, r)));
+        }
+
+        // Le classement final est chronologique, tous salons confondus : on
+        // cherche « quand ai-je vu ça », pas « dans quel fichier ».
+        trouves.sort_by_key(|(_, r)| r.ts);
+        if trouves.len() > limit {
+            trouves.drain(..trouves.len() - limit);
+            deborde = true;
+        }
+
+        // La réponse part en **une seule ligne** sur le flux de contrôle,
+        // exactement comme une page d'historique : même borne, même raison.
+        // Cent résultats de quatre mille caractères ne tiendraient pas, et une
+        // ligne trop longue fait fermer la connexion d'en face — la recherche
+        // deviendrait un moyen de se déconnecter soi-même.
+        let mut total = 0usize;
+        let mut debut = trouves.len();
+        for (i, (_, rec)) in trouves.iter().enumerate().rev() {
+            // Une quarantaine d'octets pour l'enveloppe `SearchHit` autour du
+            // message : le numéro de salon et les accolades.
+            let taille = serde_json::to_string(rec).map(|s| s.len() + 48).unwrap_or(usize::MAX);
+            if total + taille > MAX_HISTORY_BYTES {
+                break;
+            }
+            total += taille;
+            debut = i;
+        }
+        if debut > 0 {
+            trouves.drain(..debut);
+            deborde = true;
+        }
+        (trouves, deborde)
+    }
+}
+
+/// Ajoute un résultat à la fenêtre, en poussant dehors le plus ancien si elle
+/// est pleine — et en notant qu'il a été poussé dehors.
+fn garder(
+    fenetre: &mut VecDeque<ChatRecord>,
+    limit: usize,
+    rec: ChatRecord,
+    deborde: &mut bool,
+) {
+    if fenetre.len() == limit {
+        fenetre.pop_front();
+        *deborde = true;
+    }
+    fenetre.push_back(rec);
+}
+
+/// `foin.contains(aiguille)`, en octets.
+///
+/// `slice::windows` plutôt qu'une conversion en `str` : la ligne brute n'est
+/// pas forcément de l'UTF-8 valide, et l'on refuse de payer une validation
+/// pour un test qui n'en a pas besoin.
+fn contient(foin: &[u8], aiguille: &[u8]) -> bool {
+    if aiguille.len() > foin.len() {
+        return false;
+    }
+    foin.windows(aiguille.len()).any(|f| f == aiguille)
 }
 
 /// Lit le message qui commence à `offset`.
@@ -515,6 +691,110 @@ mod tests {
 
     fn stamped(n: u64) -> ChatRecord {
         ChatRecord { user_id: 1, username: "kevin".into(), text: format!("m{n}"), ts: n }
+    }
+
+    fn dit(user_id: ki_protocol::UserId, ts: u64, text: &str) -> ChatRecord {
+        ChatRecord { user_id, username: format!("u{user_id}"), text: text.into(), ts }
+    }
+
+    /// La recherche ignore la casse, traverse les salons, et rend les
+    /// résultats du plus ancien au plus récent.
+    #[test]
+    fn la_recherche_ignore_la_casse_et_traverse_les_salons() {
+        let dir = scratch("recherche");
+        let history = History::open(&dir, &[text_channel(1), text_channel(2)]).unwrap();
+        history.append(1, &dit(1, 10, "on se fait un Valorant ?"));
+        history.append(2, &dit(2, 20, "VALORANT à 21h"));
+        history.append(1, &dit(3, 30, "moi je suis sur Deadlock"));
+
+        let (hits, more) = history.search(&dir, &[1, 2], "valorant", 10);
+        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![10, 20]);
+        assert_eq!(hits.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(!more, "les deux résultats tiennent dans la limite");
+
+        // Restreindre à un salon ne rend que celui-là : c'est ce qui rend la
+        // garde de permission efficace côté serveur, qui ne fait que réduire
+        // cette liste.
+        let (hits, _) = history.search(&dir, &[2], "valorant", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 2);
+    }
+
+    /// Le tamis en octets ne doit **jamais** faire manquer un résultat que la
+    /// lecture complète aurait trouvé — c'est tout l'enjeu de l'optimisation,
+    /// et le seul endroit où elle pourrait mentir.
+    ///
+    /// Le journal est écrit à la main, au-delà de `MEM_CAP`, et les messages
+    /// cherchés sont **au début** : le cache mémoire ne les a pas. Sans cette
+    /// précaution le test passait quoi qu'il arrive — c'est le cache qui
+    /// rattrapait le tamis, et le trou restait invisible.
+    #[test]
+    fn le_tamis_ne_manque_aucun_resultat() {
+        let dir = scratch("tamis");
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        let mut bytes = Vec::new();
+        // Trois pièges, chacun visant une façon différente de manquer un
+        // résultat : l'accent majuscule que les octets ne ramènent pas au
+        // minuscule, et les deux caractères que JSON réécrit dans le fichier.
+        let pieges = [
+            (1u64, "ÉNORME partie hier"),
+            (2, "un guillemet \" au milieu"),
+            (3, "un antislash \\ au milieu"),
+            (4, "sur deux\nlignes"),
+        ];
+        for (ts, texte) in pieges {
+            bytes.extend_from_slice(serde_json::to_string(&dit(1, ts, texte)).unwrap().as_bytes());
+            bytes.push(b'\n');
+        }
+        for n in 100..(100 + MEM_CAP as u64) {
+            bytes.extend_from_slice(serde_json::to_string(&stamped(n)).unwrap().as_bytes());
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        for (besoin, attendu) in [
+            ("énorme", 1),
+            ("guillemet \"", 2),
+            ("antislash \\", 3),
+            ("deux\nlignes", 4),
+            // Le cas courant, celui qui passe par le tamis : il doit trouver.
+            ("partie", 1),
+        ] {
+            let (hits, _) = history.search(&dir, &[1], besoin, 10);
+            assert_eq!(
+                hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(),
+                vec![attendu],
+                "« {besoin} » aurait dû être trouvé"
+            );
+        }
+    }
+
+    /// Le pseudo n'est pas le texte : chercher un nom ne doit pas rendre tout
+    /// ce que cette personne a écrit. Le tamis, lui, voit la ligne entière —
+    /// c'est la vérification après désérialisation qui tranche.
+    #[test]
+    fn la_recherche_ne_porte_que_sur_le_texte() {
+        let dir = scratch("texte-seul");
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        history.append(1, &dit(7, 10, "salut"));
+        history.append(1, &dit(1, 20, "u7 tu viens ?"));
+
+        let (hits, _) = history.search(&dir, &[1], "u7", 10);
+        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![20]);
+    }
+
+    /// Trop de résultats : on garde les plus **récents**, et on le dit.
+    #[test]
+    fn la_recherche_garde_les_plus_recents_et_l_annonce() {
+        let dir = scratch("trop");
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        for n in 1..=10 {
+            history.append(1, &dit(1, n, "encore un test"));
+        }
+        let (hits, more) = history.search(&dir, &[1], "test", 3);
+        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![8, 9, 10]);
+        assert!(more, "sept résultats ont été laissés de côté");
     }
 
     /// Remonter le fil doit rendre les messages **antérieurs**, du plus

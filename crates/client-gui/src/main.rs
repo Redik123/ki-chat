@@ -5,6 +5,7 @@
 mod appicon;
 mod icons;
 mod images;
+mod markup;
 mod net;
 mod perf;
 mod photos;
@@ -190,6 +191,32 @@ struct ChannelDraft {
     allowed_roles: Vec<ki_protocol::RoleId>,
     restricted: bool,
 }
+
+/// Salon en cours de modification, dans le panneau d'administration.
+///
+/// Séparé du brouillon de création : les deux formulaires peuvent être
+/// ouverts en même temps, et confondre les deux ferait qu'ouvrir une
+/// modification effacerait la création commencée.
+struct ChannelEdit {
+    id: ki_protocol::ChannelId,
+    draft: ChannelDraft,
+    /// Le type ne se change pas après coup — on ne convertit pas un salon
+    /// textuel plein d'historique en salon vocal. Conservé pour le
+    /// renvoyer tel quel au serveur.
+    position: u32,
+}
+
+/// Verrou vocal en cours de pose.
+struct VerrouDraft {
+    channel: ki_protocol::ChannelId,
+    mot_de_passe: String,
+    ttl_secs: u32,
+}
+
+/// Durées proposées pour un verrou vocal. Le serveur borne entre une minute
+/// et un jour ; on ne propose que ce qui a un sens : le temps d'une partie.
+const VOICE_LOCK_DURATIONS: &[(&str, u32)] =
+    &[("15 minutes", 900), ("1 heure", 3600), ("4 heures", 14_400), ("1 jour", 86_400)];
 
 /// Durées proposées pour un bannissement. Un menu court vaut mieux qu'un
 /// champ libre : personne ne bannit « 137 minutes ».
@@ -439,6 +466,33 @@ struct KiApp {
     role_draft: Option<RoleDraft>,
     /// Salon en cours de création.
     channel_draft: Option<ChannelDraft>,
+    /// Salon en cours de renommage, et verrou vocal en cours de pose. Un
+    /// seul de chaque à la fois : deux formulaires ouverts sur la même
+    /// liste, on ne sait plus lequel on remplit.
+    channel_edit: Option<ChannelEdit>,
+    verrou_draft: Option<VerrouDraft>,
+
+    // Recherche dans l'historique
+    show_search: bool,
+    search_query: String,
+    /// Chercher dans le salon courant seulement, ou dans tous ceux qu'on peut
+    /// lire. Restreint par défaut : on sait presque toujours où l'on a vu
+    /// passer la chose, et le serveur relit moins de fichiers.
+    search_ici: bool,
+    search_hits: Vec<ki_protocol::SearchHit>,
+    search_more: bool,
+    /// La requête effectivement envoyée, en attente de réponse.
+    ///
+    /// Sert à jeter une réponse périmée : le serveur relit des fichiers, deux
+    /// réponses peuvent revenir dans le désordre, et la plus lente écraserait
+    /// la bonne.
+    search_envoyee: Option<String>,
+    search_focus: bool,
+    /// Salon dans lequel on a sauté au milieu du passé.
+    ///
+    /// Le fil n'affiche alors pas la fin de la conversation, et rien ne le
+    /// dirait sans ce drapeau : on croirait le salon vide depuis.
+    retour_present: Option<ChannelId>,
     /// Compte dont on modifie les rôles, et la sélection en cours.
     roles_target: Option<String>,
     roles_draft: Vec<ki_protocol::RoleId>,
@@ -641,6 +695,16 @@ impl KiApp {
             voice_prompt: None,
             role_draft: None,
             channel_draft: None,
+            channel_edit: None,
+            verrou_draft: None,
+            show_search: false,
+            search_query: String::new(),
+            search_ici: true,
+            search_hits: Vec::new(),
+            search_more: false,
+            search_envoyee: None,
+            search_focus: false,
+            retour_present: None,
             roles_target: None,
             roles_draft: Vec::new(),
             show_account: false,
@@ -931,6 +995,19 @@ impl KiApp {
         }
     }
 
+    /// Mon pseudo **tel que le serveur le connaît**.
+    ///
+    /// Et non celui tapé dans le formulaire de connexion : le serveur le
+    /// rogne, et une mention se compare à ce qu'il diffuse, pas à ce qu'on a
+    /// saisi.
+    fn my_pseudo(&self) -> Option<&str> {
+        let id = self.my_id?;
+        self.members
+            .iter()
+            .find(|m| m.user_id == id)
+            .map(|m| m.username.as_str())
+    }
+
     /// Volume mémorisé pour un utilisateur (1.0 = 100 %).
     fn volume_of(&self, user_id: UserId) -> f32 {
         self.all_volumes
@@ -992,6 +1069,9 @@ impl KiApp {
         // dira le contraire dès la première page s'il n'y en a pas.
         self.history_more = true;
         self.history_pending = false;
+        // Entrer normalement dans un salon, c'est en voir la fin : le pied de
+        // fil « tu regardes un message retrouvé » n'a plus lieu d'être.
+        self.retour_present = None;
         // L'ancre de défilement se rapporte à la hauteur du salon qu'on
         // quitte : la garder ferait sauter la vue du nouveau.
         self.history_anchor = None;
@@ -1252,6 +1332,16 @@ impl KiApp {
         // --- Fenêtres et brouillons en cours ---
         self.ban_draft = None;
         self.voice_prompt = None;
+        self.channel_edit = None;
+        self.verrou_draft = None;
+        // Les résultats se rapportent à un serveur et à ses salons : les
+        // garder ferait cliquer sur des numéros de salon d'ailleurs.
+        self.show_search = false;
+        self.search_query.clear();
+        self.search_hits.clear();
+        self.search_envoyee = None;
+        self.search_more = false;
+        self.retour_present = None;
         *self.upload_status.lock().unwrap() = None;
 
         self.armed = false;
@@ -1705,12 +1795,21 @@ impl KiApp {
                 text,
                 ts,
             } => {
+                // Être **nommé** n'est pas un message de plus : ça appelle une
+                // réponse. On prévient donc même fenêtre au premier plan, là où
+                // un message ordinaire ne le fait pas.
+                let pour_moi = Some(user_id) != self.my_id
+                    && self.my_pseudo().is_some_and(|moi| {
+                        let membres: Vec<&str> =
+                            self.members.iter().map(|m| m.username.as_str()).collect();
+                        markup::me_mentionne(&text, &membres, moi)
+                    });
                 // Jamais de son pour ses propres messages ; et pour ceux des
                 // autres, seulement quand la fenêtre n'a pas le focus — en
                 // pleine conversation, un bip par message serait insupportable.
                 // La barre des tâches clignote en prime : le « quoi de neuf »
                 // se voit même en jeu.
-                if Some(user_id) != self.my_id && !self.window_focused {
+                if Some(user_id) != self.my_id && (pour_moi || !self.window_focused) {
                     self.play_sfx(sfx::MESSAGE);
                     self.wants_attention = true;
                 }
@@ -1726,6 +1825,17 @@ impl KiApp {
             }
             ServerMsg::History { messages } => {
                 self.messages = messages.into_iter().map(clean_record).collect();
+            }
+            ServerMsg::SearchResults { query, hits, more } => {
+                // Une réponse à une requête qu'on ne pose plus est jetée : le
+                // serveur relit des fichiers, et la réponse à « val » peut
+                // très bien arriver après celle à « valorant ».
+                if self.search_envoyee.as_deref() != Some(query.as_str()) {
+                    return;
+                }
+                self.search_envoyee = None;
+                self.search_hits = hits;
+                self.search_more = more;
             }
             ServerMsg::HistoryPage { messages, more, channel } => {
                 // Une page d'un autre salon est jetée : le serveur relit le
@@ -2463,6 +2573,9 @@ impl KiApp {
         if self.show_admin {
             self.admin_window(ctx);
         }
+        if self.show_search {
+            self.search_window(ctx);
+        }
         if self.show_account {
             self.account_window(ctx);
         }
@@ -2750,6 +2863,9 @@ impl KiApp {
                     }
 
                     ui.add_space(6.0);
+                    if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
+                        self.ouvrir_recherche();
+                    }
                     if ui::button(ui, Icon::Sliders, "Audio").clicked() {
                         self.show_settings = !self.show_settings;
                         if self.show_settings {
@@ -3342,15 +3458,38 @@ impl KiApp {
 
                     let filled = !self.input.trim().is_empty();
                     let send_width = 34.0 + ui.spacing().item_spacing.x;
+                    // Zone **multiligne**. Le protocole a toujours accepté les
+                    // sauts de ligne ; c'était l'interface qui les interdisait,
+                    // si bien que Maj+Entrée envoyait le message au lieu d'aller
+                    // à la ligne — et qu'on ne pouvait pas coller un extrait de
+                    // code sans qu'il parte en dix messages.
+                    //
+                    // La hauteur suit le contenu, dans des bornes : une ligne au
+                    // repos, jusqu'à six ensuite. Sans plafond, coller cent
+                    // lignes mangerait la conversation.
+                    let lignes = self.input.lines().count().clamp(1, 6);
                     let response = ui.add_sized(
-                        Vec2::new(ui.available_width() - send_width, 26.0),
-                        egui::TextEdit::singleline(&mut self.input)
+                        Vec2::new(ui.available_width() - send_width, 18.0 * lignes as f32 + 8.0),
+                        egui::TextEdit::multiline(&mut self.input)
                             .char_limit(ki_protocol::MAX_CHAT_TEXT)
+                            .desired_rows(lignes)
                             .frame(false)
                             .margin(egui::Margin::symmetric(4, 4))
                             .hint_text(format!("Message dans #{channel_name}")),
                     );
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    // Entrée envoie, Maj+Entrée va à la ligne. La zone
+                    // multiligne consomme Entrée pour son propre compte : on
+                    // intercepte donc AVANT elle, et l'on retire le saut de
+                    // ligne qu'elle vient d'insérer.
+                    if response.has_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                    {
+                        // egui a déjà écrit le saut de ligne dans le tampon au
+                        // moment où l'on regarde : on l'enlève, sinon chaque
+                        // message partirait avec une ligne vide en trop.
+                        if self.input.ends_with('\n') {
+                            self.input.pop();
+                        }
                         submit = true;
                         self.focus_input = true;
                     }
@@ -3359,7 +3498,7 @@ impl KiApp {
                     }
 
                     let tint = if filled { Some(ACCENT) } else { None };
-                    if ui::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer (Entrée)", tint).clicked()
+                    if ui::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne", tint).clicked()
                     {
                         submit = true;
                         self.focus_input = true;
@@ -3378,6 +3517,7 @@ impl KiApp {
 
     fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let mut want_older = false;
+        let mut revenir = false;
         // Compté, et pas déduit de `messages.len()` : le jour où le fil sera
         // virtualisé (P3.3), les deux cesseront de coïncider — et c'est
         // précisément l'écart qui prouvera que ça marche.
@@ -3438,6 +3578,17 @@ impl KiApp {
                 let vue = ui.clip_rect();
                 let marge = vue.height().max(200.0);
 
+                // Les pseudos connus, empruntés le temps du rendu comme les
+                // messages : c'est ce qui permet de reconnaître une mention
+                // sans allouer une chaîne par membre et par image.
+                let membres_source = std::mem::take(&mut self.members);
+                let membres: Vec<&str> =
+                    membres_source.iter().map(|m| m.username.as_str()).collect();
+                let moi = self
+                    .my_id
+                    .and_then(|id| membres_source.iter().find(|m| m.user_id == id))
+                    .map(|m| m.username.clone());
+
                 let mut last_day = i32::MIN;
                 let mut previous: Option<(UserId, u64)> = None;
                 let messages = std::mem::take(&mut self.messages);
@@ -3495,13 +3646,26 @@ impl KiApp {
                         if jour_change {
                             day_separator(ui, &day_label(msg.ts));
                         }
-                        message_block(ui, msg, !grouped, photo.as_ref(), previews, color);
+                        message_block(
+                            ui,
+                            MessageRow {
+                                msg,
+                                with_header: !grouped,
+                                photo: photo.as_ref(),
+                                color,
+                                membres: &membres,
+                                moi: moi.as_deref(),
+                            },
+                            previews,
+                        );
                     });
                     // Mesurée séparateur compris : c'est le bloc entier qu'on
                     // sautera la prochaine fois.
                     self.msg_heights.insert(cle, bloc.response.rect.height());
                 }
                 self.messages = messages;
+                drop(membres);
+                self.members = membres_source;
                 // Le cache ne garde que ce qui est encore affiché : sans ça,
                 // remonter un fil de plusieurs mois y laisserait une entrée
                 // par message lu, pour toujours.
@@ -3509,6 +3673,28 @@ impl KiApp {
                     let vivants: std::collections::HashSet<(UserId, u64)> =
                         self.messages.iter().map(|m| (m.user_id, m.ts)).collect();
                     self.msg_heights.retain(|k, _| vivants.contains(k));
+                }
+
+                // On a sauté au milieu du passé : ce qui a suivi n'est pas
+                // affiché, et rien ne le dirait. Sans ce pied de fil, on croit
+                // le salon mort depuis ce jour-là.
+                if self.retour_present == self.current {
+                    ui.add_space(6.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("tu regardes un message retrouvé")
+                                .color(TEXT_FAINT)
+                                .size(11.5),
+                        );
+                        if ui
+                            .button(
+                                RichText::new("Revenir au présent").color(TEXT_DIM).size(11.5),
+                            )
+                            .clicked()
+                        {
+                            revenir = true;
+                        }
+                    });
                 }
                 ui.add_space(10.0);
             });
@@ -3554,11 +3740,197 @@ impl KiApp {
         if want_older {
             self.load_older_history();
         }
+        if revenir {
+            if let Some(channel) = self.current {
+                self.join(channel);
+            }
+        }
     }
 
     // -----------------------------------------------------------------
     // Fenêtres
     // -----------------------------------------------------------------
+
+    /// Ouvre la recherche, curseur dans le champ.
+    fn ouvrir_recherche(&mut self) {
+        self.show_search = !self.show_search;
+        if self.show_search {
+            self.search_focus = true;
+        }
+    }
+
+    /// Envoie la requête en cours, si elle a de quoi chercher.
+    fn lancer_recherche(&mut self) {
+        let query = self.search_query.trim().to_string();
+        if query.is_empty() {
+            self.search_hits.clear();
+            self.search_envoyee = None;
+            return;
+        }
+        let channel = self.search_ici.then_some(self.current).flatten();
+        self.search_envoyee = Some(query.clone());
+        self.send(ClientMsg::Search {
+            query,
+            channel,
+            limit: ki_protocol::MAX_SEARCH_HITS as u32,
+        });
+    }
+
+    /// Ouvre un salon **au niveau d'un message précis** plutôt qu'à sa fin.
+    ///
+    /// Ce n'est pas `join` : celui-ci demande les derniers messages, alors
+    /// qu'ici on veut la page qui **se termine** par le message trouvé. Le
+    /// résultat est donc en bas de l'écran, sans qu'il faille recalculer un
+    /// défilement — et sans afficher ce qui a suivi, d'où le retour au
+    /// présent proposé en bas du fil.
+    fn sauter_a(&mut self, channel: ChannelId, ts: u64) {
+        self.current = Some(channel);
+        self.messages.clear();
+        self.msg_heights.clear();
+        self.history_more = true;
+        self.history_pending = true;
+        self.history_anchor = None;
+        self.retour_present = Some(channel);
+        self.send(ClientMsg::Join { channel });
+        // `before_ts` est exclusif : +1 pour que le message cherché soit dans
+        // la page, et en dernier.
+        self.send(ClientMsg::HistoryBefore { before_ts: ts + 1, limit: 100, channel });
+    }
+
+    /// Fenêtre de recherche : la requête, la portée, et les résultats.
+    fn search_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut lancer = false;
+        let mut saut: Option<(ChannelId, u64)> = None;
+        let roomy = (ctx.screen_rect().height() - 160.0).clamp(280.0, 720.0);
+        egui::Window::new("Rechercher")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(440.0)
+            .default_height(roomy)
+            .min_width(320.0)
+            .show(ctx, |ui| {
+                let champ = ui.add(ui::text_field(&mut self.search_query, "chercher…", false));
+                if std::mem::take(&mut self.search_focus) {
+                    champ.request_focus();
+                }
+                // À la frappe, pas de recherche : chaque requête fait relire
+                // des journaux entiers au serveur. On cherche quand on a fini
+                // de taper, et on le dit.
+                if champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    lancer = true;
+                }
+                ui.horizontal(|ui| {
+                    let ici = ui.selectable_label(self.search_ici, "Ce salon");
+                    let partout = ui.selectable_label(!self.search_ici, "Partout");
+                    // Changer de portée relance : sinon la liste affichée ne
+                    // correspond plus au bouton allumé, et l'on croit que la
+                    // recherche n'a rien trouvé ailleurs.
+                    if ici.clicked() && !self.search_ici {
+                        self.search_ici = true;
+                        lancer = true;
+                    }
+                    if partout.clicked() && self.search_ici {
+                        self.search_ici = false;
+                        lancer = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
+                            lancer = true;
+                        }
+                    });
+                });
+                ui::hint(ui, "Entrée pour chercher — la casse et les accents majuscules sont ignorés");
+
+                ui.add_space(8.0);
+                ui::hairline(ui);
+                ui.add_space(8.0);
+
+                if self.search_envoyee.is_some() && self.search_hits.is_empty() {
+                    ui.label(RichText::new("Recherche en cours…").color(TEXT_FAINT).size(12.0));
+                    return;
+                }
+                if self.search_hits.is_empty() {
+                    let quoi = if self.search_query.trim().is_empty() {
+                        "Tape ce que tu cherches, puis Entrée."
+                    } else {
+                        "Aucun message ne contient ça."
+                    };
+                    ui.label(RichText::new(quoi).color(TEXT_FAINT).size(12.0));
+                    return;
+                }
+                if self.search_more {
+                    ui::hint(ui, "il y en avait davantage : voici les plus récents");
+                }
+
+                // Les plus récents en premier : c'est l'ordre dans lequel on
+                // cherche, alors que le serveur rend l'ordre du fil.
+                let hits: Vec<ki_protocol::SearchHit> =
+                    self.search_hits.iter().rev().cloned().collect();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for (rang, hit) in hits.iter().enumerate() {
+                        let nom = self
+                            .channels
+                            .iter()
+                            .find(|c| c.id == hit.channel)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| format!("salon {}", hit.channel));
+                        // Le rang, et non salon+horodatage : deux messages
+                        // peuvent partager les deux à la milliseconde près,
+                        // et deux widgets de même identité, egui n'en peint
+                        // qu'un.
+                        let bloc = ui.push_id(("hit", rang), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("#{nom}")).color(ACCENT).size(11.0),
+                                );
+                                ui.label(
+                                    RichText::new(&hit.record.username).color(TEXT_DIM).size(11.0),
+                                );
+                                ui.label(
+                                    RichText::new(day_label(hit.record.ts))
+                                        .color(TEXT_FAINT)
+                                        .size(11.0),
+                                );
+                            });
+                            // Une seule ligne : un résultat sert à reconnaître
+                            // le message, pas à le relire. Le fil s'en charge.
+                            let apercu: String = hit
+                                .record
+                                .text
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                                .chars()
+                                .take(160)
+                                .collect();
+                            ui.label(RichText::new(apercu).color(TEXT).size(13.0));
+                        });
+                        if bloc
+                            .response
+                            .interact(egui::Sense::click())
+                            .on_hover_text("aller à ce message")
+                            .clicked()
+                        {
+                            saut = Some((hit.channel, hit.record.ts));
+                        }
+                        ui.add_space(4.0);
+                        ui::hairline(ui);
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+        if lancer {
+            self.lancer_recherche();
+        }
+        if let Some((channel, ts)) = saut {
+            self.sauter_a(channel, ts);
+        }
+        if !open {
+            self.show_search = false;
+        }
+    }
 
     /// Fenêtre de réglages audio : périphériques, micro, sortie, qualité.
     fn settings_window(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
@@ -4894,30 +5266,8 @@ impl KiApp {
             ui.selectable_value(&mut draft.kind, ChannelKind::Text, "Textuel");
             ui.selectable_value(&mut draft.kind, ChannelKind::Voice, "Vocal");
         });
-        ui.checkbox(&mut draft.restricted, "Réservé à certains rôles");
-        if draft.restricted {
-            let roles = self.roles.clone();
-            ui.horizontal_wrapped(|ui| {
-                for role in &roles {
-                    // `@everyone` n'a pas de sens dans une restriction : le
-                    // cocher reviendrait à ne rien restreindre du tout.
-                    if role.id == ki_protocol::ROLE_EVERYONE {
-                        continue;
-                    }
-                    let mut on = draft.allowed_roles.contains(&role.id);
-                    if ui.checkbox(&mut on, &role.name).changed() {
-                        if on {
-                            draft.allowed_roles.push(role.id);
-                        } else {
-                            draft.allowed_roles.retain(|r| *r != role.id);
-                        }
-                    }
-                }
-            });
-            if draft.allowed_roles.is_empty() {
-                ui::hint(ui, "aucun rôle coché : le salon resterait invisible pour tous");
-            }
-        }
+        let roles = self.roles.clone();
+        restriction_par_roles(ui, &roles, draft);
         let ready = !draft.name.trim().is_empty()
             && (!draft.restricted || !draft.allowed_roles.is_empty());
         let create = ui
@@ -4938,7 +5288,12 @@ impl KiApp {
         ui.add_space(10.0);
         ui::group_title(ui, Icon::Hash, "Salons existants");
         let channels = self.channels.clone();
-        for ch in &channels {
+        // L'ordre affiché **est** l'ordre du serveur : la liste arrive déjà
+        // triée par position, et qui gère les salons les voit tous. C'est ce
+        // qui permet d'envoyer une permutation exacte — le serveur refuse
+        // toute liste incomplète, et une vue filtrée en serait une.
+        let ids: Vec<ki_protocol::ChannelId> = channels.iter().map(|c| c.id).collect();
+        for (i, ch) in channels.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui::glyph(
                     ui,
@@ -4957,8 +5312,152 @@ impl KiApp {
                     if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
                         to_send.push(ClientMsg::AdminDeleteChannel { channel: ch.id });
                     }
+                    if ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Renommer", None).clicked() {
+                        // Un formulaire déjà ouvert sur ce salon se referme :
+                        // le crayon fait aller-retour, sans bouton « annuler »
+                        // à chercher.
+                        self.channel_edit = match self.channel_edit.take() {
+                            Some(e) if e.id == ch.id => None,
+                            _ => Some(ChannelEdit {
+                                id: ch.id,
+                                position: ch.position,
+                                draft: ChannelDraft {
+                                    name: ch.name.clone(),
+                                    kind: ch.kind,
+                                    restricted: ch.allowed_roles.is_some(),
+                                    allowed_roles: ch.allowed_roles.clone().unwrap_or_default(),
+                                },
+                            }),
+                        };
+                    }
+                    // Le verrou n'a de sens que sur un salon vocal : c'est le
+                    // seul endroit où l'on entre, et donc le seul où l'on
+                    // puisse être arrêté à la porte.
+                    if ch.kind == ChannelKind::Voice {
+                        let quoi = if ch.locked { "Changer le verrou" } else { "Verrouiller" };
+                        let teinte = ch.locked.then_some(WARN);
+                        if ui::icon_button_ex(ui, Icon::Key, 24.0, quoi, teinte).clicked() {
+                            self.verrou_draft = match self.verrou_draft.take() {
+                                Some(v) if v.channel == ch.id => None,
+                                _ => Some(VerrouDraft {
+                                    channel: ch.id,
+                                    mot_de_passe: String::new(),
+                                    ttl_secs: VOICE_LOCK_DURATIONS[1].1,
+                                }),
+                            };
+                        }
+                    }
+                    // Monter et descendre plutôt qu'un glisser-déposer : sur
+                    // une dizaine de salons c'est aussi rapide, et ça ne
+                    // dépend pas de la précision de la souris.
+                    let bouger = |haut: bool| -> ClientMsg {
+                        let mut order = ids.clone();
+                        order.swap(i, if haut { i - 1 } else { i + 1 });
+                        ClientMsg::AdminReorderChannels { order }
+                    };
+                    if ui
+                        .add_enabled_ui(i + 1 < ids.len(), |ui| {
+                            ui::icon_button_ex(ui, Icon::ArrowDown, 24.0, "Descendre", None)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        to_send.push(bouger(false));
+                    }
+                    if ui
+                        .add_enabled_ui(i > 0, |ui| {
+                            ui::icon_button_ex(ui, Icon::ArrowUp, 24.0, "Monter", None)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        to_send.push(bouger(true));
+                    }
                 });
             });
+
+            // Les deux formulaires s'ouvrent sous leur salon, et pas dans une
+            // fenêtre à part : on voit ce qu'on modifie.
+            if self.channel_edit.as_ref().is_some_and(|e| e.id == ch.id) {
+                let mut valider = false;
+                let mut annuler = false;
+                ui.indent(("edition", ch.id), |ui| {
+                    let edit = self.channel_edit.as_mut().expect("vérifié à l'instant");
+                    ui.add(ui::text_field(&mut edit.draft.name, "nom du salon", false));
+                    restriction_par_roles(ui, &roles, &mut edit.draft);
+                    let ok = !edit.draft.name.trim().is_empty()
+                        && (!edit.draft.restricted || !edit.draft.allowed_roles.is_empty());
+                    ui.horizontal(|ui| {
+                        valider = ui
+                            .add_enabled_ui(ok, |ui| ui::button(ui, Icon::Check, "Enregistrer"))
+                            .inner
+                            .clicked();
+                        annuler = ui::button(ui, Icon::Close, "Annuler").clicked();
+                    });
+                });
+                if valider {
+                    let edit = self.channel_edit.take().expect("vérifié à l'instant");
+                    to_send.push(ClientMsg::AdminEditChannel {
+                        channel: ki_protocol::ChannelInfo {
+                            id: edit.id,
+                            name: edit.draft.name.trim().to_string(),
+                            // La nature ne se change pas — le serveur le
+                            // refuse — mais le message remplace tout le
+                            // salon : il faut la lui redire à l'identique.
+                            kind: edit.draft.kind,
+                            // Idem pour la position : la taire reviendrait à
+                            // demander le rang 0, et renommer un salon le
+                            // ferait remonter en tête de liste.
+                            position: edit.position,
+                            locked: false,
+                            allowed_roles: edit
+                                .draft
+                                .restricted
+                                .then(|| edit.draft.allowed_roles.clone()),
+                        },
+                    });
+                } else if annuler {
+                    self.channel_edit = None;
+                }
+            }
+
+            if self.verrou_draft.as_ref().is_some_and(|v| v.channel == ch.id) {
+                let mut poser = false;
+                let mut retirer = false;
+                ui.indent(("verrou", ch.id), |ui| {
+                    let v = self.verrou_draft.as_mut().expect("vérifié à l'instant");
+                    ui.add(ui::text_field(&mut v.mot_de_passe, "mot de passe", true));
+                    ui.horizontal_wrapped(|ui| {
+                        for (label, secs) in VOICE_LOCK_DURATIONS {
+                            ui.selectable_value(&mut v.ttl_secs, *secs, *label);
+                        }
+                    });
+                    let ok = !v.mot_de_passe.is_empty();
+                    ui.horizontal(|ui| {
+                        poser = ui
+                            .add_enabled_ui(ok, |ui| ui::button(ui, Icon::Key, "Poser le verrou"))
+                            .inner
+                            .clicked();
+                        // Retirer n'est proposé que s'il y a quelque chose à
+                        // retirer, sinon le bouton ne fait rien de visible.
+                        retirer = ch.locked
+                            && ui::button(ui, Icon::Close, "Retirer le verrou").clicked();
+                    });
+                    ui::hint(
+                        ui,
+                        "qui gère les salons entre sans le mot de passe : \
+                         poser un verrou ne s'enferme pas dehors",
+                    );
+                });
+                if poser || retirer {
+                    let v = self.verrou_draft.take().expect("vérifié à l'instant");
+                    to_send.push(ClientMsg::AdminSetVoicePassword {
+                        channel: v.channel,
+                        password: poser.then_some(v.mot_de_passe),
+                        ttl_secs: v.ttl_secs,
+                    });
+                }
+            }
         }
         ui::hint(
             ui,
@@ -6074,17 +6573,31 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
 /// Un message : en-tête (avatar + pseudo + heure) si c'est le premier du
 /// groupe, puis le corps. Les messages consécutifs du même auteur se
 /// collent, comme sur Discord.
+/// Ce qu'il faut pour peindre un message, en plus du message lui-même.
+///
+/// Groupé plutôt qu'énuméré : à sept paramètres positionnels, on ne sait plus
+/// lequel est lequel — et il en faut deux de plus depuis les mentions.
+struct MessageRow<'a> {
+    msg: &'a ChatRecord,
+    with_header: bool,
+    photo: Option<&'a egui::TextureHandle>,
+    /// Couleur de l'auteur, résolue depuis son rôle par l'appelant. Elle
+    /// n'est pas figée dans l'historique : changer un rôle doit recolorer les
+    /// anciens messages, pas seulement les nouveaux.
+    color: egui::Color32,
+    /// Pseudos connus, pour reconnaître les mentions. Sans eux, `@` n'importe
+    /// quoi passerait pour une mention.
+    membres: &'a [&'a str],
+    /// Le pseudo de celui qui lit, pour distinguer sa propre mention.
+    moi: Option<&'a str>,
+}
+
 fn message_block(
     ui: &mut egui::Ui,
-    msg: &ChatRecord,
-    with_header: bool,
-    photo: Option<&egui::TextureHandle>,
+    row: MessageRow<'_>,
     previews: &mut images::Previews,
-    // Couleur de l'auteur, résolue depuis son rôle par l'appelant. Elle
-    // n'est pas figée dans l'historique : changer un rôle doit recolorer les
-    // anciens messages, pas seulement les nouveaux.
-    color: egui::Color32,
 ) {
+    let MessageRow { msg, with_header, photo, color, membres, moi } = row;
     const GUTTER: f32 = 36.0;
     let bg_slot = ui.painter().add(egui::Shape::Noop);
 
@@ -6117,7 +6630,7 @@ fn message_block(
                     });
                     ui.add_space(1.0);
                 }
-                message_body(ui, &msg.text);
+                message_body(ui, &msg.text, membres, moi, (msg.user_id, msg.ts));
                 // Les images partagées s'affichent sous le message.
                 for (is_link, chunk) in split_links(&msg.text) {
                     if is_link && images::looks_like_image(chunk) {
@@ -6198,27 +6711,154 @@ fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) 
     }
 }
 
-fn message_body(ui: &mut egui::Ui, text: &str) {
-    let parts = split_links(text);
-    if parts.len() == 1 && !parts[0].0 {
-        ui.label(RichText::new(text).color(TEXT).size(14.0));
+/// Le sélecteur « réservé à certains rôles » d'un salon.
+///
+/// Partagé par la création et la modification : deux copies divergeraient, et
+/// c'est exactement le genre d'écart qui laisse un salon visible de tous alors
+/// que le formulaire affichait le contraire.
+fn restriction_par_roles(ui: &mut egui::Ui, roles: &[ki_protocol::RoleInfo], draft: &mut ChannelDraft) {
+    ui.checkbox(&mut draft.restricted, "Réservé à certains rôles");
+    if !draft.restricted {
         return;
     }
+    ui.horizontal_wrapped(|ui| {
+        for role in roles {
+            // `@everyone` n'a pas de sens dans une restriction : le cocher
+            // reviendrait à ne rien restreindre du tout.
+            if role.id == ki_protocol::ROLE_EVERYONE {
+                continue;
+            }
+            let mut on = draft.allowed_roles.contains(&role.id);
+            if ui.checkbox(&mut on, &role.name).changed() {
+                if on {
+                    draft.allowed_roles.push(role.id);
+                } else {
+                    draft.allowed_roles.retain(|r| *r != role.id);
+                }
+            }
+        }
+    });
+    if draft.allowed_roles.is_empty() {
+        ui::hint(ui, "aucun rôle coché : le salon resterait invisible pour tous");
+    }
+}
+
+/// Peint le corps d'un message : liens, mentions, gras, italique, code.
+///
+/// Le découpage vit dans `markup`, qui se teste sans ouvrir de fenêtre ; ici,
+/// on ne fait que peindre ce qu'il rend.
+///
+/// `membres` sert à reconnaître les mentions — `@` suivi d'un pseudo **connu**
+/// — et `moi` à distinguer la sienne. Sans la liste, une adresse électronique
+/// écrite dans un message deviendrait un surlignage.
+fn message_body(
+    ui: &mut egui::Ui,
+    text: &str,
+    membres: &[&str],
+    moi: Option<&str>,
+    // De quoi identifier le message d'une image a l'autre. Un bloc de code
+    // defile horizontalement, et egui range ce defilement sous une cle : si
+    // elle change a chaque image, le bloc revient au debut des qu'on scrute
+    // autre chose. L'auteur et l'horodatage, eux, ne bougent pas.
+    cle: (UserId, u64),
+) {
+    let blocs = markup::decouper(text, membres, moi);
+
+    // Le cas de loin le plus fréquent : une ligne, aucun balisage. On évite
+    // alors toute la machinerie de mise en page horizontale, qui coûte un
+    // widget par fragment.
+    if let [markup::Bloc::Ligne(frags)] = blocs.as_slice() {
+        if let [markup::Fragment::Texte(t)] = frags.as_slice() {
+            ui.label(RichText::new(*t).color(TEXT).size(14.0));
+            return;
+        }
+    }
+
     ui.scope(|ui| {
         // Espacement nul : les espaces font partie des fragments de texte,
         // le retour à la ligne tombe donc au bon endroit.
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.horizontal_wrapped(|ui| {
-            for (is_link, chunk) in parts {
-                if is_link {
-                    ui.hyperlink_to(RichText::new(shorten(chunk)).size(14.0), chunk)
-                        .on_hover_text(chunk);
-                } else {
-                    ui.label(RichText::new(chunk).color(TEXT).size(14.0));
+        for (i, bloc) in blocs.iter().enumerate() {
+            match bloc {
+                markup::Bloc::Code(code) => bloc_de_code(ui, code, (cle, i)),
+                markup::Bloc::Ligne(frags) => {
+                    ui.horizontal_wrapped(|ui| {
+                        for frag in frags {
+                            peindre_fragment(ui, frag);
+                        }
+                    });
                 }
             }
-        });
+        }
     });
+}
+
+fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
+    use markup::Fragment as F;
+    match frag {
+        F::Texte(t) => {
+            ui.label(RichText::new(*t).color(TEXT).size(14.0));
+        }
+        F::Lien(url) => {
+            ui.hyperlink_to(RichText::new(shorten(url)).size(14.0), *url)
+                .on_hover_text(*url);
+        }
+        F::Gras(t) => {
+            ui.label(RichText::new(*t).color(TEXT).size(14.0).strong());
+        }
+        F::Italique(t) => {
+            ui.label(RichText::new(*t).color(TEXT).size(14.0).italics());
+        }
+        F::Code(t) => {
+            // Fond discret : ce qui distingue du code d'une phrase, c'est
+            // la chasse fixe et un léger relief, pas une couleur criarde.
+            ui.label(
+                RichText::new(*t)
+                    .monospace()
+                    .size(13.0)
+                    .color(TEXT)
+                    .background_color(theme::BG_RAISED),
+            );
+        }
+        F::Mention { pseudo, moi } => {
+            // Sa propre mention attire l'œil ; celle de quelqu'un d'autre
+            // se contente d'être reconnaissable. Sans cette distinction, un
+            // salon actif devient un sapin de Noël et l'on cesse de voir
+            // celles qui nous concernent.
+            let (couleur, fond) = if *moi {
+                (theme::BG_DEEP, ACCENT)
+            } else {
+                (ACCENT, theme::BG_RAISED)
+            };
+            ui.label(
+                RichText::new(format!("@{pseudo}"))
+                    .size(14.0)
+                    .color(couleur)
+                    .background_color(fond),
+            );
+        }
+    }
+}
+
+/// Un bloc de code : chasse fixe, fond propre, et **pas** de retour à la
+/// ligne automatique — un extrait de code coupé au milieu ne se lit plus. Il
+/// défile horizontalement dans son cadre.
+fn bloc_de_code(ui: &mut egui::Ui, code: &str, cle: ((UserId, u64), usize)) {
+    ui.add_space(3.0);
+    egui::Frame::NONE
+        .fill(theme::BG_RAISED)
+        .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt(("bloc-code", cle))
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new(code).monospace().size(13.0).color(TEXT));
+                });
+        });
+    ui.add_space(3.0);
 }
 
 /// Salon vide : on n'affiche pas une page blanche.

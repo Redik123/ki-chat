@@ -99,7 +99,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                     println!(
                         "tape /join <id> pour lire un salon texte, /voice <id> pour \
-                         rejoindre un vocal, /mic on pour parler"
+                         rejoindre un vocal, /mic on pour parler, \
+                         /search <texte> pour fouiller l'historique"
                     );
                     let key: Option<[u8; 32]> = ki_protocol::hex_decode(&voice_key)
                         .and_then(|v| v.try_into().ok());
@@ -120,6 +121,20 @@ async fn main() -> anyhow::Result<()> {
                 ServerMsg::History { messages } => {
                     for m in messages {
                         println!("  [ancien] <{}> {}", m.username, m.text);
+                    }
+                }
+                ServerMsg::SearchResults { hits, more, .. } => {
+                    if hits.is_empty() {
+                        println!("* rien trouvé");
+                    }
+                    for h in hits {
+                        println!(
+                            "  [salon {}] <{}> {}",
+                            h.channel, h.record.username, h.record.text
+                        );
+                    }
+                    if more {
+                        println!("* (il y en avait davantage : voici les plus récents)");
                     }
                 }
                 ServerMsg::UserJoined { username, .. } => println!("* {username} a rejoint"),
@@ -317,6 +332,15 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("! id de salon invalide");
                     continue;
                 }
+            }
+        } else if let Some(rest) = line.strip_prefix("/search ") {
+            // Sans salon : partout où l'on a le droit de lire. En ligne de
+            // commande on n'a pas de fenêtre où restreindre la portée, et
+            // chercher large est ce qu'on attend d'une commande.
+            ClientMsg::Search {
+                query: rest.trim().to_string(),
+                channel: None,
+                limit: 30,
             }
         } else if let Some(rest) = line.strip_prefix("/mic ") {
             let Some(engine) = &engine else {

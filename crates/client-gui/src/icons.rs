@@ -40,6 +40,7 @@ pub enum Icon {
     Pencil,
     Trash,
     Server,
+    Loupe,
 }
 
 /// Dessine `icon` centrée dans `rect` (le carré inscrit est utilisé).
@@ -277,6 +278,13 @@ impl Pen<'_> {
             Icon::Ban => {
                 self.ring((12.0, 12.0), 8.2);
                 self.seg((6.2, 6.2), (17.8, 17.8));
+            }
+            // Une loupe : le cercle de la lentille, et le manche qui part
+            // vers le bas à droite — l'orientation universelle, changer d'axe
+            // ne ferait que la rendre méconnaissable.
+            Icon::Loupe => {
+                self.ring((10.2, 10.2), 6.2);
+                self.seg((14.8, 14.8), (20.5, 20.5));
             }
             Icon::Key => {
                 self.ring((8.2, 15.8), 3.9);
