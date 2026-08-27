@@ -1022,17 +1022,17 @@ il l'avait. **Un test qui passe ici et échoue là-bas, sans que rien ne change
 dans le code.**
 
 La comparaison se fait désormais dans l'autre sens : on relève d'abord ce que
-le cache contient — borné à , donc seize kilooctets au pire — et l'on
+le cache contient — borné à `MEM_CAP`, donc seize kilooctets au pire — et l'on
 écarte du fichier ce qu'il redira. Le cache passe en dernier, puisqu'il porte
 les messages les plus récents.
 
 Deux tests le tiennent, et les deux ont été vérifiés en retirant la garde pour
 s'assurer qu'ils échouent : l'un sur l'ordre, l'autre sur les doublons — celui
-qui rendait  au lieu de . Le premier essai de
+qui rendait `[1, 1, 2, 2, 3, 3]` au lieu de `[1, 2, 3]`. Le premier essai de
 test ne prouvait rien, il passait sans la garde ; il a fallu chercher la
 propriété que la garde protège vraiment.
 
-Les deux écrivent leur journal à la main plutôt que par  : sinon le
+Les deux écrivent leur journal à la main plutôt que par `append` : sinon le
 recouvrement entre fichier et cache dépend de l'avance du fil d'écriture, et
 c'est précisément ce qui avait masqué le défaut.
 
