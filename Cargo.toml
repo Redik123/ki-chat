@@ -9,6 +9,7 @@ members = [
     "crates/client-quic",
     "crates/client-cli",
     "crates/client-gui",
+    "crates/load",
 ]
 
 [workspace.package]

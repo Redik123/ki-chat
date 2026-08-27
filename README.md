@@ -328,6 +328,40 @@ cargo run -p ki-client-cli -- 127.0.0.1 mon_pseudo mon_pass --invite changeme
 Adresse serveur côté clients : `hôte` ou `hôte:port` (port QUIC, 9987 par
 défaut) — plus d'URL `ws://`.
 
+### Mesurer
+
+Trente personnes ne se réunissent pas sur commande pour valider un correctif,
+et « ça rame quand je joue » ne se reproduit jamais sur la machine de
+développement. Trois outils remplacent la divination :
+
+```bash
+# N clients virtuels : vraies connexions QUIC, vrais comptes, vraie voix
+# chiffrée, à la taille et au rythme réels. Aucun matériel audio requis —
+# la charge tourne aussi depuis un conteneur posé à côté du serveur.
+cargo run --release -p ki-load -- 127.0.0.1 --clients 30 --invite changeme \
+    --secondes 60 --muets 20
+
+# les chemins où il y a du calcul par échantillon, et le coût d'une diffusion
+cargo bench -p ki-voice        # mixage de N locuteurs, rééchantillonnage
+cargo bench -p ki-protocol     # diffusion d'un roster à N destinataires
+```
+
+`--muets` compte : un salon réel est surtout fait d'auditeurs, et ce sont eux
+qui font payer le relais. Le bilan sort l'amplification (paquets reçus sur
+paquets émis), les pertes montantes que le serveur signale lui-même, et le
+volume de contrôle reçu.
+
+Côté client, **⚙ → Relevé de performance** donne le coût de l'interface chez
+la personne qui se plaint, et se copie comme le journal audio : temps d'une
+image, temps du fil de discussion, messages parcourus sur messages chargés,
+images par seconde réellement peintes, et trames audio incomplètes (chacune
+est un craquement — zéro est la seule bonne valeur). Des quantiles, pas des
+moyennes : une moyenne de 3 ms cache une image sur vingt à 40 ms, et c'est
+celle-là qui se voit. Le compteur d'allocations par image demande
+`--features mesures`, parce qu'une incrémentation atomique par allocation
+coûterait sur la ligne de cache que se disputent l'interface, le réseau et
+l'audio.
+
 L'application retient serveur/pseudo et les réglages audio entre les
 sessions. Le push-to-talk est **global** : la touche fonctionne même quand la
 fenêtre n'a pas le focus (poll clavier système via GetAsyncKeyState), donc en

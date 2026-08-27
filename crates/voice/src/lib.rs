@@ -9,8 +9,16 @@
 //! indépendant du reste du client.
 
 pub mod effects;
-mod jitter;
-mod resample;
+// `jitter` et `resample` sont l'intérieur du moteur, et le resteraient
+// volontiers — mais un banc criterion est un crate EXTÉRIEUR : il ne voit que
+// l'API publique. Les mesurer depuis `benches/` demande donc de les exposer.
+//
+// Le coût est nul ici : ce crate n'a d'autres consommateurs que les binaires
+// de cet espace de travail. Et sans mesure, « optimiser » le mixage ou le
+// rééchantillonnage reviendrait à parier — c'est précisément ce que les bancs
+// existent pour empêcher.
+pub mod jitter;
+pub mod resample;
 #[cfg(windows)]
 mod wasapi;
 
@@ -294,6 +302,10 @@ pub struct VoiceStats {
     pub samples_played: u64,
     /// Pire gigue réseau mesurée parmi les locuteurs actifs, en ms.
     pub worst_jitter_ms: f32,
+    /// Trames incomplètes parties vers la carte son depuis le démarrage du
+    /// moteur : chacune est un trou audible. Zéro est la seule bonne valeur ;
+    /// c'est la cible chiffrée de P4.
+    pub underruns: u64,
 }
 
 #[derive(Default)]
@@ -305,6 +317,10 @@ struct Counters {
     rejected: AtomicU64,
     mic_peak_bits: std::sync::atomic::AtomicU32,
     played: AtomicU64,
+    /// Trames incomplètes parties vers la carte son : la sortie a réclamé
+    /// des échantillons qu'aucun tampon de lecture n'avait. C'est la mesure
+    /// du craquement, ramassée par le rappel de sortie.
+    underruns: AtomicU64,
 }
 
 use std::sync::atomic::{AtomicI32, AtomicU32};
@@ -661,6 +677,7 @@ impl VoiceEngine {
             mic_peak: f32::from_bits(self.shared.counters.mic_peak_bits.load(Ordering::Relaxed)),
             samples_played: self.shared.counters.played.load(Ordering::Relaxed),
             worst_jitter_ms,
+            underruns: self.shared.counters.underruns.load(Ordering::Relaxed),
         }
     }
 
@@ -1941,6 +1958,7 @@ fn output_writer(
         while !resampler.can_pull(mono_needed) {
             let mut mix = [0f32; FRAME_SAMPLES];
             let mut any = false;
+            let mut trous = 0u64;
             {
                 // Fil temps réel : on ne touche qu'aux tampons déjà décodés.
                 // Le verrou de la carte n'est tenu que le temps de la
@@ -1950,7 +1968,12 @@ fn output_writer(
                 let playouts = sh_cb.playouts.lock().unwrap();
                 for (id, playout) in playouts.iter() {
                     let gain = volumes.get(id).copied().unwrap_or(1.0);
-                    any |= playout.lock().unwrap().mix_into(&mut mix, gain);
+                    // Le verrou est déjà tenu pour mixer : on relève les
+                    // trous dans la foulée, sans second verrouillage sur le
+                    // chemin temps réel.
+                    let mut p = playout.lock().unwrap();
+                    any |= p.mix_into(&mut mix, gain);
+                    trous += p.take_starvations();
                 }
             }
             // Retour local : test micro (« s'écouter ») et son de test.
@@ -1989,6 +2012,11 @@ fn output_writer(
             if any {
                 // De la voix distante part réellement vers la carte son.
                 sh_cb.counters.played.fetch_add(FRAME_SAMPLES as u64, Ordering::Relaxed);
+            }
+            // Une seule écriture atomique par trame, et seulement s'il y a
+            // eu quelque chose à dire : le chemin propre ne paie rien.
+            if trous > 0 {
+                sh_cb.counters.underruns.fetch_add(trous, Ordering::Relaxed);
             }
             resampler.push(&mix);
         }

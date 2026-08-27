@@ -282,6 +282,31 @@ La correction est mécanique et sans risque : sérialiser **une fois** en
 `ServerMsg`. Elle supprime au passage le garde-fou `MAX_LINE` dupliqué dans
 chaque tâche d'écriture.
 
+> **Mesuré depuis** (P1) : 6,51 µs → 1,33 µs à 5 destinataires, **214,5 µs →
+> 7,22 µs à 30** (29,7×). La prédiction « d'un facteur N » est exacte.
+
+### 6.1 bis — Et le roster grandit avec les comptes, pas avec les connectés
+
+Trouvé en passant `ki-load` deux fois de suite sur le même serveur : à
+**nombre de connectés identique** (12), le roster diffusé est passé de
+1 252 à 2 691 octets. Entre les deux, le magasin de comptes était monté de
+12 à 24.
+
+C'est voulu et documenté — `roster()` liste « toute la communauté, pas
+seulement les présents », comptes hors ligne compris — mais la conséquence ne
+l'était pas : **le coût d'une diffusion suit le nombre de comptes créés depuis
+toujours**, pas le nombre de gens dans la pièce. Un serveur de trente
+habitués qui a vu passer deux cents personnes en un an sérialise deux cents
+membres, trente fois, à chaque entrée et sortie de vocal.
+
+Deux corrections, complémentaires :
+
+- **P5.1** divise par le nombre de destinataires (la sérialisation unique) ;
+- **P5.3** divise par le nombre de membres (`MemberUpdate` différentiel au
+  lieu du roster entier). Cette trouvaille la fait passer de confort à
+  nécessaire — et elle porte aussi la pagination des comptes hors ligne, si
+  le magasin devait vraiment grossir.
+
 ### 6.2 Remonter le fil relit tout le fichier
 
 `history.rs:279` — `before()` relit **l'intégralité** de `channel-N.jsonl`,
@@ -385,26 +410,102 @@ workflows sont syntaxiquement valides.
 
 *Coût réel : une session. Gain : tout le reste devient possible.*
 
-## P1 — Pouvoir mesurer
+## P1 — Pouvoir mesurer ✅ (livré le 2026-08-27)
 
 Optimiser sans mesure produit du code plus compliqué et pas plus rapide.
 
-1. **`criterion` sur les trois chemins qui comptent** : mixage de N locuteurs
-   (`Playout::mix_into`), rééchantillonnage cubique, sérialisation d'un
-   `Members` à 30 membres. Ce sont les repères contre lesquels P3 et P4 se
-   jugeront.
-2. **Compteurs de temps d'image dans le client** : temps de `update()`, temps
-   de mise en page du fil, nombre d'allocations par image. Affichés dans le
-   panneau de diagnostic existant (celui du journal audio), pas dans
-   l'interface principale.
-3. **Compteur de sous-alimentations du rappel de sortie** (`underruns`) dans
-   les statistiques voix. Aujourd'hui, un craquement ne laisse aucune trace :
-   on ne peut ni le reproduire, ni prouver qu'il a disparu.
-4. **Une charge de test** : un binaire `ki-load` qui ouvre N connexions QUIC
-   authentifiées et émet de la voix. Trente personnes ne se réunissent pas sur
-   commande pour valider un correctif.
+1. ✅ **`criterion` sur les trois chemins qui comptent.**
+   `crates/voice/benches/moteur.rs` mesure le mixage de 1, 4 et 10 locuteurs
+   (`Playout::mix_into`) et le rééchantillonnage cubique dans les deux sens
+   plus l'identité ; `crates/protocol/benches/diffusion.rs` met face à face les
+   deux façons de diffuser un roster. `jitter` et `resample` sont devenus
+   publics pour ça : un banc criterion est un crate extérieur, il ne voit que
+   l'API publique.
 
-*Coût : une à deux sessions.*
+   **Le premier résultat solde une question de l'audit.** La diffusion d'un
+   roster, mesurée :
+
+   | Destinataires | Aujourd'hui (`msg.clone()` + JSON par client) | P5.1 (`Arc<[u8]>` sérialisé une fois) | Écart |
+   |---|---|---|---|
+   | 5  | 6,51 µs | 1,33 µs | **4,9×** |
+   | 30 | 214,5 µs | 7,22 µs | **29,7×** |
+
+   La prédiction « d'un facteur N » de l'audit est donc exacte, et 214 µs par
+   diffusion sur un ouvrier tokio — à chaque connexion, déconnexion, entrée et
+   sortie de vocal, sur un VPS à deux cœurs qui porte aussi le relais vocal —
+   fait de P5.1 le meilleur rapport travail/gain du plan côté serveur.
+
+   **Et le second résultat en réfute un morceau.** Le mixage, par trame de
+   20 ms (960 échantillons) :
+
+   | Locuteurs | Temps | Part du budget de 20 ms |
+   |---|---|---|
+   | 1  | 2,29 µs  | 0,011 % |
+   | 4  | 9,28 µs  | 0,046 % |
+   | 10 | 23,37 µs | **0,12 %** |
+
+   Parfaitement linéaire, et **négligeable en valeur absolue**. À dix
+   locuteurs, la boucle que l'audit désignait comme « le seul endroit du client
+   où il y a réellement du calcul par échantillon » consomme un huit-centième
+   du temps disponible. La vectoriser rendrait ~20 µs par trame, soit 0,1 % de
+   processeur.
+
+   Le rééchantillonnage dit la même chose : 5,68 µs (44,1 → 48), 4,86 µs
+   (48 → 44,1), et — curiosité — **5,29 µs à l'identité 48 → 48**, c'est-à-dire
+   autant qu'une vraie conversion : il n'y a pas de chemin rapide pour le
+   rapport 1,0, pourtant le cas courant. Cela reste 0,03 % du budget.
+
+   **Ce que ça change au plan** : le chemin audio n'est pas *lent*, il est
+   *fragile*. Les allocations et les verrous du rappel de sortie restent à
+   supprimer — mais pour la raison qui compte vraiment, les à-coups et
+   l'inversion de priorité, pas pour un débit qui n'a jamais manqué. P4.4 est
+   déclassé en conséquence, et c'est le compteur de sous-alimentations, pas le
+   banc, qui jugera P4.
+
+2. ✅ **Compteurs de temps d'image dans le client** (`crates/client-gui/src/perf.rs`),
+   dans ⚙ → **Relevé de performance**, à côté du journal audio et copiable
+   comme lui : temps de l'image complète, temps du fil de discussion, messages
+   parcourus **sur** messages chargés (l'écart prouvera P3.3), et images par
+   seconde **réellement peintes**.
+
+   Des **quantiles** (p50 / p95 / max sur 600 images), pas des moyennes : une
+   moyenne de 3 ms cache une image sur vingt à 40 ms, et c'est celle-là qui se
+   voit. Un test le vérifie.
+
+   Le compteur d'allocations par image existe aussi, mais derrière
+   `--features mesures`, et ce n'est pas de la timidité : une incrémentation
+   atomique par allocation, sur une ligne de cache que se disputent le fil de
+   l'interface, celui du réseau et **celui de l'audio**, coûte précisément là
+   où il ne faut pas. `cargo run -p ki-client-gui --features mesures` quand on
+   veut le chiffre.
+
+3. ✅ **Compteur de sous-alimentations.** `Playout` compte les trames qu'il n'a
+   pas pu remplir — à sec (trou franc) comme partiellement — et le rappel de
+   sortie les relève **sous le verrou qu'il tient déjà pour mixer**, sans
+   second verrouillage sur le chemin temps réel. Une seule écriture atomique
+   par trame, et seulement s'il y a eu un trou : le chemin propre ne paie rien.
+   Remonte dans `VoiceStats::underruns` et dans le relevé.
+
+4. ✅ **Charge de test** : `crates/load`, binaire `ki-load`. N vraies connexions
+   QUIC, vrais comptes créés par code d'invitation, vraie voix chiffrée
+   (XChaCha20-Poly1305, même dérivation de nonce que le moteur) à la taille et
+   au rythme réels — 160 octets utiles, 50 trames par seconde.
+
+   ```
+   ki-load 127.0.0.1 --clients 30 --invite changeme --secondes 60 --muets 20
+   ```
+
+   Aucune dépendance au moteur audio : ni carte son, ni cpal, ni encodeur —
+   trente encodeurs neuronaux mesureraient la machine, pas le serveur. La
+   charge tourne donc aussi depuis un conteneur Linux posé à côté du serveur.
+   `--muets` compte : un salon réel est surtout fait d'auditeurs, et ce sont
+   eux qui font payer le relais.
+
+   Le bilan sort l'**amplification** (reçus / émis, à comparer au nombre
+   d'occupants), les **pertes montantes** que le serveur signale lui-même, et
+   les **octets de contrôle reçus** — la grandeur exacte que P5.1 vise.
+
+*Coût réel : une session.*
 
 ## P2 — Solder la dette vérifiée
 
@@ -455,24 +556,42 @@ rentable.*
 
 ## P4 — Le moteur audio : un chemin temps réel qui mérite son nom
 
+> **Révisé par les mesures de P1.** Ce chemin n'est pas *lent* — le mixage
+> coûte 0,12 % du budget à dix locuteurs, le rééchantillonnage 0,03 %. Il est
+> *fragile* : il alloue et il verrouille dans un rappel temps réel, ce qui
+> produit des à-coups et de l'inversion de priorité, pas de la lenteur
+> moyenne. Les points ci-dessous sont donc les mêmes, mais leur justification
+> change — et leur juge n'est plus le banc, c'est le compteur de
+> sous-alimentations.
+
 1. **Zéro allocation dans les deux rappels.** Tampons préalloués tenus dans la
    fermeture ; conversion et repli mono en place vers une tranche fournie.
+   *C'est le point n° 1 : l'allocateur système de Windows prend un verrou de
+   tas, et c'est lui qu'on ne peut pas se permettre d'attendre.*
 2. **Tampons circulaires sans verrou** (`ringbuf`, 100 % Rust) entre
    `recv_loop` et le rappel de sortie, et entre le rappel de capture et
    `capture_loop`. Le rappel ne prend plus aucun `Mutex`.
 3. **Liste de locuteurs publiée par échange atomique** (`arc-swap`) : le rappel
    de sortie lit un instantané sans verrou ; `recv_loop` publie une nouvelle
    liste à l'apparition ou au départ d'un locuteur.
-4. **Mixage vectorisable** : tampon circulaire à tranches contiguës, boucle sur
-   `&[f32]` au lieu de `pop_front()`. Vérifié par le banc de P1.
+4. ~~**Mixage vectorisable**~~ — **déclassé par la mesure.** 23,37 µs par
+   trame à dix locuteurs, soit 0,12 % du budget : le vectoriser rendrait
+   0,1 % de processeur. Le tampon circulaire à tranches contiguës reste
+   souhaitable, mais comme **conséquence** du point 2 (sortir les verrous),
+   pas comme objectif. À ne pas écrire pour lui-même.
 5. **Canaux bornés à politique d'éviction** sur le chemin de la voix, et
    `Bytes` transmis tel quel au lieu de `to_vec()`.
 6. **Priorité temps réel du fil audio** (`AvSetMmThreadCharacteristics`, classe
    « Pro Audio ») — ce que fait tout moteur audio Windows sérieux, et ce qui
    protège des craquements quand un jeu sature les cœurs.
+7. *(Mineur, trouvé par le banc)* **Chemin rapide au rapport 1,0** dans le
+   rééchantillonneur : il fait aujourd'hui l'interpolation cubique complète
+   même quand il n'y a rien à convertir — le cas le plus courant, puisque le
+   moteur demande 48 kHz. Cinq microsecondes par trame, donc à faire en
+   passant, jamais pour lui-même.
 
-*Cible mesurable : zéro sous-alimentation du rappel de sortie pendant une
-partie de Valorant, avec dix locuteurs simultanés et DeepFilterNet actif.*
+*Cible mesurable : zéro sous-alimentation (⚙ → Relevé de performance) pendant
+une partie de Valorant, avec dix locuteurs simultanés et DeepFilterNet actif.*
 
 *Coût : deux à trois sessions.*
 
@@ -600,7 +719,8 @@ Ce qu'on doit pouvoir mesurer à la fin, et l'état de départ.
 | Allocations par image de rendu | plusieurs milliers (copies d'état) | ~ 0 en régime |
 | Allocations par rappel audio | 1 (sortie), 2 (capture) | 0 |
 | Verrous pris par le rappel de sortie | 4 à 5 par trame | 0 |
-| Sous-alimentations pendant une partie | non mesuré | 0, et mesuré |
+| Sous-alimentations pendant une partie | ~~non mesuré~~ **mesuré** (⚙ → Relevé) | 0 |
+| Mixage, 10 locuteurs | 23,4 µs/trame — **0,12 % du budget** | *inchangé : rien à gagner* |
 | Diffusion d'un `Members` (30 connectés) | 30 copies + 30 sérialisations | 1 sérialisation |
 | Page d'historique (salon de 100 k messages) | relecture de ~15 Mo | recherche binaire + `seek` |
 | Tests exécutés avant publication | 0 | 132 |

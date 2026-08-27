@@ -8,6 +8,14 @@ license.workspace = true
 name = "ki-chat"
 path = "src/main.rs"
 
+[features]
+# Compteur d'allocations par image (`perf.rs`). Hors drapeau par défaut, et
+# ce n'est pas de la timidité : une incrémentation atomique par allocation,
+# sur une ligne de cache que se disputent le fil de l'interface, celui du
+# réseau et CELUI DE L'AUDIO, coûte précisément là où il ne faut pas.
+# `cargo run -p ki-client-gui --features mesures` quand on veut le chiffre.
+mesures = []
+
 [dependencies]
 ki-protocol = { path = "../protocol" }
 ki-voice = { path = "../voice" }

@@ -6,6 +6,7 @@ mod appicon;
 mod icons;
 mod images;
 mod net;
+mod perf;
 mod photos;
 mod ptt;
 mod secret;
@@ -14,6 +15,15 @@ mod sfxgen;
 mod theme;
 mod ui;
 mod update;
+
+/// Sous `--features mesures`, toutes les allocations du processus passent par
+/// un compteur. C'est ce qui rend vérifiable la cible « ~0 allocation par
+/// image » de P3 : aujourd'hui le rendu recopie l'état complet (membres,
+/// rôles, salons, journal) vingt fois par seconde, et l'on ne peut pas
+/// corriger ce qu'on ne compte pas.
+#[cfg(feature = "mesures")]
+#[global_allocator]
+static COMPTEUR: perf::alloc::Compteur = perf::alloc::Compteur;
 
 use std::collections::HashMap;
 
@@ -363,6 +373,10 @@ struct KiApp {
     show_settings: bool,
     /// Journal audio déplié dans les réglages.
     show_audio_journal: bool,
+    /// Relevé de performance déplié dans les réglages.
+    show_perf: bool,
+    /// Coût de l'interface, mesuré en continu (P1).
+    perf: perf::Perf,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
     upload_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -570,6 +584,8 @@ impl KiApp {
             focus_input: false,
             show_settings: false,
             show_audio_journal: false,
+            show_perf: false,
+            perf: perf::Perf::default(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             upload_status: Default::default(),
@@ -3097,6 +3113,11 @@ impl KiApp {
 
     fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let mut want_older = false;
+        // Compté, et pas déduit de `messages.len()` : le jour où le fil sera
+        // virtualisé (P3.3), les deux cesseront de coïncider — et c'est
+        // précisément l'écart qui prouvera que ça marche.
+        let mut rendus = 0usize;
+        self.perf.debut_fil();
         let out = egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink(false)
@@ -3143,6 +3164,7 @@ impl KiApp {
                 let mut previous: Option<(UserId, u64)> = None;
                 let messages = std::mem::take(&mut self.messages);
                 for msg in &messages {
+                    rendus += 1;
                     let day = day_key(msg.ts);
                     if day != last_day {
                         day_separator(ui, &day_label(msg.ts));
@@ -3174,6 +3196,7 @@ impl KiApp {
                 self.messages = messages;
                 ui.add_space(10.0);
             });
+        self.perf.fin_fil(rendus, self.messages.len());
         // Une page vient de s'ajouter au-dessus : on décale la vue d'autant
         // que le contenu a grandi. Sans ce rattrapage, la vue reste au sommet
         // du nouveau bloc — l'écran saute, on perd sa ligne, et la condition
@@ -3429,6 +3452,74 @@ impl KiApp {
                                     );
                                 }
                             }
+                        }
+
+                        // --- Relevé de performance ---
+                        // Même usage que le journal au-dessus : on se le fait
+                        // copier-coller. « Ça rame quand je joue » ne se
+                        // reproduit pas sur la machine de développement, et
+                        // une moyenne noierait justement l'image lente qu'on
+                        // vient chercher — d'où des quantiles.
+                        ui.add_space(8.0);
+                        let label = if self.show_perf {
+                            "Masquer le relevé de performance"
+                        } else {
+                            "Relevé de performance"
+                        };
+                        if ui::button(ui, Icon::Info, label).clicked() {
+                            self.show_perf = !self.show_perf;
+                        }
+                        if self.show_perf {
+                            let lignes = self.perf.lignes();
+                            if ui::button(ui, Icon::Copy, "Copier le relevé").clicked() {
+                                let mut texte = format!(
+                                    "ki-chat {} — relevé de performance\n",
+                                    env!("CARGO_PKG_VERSION")
+                                );
+                                for (quoi, valeur) in &lignes {
+                                    texte.push_str(&format!("{quoi} : {valeur}\n"));
+                                }
+                                texte.push_str(&format!(
+                                    "Trames incomplètes (audio) : {}\n",
+                                    voice.stats.underruns
+                                ));
+                                ctx.copy_text(texte);
+                                self.info = Some("relevé copié".into());
+                            }
+                            ui.add_space(4.0);
+                            for (quoi, valeur) in &lignes {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        RichText::new(quoi.as_str()).color(TEXT_DIM).size(11.5),
+                                    );
+                                    ui.label(
+                                        RichText::new(valeur.as_str())
+                                            .color(TEXT)
+                                            .monospace()
+                                            .size(11.5),
+                                    );
+                                });
+                            }
+                            // Les trous audio vivent dans le moteur, pas dans
+                            // l'interface, mais c'est le même relevé pour qui
+                            // le lit. Zéro est la seule bonne valeur.
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new("Trames incomplètes (audio)")
+                                        .color(TEXT_DIM)
+                                        .size(11.5),
+                                );
+                                ui.label(
+                                    RichText::new(voice.stats.underruns.to_string())
+                                        .color(if voice.stats.underruns == 0 {
+                                            SPEAK
+                                        } else {
+                                            DANGER
+                                        })
+                                        .monospace()
+                                        .size(11.5),
+                                );
+                            });
                         }
 
                         // --- Micro ---
@@ -5857,6 +5948,11 @@ fn megabytes(bytes: u64) -> f32 {
 
 impl eframe::App for KiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // La mesure encadre TOUT le corps de `update`, sinon elle mentirait
+        // par omission — c'est le coût complet d'une image qu'on cherche, pas
+        // celui de la partie qu'on a pensé à instrumenter.
+        self.perf.debut_image();
+
         // Géométrie : on ne restaure que « maximisée », et on suit l'état
         // courant pour le réenregistrer. Cf. `main` pour le pourquoi.
         if self.restore_maximized {
@@ -5900,7 +5996,13 @@ impl eframe::App for KiApp {
 
         // Repeint périodique : nécessaire pour le PTT global (poll clavier)
         // et les indicateurs temps réel, même fenêtre non focalisée.
+        //
+        // C'est cette ligne que P3.2 doit rendre conditionnelle. Le relevé de
+        // `perf` (⚙ → Relevé de performance) montre ce qu'elle coûte : la
+        // cadence réellement peinte, au repos comme en charge.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
+
+        self.perf.fin_image();
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

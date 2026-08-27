@@ -11,3 +11,13 @@ serde_json.workspace = true
 # de leur en-tête PNG se fait ici, pour que client et serveur appliquent
 # exactement la même règle.
 base64 = "0.22"
+
+[dev-dependencies]
+# Bancs de mesure (P1). `default-features = false` : on ne veut ni les
+# rapports HTML ni leur arbre de dépendances — les chiffres se lisent au
+# terminal, et le crate doit rester léger à compiler en CI.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "diffusion"
+harness = false

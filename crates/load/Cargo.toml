@@ -1,0 +1,39 @@
+[package]
+name = "ki-load"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Charge de test : N clients virtuels, vrai transport QUIC, vraie voix
+# chiffrée. Trente personnes ne se réunissent pas sur commande pour valider un
+# correctif — sans cet outil, « ça tient à trente » est une opinion.
+#
+# Aucune dépendance au moteur audio : pas de carte son, pas de cpal, pas de
+# WASAPI. On fabrique les datagrammes voix directement, ce qui permet aussi de
+# lancer la charge depuis un conteneur Linux à côté du serveur.
+
+[[bin]]
+name = "ki-load"
+path = "src/main.rs"
+
+[dependencies]
+ki-protocol = { path = "../protocol" }
+ki-client-quic = { path = "../client-quic" }
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# La voix part chiffrée comme celle d'un vrai client : le serveur ne
+# déchiffre pas, mais la taille des paquets et le coût du relais doivent être
+# ceux de la production.
+chacha20poly1305 = "0.10"
+rand = "0.9"
+
+# `timeBeginPeriod` : sans lui, le minuteur de Windows tourne à 15,6 ms et
+# `interval(20 ms)` livre une trame toutes les 31 ms — la charge émettrait
+# 32 trames par seconde au lieu de 50, et sous-chargerait le serveur d'un
+# tiers sans le dire. Une dégradation silencieuse n'a pas sa place dans un
+# outil de mesure.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Media"] }

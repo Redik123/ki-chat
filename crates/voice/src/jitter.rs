@@ -77,6 +77,14 @@ pub struct Playout {
     /// Trames d'avance à accumuler avant de jouer. Calculée côté décodeur,
     /// qui est le seul à mesurer la gigue.
     prime_frames: usize,
+    /// Trous partis vers la carte son depuis la dernière relève : la carte a
+    /// réclamé des échantillons et ce tampon n'en avait pas assez.
+    ///
+    /// C'est la seule trace qu'un craquement laisse. Sans elle, un
+    /// utilisateur dit « ça grésille quand je joue » et l'on ne peut ni le
+    /// reproduire, ni prouver qu'un correctif l'a supprimé — ce qui rend P4
+    /// invérifiable.
+    starved: u64,
 }
 
 impl Playout {
@@ -86,7 +94,30 @@ impl Playout {
             primed: false,
             level: 0.0,
             prime_frames: 2,
+            starved: 0,
         }
+    }
+
+    /// Dépose des échantillons déjà prêts, sans passer par le décodeur.
+    ///
+    /// **Pour les bancs de mesure et les tests uniquement.** Le chemin normal
+    /// remplit ce tampon depuis `Receiver::push`, dont la logique adaptative
+    /// escamote délibérément des trames pour rattraper la dérive — précieux en
+    /// production, ruineux pour mesurer `mix_into` seul : le tampon tourne à
+    /// sec et l'on chronomètre la sortie anticipée au lieu du mixage.
+    #[doc(hidden)]
+    pub fn fill_for_bench(&mut self, samples: &[f32]) {
+        self.ready.extend(samples.iter().copied());
+        self.primed = true;
+    }
+
+    /// Relève les trous constatés et remet le compteur à zéro.
+    ///
+    /// Une relève plutôt qu'une lecture : le rappel de sortie tient déjà le
+    /// verrou de ce tampon quand il mixe, donc il ramasse au passage, sans
+    /// second verrouillage sur le chemin temps réel.
+    pub fn take_starvations(&mut self) -> u64 {
+        std::mem::take(&mut self.starved)
     }
 
     /// Niveau crête récent (0..1) de ce locuteur.
@@ -109,11 +140,20 @@ impl Playout {
             }
         }
         if self.ready.is_empty() {
+            // Amorcé, puis à sec : la trame entière part en silence. C'est le
+            // trou franc, celui qui s'entend.
+            self.starved += 1;
             self.primed = false;
             self.level *= 0.85;
             return false;
         }
         let n = out.len().min(self.ready.len());
+        // Trou partiel : on remplit ce qu'on a, le reste de la trame reste
+        // muet. Moins net à l'oreille que le précédent, mais c'est le même
+        // défaut — la carte a demandé plus que ce tampon ne portait.
+        if n < out.len() {
+            self.starved += 1;
+        }
         let mut peak = 0f32;
         for o in out.iter_mut().take(n) {
             let s = self.ready.pop_front().unwrap() * gain;
@@ -158,6 +198,16 @@ pub struct Receiver {
     behind_run: u8,
     /// Taille de tampon imposée par l'utilisateur (None = adaptatif).
     jitter_override: Option<usize>,
+}
+
+/// Réclamé depuis que `jitter` est public (les bancs de mesure en ont
+/// besoin) : un `new()` sans argument et sans `Default` est une aspérité
+/// d'API. Il n'y a qu'une façon de construire un récepteur, donc les deux
+/// disent la même chose.
+impl Default for Receiver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Receiver {
