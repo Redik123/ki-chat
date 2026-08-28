@@ -10,12 +10,14 @@ mod net;
 mod perf;
 mod photos;
 mod ptt;
+mod secours;
 mod secret;
 mod servers;
 mod sfxgen;
 mod theme;
 mod ui;
 mod update;
+mod veille;
 
 /// Sous `--features mesures`, toutes les allocations du processus passent par
 /// un compteur. C'est ce qui rend vérifiable la cible « ~0 allocation par
@@ -80,12 +82,22 @@ const ROSTER_WIDTH: f32 = 210.0;
 const SPEAK_LEVEL: f32 = 0.02;
 
 fn main() -> eframe::Result {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Traces sur stderr ET dans un fichier, plus un panic hook : compilée
+    // `panic = "abort"` sans console, l'application mourait sans témoin.
+    let journal = secours::installer();
+    match &journal {
+        Some(chemin) => {
+            tracing::info!("ki-chat {} démarre — journal : {}", update::current(), chemin.display());
+        }
+        None => tracing::warn!(
+            "ki-chat {} démarre — journal sur disque indisponible, stderr seul",
+            update::current()
+        ),
+    }
+    let relances = secours::essais_actuels();
+    if relances > 0 {
+        tracing::info!("instance relancée automatiquement (tentative {relances})");
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -107,15 +119,32 @@ fn main() -> eframe::Result {
         persist_window: false,
         ..Default::default()
     };
+    let depart = std::time::Instant::now();
     let outcome = eframe::run_native(
         "ki-chat",
         options,
         Box::new(|cc| Ok(Box::new(KiApp::new(cc)))),
     );
-    // Une mise à jour installée ne prend effet qu'au prochain lancement : on
-    // le déclenche ici, la fenêtre fermée — donc après que les réglages ont
-    // été enregistrés et les périphériques audio rendus.
-    update::relaunch_if_requested();
+    match &outcome {
+        // Une mise à jour installée ne prend effet qu'au prochain lancement :
+        // on le déclenche ici, la fenêtre fermée — donc après que les
+        // réglages ont été enregistrés et les périphériques audio rendus.
+        Ok(()) => update::relaunch_if_requested(),
+        // eframe tient toute erreur de rendu pour fatale : un seul
+        // `SwapBuffers` raté — pilote réinitialisé sous un jeu, veille,
+        // bascule de GPU d'un portable — et sa boucle se termine, fenêtre
+        // fermée, en rendant l'erreur ici. Le contexte graphique suivant
+        // n'aura rien : on relance, plutôt que de laisser un hoquet d'une
+        // image coûter la soirée. Budget borné : une erreur qui revient dès
+        // le démarrage n'est pas un hoquet, on rend la main.
+        Err(e) => {
+            tracing::error!("boucle graphique terminée en erreur : {e}");
+            match secours::decision_relance(relances, depart.elapsed()) {
+                Some(essais) => secours::relancer(essais),
+                None => tracing::error!("l'erreur revient dès le démarrage — relances épuisées"),
+            }
+        }
+    }
     outcome
 }
 
@@ -623,6 +652,8 @@ struct KiApp {
     /// `Option` parce qu'elle a besoin du contexte egui, qui n'existe qu'une
     /// fois la fenêtre ouverte : elle démarre à la première image.
     ptt: Option<ptt::Watcher>,
+    /// Interdiction de veille système pendant le vocal.
+    veille: veille::Garde,
 }
 
 /// Photo de l'état vocal prise une fois par frame, pour ne pas verrouiller
@@ -820,7 +851,24 @@ impl KiApp {
             labo_stats: Default::default(),
             labo_texture: None,
             ptt: None,
+            veille: veille::Garde::default(),
         };
+        // Instance relancée par le dispositif de secours : le dire. Sans ce
+        // bandeau, la fenêtre qui se ferme puis revient passe pour un caprice,
+        // et personne ne sait qu'un journal attend d'être lu.
+        if secours::essais_actuels() > 0 {
+            app.error = Some(match secours::chemin_journal() {
+                Some(chemin) => format!(
+                    "ki-chat s'est relancé : la fenêtre précédente s'est fermée sur une \
+                     erreur graphique (pilote réinitialisé par un jeu, veille…). \
+                     Détails : {}",
+                    chemin.display()
+                ),
+                None => "ki-chat s'est relancé : la fenêtre précédente s'est fermée sur \
+                         une erreur graphique (pilote réinitialisé par un jeu, veille…)"
+                    .into(),
+            });
+        }
         app.reload_sounds();
         app
     }
@@ -7366,6 +7414,11 @@ impl eframe::App for KiApp {
         // même pas le clavier.
         ptt.watch((self.mode == MicMode::Ptt).then_some(self.ptt_key));
         ptt.set_release_ms(self.ptt_release_ms);
+
+        // En vocal, la machine ne doit pas s'endormir : parler ne compte pas
+        // comme de l'activité pour Windows, et un portable dont on ne touche
+        // pas le clavier se mettait en veille en pleine conversation.
+        self.veille.actualiser(self.voice_channel.is_some());
 
         self.poll_events();
         self.check_connect_timeout();
