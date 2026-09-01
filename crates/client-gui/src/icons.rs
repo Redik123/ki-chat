@@ -42,6 +42,8 @@ pub enum Icon {
     Server,
     Loupe,
     HeadphonesOff,
+    /// Un écran sur son pied, une lecture dedans : « diffuse ».
+    Screen,
 }
 
 /// Dessine `icon` centrée dans `rect` (le carré inscrit est utilisé).
@@ -191,6 +193,12 @@ impl Pen<'_> {
                 self.rrect(3.0, 12.5, 7.6, 20.5, 2.0, true);
                 self.rrect(16.4, 12.5, 21.0, 20.5, 2.0, true);
                 self.seg((3.5, 3.5), (20.5, 20.5));
+            }
+            Icon::Screen => {
+                self.rrect(2.5, 4.0, 21.5, 16.5, 2.0, false);
+                self.seg((12.0, 16.5), (12.0, 20.0));
+                self.seg((7.5, 20.5), (16.5, 20.5));
+                self.solid(&[(9.5, 7.0), (15.5, 10.25), (9.5, 13.5)]);
             }
             Icon::Gear => {
                 let teeth = 8;

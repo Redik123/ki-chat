@@ -3,7 +3,7 @@
 > **▶ CHANTIER REPRIS** (01/09/2026) : S0 ✅, S0.5 ✅, S1a ✅, **S1b livré
 > en 0.1.17** — protocole média, relais SFU, émission chiffrée, visionnage.
 > La validation chiffrée de S1b (latence, gigue vocale) attend le test LAN
-> du groupe. Prochain jalon : S2.
+> du groupe. S2 en cours : réglages de diffusion + badge livrés en 0.1.18.
 
 *Version 2 du 16/08/2026 — nourrie par trois rapports de recherche (capture
 Windows, codec, transport QUIC lu dans les sources de quinn), puis passée au
@@ -145,10 +145,18 @@ revisiter en S3 si le WAN le réclame ; pas d'horodatage incrusté (le
 dégradation < 10 ms ; « le streamer tue son client → les viewers reçoivent
 `StreamStopped` en < 1 s ».
 
-### S2 — Multi-viewers robuste + UX
-`KeyframeRequest` limité, `StreamDegraded`, clause du quantile, stats stream ;
-picker avec vignettes (capture one-shot), fenêtre de visionnage **détachée** +
-plein écran, badge « diffuse » dans la liste des membres.
+### S2 — Multi-viewers robuste + UX — en cours
+Livré en 0.1.18 : badge « diffuse » cliquable à côté du pseudo ; sélecteur
+de source (écran au choix ou fenêtre par titre, curseur ou non) ; réglages
+persistants — résolution plafond 1080p/720p/480p par réduction I420 maison
+(moitiés exactes puis bilinéaire séparable), 15/30/60 i/s, débit 1-20 Mbit/s,
+aperçu débrayable — appliqués à chaud (la capture repart sur le même stream,
+la séquence continue, les spectateurs ne voient qu'une IDR de plus) ; stats
+instantanées côté streamer, cadence côté spectateur ; arrêt propre quand la
+fenêtre diffusée se ferme. `KeyframeNeeded` est limité à 1 par 500 ms côté
+relais depuis S1b.
+Reste : `StreamDegraded` + clause du quantile, vignettes dans le sélecteur,
+fenêtre de visionnage **détachée** + plein écran.
 **Validation** : un viewer bridé (limiteur de débit) ne dégrade ni les autres
 ni la voix, et récupère par IDR.
 

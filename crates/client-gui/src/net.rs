@@ -271,6 +271,7 @@ impl NetHandle {
         stream_id: u32,
         key: [u8; 32],
         force_idr: Arc<AtomicBool>,
+        cadence: Arc<Mutex<StreamMeta>>,
     ) -> Option<ki_video::FrameEmit> {
         let conn = self.link.conn.lock().unwrap().clone()?;
         let rt = self.rt.lock().unwrap().clone()?;
@@ -324,12 +325,15 @@ impl NetHandle {
                 // monde, la prochaine décodable devra être une trame clé.
                 force_idr.store(true, AtomOrd::Relaxed);
             }
-            // Dimensions changées (resize, jeu qui passe en fenêtré) : le
-            // salon doit l'apprendre pour redimensionner ses vues.
+            // Dimensions changées (resize, jeu qui passe en fenêtré, réglage
+            // de résolution) : le salon doit l'apprendre pour redimensionner
+            // ses vues. Cadence et débit viennent des réglages, tenus à jour
+            // par l'interface.
             let packed = ((f.width as u32) << 16) | f.height as u32;
             if dims.swap(packed, AtomOrd::Relaxed) != packed {
-                let meta =
-                    StreamMeta { width: f.width, height: f.height, fps: 30, kbps: 6000 };
+                let mut meta = *cadence.lock().unwrap();
+                meta.width = f.width;
+                meta.height = f.height;
                 let _ = cmd.send(Cmd::Send(ClientMsg::StreamMetaUpdate { meta }));
             }
         }))
