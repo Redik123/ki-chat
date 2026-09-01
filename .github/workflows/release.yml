@@ -38,7 +38,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Établir la version
         id: version
@@ -141,7 +141,7 @@ jobs:
           if (-not (Test-Path "$exe.sig")) { Write-Error "signature non produite"; exit 1 }
 
       - name: Déposer les artefacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ki-chat-windows
           path: |
