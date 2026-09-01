@@ -186,7 +186,9 @@ impl Diagnostic {
             out.push(format!(
                 "{} trames incomplètes sont parties vers la carte son : autant de \
                  craquements. Si cela arrive pendant une partie, c'est que la machine \
-                 est saturée — vérifier que le jeu tourne en fenêtré sans bordure plutôt \
+                 est saturée ou la carte son USB fragile — coche « Sortie audio \
+                 robuste » dans ⚙ Audio → Sortie (plus de marge, un peu plus de \
+                 latence), et vérifie que le jeu tourne en fenêtré sans bordure plutôt \
                  qu'en plein écran exclusif.",
                 self.trames_incompletes
             ));
@@ -420,7 +422,10 @@ const CONNUS: &[(&str, &str, &str)] = &[
         "Valorant",
         "Sa voix intégrée (Vivox) tient la voie de capture même quand tu ne \
          t'en sers pas. Réglages → Audio → Chat vocal → couper le micro de la \
-         voix intégrée. Et préfère le jeu en fenêtré sans bordure : le plein \
+         voix intégrée, et mettre « Atténuation VoIP » à 0 % : c'est ce curseur \
+         qui baisse le son du jeu par à-coups dès que sa détection vocale croit \
+         entendre quelqu'un — un micro de bureau qui capte le casque suffit à \
+         la déclencher. Et préfère le jeu en fenêtré sans bordure : le plein \
          écran exclusif aggrave tout ce qui touche au son.",
     ),
 ];

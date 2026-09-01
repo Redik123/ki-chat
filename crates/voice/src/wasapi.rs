@@ -452,6 +452,7 @@ fn open_client(
     input: bool,
     raw: bool,
     comms: bool,
+    deep: bool,
 ) -> anyhow::Result<OpenClient> {
     // Chaque tentative repart d'un client neuf : un Initialize raté ne
     // laisse pas le client dans un état garanti réutilisable.
@@ -461,6 +462,7 @@ fn open_client(
         raw: bool,
         comms: bool,
         mix: bool,
+        deep: bool,
     ) -> anyhow::Result<OpenClient> {
         unsafe {
             let client: IAudioClient2 = device
@@ -510,7 +512,9 @@ fn open_client(
             // micro (simple mémoire, la latence ne dépend que du rythme de
             // lecture) ; en sortie l'allocation est une réserve — la latence
             // réelle est bornée par la cible de remplissage du render_worker.
-            let buffer_100ns: i64 = if input { 2_000_000 } else { 600_000 };
+            // En sortie robuste (`deep`), la réserve passe à 200 ms elle
+            // aussi : la cible de 100 ms doit tenir dedans avec de la marge.
+            let buffer_100ns: i64 = if input || deep { 2_000_000 } else { 600_000 };
             let init = client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK
@@ -544,7 +548,7 @@ fn open_client(
     };
     let mut last = None;
     for &(try_raw, mix) in plans {
-        match attempt(device, input, try_raw, comms, mix) {
+        match attempt(device, input, try_raw, comms, mix, deep) {
             Ok(c) => {
                 if raw && !try_raw {
                     tracing::warn!("mode brut refusé par le périphérique — ouvert sans");
@@ -602,7 +606,7 @@ pub fn open_input(
                 let enu = enumerator()?;
                 let (device, fallback) = pick(&enu, name.as_deref(), true)?;
                 let dev_name = friendly_name(&device).unwrap_or_default();
-                let open = open_client(&device, true, raw, comms)?;
+                let open = open_client(&device, true, raw, comms, false)?;
                 let capture: IAudioCaptureClient =
                     unsafe { open.client.GetService() }.context("service de capture")?;
                 unsafe { open.client.Start() }.context("démarrage de la capture")?;
@@ -748,6 +752,7 @@ pub fn open_output<F, W>(
     device_name: Option<&str>,
     make_writer: F,
     alive: Arc<AtomicBool>,
+    robust: bool,
 ) -> anyhow::Result<(NativeStream, bool)>
 where
     F: FnOnce(u32) -> W + Send + 'static,
@@ -765,7 +770,7 @@ where
                 let enu = enumerator()?;
                 let (device, fallback) = pick(&enu, name.as_deref(), false)?;
                 let dev_name = friendly_name(&device).unwrap_or_default();
-                let open = open_client(&device, false, false, false)?;
+                let open = open_client(&device, false, false, false, robust)?;
                 let render: IAudioRenderClient =
                     unsafe { open.client.GetService() }.context("service de lecture")?;
                 let buffer_frames =
@@ -802,7 +807,14 @@ where
             // Amorcer à la cible avant de démarrer : le moteur part sans
             // blanc initial, et sans non plus charger tout le tampon — la
             // réserve au-delà de la cible n'est pas de la latence.
-            let target = target_padding(open.rate).min(buffer_frames);
+            let target = target_padding(open.rate, robust).min(buffer_frames);
+            if robust {
+                journal(format!(
+                    "sortie robuste : tampon {} ms, cible {} ms",
+                    buffer_frames * 1000 / open.rate.max(1),
+                    target * 1000 / open.rate.max(1)
+                ));
+            }
             let ok = unsafe {
                 fill_render(&open, &render, target, &mut write, &mut scratch).is_ok()
                     && open.client.Start().is_ok()
@@ -816,6 +828,7 @@ where
                 open,
                 render,
                 buffer_frames,
+                target,
                 &stop_thread,
                 &mut write,
                 &mut scratch,
@@ -840,9 +853,15 @@ where
 
 /// Niveau de remplissage visé du tampon de sortie : ~30 ms. C'est lui qui
 /// fixe la latence de lecture ET la marge avant craquement — la réserve
-/// allouée au-delà (60 ms) ne sert qu'aux réveils tardifs du fil.
-fn target_padding(rate: u32) -> u32 {
-    rate * 3 / 100
+/// allouée au-delà (60 ms) ne sert qu'aux réveils tardifs du fil. En sortie
+/// robuste, 100 ms : trois fois la marge, pour la machine qu'un jeu sature
+/// ou la carte son USB qui réclame par à-coups.
+fn target_padding(rate: u32, robust: bool) -> u32 {
+    if robust {
+        rate / 10
+    } else {
+        rate * 3 / 100
+    }
 }
 
 /// Boucle de lecture : à chaque réveil, complète le tampon jusqu'à la cible.
@@ -854,10 +873,12 @@ fn target_padding(rate: u32) -> u32 {
 /// siffler chez tout le monde. À l'arrêt, le mix est sondé toutes les 20 ms ;
 /// au premier échantillon non nul, l'amorce sondée est pré-chargée puis le
 /// flux repart — rien n'est perdu, au prix de ~20 ms de latence au réveil.
+#[allow(clippy::too_many_arguments)]
 fn render_worker<W: FnMut(&mut [f32])>(
     open: OpenClient,
     render: IAudioRenderClient,
     buffer_frames: u32,
+    target: u32,
     stop: &AtomicBool,
     write: &mut W,
     scratch: &mut Vec<f32>,
@@ -868,7 +889,6 @@ fn render_worker<W: FnMut(&mut [f32])>(
     /// Sonde à l'arrêt : une trame moteur, 20 ms.
     const PROBE: usize = (SAMPLE_RATE / 50) as usize;
 
-    let target = target_padding(open.rate).min(buffer_frames);
     let mut last_audio = Instant::now();
     let mut running = true;
     while !stop.load(Ordering::Relaxed) {

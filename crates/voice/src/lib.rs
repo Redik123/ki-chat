@@ -139,6 +139,11 @@ pub struct VoiceConfig {
     /// autres sons réduit chez qui n'a pas réglé « Ne rien faire ». Faux par
     /// défaut ; le moteur y bascule de lui-même s'il détecte la famine.
     pub comms_mic: bool,
+    /// Sortie robuste : tampon de lecture trois fois plus profond (cible
+    /// 100 ms au lieu de 30) pour les machines saturées par un jeu et les
+    /// cartes son USB fragiles, au prix de ~70 ms de latence en plus. Moteur
+    /// natif seulement.
+    pub robust_output: bool,
     /// Annulation d'écho acoustique : soustrait du micro ce que la sortie
     /// joue — l'écho des haut-parleurs. Sans objet au casque, indispensable
     /// sans ; active par défaut, l'adaptation est neutre quand il n'y a pas
@@ -182,6 +187,7 @@ impl VoiceConfig {
             native_audio: cfg!(windows),
             raw_mic: false,
             comms_mic: false,
+            robust_output: false,
             aec: true,
             noise_mode: NOISE_RNNOISE,
             volumes: HashMap::new(),
@@ -671,8 +677,9 @@ impl VoiceEngine {
             let sh = shared.clone();
             let output_device = cfg.output_device.clone();
             let native = cfg.native_audio;
+            let robust = cfg.robust_output;
             threads.push(std::thread::spawn(move || {
-                if let Err(e) = playback_loop(sh, output_device, native) {
+                if let Err(e) = playback_loop(sh, output_device, native, robust) {
                     tracing::error!("sortie audio : {e:#}");
                 }
             }));
@@ -2214,6 +2221,7 @@ fn playback_loop(
     sh: Arc<Shared>,
     device_name: Option<String>,
     native: bool,
+    robust: bool,
 ) -> anyhow::Result<()> {
     #[cfg(windows)]
     wasapi::ensure_notifications();
@@ -2221,7 +2229,7 @@ fn playback_loop(
     // de veille, emporte le flux de sortie sans que rien ne le relance —
     // on n'entendait alors plus personne jusqu'au redémarrage.
     'device: while !is_shutdown(&sh) {
-        let opened = open_output(&sh, device_name.as_deref(), native);
+        let opened = open_output(&sh, device_name.as_deref(), native, robust);
         let (stream, alive, ticks, fallback) = match opened {
             Ok(parts) => {
                 // Comme au micro : un repli est signalé, sinon le son sortait
@@ -2330,6 +2338,7 @@ fn open_output(
     sh: &Arc<Shared>,
     device_name: Option<&str>,
     native: bool,
+    robust: bool,
 ) -> anyhow::Result<OpenedOutput> {
     let sh = sh.clone();
     // Compteur d'appels du fournisseur d'échantillons : c'est lui qui révèle
@@ -2347,6 +2356,7 @@ fn open_output(
             device_name,
             move |rate| output_writer(sh_w, ticks_w, rate),
             alive.clone(),
+            robust,
         ) {
             Ok((stream, fallback)) => {
                 return Ok((OutputStream::Native(stream), alive, ticks, fallback));

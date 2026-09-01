@@ -663,6 +663,9 @@ struct KiApp {
     /// Micro en catégorie « communications » dès l'ouverture (sinon le moteur
     /// n'y bascule que s'il détecte un micro affamé).
     comms_mic: bool,
+    /// Sortie robuste : tampon de lecture profond (+70 ms de latence) pour
+    /// les machines saturées et les cartes son USB fragiles.
+    robust_output: bool,
     noise_mode: u8,
     input_gain: f32,
     output_gain: f32,
@@ -893,6 +896,7 @@ impl KiApp {
             pref_output: Some(get("output_device", "")).filter(|s| !s.is_empty()),
             native_audio: get("native_audio", "on") != "off",
             raw_mic: get("raw_mic", "off") == "on",
+            robust_output: get("robust_output", "off") == "on",
             comms_mic: get("comms_mic", "off") == "on",
             noise_mode: get("noise_mode", "1")
                 .parse()
@@ -1133,6 +1137,7 @@ impl KiApp {
             output_device: self.pref_output.clone(),
             native_audio: self.native_audio,
             raw_mic: self.raw_mic,
+            robust_output: self.robust_output,
             comms_mic: self.comms_mic,
             noise_mode: self.noise_mode,
             volumes: self
@@ -5212,6 +5217,24 @@ impl KiApp {
                                 engine.play_test_tone();
                             }
                         }
+                        if self.native_audio {
+                            ui.add_space(6.0);
+                            if ui
+                                .checkbox(
+                                    &mut self.robust_output,
+                                    "Sortie audio robuste (plus de marge, +70 ms de latence)",
+                                )
+                                .on_hover_text(
+                                    "tampon de lecture trois fois plus profond : pour un PC \
+                                     que le jeu sature ou une carte son USB fragile, quand \
+                                     le docteur compte des trames incomplètes (craquements, \
+                                     micro-coupures dans ce que tu entends).",
+                                )
+                                .changed()
+                            {
+                                restart = true;
+                            }
+                        }
 
                         // --- Effets sonores ---
                         ui.add_space(12.0);
@@ -8511,6 +8534,10 @@ impl eframe::App for KiApp {
         );
         storage.set_string("native_audio", if self.native_audio { "on" } else { "off" }.into());
         storage.set_string("raw_mic", if self.raw_mic { "on" } else { "off" }.into());
+        storage.set_string(
+            "robust_output",
+            if self.robust_output { "on" } else { "off" }.into(),
+        );
         storage.set_string("comms_mic", if self.comms_mic { "on" } else { "off" }.into());
         storage.set_string("diag_share", if self.diag_share { "on" } else { "off" }.into());
         storage.set_string("diag_crash_envoye", self.diag_crash_envoye.clone());

@@ -39,6 +39,9 @@ pub struct VoicePrefs {
     /// voie de traitement avec la voix des jeux). Le moteur y bascule seul
     /// en cas de micro affamé ; la case rend le choix permanent.
     pub comms_mic: bool,
+    /// Sortie robuste : tampon de lecture profond pour les machines saturées
+    /// et les cartes son USB fragiles (+70 ms de latence). Natif seulement.
+    pub robust_output: bool,
     /// Mode de suppression de bruit (ki_voice::NOISE_*).
     pub noise_mode: u8,
     /// Volumes par utilisateur (user_id -> gain, 1.0 = 100 %).
@@ -354,6 +357,7 @@ fn start_engine(
     cfg.native_audio = prefs.native_audio;
     cfg.raw_mic = prefs.raw_mic;
     cfg.comms_mic = prefs.comms_mic;
+    cfg.robust_output = prefs.robust_output;
     cfg.noise_mode = prefs.noise_mode;
     cfg.volumes = prefs.volumes.clone();
     cfg.input_gain = prefs.input_gain;
