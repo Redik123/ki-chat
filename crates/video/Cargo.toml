@@ -17,6 +17,17 @@ openh264 = { version = "0.9", features = ["source"] }
 # Capture d'écran/fenêtre : Windows.Graphics.Capture (backend DXGI en secours).
 # API 2.x — les exemples web en 1.x (Settings à 5 paramètres) ne compilent pas.
 windows-capture = "2.0.1"
+# NVENC : nvEncodeAPI64.dll chargée au vol (elle vient avec le pilote), la
+# session vit sur un device Direct3D 11 de la carte NVIDIA. Même version
+# de `windows` que windows-capture, pour ne pas doubler le crate.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_LibraryLoader",
+] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

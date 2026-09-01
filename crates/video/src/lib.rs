@@ -8,6 +8,8 @@
 //! que les pixels et le codec.
 
 pub mod capture;
+mod nvenc;
+mod nvenc_ffi;
 pub mod scale;
 pub mod stats;
 
@@ -35,6 +37,110 @@ pub struct RgbaFrame {
 
 /// Réceptacle d'images côté UI : la boucle y dépose chaque frame décodée.
 pub type FrameSink = Arc<dyn Fn(RgbaFrame) + Send + Sync>;
+
+/// Une trame encodée, telle que l'encodeur la rend.
+pub struct Paquet {
+    pub data: Vec<u8>,
+    pub idr: bool,
+}
+
+/// Un encodeur H.264, logiciel ou matériel : des images I420 entrent, des
+/// trames Annex B sortent. `None` : l'encodeur a sauté la trame.
+pub trait VideoEncoder {
+    fn nom(&self) -> &'static str;
+    fn encode(&mut self, src: &dyn YUVSource, force_idr: bool)
+        -> anyhow::Result<Option<Paquet>>;
+}
+
+/// Quel encodeur : le matériel s'il existe, ou imposé, ou le logiciel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EncoderChoice {
+    #[default]
+    Auto,
+    Nvenc,
+    Logiciel,
+}
+
+/// L'encodeur logiciel (openh264), derrière le trait commun.
+struct Logiciel(Encoder);
+
+/// Pont entre `&dyn YUVSource` et l'API générique d'openh264.
+struct Dyn<'a>(&'a dyn YUVSource);
+
+impl YUVSource for Dyn<'_> {
+    fn dimensions(&self) -> (usize, usize) {
+        self.0.dimensions()
+    }
+
+    fn strides(&self) -> (usize, usize, usize) {
+        self.0.strides()
+    }
+
+    fn y(&self) -> &[u8] {
+        self.0.y()
+    }
+
+    fn u(&self) -> &[u8] {
+        self.0.u()
+    }
+
+    fn v(&self) -> &[u8] {
+        self.0.v()
+    }
+}
+
+impl VideoEncoder for Logiciel {
+    fn nom(&self) -> &'static str {
+        "logiciel"
+    }
+
+    fn encode(
+        &mut self,
+        src: &dyn YUVSource,
+        force_idr: bool,
+    ) -> anyhow::Result<Option<Paquet>> {
+        if force_idr {
+            self.0.force_intra_frame();
+        }
+        let bs = self.0.encode(&Dyn(src)).map_err(|e| anyhow::anyhow!("openh264 : {e}"))?;
+        Ok(match bs.frame_type() {
+            FrameType::Skip => None,
+            t => Some(Paquet { data: bs.to_vec(), idr: t == FrameType::IDR }),
+        })
+    }
+}
+
+/// Crée l'encodeur demandé. En « Auto », NVENC si la machine l'offre, le
+/// logiciel sinon — et l'on dit lequel, au journal comme aux stats.
+pub fn creer_encodeur(
+    choix: EncoderChoice,
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    fps: u32,
+    stats: &StageStats,
+) -> anyhow::Result<Box<dyn VideoEncoder>> {
+    if choix != EncoderChoice::Logiciel {
+        match nvenc::Nvenc::new(width, height, bitrate_bps, fps) {
+            Ok(e) => {
+                let (maj, min) = e.version_pilote();
+                tracing::info!(
+                    "encodeur : NVENC sur {} (API {maj}.{min}), {width}x{height} à {fps} i/s",
+                    e.carte
+                );
+                stats.materiel.store(true, Ordering::Relaxed);
+                return Ok(Box::new(e));
+            }
+            Err(e) if choix == EncoderChoice::Nvenc => {
+                return Err(e.context("NVENC exigé par les réglages"));
+            }
+            Err(e) => tracing::warn!("NVENC indisponible ({e:#}) : encodeur logiciel"),
+        }
+    }
+    stats.materiel.store(false, Ordering::Relaxed);
+    tracing::info!("encodeur : logiciel (openh264), {width}x{height} à {fps} i/s");
+    Ok(Box::new(Logiciel(screen_encoder(width, height, bitrate_bps, fps)?)))
+}
 
 /// Boucle locale S1a : capture écran -> I420 -> H.264 -> décodage -> sink.
 ///
@@ -101,7 +207,7 @@ fn pipeline_loop(
     recycle: std::sync::mpsc::Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
 ) {
-    let mut encoder: Option<Encoder> = None;
+    let mut encoder: Option<Box<dyn VideoEncoder>> = None;
     let mut decoder = match Decoder::new() {
         Ok(d) => d,
         Err(e) => {
@@ -158,10 +264,11 @@ fn pipeline_loop(
         // Le tampon BGRA repart au recyclage.
         let _ = recycle.send(frame.bgra);
 
-        // 2. Encodage H.264.
+        // 2. Encodage H.264 — le même choix d'encodeur que la diffusion :
+        //    le labo teste ce qui partira réellement.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match screen_encoder(w, h, 6_000_000, 30) {
+            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, &stats) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -170,15 +277,20 @@ fn pipeline_loop(
             },
         };
         let t1 = Instant::now();
-        let packet = match enc.encode(yuv_buf) {
-            Ok(bs) => {
-                if bs.frame_type() == FrameType::IDR {
+        let packet = match enc.encode(&*yuv_buf, false) {
+            Ok(Some(p)) => {
+                if p.idr {
                     stats.keyframes.fetch_add(1, Ordering::Relaxed);
                 }
-                bs.to_vec()
+                p.data
+            }
+            Ok(None) => {
+                stats.enc_skipped.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
             Err(e) => {
-                tracing::warn!("encodage : {e}");
+                tracing::warn!("encodage : {e:#}");
+                encoder = None;
                 continue;
             }
         };
@@ -249,6 +361,7 @@ pub struct StreamConfig {
     /// Décoder localement ce qui part, pour l'aperçu — ~3 ms par trame que
     /// l'on peut rendre au jeu en s'en passant.
     pub preview: bool,
+    pub encoder: EncoderChoice,
 }
 
 impl Default for StreamConfig {
@@ -260,6 +373,7 @@ impl Default for StreamConfig {
             bitrate_bps: 6_000_000,
             cursor: true,
             preview: true,
+            encoder: EncoderChoice::Auto,
         }
     }
 }
@@ -338,7 +452,7 @@ fn streamer_pipeline(
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
 ) {
-    let mut encoder: Option<Encoder> = None;
+    let mut encoder: Option<Box<dyn VideoEncoder>> = None;
     // L'aperçu n'existe que si on le demande : sans lui, pas de décodeur.
     let mut decoder = if config.preview {
         match Decoder::new() {
@@ -417,7 +531,14 @@ fn streamer_pipeline(
         // 2. Encodage — trame clé exigée si un spectateur l'attend.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match screen_encoder(ow, oh, config.bitrate_bps, config.fps) {
+            None => match creer_encodeur(
+                config.encoder,
+                ow,
+                oh,
+                config.bitrate_bps,
+                config.fps,
+                &stats,
+            ) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -425,24 +546,34 @@ fn streamer_pipeline(
                 }
             },
         };
-        if force_idr.swap(false, Ordering::Relaxed) {
-            enc.force_intra_frame();
-        }
+        let force = force_idr.swap(false, Ordering::Relaxed);
         let t1 = Instant::now();
-        let encode = match reduit {
-            Some(petit) => enc.encode(petit),
-            None => enc.encode(&*yuv_buf),
+        let source: &dyn YUVSource = match reduit {
+            Some(petit) => petit,
+            None => &*yuv_buf,
         };
-        let (packet, idr) = match encode {
-            Ok(bs) => {
-                let idr = bs.frame_type() == FrameType::IDR;
-                if idr {
+        let (packet, idr) = match enc.encode(source, force) {
+            Ok(Some(p)) => {
+                if p.idr {
                     stats.keyframes.fetch_add(1, Ordering::Relaxed);
                 }
-                (bs.to_vec(), idr)
+                (p.data, p.idr)
+            }
+            Ok(None) => {
+                // L'encodeur a sauté la trame (budget de débit dépassé) ;
+                // la demande de trame clé, elle, ne se perd pas.
+                stats.enc_skipped.fetch_add(1, Ordering::Relaxed);
+                if force {
+                    force_idr.store(true, Ordering::Relaxed);
+                }
+                continue;
             }
             Err(e) => {
-                tracing::warn!("encodage : {e}");
+                // Un encodeur qui lâche (carte perdue, pilote) se recrée à
+                // la trame suivante — et retombe sur le logiciel s'il faut.
+                tracing::warn!("encodage : {e:#}");
+                encoder = None;
+                force_idr.store(true, Ordering::Relaxed);
                 continue;
             }
         };

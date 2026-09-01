@@ -43,6 +43,12 @@ pub struct StageStats {
     pub decoded: AtomicU64,
     /// Trames réellement peintes par l'UI (incrémenté par la GUI).
     pub painted: AtomicU64,
+    /// Trames que l'encodeur a choisi de sauter (budget de débit dépassé).
+    pub enc_skipped: AtomicU64,
+    /// Trames encodées puis jetées faute de place vers le réseau.
+    pub net_dropped: AtomicU64,
+    /// L'encodeur en service est matériel (NVENC).
+    pub materiel: std::sync::atomic::AtomicBool,
 
     pub convert_ms: EwmaMs,
     pub encode_ms: EwmaMs,
