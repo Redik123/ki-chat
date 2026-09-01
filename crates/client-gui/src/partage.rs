@@ -21,7 +21,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use eframe::egui::{self, RichText};
 use ki_protocol::StreamMeta;
 use ki_video::{
-    CaptureSource, FrameEmit, FrameSink, MonitorInfo, RgbaFrame, StageStats, StreamConfig,
+    CaptureSource, EncoderChoice, FrameEmit, FrameSink, MonitorInfo, StageStats, StreamConfig,
     StreamerLoop, ViewerDecoder, WindowInfo,
 };
 
@@ -42,6 +42,7 @@ pub struct Reglages {
     pub kbps: u32,
     pub cursor: bool,
     pub preview: bool,
+    pub encodeur: EncoderChoice,
 }
 
 impl Default for Reglages {
@@ -53,9 +54,17 @@ impl Default for Reglages {
             kbps: 6000,
             cursor: true,
             preview: true,
+            encodeur: EncoderChoice::Auto,
         }
     }
 }
+
+/// Les encodeurs proposés, avec le mot qui les présente.
+const ENCODEURS: [(EncoderChoice, &str, &str); 3] = [
+    (EncoderChoice::Auto, "auto", "Auto — NVENC si la carte le permet"),
+    (EncoderChoice::Nvenc, "nvenc", "NVENC (carte NVIDIA)"),
+    (EncoderChoice::Logiciel, "logiciel", "Logiciel (processeur)"),
+];
 
 /// Les hauteurs proposées (0 = celle de la source).
 const HAUTEURS: [(u32, &str); 4] = [(0, "Native"), (1080, "1080p"), (720, "720p"), (480, "480p")];
@@ -79,6 +88,14 @@ impl Reglages {
             kbps: nombre("stream_kbps", d.kbps).clamp(500, 50_000),
             cursor: get("stream_cursor", "on") != "off",
             preview: get("stream_preview", "on") != "off",
+            encodeur: {
+                let cle = get("stream_encoder", "auto");
+                ENCODEURS
+                    .iter()
+                    .find(|(_, id, _)| *id == cle)
+                    .map(|(e, _, _)| *e)
+                    .unwrap_or_default()
+            },
         }
     }
 
@@ -93,6 +110,12 @@ impl Reglages {
         storage.set_string("stream_kbps", self.kbps.to_string());
         storage.set_string("stream_cursor", if self.cursor { "on" } else { "off" }.into());
         storage.set_string("stream_preview", if self.preview { "on" } else { "off" }.into());
+        let encodeur = ENCODEURS
+            .iter()
+            .find(|(e, _, _)| *e == self.encodeur)
+            .map(|(_, id, _)| *id)
+            .unwrap_or("auto");
+        storage.set_string("stream_encoder", encodeur.into());
     }
 
     pub fn config(&self) -> StreamConfig {
@@ -103,6 +126,7 @@ impl Reglages {
             bitrate_bps: self.kbps.saturating_mul(1000),
             cursor: self.cursor,
             preview: self.preview,
+            encoder: self.encodeur,
         }
     }
 
@@ -238,6 +262,32 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
+        ui.label(RichText::new("encodeur").color(TEXT_DIM).size(12.5));
+        let actuel = ENCODEURS
+            .iter()
+            .find(|(e, _, _)| *e == r.encodeur)
+            .map(|(_, _, l)| *l)
+            .unwrap_or("Auto");
+        egui::ComboBox::from_id_salt("stream_encoder")
+            .width(240.0)
+            .selected_text(RichText::new(actuel).color(TEXT))
+            .show_ui(ui, |ui| {
+                for (e, _, l) in ENCODEURS {
+                    if ui.selectable_label(r.encodeur == e, l).clicked() {
+                        r.encodeur = e;
+                        change = true;
+                    }
+                }
+            });
+    });
+    ui::hint(
+        ui,
+        "NVENC encode sur la carte graphique : le processeur reste au jeu. Sans carte \
+         NVIDIA, l'encodeur logiciel prend le relais tout seul.",
+    );
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
         ui.label(RichText::new("débit").color(TEXT_DIM).size(12.5));
         let mut mbit = r.kbps as f32 / 1000.0;
         if ui
@@ -291,8 +341,10 @@ pub struct GoLive {
     pub boucle: StreamerLoop,
     pub stats: Arc<StageStats>,
     pub stream_id: u32,
-    /// L'aperçu local — exactement ce que les spectateurs reçoivent.
-    pub apercu: Arc<Mutex<Option<RgbaFrame>>>,
+    /// L'aperçu local — exactement ce que les spectateurs reçoivent, déjà
+    /// converti en image egui sur le fil vidéo : le fil d'interface n'a plus
+    /// que la texture à pousser.
+    pub apercu: Arc<Mutex<Option<egui::ColorImage>>>,
     pub emit: FrameEmit,
     pub sink: FrameSink,
     pub force_idr: Arc<AtomicBool>,
@@ -382,8 +434,8 @@ pub struct Regard {
     pub stream_id: u32,
     /// Qui diffuse (pour le titre de la fenêtre).
     pub streamer: String,
-    /// La dernière image décodée, prête à peindre.
-    pub image: Arc<Mutex<Option<RgbaFrame>>>,
+    /// La dernière image décodée, déjà au format egui, prête à peindre.
+    pub image: Arc<Mutex<Option<egui::ColorImage>>>,
     /// Images décodées depuis le début, pour la cadence affichée.
     pub images: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -436,7 +488,7 @@ fn fil_decodeur(
     stream_id: u32,
     key: [u8; 32],
     rx: std_mpsc::Receiver<Vec<u8>>,
-    image: Arc<Mutex<Option<RgbaFrame>>>,
+    image: Arc<Mutex<Option<egui::ColorImage>>>,
     images: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     ctx: egui::Context,
@@ -502,7 +554,13 @@ fn fil_decodeur(
         // Tout ce qui est contigu part au décodeur, dans l'ordre.
         while let Some((_, clair)) = attente.remove(&next) {
             if let Some(frame) = decodeur.decode(&clair) {
-                *image.lock().unwrap() = Some(frame);
+                // La conversion RGBA -> image egui (8 Mo en 1080p) se paie
+                // ici, pas sur le fil d'interface.
+                let prete = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width, frame.height],
+                    &frame.rgba,
+                );
+                *image.lock().unwrap() = Some(prete);
                 images.fetch_add(1, Ordering::Relaxed);
                 // Seul moyen de peindre au rythme du stream : la boucle de
                 // repeint de l'application est plafonnée à 20 fps sinon.
@@ -584,6 +642,7 @@ mod tests {
             kbps: 8000,
             cursor: false,
             preview: false,
+            encodeur: EncoderChoice::Nvenc,
         };
 
         let mut cle_valeur = std::collections::HashMap::new();

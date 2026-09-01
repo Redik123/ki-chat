@@ -5900,18 +5900,25 @@ impl KiApp {
         let Some(conn) = &self.conn else { return };
         let force_idr = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cadence = std::sync::Arc::new(std::sync::Mutex::new(self.diffusion.meta()));
-        let Some(emit) = conn.video_emit(stream_id, key, force_idr.clone(), cadence.clone())
+        let stats = std::sync::Arc::new(ki_video::StageStats::default());
+        let Some(emit) =
+            conn.video_emit(stream_id, key, force_idr.clone(), cadence.clone(), stats.clone())
         else {
             self.info = Some("diffusion impossible : pas de connexion".into());
             return;
         };
-        let stats = std::sync::Arc::new(ki_video::StageStats::default());
-        let apercu: std::sync::Arc<std::sync::Mutex<Option<ki_video::RgbaFrame>>> =
+        let apercu: std::sync::Arc<std::sync::Mutex<Option<egui::ColorImage>>> =
             Default::default();
         let sink: ki_video::FrameSink = {
             let (apercu, ctx) = (apercu.clone(), self.app_ctx.clone());
-            std::sync::Arc::new(move |frame| {
-                *apercu.lock().unwrap() = Some(frame);
+            std::sync::Arc::new(move |frame: ki_video::RgbaFrame| {
+                // Converti ici, sur le fil vidéo : le fil d'interface n'a
+                // plus que la texture à pousser.
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width, frame.height],
+                    &frame.rgba,
+                );
+                *apercu.lock().unwrap() = Some(image);
                 ctx.request_repaint();
             })
         };
@@ -6121,11 +6128,7 @@ impl KiApp {
         }
         if let Some(g) = &self.go_live {
             let frame = g.apercu.lock().unwrap().take();
-            if let Some(f) = frame {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [f.width, f.height],
-                    &f.rgba,
-                );
+            if let Some(image) = frame {
                 match &mut self.go_live_tex {
                     Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
                     None => {
@@ -6143,12 +6146,16 @@ impl KiApp {
                 g.stats.encoded_bytes.load(Relaxed),
             );
             let (w, h) = g.stats.dims();
+            let moteur = if g.stats.materiel.load(Relaxed) { "NVENC" } else { "CPU" };
             let etat = format!(
-                "{w}x{h} · {:.0} i/s · {:.0} kbit/s · encodage {:.1} ms · sautées {}",
+                "{moteur} · {w}x{h} · {:.0} i/s · {:.0} kbit/s · encodage {:.1} ms · sautées : \
+                 capture {}, encodeur {}, réseau {}",
                 self.cadence_live.fps,
                 self.cadence_live.kbps,
                 g.stats.encode_ms.get(),
                 g.stats.skipped.load(Relaxed),
+                g.stats.enc_skipped.load(Relaxed),
+                g.stats.net_dropped.load(Relaxed),
             );
             let mut arreter = false;
             let mut reglages = false;
@@ -6194,11 +6201,7 @@ impl KiApp {
         // --- Ce que je regarde ---
         if let Some(r) = &self.regard {
             let frame = r.image.lock().unwrap().take();
-            if let Some(f) = frame {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [f.width, f.height],
-                    &f.rgba,
-                );
+            if let Some(image) = frame {
                 match &mut self.regard_tex {
                     Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
                     None => {

@@ -272,6 +272,7 @@ impl NetHandle {
         key: [u8; 32],
         force_idr: Arc<AtomicBool>,
         cadence: Arc<Mutex<StreamMeta>>,
+        stats: Arc<ki_video::StageStats>,
     ) -> Option<ki_video::FrameEmit> {
         let conn = self.link.conn.lock().unwrap().clone()?;
         let rt = self.rt.lock().unwrap().clone()?;
@@ -324,6 +325,7 @@ impl NetHandle {
                 // Le réseau ne suit pas : cette trame est perdue pour tout le
                 // monde, la prochaine décodable devra être une trame clé.
                 force_idr.store(true, AtomOrd::Relaxed);
+                stats.net_dropped.fetch_add(1, AtomOrd::Relaxed);
             }
             // Dimensions changées (resize, jeu qui passe en fenêtré, réglage
             // de résolution) : le salon doit l'apprendre pour redimensionner

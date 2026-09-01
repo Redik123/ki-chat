@@ -168,10 +168,25 @@ côté client (mesuré sur le RTT vocal).
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 
-### S4 — Perf & options
-Encodage matériel Media Foundation (trait `VideoEncoder`), shader YUV
-(`PaintCallback`) pour le 60 fps, intra-refresh (supprime les pics d'IDR),
-enveloppes X25519 (niveau 2), qualité manuelle par viewer.
+### S4 — Perf & options — entamé
+**Livré en 0.1.19, avancé sur retour du terrain (« 10 images/s max »)** :
+encodage matériel **NVENC** derrière le trait `VideoEncoder` — pas Media
+Foundation, et pas le crate `nvidia-video-codec-sdk` (il lie
+`nvEncodeAPI.lib`/`nvcuvid.lib` à la compilation et impose CUDA : la CI
+n'a ni l'un ni l'autre). À la place : `nvEncodeAPI64.dll` du pilote chargée
+au vol, structures du SDK 12.0 (en-têtes MIT de FFmpeg) traduites à la
+main avec gardes de taille à la compilation, session Direct3D 11 ouverte
+sur l'adaptateur NVIDIA (pas le premier venu — sur un portable c'est
+l'iGPU), tampons d'entrée I420 du pilote, P4 « faible latence », CBR à VBV
+d'une image, profil Main pour que tout décodeur suive. Choix « Auto /
+NVENC / logiciel » dans les réglages, repli logiciel automatique et dit au
+journal. Les stats du streamer nomment l'encodeur et distinguent les
+trames sautées par la capture, l'encodeur et le réseau — de quoi lire le
+prochain goulot.
+Reste : shader YUV (`PaintCallback`) pour le 60 fps, intra-refresh
+(supprime les pics d'IDR), enveloppes X25519 (niveau 2), qualité manuelle
+par viewer, AMD/Intel (AMF / QuickSync) si des joueurs sans NVIDIA le
+demandent.
 
 ## Risques et parades
 
