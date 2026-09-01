@@ -59,7 +59,13 @@ jobs:
 
       # nasm : sans lui, openh264 (partage d'écran) compile quand même mais
       # encode ~3× plus lentement — dégradation silencieuse à interdire.
-      - uses: ilammy/setup-nasm@v1
+      # Au choco plutôt que par l'action tierce ilammy/setup-nasm, restée
+      # sur Node 20 (dernier avertissement de dépréciation de la chaîne).
+      - name: Installer nasm
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
       - uses: dtolnay/rust-toolchain@stable
         with:
