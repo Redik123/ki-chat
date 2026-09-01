@@ -15,6 +15,7 @@
 mod accounts;
 mod audit;
 mod channels;
+mod diag;
 mod files;
 mod history;
 mod meta;
@@ -102,12 +103,25 @@ async fn main() -> anyhow::Result<()> {
     //
     // Un navigateur, lui, avertira une fois que le certificat est auto-signé —
     // c'est le prix d'un serveur privé sans nom de domaine.
+    // Le jeton d'accès aux diagnostics existe dès le démarrage : l'admin
+    // sait où le lire avant le premier besoin.
+    diag::init(&state);
+
     let app = Router::new()
         .route("/", get(|| async { "ki-chat server" }))
         .route(
             "/upload",
             post(files::upload).layer(DefaultBodyLimit::max(files::MAX_FILE_SIZE)),
         )
+        // Diagnostics partagés : dépôt par les clients volontaires (jeton
+        // voix), lecture par l'admin (jeton data/diag.token).
+        .route(
+            "/diag",
+            post(diag::upload)
+                .layer(DefaultBodyLimit::max(diag::MAX_BATCH))
+                .get(diag::lister),
+        )
+        .route("/diag/{fichier}", get(diag::lire))
         .route("/files/{file_id}/{name}", get(files::download))
         .with_state(state);
 

@@ -497,6 +497,13 @@ struct KiApp {
     show_audio_journal: bool,
     /// Docteur audio déplié dans les réglages.
     show_docteur: bool,
+    /// Diagnostic partagé : le journal technique part vers le serveur
+    /// (opt-in). Voir `flush_diag` pour ce qui transite — et ne transite pas.
+    diag_share: bool,
+    /// Horodatage (epoch ms) de la dernière ligne de journal déjà envoyée.
+    diag_last_sent_ts: u64,
+    /// Dernier envoi périodique, pour la cadence d'une minute.
+    diag_last_flush: Option<std::time::Instant>,
     /// Dernier diagnostic établi. Coûteux — il énumère les processus et
     /// interroge le registre — donc calculé au clic, pas à chaque image.
     docteur: Option<ki_voice::docteur::Diagnostic>,
@@ -767,6 +774,9 @@ impl KiApp {
             show_audio_journal: false,
             show_docteur: false,
             docteur: None,
+            diag_share: get("diag_share", "off") == "on",
+            diag_last_sent_ts: 0,
+            diag_last_flush: None,
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
@@ -2290,6 +2300,84 @@ impl KiApp {
             }
             ServerMsg::Pong => {}
         }
+    }
+
+    /// Envoie au serveur les diagnostics accumulés depuis le dernier envoi :
+    /// méta (version, système), nouvelles lignes du journal audio, et — au
+    /// premier envoi de la session ou sur demande — le rapport du docteur.
+    ///
+    /// C'est TOUT ce qui transite, et rien d'autre : pas un message, pas une
+    /// trame audio. Le lot part en JSONL sur le canal HTTPS épinglé du
+    /// serveur (même authentification que le partage de fichiers), dans un
+    /// thread — l'interface ne l'attend jamais.
+    fn flush_diag(&mut self, manual: bool) {
+        if self.conn.is_none() {
+            return;
+        }
+        let journal = ki_voice::journal_snapshot();
+        let fresh: Vec<&(u64, String)> =
+            journal.iter().filter(|(t, _)| *t > self.diag_last_sent_ts).collect();
+        if fresh.is_empty() && !manual {
+            return;
+        }
+        let now_ms = chrono::Local::now().timestamp_millis().max(0) as u64;
+        let mut lot = String::new();
+        lot.push_str(&format!(
+            "{{\"type\":\"meta\",\"t\":{now_ms},\"version\":\"{}\",\"os\":\"{} {}\"}}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        ));
+        for (t, msg) in &fresh {
+            lot.push_str(&format!(
+                "{{\"type\":\"journal\",\"t\":{t},\"msg\":{}}}\n",
+                serde_json::Value::String((*msg).clone())
+            ));
+        }
+        // Le docteur énumère les processus : pas de quoi le faire chaque
+        // minute. Au premier envoi et à la demande, c'est là qu'il compte.
+        if manual || self.diag_last_sent_ts == 0 {
+            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                lot.push_str(&format!(
+                    "{{\"type\":\"docteur\",\"t\":{now_ms},\"rapport\":{}}}\n",
+                    serde_json::Value::String(engine.docteur().rapport())
+                ));
+            }
+        }
+        if let Some((t, _)) = journal.last() {
+            self.diag_last_sent_ts = *t;
+        }
+        let base = self.http_base();
+        let agent = self.http_agent();
+        let token_hex = format!("{:x}", self.voice_token);
+        std::thread::spawn(move || {
+            if let Err(e) = agent
+                .post(&format!("{base}/diag"))
+                .set("x-ki-token", &token_hex)
+                .send_string(&lot)
+            {
+                // Raté silencieux : le diagnostic est un luxe, pas une
+                // fonction — la prochaine minute réessaiera avec le cumul.
+                tracing::debug!("envoi du diagnostic raté : {e}");
+            }
+        });
+    }
+
+    /// La cadence du diagnostic partagé : une minute, et seulement s'il y a
+    /// du neuf. Appelée à chaque image ; le garde-fou coûte deux lectures.
+    fn maybe_flush_diag(&mut self) {
+        if !self.diag_share || self.conn.is_none() {
+            return;
+        }
+        let due = self
+            .diag_last_flush
+            .map(|t| t.elapsed() > std::time::Duration::from_secs(60))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.diag_last_flush = Some(std::time::Instant::now());
+        self.flush_diag(false);
     }
 
     /// Sélection d'un fichier puis upload, dans un thread (le dialogue
@@ -4513,6 +4601,33 @@ impl KiApp {
                                         "le bouton copie l'intégralité du journal",
                                     );
                                 }
+                            }
+                        }
+
+                        // --- Diagnostic partagé ---
+                        // Le journal ci-dessus se copie à la main ; ici, il
+                        // part tout seul vers le serveur — pour que l'admin
+                        // (et l'assistant qui débogue avec lui) lise ce qui
+                        // s'est passé sans rien demander à personne. Opt-in,
+                        // et technique seulement : jamais les messages, jamais
+                        // l'audio.
+                        ui.add_space(8.0);
+                        ui.checkbox(
+                            &mut self.diag_share,
+                            "Partager mes diagnostics avec l'admin du serveur",
+                        )
+                        .on_hover_text(
+                            "envoie chaque minute le journal technique (périphériques, \
+                             pertes, réouvertures), la version et le rapport du docteur \
+                             au serveur du groupe. Jamais tes messages, jamais ta voix. \
+                             Décochable à tout moment.",
+                        );
+                        if self.diag_share {
+                            if ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
+                                .clicked()
+                            {
+                                self.flush_diag(true);
+                                self.info = Some("diagnostic envoyé au serveur".into());
                             }
                         }
 
@@ -7405,6 +7520,10 @@ impl eframe::App for KiApp {
         // Focus : conditionne le son des messages et la notification.
         self.window_focused = ctx.input(|i| i.focused);
 
+        // Diagnostic partagé : si l'option est cochée, le journal technique
+        // part vers le serveur à son rythme (une minute, et que du neuf).
+        self.maybe_flush_diag();
+
         // La surveillance du clavier démarre à la première image : elle a
         // besoin du contexte pour réveiller la fenêtre, et lui seul sait
         // quand il existe.
@@ -7522,6 +7641,7 @@ impl eframe::App for KiApp {
         storage.set_string("native_audio", if self.native_audio { "on" } else { "off" }.into());
         storage.set_string("raw_mic", if self.raw_mic { "on" } else { "off" }.into());
         storage.set_string("comms_mic", if self.comms_mic { "on" } else { "off" }.into());
+        storage.set_string("diag_share", if self.diag_share { "on" } else { "off" }.into());
         if let Ok(json) = serde_json::to_string(&self.all_volumes) {
             storage.set_string("user_volumes", json);
         }

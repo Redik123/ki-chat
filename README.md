@@ -198,6 +198,25 @@ réinstalles le serveur en perdant `data/quic-cert.der`, son empreinte change :
 les clients refuseront de se connecter tant que le serveur n'aura pas été
 retiré puis rajouté à leur carnet. Sauvegarde ce fichier avec le reste.
 
+## Diagnostics partagés (opt-in)
+
+Chaque joueur peut cocher « Partager mes diagnostics avec l'admin du
+serveur » (⚙ Audio). Son client envoie alors chaque minute son **journal
+technique** — périphériques ouverts/perdus, réouvertures, version, rapport
+du docteur audio — jamais les messages, jamais la voix. Le serveur archive
+tout dans `data/diag/`, un fichier JSONL par joueur, borné (~10 Mo, rotation).
+
+Lecture à distance, réservée au porteur du jeton `data/diag.token`
+(généré au premier démarrage, à lire sur la machine du serveur) :
+
+```bash
+curl -k -H "x-ki-admin: $(cat diag.token)" https://ton-serveur:8080/diag
+```
+
+liste les archives, et `/diag/<fichier>` en renvoie une. `-k` parce que le
+certificat est auto-signé — l'épinglage d'empreinte, lui, est fait par les
+clients ki-chat, pas par curl.
+
 ## Installer le serveur (Docker / Portainer)
 
 Rien à compiler : l'image du serveur est construite et publiée par GitHub
