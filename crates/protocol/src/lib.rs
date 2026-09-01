@@ -175,6 +175,28 @@ pub enum ClientMsg {
         #[serde(default)]
         muted: bool,
     },
+    /// Démarrer un partage d'écran dans son salon vocal. Idempotent : un
+    /// second appel renvoie le stream existant.
+    ///
+    /// La clé est générée par le streamer et confiée au serveur pour la
+    /// durée du stream : il ne la remet qu'à un spectateur vérifié (même
+    /// salon vocal), jamais au salon entier. Le serveur connaît déjà la clé
+    /// voix — même modèle de confiance ; les enveloppes par spectateur
+    /// (niveau 2, X25519) sont prévues en S4.
+    StreamStart {
+        meta: StreamMeta,
+        /// Clé XChaCha20-Poly1305 du stream (32 octets, hex).
+        stream_key: String,
+    },
+    /// Arrêter son partage d'écran.
+    StreamStop,
+    /// Le streamer annonce un changement (dimensions, débit) : le serveur le
+    /// rediffuse au salon en StreamMetaChanged.
+    StreamMetaUpdate { meta: StreamMeta },
+    /// Regarder le stream d'un membre de son salon vocal.
+    Watch { stream_id: u32 },
+    /// Cesser de regarder.
+    Unwatch { stream_id: u32 },
     /// Expulse un utilisateur du serveur (admin uniquement). Il peut se
     /// reconnecter aussitôt : pour l'en empêcher, voir `AdminBan`.
     Kick {
@@ -415,6 +437,34 @@ pub enum ServerMsg {
         #[serde(default)]
         muted: bool,
     },
+    /// Un membre diffuse son écran. Annoncé au salon — SANS la clé : elle ne
+    /// se remet qu'à qui demande à regarder, après vérification.
+    StreamStarted {
+        stream_id: u32,
+        user_id: UserId,
+        meta: StreamMeta,
+    },
+    /// La diffusion s'arrête (volontairement, ou par départ/déconnexion).
+    StreamStopped { stream_id: u32 },
+    /// Réponse à StreamStart : l'identifiant attribué (le streamer le grave
+    /// dans chaque en-tête de trame).
+    StreamGranted { stream_id: u32 },
+    /// Réponse à Watch, au seul demandeur : la clé de déchiffrement du
+    /// stream (tenue par le serveur pour la durée du stream, remise après
+    /// vérification que le demandeur partage le salon vocal du streamer).
+    WatchAccepted {
+        stream_id: u32,
+        /// Clé XChaCha20-Poly1305 du stream (32 octets, hex).
+        stream_key: String,
+        meta: StreamMeta,
+    },
+    /// Regard refusé (pas dans le salon vocal du streamer, stream éteint…).
+    WatchDenied { stream_id: u32, reason: String },
+    /// Au streamer : un spectateur (nouveau, ou qui a perdu pied) a besoin
+    /// d'une trame clé. Cadence bornée par le serveur (≤ 1 / 500 ms).
+    KeyframeNeeded { stream_id: u32 },
+    /// Les caractéristiques d'un stream ont changé (dimensions, débit).
+    StreamMetaChanged { stream_id: u32, meta: StreamMeta },
     /// Liste complète des membres. Envoyée à la connexion, et chaque fois
     /// qu'un changement touche potentiellement tout le monde (rôles remaniés,
     /// salon supprimé).
@@ -899,6 +949,9 @@ pub struct Member {
     /// antérieur : faux.
     #[serde(default)]
     pub muted: bool,
+    /// Identifiant du stream que ce membre diffuse, s'il partage son écran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<u32>,
     /// Micro coupé **par un modérateur**. Distinct de `muted`, et il faut que
     /// ça se voie : l'un se défait d'un clic par l'intéressé, l'autre non.
     #[serde(default)]
@@ -1005,6 +1058,157 @@ pub fn write_voice_header(buf: &mut [u8], id: u64, counter: u64) {
     buf[2] = VOICE_VERSION;
     buf[3..11].copy_from_slice(&id.to_le_bytes());
     buf[11..19].copy_from_slice(&counter.to_le_bytes());
+}
+
+/// --- Protocole média (partage d'écran), version 1 — voir PLAN-STREAM.md ---
+///
+/// Chaque trame vidéo voyage dans SON flux QUIC unidirectionnel : fiabilité
+/// par trame, sans blocage de tête de ligne entre trames, et le relais peut
+/// jeter une trame entière d'un `stop_sending`. L'en-tête est en clair — le
+/// serveur route et filtre sans déchiffrer — et sert d'AAD au chiffrement :
+/// le réécrire invalide le tag.
+///
+///   [0..2]   magic  "KF"
+///   [2]      version (1)
+///   [3]      drapeaux — bit 0 : trame clé (IDR)
+///   [4..8]   stream_id (u32) — attribué par le serveur à StreamStart
+///   [8..16]  seq (u64) — strictement croissant, jamais réinitialisé (nonce)
+///   [16..24] pts_us (u64) — horodatage de capture, base de la sync A/V
+///   [24..28] group_id (u32) — index de GOP (porte ouverte MoQ, cf. plan)
+///   [28..30] largeur (u16) · [30..32] hauteur (u16)
+///
+/// La charge est chiffrée XChaCha20-Poly1305 avec la clé DU STREAM (générée
+/// par le streamer, remise à chaque spectateur via WatchAccepted — jamais
+/// diffusée au salon). Le nonce porte un octet de domaine : la même clé
+/// couvrira la vidéo (1) et l'audio du jeu (2) sans jamais croiser leurs
+/// nonces ; la voix (domaine 0 implicite) a sa propre clé de session.
+pub const MEDIA_MAGIC_VIDEO: [u8; 2] = *b"KF";
+pub const MEDIA_VERSION: u8 = 1;
+pub const MEDIA_HEADER_LEN: usize = 32;
+/// Une trame vidéo (IDR comprise) ne dépasse jamais ça : au-delà, l'entrée
+/// est hostile ou l'encodeur déréglé — dans les deux cas, on coupe.
+pub const MEDIA_MAX_FRAME: usize = 4 * 1024 * 1024;
+/// Drapeau : la trame est une trame clé (IDR) — un spectateur peut décoder
+/// à partir d'elle sans rien avoir vu avant.
+pub const MEDIA_FLAG_IDR: u8 = 1 << 0;
+
+/// Domaines de nonce sous une clé de stream.
+pub const MEDIA_DOMAIN_VIDEO: u8 = 1;
+pub const MEDIA_DOMAIN_GAME_AUDIO: u8 = 2;
+
+/// En-tête d'une trame média, tel qu'il circule en clair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaHeader {
+    pub idr: bool,
+    pub stream_id: u32,
+    pub seq: u64,
+    pub pts_us: u64,
+    pub group_id: u32,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Écrit l'en-tête média dans `buf` (au moins MEDIA_HEADER_LEN octets).
+pub fn write_media_header(buf: &mut [u8], h: &MediaHeader) {
+    buf[0..2].copy_from_slice(&MEDIA_MAGIC_VIDEO);
+    buf[2] = MEDIA_VERSION;
+    buf[3] = if h.idr { MEDIA_FLAG_IDR } else { 0 };
+    buf[4..8].copy_from_slice(&h.stream_id.to_le_bytes());
+    buf[8..16].copy_from_slice(&h.seq.to_le_bytes());
+    buf[16..24].copy_from_slice(&h.pts_us.to_le_bytes());
+    buf[24..28].copy_from_slice(&h.group_id.to_le_bytes());
+    buf[28..30].copy_from_slice(&h.width.to_le_bytes());
+    buf[30..32].copy_from_slice(&h.height.to_le_bytes());
+}
+
+/// Analyse un en-tête média. None si magie, version ou taille ne collent pas.
+pub fn parse_media_header(buf: &[u8]) -> Option<MediaHeader> {
+    if buf.len() < MEDIA_HEADER_LEN || buf[0..2] != MEDIA_MAGIC_VIDEO || buf[2] != MEDIA_VERSION {
+        return None;
+    }
+    Some(MediaHeader {
+        idr: buf[3] & MEDIA_FLAG_IDR != 0,
+        stream_id: u32::from_le_bytes(buf[4..8].try_into().ok()?),
+        seq: u64::from_le_bytes(buf[8..16].try_into().ok()?),
+        pts_us: u64::from_le_bytes(buf[16..24].try_into().ok()?),
+        group_id: u32::from_le_bytes(buf[24..28].try_into().ok()?),
+        width: u16::from_le_bytes(buf[28..30].try_into().ok()?),
+        height: u16::from_le_bytes(buf[30..32].try_into().ok()?),
+    })
+}
+
+/// Nonce XChaCha20 (24 octets) d'une trame média : octet de domaine,
+/// identifiant de stream, séquence. Unique par clé de stream tant que `seq`
+/// ne se répète pas — et il ne se réinitialise jamais, par contrat.
+pub fn nonce_for_media(domain: u8, stream_id: u32, seq: u64) -> [u8; 24] {
+    let mut n = [0u8; 24];
+    n[0] = domain;
+    n[1..5].copy_from_slice(&stream_id.to_le_bytes());
+    n[8..16].copy_from_slice(&seq.to_le_bytes());
+    n
+}
+
+/// Ce qu'un stream diffuse, annoncé au salon et mis à jour au vol.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamMeta {
+    pub width: u16,
+    pub height: u16,
+    #[serde(default)]
+    pub fps: u8,
+    /// Débit d'encodage courant, en kbps.
+    #[serde(default)]
+    pub kbps: u32,
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+
+    #[test]
+    fn en_tete_media_aller_retour() {
+        let h = MediaHeader {
+            idr: true,
+            stream_id: 7,
+            seq: 123_456_789_012,
+            pts_us: 42_000_000,
+            group_id: 9,
+            width: 1920,
+            height: 1080,
+        };
+        let mut buf = [0u8; MEDIA_HEADER_LEN];
+        write_media_header(&mut buf, &h);
+        assert_eq!(parse_media_header(&buf), Some(h));
+
+        // Magie ou version faussées : rejet net.
+        let mut faux = buf;
+        faux[0] = b'X';
+        assert!(parse_media_header(&faux).is_none());
+        let mut faux = buf;
+        faux[2] = 99;
+        assert!(parse_media_header(&faux).is_none());
+        assert!(parse_media_header(&buf[..MEDIA_HEADER_LEN - 1]).is_none());
+    }
+
+    /// La même clé de stream couvre vidéo et audio du jeu : leurs nonces ne
+    /// doivent JAMAIS se croiser, ni entre domaines, ni entre streams, ni
+    /// entre séquences.
+    #[test]
+    fn les_nonces_media_ne_se_croisent_pas() {
+        let a = nonce_for_media(MEDIA_DOMAIN_VIDEO, 1, 5);
+        assert_ne!(a, nonce_for_media(MEDIA_DOMAIN_GAME_AUDIO, 1, 5));
+        assert_ne!(a, nonce_for_media(MEDIA_DOMAIN_VIDEO, 2, 5));
+        assert_ne!(a, nonce_for_media(MEDIA_DOMAIN_VIDEO, 1, 6));
+    }
+
+    /// Un client d'avant le partage d'écran lit un Member sans le champ
+    /// `streaming` ; un serveur d'avant n'envoie pas le champ. Personne ne
+    /// casse — la discipline serde(default) de toute la maison.
+    #[test]
+    fn member_sans_streaming_se_lit() {
+        let ancien = r#"{"user_id":1,"username":"alice","speaking":false}"#;
+        let m: Member = serde_json::from_str(ancien).unwrap();
+        assert_eq!(m.streaming, None);
+    }
 }
 
 // --- Petits utilitaires hex (clé voix dans Welcome) ---

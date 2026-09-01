@@ -280,6 +280,7 @@ async fn handle_connection(
                 voice: None,
                 speaking: false,
                 muted: false,
+                streaming: None,
                 force_muted,
                 force_deafened,
                 roles: auth.roles.clone(),
@@ -345,6 +346,11 @@ async fn handle_connection(
     // Tâche voix : datagrammes entrants -> relais + suivi des pertes.
     let voice = tokio::spawn(voice_task(state.clone(), conn.clone(), user_id, tx.clone()));
 
+    // Tâche vidéo : les trames du partage d'écran arrivent chacune dans son
+    // flux QUIC unidirectionnel — ingestion durcie, puis relais.
+    let stream_in =
+        tokio::spawn(stream_ingest_task(state.clone(), conn.clone(), user_id, tx.clone()));
+
     // Boucle de contrôle.
     //
     // Le débit de **tout** le flux est borné, et pas seulement celui du chat.
@@ -383,8 +389,52 @@ async fn handle_connection(
     tracing::info!("déconnexion : {username} (id {user_id})");
     state.disconnect_session(user_id, voice_token);
     voice.abort();
+    stream_in.abort();
     writer.abort();
     Ok(())
+}
+
+/// Ingestion des trames vidéo d'UN streamer : chaque flux unidirectionnel
+/// entrant porte une trame (en-tête clair + charge chiffrée). Tout est borné
+/// — cadence, taille, délai de lecture — parce que tout ce qui entre ici
+/// vient d'un pair qu'on ne contrôle pas, authentifié ou non.
+async fn stream_ingest_task(
+    state: Arc<AppState>,
+    conn: quinn::Connection,
+    user_id: UserId,
+    tx: crate::state::Outbox,
+) {
+    // 90 trames/s : au-delà du 60 fps + rattrapages, c'est un arrosage.
+    let mut budget = crate::state::TokenBucket::new(90.0, 120.0);
+    loop {
+        let Ok(mut uni) = conn.accept_uni().await else { return };
+        // Un compte qui ne diffuse rien n'a rien à envoyer ici : coupé sans
+        // lire un octet.
+        if state.streams.stream_of(user_id).is_none() {
+            let _ = uni.stop(quinn::VarInt::from_u32(1));
+            continue;
+        }
+        if !budget.take() {
+            let _ = uni.stop(quinn::VarInt::from_u32(2));
+            continue;
+        }
+        // Une trame se lit en bien moins d'une seconde ; au-delà, le flux
+        // est mort ou malveillant, et l'ingestion ne doit pas s'y pendre.
+        let lu = tokio::time::timeout(
+            Duration::from_secs(1),
+            uni.read_to_end(ki_protocol::MEDIA_HEADER_LEN + ki_protocol::MEDIA_MAX_FRAME),
+        )
+        .await;
+        let Ok(Ok(bytes)) = lu else { continue };
+        let Some(header) = ki_protocol::parse_media_header(&bytes) else { continue };
+        if let crate::stream::Ingest::Ok { ask_idr: true } =
+            state.streams.ingest(user_id, &header, bytes)
+        {
+            // Un spectateur (nouveau, lent, ou sacrifié par le plafond
+            // mémoire) attend une trame décodable : prier le streamer.
+            let _ = tx.send(ServerMsg::KeyframeNeeded { stream_id: header.stream_id });
+        }
+    }
 }
 
 /// Relais des datagrammes voix d'UN émetteur vers son salon, avec mesure
@@ -792,9 +842,88 @@ fn handle_msg(
                 }
             };
             if was_in_voice {
+                // Sorti du vocal = plus de public ni de scène : sa diffusion
+                // s'arrête, et il quitte celles qu'il regardait.
+                state.fin_de_streams(user_id);
                 state.rebuild_voice_routes();
                 state.broadcast_member(user_id);
             }
+        }
+        ClientMsg::StreamStart { meta, stream_key } => {
+            // Diffuser exige d'être en vocal : le salon EST le public, et
+            // c'est l'appartenance au salon qui donnera droit de regard.
+            let channel = {
+                let users = state.users.lock().unwrap();
+                users.get(&user_id).and_then(|u| u.voice)
+            };
+            let Some(channel) = channel else {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "entre d'abord dans un salon vocal pour diffuser".into(),
+                });
+                return;
+            };
+            // La clé est opaque pour le serveur, mais sa forme ne l'est pas :
+            // 32 octets hex, sinon les spectateurs ne pourront jamais déchiffrer.
+            if ki_protocol::hex_decode(&stream_key).map(|k| k.len()) != Some(32) {
+                let _ = tx.send(ServerMsg::Error { message: "clé de stream invalide".into() });
+                return;
+            }
+            match state.streams.start(user_id, channel, stream_key, meta) {
+                Ok(stream_id) => {
+                    {
+                        let mut users = state.users.lock().unwrap();
+                        if let Some(u) = users.get_mut(&user_id) {
+                            u.streaming = Some(stream_id);
+                        }
+                    }
+                    let _ = tx.send(ServerMsg::StreamGranted { stream_id });
+                    state.broadcast_all_except(
+                        user_id,
+                        &ServerMsg::StreamStarted { stream_id, user_id, meta },
+                    );
+                    state.broadcast_member(user_id);
+                    tracing::info!("{username} diffuse son écran (stream {stream_id})");
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e.into() });
+                }
+            }
+        }
+        ClientMsg::StreamStop => {
+            state.fin_de_streams(user_id);
+        }
+        ClientMsg::StreamMetaUpdate { meta } => {
+            if let Some(stream_id) = state.streams.meta_update(user_id, meta) {
+                state.broadcast_all_except(
+                    user_id,
+                    &ServerMsg::StreamMetaChanged { stream_id, meta },
+                );
+            }
+        }
+        ClientMsg::Watch { stream_id } => {
+            let viewer = {
+                let users = state.users.lock().unwrap();
+                users.get(&user_id).map(|u| (u.voice, u.conn.clone()))
+            };
+            let Some((channel, conn)) = viewer else { return };
+            match state.streams.watch(stream_id, user_id, channel, conn) {
+                Ok((stream_key, meta, ask_idr, streamer)) => {
+                    let _ = tx.send(ServerMsg::WatchAccepted { stream_id, stream_key, meta });
+                    if ask_idr {
+                        // Le nouveau venu a besoin d'une trame décodable.
+                        state.send_to(streamer, &ServerMsg::KeyframeNeeded { stream_id });
+                    }
+                }
+                Err(reason) => {
+                    let _ = tx.send(ServerMsg::WatchDenied {
+                        stream_id,
+                        reason: reason.into(),
+                    });
+                }
+            }
+        }
+        ClientMsg::Unwatch { stream_id } => {
+            state.streams.unwatch(stream_id, user_id);
         }
         ClientMsg::Chat { text } => {
             if !require(state, user_id, tx, ki_protocol::perm::SEND_MESSAGE) {

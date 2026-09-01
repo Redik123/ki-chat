@@ -176,6 +176,8 @@ pub struct ConnectedUser {
     pub speaking: bool,
     /// Micro coupé volontairement (annoncé par le client, montré aux autres).
     pub muted: bool,
+    /// Identifiant du partage d'écran en cours, s'il diffuse.
+    pub streaming: Option<u32>,
     /// Sanctions vocales posées par un modérateur, relues du compte à la
     /// connexion. Elles ne sont **pas** annoncées par le client et ne peuvent
     /// donc pas être désavouées par lui.
@@ -390,6 +392,8 @@ pub struct AppState {
     pub data_dir: String,
     pub users: Mutex<HashMap<UserId, ConnectedUser>>,
     pub voice_routes: std::sync::RwLock<RouteTable>,
+    /// Les partages d'écran en cours (relais SFU vidéo).
+    pub streams: crate::stream::Streams,
     pub history: History,
     /// Journal des actions d'administration.
     pub audit: crate::audit::Audit,
@@ -429,6 +433,7 @@ impl AppState {
             data_dir: data_dir.to_string(),
             users: Mutex::new(HashMap::new()),
             voice_routes: std::sync::RwLock::new(RouteTable::default()),
+            streams: crate::stream::Streams::new(),
             history,
             audit,
         })
@@ -704,6 +709,33 @@ impl AppState {
         }
     }
 
+    /// Envoie un message à UN connecté — le streamer à qui l'on demande une
+    /// trame clé, typiquement.
+    pub fn send_to(&self, user_id: UserId, msg: &ServerMsg) {
+        let Some(line) = encode(msg) else { return };
+        let users = self.users.lock().unwrap();
+        if let Some(u) = users.get(&user_id) {
+            let _ = u.tx.send_line(&line);
+        }
+    }
+
+    /// Termine la diffusion éventuelle de ce compte et le retire de tous les
+    /// publics. Les trois sorties passent ici — arrêt volontaire, sortie du
+    /// vocal, déconnexion — une seule vérité de démontage.
+    pub fn fin_de_streams(&self, user_id: UserId) {
+        self.streams.drop_viewer_everywhere(user_id);
+        if let Some(stream_id) = self.streams.stop_by_user(user_id) {
+            {
+                let mut users = self.users.lock().unwrap();
+                if let Some(u) = users.get_mut(&user_id) {
+                    u.streaming = None;
+                }
+            }
+            self.broadcast_all(&ServerMsg::StreamStopped { stream_id });
+            self.broadcast_member(user_id);
+        }
+    }
+
     /// Comme `broadcast_all`, mais sans renvoyer à l'émetteur : celui-ci
     /// connaît déjà son propre état, sans aller-retour réseau.
     pub fn broadcast_all_except(&self, except: UserId, msg: &ServerMsg) {
@@ -740,6 +772,7 @@ impl AppState {
             username: u.username.clone(),
             speaking: u.speaking,
             muted: u.muted,
+            streaming: u.streaming,
             force_muted: u.force_muted,
             force_deafened: u.force_deafened,
             admin: u.admin,
@@ -775,6 +808,7 @@ impl AppState {
                 username: u.username.clone(),
                 speaking: u.speaking,
                 muted: u.muted,
+                streaming: u.streaming,
                 force_muted: u.force_muted,
                 force_deafened: u.force_deafened,
                 admin: u.admin,
@@ -800,6 +834,7 @@ impl AppState {
                 username: account.username,
                 speaking: false,
                 muted: false,
+                streaming: None,
                 // Les sanctions d'un compte hors ligne se lisent quand même :
                 // elles l'attendent au retour, et le modérateur doit pouvoir
                 // les lever sans attendre qu'il revienne.
@@ -866,6 +901,11 @@ impl AppState {
                 _ => return,
             }
         }
+        // Sa diffusion éventuelle s'éteint avec lui, et il quitte les
+        // publics qu'il suivait. APRÈS la garde du jeton : une session
+        // supplantée par une reconnexion ne doit pas tuer le stream de la
+        // nouvelle.
+        self.fin_de_streams(user_id);
         self.rebuild_voice_routes();
         // La liste du serveur change pour tout le monde — mais une seule
         // fiche a bougé : celle qui vient de passer hors ligne. Le compte
@@ -877,6 +917,7 @@ impl AppState {
                 member.voice = None;
                 member.speaking = false;
                 member.muted = false;
+                member.streaming = None;
                 self.broadcast_all(&ServerMsg::MemberUpdate { member });
             }
             // Fiche introuvable : on retombe sur la liste entière plutôt que

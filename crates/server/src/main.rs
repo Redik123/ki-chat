@@ -23,6 +23,7 @@ mod quic;
 mod roles;
 mod state;
 mod store;
+mod stream;
 mod throttle;
 
 use std::net::SocketAddr;
