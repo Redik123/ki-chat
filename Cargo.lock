@@ -2884,6 +2884,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "ki-aec"
+version = "0.1.15"
+dependencies = [
+ "cc",
+ "flate2",
+ "sha2",
+ "tar",
+ "ureq",
+]
+
+[[package]]
 name = "ki-client-cli"
 version = "0.1.15"
 dependencies = [
@@ -3024,6 +3035,7 @@ dependencies = [
  "dasp_sample",
  "deep_filter",
  "hound",
+ "ki-aec",
  "ki-opus",
  "ki-protocol",
  "ndarray",

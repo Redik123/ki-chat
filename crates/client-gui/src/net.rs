@@ -52,6 +52,8 @@ pub struct VoicePrefs {
     pub bitrate: i32,
     /// Gain automatique (AGC).
     pub agc: bool,
+    /// Annulation d'écho acoustique.
+    pub aec: bool,
     /// Niveau cible de l'AGC (0..1).
     pub agc_target: f32,
     /// Porte de bruit (0.0 = désactivée).
@@ -260,6 +262,7 @@ fn start_engine(
     cfg.vad_hangover_ms = prefs.vad_hangover_ms;
     cfg.bitrate = prefs.bitrate;
     cfg.agc = prefs.agc;
+    cfg.aec = prefs.aec;
     cfg.agc_target = prefs.agc_target;
     cfg.gate_threshold = prefs.gate_threshold;
     cfg.jitter_frames = prefs.jitter_frames;

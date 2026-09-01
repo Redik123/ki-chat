@@ -43,6 +43,14 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// Trames de 20 ms.
 pub const FRAME_SAMPLES: usize = 960;
 
+/// Queue du filtre d'annulation d'écho : 200 ms couvrent le tampon de
+/// sortie, le trajet acoustique de la pièce et les files entre fils.
+const AEC_TAIL: usize = SAMPLE_RATE as usize / 5;
+/// Encours maximal du signal « lointain » (ce que la sortie a joué) en
+/// attente de la capture : 500 ms. Au-delà, le plus ancien est jeté — les
+/// horloges des cartes d'entrée et de sortie dérivent l'une de l'autre.
+const AEC_FAR_MAX: usize = SAMPLE_RATE as usize / 2;
+
 // ---------------------------------------------------------------------------
 // Journal audio
 // ---------------------------------------------------------------------------
@@ -131,6 +139,11 @@ pub struct VoiceConfig {
     /// autres sons réduit chez qui n'a pas réglé « Ne rien faire ». Faux par
     /// défaut ; le moteur y bascule de lui-même s'il détecte la famine.
     pub comms_mic: bool,
+    /// Annulation d'écho acoustique : soustrait du micro ce que la sortie
+    /// joue — l'écho des haut-parleurs. Sans objet au casque, indispensable
+    /// sans ; active par défaut, l'adaptation est neutre quand il n'y a pas
+    /// d'écho à enlever.
+    pub aec: bool,
     /// Mode de suppression de bruit (NOISE_OFF / NOISE_RNNOISE).
     pub noise_mode: u8,
     /// Volumes par émetteur (user_id -> gain, 1.0 = 100 %), appliqués au mixage.
@@ -169,6 +182,7 @@ impl VoiceConfig {
             native_audio: cfg!(windows),
             raw_mic: false,
             comms_mic: false,
+            aec: true,
             noise_mode: NOISE_RNNOISE,
             volumes: HashMap::new(),
             input_gain: 1.0,
@@ -533,6 +547,14 @@ struct Shared {
     /// capture et lecture ferment et rouvrent leur périphérique — l'effet
     /// d'un débranchement/rebranchement, sans toucher au câble.
     audio_reset: std::sync::atomic::AtomicU64,
+    /// Annulation d'écho active (réglage, à chaud).
+    aec: AtomicBool,
+    /// Le signal « lointain » de l'annulateur d'écho : ce que la sortie
+    /// vient de jouer, en attente d'être soustrait de la capture. Déposé par
+    /// le fournisseur d'échantillons de la sortie, consommé trame à trame
+    /// par le fil de capture — même famille que `loopback_buf`, mêmes
+    /// précautions (verrou bref, encours borné).
+    aec_far: Mutex<std::collections::VecDeque<f32>>,
     /// Micro affamé : la bascule en catégorie « communications » est
     /// **proposée** à l'utilisateur, jamais imposée — c'est elle qui peut
     /// faire baisser le volume de ses autres sons, à lui de choisir.
@@ -598,6 +620,8 @@ impl VoiceEngine {
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
             audio_reset: std::sync::atomic::AtomicU64::new(0),
+            aec: AtomicBool::new(cfg.aec),
+            aec_far: Mutex::new(std::collections::VecDeque::new()),
             comms_proposed: AtomicBool::new(false),
             comms_decision: std::sync::atomic::AtomicU8::new(0),
             input_lost: AtomicBool::new(false),
@@ -797,6 +821,12 @@ impl VoiceEngine {
     /// Gain automatique (AGC), à chaud.
     pub fn set_agc(&self, on: bool) {
         self.shared.agc.store(on, Ordering::Relaxed);
+    }
+
+    /// Annulation d'écho, à chaud. La coupure libère l'annulateur et vide la
+    /// file du signal lointain ; la réactivation repart d'un filtre neuf.
+    pub fn set_aec(&self, on: bool) {
+        self.shared.aec.store(on, Ordering::Relaxed);
     }
 
     /// Niveau crête récent de chaque locuteur distant (pour les vumètres).
@@ -1243,6 +1273,21 @@ fn capture_loop(
         let mut my_gen = native_generation();
         // Début de l'épisode de zéros stricts en cours, s'il y en a un.
         let mut zero_since: Option<Instant> = None;
+        // L'annulateur d'écho de CE flux : recréé à chaque réouverture — un
+        // autre périphérique, c'est un autre trajet acoustique, le filtre
+        // repart de zéro et converge en une seconde ou deux. Double Option,
+        // comme LazyDeep : None = jamais tenté, Some(None) = refusé une fois
+        // pour toutes (on ne réessaie pas à chaque trame).
+        let mut aec: Option<Option<ki_aec::Aec>> = None;
+        // Le lointain accumulé pendant que le micro était fermé date d'avant
+        // lui : on n'en garde qu'une demi-queue de filtre, pour que le
+        // « maintenant » des deux signaux coïncide à peu près.
+        {
+            let mut far = sh.aec_far.lock().unwrap();
+            while far.len() > AEC_TAIL / 2 {
+                far.pop_front();
+            }
+        }
 
     while !is_shutdown(&sh) {
         // Réinitialisation demandée (bouton « Réinitialiser l'audio ») :
@@ -1421,6 +1466,49 @@ fn capture_loop(
         chunks.recycle(chunk);
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
+
+            // 0. Annulation d'écho : soustrait ce que la sortie vient de
+            // jouer (l'écho des haut-parleurs revenu dans le micro), AVANT
+            // tout le reste — le filtre veut la capture telle quelle, et la
+            // chaîne préfère une trame déjà débarrassée de la voix des
+            // autres. La file manquante est complétée de silence : pas de
+            // lointain = rien à soustraire.
+            if sh.aec.load(Ordering::Relaxed) {
+                let canceller = aec
+                    .get_or_insert_with(|| match ki_aec::Aec::new(
+                        FRAME_SAMPLES,
+                        AEC_TAIL,
+                        SAMPLE_RATE,
+                    ) {
+                        Some(c) => {
+                            journal("annulation d'écho active (queue 200 ms)".into());
+                            Some(c)
+                        }
+                        None => {
+                            tracing::error!("annulateur d'écho indisponible");
+                            None
+                        }
+                    })
+                    .as_mut();
+                if let Some(canceller) = canceller {
+                    let mut far = [0f32; FRAME_SAMPLES];
+                    {
+                        let mut q = sh.aec_far.lock().unwrap();
+                        for slot in far.iter_mut() {
+                            match q.pop_front() {
+                                Some(s) => *slot = s,
+                                None => break,
+                            }
+                        }
+                    }
+                    canceller.process(&mut frame, &far);
+                }
+            } else if aec.is_some() {
+                // Coupé à chaud : l'état part, la file aussi — une
+                // réactivation repartira d'un filtre neuf et aligné.
+                aec = None;
+                sh.aec_far.lock().unwrap().clear();
+            }
 
             // 1. Gain d'entrée.
             let gain = load_f32(&sh.input_gain);
@@ -2382,6 +2470,17 @@ fn output_writer(
             let out_gain = load_f32(&sh_cb.output_gain);
             for o in mix.iter_mut() {
                 *o = soft_clip(*o * out_gain);
+            }
+            // Copie pour l'annulateur d'écho : ce mix est EXACTEMENT ce qui
+            // part aux haut-parleurs — le « lointain » que la capture va
+            // soustraire. Y compris le silence : le filtre vit de la
+            // continuité du signal, pas seulement de ses pics.
+            if sh_cb.aec.load(Ordering::Relaxed) {
+                let mut far = sh_cb.aec_far.lock().unwrap();
+                far.extend(mix.iter().copied());
+                while far.len() > AEC_FAR_MAX {
+                    far.pop_front();
+                }
             }
             if any {
                 // De la voix distante part réellement vers la carte son.

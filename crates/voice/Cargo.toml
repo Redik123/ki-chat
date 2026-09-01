@@ -31,6 +31,8 @@ ndarray = "0.15"
 # Bindings maison libopus 1.6 : DRED + Deep PLC (le crate `opus` public
 # est figé sur libopus 1.3.1, sans les fonctions neuronales).
 ki-opus = { path = "../ki-opus" }
+# Annulation d'écho acoustique (SpeexDSP MDF + suppression de résidu).
+ki-aec = { path = "../ki-aec" }
 
 # Moteur audio Windows natif (WASAPI direct) : rôle communication, conversion
 # de format déléguée à Windows, notifications de périphériques, mode brut —

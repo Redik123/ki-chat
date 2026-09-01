@@ -654,6 +654,8 @@ struct KiApp {
     /// DRED actuellement engagé (mode auto).
     dred_active: bool,
     agc: bool,
+    /// Annulation d'écho (les haut-parleurs qui reviennent dans le micro).
+    aec_on: bool,
     agc_target: f32,
     gate_threshold: f32,
     jitter_frames: usize,
@@ -867,6 +869,7 @@ impl KiApp {
             dred_mode: get("dred_mode", "1").parse().unwrap_or(1),
             dred_active: false,
             agc: get("agc", "on") != "off",
+            aec_on: get("aec", "on") != "off",
             agc_target: get("agc_target", "0.30").parse().unwrap_or(0.30),
             gate_threshold: get("gate_threshold", "0").parse().unwrap_or(0.0),
             jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
@@ -1066,6 +1069,7 @@ impl KiApp {
             engine.set_vad_hangover_ms(self.vad_hangover_ms);
             engine.set_bitrate(self.effective_bitrate());
             engine.set_agc(self.agc);
+            engine.set_aec(self.aec_on);
             engine.set_agc_target(self.agc_target);
             engine.set_gate_threshold(self.gate_threshold);
             engine.set_jitter_frames(self.jitter_frames);
@@ -1103,6 +1107,7 @@ impl KiApp {
             vad_hangover_ms: self.vad_hangover_ms,
             bitrate: self.effective_bitrate(),
             agc: self.agc,
+            aec: self.aec_on,
             agc_target: self.agc_target,
             gate_threshold: self.gate_threshold,
             jitter_frames: self.jitter_frames,
@@ -4858,6 +4863,17 @@ impl KiApp {
                         ui.add_space(8.0);
 
                         if ui
+                            .checkbox(&mut self.aec_on, "Annulation d'écho")
+                            .on_hover_text(
+                                "soustrait du micro ce que tes haut-parleurs jouent : \
+                                 les autres ne s'entendent plus revenir. Indispensable \
+                                 sans casque, sans effet notable avec.",
+                            )
+                            .changed()
+                        {
+                            apply = true;
+                        }
+                        if ui
                             .checkbox(&mut self.agc, "Gain automatique (AGC)")
                             .on_hover_text(
                                 "normalise ta voix tout seul : fini les réglages manuels",
@@ -7835,6 +7851,7 @@ impl eframe::App for KiApp {
         storage.set_string("vad_hangover_ms", format!("{}", self.vad_hangover_ms));
         storage.set_string("bitrate", format!("{}", self.bitrate));
         storage.set_string("agc", if self.agc { "on" } else { "off" }.into());
+        storage.set_string("aec", if self.aec_on { "on" } else { "off" }.into());
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));

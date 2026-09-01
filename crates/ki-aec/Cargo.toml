@@ -1,0 +1,20 @@
+[package]
+name = "ki-aec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Annulation d'écho acoustique : bindings maison vers l'annulateur MDF de
+# SpeexDSP (speex_echo) + la suppression de résidu (speex_preprocess).
+# Pourquoi SpeexDSP ? C'est le seul annulateur C portable, éprouvé et
+# autonome : l'AEC3 de WebRTC exige la moitié de Chromium, et il n'existe
+# pas d'équivalent Rust mûr. Le tarball officiel est téléchargé et vérifié
+# (SHA-256) par build.rs, puis six fichiers C sont compilés en direct —
+# pas d'autotools, le header généré est fabriqué par build.rs.
+
+[build-dependencies]
+cc = "1"
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+ureq = { version = "2", features = ["tls"] }

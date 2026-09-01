@@ -6,6 +6,7 @@ members = [
     "crates/voice",
     "crates/video",
     "crates/ki-opus",
+    "crates/ki-aec",
     "crates/client-quic",
     "crates/client-cli",
     "crates/client-gui",
