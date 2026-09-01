@@ -29,5 +29,5 @@
 .idea/
 .vscode/
 
-# Réglages locaux de l'outillage
-/.claude/settings.local.json
+# Outillage local de session : réglages et copies de travail des agents.
+/.claude/

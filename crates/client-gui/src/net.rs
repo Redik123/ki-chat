@@ -2,11 +2,14 @@
 //! voix) pilotée par un thread dédié avec son propre runtime tokio,
 //! commandes et événements échangés par canaux avec le thread UI.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomOrd};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ki_client_quic::{quinn, QuicClient};
-use ki_protocol::{ClientMsg, ServerMsg};
+use ki_protocol::{ClientMsg, MediaHeader, ServerMsg, StreamMeta};
 use ki_voice::{VoiceConfig, VoiceEngine};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -201,6 +204,14 @@ pub struct NetHandle {
     /// Le lien audio, **prêté** par l'application. La connexion s'en sert,
     /// elle ne le possède pas : sa fin ne l'emporte pas.
     link: VoiceLink,
+    /// Où aiguiller les trames vidéo entrantes (un flux QUIC par trame) :
+    /// posé quand on regarde un stream, vidé sinon — le motif de la voix.
+    /// Contrairement au lien audio, rien ici ne survit à la connexion : une
+    /// coupure met fin au stream côté serveur de toute façon.
+    video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    /// Poignée du runtime réseau, pour lancer la tâche d'émission vidéo
+    /// depuis le fil de l'interface.
+    rt: Arc<Mutex<Option<tokio::runtime::Handle>>>,
     /// Fil réseau, pour pouvoir attendre qu'il ait vraiment fermé la
     /// connexion avant que le processus ne s'arrête.
     worker: Option<std::thread::JoinHandle<()>>,
@@ -240,6 +251,89 @@ impl NetHandle {
             .map(|c| c.rtt().as_millis() as u32)
     }
 
+    /// Pose (ou retire) l'aiguillage des trames vidéo entrantes : le fil
+    /// décodeur du spectateur en est l'autre bout.
+    pub fn set_video_feed(&self, tx: Option<std_mpsc::Sender<Vec<u8>>>) {
+        *self.video_feed.lock().unwrap() = tx;
+    }
+
+    /// Prépare l'émission du partage d'écran : rend le rappel à donner à la
+    /// boucle streamer.
+    ///
+    /// Chaque trame est chiffrée SUR LE FIL VIDÉO (clé du stream, en-tête en
+    /// AAD, nonce à domaine) puis part dans SON flux QUIC unidirectionnel,
+    /// priorité décroissante avec l'âge. File de deux trames vers la tâche
+    /// d'émission : si le réseau ne suit pas, on jette à la source et on
+    /// exige une trame clé — la même politique que le relais applique à un
+    /// spectateur lent, appliquée à soi-même.
+    pub fn video_emit(
+        &self,
+        stream_id: u32,
+        key: [u8; 32],
+        force_idr: Arc<AtomicBool>,
+    ) -> Option<ki_video::FrameEmit> {
+        let conn = self.link.conn.lock().unwrap().clone()?;
+        let rt = self.rt.lock().unwrap().clone()?;
+        let (tx, mut rx) = tokio_mpsc::channel::<(u64, Vec<u8>)>(2);
+        rt.spawn(async move {
+            while let Some((seq, bytes)) = rx.recv().await {
+                let Ok(mut flux) = conn.open_uni().await else { return };
+                // Le plus ancien d'abord : la priorité décroît avec l'âge,
+                // en saturant — cf. le relais, même arithmétique.
+                let _ = flux.set_priority(0i32.saturating_sub(seq.min(i32::MAX as u64) as i32));
+                if flux.write_all(&bytes).await.is_err() {
+                    return;
+                }
+                let _ = flux.finish();
+            }
+        });
+        let cipher = XChaCha20Poly1305::new(&key.into());
+        let seq = AtomicU64::new(0);
+        let gop = AtomicU32::new(0);
+        let dims = AtomicU32::new(0);
+        let cmd = self.cmd_tx.clone();
+        Some(Arc::new(move |f: ki_video::EncodedFrame| {
+            let s = seq.fetch_add(1, AtomOrd::Relaxed);
+            if f.idr {
+                gop.fetch_add(1, AtomOrd::Relaxed);
+            }
+            let header = MediaHeader {
+                idr: f.idr,
+                stream_id,
+                seq: s,
+                pts_us: f.pts_us,
+                group_id: gop.load(AtomOrd::Relaxed),
+                width: f.width,
+                height: f.height,
+            };
+            let mut head = [0u8; ki_protocol::MEDIA_HEADER_LEN];
+            ki_protocol::write_media_header(&mut head, &header);
+            let nonce =
+                ki_protocol::nonce_for_media(ki_protocol::MEDIA_DOMAIN_VIDEO, stream_id, s);
+            let Ok(sealed) = cipher.encrypt(
+                XNonce::from_slice(&nonce),
+                Payload { msg: &f.data, aad: &head },
+            ) else {
+                return;
+            };
+            let mut bytes = Vec::with_capacity(head.len() + sealed.len());
+            bytes.extend_from_slice(&head);
+            bytes.extend_from_slice(&sealed);
+            if tx.try_send((s, bytes)).is_err() {
+                // Le réseau ne suit pas : cette trame est perdue pour tout le
+                // monde, la prochaine décodable devra être une trame clé.
+                force_idr.store(true, AtomOrd::Relaxed);
+            }
+            // Dimensions changées (resize, jeu qui passe en fenêtré) : le
+            // salon doit l'apprendre pour redimensionner ses vues.
+            let packed = ((f.width as u32) << 16) | f.height as u32;
+            if dims.swap(packed, AtomOrd::Relaxed) != packed {
+                let meta =
+                    StreamMeta { width: f.width, height: f.height, fps: 30, kbps: 6000 };
+                let _ = cmd.send(Cmd::Send(ClientMsg::StreamMetaUpdate { meta }));
+            }
+        }))
+    }
 }
 
 fn start_engine(
@@ -288,9 +382,12 @@ pub fn connect(
 ) -> NetHandle {
     let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
     let (event_tx, event_rx) = std_mpsc::channel();
+    let video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+    let rt_slot: Arc<Mutex<Option<tokio::runtime::Handle>>> = Arc::new(Mutex::new(None));
 
     let worker = std::thread::spawn({
         let link = link.clone();
+        let (video_feed, rt_slot) = (video_feed.clone(), rt_slot.clone());
         move || {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -300,13 +397,15 @@ pub fn connect(
                     return;
                 }
             };
-            rt.block_on(run(url, creds, prefs, cmd_rx, event_tx, link, ctx));
+            *rt_slot.lock().unwrap() = Some(rt.handle().clone());
+            rt.block_on(run(url, creds, prefs, cmd_rx, event_tx, link, video_feed, ctx));
         }
     });
 
-    NetHandle { cmd_tx, events: event_rx, link, worker: Some(worker) }
+    NetHandle { cmd_tx, events: event_rx, link, video_feed, rt: rt_slot, worker: Some(worker) }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     url: String,
     creds: Credentials,
@@ -314,6 +413,7 @@ async fn run(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Cmd>,
     event_tx: std_mpsc::Sender<Event>,
     link: VoiceLink,
+    video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
     ctx: eframe::egui::Context,
 ) {
     use std::sync::atomic::Ordering;
@@ -366,6 +466,34 @@ async fn run(
                     // d'arriéré ne vaut plus rien de toute façon.
                     let _ = tx.try_send(dat);
                 }
+            }
+        });
+    }
+
+    // Trames vidéo entrantes : chaque flux unidirectionnel porte une trame.
+    // Une sous-tâche par flux : une grosse trame clé en cours de lecture ne
+    // retient pas les petites qui arrivent derrière — c'est le fil décodeur
+    // qui remettra tout en ordre par numéro de séquence.
+    {
+        let conn = writer.conn.clone();
+        let feed = video_feed.clone();
+        tokio::spawn(async move {
+            while let Ok(mut uni) = conn.accept_uni().await {
+                let feed = feed.clone();
+                tokio::spawn(async move {
+                    let lu = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        uni.read_to_end(
+                            ki_protocol::MEDIA_HEADER_LEN + ki_protocol::MEDIA_MAX_FRAME,
+                        ),
+                    )
+                    .await;
+                    let Ok(Ok(bytes)) = lu else { return };
+                    let guard = feed.lock().unwrap();
+                    if let Some(tx) = guard.as_ref() {
+                        let _ = tx.send(bytes);
+                    }
+                });
             }
         });
     }

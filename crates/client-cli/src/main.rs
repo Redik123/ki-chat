@@ -284,6 +284,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ServerMsg::Pong => {}
+                // Le partage d'écran est une affaire d'interface graphique :
+                // le client de terminal l'ignore poliment.
+                ServerMsg::StreamStarted { .. }
+                | ServerMsg::StreamStopped { .. }
+                | ServerMsg::StreamGranted { .. }
+                | ServerMsg::WatchAccepted { .. }
+                | ServerMsg::WatchDenied { .. }
+                | ServerMsg::KeyframeNeeded { .. }
+                | ServerMsg::StreamMetaChanged { .. } => {}
             }
         }
         println!("connexion fermée par le serveur");

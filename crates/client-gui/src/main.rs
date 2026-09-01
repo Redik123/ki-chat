@@ -7,6 +7,7 @@ mod icons;
 mod images;
 mod markup;
 mod net;
+mod partage;
 mod perf;
 mod photos;
 mod ptt;
@@ -504,6 +505,17 @@ struct KiApp {
     show_settings: bool,
     /// Journal audio déplié dans les réglages.
     show_audio_journal: bool,
+    /// Contexte egui, pour les fils qui doivent réveiller le repeint
+    /// (décodeur du partage d'écran, notamment).
+    app_ctx: egui::Context,
+    /// Ma diffusion d'écran en cours.
+    go_live: Option<partage::GoLive>,
+    /// Clé générée, en attente du StreamGranted du serveur.
+    go_live_attente: Option<[u8; 32]>,
+    go_live_tex: Option<egui::TextureHandle>,
+    /// Le stream que je regarde.
+    regard: Option<partage::Regard>,
+    regard_tex: Option<egui::TextureHandle>,
     /// Docteur audio déplié dans les réglages.
     show_docteur: bool,
     /// Diagnostic partagé : le journal technique part vers le serveur
@@ -795,6 +807,12 @@ impl KiApp {
             focus_input: false,
             show_settings: false,
             show_audio_journal: false,
+            app_ctx: cc.egui_ctx.clone(),
+            go_live: None,
+            go_live_attente: None,
+            go_live_tex: None,
+            regard: None,
+            regard_tex: None,
             show_docteur: false,
             docteur: None,
             diag_share: get("diag_share", "off") == "on",
@@ -1446,6 +1464,16 @@ impl KiApp {
     /// marteler un serveur qui vient de nous refuser, ou reprendre une
     /// connexion que l'on venait de fermer exprès.
     fn connexion_perdue(&mut self, error: Option<String>) {
+        // Le partage d'écran ne survit pas à la connexion — le serveur a de
+        // toute façon démonté le stream de son côté. Capture et visionnage
+        // s'arrêtent localement, sans messages : il n'y a plus personne pour
+        // les recevoir.
+        if let Some(g) = self.go_live.take() {
+            g.arreter();
+        }
+        self.go_live_attente = None;
+        self.go_live_tex = None;
+        self.fermer_regard(false);
         // On ne reprend qu'une connexion qui a **déjà fonctionné**. Un
         // premier essai qui échoue, c'est une adresse mal tapée ou un serveur
         // qu'on n'a jamais eu : réessayer en boucle n'y changerait rien et
@@ -2196,6 +2224,54 @@ impl KiApp {
                     m.muted = muted;
                 }
             }
+            ServerMsg::StreamGranted { stream_id } => {
+                self.diffusion_accordee(stream_id);
+            }
+            ServerMsg::StreamStarted { stream_id, user_id, .. } => {
+                let mut nom = String::new();
+                if let Some(m) = self.members.iter_mut().find(|m| m.user_id == user_id) {
+                    m.streaming = Some(stream_id);
+                    nom = m.username.clone();
+                }
+                if Some(user_id) != self.my_id && !nom.is_empty() {
+                    self.info =
+                        Some(format!("{nom} diffuse son écran — clic droit sur son nom pour regarder"));
+                }
+            }
+            ServerMsg::StreamStopped { stream_id } => {
+                for m in self.members.iter_mut() {
+                    if m.streaming == Some(stream_id) {
+                        m.streaming = None;
+                    }
+                }
+                // Si c'est ce qu'on regardait : rideau, sans Unwatch — le
+                // stream n'existe plus, il n'y a rien à quitter.
+                if self.regard.as_ref().map(|r| r.stream_id) == Some(stream_id) {
+                    self.fermer_regard(false);
+                }
+                // Et si c'est le nôtre (arrêté par le serveur : sortie du
+                // vocal, par exemple), la capture locale s'arrête aussi.
+                if self.go_live.as_ref().map(|g| g.stream_id) == Some(stream_id) {
+                    if let Some(g) = self.go_live.take() {
+                        g.arreter();
+                    }
+                    self.go_live_tex = None;
+                }
+            }
+            ServerMsg::WatchAccepted { stream_id, stream_key, .. } => {
+                self.regard_accepte(stream_id, &stream_key);
+            }
+            ServerMsg::WatchDenied { reason, .. } => {
+                self.info = Some(format!("impossible de regarder : {reason}"));
+            }
+            ServerMsg::KeyframeNeeded { stream_id } => {
+                if let Some(g) = &self.go_live {
+                    if g.stream_id == stream_id {
+                        g.boucle.force_keyframe();
+                    }
+                }
+            }
+            ServerMsg::StreamMetaChanged { .. } => {}
             ServerMsg::Error { message } => {
                 let message = ki_protocol::safe_display(&message, 300);
                 // Avant le Welcome, une erreur = échec de connexion (jeton...).
@@ -2961,6 +3037,7 @@ impl KiApp {
         self.roster_panel(ctx, voice);
         self.chat_panel(ctx);
         self.comms_popup(ctx, voice);
+        self.partage_windows(ctx);
 
         if self.show_settings {
             self.settings_window(ctx, voice);
@@ -3201,6 +3278,21 @@ impl KiApp {
                             speaking: self.transmitting,
                             muted: self.muted,
                         });
+                    }
+                    // Partage d'écran : diffuser / arrêter, en vocal seulement.
+                    let (s_icon, s_tint, s_tip) = if self.go_live.is_some() {
+                        (Icon::Close, Some(DANGER), "Arrêter la diffusion d'écran")
+                    } else if self.go_live_attente.is_some() {
+                        (Icon::Play, Some(WARN), "Diffusion en cours de démarrage…")
+                    } else {
+                        (Icon::Play, None, "Diffuser mon écran au salon")
+                    };
+                    if ui::icon_button_ex(ui, s_icon, 38.0, s_tip, s_tint).clicked() && in_voice {
+                        if self.go_live.is_some() {
+                            self.arreter_diffusion();
+                        } else if self.go_live_attente.is_none() {
+                            self.demarrer_diffusion();
+                        }
                     }
                     ui.add_space(2.0);
                     ui.vertical(|ui| {
@@ -3736,6 +3828,25 @@ impl KiApp {
                         ui.close();
                     }
                 });
+            }
+
+            // Il diffuse son écran et l'on partage son salon vocal : le
+            // visionnage est à un clic — c'est la porte d'entrée du S1b.
+            if let Some(stream_id) = m.streaming {
+                if !is_me && m.voice.is_some() && m.voice == self.voice_channel {
+                    let deja = self.regard.as_ref().map(|r| r.stream_id) == Some(stream_id);
+                    let libelle =
+                        if deja { "Arrêter de regarder" } else { "Regarder son écran" };
+                    if ui::button(ui, Icon::Play, libelle).clicked() {
+                        if deja {
+                            self.fermer_regard(true);
+                        } else {
+                            self.send(ClientMsg::Watch { stream_id });
+                        }
+                        ui.close();
+                    }
+                    ui.add_space(4.0);
+                }
             }
 
             // Chaque action n'apparaît que si elle aboutirait : la permission
@@ -5718,6 +5829,199 @@ impl KiApp {
                 name: Some(self.admin_name.trim().to_string()),
                 icon: std::mem::take(&mut self.admin_icon),
             });
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Partage d'écran (S1b)
+    // -----------------------------------------------------------------
+
+    /// Demande à diffuser : génère la clé du stream, l'envoie au serveur, et
+    /// attend son StreamGranted pour démarrer la capture.
+    fn demarrer_diffusion(&mut self) {
+        if self.go_live.is_some() || self.go_live_attente.is_some() {
+            return;
+        }
+        use chacha20poly1305::aead::rand_core::RngCore;
+        let mut key = [0u8; 32];
+        chacha20poly1305::aead::OsRng.fill_bytes(&mut key);
+        self.go_live_attente = Some(key);
+        let meta = ki_protocol::StreamMeta { width: 0, height: 0, fps: 30, kbps: 6000 };
+        self.send(ClientMsg::StreamStart {
+            meta,
+            stream_key: ki_protocol::hex_encode(&key),
+        });
+    }
+
+    /// Le serveur a accordé le stream : la capture démarre, l'émission aussi.
+    fn diffusion_accordee(&mut self, stream_id: u32) {
+        let Some(key) = self.go_live_attente.take() else { return };
+        let Some(conn) = &self.conn else { return };
+        let force_idr = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let Some(emit) = conn.video_emit(stream_id, key, force_idr.clone()) else {
+            self.info = Some("diffusion impossible : pas de connexion".into());
+            return;
+        };
+        let stats = std::sync::Arc::new(ki_video::StageStats::default());
+        let apercu: std::sync::Arc<std::sync::Mutex<Option<ki_video::RgbaFrame>>> =
+            Default::default();
+        let sink: ki_video::FrameSink = {
+            let (apercu, ctx) = (apercu.clone(), self.app_ctx.clone());
+            std::sync::Arc::new(move |frame| {
+                *apercu.lock().unwrap() = Some(frame);
+                ctx.request_repaint();
+            })
+        };
+        match ki_video::StreamerLoop::start(stats.clone(), sink, emit, 6_000_000, force_idr.clone())
+        {
+            Ok(boucle) => {
+                self.go_live = Some(partage::GoLive { boucle, stats, stream_id, apercu });
+                self.info = Some("tu diffuses ton écran".into());
+            }
+            Err(e) => {
+                self.info = Some(format!("capture impossible : {e:#}"));
+                self.send(ClientMsg::StreamStop);
+            }
+        }
+    }
+
+    /// Arrête sa propre diffusion, côté capture ET côté serveur.
+    fn arreter_diffusion(&mut self) {
+        if let Some(g) = self.go_live.take() {
+            g.arreter();
+        }
+        self.go_live_attente = None;
+        self.go_live_tex = None;
+        self.send(ClientMsg::StreamStop);
+    }
+
+    /// WatchAccepted : la clé est là, le fil décodeur démarre.
+    fn regard_accepte(&mut self, stream_id: u32, key_hex: &str) {
+        let Some(key) = ki_protocol::hex_decode(key_hex).and_then(|v| <[u8; 32]>::try_from(v).ok())
+        else {
+            self.info = Some("clé de stream invalide".into());
+            return;
+        };
+        self.fermer_regard(true);
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Some(conn) = &self.conn {
+            conn.set_video_feed(Some(tx));
+        }
+        let streamer = self
+            .members
+            .iter()
+            .find(|m| m.streaming == Some(stream_id))
+            .map(|m| m.username.clone())
+            .unwrap_or_else(|| "?".into());
+        self.regard =
+            Some(partage::Regard::demarrer(stream_id, streamer, key, rx, self.app_ctx.clone()));
+        self.regard_tex = None;
+    }
+
+    /// Ferme le visionnage en cours. `prevenir` : envoyer Unwatch au serveur
+    /// (inutile quand c'est lui qui vient d'annoncer la fin du stream).
+    fn fermer_regard(&mut self, prevenir: bool) {
+        if let Some(r) = self.regard.take() {
+            if prevenir {
+                self.send(ClientMsg::Unwatch { stream_id: r.stream_id });
+            }
+            if let Some(conn) = &self.conn {
+                conn.set_video_feed(None);
+            }
+            r.arreter();
+        }
+        self.regard_tex = None;
+    }
+
+    /// Les fenêtres du partage d'écran : l'aperçu du streamer, et la vue du
+    /// spectateur. Chaque image décodée arrive par un slot partagé ; elle
+    /// devient texture ici, sur le fil UI — jamais ailleurs.
+    fn partage_windows(&mut self, ctx: &egui::Context) {
+        // --- Mon aperçu ---
+        if let Some(g) = &self.go_live {
+            let frame = g.apercu.lock().unwrap().take();
+            if let Some(f) = frame {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [f.width, f.height],
+                    &f.rgba,
+                );
+                match &mut self.go_live_tex {
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.go_live_tex = Some(ctx.load_texture(
+                            "go-live-apercu",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ))
+                    }
+                }
+            }
+            let mut arreter = false;
+            egui::Window::new("Tu diffuses ton écran")
+                .default_width(380.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if let Some(tex) = &self.go_live_tex {
+                        let dispo = ui.available_width();
+                        let taille = tex.size_vec2();
+                        let echelle = (dispo / taille.x).min(1.0);
+                        ui.image((tex.id(), taille * echelle));
+                    } else {
+                        ui.label(RichText::new("démarrage de la capture…").color(TEXT_DIM));
+                    }
+                    ui.add_space(6.0);
+                    if ui::button(ui, Icon::Close, "Arrêter la diffusion").clicked() {
+                        arreter = true;
+                    }
+                });
+            if arreter {
+                self.arreter_diffusion();
+            }
+        }
+
+        // --- Ce que je regarde ---
+        if let Some(r) = &self.regard {
+            let frame = r.image.lock().unwrap().take();
+            if let Some(f) = frame {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [f.width, f.height],
+                    &f.rgba,
+                );
+                match &mut self.regard_tex {
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.regard_tex = Some(ctx.load_texture(
+                            "regard",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ))
+                    }
+                }
+            }
+            let titre = format!("Écran de {}", r.streamer);
+            let mut quitter = false;
+            egui::Window::new(titre)
+                .default_width(900.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if let Some(tex) = &self.regard_tex {
+                        let dispo = ui.available_size();
+                        let taille = tex.size_vec2();
+                        let echelle = (dispo.x / taille.x).min(dispo.y / taille.y).min(2.0);
+                        ui.image((tex.id(), taille * echelle.max(0.05)));
+                    } else {
+                        ui.label(
+                            RichText::new("en attente de la première image…").color(TEXT_DIM),
+                        );
+                    }
+                    ui.add_space(6.0);
+                    if ui::button(ui, Icon::Close, "Quitter le visionnage").clicked() {
+                        quitter = true;
+                    }
+                });
+            if quitter {
+                self.fermer_regard(true);
+            }
         }
     }
 

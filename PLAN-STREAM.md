@@ -1,10 +1,9 @@
 # Plan : partage d'écran « Go Live » — ki-chat
 
-> **⏸ CHANTIER EN PAUSE** (décision du 16/08/2026) : la vidéo reprendra quand
-> le reste de ki-chat sera jugé parfait. Acquis conservés : S0 (correctifs
-> transport, bénéfice vocal permanent), S0.5 (porte de build openh264 : GO)
-> et S1a (boucle locale + bouton labo dans ⚙) restent dans le dépôt, prêts
-> pour la reprise en S1b.
+> **▶ CHANTIER REPRIS** (01/09/2026) : S0 ✅, S0.5 ✅, S1a ✅, **S1b livré
+> en 0.1.17** — protocole média, relais SFU, émission chiffrée, visionnage.
+> La validation chiffrée de S1b (latence, gigue vocale) attend le test LAN
+> du groupe. Prochain jalon : S2.
 
 *Version 2 du 16/08/2026 — nourrie par trois rapports de recherche (capture
 Windows, codec, transport QUIC lu dans les sources de quinn), puis passée au
@@ -129,16 +128,22 @@ ms/frame, débit encodé). Le resize et le plafond de repeint se règlent ici.
 **Validation** : 1080p30 affichés (compteur de frames peintes) pendant qu'un
 jeu tourne, resize de la fenêtre capturée sans crash ni image cassée.
 
-### S1b — Ça passe sur le fil
-Protocole (`KF`/`KA`, `nonce_for_media`, StartStream/Watch/WatchAccepted/…,
-`StreamMeta`, `Member.streaming`, `Welcome.features`) ; serveur (table des
-streams, ingestion durcie, **tâche par viewer + `mpsc(2)` + needs_idr**,
-plafond 32 Mio, cycle de vie complet) ; client (tâche d'émission avec table
-des trames en vol, viewer en **panneau de la fenêtre existante**).
-**Validation chiffrée** : 1 streamer + 2 viewers en LAN, latence mesurée
-(horodatage incrusté) < 150 ms ; gigue vocale p95 et pertes mesurées avant /
-pendant le stream : dégradation < 10 ms ; « le streamer tue son client → les
-viewers reçoivent `StreamStopped` en < 1 s ».
+### S1b — Ça passe sur le fil ✅ (0.1.17)
+Protocole (`KF`, `nonce_for_media`, StreamStart/Watch/WatchAccepted/…,
+`StreamMeta`, `Member.streaming`) ; serveur (table des streams, ingestion
+durcie, **tâche par viewer + `mpsc(2)` + needs_idr**, plafond 32 Mio, cycle
+de vie complet) ; client (émission chiffrée, viewer en fenêtre flottante de
+la fenêtre principale).
+Écarts assumés sur le plan : `Welcome.features` écarté (le groupe met à
+jour en bloc, les vieux clients ne comprennent pas les nouveaux messages) ;
+l'émission est séquentielle sur un canal borné à 2 (trame jetée → IDR
+forcée) plutôt qu'une table de trames en vol avec `RESET_STREAM` — à
+revisiter en S3 si le WAN le réclame ; pas d'horodatage incrusté (le
+`pts_us` transite, l'affichage de latence ira dans l'overlay S2).
+**Validation chiffrée — reste à faire sur le terrain** : 1 streamer +
+2 viewers en LAN, latence < 150 ms ; gigue vocale p95 avant / pendant :
+dégradation < 10 ms ; « le streamer tue son client → les viewers reçoivent
+`StreamStopped` en < 1 s ».
 
 ### S2 — Multi-viewers robuste + UX
 `KeyframeRequest` limité, `StreamDegraded`, clause du quantile, stats stream ;

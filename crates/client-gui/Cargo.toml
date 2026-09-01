@@ -25,6 +25,8 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe = { version = "0.32", features = ["persistence"] }
+# Chiffrement des trames du partage d'écran (clé de stream, en-tête en AAD).
+chacha20poly1305 = "0.10"
 ki-client-quic = { path = "../client-quic" }
 # Les datagrammes voix voyagent en `Bytes` du transport jusqu'au moteur,
 # sans jamais être recopiés.
