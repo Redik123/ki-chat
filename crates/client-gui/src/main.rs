@@ -139,6 +139,9 @@ fn main() -> eframe::Result {
         // le démarrage n'est pas un hoquet, on rend la main.
         Err(e) => {
             tracing::error!("boucle graphique terminée en erreur : {e}");
+            // Dans le rapport de plantage aussi : le diagnostic partagé
+            // l'embarquera au prochain démarrage, si le joueur a opté.
+            secours::consigner_crash(&format!("boucle graphique terminée en erreur : {e}"));
             match secours::decision_relance(relances, depart.elapsed()) {
                 Some(essais) => secours::relancer(essais),
                 None => tracing::error!("l'erreur revient dès le démarrage — relances épuisées"),
@@ -510,6 +513,9 @@ struct KiApp {
     diag_last_sent_ts: u64,
     /// Dernier envoi périodique, pour la cadence de dix minutes.
     diag_last_flush: Option<std::time::Instant>,
+    /// Horodatage de modification du rapport de plantage déjà transmis
+    /// (préférence persistée) : un même crash ne repart pas à chaque session.
+    diag_crash_envoye: String,
     /// Onglet admin « Diagnostics » : le dernier lot récupéré du serveur,
     /// rempli par un thread de récupération.
     diag_admin: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -794,6 +800,7 @@ impl KiApp {
             diag_share: get("diag_share", "off") == "on",
             diag_last_sent_ts: 0,
             diag_last_flush: None,
+            diag_crash_envoye: get("diag_crash_envoye", ""),
             diag_admin: Default::default(),
             diag_versions: Default::default(),
             show_perf: false,
@@ -2365,6 +2372,22 @@ impl KiApp {
                     "{{\"type\":\"docteur\",\"t\":{now_ms},\"rapport\":{}}}\n",
                     serde_json::Value::String(engine.docteur().rapport())
                 ));
+            }
+        }
+        // Le plantage de la session précédente, si le dispositif de secours
+        // en a consigné un : il part avec le premier lot de la session, et
+        // une seule fois — l'horodatage du fichier déjà envoyé reste dans
+        // les préférences. Comme tout le reste du lot, c'est du technique
+        // (panic, pile, erreur de rendu) : jamais un message, jamais de
+        // l'audio.
+        if self.diag_last_sent_ts == 0 {
+            if let Some((tampon, rapport)) = secours::rapport_a_envoyer(&self.diag_crash_envoye)
+            {
+                lot.push_str(&format!(
+                    "{{\"type\":\"crash\",\"t\":{now_ms},\"rapport\":{}}}\n",
+                    serde_json::Value::String(rapport)
+                ));
+                self.diag_crash_envoye = tampon;
             }
         }
         if let Some((t, _)) = journal.last() {
@@ -4643,9 +4666,10 @@ impl KiApp {
                         )
                         .on_hover_text(
                             "envoie toutes les 10 minutes le journal technique \
-                             (périphériques, pertes, réouvertures), la version et le \
-                             rapport du docteur au serveur du groupe. Jamais tes \
-                             messages, jamais ta voix. Décochable à tout moment.",
+                             (périphériques, pertes, réouvertures), la version, le \
+                             rapport du docteur et l'éventuel rapport de plantage au \
+                             serveur du groupe. Jamais tes messages, jamais ta voix. \
+                             Décochable à tout moment.",
                         );
                         if self.diag_share
                             && ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
@@ -7868,6 +7892,7 @@ impl eframe::App for KiApp {
         storage.set_string("raw_mic", if self.raw_mic { "on" } else { "off" }.into());
         storage.set_string("comms_mic", if self.comms_mic { "on" } else { "off" }.into());
         storage.set_string("diag_share", if self.diag_share { "on" } else { "off" }.into());
+        storage.set_string("diag_crash_envoye", self.diag_crash_envoye.clone());
         if let Ok(json) = serde_json::to_string(&self.all_volumes) {
             storage.set_string("user_volumes", json);
         }
