@@ -114,14 +114,16 @@ async fn main() -> anyhow::Result<()> {
             post(files::upload).layer(DefaultBodyLimit::max(files::MAX_FILE_SIZE)),
         )
         // Diagnostics partagés : dépôt par les clients volontaires (jeton
-        // voix), lecture par l'admin (jeton data/diag.token).
+        // voix), classement par version, lecture et purge par l'admin
+        // (session ADMINISTRATOR ou jeton data/diag.token).
         .route(
             "/diag",
             post(diag::upload)
                 .layer(DefaultBodyLimit::max(diag::MAX_BATCH))
                 .get(diag::lister),
         )
-        .route("/diag/{fichier}", get(diag::lire))
+        .route("/diag/{version}", axum::routing::delete(diag::supprimer))
+        .route("/diag/{version}/{fichier}", get(diag::lire))
         .route("/files/{file_id}/{name}", get(files::download))
         .with_state(state);
 

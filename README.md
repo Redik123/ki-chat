@@ -216,9 +216,12 @@ démarrage, à lire sur la machine du serveur) :
 curl -k -H "x-ki-admin: $(cat diag.token)" https://ton-serveur:8080/diag
 ```
 
-liste les archives, et `/diag/<fichier>` en renvoie une. `-k` parce que le
-certificat est auto-signé — l'épinglage d'empreinte, lui, est fait par les
-clients ki-chat, pas par curl.
+liste les archives — **classées par version de ki-chat**, l'historique des
+bugs de chaque livraison. `/diag/<version>/<fichier>` en renvoie une
+(`?tail=65536` pour la fin seulement), et `DELETE /diag/<version>` purge
+tout le lot d'une vieille version. `-k` parce que le certificat est
+auto-signé — l'épinglage d'empreinte, lui, est fait par les clients
+ki-chat, pas par curl.
 
 ## Installer le serveur (Docker / Portainer)
 

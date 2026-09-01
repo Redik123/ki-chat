@@ -47,6 +47,36 @@ fn diag_dir(state: &AppState) -> PathBuf {
     PathBuf::from(&state.data_dir).join("diag")
 }
 
+/// La version annoncée par le client (en-tête x-ki-version), réduite à un
+/// nom de dossier sûr. Les archives sont **classées par version** : c'est
+/// l'historique des bugs de chaque livraison, et ce qui permet de purger
+/// « tout ce qui date de la 0.1.12 » d'un geste.
+fn version_propre(v: Option<&str>) -> String {
+    let propre: String = v
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .take(24)
+        .collect();
+    // Un nom fait uniquement de points (« .. » !) serait un chemin, pas une
+    // version : au rebut avec les vides.
+    if propre.is_empty() || propre.chars().all(|c| c == '.') {
+        "inconnue".into()
+    } else {
+        propre
+    }
+}
+
+/// Un segment de chemin est-il une version telle que nous les écrivons ?
+/// Tout le reste est refusé : pas de traversée, pas de `..`, pas de vide.
+fn segment_version_valide(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 24
+        && v != ".."
+        && v != "."
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
 /// Nom de fichier d'un utilisateur : identifiant + pseudo assaini. C'est
 /// l'identifiant qui fait l'unicité, le pseudo n'est là que pour l'humain
 /// qui liste le dossier.
@@ -83,7 +113,10 @@ pub async fn upload(
         return (StatusCode::BAD_REQUEST, "le lot doit être du texte UTF-8").into_response();
     };
 
-    let dir = diag_dir(&state);
+    let version = version_propre(
+        headers.get("x-ki-version").and_then(|v| v.to_str().ok()),
+    );
+    let dir = diag_dir(&state).join(&version);
     let chemin = dir.join(fichier_de(user_id, &username));
     let recu = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -187,32 +220,63 @@ pub async fn lister(
         return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
     }
     let dir = diag_dir(&state);
+    // Deux niveaux : les dossiers de version, puis les archives des joueurs.
+    // Une ligne par archive, « version/fichier », triée — les versions se
+    // lisent groupées, l'historique des bugs saute aux yeux.
     let liste = tokio::task::spawn_blocking(move || {
-        let Ok(entrees) = std::fs::read_dir(&dir) else { return String::new() };
-        let mut lignes: Vec<String> = entrees
-            .flatten()
-            .filter_map(|e| {
-                let meta = e.metadata().ok()?;
+        let Ok(versions) = std::fs::read_dir(&dir) else { return String::new() };
+        let mut lignes: Vec<String> = Vec::new();
+        for vdir in versions.flatten() {
+            if !vdir.path().is_dir() {
+                continue;
+            }
+            let version = vdir.file_name().to_string_lossy().to_string();
+            let Ok(entrees) = std::fs::read_dir(vdir.path()) else { continue };
+            for e in entrees.flatten() {
+                let Ok(meta) = e.metadata() else { continue };
                 let age = meta
                     .modified()
                     .ok()
                     .and_then(|m| m.elapsed().ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                Some(format!(
-                    "{}\t{} Ko\til y a {} min",
+                lignes.push(format!(
+                    "{version}/{}\t{} Ko\til y a {} min",
                     e.file_name().to_string_lossy(),
                     meta.len() / 1024,
                     age / 60
-                ))
-            })
-            .collect();
+                ));
+            }
+        }
         lignes.sort();
         lignes.join("\n")
     })
     .await
     .unwrap_or_default();
     (StatusCode::OK, liste).into_response()
+}
+
+/// DELETE /diag/{version} — purge toutes les archives d'une version : le
+/// grand ménage quand une livraison ancienne n'a plus rien à apprendre.
+pub async fn supprimer(
+    State(state): State<Arc<AppState>>,
+    Path(version): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !lecteur_autorise(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
+    }
+    if !segment_version_valide(&version) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let dir = diag_dir(&state).join(&version);
+    match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir)).await {
+        Ok(Ok(())) => {
+            tracing::info!("diagnostics de la version {version} supprimés");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -222,10 +286,10 @@ pub struct LireParams {
     tail: Option<u64>,
 }
 
-/// GET /diag/{fichier}[?tail=N] — une archive, en texte brut.
+/// GET /diag/{version}/{fichier}[?tail=N] — une archive, en texte brut.
 pub async fn lire(
     State(state): State<Arc<AppState>>,
-    Path(fichier): Path<String>,
+    Path((version, fichier)): Path<(String, String)>,
     axum::extract::Query(params): axum::extract::Query<LireParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -233,19 +297,20 @@ pub async fn lire(
         return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
     }
     // Seuls les noms que nous générons passent : pas de traversée de chemin.
-    let valide = fichier
-        .strip_suffix(".jsonl")
-        .or_else(|| fichier.strip_suffix(".jsonl.old"))
-        .is_some_and(|base| {
-            !base.is_empty()
-                && base
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
-        });
+    let valide = segment_version_valide(&version)
+        && fichier
+            .strip_suffix(".jsonl")
+            .or_else(|| fichier.strip_suffix(".jsonl.old"))
+            .is_some_and(|base| {
+                !base.is_empty()
+                    && base
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+            });
     if !valide {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match tokio::fs::read_to_string(diag_dir(&state).join(&fichier)).await {
+    match tokio::fs::read_to_string(diag_dir(&state).join(&version).join(&fichier)).await {
         Ok(texte) => {
             let texte = match params.tail {
                 Some(n) => {
@@ -305,6 +370,24 @@ mod tests {
         assert_eq!(vieux[0], b'y');
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn la_version_est_reduite_a_un_dossier_sur() {
+        assert_eq!(version_propre(Some("0.1.15")), "0.1.15");
+        assert_eq!(version_propre(Some("../../etc")), "....etc");
+        assert_eq!(version_propre(None), "inconnue");
+        assert_eq!(version_propre(Some("")), "inconnue");
+        // « .. » filtré reste « .. » : sans ce garde-fou, l'écriture
+        // remonterait d'un dossier. Au rebut.
+        assert_eq!(version_propre(Some("..")), "inconnue");
+        assert_eq!(version_propre(Some("//")), "inconnue");
+        // Et côté chemin, seuls nos dossiers passent.
+        assert!(segment_version_valide("0.1.15"));
+        assert!(segment_version_valide("inconnue"));
+        assert!(!segment_version_valide(".."));
+        assert!(!segment_version_valide(""));
+        assert!(!segment_version_valide("a/b"));
     }
 
     #[test]

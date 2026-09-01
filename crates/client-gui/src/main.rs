@@ -513,6 +513,9 @@ struct KiApp {
     /// Onglet admin « Diagnostics » : le dernier lot récupéré du serveur,
     /// rempli par un thread de récupération.
     diag_admin: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Les versions de ki-chat présentes dans les archives, pour proposer la
+    /// purge d'un lot ancien.
+    diag_versions: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Dernier diagnostic établi. Coûteux — il énumère les processus et
     /// interroge le registre — donc calculé au clic, pas à chaque image.
     docteur: Option<ki_voice::docteur::Diagnostic>,
@@ -790,6 +793,7 @@ impl KiApp {
             diag_last_sent_ts: 0,
             diag_last_flush: None,
             diag_admin: Default::default(),
+            diag_versions: Default::default(),
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
@@ -2368,6 +2372,7 @@ impl KiApp {
             if let Err(e) = agent
                 .post(&format!("{base}/diag"))
                 .set("x-ki-token", &token_hex)
+                .set("x-ki-version", env!("CARGO_PKG_VERSION"))
                 .send_string(&lot)
             {
                 // Raté silencieux : le diagnostic est un luxe, pas une
@@ -5756,8 +5761,10 @@ impl KiApp {
             let agent = self.http_agent();
             let token_hex = format!("{:x}", self.voice_token);
             let slot = self.diag_admin.clone();
+            let versions_slot = self.diag_versions.clone();
             *slot.lock().unwrap() = Some("récupération en cours…".into());
             std::thread::spawn(move || {
+                let mut versions: Vec<String> = Vec::new();
                 let resultat = (|| -> Result<String, String> {
                     let liste = agent
                         .get(&format!("{base}/diag"))
@@ -5774,9 +5781,17 @@ impl KiApp {
                     // La fin de chaque archive suffit : c'est le passé récent
                     // qu'on débogue, et l'affichage comme le presse-papiers
                     // n'ont pas à charrier des mégaoctets d'historique.
+                    // Les archives arrivent triées par version (le serveur
+                    // les classe ainsi) : l'historique des bugs se lit par
+                    // livraison.
                     let mut tout = String::new();
                     for ligne in liste.lines() {
                         let Some(fichier) = ligne.split('\t').next() else { continue };
+                        if let Some(version) = fichier.split('/').next() {
+                            if versions.last().map(String::as_str) != Some(version) {
+                                versions.push(version.to_string());
+                            }
+                        }
                         tout.push_str(&format!("\n===== {ligne} =====\n"));
                         match agent
                             .get(&format!("{base}/diag/{fichier}?tail=65536"))
@@ -5789,10 +5804,45 @@ impl KiApp {
                     }
                     Ok(tout)
                 })();
+                *versions_slot.lock().unwrap() = versions;
                 *slot.lock().unwrap() = Some(match resultat {
                     Ok(t) => t,
                     Err(e) => format!("échec de la récupération : {e}"),
                 });
+            });
+        }
+        // La purge par version : l'historique des bugs d'une livraison
+        // dépassée n'apprend plus rien, autant rendre la place.
+        let versions = self.diag_versions.lock().unwrap().clone();
+        if !versions.is_empty() {
+            ui.add_space(6.0);
+            ui::field_label(ui, "purger les archives d'une version");
+            ui.horizontal_wrapped(|ui| {
+                for version in &versions {
+                    if ui::button(ui, Icon::Trash, version).clicked() {
+                        let base = self.http_base();
+                        let agent = self.http_agent();
+                        let token_hex = format!("{:x}", self.voice_token);
+                        let slot = self.diag_admin.clone();
+                        let versions_slot = self.diag_versions.clone();
+                        let version = version.clone();
+                        std::thread::spawn(move || {
+                            let r = agent
+                                .delete(&format!("{base}/diag/{version}"))
+                                .set("x-ki-token", &token_hex)
+                                .call();
+                            let message = match r {
+                                Ok(_) => format!(
+                                    "archives de la version {version} supprimées — \
+                                     re-récupère la liste"
+                                ),
+                                Err(e) => format!("suppression impossible : {e}"),
+                            };
+                            versions_slot.lock().unwrap().retain(|v| v != &version);
+                            *slot.lock().unwrap() = Some(message);
+                        });
+                    }
+                }
             });
         }
         let contenu = self.diag_admin.lock().unwrap().clone();
