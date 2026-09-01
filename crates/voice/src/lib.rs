@@ -352,6 +352,45 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Le réglage Windows « Lorsque Windows détecte une activité de
+/// communication » (Panneau son → onglet Communications), tel que
+/// l'utilisateur l'a laissé : 0 = couper les autres sons, 1 = réduire de
+/// 80 %, 2 = réduire de 50 %, 3 = ne rien faire. `None` = jamais réglé —
+/// Windows applique alors « réduire de 80 % ». C'est LE réglage qui baisse
+/// le volume des jeux quand le micro passe en catégorie communications.
+/// Lecture seule, comme tout ce que consulte le docteur.
+#[cfg(windows)]
+fn attenuation_communications() -> Option<u32> {
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+
+    let chemin = wide(r"Software\Microsoft\Multimedia\Audio");
+    let valeur_nom = wide("UserDuckingPreference");
+    // SAFETY: chemins et noms sont des chaînes larges terminées par un zéro,
+    // construites juste au-dessus ; RegGetValueW avec sous-chemin n'ouvre
+    // aucune clé à refermer.
+    unsafe {
+        let mut valeur: u32 = 0;
+        let mut taille = std::mem::size_of::<u32>() as u32;
+        let lu = RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows::core::PCWSTR(chemin.as_ptr()),
+            windows::core::PCWSTR(valeur_nom.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut valeur as *mut u32 as *mut _),
+            Some(&mut taille),
+        );
+        lu.ok().ok()?;
+        Some(valeur)
+    }
+}
+
+#[cfg(not(windows))]
+fn attenuation_communications() -> Option<u32> {
+    // L'atténuation « communications » est une notion Windows.
+    None
+}
+
 /// Le nom du périphérique réellement en service.
 #[cfg(windows)]
 fn peripherique_par_defaut(input: bool) -> Option<String> {
@@ -428,6 +467,11 @@ struct Counters {
     /// servie. La boucle de capture s'en sert déjà pour escalader en
     /// catégorie communications ; le docteur audio s'en sert pour le dire.
     starved_opens: AtomicU64,
+    /// Le micro tourne en catégorie « communications » (réglage, ou escalade
+    /// anti-famine). Aux yeux de Windows c'est un appel permanent : son
+    /// réglage « activité de communication » baisse alors les autres sons —
+    /// LA cause du « volume du jeu qui chute » que le docteur doit nommer.
+    comms_capture: AtomicBool,
 }
 
 use std::sync::atomic::{AtomicI32, AtomicU32};
@@ -804,6 +848,8 @@ impl VoiceEngine {
                 as u32,
             trames_incompletes: self.shared.counters.underruns.load(Ordering::Relaxed),
             moteur_natif: self.shared.counters.native_ok.load(Ordering::Relaxed),
+            micro_communications: self.shared.counters.comms_capture.load(Ordering::Relaxed),
+            attenuation_windows: attenuation_communications(),
         }
     }
 
@@ -1109,6 +1155,7 @@ fn capture_loop(
     // d'elle-même à la famine — la voix intégrée d'un jeu qui tient la voie
     // de traitement ne la partage qu'avec un flux de la même catégorie.
     let mut comms = comms_pref;
+    sh.counters.comms_capture.store(comms, Ordering::Relaxed);
 
     // Boucle de surveillance : le périphérique peut disparaître à tout
     // moment (débranchement, casque sans fil qui s'endort). On le rouvre
@@ -1254,6 +1301,7 @@ fn capture_loop(
                         );
                         if native && !comms {
                             comms = true;
+                            sh.counters.comms_capture.store(true, Ordering::Relaxed);
                             starved_opens = 0;
                             journal(
                                 "micro passé en catégorie communications — la voie de \

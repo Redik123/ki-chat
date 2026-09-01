@@ -71,6 +71,14 @@ pub struct Diagnostic {
     pub trames_incompletes: u64,
     /// Le moteur natif est-il en service, ou est-on retombé sur cpal ?
     pub moteur_natif: bool,
+    /// Le micro tourne en catégorie « communications » — la case « partager
+    /// le micro avec la voix du jeu », ou l'escalade anti-famine. Aux yeux
+    /// de Windows, c'est un appel permanent.
+    pub micro_communications: bool,
+    /// Le réglage Windows « activité de communication » : 0 = couper les
+    /// autres sons, 1 = réduire de 80 %, 2 = réduire de 50 %, 3 = ne rien
+    /// faire. `None` = jamais réglé, Windows applique alors 80 %.
+    pub attenuation_windows: Option<u32>,
 }
 
 impl Diagnostic {
@@ -101,6 +109,43 @@ impl Diagnostic {
             if let Some(conseil) = virtuel(nom, entree) {
                 let quoi = if entree { "Le micro" } else { "La sortie" };
                 out.push(format!("{quoi} en service est « {nom} ». {conseil}"));
+            }
+        }
+
+        // Le micro en catégorie « communications » + le réglage d'atténuation
+        // de Windows : c'est LA chaîne qui fait chuter le volume du jeu — vue
+        // sur le terrain, typiquement chez qui a un micro séparé du casque
+        // qui famine (pilote virtuel sans son application, périphérique
+        // coincé) et déclenche l'escalade sans s'en douter. On nomme la
+        // chaîne entière : la cause, l'effet, et le remède de chaque bout.
+        if self.micro_communications {
+            let effet = match self.attenuation_windows {
+                Some(3) => None, // « Ne rien faire » : Windows n'y est pour rien.
+                Some(0) => Some("couper tous les autres sons"),
+                Some(2) => Some("réduire les autres sons de 50 %"),
+                // 1 explicite, ou jamais réglé : le défaut de Windows.
+                _ => Some("réduire les autres sons de 80 %"),
+            };
+            match effet {
+                Some(effet) => out.push(format!(
+                    "Le micro tourne en catégorie « communications » (voie partagée \
+                     avec la voix du jeu), et Windows est réglé pour {effet} pendant \
+                     une communication : c'est LUI qui baisse le volume du jeu tant \
+                     que le vocal est ouvert. Remède immédiat : Panneau de \
+                     configuration → Son → onglet Communications → « Ne rien \
+                     faire ». Et si cette catégorie s'est enclenchée toute seule \
+                     (micro affamé), le vrai correctif est de choisir dans ⚙ Audio \
+                     le micro physique — pas un périphérique virtuel dont \
+                     l'application ne tourne pas."
+                )),
+                None => out.push(
+                    "Le micro tourne en catégorie « communications », mais Windows \
+                     est déjà réglé sur « Ne rien faire » : si le volume du jeu \
+                     baisse quand même, le coupable est le mixeur du casque \
+                     (ChatMix de Sonar, Wave Link…), qui baisse le jeu dès qu'une \
+                     session d'appel existe — voir les logiciels détectés."
+                        .into(),
+                ),
             }
         }
 
@@ -177,6 +222,15 @@ impl Diagnostic {
             "ouvertures affamées : {} · trames incomplètes : {}\n",
             self.ouvertures_affamees, self.trames_incompletes
         ));
+        out.push_str(&format!(
+            "catégorie du micro : {} · atténuation Windows : {}\n",
+            if self.micro_communications {
+                "communications (réglage ou escalade)"
+            } else {
+                "standard"
+            },
+            attenuation(self.attenuation_windows)
+        ));
         if self.suites.is_empty() {
             out.push_str("logiciels détectés : aucun\n");
         } else {
@@ -201,6 +255,19 @@ fn etat(v: Option<bool>) -> &'static str {
         // change : « jamais réglé » est donc le cas courant, et il veut dire
         // « autorisé ».
         None => "jamais réglé (donc autorisé)",
+    }
+}
+
+/// Le réglage « activité de communication », en clair. Même logique que le
+/// mode exclusif : la valeur n'existe que si quelqu'un a touché le panneau,
+/// et son absence signifie le défaut de Windows — réduire de 80 %.
+fn attenuation(v: Option<u32>) -> &'static str {
+    match v {
+        Some(3) => "ne rien faire",
+        Some(2) => "réduire de 50 %",
+        Some(0) => "couper les autres sons",
+        Some(_) => "réduire de 80 %",
+        None => "jamais réglée (donc réduire de 80 %)",
     }
 }
 
@@ -521,6 +588,8 @@ mod tests {
             ouvertures_affamees: 4,
             trames_incompletes: 12,
             moteur_natif: false,
+            micro_communications: false,
+            attenuation_windows: None,
         };
         let conseils = d.conseils();
         // Ce qui s'interpose d'abord, les symptômes ensuite.
@@ -537,5 +606,35 @@ mod tests {
         assert!(rapport.contains("VB-Audio"));
         assert!(rapport.contains("jamais réglé"));
         assert!(rapport.contains("SteelSeries Sonar"));
+    }
+
+    /// La chaîne complète du « volume du jeu qui baisse » : micro passé en
+    /// catégorie communications + atténuation Windows. Le docteur la nomme
+    /// d'un bout à l'autre — et change de coupable quand Windows est déjà
+    /// réglé sur « Ne rien faire » (c'est alors le mixeur du casque).
+    #[test]
+    fn le_micro_en_communications_nomme_l_attenuation() {
+        let d = Diagnostic {
+            micro_communications: true,
+            moteur_natif: true,
+            ..Default::default()
+        };
+        let conseils = d.conseils();
+        assert!(conseils[0].contains("réduire les autres sons de 80 %"));
+        assert!(conseils[0].contains("Ne rien faire"));
+
+        let d = Diagnostic {
+            micro_communications: true,
+            attenuation_windows: Some(3),
+            moteur_natif: true,
+            ..Default::default()
+        };
+        let conseils = d.conseils();
+        assert!(conseils[0].contains("déjà réglé"));
+        assert!(conseils[0].contains("ChatMix"));
+
+        // Et le rapport porte l'état, pour le copier-coller.
+        assert!(d.rapport().contains("communications (réglage ou escalade)"));
+        assert!(d.rapport().contains("ne rien faire"));
     }
 }
