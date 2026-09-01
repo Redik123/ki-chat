@@ -6159,16 +6159,23 @@ impl KiApp {
             );
             let mut arreter = false;
             let mut reglages = false;
+            let mut ouvert = true;
             let avec_apercu = g.reglages.preview;
+            // La croix de la barre de titre arrête la diffusion : cette
+            // fenêtre est son tableau de bord, la fermer c'est finir.
             egui::Window::new("Tu diffuses ton écran")
+                .open(&mut ouvert)
                 .default_width(380.0)
                 .resizable(true)
                 .show(ctx, |ui| {
                     if let Some(tex) = &self.go_live_tex {
-                        let dispo = ui.available_width();
+                        let dispo = ui.available_size();
                         let taille = tex.size_vec2();
-                        let echelle = (dispo / taille.x).min(1.0);
-                        ui.image((tex.id(), taille * echelle));
+                        // L'image garde toujours la place de la ligne de
+                        // stats et des boutons sous elle.
+                        let hauteur = (dispo.y - 64.0).max(60.0);
+                        let echelle = (dispo.x / taille.x).min(hauteur / taille.y).min(1.0);
+                        ui.image((tex.id(), taille * echelle.max(0.05)));
                     } else if avec_apercu {
                         ui.label(RichText::new("démarrage de la capture…").color(TEXT_DIM));
                     } else {
@@ -6189,7 +6196,7 @@ impl KiApp {
                         }
                     });
                 });
-            if arreter {
+            if arreter || !ouvert {
                 self.arreter_diffusion();
             }
             if reglages {
@@ -6224,14 +6231,22 @@ impl KiApp {
                 None => String::new(),
             };
             let mut quitter = false;
+            let mut ouvert = true;
+            // La croix de la barre de titre quitte le visionnage, comme le
+            // bouton en bas — que l'on ne voit plus quand la fenêtre est
+            // agrandie au-delà de l'écran.
             egui::Window::new(titre)
+                .open(&mut ouvert)
                 .default_width(900.0)
                 .resizable(true)
                 .show(ctx, |ui| {
                     if let Some(tex) = &self.regard_tex {
                         let dispo = ui.available_size();
                         let taille = tex.size_vec2();
-                        let echelle = (dispo.x / taille.x).min(dispo.y / taille.y).min(2.0);
+                        // L'image laisse toujours la place de la ligne du
+                        // bas : bouton et cadence restent visibles.
+                        let hauteur = (dispo.y - 44.0).max(60.0);
+                        let echelle = (dispo.x / taille.x).min(hauteur / taille.y).min(2.0);
                         ui.image((tex.id(), taille * echelle.max(0.05)));
                     } else {
                         ui.label(
@@ -6248,7 +6263,7 @@ impl KiApp {
                         }
                     });
                 });
-            if quitter {
+            if quitter || !ouvert {
                 self.fermer_regard(true);
             }
         }
