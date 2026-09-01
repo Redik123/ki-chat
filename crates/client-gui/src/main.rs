@@ -5789,6 +5789,11 @@ impl KiApp {
     /// se récupère en un clic, s'affiche, et se copie d'un bloc — pour être
     /// collé à qui débogue.
     fn admin_diag_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Marqueurs du résumé dans le slot d'affichage : ils permettent d'en
+        // remplacer un périmé sans toucher au détail, et de garder le résumé
+        // entier à l'écran quand le détail, lui, est coupé.
+        const ENTETE_RESUME: &str = "===== résumé par version =====\n";
+        const FIN_RESUME: &str = "\n===== détail des archives =====\n";
         ui::group_title(ui, Icon::Info, "Diagnostics des joueurs");
         ui::hint(
             ui,
@@ -5851,6 +5856,43 @@ impl KiApp {
                 });
             });
         }
+        // L'état des lieux avant le détail : le serveur compte, par version,
+        // les joueurs et les marqueurs qui fâchent (sessions, réouvertures,
+        // famines, erreurs, crashs) — un écran au lieu d'un défilement.
+        ui.add_space(4.0);
+        if ui::button(ui, Icon::Info, "Résumé par version").clicked() {
+            let base = self.http_base();
+            let agent = self.http_agent();
+            let token_hex = format!("{:x}", self.voice_token);
+            let slot = self.diag_admin.clone();
+            std::thread::spawn(move || {
+                let resume = match agent
+                    .get(&format!("{base}/diag-resume"))
+                    .set("x-ki-token", &token_hex)
+                    .call()
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.into_string().map_err(|e| e.to_string()))
+                {
+                    Ok(t) => t,
+                    Err(e) => format!("résumé indisponible : {e}"),
+                };
+                // Le résumé se pose AU-DESSUS du détail déjà récupéré, dans
+                // le même slot : même affichage monospace, et la copie
+                // emporte les deux d'un bloc.
+                let mut slot = slot.lock().unwrap();
+                let ancien = slot.take().unwrap_or_default();
+                let detail = match ancien.split_once(FIN_RESUME) {
+                    Some((_, d)) => d.to_string(),
+                    None if ancien.starts_with(ENTETE_RESUME) => String::new(),
+                    None => ancien,
+                };
+                *slot = Some(if detail.is_empty() {
+                    format!("{ENTETE_RESUME}{resume}")
+                } else {
+                    format!("{ENTETE_RESUME}{resume}{FIN_RESUME}{detail}")
+                });
+            });
+        }
         // La purge par version : l'historique des bugs d'une livraison
         // dépassée n'apprend plus rien, autant rendre la place.
         let versions = self.diag_versions.lock().unwrap().clone();
@@ -5895,16 +5937,27 @@ impl KiApp {
             ui.add_space(4.0);
             // L'affichage est borné aux derniers caractères : des mégaoctets
             // de journal mettraient l'interface à genoux. La copie, elle,
-            // emporte tout ce qui a été récupéré.
-            let debut = texte
+            // emporte tout ce qui a été récupéré. Seule exception : le résumé
+            // en tête reste entier — c'est un écran, et c'est lui qu'on est
+            // venu lire ; la coupe ne s'applique qu'au détail qui le suit.
+            let (tete, reste) = match texte.find(FIN_RESUME) {
+                Some(i) => texte.split_at(i + FIN_RESUME.len()),
+                None => ("", texte.as_str()),
+            };
+            let debut = reste
                 .char_indices()
                 .rev()
                 .nth(20_000)
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                if !tete.is_empty() {
+                    ui.label(
+                        RichText::new(tete).monospace().size(11.0).color(TEXT),
+                    );
+                }
                 ui.label(
-                    RichText::new(&texte[debut..]).monospace().size(11.0).color(TEXT),
+                    RichText::new(&reste[debut..]).monospace().size(11.0).color(TEXT),
                 );
             });
         }

@@ -330,6 +330,135 @@ pub async fn lire(
     }
 }
 
+/// Lecture max par archive pour le résumé : la fin suffit — c'est le passé
+/// récent qui compte, et le parcours relit tous les fichiers d'un coup.
+const RESUME_LECTURE_MAX: u64 = 2 * 1024 * 1024;
+
+/// Ce que le résumé compte dans les archives d'une version : les marqueurs
+/// que les clients écrivent, tels quels. Des compteurs indicatifs — une même
+/// ligne peut en nourrir plusieurs — mais qui suffisent à dire où ça casse.
+#[derive(Default)]
+struct Compte {
+    /// Lignes « moteur vocal démarré » : autant de sessions vocales.
+    sessions: u64,
+    /// Lignes contenant « réouverture » : périphériques perdus puis repris.
+    reouvertures: u64,
+    /// Lignes contenant « affamé » : la signature du micro tenu par un jeu.
+    famines: u64,
+    /// Lignes contenant « erreur », quelle qu'elle soit.
+    erreurs: u64,
+    /// Lignes `"type":"crash"` : les rapports de plantage embarqués.
+    crashs: u64,
+}
+
+fn compter_lignes(texte: &str, c: &mut Compte) {
+    for ligne in texte.lines() {
+        if ligne.contains("moteur vocal démarré") {
+            c.sessions += 1;
+        }
+        if ligne.contains("réouverture") {
+            c.reouvertures += 1;
+        }
+        if ligne.contains("affamé") {
+            c.famines += 1;
+        }
+        if ligne.contains("erreur") {
+            c.erreurs += 1;
+        }
+        if ligne.contains("\"type\":\"crash\"") {
+            c.crashs += 1;
+        }
+    }
+}
+
+/// La fin d'un fichier, bornée à `max` octets. Quand la borne coupe, la
+/// première ligne — entamée au milieu — est écartée : une demi-ligne
+/// compterait de travers.
+fn fin_de_fichier(chemin: &FsPath, max: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(chemin)?;
+    let taille = f.metadata()?.len();
+    if taille <= max {
+        let mut octets = Vec::with_capacity(taille as usize);
+        f.read_to_end(&mut octets)?;
+        return Ok(String::from_utf8_lossy(&octets).into_owned());
+    }
+    f.seek(SeekFrom::End(-(max as i64)))?;
+    let mut octets = Vec::with_capacity(max as usize);
+    f.read_to_end(&mut octets)?;
+    let texte = String::from_utf8_lossy(&octets);
+    Ok(texte.split_once('\n').map(|(_, reste)| reste).unwrap_or("").to_owned())
+}
+
+/// Construit le résumé : une ligne tabulée par version, triée, sous une
+/// ligne d'en-tête. Vide s'il n'y a aucune archive.
+fn resume_versions(dir: &FsPath) -> String {
+    let Ok(versions) = std::fs::read_dir(dir) else { return String::new() };
+    let mut lignes: Vec<String> = Vec::new();
+    for vdir in versions.flatten() {
+        if !vdir.path().is_dir() {
+            continue;
+        }
+        let version = vdir.file_name().to_string_lossy().to_string();
+        let Ok(entrees) = std::fs::read_dir(vdir.path()) else { continue };
+        let mut joueurs = 0u64;
+        let mut taille = 0u64;
+        let mut compte = Compte::default();
+        for e in entrees.flatten() {
+            // Un joueur = son archive vivante ; la génération `.old` du même
+            // joueur nourrit les compteurs et la taille, pas l'effectif.
+            if e.file_name().to_string_lossy().ends_with(".jsonl") {
+                joueurs += 1;
+            }
+            taille += e.metadata().map(|m| m.len()).unwrap_or(0);
+            if let Ok(texte) = fin_de_fichier(&e.path(), RESUME_LECTURE_MAX) {
+                compter_lignes(&texte, &mut compte);
+            }
+        }
+        lignes.push(format!(
+            "{version}\t{joueurs}\t{}\t{}\t{}\t{}\t{}\t{} Ko",
+            compte.sessions,
+            compte.reouvertures,
+            compte.famines,
+            compte.erreurs,
+            compte.crashs,
+            taille / 1024
+        ));
+    }
+    if lignes.is_empty() {
+        return String::new();
+    }
+    lignes.sort();
+    format!(
+        "version\tjoueurs\tsessions\tréouvertures\tfamines\terreurs\tcrashs\ttaille\n{}",
+        lignes.join("\n")
+    )
+}
+
+/// GET /diag-resume — l'état des lieux en un écran : une ligne par version,
+/// les compteurs qui disent la santé de chaque livraison, avant de plonger
+/// dans le détail des archives.
+pub async fn resume(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !lecteur_autorise(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
+    }
+    let dir = diag_dir(&state);
+    // Le résumé relit la fin de chaque archive : sur le pool bloquant, comme
+    // tout ce qui touche au disque — jamais sur la boucle qui relaie la voix.
+    let texte = tokio::task::spawn_blocking(move || resume_versions(&dir))
+        .await
+        .unwrap_or_default();
+    let texte = if texte.is_empty() {
+        "aucune archive de diagnostic pour l'instant".to_string()
+    } else {
+        texte
+    };
+    (StatusCode::OK, texte).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +517,82 @@ mod tests {
         assert!(!segment_version_valide(".."));
         assert!(!segment_version_valide(""));
         assert!(!segment_version_valide("a/b"));
+    }
+
+    #[test]
+    fn le_resume_compte_par_version_triee() {
+        let dir = std::env::temp_dir().join("ki-chat-diag-resume");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("0.1.15")).unwrap();
+        std::fs::create_dir_all(dir.join("0.1.14")).unwrap();
+        // Deux joueurs sur la 0.1.15 : sessions, réouverture, famine, erreur
+        // et un crash se répartissent entre eux.
+        std::fs::write(
+            dir.join("0.1.15").join("00000001-a.jsonl"),
+            "{\"type\":\"journal\",\"t\":1,\"msg\":\"moteur vocal démarré\"}\n\
+             {\"type\":\"journal\",\"t\":2,\"msg\":\"micro perdu — réouverture\"}\n\
+             {\"type\":\"journal\",\"t\":3,\"msg\":\"flux affamé, bascule proposée\"}\n\
+             {\"type\":\"crash\",\"t\":4,\"rapport\":\"panic : boum\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("0.1.15").join("00000002-b.jsonl"),
+            "{\"type\":\"journal\",\"t\":1,\"msg\":\"moteur vocal démarré\"}\n\
+             {\"type\":\"journal\",\"t\":2,\"msg\":\"erreur d'ouverture du micro\"}\n",
+        )
+        .unwrap();
+        // Un seul joueur sur la 0.1.14, mais avec une génération .old : elle
+        // nourrit les compteurs, pas l'effectif.
+        std::fs::write(
+            dir.join("0.1.14").join("00000001-a.jsonl"),
+            "{\"type\":\"journal\",\"t\":9,\"msg\":\"moteur vocal démarré\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("0.1.14").join("00000001-a.jsonl.old"),
+            "{\"type\":\"journal\",\"t\":1,\"msg\":\"erreur ancienne\"}\n",
+        )
+        .unwrap();
+
+        let resume = resume_versions(&dir);
+        let lignes: Vec<&str> = resume.lines().collect();
+        assert_eq!(lignes.len(), 3, "en-tête + une ligne par version : {resume}");
+        assert!(lignes[0].starts_with("version\tjoueurs\tsessions\t"));
+        // Triées par version, colonnes : joueurs, sessions, réouvertures,
+        // famines, erreurs, crashs.
+        assert!(lignes[1].starts_with("0.1.14\t1\t1\t0\t0\t1\t0\t"), "0.1.14 : {}", lignes[1]);
+        assert!(lignes[2].starts_with("0.1.15\t2\t2\t1\t1\t1\t1\t"), "0.1.15 : {}", lignes[2]);
+
+        // Et sans archives du tout, rien — l'appelant mettra les mots.
+        let vide = std::env::temp_dir().join("ki-chat-diag-resume-vide");
+        let _ = std::fs::remove_dir_all(&vide);
+        assert_eq!(resume_versions(&vide), "");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn le_resume_ne_lit_que_des_lignes_entieres_de_la_fin() {
+        let dir = std::env::temp_dir().join("ki-chat-diag-resume-fin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let chemin = dir.join("00000001-a.jsonl");
+        std::fs::write(&chemin, "erreur un\nerreur deux\nerreur trois\n").unwrap();
+
+        // Assez de place : tout est lu.
+        assert_eq!(
+            fin_de_fichier(&chemin, 1024).unwrap(),
+            "erreur un\nerreur deux\nerreur trois\n"
+        );
+        // Borne serrée : la ligne coupée en tête est écartée, seule la fin
+        // entière reste — et elle seule compte.
+        let fin = fin_de_fichier(&chemin, 18).unwrap();
+        assert_eq!(fin, "erreur trois\n");
+        let mut c = Compte::default();
+        compter_lignes(&fin, &mut c);
+        assert_eq!(c.erreurs, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

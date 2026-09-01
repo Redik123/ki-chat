@@ -122,6 +122,9 @@ async fn main() -> anyhow::Result<()> {
                 .layer(DefaultBodyLimit::max(diag::MAX_BATCH))
                 .get(diag::lister),
         )
+        // L'état des lieux compté par le serveur : une ligne par version,
+        // joueurs, sessions, réouvertures, famines, erreurs, crashs, taille.
+        .route("/diag-resume", get(diag::resume))
         .route("/diag/{version}", axum::routing::delete(diag::supprimer))
         .route("/diag/{version}/{fichier}", get(diag::lire))
         .route("/files/{file_id}/{name}", get(files::download))
