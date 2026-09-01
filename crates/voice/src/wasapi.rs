@@ -1,12 +1,15 @@
 //! Moteur audio Windows natif (WASAPI direct), sans passer par cpal.
 //!
 //! Pourquoi doubler cpal ? Parce qu'il ouvre les flux comme un lecteur de
-//! musique, et qu'un client vocal a besoin de quatre choses que cpal ne
-//! demande jamais à Windows — celles-là mêmes qui rendent Discord insensible
-//! aux jeux qui rebrassent l'audio :
+//! musique, et qu'un client vocal a besoin de choses que cpal ne demande
+//! jamais à Windows — celles-là mêmes qui rendent Discord insensible aux
+//! jeux qui rebrassent l'audio :
 //!
-//! - le périphérique de communication par défaut (rôle eCommunications),
-//!   et non celui des jeux (eConsole) ;
+//! - le périphérique par défaut par le rôle eConsole, celui des jeux — et
+//!   NON le rôle eCommunications, essayé d'abord « comme Discord » : Windows
+//!   tient tout flux ouvert sur le périphérique de communication pour un
+//!   appel, et baisse les autres sons de 80 % chez qui n'a pas réglé « Ne
+//!   rien faire ». Le son du jeu qui baisse quand on parle, c'était ça ;
 //! - la conversion de format automatique (AUTOCONVERTPCM) : un jeu qui fait
 //!   basculer le périphérique de 44,1 à 48 kHz ne tue plus le flux ;
 //! - la catégorie « Communications » **nulle part par défaut**, leçon chère
@@ -41,7 +44,7 @@ use windows::core::{implement, PCWSTR};
 use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    eCapture, eCommunications, eRender, AudioCategory_Communications, AudioCategory_Other,
+    eCapture, eConsole, eRender, AudioCategory_Communications, AudioCategory_Other,
     EDataFlow, ERole, IAudioCaptureClient, IAudioClient2, IAudioRenderClient, IMMDevice,
     IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
     AudioClientProperties, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
@@ -295,8 +298,15 @@ fn active_devices(
 }
 
 /// Le périphérique demandé (exact, puis sans compteur de ré-énumération),
-/// ou le défaut **de communication** — c'est le rôle que suivent les apps
-/// d'appel, Discord en tête ; cpal suivait celui des jeux.
+/// ou le défaut **des jeux** (eConsole) — et surtout pas celui « de
+/// communication » : Windows tient tout flux ouvert sur le périphérique
+/// obtenu par le rôle eCommunications pour un flux d'appel, catégorie ou
+/// pas, et baisse alors les autres sons de 80 % chez qui a laissé le
+/// réglage par défaut. Vu sur le terrain : le son du jeu qui baisse quand
+/// quelqu'un parle et remonte quand il se tait — notre sortie dort après
+/// cinq secondes de silence et se réveille à la voix, l'atténuation suivait.
+/// Le joueur qui destine un autre périphérique aux appels le choisit dans
+/// les réglages.
 fn pick(
     enu: &IMMDeviceEnumerator,
     name: Option<&str>,
@@ -304,7 +314,7 @@ fn pick(
 ) -> anyhow::Result<(IMMDevice, bool)> {
     let flow = if input { eCapture } else { eRender };
     let default = || unsafe {
-        enu.GetDefaultAudioEndpoint(flow, eCommunications)
+        enu.GetDefaultAudioEndpoint(flow, eConsole)
             .context("aucun périphérique par défaut")
     };
     let Some(wanted) = name else {
@@ -618,11 +628,12 @@ pub fn open_input(
                     if comms { ", catégorie communications" } else { "" }
                 );
                 journal(format!(
-                    "micro ouvert (natif) : {dev_name} ({} Hz, {} canaux{}{}){}",
+                    "micro ouvert (natif) : {dev_name} ({} Hz, {} canaux{}{}{}){}",
                     open.rate,
                     open.channels,
                     if raw { ", mode brut" } else { "" },
                     if comms { ", catégorie communications" } else { "" },
+                    if name.is_none() { ", défaut Windows" } else { ", choisi" },
                     if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
                 ));
                 Ok((open, capture, fallback))
@@ -781,9 +792,10 @@ where
                     open.channels
                 );
                 journal(format!(
-                    "sortie ouverte (natif) : {dev_name} ({} Hz, {} canaux){}",
+                    "sortie ouverte (natif) : {dev_name} ({} Hz, {} canaux{}){}",
                     open.rate,
                     open.channels,
+                    if name.is_none() { ", défaut Windows" } else { ", choisi" },
                     if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
                 ));
                 Ok((open, render, buffer_frames, fallback))
