@@ -1,13 +1,17 @@
 //! Pipeline vidéo du partage d'écran — voir PLAN-STREAM.md.
 //!
-//! État actuel : S1a, la boucle locale — capture d'écran -> conversion
-//! I420 -> encodage H.264 -> décodage -> image RGBA prête à peindre, le
-//! tout instrumenté étage par étage (`StageStats`). Aucun réseau ici : le
-//! transport arrivera en S1b, par-dessus les mêmes briques.
+//! Deux boucles sur les mêmes briques : celle du labo (capture -> I420 ->
+//! H.264 -> décodage -> image RGBA, zéro réseau) et la boucle streamer — la
+//! même, qui sait en plus réduire l'image avant l'encodeur et livre chaque
+//! trame encodée à la couche réseau. Le tout instrumenté étage par étage
+//! (`StageStats`). Le transport, lui, vit ailleurs : ce crate ne connaît
+//! que les pixels et le codec.
 
 pub mod capture;
+pub mod scale;
 pub mod stats;
 
+pub use capture::{list_monitors, list_windows, CaptureSource, MonitorInfo, WindowInfo};
 pub use stats::StageStats;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,11 +58,17 @@ impl LocalLoop {
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
         let (recycle_tx, recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
-        let control = capture::start_primary_monitor(capture::CaptureFlags {
-            stats: stats.clone(),
-            tx: frame_tx,
-            recycle: recycle_rx,
-        })?;
+        let control = capture::start_capture(
+            &CaptureSource::Monitor(0),
+            true,
+            30,
+            capture::CaptureFlags {
+                stats: stats.clone(),
+                tx: frame_tx,
+                recycle: recycle_rx,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
+        )?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let worker = {
@@ -151,7 +161,7 @@ fn pipeline_loop(
         // 2. Encodage H.264.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match screen_encoder(w, h, 6_000_000) {
+            None => match screen_encoder(w, h, 6_000_000, 30) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -219,13 +229,39 @@ pub type FrameEmit = Arc<dyn Fn(EncodedFrame) + Send + Sync>;
 /// voit est EXACTEMENT ce que ses spectateurs reçoivent, artefacts du codec
 /// compris — jamais un aller-retour serveur.
 pub struct StreamerLoop {
-    control: windows_capture::capture::CaptureControl<
-        capture::ScreenGrab,
-        Box<dyn std::error::Error + Send + Sync>,
-    >,
+    control: capture::Control,
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
     worker: std::thread::JoinHandle<()>,
+}
+
+/// Les réglages d'une diffusion, tels que l'interface les tient.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamConfig {
+    pub source: CaptureSource,
+    /// Hauteur plafond de l'image émise (0 = celle de la source). La source
+    /// est réduite avant l'encodeur, jamais agrandie.
+    pub max_height: u32,
+    pub fps: u32,
+    pub bitrate_bps: u32,
+    pub cursor: bool,
+    /// Décoder localement ce qui part, pour l'aperçu — ~3 ms par trame que
+    /// l'on peut rendre au jeu en s'en passant.
+    pub preview: bool,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            source: CaptureSource::Monitor(0),
+            max_height: 0,
+            fps: 30,
+            bitrate_bps: 6_000_000,
+            cursor: true,
+            preview: true,
+        }
+    }
 }
 
 impl StreamerLoop {
@@ -236,17 +272,24 @@ impl StreamerLoop {
         stats: Arc<StageStats>,
         preview: FrameSink,
         emit: FrameEmit,
-        bitrate_bps: u32,
+        config: StreamConfig,
         force_idr: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         stats.mark_started();
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
         let (recycle_tx, recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let control = capture::start_primary_monitor(capture::CaptureFlags {
-            stats: stats.clone(),
-            tx: frame_tx,
-            recycle: recycle_rx,
-        })?;
+        let closed = Arc::new(AtomicBool::new(false));
+        let control = capture::start_capture(
+            &config.source,
+            config.cursor,
+            config.fps,
+            capture::CaptureFlags {
+                stats: stats.clone(),
+                tx: frame_tx,
+                recycle: recycle_rx,
+                closed: closed.clone(),
+            },
+        )?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker = {
             let (stop, force_idr) = (stop.clone(), force_idr.clone());
@@ -254,18 +297,24 @@ impl StreamerLoop {
                 .name("video-streamer".into())
                 .spawn(move || {
                     streamer_pipeline(
-                        stats, preview, emit, bitrate_bps, frame_rx, recycle_tx, stop, force_idr,
+                        stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr,
                     )
                 })
                 .context("thread streamer vidéo")?
         };
-        Ok(Self { control, stop, force_idr, worker })
+        Ok(Self { control, stop, force_idr, closed, worker })
     }
 
     /// La prochaine trame encodée sera une trame clé (IDR) — pour un
     /// spectateur qui arrive ou qui a perdu pied.
     pub fn force_keyframe(&self) {
         self.force_idr.store(true, Ordering::Relaxed);
+    }
+
+    /// La source s'est évanouie (fenêtre fermée) : plus rien ne viendra,
+    /// à l'appelant de conclure la diffusion.
+    pub fn source_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 
     pub fn stop(self) {
@@ -283,22 +332,30 @@ fn streamer_pipeline(
     stats: Arc<StageStats>,
     preview: FrameSink,
     emit: FrameEmit,
-    bitrate_bps: u32,
+    config: StreamConfig,
     frames: std::sync::mpsc::Receiver<capture::CapturedFrame>,
     recycle: std::sync::mpsc::Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
 ) {
     let mut encoder: Option<Encoder> = None;
-    let mut decoder = match Decoder::new() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!("décodeur H.264 (aperçu) : {e}");
-            return;
+    // L'aperçu n'existe que si on le demande : sans lui, pas de décodeur.
+    let mut decoder = if config.preview {
+        match Decoder::new() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("décodeur H.264 (aperçu) : {e} — diffusion sans aperçu");
+                None
+            }
         }
+    } else {
+        None
     };
     let mut yuv: Option<YUVBuffer> = None;
+    let mut scaler = scale::Scaler::new();
+    // Dimensions de la source, et celles que l'on émet (réduites ou non).
     let mut dims = (0u32, 0u32);
+    let mut sortie = (0u32, 0u32);
     // La base des horodatages : l'instant zéro du stream. Tout pts_us en
     // découle — c'est lui qui portera la synchronisation A/V en S3.
     let depart = Instant::now();
@@ -323,14 +380,21 @@ fn streamer_pipeline(
         let (w, h) = (frame.width & !1, frame.height & !1);
         if (w, h) != dims {
             dims = (w, h);
-            stats.set_dims(w, h);
+            sortie = scale::target_dims(w, h, config.max_height);
+            stats.set_dims(sortie.0, sortie.1);
             encoder = None;
             yuv = Some(YUVBuffer::new(w as usize, h as usize));
-            tracing::info!("diffusion : source {w}x{h}");
+            if sortie == dims {
+                tracing::info!("diffusion : source {w}x{h}");
+            } else {
+                tracing::info!("diffusion : source {w}x{h}, émise en {}x{}", sortie.0, sortie.1);
+            }
         }
         let Some(yuv_buf) = yuv.as_mut() else { continue };
+        let (ow, oh) = sortie;
 
-        // 1. Conversion BGRA -> I420.
+        // 1. Conversion BGRA -> I420, puis réduction si l'image émise est
+        //    plus petite que la source.
         let t0 = Instant::now();
         let src_w = frame.width as usize;
         let tight;
@@ -341,14 +405,19 @@ fn streamer_pipeline(
             &tight
         };
         yuv_buf.read_bgra8(BgraSliceU8::new(bgra, (w as usize, h as usize)));
+        let _ = recycle.send(frame.bgra);
+        let reduit: Option<&scale::I420> = if (ow, oh) != (w, h) {
+            Some(scaler.scale(yuv_buf, ow as usize, oh as usize))
+        } else {
+            None
+        };
         stats.convert_ms.record(t0.elapsed().as_secs_f32() * 1000.0);
         stats.converted.fetch_add(1, Ordering::Relaxed);
-        let _ = recycle.send(frame.bgra);
 
         // 2. Encodage — trame clé exigée si un spectateur l'attend.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match screen_encoder(w, h, bitrate_bps) {
+            None => match screen_encoder(ow, oh, config.bitrate_bps, config.fps) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -360,7 +429,11 @@ fn streamer_pipeline(
             enc.force_intra_frame();
         }
         let t1 = Instant::now();
-        let (packet, idr) = match enc.encode(yuv_buf) {
+        let encode = match reduit {
+            Some(petit) => enc.encode(petit),
+            None => enc.encode(&*yuv_buf),
+        };
+        let (packet, idr) = match encode {
             Ok(bs) => {
                 let idr = bs.frame_type() == FrameType::IDR;
                 if idr {
@@ -379,22 +452,24 @@ fn streamer_pipeline(
 
         // 3. Aperçu local : le décodage de ce qui vient de partir — le
         // streamer voit ce que voient ses spectateurs.
-        let t2 = Instant::now();
-        match decoder.decode(&packet) {
-            Ok(Some(image)) => {
-                let (dw, dh) = image.dimensions();
-                let mut rgba = vec![0u8; dw * dh * 4];
-                image.write_rgba8(&mut rgba);
-                stats.decode_ms.record(t2.elapsed().as_secs_f32() * 1000.0);
-                stats.decoded.fetch_add(1, Ordering::Relaxed);
-                preview(RgbaFrame { width: dw, height: dh, rgba });
+        if let Some(dec) = decoder.as_mut() {
+            let t2 = Instant::now();
+            match dec.decode(&packet) {
+                Ok(Some(image)) => {
+                    let (dw, dh) = image.dimensions();
+                    let mut rgba = vec![0u8; dw * dh * 4];
+                    image.write_rgba8(&mut rgba);
+                    stats.decode_ms.record(t2.elapsed().as_secs_f32() * 1000.0);
+                    stats.decoded.fetch_add(1, Ordering::Relaxed);
+                    preview(RgbaFrame { width: dw, height: dh, rgba });
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("décodage aperçu : {e}"),
             }
-            Ok(None) => {}
-            Err(e) => tracing::warn!("décodage aperçu : {e}"),
         }
 
         // 4. Émission : la couche réseau chiffre, encadre, envoie.
-        emit(EncodedFrame { data: packet, idr, pts_us, width: w as u16, height: h as u16 });
+        emit(EncodedFrame { data: packet, idr, pts_us, width: ow as u16, height: oh as u16 });
     }
 }
 
@@ -439,14 +514,20 @@ fn crop_bgra(src: &[u8], src_w: usize, w: usize, h: usize) -> Vec<u8> {
 }
 
 /// Construit un encodeur H.264 configuré pour le partage d'écran temps réel.
-/// GOP de 60 trames (2 s à 30 fps) — les trames clés à la demande viendront
-/// de `force_intra_frame` en S1b.
-pub fn screen_encoder(width: u32, height: u32, bitrate_bps: u32) -> anyhow::Result<Encoder> {
+/// GOP de deux secondes — les trames clés à la demande viennent de
+/// `force_intra_frame`.
+pub fn screen_encoder(
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    fps: u32,
+) -> anyhow::Result<Encoder> {
+    let fps = fps.clamp(1, 120);
     let config = EncoderConfig::new()
         .usage_type(UsageType::ScreenContentRealTime)
         .bitrate(BitRate::from_bps(bitrate_bps))
-        .max_frame_rate(FrameRate::from_hz(30.0))
-        .intra_frame_period(IntraFramePeriod::from_num_frames(60))
+        .max_frame_rate(FrameRate::from_hz(fps as f32))
+        .intra_frame_period(IntraFramePeriod::from_num_frames(2 * fps))
         .skip_frames(true)
         // Quelques threads d'encodage : le 1080p30 doit tenir même pendant
         // qu'un jeu occupe le reste du CPU.
@@ -466,7 +547,7 @@ mod tests {
     #[test]
     fn h264_roundtrip_smoke() {
         let (w, h) = (320usize, 240usize);
-        let mut encoder = screen_encoder(w as u32, h as u32, 500_000).unwrap();
+        let mut encoder = screen_encoder(w as u32, h as u32, 500_000, 30).unwrap();
 
         // Dégradé synthétique en I420.
         let mut yuv = vec![0u8; w * h + (w * h) / 2];
