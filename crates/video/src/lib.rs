@@ -193,6 +193,241 @@ fn pipeline_loop(
     }
 }
 
+/// Une trame encodée prête à partir sur le réseau — H.264 en clair : le
+/// chiffrement et l'en-tête de transport appartiennent à la couche réseau,
+/// ce module ne connaît que les pixels et le codec.
+pub struct EncodedFrame {
+    pub data: Vec<u8>,
+    pub idr: bool,
+    /// Horodatage de capture, en microsecondes depuis le début du stream.
+    pub pts_us: u64,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Réceptacle des trames encodées : la boucle streamer y verse chaque trame.
+pub type FrameEmit = Arc<dyn Fn(EncodedFrame) + Send + Sync>;
+
+/// Boucle streamer S1b : capture -> I420 -> H.264 -> **émission** + aperçu.
+///
+/// C'est la boucle locale (S1a) plus deux choses : chaque trame encodée part
+/// vers `emit` (la couche réseau chiffre et envoie), et une trame clé peut
+/// être exigée à tout moment (`force_keyframe`) — c'est ainsi qu'un nouveau
+/// spectateur obtient de quoi décoder en moins d'une demi-seconde.
+///
+/// L'aperçu passe par le décodage local, comme au labo : ce que le streamer
+/// voit est EXACTEMENT ce que ses spectateurs reçoivent, artefacts du codec
+/// compris — jamais un aller-retour serveur.
+pub struct StreamerLoop {
+    control: windows_capture::capture::CaptureControl<
+        capture::ScreenGrab,
+        Box<dyn std::error::Error + Send + Sync>,
+    >,
+    stop: Arc<AtomicBool>,
+    force_idr: Arc<AtomicBool>,
+    worker: std::thread::JoinHandle<()>,
+}
+
+impl StreamerLoop {
+    /// `force_idr` est partagé avec l'appelant : la couche réseau le lève
+    /// quand elle jette une trame (le spectateur suivant a besoin d'une
+    /// trame clé), l'interface quand le serveur transmet KeyframeNeeded.
+    pub fn start(
+        stats: Arc<StageStats>,
+        preview: FrameSink,
+        emit: FrameEmit,
+        bitrate_bps: u32,
+        force_idr: Arc<AtomicBool>,
+    ) -> anyhow::Result<Self> {
+        stats.mark_started();
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
+        let (recycle_tx, recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let control = capture::start_primary_monitor(capture::CaptureFlags {
+            stats: stats.clone(),
+            tx: frame_tx,
+            recycle: recycle_rx,
+        })?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (stop, force_idr) = (stop.clone(), force_idr.clone());
+            std::thread::Builder::new()
+                .name("video-streamer".into())
+                .spawn(move || {
+                    streamer_pipeline(
+                        stats, preview, emit, bitrate_bps, frame_rx, recycle_tx, stop, force_idr,
+                    )
+                })
+                .context("thread streamer vidéo")?
+        };
+        Ok(Self { control, stop, force_idr, worker })
+    }
+
+    /// La prochaine trame encodée sera une trame clé (IDR) — pour un
+    /// spectateur qui arrive ou qui a perdu pied.
+    pub fn force_keyframe(&self) {
+        self.force_idr.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Err(e) = self.control.stop() {
+            tracing::warn!("arrêt de la capture : {e}");
+        }
+        let _ = self.worker.join();
+    }
+}
+
+/// Le pipeline streamer : mêmes étages que le labo, plus l'émission.
+#[allow(clippy::too_many_arguments)]
+fn streamer_pipeline(
+    stats: Arc<StageStats>,
+    preview: FrameSink,
+    emit: FrameEmit,
+    bitrate_bps: u32,
+    frames: std::sync::mpsc::Receiver<capture::CapturedFrame>,
+    recycle: std::sync::mpsc::Sender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+    force_idr: Arc<AtomicBool>,
+) {
+    let mut encoder: Option<Encoder> = None;
+    let mut decoder = match Decoder::new() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("décodeur H.264 (aperçu) : {e}");
+            return;
+        }
+    };
+    let mut yuv: Option<YUVBuffer> = None;
+    let mut dims = (0u32, 0u32);
+    // La base des horodatages : l'instant zéro du stream. Tout pts_us en
+    // découle — c'est lui qui portera la synchronisation A/V en S3.
+    let depart = Instant::now();
+
+    loop {
+        let frame = match frames.recv_timeout(Duration::from_millis(200)) {
+            Ok(f) => f,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let pts_us = depart.elapsed().as_micros() as u64;
+
+        // I420 exige des dimensions paires : rognées, comme au labo.
+        let (w, h) = (frame.width & !1, frame.height & !1);
+        if (w, h) != dims {
+            dims = (w, h);
+            stats.set_dims(w, h);
+            encoder = None;
+            yuv = Some(YUVBuffer::new(w as usize, h as usize));
+            tracing::info!("diffusion : source {w}x{h}");
+        }
+        let Some(yuv_buf) = yuv.as_mut() else { continue };
+
+        // 1. Conversion BGRA -> I420.
+        let t0 = Instant::now();
+        let src_w = frame.width as usize;
+        let tight;
+        let bgra: &[u8] = if (frame.width, frame.height) == (w, h) {
+            &frame.bgra
+        } else {
+            tight = crop_bgra(&frame.bgra, src_w, w as usize, h as usize);
+            &tight
+        };
+        yuv_buf.read_bgra8(BgraSliceU8::new(bgra, (w as usize, h as usize)));
+        stats.convert_ms.record(t0.elapsed().as_secs_f32() * 1000.0);
+        stats.converted.fetch_add(1, Ordering::Relaxed);
+        let _ = recycle.send(frame.bgra);
+
+        // 2. Encodage — trame clé exigée si un spectateur l'attend.
+        let enc = match encoder.as_mut() {
+            Some(e) => e,
+            None => match screen_encoder(w, h, bitrate_bps) {
+                Ok(e) => encoder.insert(e),
+                Err(e) => {
+                    tracing::error!("encodeur H.264 : {e:#}");
+                    return;
+                }
+            },
+        };
+        if force_idr.swap(false, Ordering::Relaxed) {
+            enc.force_intra_frame();
+        }
+        let t1 = Instant::now();
+        let (packet, idr) = match enc.encode(yuv_buf) {
+            Ok(bs) => {
+                let idr = bs.frame_type() == FrameType::IDR;
+                if idr {
+                    stats.keyframes.fetch_add(1, Ordering::Relaxed);
+                }
+                (bs.to_vec(), idr)
+            }
+            Err(e) => {
+                tracing::warn!("encodage : {e}");
+                continue;
+            }
+        };
+        stats.encode_ms.record(t1.elapsed().as_secs_f32() * 1000.0);
+        stats.encoded.fetch_add(1, Ordering::Relaxed);
+        stats.encoded_bytes.fetch_add(packet.len() as u64, Ordering::Relaxed);
+
+        // 3. Aperçu local : le décodage de ce qui vient de partir — le
+        // streamer voit ce que voient ses spectateurs.
+        let t2 = Instant::now();
+        match decoder.decode(&packet) {
+            Ok(Some(image)) => {
+                let (dw, dh) = image.dimensions();
+                let mut rgba = vec![0u8; dw * dh * 4];
+                image.write_rgba8(&mut rgba);
+                stats.decode_ms.record(t2.elapsed().as_secs_f32() * 1000.0);
+                stats.decoded.fetch_add(1, Ordering::Relaxed);
+                preview(RgbaFrame { width: dw, height: dh, rgba });
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("décodage aperçu : {e}"),
+        }
+
+        // 4. Émission : la couche réseau chiffre, encadre, envoie.
+        emit(EncodedFrame { data: packet, idr, pts_us, width: w as u16, height: h as u16 });
+    }
+}
+
+/// Décodeur d'un spectateur : reçoit du H.264 en clair (déjà déchiffré et
+/// remis en ordre par la couche réseau), rend des images prêtes à peindre.
+/// `None` n'est pas une erreur : un paquet SPS/PPS seul ne produit pas
+/// d'image, la suivante sortira.
+pub struct ViewerDecoder {
+    decoder: Decoder,
+}
+
+impl ViewerDecoder {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self { decoder: Decoder::new().context("décodeur H.264 spectateur")? })
+    }
+
+    pub fn decode(&mut self, h264: &[u8]) -> Option<RgbaFrame> {
+        match self.decoder.decode(h264) {
+            Ok(Some(image)) => {
+                let (w, h) = image.dimensions();
+                let mut rgba = vec![0u8; w * h * 4];
+                image.write_rgba8(&mut rgba);
+                Some(RgbaFrame { width: w, height: h, rgba })
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::debug!("décodage spectateur : {e}");
+                None
+            }
+        }
+    }
+}
+
 /// Rogne un buffer BGRA serré de `src_w` colonnes vers `w`x`h`.
 fn crop_bgra(src: &[u8], src_w: usize, w: usize, h: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h * 4);
