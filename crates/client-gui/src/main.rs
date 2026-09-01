@@ -163,16 +163,18 @@ enum AdminTab {
     Members,
     Invites,
     Audit,
+    Diagnostics,
 }
 
 impl AdminTab {
-    const ALL: [AdminTab; 6] = [
+    const ALL: [AdminTab; 7] = [
         AdminTab::Server,
         AdminTab::Channels,
         AdminTab::Roles,
         AdminTab::Members,
         AdminTab::Invites,
         AdminTab::Audit,
+        AdminTab::Diagnostics,
     ];
 
     fn label(self) -> &'static str {
@@ -183,6 +185,7 @@ impl AdminTab {
             AdminTab::Members => "Membres",
             AdminTab::Invites => "Invitations",
             AdminTab::Audit => "Journal",
+            AdminTab::Diagnostics => "Diagnostics",
         }
     }
 
@@ -197,6 +200,9 @@ impl AdminTab {
             AdminTab::Members => KICK,
             AdminTab::Invites => CREATE_INVITE,
             AdminTab::Audit => VIEW_AUDIT_LOG,
+            // Les journaux techniques des joueurs : réservé au super-admin,
+            // pas à quiconque sait expulser quelqu'un.
+            AdminTab::Diagnostics => ADMINISTRATOR,
         }
     }
 }
@@ -502,8 +508,11 @@ struct KiApp {
     diag_share: bool,
     /// Horodatage (epoch ms) de la dernière ligne de journal déjà envoyée.
     diag_last_sent_ts: u64,
-    /// Dernier envoi périodique, pour la cadence d'une minute.
+    /// Dernier envoi périodique, pour la cadence de dix minutes.
     diag_last_flush: Option<std::time::Instant>,
+    /// Onglet admin « Diagnostics » : le dernier lot récupéré du serveur,
+    /// rempli par un thread de récupération.
+    diag_admin: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Dernier diagnostic établi. Coûteux — il énumère les processus et
     /// interroge le registre — donc calculé au clic, pas à chaque image.
     docteur: Option<ki_voice::docteur::Diagnostic>,
@@ -675,6 +684,9 @@ struct VoiceSnapshot {
     device_trouble: (bool, bool),
     /// Périphériques de repli en service : (micro, sortie).
     device_fallback: (bool, bool),
+    /// Le moteur propose de basculer le micro en catégorie « communications »
+    /// (micro affamé) et attend la réponse de l'utilisateur.
+    comms_proposal: bool,
 }
 
 impl KiApp {
@@ -777,6 +789,7 @@ impl KiApp {
             diag_share: get("diag_share", "off") == "on",
             diag_last_sent_ts: 0,
             diag_last_flush: None,
+            diag_admin: Default::default(),
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
@@ -1112,6 +1125,7 @@ impl KiApp {
                 levels: engine.user_levels().into_iter().collect(),
                 device_trouble: engine.device_trouble(),
                 device_fallback: engine.device_fallback(),
+                comms_proposal: engine.comms_proposal(),
             },
             None => VoiceSnapshot {
                 ping,
@@ -2363,7 +2377,7 @@ impl KiApp {
         });
     }
 
-    /// La cadence du diagnostic partagé : une minute, et seulement s'il y a
+    /// La cadence du diagnostic partagé : dix minutes, et seulement s'il y a
     /// du neuf. Appelée à chaque image ; le garde-fou coûte deux lectures.
     fn maybe_flush_diag(&mut self) {
         if !self.diag_share || self.conn.is_none() {
@@ -2371,7 +2385,7 @@ impl KiApp {
         }
         let due = self
             .diag_last_flush
-            .map(|t| t.elapsed() > std::time::Duration::from_secs(60))
+            .map(|t| t.elapsed() > std::time::Duration::from_secs(600))
             .unwrap_or(true);
         if !due {
             return;
@@ -2913,6 +2927,7 @@ impl KiApp {
         self.sidebar(ctx, voice);
         self.roster_panel(ctx, voice);
         self.chat_panel(ctx);
+        self.comms_popup(ctx, voice);
 
         if self.show_settings {
             self.settings_window(ctx, voice);
@@ -4617,18 +4632,17 @@ impl KiApp {
                             "Partager mes diagnostics avec l'admin du serveur",
                         )
                         .on_hover_text(
-                            "envoie chaque minute le journal technique (périphériques, \
-                             pertes, réouvertures), la version et le rapport du docteur \
-                             au serveur du groupe. Jamais tes messages, jamais ta voix. \
-                             Décochable à tout moment.",
+                            "envoie toutes les 10 minutes le journal technique \
+                             (périphériques, pertes, réouvertures), la version et le \
+                             rapport du docteur au serveur du groupe. Jamais tes \
+                             messages, jamais ta voix. Décochable à tout moment.",
                         );
-                        if self.diag_share {
-                            if ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
+                        if self.diag_share
+                            && ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
                                 .clicked()
-                            {
-                                self.flush_diag(true);
-                                self.info = Some("diagnostic envoyé au serveur".into());
-                            }
+                        {
+                            self.flush_diag(true);
+                            self.info = Some("diagnostic envoyé au serveur".into());
                         }
 
                         // --- Docteur audio ---
@@ -5662,6 +5676,150 @@ impl KiApp {
         }
     }
 
+    /// La demande de bascule du micro en catégorie « communications ».
+    ///
+    /// Le moteur a détecté un micro affamé (il s'ouvre, rien n'en sort) et
+    /// propose la seule parade logicielle : partager la voie de traitement
+    /// avec la voix du jeu. Mais cette bascule peut faire baisser le volume
+    /// des autres sons (l'atténuation Windows) — alors on demande, on
+    /// n'impose pas. Refuser vaut pour la session : à l'utilisateur de
+    /// régler son casque, le docteur audio lui dit comment.
+    fn comms_popup(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
+        if !voice.comms_proposal {
+            return;
+        }
+        let mut reponse: Option<bool> = None;
+        egui::Window::new("Ton micro ne livre rien")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                ui.label(
+                    "Ton micro s'ouvre mais ne capte rien : un autre logiciel — la \
+                     voix intégrée d'un jeu, le pilote du casque — tient probablement \
+                     la voie de capture.",
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    "ki-chat peut demander la même voie que lui (catégorie \
+                     « communications » de Windows). Revers possible : Windows peut \
+                     alors baisser le volume de tes autres sons — réglable dans \
+                     Panneau son → Communications → « Ne rien faire ».",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui::button(ui, Icon::Check, "Basculer (cette session)").clicked() {
+                        reponse = Some(true);
+                    }
+                    if ui::button(ui, Icon::Close, "Non — je règle mon casque").clicked() {
+                        reponse = Some(false);
+                    }
+                });
+                ui.add_space(4.0);
+                ui::hint(
+                    ui,
+                    "pour le rendre permanent : ⚙ Audio → « Partager le micro avec \
+                     la voix du jeu ». Pour comprendre : le docteur audio, au même \
+                     endroit.",
+                );
+            });
+        if let Some(accept) = reponse {
+            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                engine.resolve_comms(accept);
+            }
+            self.info = Some(
+                if accept {
+                    "micro basculé en catégorie communications pour cette session"
+                } else {
+                    "compris — le micro reste en catégorie standard"
+                }
+                .into(),
+            );
+        }
+    }
+
+    /// Onglet Diagnostics : les journaux techniques que les joueurs
+    /// volontaires partagent (⚙ Audio → « Partager mes diagnostics »). Tout
+    /// se récupère en un clic, s'affiche, et se copie d'un bloc — pour être
+    /// collé à qui débogue.
+    fn admin_diag_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui::group_title(ui, Icon::Info, "Diagnostics des joueurs");
+        ui::hint(
+            ui,
+            "n'existe que pour ceux qui ont coché « Partager mes diagnostics » dans \
+             leurs réglages audio — technique seulement, jamais les messages ni la voix",
+        );
+        ui.add_space(6.0);
+        if ui::button(ui, Icon::Refresh, "Récupérer tous les diagnostics").clicked() {
+            let base = self.http_base();
+            let agent = self.http_agent();
+            let token_hex = format!("{:x}", self.voice_token);
+            let slot = self.diag_admin.clone();
+            *slot.lock().unwrap() = Some("récupération en cours…".into());
+            std::thread::spawn(move || {
+                let resultat = (|| -> Result<String, String> {
+                    let liste = agent
+                        .get(&format!("{base}/diag"))
+                        .set("x-ki-token", &token_hex)
+                        .call()
+                        .map_err(|e| e.to_string())?
+                        .into_string()
+                        .map_err(|e| e.to_string())?;
+                    if liste.trim().is_empty() {
+                        return Ok("aucun diagnostic reçu pour l'instant — personne n'a \
+                                   coché l'option, ou le serveur vient d'être redéployé"
+                            .into());
+                    }
+                    // La fin de chaque archive suffit : c'est le passé récent
+                    // qu'on débogue, et l'affichage comme le presse-papiers
+                    // n'ont pas à charrier des mégaoctets d'historique.
+                    let mut tout = String::new();
+                    for ligne in liste.lines() {
+                        let Some(fichier) = ligne.split('\t').next() else { continue };
+                        tout.push_str(&format!("\n===== {ligne} =====\n"));
+                        match agent
+                            .get(&format!("{base}/diag/{fichier}?tail=65536"))
+                            .set("x-ki-token", &token_hex)
+                            .call()
+                        {
+                            Ok(r) => tout.push_str(&r.into_string().unwrap_or_default()),
+                            Err(e) => tout.push_str(&format!("(illisible : {e})\n")),
+                        }
+                    }
+                    Ok(tout)
+                })();
+                *slot.lock().unwrap() = Some(match resultat {
+                    Ok(t) => t,
+                    Err(e) => format!("échec de la récupération : {e}"),
+                });
+            });
+        }
+        let contenu = self.diag_admin.lock().unwrap().clone();
+        if let Some(texte) = contenu {
+            ui.add_space(6.0);
+            if ui::button(ui, Icon::Copy, "Tout copier").clicked() {
+                ctx.copy_text(texte.clone());
+                self.info = Some("diagnostics copiés — prêts à coller".into());
+            }
+            ui.add_space(4.0);
+            // L'affichage est borné aux derniers caractères : des mégaoctets
+            // de journal mettraient l'interface à genoux. La copie, elle,
+            // emporte tout ce qui a été récupéré.
+            let debut = texte
+                .char_indices()
+                .rev()
+                .nth(20_000)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                ui.label(
+                    RichText::new(&texte[debut..]).monospace().size(11.0).color(TEXT),
+                );
+            });
+        }
+    }
+
     fn admin_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut to_send: Vec<ClientMsg> = Vec::new();
@@ -5715,6 +5873,7 @@ impl KiApp {
                             AdminTab::Members => self.admin_members_tab(ui, &mut to_send),
                             AdminTab::Invites => self.admin_invites_tab(ui, ctx, &mut to_send),
                             AdminTab::Audit => self.admin_audit_tab(ui),
+                            AdminTab::Diagnostics => self.admin_diag_tab(ui, ctx),
                         }
                         if let Some(info) = self.info.clone() {
                             ui.add_space(10.0);

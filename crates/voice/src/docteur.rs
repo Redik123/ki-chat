@@ -153,7 +153,7 @@ impl Diagnostic {
         // par le drapeau : le réglage n'existe dans le registre que si
         // quelqu'un l'a touché, si bien que son absence ne prouve rien. La
         // famine du micro, elle, est mesurée par le moteur lui-même.
-        if self.ouvertures_affamees >= 3 {
+        if self.ouvertures_affamees >= 3 && !self.micro_communications {
             out.push(format!(
                 "Le micro s'est ouvert {} fois sans livrer un seul bloc. C'est la \
                  signature d'une voie de capture tenue par un autre logiciel — la voix \

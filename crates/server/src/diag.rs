@@ -15,10 +15,11 @@
 //!
 //! - `POST /diag` : le client authentifié (jeton voix, comme l'upload de
 //!   fichiers) ajoute des lignes JSONL à son propre dossier.
-//! - `GET /diag` et `GET /diag/{fichier}` : lecture, réservée au porteur du
-//!   jeton d'administration — un secret généré au premier démarrage dans
-//!   `data/diag.token`, à lire sur le serveur. Il ne circule jamais dans le
-//!   protocole.
+//! - `GET /diag` et `GET /diag/{fichier}` : lecture, par deux portes — la
+//!   session d'un compte ADMINISTRATOR (c'est l'onglet « Diagnostics » du
+//!   panneau d'administration), ou le jeton `data/diag.token` généré au
+//!   premier démarrage (l'accès hors application, depuis une machine de
+//!   confiance ; il ne circule jamais dans le protocole).
 //!
 //! Le stock est borné par utilisateur (rotation) : les diagnostics racontent
 //! les derniers jours, pas l'histoire du monde.
@@ -97,7 +98,7 @@ pub async fn upload(
     );
     let texte = texte.to_owned();
 
-    // Écriture sur le pool bloquant : ce chemin est rare (une minute au
+    // Écriture sur le pool bloquant : ce chemin est rare (dix minutes au
     // mieux par client volontaire), mais un write n'a rien à faire sur la
     // boucle qui relaie la voix de tout le monde.
     let resultat = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -155,15 +156,26 @@ pub fn init(state: &AppState) {
     }
 }
 
-/// L'appelant porte-t-il le jeton d'administration (en-tête x-ki-admin) ?
-fn admin_ok(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(fourni) = headers.get("x-ki-admin").and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    match jeton_admin(state) {
-        Ok(attendu) => fourni == attendu,
-        Err(_) => false,
+/// L'appelant a-t-il le droit de LIRE les archives ? Deux portes, une par
+/// usage : le jeton d'administration du disque (en-tête x-ki-admin — l'accès
+/// hors application, curl depuis une machine de confiance), ou la session
+/// d'un compte ADMINISTRATOR (en-tête x-ki-token — l'onglet « Diagnostics »
+/// du panneau d'administration).
+fn lecteur_autorise(state: &AppState, headers: &HeaderMap) -> bool {
+    let admin = headers.get("x-ki-admin").and_then(|v| v.to_str().ok());
+    if let (Some(fourni), Ok(attendu)) = (admin, jeton_admin(state)) {
+        if fourni == attendu {
+            return true;
+        }
     }
+    let token = headers
+        .get("x-ki-token")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| u64::from_str_radix(s, 16).ok());
+    if let Some((user_id, _)) = token.and_then(|t| state.user_by_voice_token(t)) {
+        return state.holds(user_id, ki_protocol::perm::ADMINISTRATOR);
+    }
+    false
 }
 
 /// GET /diag — la liste des archives : une ligne par fichier, taille et date.
@@ -171,8 +183,8 @@ pub async fn lister(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !admin_ok(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "jeton d'administration requis").into_response();
+    if !lecteur_autorise(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
     }
     let dir = diag_dir(&state);
     let liste = tokio::task::spawn_blocking(move || {
@@ -203,14 +215,22 @@ pub async fn lister(
     (StatusCode::OK, liste).into_response()
 }
 
-/// GET /diag/{fichier} — une archive, en texte brut.
+#[derive(serde::Deserialize)]
+pub struct LireParams {
+    /// Ne renvoyer que les N derniers octets (borné à 512 Ko) : la page
+    /// d'administration débogue le passé récent, pas l'histoire complète.
+    tail: Option<u64>,
+}
+
+/// GET /diag/{fichier}[?tail=N] — une archive, en texte brut.
 pub async fn lire(
     State(state): State<Arc<AppState>>,
     Path(fichier): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<LireParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !admin_ok(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "jeton d'administration requis").into_response();
+    if !lecteur_autorise(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
     }
     // Seuls les noms que nous générons passent : pas de traversée de chemin.
     let valide = fichier
@@ -226,7 +246,21 @@ pub async fn lire(
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::read_to_string(diag_dir(&state).join(&fichier)).await {
-        Ok(texte) => (StatusCode::OK, texte).into_response(),
+        Ok(texte) => {
+            let texte = match params.tail {
+                Some(n) => {
+                    let vise = texte.len().saturating_sub(n.min(512 * 1024) as usize);
+                    // Découpe à une frontière de caractère : on rend du texte,
+                    // pas un début d'UTF-8 tronqué.
+                    let debut = (vise..=texte.len())
+                        .find(|i| texte.is_char_boundary(*i))
+                        .unwrap_or(0);
+                    texte[debut..].to_string()
+                }
+                None => texte,
+            };
+            (StatusCode::OK, texte).into_response()
+        }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }

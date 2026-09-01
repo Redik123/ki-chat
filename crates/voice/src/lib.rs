@@ -533,6 +533,13 @@ struct Shared {
     /// capture et lecture ferment et rouvrent leur périphérique — l'effet
     /// d'un débranchement/rebranchement, sans toucher au câble.
     audio_reset: std::sync::atomic::AtomicU64,
+    /// Micro affamé : la bascule en catégorie « communications » est
+    /// **proposée** à l'utilisateur, jamais imposée — c'est elle qui peut
+    /// faire baisser le volume de ses autres sons, à lui de choisir.
+    comms_proposed: AtomicBool,
+    /// Sa réponse : 0 = en attente, 1 = acceptée, 2 = refusée (et l'on
+    /// n'insiste plus de la session — il règle son casque lui-même).
+    comms_decision: std::sync::atomic::AtomicU8,
     input_lost: AtomicBool,
     /// On capte, mais sur un périphérique de repli : celui qui est réglé n'a
     /// pas été trouvé. C'est un état distinct de la perte — le son passe.
@@ -591,6 +598,8 @@ impl VoiceEngine {
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
             audio_reset: std::sync::atomic::AtomicU64::new(0),
+            comms_proposed: AtomicBool::new(false),
+            comms_decision: std::sync::atomic::AtomicU8::new(0),
             input_lost: AtomicBool::new(false),
             input_fallback: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
@@ -851,6 +860,22 @@ impl VoiceEngine {
             micro_communications: self.shared.counters.comms_capture.load(Ordering::Relaxed),
             attenuation_windows: attenuation_communications(),
         }
+    }
+
+    /// Une bascule du micro en catégorie « communications » attend-elle la
+    /// réponse de l'utilisateur ? (Micro affamé détecté ; l'interface
+    /// affiche alors la demande et répond par `resolve_comms`.)
+    pub fn comms_proposal(&self) -> bool {
+        self.shared.comms_proposed.load(Ordering::Relaxed)
+            && self.shared.comms_decision.load(Ordering::Relaxed) == 0
+    }
+
+    /// La réponse de l'utilisateur à la proposition de bascule. Un refus
+    /// vaut pour la session : on ne redemande pas.
+    pub fn resolve_comms(&self, accept: bool) {
+        self.shared
+            .comms_decision
+            .store(if accept { 1 } else { 2 }, Ordering::Relaxed);
     }
 
     pub fn shutdown(mut self) {
@@ -1162,6 +1187,23 @@ fn capture_loop(
     // alors sans relancer le moteur, donc sans perdre l'encodeur ni le
     // compteur de nonces.
     'device: while !is_shutdown(&sh) {
+        // La bascule « communications » proposée a-t-elle été acceptée
+        // depuis ? Elle s'applique à cette réouverture — pendant une famine,
+        // il y en a une toutes les quelques secondes.
+        if native
+            && !comms
+            && sh.comms_proposed.load(Ordering::Relaxed)
+            && sh.comms_decision.load(Ordering::Relaxed) == 1
+        {
+            comms = true;
+            sh.counters.comms_capture.store(true, Ordering::Relaxed);
+            journal(
+                "bascule acceptée — micro en catégorie communications (voie \
+                 partagée avec la voix du jeu). Si le volume de tes autres sons \
+                 chute : Panneau son Windows → Communications → « Ne rien faire »"
+                    .into(),
+            );
+        }
         let opened = open_input(device_name.as_deref(), native, raw, comms);
         let OpenedInput { stream, chunks, rate: in_rate, alive, fallback } = match opened {
             Ok(parts) => {
@@ -1299,16 +1341,20 @@ fn capture_loop(
                              intégrée d'un jeu, pilote du casque)"
                                 .into(),
                         );
-                        if native && !comms {
-                            comms = true;
-                            sh.counters.comms_capture.store(true, Ordering::Relaxed);
-                            starved_opens = 0;
+                        // La bascule n'est plus imposée : elle est PROPOSÉE.
+                        // C'est elle qui peut faire baisser le volume des
+                        // autres sons chez l'utilisateur — à lui de choisir,
+                        // en connaissance, via la fenêtre que l'interface
+                        // affiche tant que la question est ouverte. Un refus
+                        // vaut pour la session.
+                        if native
+                            && !comms
+                            && sh.comms_decision.load(Ordering::Relaxed) == 0
+                            && !sh.comms_proposed.swap(true, Ordering::Relaxed)
+                        {
                             journal(
-                                "micro passé en catégorie communications — la voie de \
-                                 traitement est désormais partagée avec la voix du jeu. \
-                                 Si le volume de tes autres sons chute pendant le vocal : \
-                                 Panneau son Windows → onglet Communication → « Ne rien \
-                                 faire »"
+                                "bascule du micro en catégorie communications proposée \
+                                 — en attente de ta réponse (fenêtre à l'écran)"
                                     .into(),
                             );
                         }

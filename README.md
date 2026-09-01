@@ -201,13 +201,16 @@ retiré puis rajouté à leur carnet. Sauvegarde ce fichier avec le reste.
 ## Diagnostics partagés (opt-in)
 
 Chaque joueur peut cocher « Partager mes diagnostics avec l'admin du
-serveur » (⚙ Audio). Son client envoie alors chaque minute son **journal
-technique** — périphériques ouverts/perdus, réouvertures, version, rapport
-du docteur audio — jamais les messages, jamais la voix. Le serveur archive
-tout dans `data/diag/`, un fichier JSONL par joueur, borné (~10 Mo, rotation).
+serveur » (⚙ Audio). Son client envoie alors toutes les 10 minutes son
+**journal technique** — périphériques ouverts/perdus, réouvertures, version,
+rapport du docteur audio — jamais les messages, jamais la voix. Le serveur
+archive tout dans `data/diag/`, un fichier JSONL par joueur, borné (~10 Mo,
+rotation).
 
-Lecture à distance, réservée au porteur du jeton `data/diag.token`
-(généré au premier démarrage, à lire sur la machine du serveur) :
+Lecture : un compte **ADMINISTRATOR** a l'onglet « Diagnostics » dans le
+panneau d'administration — tout se récupère et se copie en deux clics. Et
+hors application, le porteur du jeton `data/diag.token` (généré au premier
+démarrage, à lire sur la machine du serveur) :
 
 ```bash
 curl -k -H "x-ki-admin: $(cat diag.token)" https://ton-serveur:8080/diag
