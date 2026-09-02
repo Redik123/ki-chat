@@ -7,6 +7,7 @@ mod icons;
 mod images;
 mod markup;
 mod net;
+mod overlay;
 mod partage;
 mod perf;
 mod photos;
@@ -105,6 +106,11 @@ fn main() -> eframe::Result {
             .with_inner_size([1120.0, 720.0])
             .with_min_inner_size([900.0, 560.0])
             .with_title("ki-chat")
+            // Fond transparent : la fenêtre est peinte de bord à bord par
+            // ses panneaux, et l'overlay en jeu — une fenêtre fille qui
+            // partage cette configuration graphique — a besoin d'un canal
+            // alpha pour laisser voir le jeu.
+            .with_transparent(true)
             .with_icon(std::sync::Arc::new(theme::app_icon())),
         // eframe mémorisait la géométrie et la remettait au lancement — y
         // compris une origine sur un écran secondaire débranché depuis,
@@ -522,6 +528,8 @@ struct KiApp {
     sources: partage::Sources,
     /// Le sélecteur « Diffuser mon écran » est ouvert.
     show_diffusion: bool,
+    /// L'overlay « qui parle » par-dessus le jeu.
+    overlay: overlay::Overlay,
     /// Cadences instantanées : ce que j'émets, ce que je reçois.
     cadence_live: partage::Cadence,
     cadence_regard: partage::Cadence,
@@ -839,6 +847,7 @@ impl KiApp {
             diffusion: partage::Reglages::load(get),
             sources: Default::default(),
             show_diffusion: false,
+            overlay: overlay::Overlay::load(get),
             cadence_live: partage::Cadence::new(),
             cadence_regard: partage::Cadence::new(),
             journal_flux: std::time::Instant::now(),
@@ -3124,6 +3133,7 @@ impl KiApp {
         self.comms_popup(ctx, voice);
         self.partage_windows(ctx);
         self.diffusion_window(ctx);
+        self.overlay_en_jeu(ctx, voice);
 
         if self.show_settings {
             self.settings_window(ctx, voice);
@@ -5307,6 +5317,13 @@ impl KiApp {
                             }
                         }
 
+                        // --- Overlay en jeu ---
+                        ui.add_space(12.0);
+                        ui::hairline(ui);
+                        ui.add_space(10.0);
+                        ui::group_title(ui, Icon::User, "Overlay en jeu");
+                        overlay::reglages_ui(ui, &mut self.overlay);
+
                         // --- Effets sonores ---
                         ui.add_space(12.0);
                         ui::hairline(ui);
@@ -6163,6 +6180,38 @@ impl KiApp {
             r.arreter();
         }
         self.regard_tex = None;
+    }
+
+    /// L'overlay « qui parle » : les occupants de mon salon vocal, avec
+    /// l'anneau de ceux qui parlent — la même règle que la liste des
+    /// membres (mon état local pour moi, le drapeau serveur ou le niveau
+    /// reçu pour les autres).
+    fn overlay_en_jeu(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
+        let Some(channel) = self.voice_channel else {
+            self.overlay.montrer(ctx, Vec::new(), self.window_focused);
+            return;
+        };
+        let lignes: Vec<overlay::Ligne> = self
+            .members
+            .iter()
+            .filter(|m| m.voice == Some(channel))
+            .map(|m| {
+                let is_me = Some(m.user_id) == self.my_id;
+                let level = if is_me {
+                    voice.stats.mic_peak
+                } else {
+                    voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
+                };
+                let parle =
+                    if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
+                overlay::Ligne {
+                    nom: m.username.clone(),
+                    parle,
+                    photo: self.avatar_of(m.user_id).cloned(),
+                }
+            })
+            .collect();
+        self.overlay.montrer(ctx, lignes, self.window_focused);
     }
 
     /// Le sélecteur « Diffuser mon écran » : la source, les réglages, et le
@@ -8506,6 +8555,12 @@ fn megabytes(bytes: u64) -> f32 {
 }
 
 impl eframe::App for KiApp {
+    /// Fond vide : les panneaux couvrent la fenêtre principale, et l'overlay
+    /// en jeu ne peint que ses pilules — le jeu se voit entre.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // La mesure encadre TOUT le corps de `update`, sinon elle mentirait
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
@@ -8653,6 +8708,7 @@ impl eframe::App for KiApp {
         storage.set_string("diag_share", if self.diag_share { "on" } else { "off" }.into());
         storage.set_string("diag_crash_envoye", self.diag_crash_envoye.clone());
         self.diffusion.save(storage);
+        self.overlay.save(storage);
         if let Ok(json) = serde_json::to_string(&self.all_volumes) {
             storage.set_string("user_volumes", json);
         }
