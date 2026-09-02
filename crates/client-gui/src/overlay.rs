@@ -128,6 +128,8 @@ pub struct Overlay {
     pub coin: Coin,
     /// Montrer aussi ceux qui se taisent ; sinon, seulement qui parle.
     pub toujours: bool,
+    /// Le pseudo à côté du rond, dans une pilule ; sinon le rond seul.
+    pub pseudo: bool,
     /// Dernier signal de parole par pseudo : l'anneau tient un peu après,
     /// sans quoi il clignoterait au rythme des trames.
     recemment: HashMap<String, Instant>,
@@ -158,6 +160,8 @@ fn plein_ecran_exclusif() -> bool {
 }
 
 const AVATAR: f32 = 22.0;
+/// Le rond seul, sans pseudo : un peu plus grand, il est tout l'overlay.
+const AVATAR_SEUL: f32 = 32.0;
 const HAUTEUR_LIGNE: f32 = 28.0;
 const ECART: f32 = 4.0;
 const PAD: f32 = 5.0;
@@ -173,6 +177,7 @@ impl Overlay {
             // Par défaut, rien à l'écran tant que personne ne parle : la
             // discrétion d'abord.
             toujours: get("overlay_toujours", "off") == "on",
+            pseudo: get("overlay_pseudo", "off") == "on",
             recemment: HashMap::new(),
             exclusif: false,
             sonde: Instant::now(),
@@ -185,6 +190,7 @@ impl Overlay {
         storage.set_string("overlay", if self.actif { "on" } else { "off" }.into());
         storage.set_string("overlay_coin", self.coin.id().into());
         storage.set_string("overlay_toujours", if self.toujours { "on" } else { "off" }.into());
+        storage.set_string("overlay_pseudo", if self.pseudo { "on" } else { "off" }.into());
     }
 
     /// Montre (ou non) l'overlay pour cette image. `focus_principal` : la
@@ -249,20 +255,31 @@ impl Overlay {
             return;
         }
 
-        // Une pilule par personne, ajustée à son pseudo : pas de bloc.
+        // Sans pseudo : un rond par personne, rien d'autre. Avec : une
+        // pilule ajustée à son pseudo — jamais un bloc.
+        let avec_pseudo = self.pseudo;
         let police = egui::FontId::proportional(12.5);
-        let largeurs: Vec<f32> = affichees
-            .iter()
-            .map(|(nom, _, _)| {
-                ctx.fonts(|f| f.layout_no_wrap(nom.clone(), police.clone(), Color32::WHITE))
-                    .size()
-                    .x
-            })
-            .collect();
-        let largeur_pilule = |texte: f32| PAD + AVATAR + 6.0 + texte + PAD + 2.0;
-        let largeur = largeurs.iter().copied().fold(0.0, f32::max);
-        let largeur = largeur_pilule(largeur).ceil();
-        let hauteur = (affichees.len() as f32 * (HAUTEUR_LIGNE + ECART) - ECART + 2.0).ceil();
+        let largeurs: Vec<f32> = if avec_pseudo {
+            affichees
+                .iter()
+                .map(|(nom, _, _)| {
+                    ctx.fonts(|f| f.layout_no_wrap(nom.clone(), police.clone(), Color32::WHITE))
+                        .size()
+                        .x
+                })
+                .collect()
+        } else {
+            vec![0.0; affichees.len()]
+        };
+        let largeur_pilule = move |texte: f32| PAD + AVATAR + 6.0 + texte + PAD + 2.0;
+        let (taille_avatar, hauteur_ligne) =
+            if avec_pseudo { (AVATAR, HAUTEUR_LIGNE) } else { (AVATAR_SEUL, AVATAR_SEUL + 4.0) };
+        let largeur = if avec_pseudo {
+            largeur_pilule(largeurs.iter().copied().fold(0.0, f32::max)).ceil()
+        } else {
+            hauteur_ligne
+        };
+        let hauteur = (affichees.len() as f32 * (hauteur_ligne + ECART) - ECART + 2.0).ceil();
         let ecran = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(Vec2::new(1920.0, 1080.0));
@@ -291,7 +308,31 @@ impl Overlay {
                 let rect = ui.max_rect();
                 let painter = ui.painter();
                 for (i, (nom, parle, photo)) in affichees.iter().enumerate() {
-                    let y = rect.top() + 1.0 + i as f32 * (HAUTEUR_LIGNE + ECART);
+                    let y = rect.top() + 1.0 + i as f32 * (hauteur_ligne + ECART);
+                    if !avec_pseudo {
+                        // Le rond seul : la photo ou l'initiale, l'anneau
+                        // vert quand ça parle, un voile quand ça se tait.
+                        let avatar = Rect::from_min_size(
+                            Pos2::new(rect.left() + 2.0, y + 2.0),
+                            Vec2::splat(taille_avatar),
+                        );
+                        ui::paint_avatar(
+                            painter,
+                            avatar,
+                            nom,
+                            *parle,
+                            photo.as_ref(),
+                            Color32::TRANSPARENT,
+                        );
+                        if !*parle {
+                            painter.circle_filled(
+                                avatar.center(),
+                                taille_avatar / 2.0,
+                                Color32::from_rgba_unmultiplied(0, 0, 0, 130),
+                            );
+                        }
+                        continue;
+                    }
                     let pilule = Rect::from_min_size(
                         Pos2::new(rect.left(), y),
                         Vec2::new(largeur_pilule(largeurs[i]), HAUTEUR_LIGNE),
@@ -376,6 +417,13 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
                 });
         });
         if ui
+            .checkbox(&mut o.pseudo, "Afficher le pseudo à côté du rond")
+            .on_hover_text("décoché : juste le rond de l'avatar, avec l'anneau vert de qui parle")
+            .changed()
+        {
+            change = true;
+        }
+        if ui
             .checkbox(&mut o.toujours, "Montrer aussi ceux qui se taisent (estompés)")
             .on_hover_text(
                 "décoché : seuls ceux qui parlent apparaissent, et l'overlay disparaît au \
@@ -433,13 +481,14 @@ mod tests {
             fn flush(&mut self) {}
         }
         let mut o = Overlay::load(|_, d| d.to_string());
-        assert!(o.actif && !o.toujours && !o.exclusif);
+        assert!(o.actif && !o.toujours && !o.pseudo && !o.exclusif);
         o.actif = false;
         o.coin = Coin::BasDroite;
         o.toujours = true;
+        o.pseudo = true;
         o.save(&mut M(&mut memoire));
         let relu = Overlay::load(|k, d| memoire.get(k).cloned().unwrap_or_else(|| d.to_string()));
-        assert!(!relu.actif && relu.toujours);
+        assert!(!relu.actif && relu.toujours && relu.pseudo);
         assert_eq!(relu.coin, Coin::BasDroite);
     }
 }
