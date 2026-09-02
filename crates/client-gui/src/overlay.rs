@@ -24,6 +24,13 @@ use crate::ui::{self, Tone};
 /// pour la remettre au-dessus.
 const TITRE: &str = "ki-chat — qui parle";
 
+/// La couleur de fond réservée, que Windows rend transparente (clé de
+/// couleur) : un noir presque pur, pour que le lissage des bords des ronds
+/// fonde vers du sombre et qu'aucune photo n'en contienne exactement.
+pub const CLE: [f32; 4] = [1.0 / 255.0, 0.0, 1.0 / 255.0, 1.0];
+/// La même, au format COLORREF de Windows (0x00BBGGRR).
+const CLE_COLORREF: u32 = 0x0001_0001;
+
 /// Les deux gestes Windows que l'overlay a besoin de faire lui-même : se
 /// remettre au sommet de la pile des fenêtres « toujours au-dessus » (les
 /// jeux s'y remettent aussi, à chaque reprise du focus — la dernière
@@ -31,13 +38,24 @@ const TITRE: &str = "ki-chat — qui parle";
 #[cfg(windows)]
 mod win {
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::COLORREF;
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowTextW, SetWindowPos,
-        GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+        FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowTextW,
+        SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+        LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TOPMOST,
+        WS_EX_TRANSPARENT,
     };
 
     /// Remet la fenêtre `titre` au sommet des « toujours au-dessus », sans
-    /// la déplacer ni l'activer. `false` si elle n'existe pas (encore).
+    /// la déplacer ni l'activer, et lui (re)donne sa clé de couleur.
+    /// `false` si elle n'existe pas (encore).
+    ///
+    /// Pourquoi une clé de couleur : « les clics passent à travers » se
+    /// fait à Windows par le style `WS_EX_LAYERED`, et une fenêtre en
+    /// couches ignore la transparence par pixel de ce qu'on y dessine — le
+    /// fond sortait noir. Avec la clé, chaque pixel de la couleur réservée
+    /// (`CLE`, peinte en fond) est transparent ET laisse passer les clics :
+    /// c'est la technique de tous les overlays de viseur.
     pub fn remettre_au_dessus(titre: &str) -> bool {
         let large: Vec<u16> = titre.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
@@ -45,6 +63,12 @@ mod win {
             if hwnd.is_invalid() {
                 return false;
             }
+            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let voulu = ex | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
+            if voulu != ex {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, voulu as i32);
+            }
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(super::CLE_COLORREF), 255, LWA_COLORKEY);
             SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -292,10 +316,12 @@ impl Overlay {
         };
         let anime = affichees.iter().any(|(_, parle, _)| *parle);
         let id = egui::ViewportId::from_hash_of("overlay-qui-parle");
+        // Pas de « transparent » ici : la transparence vient de la clé de
+        // couleur (voir `win::remettre_au_dessus`), la seule qui marche avec
+        // les clics à travers.
         let builder = ViewportBuilder::default()
             .with_title(TITRE)
             .with_decorations(false)
-            .with_transparent(true)
             .with_always_on_top()
             .with_taskbar(false)
             .with_resizable(false)
@@ -378,8 +404,10 @@ impl Overlay {
         // Les jeux en fenêtré plein écran se remettent eux-mêmes tout en
         // haut quand ils reprennent le focus, par-dessus nous — Valorant le
         // fait. Toutes les 300 ms, on repasse au sommet de la pile des
-        // fenêtres « toujours au-dessus », sans bouger ni prendre le focus :
-        // ce que font toutes les apps de viseur, pour la même raison.
+        // fenêtres « toujours au-dessus », sans bouger ni prendre le focus,
+        // et l'on réaffirme la clé de couleur au passage : ce que font
+        // toutes les apps de viseur, pour la même raison. (La première fois
+        // passe tout de suite : le dernier passage date du lancement.)
         if now.duration_since(self.reaffirme) > Duration::from_millis(300) {
             self.reaffirme = now;
             win::remettre_au_dessus(TITRE);

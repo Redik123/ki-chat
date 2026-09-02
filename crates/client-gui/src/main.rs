@@ -106,11 +106,6 @@ fn main() -> eframe::Result {
             .with_inner_size([1120.0, 720.0])
             .with_min_inner_size([900.0, 560.0])
             .with_title("ki-chat")
-            // Fond transparent : la fenêtre est peinte de bord à bord par
-            // ses panneaux, et l'overlay en jeu — une fenêtre fille qui
-            // partage cette configuration graphique — a besoin d'un canal
-            // alpha pour laisser voir le jeu.
-            .with_transparent(true)
             .with_icon(std::sync::Arc::new(theme::app_icon())),
         // eframe mémorisait la géométrie et la remettait au lancement — y
         // compris une origine sur un écran secondaire débranché depuis,
@@ -8555,10 +8550,12 @@ fn megabytes(bytes: u64) -> f32 {
 }
 
 impl eframe::App for KiApp {
-    /// Fond vide : les panneaux couvrent la fenêtre principale, et l'overlay
-    /// en jeu ne peint que ses pilules — le jeu se voit entre.
+    /// Le fond de toute fenêtre est la couleur-clé de l'overlay : Windows
+    /// la rend transparente sur la fenêtre de l'overlay (c'est ainsi que le
+    /// jeu se voit entre les ronds), et les panneaux couvrent la fenêtre
+    /// principale de bord à bord — on ne l'y voit jamais.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        overlay::CLE
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
