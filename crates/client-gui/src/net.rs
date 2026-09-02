@@ -212,6 +212,9 @@ pub struct NetHandle {
     /// Contrairement au lien audio, rien ici ne survit à la connexion : une
     /// coupure met fin au stream côté serveur de toute façon.
     video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    /// Où aiguiller les datagrammes de son du jeu entrants — le lecteur du
+    /// spectateur en est l'autre bout. Même vie que l'aiguillage vidéo.
+    game_audio_feed: Arc<Mutex<Option<std_mpsc::Sender<bytes::Bytes>>>>,
     /// Poignée du runtime réseau, pour lancer la tâche d'émission vidéo
     /// depuis le fil de l'interface.
     rt: Arc<Mutex<Option<tokio::runtime::Handle>>>,
@@ -258,6 +261,43 @@ impl NetHandle {
     /// décodeur du spectateur en est l'autre bout.
     pub fn set_video_feed(&self, tx: Option<std_mpsc::Sender<Vec<u8>>>) {
         *self.video_feed.lock().unwrap() = tx;
+    }
+
+    /// Pose (ou retire) l'aiguillage du son du jeu entrant.
+    pub fn set_game_audio_feed(&self, tx: Option<std_mpsc::Sender<bytes::Bytes>>) {
+        *self.game_audio_feed.lock().unwrap() = tx;
+    }
+
+    /// Prépare l'émission du son du jeu : rend le rappel à donner à la
+    /// capture. Chaque paquet Opus est chiffré (clé du stream, en-tête en
+    /// AAD, domaine de nonce 2) et part en datagramme — jamais bloquant, et
+    /// un paquet que la connexion ne peut pas prendre est simplement perdu,
+    /// comme la voix.
+    pub fn game_audio_emit(&self, stream_id: u32, key: [u8; 32]) -> ki_voice::jeu::PaquetAudio {
+        let conn_slot = self.link.conn.clone();
+        let cipher = XChaCha20Poly1305::new(&key.into());
+        let seq = AtomicU64::new(0);
+        Arc::new(move |opus: &[u8], pts_us: u64| {
+            let s = seq.fetch_add(1, AtomOrd::Relaxed);
+            let mut head = [0u8; ki_protocol::AUDIO_HEADER_LEN];
+            ki_protocol::write_audio_header(
+                &mut head,
+                &ki_protocol::AudioHeader { stream_id, seq: s, pts_us },
+            );
+            let nonce =
+                ki_protocol::nonce_for_media(ki_protocol::MEDIA_DOMAIN_GAME_AUDIO, stream_id, s);
+            let Ok(sealed) =
+                cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: opus, aad: &head })
+            else {
+                return;
+            };
+            let mut bytes = Vec::with_capacity(head.len() + sealed.len());
+            bytes.extend_from_slice(&head);
+            bytes.extend_from_slice(&sealed);
+            if let Some(c) = conn_slot.lock().unwrap().as_ref() {
+                let _ = c.send_datagram(bytes::Bytes::from(bytes));
+            }
+        })
     }
 
     /// Prépare l'émission du partage d'écran : rend le rappel à donner à la
@@ -393,11 +433,14 @@ pub fn connect(
     let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
     let (event_tx, event_rx) = std_mpsc::channel();
     let video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+    let game_audio_feed: Arc<Mutex<Option<std_mpsc::Sender<bytes::Bytes>>>> =
+        Arc::new(Mutex::new(None));
     let rt_slot: Arc<Mutex<Option<tokio::runtime::Handle>>> = Arc::new(Mutex::new(None));
 
     let worker = std::thread::spawn({
         let link = link.clone();
-        let (video_feed, rt_slot) = (video_feed.clone(), rt_slot.clone());
+        let (video_feed, audio_feed, rt_slot) =
+            (video_feed.clone(), game_audio_feed.clone(), rt_slot.clone());
         move || {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -408,11 +451,21 @@ pub fn connect(
                 }
             };
             *rt_slot.lock().unwrap() = Some(rt.handle().clone());
-            rt.block_on(run(url, creds, prefs, cmd_rx, event_tx, link, video_feed, ctx));
+            rt.block_on(run(
+                url, creds, prefs, cmd_rx, event_tx, link, video_feed, audio_feed, ctx,
+            ));
         }
     });
 
-    NetHandle { cmd_tx, events: event_rx, link, video_feed, rt: rt_slot, worker: Some(worker) }
+    NetHandle {
+        cmd_tx,
+        events: event_rx,
+        link,
+        video_feed,
+        game_audio_feed,
+        rt: rt_slot,
+        worker: Some(worker),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -424,6 +477,7 @@ async fn run(
     event_tx: std_mpsc::Sender<Event>,
     link: VoiceLink,
     video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    audio_feed: Arc<Mutex<Option<std_mpsc::Sender<bytes::Bytes>>>>,
     ctx: eframe::egui::Context,
 ) {
     use std::sync::atomic::Ordering;
@@ -461,12 +515,21 @@ async fn run(
     let (mut writer, mut reader) = client.split();
     *conn_slot.lock().unwrap() = Some(writer.conn.clone());
 
-    // Datagrammes voix entrants -> moteur audio (via l'aiguillage).
+    // Datagrammes entrants : le son du jeu vers le lecteur du spectateur,
+    // la voix vers le moteur audio (via l'aiguillage).
     {
         let conn = writer.conn.clone();
         let feed = feed_slot.clone();
+        let audio_feed = audio_feed.clone();
         tokio::spawn(async move {
             while let Ok(dat) = conn.read_datagram().await {
+                if ki_protocol::is_audio_datagram(&dat) {
+                    let g = audio_feed.lock().unwrap();
+                    if let Some(tx) = g.as_ref() {
+                        let _ = tx.send(dat);
+                    }
+                    continue;
+                }
                 let feed = feed.lock().unwrap();
                 if let Some(tx) = feed.as_ref() {
                     // `dat` est un `Bytes` : le transmettre ne copie rien, là

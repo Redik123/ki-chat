@@ -530,6 +530,8 @@ struct KiApp {
     cadence_regard: partage::Cadence,
     /// Dernière ligne de stats de diffusion consignée au journal.
     journal_flux: std::time::Instant,
+    /// Volume du son du jeu du stream que je regarde (1.0 = 100 %).
+    regard_volume: f32,
     /// Docteur audio déplié dans les réglages.
     show_docteur: bool,
     /// Diagnostic partagé : le journal technique part vers le serveur
@@ -846,6 +848,7 @@ impl KiApp {
             cadence_live: partage::Cadence::new(),
             cadence_regard: partage::Cadence::new(),
             journal_flux: std::time::Instant::now(),
+            regard_volume: 1.0,
             regard: None,
             regard_tex: None,
             show_docteur: false,
@@ -6043,6 +6046,7 @@ impl KiApp {
             force_idr.clone(),
         ) {
             Ok(boucle) => {
+                let avec_son = reglages.son;
                 self.go_live = Some(partage::GoLive {
                     boucle,
                     stats,
@@ -6053,16 +6057,39 @@ impl KiApp {
                     force_idr,
                     cadence,
                     reglages,
+                    key,
+                    audio: None,
                 });
                 self.cadence_live = partage::Cadence::new();
                 self.journal_flux = std::time::Instant::now();
                 ki_voice::journal(format!("diffusion démarrée (stream {stream_id})"));
                 self.info = Some("tu diffuses ton écran".into());
+                if avec_son {
+                    let audio = self.demarrer_son_du_jeu(stream_id, key);
+                    if let Some(g) = &mut self.go_live {
+                        g.audio = audio;
+                    }
+                }
             }
             Err(e) => {
                 ki_voice::journal(format!("diffusion impossible : {e:#}"));
                 self.info = Some(format!("capture impossible : {e:#}"));
                 self.send(ClientMsg::StreamStop);
+            }
+        }
+    }
+
+    /// Le son du jeu : la boucle de tout le système sauf ki-chat, en Opus
+    /// stéréo, chiffré avec la clé du stream. Un échec (Windows trop
+    /// ancien, refus du système) n'empêche pas la vidéo — il se dit.
+    fn demarrer_son_du_jeu(&mut self, stream_id: u32, key: [u8; 32]) -> Option<ki_voice::jeu::GameAudio> {
+        let emit = self.conn.as_ref()?.game_audio_emit(stream_id, key);
+        match ki_voice::jeu::GameAudio::start(96_000, emit) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                ki_voice::journal(format!("son du jeu indisponible : {e:#}"));
+                self.info = Some(format!("son du jeu indisponible : {e:#}"));
+                None
             }
         }
     }
@@ -6077,7 +6104,13 @@ impl KiApp {
             return;
         }
         match g.reconfigurer(&self.diffusion) {
-            Ok(g) => {
+            Ok(mut g) => {
+                // Le son du jeu suit sa case, sans toucher à la vidéo.
+                if !self.diffusion.son {
+                    g.audio = None;
+                } else if g.audio.is_none() {
+                    g.audio = self.demarrer_son_du_jeu(g.stream_id, g.key);
+                }
                 // Cadence et débit changent tout de suite ; les dimensions,
                 // la couche réseau les annoncera d'elle-même à la première
                 // trame si elles bougent.
@@ -6148,8 +6181,13 @@ impl KiApp {
         };
         self.fermer_regard(true);
         let (tx, rx) = std::sync::mpsc::channel();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
         if let Some(conn) = &self.conn {
             conn.set_video_feed(Some(tx));
+            conn.set_game_audio_feed(Some(audio_tx));
+        }
+        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+            engine.set_aux_gain(self.regard_volume);
         }
         let streamer = self
             .members
@@ -6157,8 +6195,15 @@ impl KiApp {
             .find(|m| m.streaming == Some(stream_id))
             .map(|m| m.username.clone())
             .unwrap_or_else(|| "?".into());
-        self.regard =
-            Some(partage::Regard::demarrer(stream_id, streamer, key, rx, self.app_ctx.clone()));
+        self.regard = Some(partage::Regard::demarrer(
+            stream_id,
+            streamer,
+            key,
+            rx,
+            audio_rx,
+            self.link.engine.clone(),
+            self.app_ctx.clone(),
+        ));
         self.regard_tex = None;
     }
 
@@ -6171,8 +6216,13 @@ impl KiApp {
             }
             if let Some(conn) = &self.conn {
                 conn.set_video_feed(None);
+                conn.set_game_audio_feed(None);
             }
             r.arreter();
+            // Ce qui restait de son du jeu à jouer ne se joue pas.
+            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                engine.aux_clear();
+            }
         }
         self.regard_tex = None;
     }
@@ -6396,6 +6446,7 @@ impl KiApp {
             };
             let mut quitter = false;
             let mut ouvert = true;
+            let mut volume_change = false;
             // La croix de la barre de titre quitte le visionnage, comme le
             // bouton en bas — que l'on ne voit plus quand la fenêtre est
             // agrandie au-delà de l'écran.
@@ -6422,11 +6473,33 @@ impl KiApp {
                         if ui::button(ui, Icon::Close, "Quitter le visionnage").clicked() {
                             quitter = true;
                         }
+                        ui.add_space(8.0);
+                        // Le son du jeu du streamer, à son volume à soi —
+                        // mixé par le moteur vocal, il suit aussi le volume
+                        // général et la mise en sourdine.
+                        let mut pct = self.regard_volume * 100.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut pct, 0.0..=200.0)
+                                    .text("son du jeu")
+                                    .suffix(" %")
+                                    .integer(),
+                            )
+                            .changed()
+                        {
+                            self.regard_volume = pct / 100.0;
+                            volume_change = true;
+                        }
                         if !etat.is_empty() {
                             ui.label(RichText::new(&etat).color(TEXT_FAINT).size(11.0).monospace());
                         }
                     });
                 });
+            if volume_change {
+                if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                    engine.set_aux_gain(self.regard_volume);
+                }
+            }
             if quitter || !ouvert {
                 self.fermer_regard(true);
             }

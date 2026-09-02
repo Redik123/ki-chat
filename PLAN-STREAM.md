@@ -167,10 +167,25 @@ fenêtre de visionnage **détachée** + plein écran.
 **Validation** : un viewer bridé (limiteur de débit) ne dégrade ni les autres
 ni la voix, et récupère par IDR.
 
-### S3 — Réseau réel
-Ladder adaptatif complet (goodput → `StreamBudget` → encodeur, hystérésis,
-`StreamRung`) ; audio du jeu (wasapi EXCLUDE → Opus musique → `KA` → jitter
-dédié → sync `pts_us`, réserve vocale 4 Kio, toggle) ; `send_window(1 Mio)`
+### S3 — Réseau réel — entamé
+**Livré en 0.1.25 : le son du jeu.** Boucle par processus maison (windows
+0.61, `ActivateAudioInterfaceAsync` sur `VAD\Process_Loopback`, mode
+EXCLUDE du processus ki-chat — les spectateurs n'entendent pas leurs voix
+en retour), float 48 kHz stéréo, Opus stéréo « audio » 96 kbit/s en trames
+de 20 ms, en-tête `KA` (24 o, AAD) + XChaCha20 sous la clé du stream
+(domaine 2), un datagramme par paquet relayé tel quel par le serveur aux
+spectateurs du stream (`Streams::relayer_audio`, 60 pkt/s max, ≤ 1224 o).
+Côté spectateur : `ki_voice::jeu::Lecteur` (PLC jusqu'à 5 trames, paquets
+en retard jetés) → **mixé en mono dans la sortie du moteur vocal**
+(`aux_push`, avance bornée à 300 ms — pas de rééchantillonnage de dérive
+encore), donc même volume général, même sourdine, même annulateur d'écho ;
+curseur « son du jeu » dans la fenêtre de visionnage. Écarts assumés :
+mono (la sortie du moteur est mono ; stéréo = S4), pas de synchronisation
+A/V par `pts_us` (transmis, non exploité), pas de tampon de gigue dédié
+(l'avance du mixeur en tient lieu), pas de réserve vocale de 4 Kio dans le
+tampon datagramme.
+Reste : ladder adaptatif complet (goodput → `StreamBudget` → encodeur,
+hystérésis, `StreamRung`) ; sync A/V par `pts_us` ; `send_window(1 Mio)`
 côté client (mesuré sur le RTT vocal).
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.

@@ -43,6 +43,8 @@ pub struct Reglages {
     pub cursor: bool,
     pub preview: bool,
     pub encodeur: EncoderChoice,
+    /// Le son du jeu (tout le système sauf ki-chat) dans le stream.
+    pub son: bool,
 }
 
 impl Default for Reglages {
@@ -55,6 +57,7 @@ impl Default for Reglages {
             cursor: true,
             preview: true,
             encodeur: EncoderChoice::Auto,
+            son: true,
         }
     }
 }
@@ -88,6 +91,7 @@ impl Reglages {
             kbps: nombre("stream_kbps", d.kbps).clamp(500, 50_000),
             cursor: get("stream_cursor", "on") != "off",
             preview: get("stream_preview", "on") != "off",
+            son: get("stream_audio", "on") != "off",
             encodeur: {
                 let cle = get("stream_encoder", "auto");
                 ENCODEURS
@@ -110,6 +114,7 @@ impl Reglages {
         storage.set_string("stream_kbps", self.kbps.to_string());
         storage.set_string("stream_cursor", if self.cursor { "on" } else { "off" }.into());
         storage.set_string("stream_preview", if self.preview { "on" } else { "off" }.into());
+        storage.set_string("stream_audio", if self.son { "on" } else { "off" }.into());
         let encodeur = ENCODEURS
             .iter()
             .find(|(e, _, _)| *e == self.encodeur)
@@ -324,6 +329,18 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
             change = true;
         }
     });
+    ui.add_space(6.0);
+    if ui
+        .checkbox(&mut r.son, "Son du jeu dans le stream")
+        .on_hover_text(
+            "tout ce que joue ton PC, sauf ki-chat lui-même : les spectateurs entendent le \
+             jeu (et ta musique), jamais leurs propres voix en retour. Windows 10 2004 ou \
+             plus récent.",
+        )
+        .changed()
+    {
+        change = true;
+    }
     change
 }
 
@@ -353,6 +370,10 @@ pub struct GoLive {
     pub cadence: Arc<Mutex<StreamMeta>>,
     /// Les réglages en vigueur.
     pub reglages: Reglages,
+    /// La clé du stream, pour (re)démarrer le son du jeu en cours de route.
+    pub key: [u8; 32],
+    /// Le son du jeu, tant qu'il est diffusé — indépendant de la vidéo.
+    pub audio: Option<ki_voice::jeu::GameAudio>,
 }
 
 impl GoLive {
@@ -362,9 +383,11 @@ impl GoLive {
 
     /// Relance la capture avec d'autres réglages, le stream restant le même.
     /// L'ancienne boucle s'arrête d'abord : deux encodeurs qui se relaient
-    /// sur la même séquence donneraient un salmigondis au décodeur.
+    /// sur la même séquence donneraient un salmigondis au décodeur. Le son
+    /// du jeu, lui, continue sans interruption.
     pub fn reconfigurer(self, reglages: &Reglages) -> anyhow::Result<Self> {
-        let Self { boucle, stats, stream_id, apercu, emit, sink, force_idr, cadence, .. } = self;
+        let Self { boucle, stats, stream_id, apercu, emit, sink, force_idr, cadence, key, audio, .. } =
+            self;
         boucle.stop();
         *apercu.lock().unwrap() = None;
         let boucle = StreamerLoop::start(
@@ -384,6 +407,8 @@ impl GoLive {
             force_idr,
             cadence,
             reglages: reglages.clone(),
+            key,
+            audio,
         })
     }
 }
@@ -440,16 +465,21 @@ pub struct Regard {
     pub images: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Le fil du son du jeu, s'il a pu démarrer.
+    audio_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Regard {
     /// Démarre le fil décodeur. `rx` reçoit les trames brutes que la couche
-    /// réseau aiguille (`set_video_feed`).
+    /// réseau aiguille (`set_video_feed`), `audio_rx` les datagrammes de son
+    /// du jeu (`set_game_audio_feed`), joués par le moteur vocal `engine`.
     pub fn demarrer(
         stream_id: u32,
         streamer: String,
         key: [u8; 32],
         rx: std_mpsc::Receiver<Vec<u8>>,
+        audio_rx: std_mpsc::Receiver<bytes::Bytes>,
+        engine: Arc<Mutex<Option<ki_voice::VoiceEngine>>>,
         ctx: egui::Context,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -462,13 +492,79 @@ impl Regard {
                 .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx))
                 .ok()
         };
-        Self { stream_id, streamer, image, images, stop, worker }
+        let audio_worker = {
+            let stop = stop.clone();
+            std::thread::Builder::new()
+                .name("audio-regard".into())
+                .spawn(move || fil_audio(stream_id, key, audio_rx, engine, stop))
+                .ok()
+        };
+        Self { stream_id, streamer, image, images, stop, worker, audio_worker }
     }
 
     pub fn arreter(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(w) = self.worker.take() {
             let _ = w.join();
+        }
+        if let Some(w) = self.audio_worker.take() {
+            let _ = w.join();
+        }
+    }
+}
+
+/// Le fil du son du jeu chez le spectateur : déchiffre chaque datagramme
+/// (même clé que la vidéo, domaine de nonce 2), décode, et verse dans la
+/// sortie du moteur vocal — qui mixe, règle le volume et annule l'écho
+/// comme pour tout le reste.
+fn fil_audio(
+    stream_id: u32,
+    key: [u8; 32],
+    rx: std_mpsc::Receiver<bytes::Bytes>,
+    engine: Arc<Mutex<Option<ki_voice::VoiceEngine>>>,
+    stop: Arc<AtomicBool>,
+) {
+    let cipher = XChaCha20Poly1305::new(&key.into());
+    let mut lecteur = match ki_voice::jeu::Lecteur::new() {
+        Ok(l) => l,
+        Err(e) => {
+            ki_video::journal(format!("son du stream indisponible : {e:#}"));
+            return;
+        }
+    };
+    let mut premier = true;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(dat) => {
+                let Some(h) = ki_protocol::parse_audio_header(&dat) else { continue };
+                if h.stream_id != stream_id {
+                    continue;
+                }
+                let (aad, sealed) = dat.split_at(ki_protocol::AUDIO_HEADER_LEN);
+                let nonce = ki_protocol::nonce_for_media(
+                    ki_protocol::MEDIA_DOMAIN_GAME_AUDIO,
+                    stream_id,
+                    h.seq,
+                );
+                let Ok(opus) =
+                    cipher.decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
+                else {
+                    continue;
+                };
+                if premier {
+                    premier = false;
+                    ki_video::journal("visionnage : le son du jeu arrive".to_string());
+                }
+                if let Some(e) = engine.lock().unwrap().as_ref() {
+                    lecteur.jouer(h.seq, &opus, e);
+                }
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -654,6 +750,7 @@ mod tests {
             cursor: false,
             preview: false,
             encodeur: EncoderChoice::Nvenc,
+            son: false,
         };
 
         let mut cle_valeur = std::collections::HashMap::new();
