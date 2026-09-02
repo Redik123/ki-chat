@@ -254,7 +254,7 @@ const TENUE: Duration = Duration::from_millis(1200);
 impl Overlay {
     pub fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
-            actif: get("overlay", "on") != "off",
+            actif: get("overlay", "off") == "on",
             coin: Coin::depuis(&get("overlay_coin", "haut-gauche")),
             // Par défaut, rien à l'écran tant que personne ne parle : la
             // discrétion d'abord.
@@ -597,14 +597,14 @@ mod tests {
             fn flush(&mut self) {}
         }
         let mut o = Overlay::load(|_, d| d.to_string());
-        assert!(o.actif && !o.toujours && !o.pseudo && !o.exclusif);
-        o.actif = false;
+        assert!(!o.actif && !o.toujours && !o.pseudo && !o.exclusif);
+        o.actif = true;
         o.coin = Coin::BasDroite;
         o.toujours = true;
         o.pseudo = true;
         o.save(&mut M(&mut memoire));
         let relu = Overlay::load(|k, d| memoire.get(k).cloned().unwrap_or_else(|| d.to_string()));
-        assert!(!relu.actif && relu.toujours && relu.pseudo);
+        assert!(relu.actif && relu.toujours && relu.pseudo);
         assert_eq!(relu.coin, Coin::BasDroite);
     }
 }
