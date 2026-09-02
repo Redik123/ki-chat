@@ -87,6 +87,75 @@ fn charger() -> Result<Api, String> {
     }
 }
 
+/// Les adaptateurs graphiques matériels de la machine : nom, vendeur (PCI),
+/// mémoire vidéo dédiée en octets.
+fn adaptateurs() -> Vec<(String, u32, u64)> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(fabrique) = CreateDXGIFactory1::<IDXGIFactory1>() else { return out };
+        let mut i = 0;
+        while let Ok(adaptateur) = fabrique.EnumAdapters1(i) {
+            i += 1;
+            let Ok(desc) = adaptateur.GetDesc1() else { continue };
+            if desc.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                continue;
+            }
+            let fin = desc.Description.iter().position(|&c| c == 0).unwrap_or(128);
+            out.push((
+                String::from_utf16_lossy(&desc.Description[..fin]),
+                desc.VendorId,
+                desc.DedicatedVideoMemory as u64,
+            ));
+        }
+    }
+    out
+}
+
+static INVENTAIRE: OnceLock<String> = OnceLock::new();
+
+/// Les cartes graphiques de la machine et l'état de NVENC, en une ligne
+/// pour les rapports : c'est ce qui dira, à distance, si une diffusion
+/// lente vient d'une carte sans encodeur, d'un pilote trop vieux, ou
+/// d'ailleurs.
+pub fn inventaire() -> String {
+    let cartes: Vec<String> = adaptateurs()
+        .iter()
+        .map(|(nom, _, vram)| format!("{nom} ({} Go)", (*vram as f64 / 1e9).round()))
+        .collect();
+    let nvenc = match api() {
+        Err(e) => format!("NVENC indisponible : {e}"),
+        Ok(a) => match device_nvidia() {
+            Ok((_, nom)) => format!(
+                "NVENC disponible sur {nom} (API {}.{})",
+                a.version >> 4,
+                a.version & 0xf
+            ),
+            Err(e) => format!("NVENC indisponible : {e:#}"),
+        },
+    };
+    let cartes = if cartes.is_empty() { "aucune".to_string() } else { cartes.join(", ") };
+    format!("cartes graphiques : {cartes} ; {nvenc}")
+}
+
+/// Relève l'inventaire sur un fil à part (DXGI, chargement du pilote : pas
+/// sur le fil d'interface) et le consigne au journal ; `inventaire_pret`
+/// le rend ensuite aux rapports.
+pub fn inventaire_lancer() {
+    if INVENTAIRE.get().is_some() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("inventaire-gpu".into()).spawn(|| {
+        let inv = inventaire();
+        crate::journal(inv.clone());
+        let _ = INVENTAIRE.set(inv);
+    });
+}
+
+/// L'inventaire, une fois relevé.
+pub fn inventaire_pret() -> Option<&'static str> {
+    INVENTAIRE.get().map(String::as_str)
+}
+
 /// Un device Direct3D 11 sur la première carte NVIDIA matérielle, et son nom.
 fn device_nvidia() -> anyhow::Result<(ID3D11Device, String)> {
     unsafe {
@@ -386,6 +455,16 @@ impl Drop for Nvenc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L'inventaire se relève partout — sans carte, sans pilote — et dit
+    /// alors pourquoi NVENC manque, au lieu de manquer en silence.
+    #[test]
+    fn l_inventaire_se_releve_sur_toute_machine() {
+        let inv = inventaire();
+        eprintln!("{inv}");
+        assert!(inv.starts_with("cartes graphiques : "));
+        assert!(inv.contains("NVENC disponible") || inv.contains("NVENC indisponible : "));
+    }
 
     /// Sur une machine avec une carte NVIDIA, une session s'ouvre, encode
     /// une image et rend une trame clé qui commence par un code de départ

@@ -8,15 +8,23 @@
 //!
 //! Les tampons circulent en boucle fermée (canal de recyclage) : pas
 //! d'allocation de 8 Mo à 30 Hz en régime établi.
+//!
+//! Les options de capture ne sont pas toutes de tous les Windows : la
+//! bordure jaune ne se retire qu'à partir de Windows 11, l'intervalle minimal
+//! entre images n'existe que depuis Windows 11 24H2 — et windows-capture
+//! **refuse de démarrer** si l'on demande ce que l'OS n'a pas. Vu sur le
+//! terrain : la diffusion ne marchait que sur la machine du développeur.
+//! Chaque option se demande donc seulement si Windows la connaît, et la
+//! cadence se tient de toute façon ici, en sautant les trames trop tôt.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -118,11 +126,16 @@ pub struct CaptureFlags {
     /// Levé quand la source disparaît (fenêtre fermée) : plus aucune trame
     /// ne viendra, c'est à l'appelant de conclure.
     pub closed: Arc<AtomicBool>,
+    /// Écart minimal entre deux trames retenues : la cadence demandée,
+    /// tenue ici quel que soit le rythme auquel Windows livre.
+    pub interval: Duration,
 }
 
 pub struct ScreenGrab {
     flags: CaptureFlags,
     scratch: Vec<u8>,
+    /// Instant de la dernière trame retenue.
+    last: Option<Instant>,
 }
 
 impl GraphicsCaptureApiHandler for ScreenGrab {
@@ -130,7 +143,7 @@ impl GraphicsCaptureApiHandler for ScreenGrab {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { flags: ctx.flags, scratch: Vec::new() })
+        Ok(Self { flags: ctx.flags, scratch: Vec::new(), last: None })
     }
 
     fn on_frame_arrived(
@@ -138,6 +151,17 @@ impl GraphicsCaptureApiHandler for ScreenGrab {
         frame: &mut Frame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        // La cadence, avant de toucher au tampon : une trame trop tôt ne
+        // coûte rien, pas même sa copie. Un dixième de tolérance, sinon un
+        // écran à 60 Hz demandé à 30 i/s en donnerait 20.
+        let now = Instant::now();
+        if let Some(last) = self.last {
+            if now.duration_since(last) < self.flags.interval.mul_f32(0.9) {
+                return Ok(());
+            }
+        }
+        self.last = Some(now);
+
         let (w, h) = (frame.width(), frame.height());
         let buffer = frame.buffer()?;
         let bgra = buffer.as_nopadding_buffer(&mut self.scratch);
@@ -181,6 +205,12 @@ pub fn start_capture(
     fps: u32,
     flags: CaptureFlags,
 ) -> anyhow::Result<Control> {
+    if !GraphicsCaptureApi::is_supported().unwrap_or(false) {
+        anyhow::bail!(
+            "la capture d'écran de Windows (Windows.Graphics.Capture) n'est pas disponible \
+             sur cette machine — il faut Windows 10 version 1903 ou plus récent"
+        );
+    }
     match source {
         CaptureSource::Monitor(0) => {
             let m = Monitor::primary().map_err(|e| anyhow::anyhow!("moniteur principal : {e}"))?;
@@ -198,20 +228,48 @@ pub fn start_capture(
     }
 }
 
-fn lancer<T>(item: T, cursor: bool, fps: u32, flags: CaptureFlags) -> anyhow::Result<Control>
+/// Les options que ce Windows accepte. Ce qu'il n'a pas reste au défaut —
+/// et se dit une fois au journal, pour qu'un « pourquoi la bordure jaune »
+/// trouve sa réponse sans qu'on la cherche.
+fn options(cursor: bool, fps: u32) -> (CursorCaptureSettings, DrawBorderSettings, MinimumUpdateIntervalSettings) {
+    let sait = |f: fn() -> Result<bool, windows_capture::graphics_capture_api::Error>| {
+        f().unwrap_or(false)
+    };
+    let curseur = if sait(GraphicsCaptureApi::is_cursor_settings_supported) {
+        if cursor { CursorCaptureSettings::WithCursor } else { CursorCaptureSettings::WithoutCursor }
+    } else {
+        CursorCaptureSettings::Default
+    };
+    let bordure = if sait(GraphicsCaptureApi::is_border_settings_supported) {
+        DrawBorderSettings::WithoutBorder
+    } else {
+        crate::journal("capture : ce Windows ne sait pas retirer la bordure jaune (Windows 11 requis)");
+        DrawBorderSettings::Default
+    };
+    let cadence = if sait(GraphicsCaptureApi::is_minimum_update_interval_supported) {
+        MinimumUpdateIntervalSettings::Custom(intervalle(fps))
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+    (curseur, bordure, cadence)
+}
+
+fn intervalle(fps: u32) -> Duration {
+    Duration::from_micros(1_000_000 / u64::from(fps.clamp(1, 120)))
+}
+
+fn lancer<T>(item: T, cursor: bool, fps: u32, mut flags: CaptureFlags) -> anyhow::Result<Control>
 where
     T: TryInto<GraphicsCaptureItemType> + Send + 'static,
 {
+    let (curseur, bordure, cadence) = options(cursor, fps);
+    flags.interval = intervalle(fps);
     let settings = Settings::new(
         item,
-        if cursor { CursorCaptureSettings::WithCursor } else { CursorCaptureSettings::WithoutCursor },
-        DrawBorderSettings::WithoutBorder,
+        curseur,
+        bordure,
         SecondaryWindowSettings::Default,
-        // Limite la cadence de livraison ; l'OS ne livre de toute façon que
-        // quand l'image change (écran statique = peu de trames, c'est normal).
-        MinimumUpdateIntervalSettings::Custom(Duration::from_micros(
-            1_000_000 / u64::from(fps.clamp(1, 120)),
-        )),
+        cadence,
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         flags,

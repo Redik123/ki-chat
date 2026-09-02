@@ -14,7 +14,30 @@ pub mod scale;
 pub mod stats;
 
 pub use capture::{list_monitors, list_windows, CaptureSource, MonitorInfo, WindowInfo};
+pub use nvenc::{inventaire, inventaire_lancer, inventaire_pret};
 pub use stats::StageStats;
+
+/// Le journal partagé de l'application, branché par l'interface : ce que la
+/// vidéo a d'important à dire (encodeur retenu, capture bridée par le
+/// Windows de la machine, source perdue) y part en plus des traces, pour
+/// voyager avec les diagnostics.
+static JOURNAL: std::sync::OnceLock<Box<dyn Fn(String) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Branche le journal de l'application. Une seule fois ; les appels
+/// suivants sont ignorés.
+pub fn set_journal(sink: impl Fn(String) + Send + Sync + 'static) {
+    let _ = JOURNAL.set(Box::new(sink));
+}
+
+/// Une ligne pour le journal partagé — et pour les traces.
+pub fn journal(msg: impl Into<String>) {
+    let msg = msg.into();
+    tracing::info!("{msg}");
+    if let Some(j) = JOURNAL.get() {
+        j(msg);
+    }
+}
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -124,21 +147,26 @@ pub fn creer_encodeur(
         match nvenc::Nvenc::new(width, height, bitrate_bps, fps) {
             Ok(e) => {
                 let (maj, min) = e.version_pilote();
-                tracing::info!(
-                    "encodeur : NVENC sur {} (API {maj}.{min}), {width}x{height} à {fps} i/s",
-                    e.carte
-                );
+                journal(format!(
+                    "encodeur : NVENC sur {} (API {maj}.{min}), {width}x{height} à {fps} i/s, \
+                     {} kbit/s",
+                    e.carte,
+                    bitrate_bps / 1000
+                ));
                 stats.materiel.store(true, Ordering::Relaxed);
                 return Ok(Box::new(e));
             }
             Err(e) if choix == EncoderChoice::Nvenc => {
                 return Err(e.context("NVENC exigé par les réglages"));
             }
-            Err(e) => tracing::warn!("NVENC indisponible ({e:#}) : encodeur logiciel"),
+            Err(e) => journal(format!("NVENC indisponible ({e:#}) : encodeur logiciel")),
         }
     }
     stats.materiel.store(false, Ordering::Relaxed);
-    tracing::info!("encodeur : logiciel (openh264), {width}x{height} à {fps} i/s");
+    journal(format!(
+        "encodeur : logiciel (openh264), {width}x{height} à {fps} i/s, {} kbit/s",
+        bitrate_bps / 1000
+    ));
     Ok(Box::new(Logiciel(screen_encoder(width, height, bitrate_bps, fps)?)))
 }
 
@@ -173,6 +201,7 @@ impl LocalLoop {
                 tx: frame_tx,
                 recycle: recycle_rx,
                 closed: Arc::new(AtomicBool::new(false)),
+                interval: Duration::ZERO,
             },
         )?;
 
@@ -402,6 +431,7 @@ impl StreamerLoop {
                 tx: frame_tx,
                 recycle: recycle_rx,
                 closed: closed.clone(),
+                interval: Duration::ZERO,
             },
         )?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -499,9 +529,12 @@ fn streamer_pipeline(
             encoder = None;
             yuv = Some(YUVBuffer::new(w as usize, h as usize));
             if sortie == dims {
-                tracing::info!("diffusion : source {w}x{h}");
+                journal(format!("diffusion : source {w}x{h}"));
             } else {
-                tracing::info!("diffusion : source {w}x{h}, émise en {}x{}", sortie.0, sortie.1);
+                journal(format!(
+                    "diffusion : source {w}x{h}, émise en {}x{}",
+                    sortie.0, sortie.1
+                ));
             }
         }
         let Some(yuv_buf) = yuv.as_mut() else { continue };
@@ -571,7 +604,7 @@ fn streamer_pipeline(
             Err(e) => {
                 // Un encodeur qui lâche (carte perdue, pilote) se recrée à
                 // la trame suivante — et retombe sur le logiciel s'il faut.
-                tracing::warn!("encodage : {e:#}");
+                journal(format!("encodage : {e:#} — encodeur recréé"));
                 encoder = None;
                 force_idr.store(true, Ordering::Relaxed);
                 continue;
