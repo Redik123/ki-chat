@@ -24,51 +24,54 @@ use crate::ui::{self, Tone};
 /// pour la remettre au-dessus.
 const TITRE: &str = "ki-chat — qui parle";
 
-/// La couleur de fond réservée, que Windows rend transparente (clé de
-/// couleur) : un noir presque pur, pour que le lissage des bords des ronds
-/// fonde vers du sombre et qu'aucune photo n'en contienne exactement.
+/// Le fond des fenêtres : un noir presque pur. Sur l'overlay, on ne le voit
+/// qu'au ras des ronds (la fenêtre est découpée à leur forme), où il fond
+/// le lissage des bords vers du sombre ; sur la fenêtre principale, jamais
+/// — les panneaux la couvrent.
 pub const CLE: [f32; 4] = [1.0 / 255.0, 0.0, 1.0 / 255.0, 1.0];
-/// La même, au format COLORREF de Windows (0x00BBGGRR).
-const CLE_COLORREF: u32 = 0x0001_0001;
 
-/// Les deux gestes Windows que l'overlay a besoin de faire lui-même : se
-/// remettre au sommet de la pile des fenêtres « toujours au-dessus » (les
-/// jeux s'y remettent aussi, à chaque reprise du focus — la dernière
-/// demande gagne), et savoir qui est au premier plan.
+/// Une forme de la fenêtre de l'overlay, en points, depuis son coin haut
+/// gauche : ce que Windows en garde.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Forme {
+    Rond { cx: f32, cy: f32, r: f32 },
+    Pilule { x: f32, y: f32, w: f32, h: f32, rayon: f32 },
+}
+
+/// Les trois gestes Windows que l'overlay fait lui-même : se remettre au
+/// sommet de la pile des fenêtres « toujours au-dessus » (les jeux s'y
+/// remettent aussi, à chaque reprise du focus — la dernière demande gagne),
+/// se découper à la forme de ses ronds, et savoir qui est au premier plan.
 #[cfg(windows)]
 mod win {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        CombineRgn, CreateEllipticRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, HGDIOBJ,
+        SetWindowRgn, RGN_OR,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowTextW,
-        SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
-        LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TOPMOST,
-        WS_EX_TRANSPARENT,
+        FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+        SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
 
-    /// Remet la fenêtre `titre` au sommet des « toujours au-dessus », sans
-    /// la déplacer ni l'activer, et lui (re)donne sa clé de couleur.
-    /// `false` si elle n'existe pas (encore).
-    ///
-    /// Pourquoi une clé de couleur : « les clics passent à travers » se
-    /// fait à Windows par le style `WS_EX_LAYERED`, et une fenêtre en
-    /// couches ignore la transparence par pixel de ce qu'on y dessine — le
-    /// fond sortait noir. Avec la clé, chaque pixel de la couleur réservée
-    /// (`CLE`, peinte en fond) est transparent ET laisse passer les clics :
-    /// c'est la technique de tous les overlays de viseur.
-    pub fn remettre_au_dessus(titre: &str) -> bool {
+    fn fenetre(titre: &str) -> Option<HWND> {
         let large: Vec<u16> = titre.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe { FindWindowW(None, PCWSTR(large.as_ptr())).ok().filter(|h| !h.is_invalid()) }
+    }
+
+    /// Remet la fenêtre `titre` au sommet des « toujours au-dessus », sans
+    /// la déplacer ni l'activer, en s'assurant des deux styles qui font
+    /// passer les clics à travers. `false` si elle n'existe pas (encore).
+    pub fn remettre_au_dessus(titre: &str) -> bool {
+        let Some(hwnd) = fenetre(titre) else { return false };
         unsafe {
-            let Ok(hwnd) = FindWindowW(None, PCWSTR(large.as_ptr())) else { return false };
-            if hwnd.is_invalid() {
-                return false;
-            }
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             let voulu = ex | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
             if voulu != ex {
                 SetWindowLongW(hwnd, GWL_EXSTYLE, voulu as i32);
             }
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(super::CLE_COLORREF), 255, LWA_COLORKEY);
             SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -79,6 +82,55 @@ mod win {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             )
             .is_ok()
+        }
+    }
+
+    /// Découpe la fenêtre à la forme de ses ronds et pilules : en dehors,
+    /// elle n'existe pas — ni à l'écran, ni pour la souris.
+    ///
+    /// Pourquoi une découpe : « les clics passent à travers » se fait à
+    /// Windows par le style de fenêtre en couches, et une fenêtre en couches
+    /// ignore la transparence par pixel de ce qu'on y dessine — le fond
+    /// sortait noir. La clé de couleur, l'autre technique classique, ne
+    /// passe pas non plus ici (la sonde `overlay_probe` l'a montré : Windows
+    /// convertit les couleurs de cette fenêtre, la clé ne correspond jamais).
+    /// La forme, elle, ne dépend d'aucune couleur.
+    ///
+    /// `taille` : la taille logique de la fenêtre (points), pour convertir
+    /// les formes en pixels d'écran d'après sa taille réelle.
+    pub fn decouper(titre: &str, taille: (f32, f32), formes: &[super::Forme]) -> bool {
+        let Some(hwnd) = fenetre(titre) else { return false };
+        unsafe {
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_err() {
+                return false;
+            }
+            let px = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
+            let echelle = if taille.0 > 0.0 { px.0 / taille.0 } else { 1.0 };
+            let region = CreateRectRgn(0, 0, 0, 0);
+            for f in formes {
+                let part = match *f {
+                    super::Forme::Rond { cx, cy, r } => CreateEllipticRgn(
+                        ((cx - r) * echelle).floor() as i32,
+                        ((cy - r) * echelle).floor() as i32,
+                        ((cx + r) * echelle).ceil() as i32,
+                        ((cy + r) * echelle).ceil() as i32,
+                    ),
+                    super::Forme::Pilule { x, y, w, h, rayon } => CreateRoundRectRgn(
+                        (x * echelle).floor() as i32,
+                        (y * echelle).floor() as i32,
+                        ((x + w) * echelle).ceil() as i32,
+                        ((y + h) * echelle).ceil() as i32,
+                        (2.0 * rayon * echelle) as i32,
+                        (2.0 * rayon * echelle) as i32,
+                    ),
+                };
+                CombineRgn(Some(region), Some(region), Some(part), RGN_OR);
+                let _ = DeleteObject(HGDIOBJ(part.0));
+            }
+            // La région appartient désormais à la fenêtre : on ne la libère
+            // pas nous-mêmes.
+            SetWindowRgn(hwnd, Some(region), true) != 0
         }
     }
 
@@ -102,6 +154,9 @@ mod win {
 #[cfg(not(windows))]
 mod win {
     pub fn remettre_au_dessus(_titre: &str) -> bool {
+        false
+    }
+    pub fn decouper(_titre: &str, _taille: (f32, f32), _formes: &[super::Forme]) -> bool {
         false
     }
     pub fn premier_plan() -> (String, bool) {
@@ -167,6 +222,9 @@ pub struct Overlay {
     /// La dernière fenêtre vue au premier plan (titre, toujours au-dessus),
     /// pour ne la consigner qu'au changement.
     devant: (String, bool),
+    /// La découpe appliquée à la fenêtre, pour ne la refaire qu'au
+    /// changement — la refaire à chaque image ferait clignoter.
+    decoupe: Option<Vec<Forme>>,
 }
 
 /// Windows le sait : `SHQueryUserNotificationState` rend « un programme
@@ -207,6 +265,7 @@ impl Overlay {
             sonde: Instant::now(),
             reaffirme: Instant::now(),
             devant: (String::new(), false),
+            decoupe: None,
         }
     }
 
@@ -222,6 +281,8 @@ impl Overlay {
     /// doublon. Sans ligne (hors vocal), rien.
     pub fn montrer(&mut self, ctx: &egui::Context, lignes: Vec<Ligne>, focus_principal: bool) {
         if !self.actif || focus_principal || lignes.is_empty() {
+            // La fenêtre va disparaître : sa découpe repartira de zéro.
+            self.decoupe = None;
             return;
         }
         let now = Instant::now();
@@ -276,6 +337,7 @@ impl Overlay {
             affichees.retain(|(_, parle, _)| *parle);
         }
         if affichees.is_empty() {
+            self.decoupe = None;
             return;
         }
 
@@ -304,6 +366,28 @@ impl Overlay {
             hauteur_ligne
         };
         let hauteur = (affichees.len() as f32 * (hauteur_ligne + ECART) - ECART + 2.0).ceil();
+        // La forme de la fenêtre : la même géométrie que le dessin, depuis
+        // le coin haut gauche.
+        let formes: Vec<Forme> = (0..affichees.len())
+            .map(|i| {
+                let y = 1.0 + i as f32 * (hauteur_ligne + ECART);
+                if avec_pseudo {
+                    Forme::Pilule {
+                        x: 0.0,
+                        y,
+                        w: largeur_pilule(largeurs[i]),
+                        h: HAUTEUR_LIGNE,
+                        rayon: 14.0,
+                    }
+                } else {
+                    Forme::Rond {
+                        cx: 2.0 + taille_avatar / 2.0,
+                        cy: y + 2.0 + taille_avatar / 2.0,
+                        r: taille_avatar / 2.0,
+                    }
+                }
+            })
+            .collect();
         let ecran = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(Vec2::new(1920.0, 1080.0));
@@ -401,13 +485,17 @@ impl Overlay {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
         });
+        // La découpe suit la forme, et ne se refait qu'au changement.
+        if self.decoupe.as_ref() != Some(&formes) && win::decouper(TITRE, (largeur, hauteur), &formes) {
+            self.decoupe = Some(formes);
+        }
         // Les jeux en fenêtré plein écran se remettent eux-mêmes tout en
         // haut quand ils reprennent le focus, par-dessus nous — Valorant le
         // fait. Toutes les 300 ms, on repasse au sommet de la pile des
-        // fenêtres « toujours au-dessus », sans bouger ni prendre le focus,
-        // et l'on réaffirme la clé de couleur au passage : ce que font
-        // toutes les apps de viseur, pour la même raison. (La première fois
-        // passe tout de suite : le dernier passage date du lancement.)
+        // fenêtres « toujours au-dessus », sans bouger ni prendre le focus :
+        // ce que font toutes les apps de viseur, pour la même raison. (La
+        // première fois passe tout de suite : le dernier passage date du
+        // lancement.)
         if now.duration_since(self.reaffirme) > Duration::from_millis(300) {
             self.reaffirme = now;
             win::remettre_au_dessus(TITRE);

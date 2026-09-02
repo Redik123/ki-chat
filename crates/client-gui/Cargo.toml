@@ -72,4 +72,10 @@ windows = { version = "0.61", features = [
     # SetWindowPos(HWND_TOPMOST) : l'overlay se remet au-dessus des jeux qui
     # se remettent eux-mêmes au-dessus ; GetForegroundWindow : qui est devant.
     "Win32_UI_WindowsAndMessaging",
+    # GetPixel : la sonde de transparence de l'overlay (exemple overlay_probe)
+    # lit ce que l'écran affiche vraiment ; Dwm et Controls pour la
+    # transparence par le compositeur (DwmExtendFrameIntoClientArea, MARGINS).
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
 ] }
