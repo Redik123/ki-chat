@@ -456,8 +456,25 @@ async fn voice_task(
     // émet 50 paquets de 20 ms par seconde ; le double laisse toute la marge
     // utile, y compris à une rafale de rattrapage.
     let mut relay_budget = crate::state::TokenBucket::new(100.0, 200.0);
+    // Le son du jeu d'un streamer : 50 paquets de 20 ms par seconde, le
+    // double en rafale — au-delà, ce n'est pas du son.
+    let mut audio_budget = crate::state::TokenBucket::new(60.0, 120.0);
 
     while let Ok(dat) = conn.read_datagram().await {
+        // Son du jeu : vers les spectateurs du stream de cet émetteur, tel
+        // quel. Pas de compteur de pertes ici — c'est du son de jeu, pas la
+        // voix, et le spectateur masque lui-même les trous.
+        if ki_protocol::is_audio_datagram(&dat) {
+            if dat.len() > ki_protocol::AUDIO_HEADER_LEN + ki_protocol::AUDIO_MAX_PACKET
+                || !audio_budget.take()
+            {
+                continue;
+            }
+            if let Some(h) = ki_protocol::parse_audio_header(&dat) {
+                state.streams.relayer_audio(user_id, h.stream_id, &dat);
+            }
+            continue;
+        }
         // `VOICE_MAX_PACKET` était déclaré par le protocole mais vérifié nulle
         // part côté serveur : rien n'empêchait de faire relayer des
         // datagrammes bien plus gros que ce que la voix produit.

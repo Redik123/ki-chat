@@ -58,6 +58,9 @@ struct Viewer {
     tx: tokio::sync::mpsc::Sender<Arc<Trame>>,
     needs_idr: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
+    /// Sa connexion, pour le son du jeu : des datagrammes envoyés tels
+    /// quels, sans file ni tâche — un paquet de son perdu ne s'attend pas.
+    conn: quinn::Connection,
 }
 
 /// Une diffusion en cours.
@@ -213,13 +216,29 @@ impl Streams {
         let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Trame>>(FILE_VIEWER);
         let needs_idr = Arc::new(AtomicBool::new(true));
         let seq_start = live.seq_start.unwrap_or(0);
-        let task = tokio::spawn(diffuser(conn, rx, seq_start));
-        live.viewers.insert(user, Viewer { tx, needs_idr, task });
+        let task = tokio::spawn(diffuser(conn.clone(), rx, seq_start));
+        live.viewers.insert(user, Viewer { tx, needs_idr, task, conn });
         let ask = live.last_idr_ask.elapsed() >= IDR_COOLDOWN;
         if ask {
             live.last_idr_ask = Instant::now();
         }
         Ok((live.key_hex.clone(), live.meta, ask, live.streamer))
+    }
+
+    /// Un datagramme de son du jeu arrive du streamer : vers chaque
+    /// spectateur, tel quel — le serveur ne déchiffre rien, et un
+    /// datagramme qui ne part pas (file pleine) est simplement perdu, comme
+    /// la voix. `false` si ce compte ne diffuse pas ce stream.
+    pub fn relayer_audio(&self, streamer: UserId, stream_id: u32, dat: &bytes::Bytes) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let Some(live) = inner.by_id.get(&stream_id) else { return false };
+        if live.streamer != streamer {
+            return false;
+        }
+        for v in live.viewers.values() {
+            let _ = v.conn.send_datagram(dat.clone());
+        }
+        true
     }
 
     /// Une trame arrive du streamer : validation, comptabilité mémoire, et

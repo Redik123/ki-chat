@@ -1137,6 +1137,89 @@ pub fn parse_media_header(buf: &[u8]) -> Option<MediaHeader> {
     })
 }
 
+/// --- Son du jeu, version 1 : un paquet Opus par datagramme ---
+///
+/// Le son du jeu voyage en datagrammes QUIC, jamais dans les flux vidéo :
+/// un paquet perdu ne vaut pas d'être retransmis, et rien ne doit faire
+/// attendre le son derrière une trame clé de 200 Ko. Même clé de stream que
+/// la vidéo, domaine de nonce 2, en-tête en clair qui sert d'AAD :
+///
+///   [0..2]   magic "KA"
+///   [2]      version (1)
+///   [3]      drapeaux (réservé, 0)
+///   [4..8]   stream_id (u32)
+///   [8..16]  seq (u64) — jamais réinitialisé (nonce)
+///   [16..24] pts_us (u64) — horodatage de capture, base de la sync A/V
+pub const MEDIA_MAGIC_AUDIO: [u8; 2] = *b"KA";
+pub const AUDIO_HEADER_LEN: usize = 24;
+/// Un paquet Opus stéréo de 20 ms à 96 kbit/s fait ~240 octets ; au-delà de
+/// ça, l'entrée est hostile.
+pub const AUDIO_MAX_PACKET: usize = 1200;
+
+/// En-tête d'un paquet de son du jeu, tel qu'il circule en clair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioHeader {
+    pub stream_id: u32,
+    pub seq: u64,
+    pub pts_us: u64,
+}
+
+/// Écrit l'en-tête audio dans `buf` (au moins AUDIO_HEADER_LEN octets).
+pub fn write_audio_header(buf: &mut [u8], h: &AudioHeader) {
+    buf[0..2].copy_from_slice(&MEDIA_MAGIC_AUDIO);
+    buf[2] = MEDIA_VERSION;
+    buf[3] = 0;
+    buf[4..8].copy_from_slice(&h.stream_id.to_le_bytes());
+    buf[8..16].copy_from_slice(&h.seq.to_le_bytes());
+    buf[16..24].copy_from_slice(&h.pts_us.to_le_bytes());
+}
+
+/// Analyse un en-tête audio. None si magie, version ou taille ne collent pas.
+pub fn parse_audio_header(buf: &[u8]) -> Option<AudioHeader> {
+    if buf.len() < AUDIO_HEADER_LEN || buf[0..2] != MEDIA_MAGIC_AUDIO || buf[2] != MEDIA_VERSION {
+        return None;
+    }
+    Some(AudioHeader {
+        stream_id: u32::from_le_bytes(buf[4..8].try_into().ok()?),
+        seq: u64::from_le_bytes(buf[8..16].try_into().ok()?),
+        pts_us: u64::from_le_bytes(buf[16..24].try_into().ok()?),
+    })
+}
+
+/// Un datagramme est-il du son de jeu (et non de la voix) ? Les deux
+/// partagent la connexion ; la magie les sépare avant tout autre examen.
+pub fn is_audio_datagram(buf: &[u8]) -> bool {
+    buf.len() >= 2 && buf[0..2] == MEDIA_MAGIC_AUDIO
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+
+    #[test]
+    fn l_en_tete_audio_fait_l_aller_retour_et_ne_se_confond_pas_avec_la_voix() {
+        let h = AudioHeader { stream_id: 7, seq: 123_456, pts_us: 9_876_543 };
+        let mut buf = [0u8; AUDIO_HEADER_LEN];
+        write_audio_header(&mut buf, &h);
+        assert_eq!(parse_audio_header(&buf), Some(h));
+        assert!(is_audio_datagram(&buf));
+        assert!(parse_voice_packet(&buf).is_none());
+        assert!(parse_audio_header(&buf[..AUDIO_HEADER_LEN - 1]).is_none());
+        // Une trame vidéo n'est pas du son.
+        let mut video = [0u8; MEDIA_HEADER_LEN];
+        write_media_header(
+            &mut video,
+            &MediaHeader { idr: true, stream_id: 7, seq: 1, pts_us: 0, group_id: 0, width: 1, height: 1 },
+        );
+        assert!(!is_audio_datagram(&video));
+        // Et les nonces vidéo et audio d'une même séquence diffèrent.
+        assert_ne!(
+            nonce_for_media(MEDIA_DOMAIN_VIDEO, 7, 1),
+            nonce_for_media(MEDIA_DOMAIN_GAME_AUDIO, 7, 1)
+        );
+    }
+}
+
 /// Nonce XChaCha20 (24 octets) d'une trame média : octet de domaine,
 /// identifiant de stream, séquence. Unique par clé de stream tant que `seq`
 /// ne se répète pas — et il ne se réinitialise jamais, par contrat.
