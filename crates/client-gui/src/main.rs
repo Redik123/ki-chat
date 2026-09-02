@@ -525,6 +525,8 @@ struct KiApp {
     /// Cadences instantanées : ce que j'émets, ce que je reçois.
     cadence_live: partage::Cadence,
     cadence_regard: partage::Cadence,
+    /// Dernière ligne de stats de diffusion consignée au journal.
+    journal_flux: std::time::Instant,
     /// Docteur audio déplié dans les réglages.
     show_docteur: bool,
     /// Diagnostic partagé : le journal technique part vers le serveur
@@ -537,6 +539,9 @@ struct KiApp {
     /// Horodatage de modification du rapport de plantage déjà transmis
     /// (préférence persistée) : un même crash ne repart pas à chaque session.
     diag_crash_envoye: String,
+    /// Le rapport de plantage de la session précédente a été vérifié (et
+    /// envoyé s'il y en avait un) pour cette session — une fois suffit.
+    crash_verifie: bool,
     /// Onglet admin « Diagnostics » : le dernier lot récupéré du serveur,
     /// rempli par un thread de récupération.
     diag_admin: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -729,6 +734,14 @@ impl KiApp {
         // (le littéral Self plus bas est affecté à `app` pour charger les
         // sons juste après la construction)
         theme::install(&cc.egui_ctx);
+        // Ce que la vidéo a d'important à dire rejoint le journal audio :
+        // encodeur retenu, capture bridée par ce Windows, source perdue —
+        // et voyage avec les diagnostics partagés.
+        ki_video::set_journal(ki_voice::journal);
+        // Les cartes graphiques et l'état de NVENC, relevés en arrière-plan
+        // pour les rapports : « ça diffuse lentement chez lui » se lit alors
+        // avec le modèle de carte et la version du pilote sous les yeux.
+        ki_video::inventaire_lancer();
         // Les photos s'accumulent au fil des changements : on borne le
         // dossier une fois par démarrage.
         photos::prune();
@@ -828,6 +841,7 @@ impl KiApp {
             show_diffusion: false,
             cadence_live: partage::Cadence::new(),
             cadence_regard: partage::Cadence::new(),
+            journal_flux: std::time::Instant::now(),
             regard: None,
             regard_tex: None,
             show_docteur: false,
@@ -836,6 +850,7 @@ impl KiApp {
             diag_last_sent_ts: 0,
             diag_last_flush: None,
             diag_crash_envoye: get("diag_crash_envoye", ""),
+            crash_verifie: false,
             diag_admin: Default::default(),
             diag_versions: Default::default(),
             show_perf: false,
@@ -2272,6 +2287,7 @@ impl KiApp {
                 // Et si c'est le nôtre (arrêté par le serveur : sortie du
                 // vocal, par exemple), la capture locale s'arrête aussi.
                 if self.go_live.as_ref().map(|g| g.stream_id) == Some(stream_id) {
+                    ki_voice::journal(format!("diffusion arrêtée par le serveur (stream {stream_id})"));
                     if let Some(g) = self.go_live.take() {
                         g.arreter();
                     }
@@ -2279,9 +2295,11 @@ impl KiApp {
                 }
             }
             ServerMsg::WatchAccepted { stream_id, stream_key, .. } => {
+                ki_voice::journal(format!("visionnage accepté (stream {stream_id})"));
                 self.regard_accepte(stream_id, &stream_key);
             }
             ServerMsg::WatchDenied { reason, .. } => {
+                ki_voice::journal(format!("visionnage refusé : {reason}"));
                 self.info = Some(format!("impossible de regarder : {reason}"));
             }
             ServerMsg::KeyframeNeeded { stream_id } => {
@@ -2449,10 +2467,11 @@ impl KiApp {
         let now_ms = chrono::Local::now().timestamp_millis().max(0) as u64;
         let mut lot = String::new();
         lot.push_str(&format!(
-            "{{\"type\":\"meta\",\"t\":{now_ms},\"version\":\"{}\",\"os\":\"{} {}\"}}\n",
+            "{{\"type\":\"meta\",\"t\":{now_ms},\"version\":\"{}\",\"os\":\"{} {}\",\"gpu\":{}}}\n",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
+            serde_json::Value::String(ki_video::inventaire_pret().unwrap_or("").to_string()),
         ));
         for (t, msg) in &fresh {
             lot.push_str(&format!(
@@ -2506,10 +2525,56 @@ impl KiApp {
         });
     }
 
+    /// Le rapport de plantage de la session précédente part au serveur
+    /// **quoi qu'il en soit** — option de partage cochée ou non. Décision de
+    /// l'admin du groupe : un plantage se corrige avec sa pile d'appels, pas
+    /// avec un « ça a planté » de mémoire ; et le rapport ne contient que du
+    /// technique (panic, pile, erreur de rendu), jamais un message, jamais
+    /// de l'audio. Une fois par session, et un même plantage ne voyage
+    /// qu'une fois (horodatage mémorisé).
+    fn envoyer_crash(&mut self) {
+        let Some((tampon, rapport)) = secours::rapport_a_envoyer(&self.diag_crash_envoye)
+        else {
+            return;
+        };
+        self.diag_crash_envoye = tampon;
+        let now_ms = chrono::Local::now().timestamp_millis().max(0) as u64;
+        let lot = format!(
+            "{{\"type\":\"meta\",\"t\":{now_ms},\"version\":\"{}\",\"os\":\"{} {}\",\"gpu\":{}}}\n\
+             {{\"type\":\"crash\",\"t\":{now_ms},\"rapport\":{}}}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            serde_json::Value::String(ki_video::inventaire_pret().unwrap_or("").to_string()),
+            serde_json::Value::String(rapport),
+        );
+        ki_voice::journal("rapport de plantage de la session précédente envoyé au serveur".into());
+        let base = self.http_base();
+        let agent = self.http_agent();
+        let token_hex = format!("{:x}", self.voice_token);
+        std::thread::spawn(move || {
+            if let Err(e) = agent
+                .post(&format!("{base}/diag"))
+                .set("x-ki-token", &token_hex)
+                .set("x-ki-version", env!("CARGO_PKG_VERSION"))
+                .send_string(&lot)
+            {
+                tracing::warn!("envoi du rapport de plantage raté : {e}");
+            }
+        });
+    }
+
     /// La cadence du diagnostic partagé : dix minutes, et seulement s'il y a
     /// du neuf. Appelée à chaque image ; le garde-fou coûte deux lectures.
     fn maybe_flush_diag(&mut self) {
-        if !self.diag_share || self.conn.is_none() {
+        if self.conn.is_none() || !self.welcomed {
+            return;
+        }
+        if !self.crash_verifie {
+            self.crash_verifie = true;
+            self.envoyer_crash();
+        }
+        if !self.diag_share {
             return;
         }
         let due = self
@@ -4811,10 +4876,16 @@ impl KiApp {
                         )
                         .on_hover_text(
                             "envoie toutes les 10 minutes le journal technique \
-                             (périphériques, pertes, réouvertures), la version, le \
-                             rapport du docteur et l'éventuel rapport de plantage au \
-                             serveur du groupe. Jamais tes messages, jamais ta voix. \
-                             Décochable à tout moment.",
+                             (périphériques, pertes, réouvertures, diffusion), la \
+                             version et le rapport du docteur au serveur du groupe. \
+                             Jamais tes messages, jamais ta voix. Décochable à tout \
+                             moment.",
+                        );
+                        ui::hint(
+                            ui,
+                            "les rapports de plantage (l'erreur et sa pile d'appels, rien \
+                             d'autre) partent toujours au serveur, option cochée ou non : \
+                             c'est ce qui permet de corriger un crash sans rien te demander",
                         );
                         if self.diag_share
                             && ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
@@ -5911,6 +5982,12 @@ impl KiApp {
         chacha20poly1305::aead::OsRng.fill_bytes(&mut key);
         self.go_live_attente = Some(key);
         self.show_diffusion = false;
+        let r = &self.diffusion;
+        ki_voice::journal(format!(
+            "diffusion demandée : {:?}, plafond {}p, {} i/s, {} kbit/s, encodeur {:?}, curseur {}, \
+             aperçu {}",
+            r.source, r.max_height, r.fps, r.kbps, r.encodeur, r.cursor, r.preview
+        ));
         self.send(ClientMsg::StreamStart {
             meta: self.diffusion.meta(),
             stream_key: ki_protocol::hex_encode(&key),
@@ -5966,9 +6043,12 @@ impl KiApp {
                     reglages,
                 });
                 self.cadence_live = partage::Cadence::new();
+                self.journal_flux = std::time::Instant::now();
+                ki_voice::journal(format!("diffusion démarrée (stream {stream_id})"));
                 self.info = Some("tu diffuses ton écran".into());
             }
             Err(e) => {
+                ki_voice::journal(format!("diffusion impossible : {e:#}"));
                 self.info = Some(format!("capture impossible : {e:#}"));
                 self.send(ClientMsg::StreamStop);
             }
@@ -5999,6 +6079,7 @@ impl KiApp {
                 self.go_live = Some(g);
             }
             Err(e) => {
+                ki_voice::journal(format!("diffusion interrompue au changement de réglages : {e:#}"));
                 self.info = Some(format!("diffusion interrompue : {e:#}"));
                 self.go_live_tex = None;
                 self.send(ClientMsg::StreamStop);
@@ -6030,6 +6111,15 @@ impl KiApp {
     /// Arrête sa propre diffusion, côté capture ET côté serveur.
     fn arreter_diffusion(&mut self) {
         if let Some(g) = self.go_live.take() {
+            ki_voice::journal(format!(
+                "diffusion arrêtée (stream {}) : {} trames encodées, sautées capture {} / \
+                 encodeur {} / réseau {}",
+                g.stream_id,
+                g.stats.encoded.load(std::sync::atomic::Ordering::Relaxed),
+                g.stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
+                g.stats.enc_skipped.load(std::sync::atomic::Ordering::Relaxed),
+                g.stats.net_dropped.load(std::sync::atomic::Ordering::Relaxed),
+            ));
             g.arreter();
         }
         self.go_live_attente = None;
@@ -6146,6 +6236,7 @@ impl KiApp {
         // La source peut s'évanouir sous nos pieds (la fenêtre diffusée se
         // ferme) : la diffusion s'arrête proprement plutôt que de figer.
         if self.go_live.as_ref().is_some_and(|g| g.boucle.source_closed()) {
+            ki_voice::journal("la fenêtre diffusée a été fermée : diffusion arrêtée".into());
             self.arreter_diffusion();
             self.info = Some("la fenêtre diffusée a été fermée : diffusion arrêtée".into());
         }
@@ -6180,6 +6271,12 @@ impl KiApp {
                 g.stats.enc_skipped.load(Relaxed),
                 g.stats.net_dropped.load(Relaxed),
             );
+            // La même ligne au journal toutes les dix secondes : c'est elle
+            // qui dira, à distance, où une diffusion a coincé.
+            if self.journal_flux.elapsed() >= std::time::Duration::from_secs(10) {
+                self.journal_flux = std::time::Instant::now();
+                ki_voice::journal(format!("diffusion : {etat}"));
+            }
             let mut arreter = false;
             let mut reglages = false;
             let mut ouvert = true;
@@ -6368,8 +6465,9 @@ impl KiApp {
         ui::group_title(ui, Icon::Info, "Diagnostics des joueurs");
         ui::hint(
             ui,
-            "n'existe que pour ceux qui ont coché « Partager mes diagnostics » dans \
-             leurs réglages audio — technique seulement, jamais les messages ni la voix",
+            "les journaux n'existent que pour ceux qui ont coché « Partager mes \
+             diagnostics » dans leurs réglages audio ; les rapports de plantage, eux, \
+             arrivent de tout le monde — technique seulement, jamais les messages ni la voix",
         );
         ui.add_space(6.0);
         if ui::button(ui, Icon::Refresh, "Récupérer tous les diagnostics").clicked() {
@@ -6408,14 +6506,27 @@ impl KiApp {
                                 versions.push(version.to_string());
                             }
                         }
-                        tout.push_str(&format!("\n===== {ligne} =====\n"));
                         match agent
                             .get(&format!("{base}/diag/{fichier}?tail=65536"))
                             .set("x-ki-token", &token_hex)
                             .call()
                         {
-                            Ok(r) => tout.push_str(&r.into_string().unwrap_or_default()),
-                            Err(e) => tout.push_str(&format!("(illisible : {e})\n")),
+                            Ok(r) => {
+                                let corps = r.into_string().unwrap_or_default();
+                                // Un plantage se voit dès l'en-tête : c'est
+                                // ce qu'on cherche en premier dans ce mur.
+                                let plantages = corps.matches("\"type\":\"crash\"").count();
+                                let marque = match plantages {
+                                    0 => String::new(),
+                                    1 => " ⚠ 1 PLANTAGE".to_string(),
+                                    n => format!(" ⚠ {n} PLANTAGES"),
+                                };
+                                tout.push_str(&format!("\n===== {ligne}{marque} =====\n"));
+                                tout.push_str(&corps);
+                            }
+                            Err(e) => {
+                                tout.push_str(&format!("\n===== {ligne} =====\n(illisible : {e})\n"))
+                            }
                         }
                     }
                     Ok(tout)

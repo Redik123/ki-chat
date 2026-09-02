@@ -75,7 +75,7 @@ static LAST_DEDUP: Mutex<String> = Mutex::new(String::new());
 /// Consigne un événement audio, horodaté (epoch millis). Les appels doublent
 /// une trace `tracing` : le journal parle à l'utilisateur, la trace au
 /// développeur.
-fn journal(msg: String) {
+pub fn journal(msg: String) {
     LAST_DEDUP.lock().unwrap().clear();
     journal_raw(msg);
 }

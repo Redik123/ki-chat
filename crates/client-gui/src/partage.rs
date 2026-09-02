@@ -495,9 +495,11 @@ fn fil_decodeur(
 ) {
     let cipher = XChaCha20Poly1305::new(&key.into());
     let Ok(mut decodeur) = ViewerDecoder::new() else {
-        tracing::error!("décodeur du spectateur indisponible");
+        ki_video::journal("visionnage impossible : décodeur H.264 du spectateur indisponible");
         return;
     };
+    let depart = std::time::Instant::now();
+    let mut premiere = true;
     // Les trames déchiffrées en attente de leur tour, par séquence.
     let mut attente: BTreeMap<u64, (bool, Vec<u8>)> = BTreeMap::new();
     let mut prochaine: Option<u64> = None;
@@ -554,6 +556,15 @@ fn fil_decodeur(
         // Tout ce qui est contigu part au décodeur, dans l'ordre.
         while let Some((_, clair)) = attente.remove(&next) {
             if let Some(frame) = decodeur.decode(&clair) {
+                if premiere {
+                    premiere = false;
+                    ki_video::journal(format!(
+                        "visionnage : première image {}x{} après {} ms",
+                        frame.width,
+                        frame.height,
+                        depart.elapsed().as_millis()
+                    ));
+                }
                 // La conversion RGBA -> image egui (8 Mo en 1080p) se paie
                 // ici, pas sur le fil d'interface.
                 let prete = egui::ColorImage::from_rgba_unmultiplied(
