@@ -18,7 +18,72 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Vec2, ViewportBuilder};
 
 use crate::theme::{TEXT, TEXT_DIM};
-use crate::ui;
+use crate::ui::{self, Tone};
+
+/// Le titre de la fenêtre de l'overlay — c'est par lui qu'on la retrouve
+/// pour la remettre au-dessus.
+const TITRE: &str = "ki-chat — qui parle";
+
+/// Les deux gestes Windows que l'overlay a besoin de faire lui-même : se
+/// remettre au sommet de la pile des fenêtres « toujours au-dessus » (les
+/// jeux s'y remettent aussi, à chaque reprise du focus — la dernière
+/// demande gagne), et savoir qui est au premier plan.
+#[cfg(windows)]
+mod win {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowTextW, SetWindowPos,
+        GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+    };
+
+    /// Remet la fenêtre `titre` au sommet des « toujours au-dessus », sans
+    /// la déplacer ni l'activer. `false` si elle n'existe pas (encore).
+    pub fn remettre_au_dessus(titre: &str) -> bool {
+        let large: Vec<u16> = titre.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let Ok(hwnd) = FindWindowW(None, PCWSTR(large.as_ptr())) else { return false };
+            if hwnd.is_invalid() {
+                return false;
+            }
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .is_ok()
+        }
+    }
+
+    /// Le titre de la fenêtre au premier plan, et si elle est elle-même
+    /// « toujours au-dessus ».
+    pub fn premier_plan() -> (String, bool) {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_invalid() {
+                return (String::new(), false);
+            }
+            let mut tampon = [0u16; 128];
+            let n = GetWindowTextW(hwnd, &mut tampon).max(0) as usize;
+            let titre = String::from_utf16_lossy(&tampon[..n.min(128)]);
+            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            (titre, ex & WS_EX_TOPMOST.0 != 0)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod win {
+    pub fn remettre_au_dessus(_titre: &str) -> bool {
+        false
+    }
+    pub fn premier_plan() -> (String, bool) {
+        (String::new(), false)
+    }
+}
 
 /// Le coin de l'écran où l'overlay se pose.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -66,6 +131,30 @@ pub struct Overlay {
     /// Dernier signal de parole par pseudo : l'anneau tient un peu après,
     /// sans quoi il clignoterait au rythme des trames.
     recemment: HashMap<String, Instant>,
+    /// Un jeu tourne en plein écran exclusif : rien ne peut s'afficher
+    /// au-dessus, l'overlay compris — autant le dire.
+    pub exclusif: bool,
+    /// Dernière sonde du plein écran exclusif et du premier plan.
+    sonde: Instant,
+    /// Dernière ré-affirmation du « toujours au-dessus ».
+    reaffirme: Instant,
+    /// La dernière fenêtre vue au premier plan (titre, toujours au-dessus),
+    /// pour ne la consigner qu'au changement.
+    devant: (String, bool),
+}
+
+/// Windows le sait : `SHQueryUserNotificationState` rend « un programme
+/// Direct3D tourne en plein écran » quand un jeu a pris l'écran pour lui
+/// seul — c'est le seul cas où l'overlay ne peut pas se montrer.
+#[cfg(windows)]
+fn plein_ecran_exclusif() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
+    unsafe { SHQueryUserNotificationState().map(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN).unwrap_or(false) }
+}
+
+#[cfg(not(windows))]
+fn plein_ecran_exclusif() -> bool {
+    false
 }
 
 const LARGEUR: f32 = 220.0;
@@ -81,6 +170,10 @@ impl Overlay {
             coin: Coin::depuis(&get("overlay_coin", "haut-gauche")),
             toujours: get("overlay_toujours", "on") != "off",
             recemment: HashMap::new(),
+            exclusif: false,
+            sonde: Instant::now(),
+            reaffirme: Instant::now(),
+            devant: (String::new(), false),
         }
     }
 
@@ -98,6 +191,36 @@ impl Overlay {
             return;
         }
         let now = Instant::now();
+        // Toutes les deux secondes : un jeu a-t-il pris l'écran pour lui
+        // seul ? Le changement d'état va au journal — c'est la réponse à
+        // « l'overlay ne s'affiche pas », lisible à distance.
+        if now.duration_since(self.sonde) > Duration::from_secs(2) {
+            self.sonde = now;
+            // Qui est devant, et se met-il lui-même au-dessus ? Consigné au
+            // changement : c'est la réponse à « l'overlay ne se voit pas ».
+            let devant = win::premier_plan();
+            if devant != self.devant && devant.0 != TITRE {
+                ki_voice::journal(format!(
+                    "overlay : au premier plan « {} » (toujours au-dessus : {})",
+                    devant.0,
+                    if devant.1 { "oui" } else { "non" }
+                ));
+                self.devant = devant;
+            }
+            let exclusif = plein_ecran_exclusif();
+            if exclusif != self.exclusif {
+                self.exclusif = exclusif;
+                ki_voice::journal(
+                    if exclusif {
+                        "overlay : un jeu tourne en plein écran exclusif, rien ne peut s'afficher \
+                         au-dessus — passe-le en fenêtré plein écran"
+                    } else {
+                        "overlay : fin du plein écran exclusif, l'overlay peut s'afficher"
+                    }
+                    .into(),
+                );
+            }
+        }
         for l in &lignes {
             if l.parle {
                 self.recemment.insert(l.nom.clone(), now);
@@ -134,8 +257,9 @@ impl Overlay {
             Coin::BasDroite => Pos2::new(ecran.x - LARGEUR - 16.0, ecran.y - hauteur - 64.0),
         };
         let anime = affichees.iter().any(|(_, parle, _)| *parle);
+        let id = egui::ViewportId::from_hash_of("overlay-qui-parle");
         let builder = ViewportBuilder::default()
-            .with_title("ki-chat — qui parle")
+            .with_title(TITRE)
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
@@ -145,10 +269,7 @@ impl Overlay {
             .with_active(false)
             .with_inner_size([LARGEUR, hauteur])
             .with_position(pos);
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("overlay-qui-parle"),
-            builder,
-            move |ctx, _classe| {
+        ctx.show_viewport_immediate(id, builder, move |ctx, _classe| {
                 egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
                     let rect = ui.max_rect();
                     let painter = ui.painter();
@@ -186,8 +307,16 @@ impl Overlay {
                 if anime {
                     ctx.request_repaint_after(Duration::from_millis(100));
                 }
-            },
-        );
+        });
+        // Les jeux en fenêtré plein écran se remettent eux-mêmes tout en
+        // haut quand ils reprennent le focus, par-dessus nous — Valorant le
+        // fait. Toutes les 300 ms, on repasse au sommet de la pile des
+        // fenêtres « toujours au-dessus », sans bouger ni prendre le focus :
+        // ce que font toutes les apps de viseur, pour la même raison.
+        if now.duration_since(self.reaffirme) > Duration::from_millis(300) {
+            self.reaffirme = now;
+            win::remettre_au_dessus(TITRE);
+        }
     }
 }
 
@@ -228,11 +357,22 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
             change = true;
         }
     }
+    if o.exclusif {
+        ui.add_space(4.0);
+        ui::banner(
+            ui,
+            Tone::Warn,
+            "en ce moment, un jeu tourne en plein écran exclusif : rien ne peut s'afficher \
+             au-dessus, l'overlay compris. Dans le jeu, mode d'affichage → « Fenêtré plein \
+             écran » (Valorant : Paramètres → Vidéo → Général).",
+            false,
+        );
+    }
     ui::hint(
         ui,
-        "se voit sur un jeu en fenêtré sans bordure ou en plein écran classique ; en vrai \
-         plein écran exclusif (optimisations plein écran désactivées à la main), rien ne \
-         peut passer au-dessus du jeu",
+        "se voit sur un jeu en fenêtré plein écran (sans bordure) ; en plein écran exclusif — \
+         le mode « Plein écran » de Valorant, par exemple — rien ne peut passer au-dessus \
+         du jeu, pas même la bulle de volume de Windows",
     );
     change
 }
@@ -264,7 +404,7 @@ mod tests {
             fn flush(&mut self) {}
         }
         let mut o = Overlay::load(|_, d| d.to_string());
-        assert!(o.actif && o.toujours);
+        assert!(o.actif && o.toujours && !o.exclusif);
         o.actif = false;
         o.coin = Coin::BasDroite;
         o.toujours = false;

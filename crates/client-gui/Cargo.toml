@@ -66,4 +66,10 @@ windows = { version = "0.61", features = [
     "Win32_Security_Cryptography",
     # SetThreadExecutionState : pas de veille système en plein salon vocal.
     "Win32_System_Power",
+    # SHQueryUserNotificationState : un jeu en plein écran exclusif ? Alors
+    # l'overlay ne peut pas s'afficher, et on le dit au lieu de laisser croire.
+    "Win32_UI_Shell",
+    # SetWindowPos(HWND_TOPMOST) : l'overlay se remet au-dessus des jeux qui
+    # se remettent eux-mêmes au-dessus ; GetForegroundWindow : qui est devant.
+    "Win32_UI_WindowsAndMessaging",
 ] }
