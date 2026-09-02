@@ -155,6 +155,13 @@ la séquence continue, les spectateurs ne voient qu'une IDR de plus) ; stats
 instantanées côté streamer, cadence côté spectateur ; arrêt propre quand la
 fenêtre diffusée se ferme. `KeyframeNeeded` est limité à 1 par 500 ms côté
 relais depuis S1b.
+En 0.1.23, sur retour du terrain (« la diffusion ne marche pas pour tout
+le monde ») : les options de capture ne se demandent que si le Windows de
+la machine les connaît — windows-capture refuse de démarrer sinon, et
+l'intervalle minimal entre images n'existe qu'en 24H2 — la cadence étant
+tenue par nous ; le journal partagé reçoit les événements de diffusion et
+une ligne de stats toutes les dix secondes, plus l'inventaire des cartes
+graphiques et l'état de NVENC.
 Reste : `StreamDegraded` + clause du quantile, vignettes dans le sélecteur,
 fenêtre de visionnage **détachée** + plein écran.
 **Validation** : un viewer bridé (limiteur de débit) ne dégrade ni les autres
