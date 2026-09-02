@@ -157,18 +157,22 @@ fn plein_ecran_exclusif() -> bool {
     false
 }
 
-const LARGEUR: f32 = 220.0;
-const LIGNE: f32 = 30.0;
-const MARGE: f32 = 8.0;
-/// L'anneau reste allumé tant de temps après le dernier signal.
-const TENUE: Duration = Duration::from_millis(400);
+const AVATAR: f32 = 22.0;
+const HAUTEUR_LIGNE: f32 = 28.0;
+const ECART: f32 = 4.0;
+const PAD: f32 = 5.0;
+/// L'anneau reste allumé tant de temps après le dernier signal : le temps
+/// d'une respiration entre deux phrases, sans clignoter.
+const TENUE: Duration = Duration::from_millis(1200);
 
 impl Overlay {
     pub fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
             actif: get("overlay", "on") != "off",
             coin: Coin::depuis(&get("overlay_coin", "haut-gauche")),
-            toujours: get("overlay_toujours", "on") != "off",
+            // Par défaut, rien à l'écran tant que personne ne parle : la
+            // discrétion d'abord.
+            toujours: get("overlay_toujours", "off") == "on",
             recemment: HashMap::new(),
             exclusif: false,
             sonde: Instant::now(),
@@ -245,16 +249,29 @@ impl Overlay {
             return;
         }
 
-        let hauteur = MARGE * 2.0 + affichees.len() as f32 * LIGNE;
+        // Une pilule par personne, ajustée à son pseudo : pas de bloc.
+        let police = egui::FontId::proportional(12.5);
+        let largeurs: Vec<f32> = affichees
+            .iter()
+            .map(|(nom, _, _)| {
+                ctx.fonts(|f| f.layout_no_wrap(nom.clone(), police.clone(), Color32::WHITE))
+                    .size()
+                    .x
+            })
+            .collect();
+        let largeur_pilule = |texte: f32| PAD + AVATAR + 6.0 + texte + PAD + 2.0;
+        let largeur = largeurs.iter().copied().fold(0.0, f32::max);
+        let largeur = largeur_pilule(largeur).ceil();
+        let hauteur = (affichees.len() as f32 * (HAUTEUR_LIGNE + ECART) - ECART + 2.0).ceil();
         let ecran = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(Vec2::new(1920.0, 1080.0));
         let pos = match self.coin {
             Coin::HautGauche => Pos2::new(16.0, 16.0),
-            Coin::HautDroite => Pos2::new(ecran.x - LARGEUR - 16.0, 16.0),
+            Coin::HautDroite => Pos2::new(ecran.x - largeur - 16.0, 16.0),
             // 64 px du bas : la barre des tâches, quand elle est là.
             Coin::BasGauche => Pos2::new(16.0, ecran.y - hauteur - 64.0),
-            Coin::BasDroite => Pos2::new(ecran.x - LARGEUR - 16.0, ecran.y - hauteur - 64.0),
+            Coin::BasDroite => Pos2::new(ecran.x - largeur - 16.0, ecran.y - hauteur - 64.0),
         };
         let anime = affichees.iter().any(|(_, parle, _)| *parle);
         let id = egui::ViewportId::from_hash_of("overlay-qui-parle");
@@ -267,46 +284,55 @@ impl Overlay {
             .with_resizable(false)
             .with_mouse_passthrough(true)
             .with_active(false)
-            .with_inner_size([LARGEUR, hauteur])
+            .with_inner_size([largeur, hauteur])
             .with_position(pos);
         ctx.show_viewport_immediate(id, builder, move |ctx, _classe| {
-                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
-                    let rect = ui.max_rect();
-                    let painter = ui.painter();
-                    // Une pilule sombre et translucide : lisible sur un jeu
-                    // clair comme sombre, sans le cacher.
-                    painter.rect_filled(
-                        rect,
-                        CornerRadius::same(10),
-                        Color32::from_rgba_unmultiplied(12, 15, 20, 190),
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+                let rect = ui.max_rect();
+                let painter = ui.painter();
+                for (i, (nom, parle, photo)) in affichees.iter().enumerate() {
+                    let y = rect.top() + 1.0 + i as f32 * (HAUTEUR_LIGNE + ECART);
+                    let pilule = Rect::from_min_size(
+                        Pos2::new(rect.left(), y),
+                        Vec2::new(largeur_pilule(largeurs[i]), HAUTEUR_LIGNE),
                     );
-                    for (i, (nom, parle, photo)) in affichees.iter().enumerate() {
-                        let y = rect.top() + MARGE + i as f32 * LIGNE;
-                        let avatar = Rect::from_min_size(
-                            Pos2::new(rect.left() + MARGE + 2.0, y + 3.0),
-                            Vec2::splat(24.0),
-                        );
-                        ui::paint_avatar(
-                            painter,
-                            avatar,
-                            nom,
-                            *parle,
-                            photo.as_ref(),
-                            Color32::from_rgb(12, 15, 20),
-                        );
-                        let couleur = if *parle { TEXT } else { TEXT_DIM };
-                        painter.text(
-                            Pos2::new(avatar.right() + 8.0, y + LIGNE / 2.0),
-                            egui::Align2::LEFT_CENTER,
-                            nom,
-                            egui::FontId::proportional(13.0),
-                            couleur,
-                        );
-                    }
-                });
-                if anime {
-                    ctx.request_repaint_after(Duration::from_millis(100));
+                    // Un voile noir léger, à peine plus dense pour qui parle ;
+                    // qui se tait s'estompe.
+                    let voile = if *parle { 140 } else { 80 };
+                    painter.rect_filled(
+                        pilule,
+                        CornerRadius::same(14),
+                        Color32::from_rgba_unmultiplied(0, 0, 0, voile),
+                    );
+                    let avatar = Rect::from_min_size(
+                        Pos2::new(pilule.left() + PAD, y + (HAUTEUR_LIGNE - AVATAR) / 2.0),
+                        Vec2::splat(AVATAR),
+                    );
+                    ui::paint_avatar(
+                        painter,
+                        avatar,
+                        nom,
+                        *parle,
+                        photo.as_ref(),
+                        Color32::from_rgb(16, 16, 16),
+                    );
+                    let couleur = if *parle {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+                    };
+                    painter.text(
+                        Pos2::new(avatar.right() + 6.0, y + HAUTEUR_LIGNE / 2.0),
+                        egui::Align2::LEFT_CENTER,
+                        nom,
+                        police.clone(),
+                        couleur,
+                    );
                 }
+            });
+            if anime {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
         });
         // Les jeux en fenêtré plein écran se remettent eux-mêmes tout en
         // haut quand ils reprennent le focus, par-dessus nous — Valorant le
@@ -350,8 +376,11 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
                 });
         });
         if ui
-            .checkbox(&mut o.toujours, "Montrer aussi ceux qui se taisent")
-            .on_hover_text("décoché : seuls ceux qui parlent apparaissent, l'overlay disparaît au silence")
+            .checkbox(&mut o.toujours, "Montrer aussi ceux qui se taisent (estompés)")
+            .on_hover_text(
+                "décoché : seuls ceux qui parlent apparaissent, et l'overlay disparaît au \
+                 silence — le plus discret",
+            )
             .changed()
         {
             change = true;
@@ -404,13 +433,13 @@ mod tests {
             fn flush(&mut self) {}
         }
         let mut o = Overlay::load(|_, d| d.to_string());
-        assert!(o.actif && o.toujours && !o.exclusif);
+        assert!(o.actif && !o.toujours && !o.exclusif);
         o.actif = false;
         o.coin = Coin::BasDroite;
-        o.toujours = false;
+        o.toujours = true;
         o.save(&mut M(&mut memoire));
         let relu = Overlay::load(|k, d| memoire.get(k).cloned().unwrap_or_else(|| d.to_string()));
-        assert!(!relu.actif && !relu.toujours);
+        assert!(!relu.actif && relu.toujours);
         assert_eq!(relu.coin, Coin::BasDroite);
     }
 }
