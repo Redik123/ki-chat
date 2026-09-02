@@ -1057,3 +1057,7 @@ fn fold_mono_into_i16(data: &[i16], channels: usize, out: &mut Vec<f32>) {
     );
 }
 
+
+/// Son du jeu : la boucle de tout le systeme, sauf nous (boucle.rs).
+mod boucle;
+pub use boucle::open_loopback;

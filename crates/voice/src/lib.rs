@@ -22,6 +22,9 @@ pub mod jitter;
 pub mod resample;
 #[cfg(windows)]
 mod wasapi;
+/// Le son du jeu dans le stream : capture en boucle et lecteur.
+#[cfg(windows)]
+pub mod jeu;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -561,6 +564,13 @@ struct Shared {
     /// par le fil de capture — même famille que `loopback_buf`, mêmes
     /// précautions (verrou bref, encours borné).
     aec_far: Mutex<std::collections::VecDeque<f32>>,
+    /// Le son du jeu d'un stream que l'on regarde : mono 48 kHz déposé par
+    /// le lecteur (fil du spectateur), mixé par le rappel de sortie comme
+    /// les effets — avant le volume général et le limiteur, et dans le
+    /// signal « lointain » de l'annulateur d'écho.
+    aux_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// Son volume (bits f32), réglé par le spectateur.
+    aux_gain: AtomicU32,
     /// Micro affamé : la bascule en catégorie « communications » est
     /// **proposée** à l'utilisateur, jamais imposée — c'est elle qui peut
     /// faire baisser le volume de ses autres sons, à lui de choisir.
@@ -628,6 +638,8 @@ impl VoiceEngine {
             audio_reset: std::sync::atomic::AtomicU64::new(0),
             aec: AtomicBool::new(cfg.aec),
             aec_far: Mutex::new(std::collections::VecDeque::new()),
+            aux_buf: Mutex::new(std::collections::VecDeque::new()),
+            aux_gain: AtomicU32::new(1.0f32.to_bits()),
             comms_proposed: AtomicBool::new(false),
             comms_decision: std::sync::atomic::AtomicU8::new(0),
             input_lost: AtomicBool::new(false),
@@ -686,6 +698,31 @@ impl VoiceEngine {
         }
 
         Ok(Self { shared, threads })
+    }
+
+    /// Le son du jeu d'un stream que l'on regarde : du mono 48 kHz, mixé
+    /// dans la sortie au fil de l'eau. L'avance est bornée à 300 ms : les
+    /// horloges audio des deux machines ne battent pas exactement pareil,
+    /// et sans borne le retard grandirait sans fin — les échantillons les
+    /// plus vieux sautent, personne ne l'entend.
+    pub fn aux_push(&self, pcm: &[f32]) {
+        const AVANCE_MAX: usize = (SAMPLE_RATE as usize) * 3 / 10;
+        let mut aux = self.shared.aux_buf.lock().unwrap();
+        aux.extend(pcm.iter().copied());
+        let trop = aux.len().saturating_sub(AVANCE_MAX);
+        if trop > 0 {
+            aux.drain(..trop);
+        }
+    }
+
+    /// Volume du son du jeu reçu (1.0 = 100 %).
+    pub fn set_aux_gain(&self, gain: f32) {
+        self.shared.aux_gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Plus de stream à écouter : ce qui restait à jouer est jeté.
+    pub fn aux_clear(&self) {
+        self.shared.aux_buf.lock().unwrap().clear();
     }
 
     /// Active/coupe l'émission micro (l'équivalent du push-to-talk).
@@ -2469,6 +2506,20 @@ fn output_writer(
                     let gain = load_f32(&sh_cb.effects_gain);
                     for o in mix.iter_mut() {
                         match fx.pop_front() {
+                            Some(s) => *o += s * gain,
+                            None => break,
+                        }
+                    }
+                }
+            }
+            // Le son du jeu d'un stream que l'on regarde : même traitement
+            // que les effets, avant le volume général et le limiteur.
+            {
+                let mut aux = sh_cb.aux_buf.lock().unwrap();
+                if !aux.is_empty() {
+                    let gain = load_f32(&sh_cb.aux_gain);
+                    for o in mix.iter_mut() {
+                        match aux.pop_front() {
                             Some(s) => *o += s * gain,
                             None => break,
                         }

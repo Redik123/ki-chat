@@ -82,6 +82,9 @@ extern "C" {
 // Constantes d'opus_defines.h — stables depuis opus 1.0 pour les classiques,
 // et vérifiées dans les sources 1.6 pour le DRED.
 const OPUS_APPLICATION_VOIP: c_int = 2048;
+/// Musique et son de jeu : pas de modèle de parole, la bande passante à la
+/// fidélité.
+const OPUS_APPLICATION_AUDIO: c_int = 2049;
 const OPUS_SET_BITRATE_REQUEST: c_int = 4002;
 const OPUS_SET_COMPLEXITY_REQUEST: c_int = 4010;
 const OPUS_SET_INBAND_FEC_REQUEST: c_int = 4012;
@@ -123,6 +126,8 @@ pub enum Channels {
 #[derive(Debug, Clone, Copy)]
 pub enum Application {
     Voip,
+    /// Musique, son de jeu : fidélité plutôt que modèle de parole.
+    Audio,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,20 +137,27 @@ pub enum Bitrate {
 
 pub struct Encoder {
     ptr: *mut OpusEncoderC,
+    /// Pour convertir la longueur du tampon PCM (entrelacé) en trame par
+    /// canal : libopus compte en échantillons par canal, pas en flottants.
+    channels: usize,
 }
 // libopus n'a pas d'état global : un état par objet, déplaçable entre threads.
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-    pub fn new(sample_rate: u32, channels: Channels, _app: Application) -> Result<Self> {
+    pub fn new(sample_rate: u32, channels: Channels, app: Application) -> Result<Self> {
         let mut err: c_int = 0;
+        let application = match app {
+            Application::Voip => OPUS_APPLICATION_VOIP,
+            Application::Audio => OPUS_APPLICATION_AUDIO,
+        };
         let ptr = unsafe {
-            opus_encoder_create(sample_rate as i32, channels as c_int, OPUS_APPLICATION_VOIP, &mut err)
+            opus_encoder_create(sample_rate as i32, channels as c_int, application, &mut err)
         };
         if ptr.is_null() || err != 0 {
             return Err(Error(err));
         }
-        Ok(Self { ptr })
+        Ok(Self { ptr, channels: channels as usize })
     }
 
     pub fn set_bitrate(&mut self, bitrate: Bitrate) -> Result<()> {
@@ -177,12 +189,14 @@ impl Encoder {
         }
     }
 
+    /// `pcm` : une trame entrelacée (tous les canaux) ; sa longueur divisée
+    /// par le nombre de canaux donne la taille de trame que libopus attend.
     pub fn encode_float(&mut self, pcm: &[f32], out: &mut [u8]) -> Result<usize> {
         let n = unsafe {
             opus_encode_float(
                 self.ptr,
                 pcm.as_ptr(),
-                pcm.len() as c_int,
+                (pcm.len() / self.channels) as c_int,
                 out.as_mut_ptr(),
                 out.len() as i32,
             )
@@ -199,6 +213,9 @@ impl Drop for Encoder {
 
 pub struct Decoder {
     ptr: *mut OpusDecoderC,
+    /// Même raison que pour l'encodeur : la capacité du tampon PCM se
+    /// compte par canal.
+    channels: usize,
 }
 unsafe impl Send for Decoder {}
 
@@ -209,7 +226,7 @@ impl Decoder {
         if ptr.is_null() || err != 0 {
             return Err(Error(err));
         }
-        Ok(Self { ptr })
+        Ok(Self { ptr, channels: channels as usize })
     }
 
     /// Complexité du décodeur : >= 5 active le Deep PLC (masquage de perte
@@ -219,7 +236,8 @@ impl Decoder {
     }
 
     /// data vide = dissimulation de perte (PLC). fec = reconstruire la trame
-    /// précédente depuis la redondance LBRR de ce paquet.
+    /// précédente depuis la redondance LBRR de ce paquet. `pcm` est
+    /// entrelacé ; rend le nombre d'échantillons **par canal** décodés.
     pub fn decode_float(&mut self, data: &[u8], pcm: &mut [f32], fec: bool) -> Result<usize> {
         let (ptr, len) = if data.is_empty() {
             (std::ptr::null(), 0)
@@ -232,7 +250,7 @@ impl Decoder {
                 ptr,
                 len,
                 pcm.as_mut_ptr(),
-                pcm.len() as c_int,
+                (pcm.len() / self.channels) as c_int,
                 fec as c_int,
             )
         };
