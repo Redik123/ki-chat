@@ -3042,8 +3042,10 @@ dependencies = [
  "ki-protocol",
  "ndarray",
  "nnnoiseless",
+ "prost",
  "rand 0.9.5",
  "tracing",
+ "tract-onnx",
  "windows 0.61.3",
  "windows-core 0.61.2",
 ]

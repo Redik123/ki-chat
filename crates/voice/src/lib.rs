@@ -20,6 +20,8 @@ pub mod effects;
 // existent pour empêcher.
 pub mod jitter;
 pub mod resample;
+/// Détection de parole neuronale (Silero VAD, par tract).
+pub mod silero;
 #[cfg(windows)]
 mod wasapi;
 /// Le son du jeu dans le stream : capture en boucle et lecteur.
@@ -164,6 +166,11 @@ pub struct VoiceConfig {
     pub vad_threshold: f32,
     /// Maintien d'émission après la dernière voix détectée (VAD), en ms.
     pub vad_hangover_ms: u32,
+    /// Activation vocale par le réseau de neurones (Silero) plutôt que par
+    /// le seuil d'amplitude : un clavier n'est plus une voix.
+    pub vad_neural: bool,
+    /// Probabilité de parole à partir de laquelle le réseau ouvre le micro.
+    pub vad_sensitivity: f32,
     /// Gain automatique (AGC) : normalise le niveau micro tout seul.
     pub agc: bool,
     /// Niveau crête cible de l'AGC (0..1).
@@ -198,6 +205,8 @@ impl VoiceConfig {
             output_gain: 1.0,
             vad_threshold: 0.0,
             vad_hangover_ms: 400,
+            vad_neural: true,
+            vad_sensitivity: 0.5,
             agc: true,
             agc_target: 0.30,
             gate_threshold: 0.0,
@@ -453,6 +462,8 @@ pub struct VoiceStats {
     pub active_senders: usize,
     /// Niveau crête du micro sur le dernier bloc capturé (0.0 = silence).
     pub mic_peak: f32,
+    /// Probabilité de parole du réseau de neurones (0 si désactivé).
+    pub vad_prob: f32,
     /// Échantillons de voix distante réellement mixés vers la sortie.
     pub samples_played: u64,
     /// Pire gigue réseau mesurée parmi les locuteurs actifs, en ms.
@@ -471,6 +482,7 @@ struct Counters {
     recovered: AtomicU64,
     rejected: AtomicU64,
     mic_peak_bits: std::sync::atomic::AtomicU32,
+    vad_prob_bits: std::sync::atomic::AtomicU32,
     played: AtomicU64,
     /// Trames incomplètes parties vers la carte son : la sortie a réclamé
     /// des échantillons qu'aucun tampon de lecture n'avait. C'est la mesure
@@ -530,6 +542,8 @@ struct Shared {
     gate_threshold: AtomicU32,
     /// Maintien VAD en ms.
     vad_hangover_ms: AtomicU32,
+    vad_neural: AtomicBool,
+    vad_sens: AtomicU32,
     /// Tampon de gigue imposé en trames (0 = adaptatif).
     jitter_override: std::sync::atomic::AtomicUsize,
     /// Débit Opus demandé (appliqué à chaud par le thread de capture).
@@ -628,6 +642,8 @@ impl VoiceEngine {
             agc_target: AtomicU32::new(cfg.agc_target.to_bits()),
             gate_threshold: AtomicU32::new(cfg.gate_threshold.to_bits()),
             vad_hangover_ms: AtomicU32::new(cfg.vad_hangover_ms),
+            vad_neural: AtomicBool::new(cfg.vad_neural),
+            vad_sens: AtomicU32::new(cfg.vad_sensitivity.to_bits()),
             jitter_override: std::sync::atomic::AtomicUsize::new(cfg.jitter_frames),
             bitrate: AtomicI32::new(cfg.bitrate),
             dred: AtomicI32::new(0),
@@ -748,6 +764,16 @@ impl VoiceEngine {
     /// Maintien d'émission VAD en ms, à chaud.
     pub fn set_vad_hangover_ms(&self, ms: u32) {
         self.shared.vad_hangover_ms.store(ms.clamp(50, 2000), Ordering::Relaxed);
+    }
+
+    /// Activation vocale neuronale (Silero) ou par seuil d'amplitude.
+    pub fn set_vad_neural(&self, on: bool) {
+        self.shared.vad_neural.store(on, Ordering::Relaxed);
+    }
+
+    /// Probabilité de parole qui ouvre le micro en mode neuronal.
+    pub fn set_vad_sensitivity(&self, p: f32) {
+        store_f32(&self.shared.vad_sens, p.clamp(0.1, 0.95));
     }
 
     /// Impose une taille de tampon de gigue en trames (0 = adaptatif), à chaud.
@@ -909,6 +935,7 @@ impl VoiceEngine {
             packets_rejected: self.shared.counters.rejected.load(Ordering::Relaxed),
             active_senders,
             mic_peak: f32::from_bits(self.shared.counters.mic_peak_bits.load(Ordering::Relaxed)),
+            vad_prob: f32::from_bits(self.shared.counters.vad_prob_bits.load(Ordering::Relaxed)),
             samples_played: self.shared.counters.played.load(Ordering::Relaxed),
             worst_jitter_ms,
             underruns: self.shared.counters.underruns.load(Ordering::Relaxed),
@@ -1230,6 +1257,11 @@ fn capture_loop(
     let mut deep = LazyDeep::default();
     let mut gate = NoiseGate::new();
     let mut agc = Agc::new();
+    // Le réseau de détection de parole, chargé à la première trame qui en a
+    // besoin (mode activation vocale, micro armé) : ~1 Mo de modèle qu'on
+    // ne paie pas en push-to-talk.
+    let mut silero: Option<silero::Silero> = None;
+    let mut vad_ouvert = false;
     let mut monitor: Option<Monitor> = None;
     // Activation vocale : on continue d'émettre un court instant après le
     // dernier franchissement du seuil, pour ne pas hacher les fins de mots.
@@ -1585,7 +1617,44 @@ fn capture_loop(
             // 6. Décision d'émission : armé + activation vocale éventuelle.
             let armed = sh.transmitting.load(Ordering::Relaxed);
             let threshold = load_f32(&sh.vad_threshold);
-            if peak >= threshold {
+            // Activation vocale : par le réseau de neurones si demandé (et
+            // s'il se charge), sinon par le seuil d'amplitude. Le réseau ne
+            // tourne qu'en mode activation vocale, micro armé — rien à
+            // décider sinon.
+            let neuronal = threshold > 0.0 && armed && sh.vad_neural.load(Ordering::Relaxed);
+            let voix = if neuronal {
+                if silero.is_none() {
+                    silero = match silero::Silero::new() {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            journal(format!(
+                                "détection de parole neuronale indisponible ({e}) — retour au seuil d'amplitude"
+                            ));
+                            sh.vad_neural.store(false, Ordering::Relaxed);
+                            None
+                        }
+                    };
+                }
+                match silero.as_mut() {
+                    Some(vad) => {
+                        let _ = vad.traiter(&frame);
+                        let p = vad.derniere();
+                        sh.counters.vad_prob_bits.store(p.to_bits(), Ordering::Relaxed);
+                        // Hystérésis : on ouvre à la sensibilité, on ne
+                        // referme qu'un bon cran en dessous — pas de micro qui
+                        // papillonne entre deux syllabes.
+                        let sens = load_f32(&sh.vad_sens);
+                        vad_ouvert = if vad_ouvert { p >= sens * 0.6 } else { p >= sens };
+                        vad_ouvert
+                    }
+                    None => peak >= threshold,
+                }
+            } else {
+                sh.counters.vad_prob_bits.store(0, Ordering::Relaxed);
+                vad_ouvert = false;
+                peak >= threshold
+            };
+            if voix {
                 last_voice = Instant::now();
             }
             let hangover =

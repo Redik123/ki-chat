@@ -54,6 +54,9 @@ pub struct VoicePrefs {
     pub vad_threshold: f32,
     /// Maintien VAD en ms.
     pub vad_hangover_ms: u32,
+    /// Activation vocale neuronale (Silero) et sa sensibilité.
+    pub vad_neural: bool,
+    pub vad_sensitivity: f32,
     /// Débit Opus en bits/s.
     pub bitrate: i32,
     /// Gain automatique (AGC).
@@ -404,6 +407,8 @@ fn start_engine(
     cfg.output_gain = prefs.output_gain;
     cfg.vad_threshold = prefs.vad_threshold;
     cfg.vad_hangover_ms = prefs.vad_hangover_ms;
+    cfg.vad_neural = prefs.vad_neural;
+    cfg.vad_sensitivity = prefs.vad_sensitivity;
     cfg.bitrate = prefs.bitrate;
     cfg.agc = prefs.agc;
     cfg.aec = prefs.aec;

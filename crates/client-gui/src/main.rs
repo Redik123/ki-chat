@@ -748,6 +748,10 @@ struct KiApp {
     input_gain: f32,
     output_gain: f32,
     vad_threshold: f32,
+    /// Activation vocale par le réseau de neurones (Silero) plutôt que par
+    /// le seuil d'amplitude, et la probabilité qui ouvre le micro.
+    vad_neural: bool,
+    vad_sens: f32,
     vad_hangover_ms: u32,
     /// Débit choisi (0 = Auto : piloté par les rapports qualité du serveur).
     bitrate: i32,
@@ -1001,6 +1005,8 @@ impl KiApp {
             input_gain: get("input_gain", "1.0").parse().unwrap_or(1.0),
             output_gain: get("output_gain", "1.0").parse().unwrap_or(1.0),
             vad_threshold: get("vad_threshold", "0.02").parse().unwrap_or(0.02),
+            vad_neural: get("vad_neural", "on") != "off",
+            vad_sens: get("vad_sens", "0.5").parse().unwrap_or(0.5),
             vad_hangover_ms: get("vad_hangover_ms", "400").parse().unwrap_or(400),
             bitrate: get("bitrate", "0").parse().unwrap_or(0),
             auto_bitrate: 64_000,
@@ -1209,6 +1215,8 @@ impl KiApp {
             engine.set_output_gain(if self.sourd { 0.0 } else { self.output_gain });
             engine.set_vad_threshold(self.effective_vad());
             engine.set_vad_hangover_ms(self.vad_hangover_ms);
+            engine.set_vad_neural(self.vad_neural);
+            engine.set_vad_sensitivity(self.vad_sens);
             engine.set_bitrate(self.effective_bitrate());
             engine.set_agc(self.agc);
             engine.set_aec(self.aec_on);
@@ -1248,6 +1256,8 @@ impl KiApp {
             output_gain: self.output_gain,
             vad_threshold: self.effective_vad(),
             vad_hangover_ms: self.vad_hangover_ms,
+            vad_neural: self.vad_neural,
+            vad_sensitivity: self.vad_sens,
             bitrate: self.effective_bitrate(),
             agc: self.agc,
             aec: self.aec_on,
@@ -5367,7 +5377,9 @@ impl KiApp {
                             };
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("niveau").color(TEXT_DIM).size(12.5));
-                                let threshold = (self.mode == MicMode::Vad)
+                                // En détection neuronale, le repère n'est pas
+                                // un niveau : il est sur la jauge de parole.
+                                let threshold = (self.mode == MicMode::Vad && !self.vad_neural)
                                     .then(|| (self.vad_threshold * 3.0).min(1.0));
                                 ui::meter_with_threshold(
                                     ui,
@@ -5380,6 +5392,22 @@ impl KiApp {
                                     ui.label(RichText::new("vocal inactif").color(WARN).size(11.0));
                                 }
                             });
+                            // La jauge de parole du réseau de neurones, avec
+                            // la sensibilité en repère : on voit ce qu'il
+                            // pense de ce qu'il entend.
+                            if self.mode == MicMode::Vad && self.vad_neural {
+                                let prob = stats.vad_prob;
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("parole").color(TEXT_DIM).size(12.5));
+                                    ui::meter_with_threshold(
+                                        ui,
+                                        prob,
+                                        Some(self.vad_sens),
+                                        Vec2::new(ui.available_width().min(230.0), 9.0),
+                                        if engine_up && prob >= self.vad_sens { SPEAK } else { TEXT_DIM },
+                                    );
+                                });
+                            }
                             ui.add_space(8.0);
 
                             // Calibration automatique des seuils sur le niveau ambiant.
@@ -5472,17 +5500,52 @@ impl KiApp {
                             }
 
                             if self.mode == MicMode::Vad {
-                                let mut thr_pct = self.vad_threshold * 100.0;
+                                // Le réseau de neurones décide de ce qui est
+                                // une voix ; le seuil d'amplitude ne sert
+                                // qu'en repli, et ne s'affiche qu'alors.
+                                if !self.vad_neural {
+                                    let mut thr_pct = self.vad_threshold * 100.0;
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut thr_pct, 0.5..=25.0)
+                                                .text("seuil d'activation")
+                                                .suffix(" %"),
+                                        )
+                                        .changed()
+                                    {
+                                        self.vad_threshold = thr_pct / 100.0;
+                                        apply = true;
+                                    }
+                                }
                                 if ui
-                                    .add(
-                                        egui::Slider::new(&mut thr_pct, 0.5..=25.0)
-                                            .text("seuil d'activation")
-                                            .suffix(" %"),
+                                    .checkbox(&mut self.vad_neural, "Détection de parole neuronale (Silero)")
+                                    .on_hover_text(
+                                        "un réseau de neurones entraîné sur des milliers d'heures de \
+                                         parole ouvre le micro — un clavier, une respiration ou un \
+                                         souffle ne sont plus pris pour une voix. 0,1 ms par bloc.",
                                     )
                                     .changed()
                                 {
-                                    self.vad_threshold = thr_pct / 100.0;
                                     apply = true;
+                                }
+                                if self.vad_neural {
+                                    let mut sens_pct = self.vad_sens * 100.0;
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut sens_pct, 20.0..=90.0)
+                                                .text("sensibilité")
+                                                .suffix(" %")
+                                                .integer(),
+                                        )
+                                        .on_hover_text(
+                                            "probabilité de parole qui ouvre le micro : plus bas, \
+                                             plus réactif ; plus haut, plus strict",
+                                        )
+                                        .changed()
+                                    {
+                                        self.vad_sens = sens_pct / 100.0;
+                                        apply = true;
+                                    }
                                 }
                                 let mut hang = self.vad_hangover_ms as f32;
                                 if ui
@@ -9229,6 +9292,8 @@ impl eframe::App for KiApp {
         storage.set_string("input_gain", format!("{}", self.input_gain));
         storage.set_string("output_gain", format!("{}", self.output_gain));
         storage.set_string("vad_threshold", format!("{}", self.vad_threshold));
+        storage.set_string("vad_neural", if self.vad_neural { "on" } else { "off" }.into());
+        storage.set_string("vad_sens", format!("{}", self.vad_sens));
         storage.set_string("vad_hangover_ms", format!("{}", self.vad_hangover_ms));
         storage.set_string("bitrate", format!("{}", self.bitrate));
         storage.set_string("agc", if self.agc { "on" } else { "off" }.into());

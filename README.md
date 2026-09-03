@@ -625,8 +625,12 @@ chaud et mémorisé :
 - périphériques d'entrée/sortie (avec actualisation de la liste) ;
 - vumètre micro en direct, gain d'entrée 0–200 % ;
 - trois modes : micro ouvert, push-to-talk (touche globale), **activation
-  vocale** avec seuil réglable (jauge verte quand la voix déclenche,
-  maintien de 400 ms pour ne pas couper les fins de mots) ;
+  vocale** — par **détection de parole neuronale** (Silero VAD, exécuté par
+  le même moteur d'inférence que DeepFilterNet, 0,1 ms par bloc de 32 ms :
+  un clavier mécanique ou une respiration ne sont plus une voix, jauge de
+  probabilité et sensibilité réglable) ou par seuil d'amplitude (jauge verte
+  quand la voix déclenche), avec maintien de 400 ms pour ne pas couper les
+  fins de mots ;
 - **suppression de bruit à 3 niveaux** : désactivée / RNNoise (léger) /
   **DeepFilterNet3** — réseau de neurones qualité studio (inférence tract
   100 % Rust, modèle embarqué ~2 Mo, ~1 ms de CPU par trame, +30 ms de
