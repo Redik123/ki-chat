@@ -163,8 +163,21 @@ pub struct Watcher {
     release_ms: Arc<AtomicU32>,
     /// Touche enfoncée, ou relâchée depuis moins que le maintien.
     active: Arc<AtomicBool>,
+    /// Les raccourcis à bascule — couper le micro, se rendre sourd — : leur
+    /// touche (ou [`AUCUNE`]) et le nombre de pressions vues, que
+    /// l'interface compare à ce qu'elle a déjà traité. Un compteur plutôt
+    /// qu'un drapeau : deux pressions entre deux images ne s'annulent pas
+    /// l'une l'autre par accident, elles se voient.
+    bascules: Arc<[(AtomicU8, AtomicU32); 2]>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Les raccourcis à bascule, dans l'ordre des cases de `bascules`.
+#[derive(Clone, Copy)]
+pub enum Bascule {
+    Micro = 0,
+    Sourd = 1,
 }
 
 impl Watcher {
@@ -172,27 +185,43 @@ impl Watcher {
         let key = Arc::new(AtomicU8::new(AUCUNE));
         let release_ms = Arc::new(AtomicU32::new(0));
         let active = Arc::new(AtomicBool::new(false));
+        let bascules = Arc::new([
+            (AtomicU8::new(AUCUNE), AtomicU32::new(0)),
+            (AtomicU8::new(AUCUNE), AtomicU32::new(0)),
+        ]);
         let stop = Arc::new(AtomicBool::new(false));
 
         let handle = std::thread::Builder::new()
             .name("ki-ptt".into())
             .spawn({
-                let (key, release_ms, active, stop) =
-                    (key.clone(), release_ms.clone(), active.clone(), stop.clone());
-                move || boucle(ctx, key, release_ms, active, stop)
+                let (key, release_ms, active, bascules, stop) = (
+                    key.clone(),
+                    release_ms.clone(),
+                    active.clone(),
+                    bascules.clone(),
+                    stop.clone(),
+                );
+                move || boucle(ctx, key, release_ms, active, bascules, stop)
             })
             .ok();
 
-        Self { key, release_ms, active, stop, handle }
+        Self { key, release_ms, active, bascules, stop, handle }
     }
 
     /// Règle la touche surveillée. `None` = ne rien surveiller.
     pub fn watch(&self, key: Option<PttKey>) {
-        let index = key
-            .and_then(|k| PttKey::ALL.iter().position(|c| *c == k))
-            .map(|i| i as u8)
-            .unwrap_or(AUCUNE);
-        self.key.store(index, Ordering::Relaxed);
+        self.key.store(index_de(key), Ordering::Relaxed);
+    }
+
+    /// Règle la touche d'un raccourci à bascule. `None` = pas de raccourci.
+    pub fn watch_bascule(&self, quoi: Bascule, key: Option<PttKey>) {
+        self.bascules[quoi as usize].0.store(index_de(key), Ordering::Relaxed);
+    }
+
+    /// Nombre de pressions vues sur ce raccourci depuis le démarrage :
+    /// l'interface bascule autant de fois que la valeur a avancé.
+    pub fn pressions(&self, quoi: Bascule) -> u32 {
+        self.bascules[quoi as usize].1.load(Ordering::Relaxed)
     }
 
     pub fn set_release_ms(&self, ms: u32) {
@@ -215,29 +244,54 @@ impl Drop for Watcher {
     }
 }
 
+/// L'indice d'une touche dans [`PttKey::ALL`], ou [`AUCUNE`].
+fn index_de(key: Option<PttKey>) -> u8 {
+    key.and_then(|k| PttKey::ALL.iter().position(|c| *c == k))
+        .map(|i| i as u8)
+        .unwrap_or(AUCUNE)
+}
+
 fn boucle(
     ctx: egui::Context,
     key: Arc<AtomicU8>,
     release_ms: Arc<AtomicU32>,
     active: Arc<AtomicBool>,
+    bascules: Arc<[(AtomicU8, AtomicU32); 2]>,
     stop: Arc<AtomicBool>,
 ) {
     let device = DeviceState::new();
     let mut dernier_appui: Option<Instant> = None;
+    // Les bascules réagissent au front : une touche tenue enfoncée ne
+    // bascule qu'une fois.
+    let mut enfoncees_avant = [false; 2];
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(PERIODE);
 
         let index = key.load(Ordering::Relaxed);
+        let indices_bascules = [
+            bascules[0].0.load(Ordering::Relaxed),
+            bascules[1].0.load(Ordering::Relaxed),
+        ];
+        // Rien à surveiller : on ne lit même pas le clavier. Une
+        // application qui interroge le clavier en permanence sans en avoir
+        // l'usage n'a rien à faire sur la machine de quelqu'un.
+        if index == AUCUNE && indices_bascules.iter().all(|i| *i == AUCUNE) {
+            dernier_appui = None;
+            enfoncees_avant = [false; 2];
+            if active.swap(false, Ordering::Relaxed) {
+                ctx.request_repaint();
+            }
+            continue;
+        }
+        let touches = device.get_keys();
+
         let voulu = if index == AUCUNE {
-            // Hors push-to-talk : on ne lit même pas le clavier. Une
-            // application qui interroge le clavier en permanence sans en
-            // avoir l'usage n'a rien à faire sur la machine de quelqu'un.
             dernier_appui = None;
             false
         } else {
             let touche = PttKey::ALL[index as usize].keycode();
-            let enfoncee = device.get_keys().contains(&touche);
+            let enfoncee = touches.contains(&touche);
             if enfoncee {
                 dernier_appui = Some(Instant::now());
             }
@@ -246,9 +300,20 @@ fn boucle(
             enfoncee || dernier_appui.is_some_and(|t| t.elapsed() < maintien)
         };
 
+        let mut reveil = false;
+        for (i, idx) in indices_bascules.iter().enumerate() {
+            let enfoncee =
+                *idx != AUCUNE && touches.contains(&PttKey::ALL[*idx as usize].keycode());
+            if enfoncee && !enfoncees_avant[i] {
+                bascules[i].1.fetch_add(1, Ordering::Relaxed);
+                reveil = true;
+            }
+            enfoncees_avant[i] = enfoncee;
+        }
+
         // On ne réveille l'interface qu'aux changements : c'est ce qui permet
         // à l'application de dormir le reste du temps.
-        if active.swap(voulu, Ordering::Relaxed) != voulu {
+        if active.swap(voulu, Ordering::Relaxed) != voulu || reveil {
             ctx.request_repaint();
         }
     }

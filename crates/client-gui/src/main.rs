@@ -718,6 +718,15 @@ struct KiApp {
     mode: MicMode,
     ptt_key: PttKey,
     muted: bool,
+    /// Sourd : plus rien ne sort de la carte son — les voix, le son du jeu
+    /// d'un stream, les notifications — et le micro est coupé avec. Le
+    /// volume de sortie réglé reste en mémoire pour le retour.
+    sourd: bool,
+    /// Raccourcis globaux à bascule (en plus du push-to-talk).
+    hotkey_micro: Option<PttKey>,
+    hotkey_sourd: Option<PttKey>,
+    /// Pressions déjà traitées de chaque raccourci.
+    hotkey_vues: (u32, u32),
     /// Micro armé (mute/PTT/mode) — commande envoyée au moteur.
     armed: bool,
     /// Émission réellement en cours (lue depuis le moteur, après VAD).
@@ -973,6 +982,10 @@ impl KiApp {
                 _ => MicMode::Ptt,
             },
             ptt_key: PttKey::from_id(&get("ptt_key", "lalt")).unwrap_or(PttKey::LAlt),
+            sourd: false,
+            hotkey_micro: PttKey::from_id(&get("hotkey_micro", "")),
+            hotkey_sourd: PttKey::from_id(&get("hotkey_sourd", "")),
+            hotkey_vues: (0, 0),
             muted: false,
             armed: false,
             transmitting: false,
@@ -1191,7 +1204,9 @@ impl KiApp {
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             engine.set_noise_mode(self.noise_mode);
             engine.set_input_gain(self.input_gain);
-            engine.set_output_gain(self.output_gain);
+            // Sourd : la sortie à zéro, le réglage de volume gardé pour le
+            // retour.
+            engine.set_output_gain(if self.sourd { 0.0 } else { self.output_gain });
             engine.set_vad_threshold(self.effective_vad());
             engine.set_vad_hangover_ms(self.vad_hangover_ms);
             engine.set_bitrate(self.effective_bitrate());
@@ -3456,16 +3471,18 @@ impl KiApp {
                     };
                     let clicked = ui::icon_button_ex(ui, icon, 38.0, tip, tint).clicked();
                     if clicked && in_voice {
-                        self.muted = !self.muted;
-                        self.play_sfx(if self.muted { sfx::MUTE } else { sfx::UNMUTE });
-                        // Annoncer la bascule tout de suite : les autres voient
-                        // l'icône « muet » au lieu de se demander si l'on est
-                        // parti. Sans ça, seule la prochaine transition de
-                        // parole aurait porté l'information.
-                        self.send(ClientMsg::VoiceState {
-                            speaking: self.transmitting,
-                            muted: self.muted,
-                        });
+                        self.basculer_micro();
+                    }
+                    // --- Sourd : plus rien n'entre, et le micro est coupé ---
+                    if in_voice {
+                        let (icon, tint, tip) = if self.sourd {
+                            (Icon::HeadphonesOff, Some(DANGER), "Retrouver l'écoute")
+                        } else {
+                            (Icon::Headphones, None, "Se rendre sourd (coupe aussi le micro)")
+                        };
+                        if ui::icon_button_ex(ui, icon, 38.0, tip, tint).clicked() {
+                            self.basculer_sourd();
+                        }
                     }
                     // Partage d'écran : le sélecteur (source, réglages,
                     // démarrer) au repos, l'arrêt en direct — en vocal
@@ -4329,6 +4346,36 @@ impl KiApp {
                 self.send(ClientMsg::Chat { text, reply_to });
                 self.input.clear();
             }
+        }
+    }
+
+    /// Couper ou rétablir son micro — par le bouton ou le raccourci global.
+    fn basculer_micro(&mut self) {
+        self.muted = !self.muted;
+        self.play_sfx(if self.muted { sfx::MUTE } else { sfx::UNMUTE });
+        // Annoncer la bascule tout de suite : les autres voient l'icône
+        // « muet » au lieu de se demander si l'on est parti. Sans ça, seule
+        // la prochaine transition de parole aurait porté l'information.
+        self.send(ClientMsg::VoiceState { speaking: self.transmitting, muted: self.muted });
+    }
+
+    /// Se rendre sourd, ou retrouver l'écoute. Sourd coupe aussi le micro,
+    /// comme partout ailleurs ; le retour le rend, sans se souvenir d'un
+    /// micro coupé avant — on redevient présent d'un coup.
+    fn basculer_sourd(&mut self) {
+        self.sourd = !self.sourd;
+        if self.muted != self.sourd {
+            self.muted = self.sourd;
+            self.send(ClientMsg::VoiceState { speaking: self.transmitting, muted: self.muted });
+        }
+        // L'effet sonore part avant que la sortie ne se taise ; au retour,
+        // après qu'elle est revenue.
+        if self.sourd {
+            self.play_sfx(sfx::MUTE);
+            self.apply_audio_settings();
+        } else {
+            self.apply_audio_settings();
+            self.play_sfx(sfx::UNMUTE);
         }
     }
 
@@ -5468,6 +5515,41 @@ impl KiApp {
                                 {
                                     self.ptt_release_ms = rel as u32;
                                 }
+                            }
+
+                            // --- Raccourcis globaux à bascule ---
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("raccourcis globaux").color(TEXT_DIM).size(12.5));
+                            ui::hint(
+                                ui,
+                                "ils marchent même en jeu, fenêtre au second plan — une pression \
+                                 bascule, en vocal seulement",
+                            );
+                            let ptt_key = (self.mode == MicMode::Ptt).then_some(self.ptt_key);
+                            for (intitule, salt, choix) in [
+                                ("couper / rétablir le micro", "hotkey_micro", &mut self.hotkey_micro),
+                                ("se rendre sourd / retrouver l'écoute", "hotkey_sourd", &mut self.hotkey_sourd),
+                            ] {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(intitule).color(TEXT_DIM).size(12.5));
+                                    let actuel = choix.map(|k| k.label()).unwrap_or("aucune");
+                                    egui::ComboBox::from_id_salt(salt)
+                                        .width(130.0)
+                                        .selected_text(RichText::new(actuel).color(TEXT))
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(choix, None, "aucune");
+                                            for key in PttKey::ALL {
+                                                ui.selectable_value(choix, Some(key), key.label());
+                                            }
+                                        });
+                                    if choix.is_some() && *choix == ptt_key {
+                                        ui.label(
+                                            RichText::new("⚠ c'est la touche du push-to-talk")
+                                                .color(WARN)
+                                                .size(11.5),
+                                        );
+                                    }
+                                });
                             }
 
                             // --- Suppression de bruit ---
@@ -9030,6 +9112,33 @@ impl eframe::App for KiApp {
         // même pas le clavier.
         ptt.watch((self.mode == MicMode::Ptt).then_some(self.ptt_key));
         ptt.set_release_ms(self.ptt_release_ms);
+        // Les raccourcis à bascule : autant de pressions vues, autant de
+        // bascules — mais seulement en vocal, hors vocal elles n'ont pas de
+        // sens et sont simplement consommées.
+        ptt.watch_bascule(ptt::Bascule::Micro, self.hotkey_micro);
+        ptt.watch_bascule(ptt::Bascule::Sourd, self.hotkey_sourd);
+        let pressions = (ptt.pressions(ptt::Bascule::Micro), ptt.pressions(ptt::Bascule::Sourd));
+        if pressions != self.hotkey_vues {
+            let (micro, sourd) = (
+                pressions.0.wrapping_sub(self.hotkey_vues.0) % 2 == 1,
+                pressions.1.wrapping_sub(self.hotkey_vues.1) % 2 == 1,
+            );
+            self.hotkey_vues = pressions;
+            if self.voice_channel.is_some() {
+                if sourd {
+                    self.basculer_sourd();
+                }
+                if micro {
+                    self.basculer_micro();
+                }
+            }
+        }
+        // Sortir du vocal rend l'écoute : sourd hors vocal, ce serait des
+        // notifications muettes sans qu'on sache pourquoi.
+        if self.sourd && self.voice_channel.is_none() {
+            self.sourd = false;
+            self.apply_audio_settings();
+        }
 
         // En vocal, la machine ne doit pas s'endormir : parler ne compte pas
         // comme de l'activité pour Windows, et un portable dont on ne touche
@@ -9132,6 +9241,8 @@ impl eframe::App for KiApp {
         storage.set_string("noise_mode", format!("{}", self.noise_mode));
         storage.set_string("dred_mode", format!("{}", self.dred_mode));
         storage.set_string("ptt_key", self.ptt_key.id().into());
+        storage.set_string("hotkey_micro", self.hotkey_micro.map(|k| k.id()).unwrap_or("").into());
+        storage.set_string("hotkey_sourd", self.hotkey_sourd.map(|k| k.id()).unwrap_or("").into());
         storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
         storage.set_string(
             "output_device",
