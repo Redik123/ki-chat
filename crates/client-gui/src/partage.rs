@@ -649,50 +649,59 @@ fn fil_decodeur(
         }
         let Some(mut next) = prochaine else { continue };
 
-        // Tout ce qui est contigu part au décodeur, dans l'ordre.
-        while let Some((_, clair)) = attente.remove(&next) {
-            if let Some(frame) = decodeur.decode(&clair) {
-                if premiere {
-                    premiere = false;
-                    ki_video::journal(format!(
-                        "visionnage : première image {}x{} après {} ms",
-                        frame.width,
-                        frame.height,
-                        depart.elapsed().as_millis()
-                    ));
+        loop {
+            // Tout ce qui est contigu part au décodeur, dans l'ordre.
+            while let Some((_, clair)) = attente.remove(&next) {
+                if let Some(frame) = decodeur.decode(&clair) {
+                    if premiere {
+                        premiere = false;
+                        ki_video::journal(format!(
+                            "visionnage : première image {}x{} après {} ms",
+                            frame.width,
+                            frame.height,
+                            depart.elapsed().as_millis()
+                        ));
+                    }
+                    // La conversion RGBA -> image egui (8 Mo en 1080p) se
+                    // paie ici, pas sur le fil d'interface.
+                    let prete = egui::ColorImage::from_rgba_unmultiplied(
+                        [frame.width, frame.height],
+                        &frame.rgba,
+                    );
+                    *image.lock().unwrap() = Some(prete);
+                    images.fetch_add(1, Ordering::Relaxed);
+                    // Seul moyen de peindre au rythme du stream : la boucle
+                    // de repeint de l'application est plafonnée à 20 fps
+                    // sinon.
+                    ctx.request_repaint();
                 }
-                // La conversion RGBA -> image egui (8 Mo en 1080p) se paie
-                // ici, pas sur le fil d'interface.
-                let prete = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width, frame.height],
-                    &frame.rgba,
-                );
-                *image.lock().unwrap() = Some(prete);
-                images.fetch_add(1, Ordering::Relaxed);
-                // Seul moyen de peindre au rythme du stream : la boucle de
-                // repeint de l'application est plafonnée à 20 fps sinon.
-                ctx.request_repaint();
+                next = next.wrapping_add(1);
             }
-            next = next.wrapping_add(1);
-        }
 
-        // Un trou qui s'éternise : on saute à la prochaine trame clé plutôt
-        // que d'attendre une trame qui ne viendra peut-être jamais.
-        if attente.len() > ATTENTE_MAX {
-            if let Some(s) = attente
+            // Une trame clé en attente au-delà d'un trou : on y saute tout de
+            // suite. Elle remet le décodeur à neuf, et les trames manquantes
+            // d'avant ne serviraient à rien — le serveur les annule d'ailleurs
+            // à chaque trame clé quand le lien ne suit pas. Attendre (c'était
+            // trente trames) ne faisait que geler l'image une seconde.
+            match attente
                 .iter()
                 .find(|(k, (idr, _))| **k > next && *idr)
                 .map(|(s, _)| *s)
             {
-                attente.retain(|k, _| *k >= s);
-                next = s;
-            } else {
-                // Rien de décodable en réserve : table rase, la prochaine
-                // trame clé relancera la lecture.
-                attente.clear();
-                prochaine = None;
-                continue;
+                Some(s) => {
+                    attente.retain(|k, _| *k >= s);
+                    next = s;
+                }
+                None => break,
             }
+        }
+
+        // Un trou qui s'éternise sans trame clé en réserve : table rase, la
+        // prochaine trame clé relancera la lecture.
+        if attente.len() > ATTENTE_MAX {
+            attente.clear();
+            prochaine = None;
+            continue;
         }
         prochaine = Some(next);
     }

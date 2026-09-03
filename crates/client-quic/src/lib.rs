@@ -125,6 +125,13 @@ impl QuicClient {
         transport.receive_window(quinn::VarInt::from_u32(16 * 1024 * 1024));
         // Relais vidéo : plus de 100 trames peuvent être en vol.
         transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
+        // Symétrique du serveur : au plus 1 Mio envoyé sans accusé de
+        // réception (le défaut, 10 Mio, laisserait dix secondes de vidéo
+        // périmée s'empiler sur une liaison montante trop courte), et BBR
+        // pour ne pas gonfler les tampons des routeurs — la voix y ferait la
+        // queue derrière la vidéo.
+        transport.send_window(1024 * 1024);
+        transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
         client_config.transport_config(Arc::new(transport));
 
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;

@@ -43,6 +43,8 @@ const IDR_COOLDOWN: Duration = Duration::from_millis(500);
 pub struct Trame {
     pub bytes: Vec<u8>,
     pub seq: u64,
+    /// Trame clé : elle rend caduques toutes celles d'avant.
+    pub idr: bool,
     mem: Arc<AtomicUsize>,
 }
 
@@ -216,7 +218,7 @@ impl Streams {
         let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Trame>>(FILE_VIEWER);
         let needs_idr = Arc::new(AtomicBool::new(true));
         let seq_start = live.seq_start.unwrap_or(0);
-        let task = tokio::spawn(diffuser(conn.clone(), rx, seq_start));
+        let task = tokio::spawn(diffuser(conn.clone(), rx, seq_start, needs_idr.clone()));
         live.viewers.insert(user, Viewer { tx, needs_idr, task, conn });
         let ask = live.last_idr_ask.elapsed() >= IDR_COOLDOWN;
         if ask {
@@ -270,7 +272,8 @@ impl Streams {
             return Ingest::Ok { ask_idr: ask };
         }
         self.mem.fetch_add(taille, Ordering::Relaxed);
-        let trame = Arc::new(Trame { bytes, seq: header.seq, mem: self.mem.clone() });
+        let trame =
+            Arc::new(Trame { bytes, seq: header.seq, idr: header.idr, mem: self.mem.clone() });
 
         let mut ask = false;
         let mut partis: Vec<UserId> = Vec::new();
@@ -318,22 +321,59 @@ fn priorite(seq: u64, seq_start: u64) -> i32 {
     0i32.saturating_sub(age.min(i32::MAX as u64) as i32)
 }
 
+/// Trames d'un spectateur encore en vol (écrites, pas forcément arrivées)
+/// au-delà desquelles on annule les plus anciennes : trois secondes à
+/// 30 i/s, le temps qu'un lien lent se rattrape ou qu'une trame clé passe.
+const EN_VOL_MAX: usize = 90;
+/// Une écriture qui n'aboutit pas dans ce délai, c'est un tampon d'envoi
+/// plein depuis trop longtemps : le lien du spectateur ne suit pas.
+const ECRITURE_MAX: Duration = Duration::from_millis(400);
+
 /// La tâche d'un spectateur : chaque trame part dans SON flux QUIC
 /// unidirectionnel — fiabilité par trame, sans blocage de tête de ligne
 /// entre trames. Une erreur d'écriture termine la tâche ; l'ingestion
 /// constatera la file fermée et retirera le spectateur.
+///
+/// Le retard ne s'accumule pas : une trame clé annule (RESET_STREAM) toutes
+/// celles d'avant encore en vol — le spectateur saute à la trame clé au lieu
+/// de rattraper des images périmées —, et une écriture qui bloque trop
+/// longtemps annule sa trame et remet le spectateur en attente de trame clé.
+/// C'est ce qui manquait quand un spectateur au lien trop court prenait dix
+/// secondes de vidéo en retard, la voix de tout le salon faisant la queue
+/// derrière.
 async fn diffuser(
     conn: quinn::Connection,
     mut rx: tokio::sync::mpsc::Receiver<Arc<Trame>>,
     seq_start: u64,
+    needs_idr: Arc<AtomicBool>,
 ) {
+    let mut en_vol: std::collections::VecDeque<quinn::SendStream> =
+        std::collections::VecDeque::new();
     while let Some(trame) = rx.recv().await {
+        if trame.idr {
+            for mut vieux in en_vol.drain(..) {
+                // Déjà arrivée : l'annulation est refusée, sans conséquence.
+                let _ = vieux.reset(quinn::VarInt::from_u32(0));
+            }
+        }
         let Ok(mut flux) = conn.open_uni().await else { return };
         let _ = flux.set_priority(priorite(trame.seq, seq_start));
-        if flux.write_all(&trame.bytes).await.is_err() {
-            return;
+        match tokio::time::timeout(ECRITURE_MAX, flux.write_all(&trame.bytes)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return,
+            Err(_) => {
+                let _ = flux.reset(quinn::VarInt::from_u32(0));
+                needs_idr.store(true, Ordering::Relaxed);
+                continue;
+            }
         }
         let _ = flux.finish();
+        en_vol.push_back(flux);
+        while en_vol.len() > EN_VOL_MAX {
+            if let Some(mut vieux) = en_vol.pop_front() {
+                let _ = vieux.reset(quinn::VarInt::from_u32(0));
+            }
+        }
     }
 }
 
@@ -379,7 +419,7 @@ mod tests {
     fn la_memoire_se_rend_au_drop() {
         let mem = Arc::new(AtomicUsize::new(0));
         mem.fetch_add(1000, Ordering::Relaxed);
-        let t = Arc::new(Trame { bytes: vec![0u8; 1000], seq: 1, mem: mem.clone() });
+        let t = Arc::new(Trame { bytes: vec![0u8; 1000], seq: 1, idr: false, mem: mem.clone() });
         let t2 = t.clone();
         drop(t);
         assert_eq!(mem.load(Ordering::Relaxed), 1000, "une copie vit encore");

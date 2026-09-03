@@ -137,8 +137,8 @@ la fenêtre principale).
 Écarts assumés sur le plan : `Welcome.features` écarté (le groupe met à
 jour en bloc, les vieux clients ne comprennent pas les nouveaux messages) ;
 l'émission est séquentielle sur un canal borné à 2 (trame jetée → IDR
-forcée) plutôt qu'une table de trames en vol avec `RESET_STREAM` — à
-revisiter en S3 si le WAN le réclame ; pas d'horodatage incrusté (le
+forcée) — **complétée en 0.1.26 par la table de trames en vol avec
+`RESET_STREAM`** (voir S3) après un retour du terrain ; pas d'horodatage incrusté (le
 `pts_us` transite, l'affichage de latence ira dans l'overlay S2).
 **Validation chiffrée — reste à faire sur le terrain** : 1 streamer +
 2 viewers en LAN, latence < 150 ms ; gigue vocale p95 avant / pendant :
@@ -184,9 +184,21 @@ mono (la sortie du moteur est mono ; stéréo = S4), pas de synchronisation
 A/V par `pts_us` (transmis, non exploité), pas de tampon de gigue dédié
 (l'avance du mixeur en tient lieu), pas de réserve vocale de 4 Kio dans le
 tampon datagramme.
+**Livré en 0.1.26 : le retard ne s'accumule plus.** Retour du terrain
+(0.1.24) : pendant un stream, les spectateurs entendaient une voix
+horrible au bout d'une minute, le streamer rien, et ça durait 10–15 s
+après la fin. Cause : `send_window` de quinn à 10 Mio par défaut — vers
+un spectateur dont le lien ne suit pas la vidéo, dix secondes de trames
+périmées s'empilaient, et Cubic remplissait les tampons des routeurs, où
+la voix faisait la queue. Correctifs : `send_window(1 Mio)` serveur et
+client, BBR des deux côtés, table de trames en vol par spectateur avec
+`RESET_STREAM` des périmées à chaque trame clé (+ plafond de 90 en vol),
+écriture bornée à 400 ms (au-delà : trame annulée, spectateur remis en
+attente de trame clé), et le spectateur saute immédiatement à une trame
+clé en attente au lieu d'attendre trente trames derrière un trou.
 Reste : ladder adaptatif complet (goodput → `StreamBudget` → encodeur,
-hystérésis, `StreamRung`) ; sync A/V par `pts_us` ; `send_window(1 Mio)`
-côté client (mesuré sur le RTT vocal).
+hystérésis, `StreamRung`) — c'est lui qui évitera de saturer un lien
+court plutôt que d'en gérer les dégâts ; sync A/V par `pts_us`.
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 

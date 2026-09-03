@@ -68,6 +68,17 @@ pub async fn run(
     transport.receive_window(quinn::VarInt::from_u32(16 * 1024 * 1024));
     // Le défaut (100) plafonnerait le relais vidéo à 100 trames en vol.
     transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
+    // Ce que le serveur peut avoir envoyé sans accusé de réception : le
+    // défaut (10 Mio) laissait, vers un spectateur dont le lien ne suit pas
+    // la vidéo, s'empiler dix secondes de trames périmées — et la voix de
+    // tout le salon faisait la queue derrière. 1 Mio à 30 ms d'aller-retour
+    // suffit encore à 250 Mbit/s ; au-delà, la tâche de diffusion bloque,
+    // jette, et fait repartir le spectateur d'une trame clé.
+    transport.send_window(1024 * 1024);
+    // BBR plutôt que Cubic : il vise le débit du goulot sans remplir les
+    // tampons des routeurs, là où Cubic les gonfle jusqu'à la perte — et ces
+    // tampons pleins, c'est du retard pour chaque paquet de voix.
+    transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
     let endpoint = quinn::Endpoint::server(server_config, ([0, 0, 0, 0], port).into())?;
     tune_socket();
