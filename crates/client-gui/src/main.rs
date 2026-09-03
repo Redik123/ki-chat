@@ -589,6 +589,9 @@ struct KiApp {
     journal_flux: std::time::Instant,
     /// Volume du son du jeu du stream que je regarde (1.0 = 100 %).
     regard_volume: f32,
+    /// Le streamer est sur ce PC (un second ki-chat) : son son du jeu est
+    /// coupé chez nous, sinon sa capture nous recapturerait sans fin.
+    regard_meme_machine: bool,
     /// Docteur audio déplié dans les réglages.
     show_docteur: bool,
     /// Diagnostic partagé : le journal technique part vers le serveur
@@ -921,6 +924,7 @@ impl KiApp {
             cadence_regard: partage::Cadence::new(),
             journal_flux: std::time::Instant::now(),
             regard_volume: 1.0,
+            regard_meme_machine: false,
             regard: None,
             regard_tex: None,
             show_docteur: false,
@@ -2419,9 +2423,10 @@ impl KiApp {
                     self.go_live_tex = None;
                 }
             }
-            ServerMsg::WatchAccepted { stream_id, stream_key, .. } => {
+            ServerMsg::WatchAccepted { stream_id, stream_key, meta } => {
                 ki_voice::journal(format!("visionnage accepté (stream {stream_id})"));
-                self.regard_accepte(stream_id, &stream_key);
+                let meme_machine = meta.machine != 0 && meta.machine == partage::empreinte_machine();
+                self.regard_accepte(stream_id, &stream_key, meme_machine);
             }
             ServerMsg::WatchDenied { reason, .. } => {
                 ki_voice::journal(format!("visionnage refusé : {reason}"));
@@ -6584,13 +6589,20 @@ impl KiApp {
     }
 
     /// WatchAccepted : la clé est là, le fil décodeur démarre.
-    fn regard_accepte(&mut self, stream_id: u32, key_hex: &str) {
+    /// `meme_machine` : le streamer est ce PC (un second ki-chat) — son son
+    /// du jeu est coupé chez nous, sinon sa capture nous recapturerait sans
+    /// fin.
+    fn regard_accepte(&mut self, stream_id: u32, key_hex: &str, meme_machine: bool) {
         let Some(key) = ki_protocol::hex_decode(key_hex).and_then(|v| <[u8; 32]>::try_from(v).ok())
         else {
             self.info = Some("clé de stream invalide".into());
             return;
         };
         self.fermer_regard(true);
+        self.regard_meme_machine = meme_machine;
+        if meme_machine {
+            ki_voice::journal("visionnage : streamer sur cette machine, son du jeu coupé ici".into());
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let (audio_tx, audio_rx) = std::sync::mpsc::channel();
         if let Some(conn) = &self.conn {
@@ -6598,7 +6610,7 @@ impl KiApp {
             conn.set_game_audio_feed(Some(audio_tx));
         }
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-            engine.set_aux_gain(self.regard_volume);
+            engine.set_aux_gain(if meme_machine { 0.0 } else { self.regard_volume });
         }
         let streamer = self
             .members
@@ -6888,18 +6900,30 @@ impl KiApp {
                         // Le son du jeu du streamer, à son volume à soi —
                         // mixé par le moteur vocal, il suit aussi le volume
                         // général et la mise en sourdine.
-                        let mut pct = self.regard_volume * 100.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut pct, 0.0..=200.0)
-                                    .text("son du jeu")
-                                    .suffix(" %")
-                                    .integer(),
+                        if self.regard_meme_machine {
+                            ui.label(
+                                RichText::new("son du jeu coupé : le streamer est sur ce PC")
+                                    .color(TEXT_FAINT)
+                                    .size(11.5),
                             )
-                            .changed()
-                        {
-                            self.regard_volume = pct / 100.0;
-                            volume_change = true;
+                            .on_hover_text(
+                                "sa capture exclut son propre ki-chat, pas celui-ci : \
+                                 rejouer son son ici le lui renverrait en boucle",
+                            );
+                        } else {
+                            let mut pct = self.regard_volume * 100.0;
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut pct, 0.0..=200.0)
+                                        .text("son du jeu")
+                                        .suffix(" %")
+                                        .integer(),
+                                )
+                                .changed()
+                            {
+                                self.regard_volume = pct / 100.0;
+                                volume_change = true;
+                            }
                         }
                         if !etat.is_empty() {
                             ui.label(RichText::new(&etat).color(TEXT_FAINT).size(11.0).monospace());
@@ -6908,7 +6932,7 @@ impl KiApp {
                 });
             if volume_change {
                 if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                    engine.set_aux_gain(self.regard_volume);
+                    engine.set_aux_gain(if self.regard_meme_machine { 0.0 } else { self.regard_volume });
                 }
             }
             if quitter || !ouvert {

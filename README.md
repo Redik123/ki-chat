@@ -188,7 +188,11 @@ les spectateurs n'entendent pas leurs propres voix en retour —, Opus stéréo
 relayés tels quels. Chez le spectateur il est mixé dans la sortie du moteur
 vocal (même volume, même annulateur d'écho), avec un curseur « son du jeu »
 dans la fenêtre de visionnage. Case « Son du jeu dans le stream » chez le
-streamer, cochée par défaut.
+streamer, cochée par défaut. Deux ki-chat sur la même machine (un qui
+diffuse, un qui regarde) se reconnaissent par une empreinte dans les
+métadonnées du stream : le spectateur coupe alors le son du jeu chez lui,
+sinon la capture du streamer — qui n'exclut que son propre processus — le
+renverrait en boucle.
 
 **Visionnage** : une fenêtre flottante par stream, croix pour partir,
 décodage sur un fil dédié (départ sur trame clé, remise en ordre, saut

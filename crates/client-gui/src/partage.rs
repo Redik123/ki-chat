@@ -137,8 +137,30 @@ impl Reglages {
 
     /// Ce qu'on annonce au salon — les dimensions viendront des trames.
     pub fn meta(&self) -> StreamMeta {
-        StreamMeta { width: 0, height: 0, fps: self.fps.min(255) as u8, kbps: self.kbps }
+        StreamMeta {
+            width: 0,
+            height: 0,
+            fps: self.fps.min(255) as u8,
+            kbps: self.kbps,
+            machine: empreinte_machine(),
+        }
     }
+}
+
+/// L'empreinte de cette machine et de ce compte Windows, telle qu'elle
+/// voyage dans les métadonnées d'un stream : deux ki-chat lancés ici (un
+/// qui diffuse, un qui regarde — le cas du test) se reconnaissent, et le
+/// spectateur coupe le son du jeu chez lui au lieu de le renvoyer en boucle
+/// dans la capture du streamer. FNV-1a, comme les vignettes.
+pub fn empreinte_machine() -> u64 {
+    let nom = std::env::var("COMPUTERNAME").unwrap_or_default();
+    let compte = std::env::var("USERNAME").unwrap_or_default();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in nom.bytes().chain([0u8]).chain(compte.bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h.max(1)
 }
 
 /// Écrans et fenêtres capturables, relevés à l'ouverture du sélecteur et

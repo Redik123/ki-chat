@@ -1334,6 +1334,12 @@ pub struct StreamMeta {
     /// Débit d'encodage courant, en kbps.
     #[serde(default)]
     pub kbps: u32,
+    /// Empreinte de la machine du streamer (nom de machine + compte
+    /// Windows). Un spectateur sur la **même** machine coupe le son du jeu
+    /// chez lui : la boucle du streamer ne s'exclut qu'elle-même, et
+    /// recapturerait ce second ki-chat sans fin. 0 = inconnue.
+    #[serde(default)]
+    pub machine: u64,
 }
 
 #[cfg(test)]

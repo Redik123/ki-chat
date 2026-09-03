@@ -382,7 +382,7 @@ mod tests {
     use super::*;
 
     fn meta() -> StreamMeta {
-        StreamMeta { width: 1920, height: 1080, fps: 30, kbps: 6000 }
+        StreamMeta { width: 1920, height: 1080, fps: 30, kbps: 6000, ..Default::default() }
     }
 
     #[test]
