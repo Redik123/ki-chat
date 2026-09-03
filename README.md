@@ -134,8 +134,8 @@ aussi.
 
 ## Partage d'écran
 
-**Diffuser son écran** — bouton dans la barre vocale ou ⚙ « Diffusion
-d'écran » — et **regarder celui des autres** — clic droit sur un membre, ou
+**Diffuser son écran** — bouton dans la barre vocale ou ⚙ → Diffusion
+d'écran — et **regarder celui des autres** — clic droit sur un membre, ou
 sur le petit écran affiché à côté de son pseudo pendant qu'il diffuse. La
 diffusion est réservée au salon vocal du streamer, deux par salon au plus.
 
@@ -201,8 +201,8 @@ demande), rien au silence, dans le coin de son choix. Elle ne se montre que
 lorsque ki-chat n'a pas le focus et qu'on est en salon vocal, et se repeint
 dix fois par seconde quand quelqu'un parle, jamais plus.
 
-**Désactivé de base** : ⚙ « Afficher qui parle par-dessus le jeu » pour
-l'allumer. Il se voit partout où le jeu passe par le compositeur de Windows
+**Désactivé de base** : ⚙ → Overlay en jeu, « Afficher qui parle par-dessus
+le jeu » pour l'allumer. Il se voit partout où le jeu passe par le compositeur de Windows
 — fenêtré, fenêtré sans bordure, et « plein écran » avec les optimisations
 plein écran, le défaut. En **plein écran exclusif** (Valorant réglé sur
 « Plein écran » plutôt que « Fenêtré plein écran »), rien ne peut passer
@@ -319,7 +319,8 @@ retiré puis rajouté à leur carnet. Sauvegarde ce fichier avec le reste.
 ## Diagnostics partagés
 
 Chaque joueur peut cocher « Partager mes diagnostics avec l'admin du
-serveur » (⚙ Audio). Son client envoie alors toutes les 10 minutes son
+serveur » (⚙ → Aide & diagnostics). Son client envoie alors toutes les
+10 minutes son
 **journal technique** — périphériques ouverts/perdus, réouvertures, version,
 rapport du docteur audio, ce que la diffusion d'écran a à dire (encodeur
 retenu, capture bridée, statistiques), et l'inventaire des cartes graphiques
@@ -531,7 +532,8 @@ qui font payer le relais. Le bilan sort l'amplification (paquets reçus sur
 paquets émis), les pertes montantes que le serveur signale lui-même, et le
 volume de contrôle reçu.
 
-Côté client, **⚙ → Relevé de performance** donne le coût de l'interface chez
+Côté client, **⚙ → Aide & diagnostics → Relevé de performance** donne le
+coût de l'interface chez
 la personne qui se plaint, et se copie comme le journal audio : temps d'une
 image, temps du fil de discussion, messages parcourus sur messages chargés,
 images par seconde réellement peintes, et trames audio incomplètes (chacune
@@ -570,7 +572,7 @@ d'effets d'un casque, un pilote virtuel — on ne peut pas la lui reprendre. On
 peut seulement récupérer vite (ce que font les correctifs précédents) et
 **nommer la cause**.
 
-⚙ Audio → **Docteur audio** fait les deux dernières choses :
+⚙ → Aide & diagnostics → **Docteur audio** fait les deux dernières choses :
 
 - il **détecte les logiciels qui s'interposent** — SteelSeries Sonar et GG,
   Nahimic, Razer Synapse, Logitech G HUB, NVIDIA Broadcast, Voicemeeter,
@@ -583,7 +585,7 @@ peut seulement récupérer vite (ce que font les correctifs précédents) et
   bloc reçu (la signature d'une voie de capture volée), trames incomplètes
   parties vers la carte son (autant de craquements), et si le moteur natif
   tourne vraiment ou si l'on est retombé sur le moteur de secours ;
-- il conseille la **sortie audio robuste** (⚙ Audio → Sortie) dès qu'une
+- il conseille la **sortie audio robuste** (⚙ → Audio → Sortie) dès qu'une
   trame incomplète est partie : 200 ms de tampon au lieu de 60, pour les
   machines qu'un jeu sature ; et il nomme l'**Atténuation VoIP** de
   Valorant quand « le son du jeu baisse par à-coups » — un micro de bureau
@@ -602,7 +604,10 @@ envoyer par quelqu'un qui « a le bug » plutôt que de deviner.
 À distance, la même chose sans lancer l'interface :
 `cargo run -p ki-voice --example sonde-audio`.
 
-**Réglages audio** (bouton ⚙ Audio) — tout est appliqué à chaud et mémorisé :
+**Réglages audio** (⚙ → Audio ; la fenêtre ⚙ se range en onglets : Audio,
+Réseau & qualité, Diffusion d'écran, Overlay en jeu, Sons & notifications,
+Aide & diagnostics, l'onglet ouvert étant mémorisé) — tout est appliqué à
+chaud et mémorisé :
 - périphériques d'entrée/sortie (avec actualisation de la liste) ;
 - vumètre micro en direct, gain d'entrée 0–200 % ;
 - trois modes : micro ouvert, push-to-talk (touche globale), **activation
@@ -640,7 +645,7 @@ envoyer par quelqu'un qui « a le bug » plutôt que de deviner.
 - **DRED (redondance neuronale, libopus 1.6.1)** : chaque paquet peut
   re-transmettre jusqu'à ~1 s de passé compressé par réseau de neurones —
   un trou de plusieurs trames est **resynthétisé** depuis n'importe quel
-  paquet suivant. Trois positions (⚙ réseau) : désactivé / **Auto**
+  paquet suivant. Trois positions (⚙ → Réseau & qualité) : désactivé / **Auto**
   (recommandé : s'engage dès 2 % de pertes signalées par le serveur, zéro
   surcoût par beau temps) / toujours (~+32 kbps). Les trames irrécupérables
   passent au **Deep PLC** (masquage de perte neuronal) au lieu de
@@ -739,7 +744,7 @@ fait le lien avec l'événement :
 | `micro-coupe.wav` / `micro-actif.wav` | coupure et réactivation du micro |
 
 Un son absent ne manque à personne : il n'est simplement pas joué. Réglages
-dans **⚙ → Effets sonores** (interrupteur, volume, rechargement à chaud, et
+dans **⚙ → Sons & notifications** (interrupteur, volume, rechargement à chaud, et
 la liste de ce qui a été trouvé). Les sons passent par le volume de sortie
 général : baisser le son baisse aussi les notifications.
 
