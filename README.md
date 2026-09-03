@@ -1,21 +1,38 @@
 # ki-chat
 
 Serveur de chat privé façon Discord, 100 % Rust, orienté gaming : chat texte
-temps réel + vocal basse latence, pour ~30 personnes.
+temps réel, vocal basse latence, partage d'écran avec le son du jeu, overlay
+« qui parle » — pour ~30 personnes.
 
 ## Architecture
 
 ```
 crates/
-  protocol/     types partagés : messages de contrôle (JSON) + format paquets voix
-  server/       ki-server : QUIC (contrôle + relais vocal SFU) + HTTPS (fichiers)
-  voice/        moteur audio client : cpal + Opus + jitter buffer (indépendant du transport)
-  client-quic/  connexion QUIC cliente partagée (contrôle + datagrammes voix)
+  protocol/     types partagés : messages de contrôle (JSON), paquets voix,
+                en-têtes des trames vidéo (KF) et du son du jeu (KA)
+  server/       ki-server : QUIC (contrôle + relais vocal SFU + relais vidéo SFU)
+                + HTTPS (fichiers, diagnostics)
+  voice/        moteur audio client : WASAPI natif (cpal en secours), Opus, jitter
+                buffer, annulation d'écho, docteur audio, son du jeu (indépendant
+                du transport)
+  video/        capture d'écran (Windows Graphics Capture), réduction d'image,
+                encodage H.264 — NVENC sans SDK, openh264 en secours
+  ki-opus/      libopus 1.6.1 compilé depuis les sources (DRED, Deep PLC, OSCE)
+  ki-aec/       annulation d'écho acoustique (annulateur MDF de SpeexDSP)
+  client-quic/  connexion QUIC cliente partagée (contrôle + datagrammes)
   client-cli/   client de test en ligne de commande (chat texte + vocal)
-  client-gui/   ki-chat : l'application de bureau (egui) — chat, vocal, PTT global
-                theme.rs (couleurs/typo), icons.rs (icônes dessinées),
-                ui.rs (widgets), servers.rs (carnet de serveurs + sonde de ping)
+  load/         ki-load : N clients virtuels pour charger un serveur
+  client-gui/   ki-chat : l'application de bureau (egui) — chat, vocal, diffusion
+                theme.rs (couleurs/typo), icons.rs (icônes dessinées), ui.rs
+                (widgets), servers.rs (carnet de serveurs + sonde de ping),
+                net.rs (la connexion et son aiguillage), partage.rs (diffusion
+                et visionnage), overlay.rs (« qui parle » par-dessus le jeu),
+                ptt.rs (touche globale), secours.rs (journal, panic, relance),
+                update.rs (mise à jour signée), perf.rs (relevé de performance)
 ```
+
+Le chantier du partage d'écran a son propre document, [`PLAN-STREAM.md`](PLAN-STREAM.md) :
+décisions, jalons, mesures et écarts assumés.
 
 **Plusieurs serveurs, un seul client.** L'écran d'accueil est un lanceur :
 chaque serveur y est enregistré avec son adresse et les identifiants associés
@@ -89,13 +106,114 @@ signale toutes les 5 s — c'est ce qui alimente le **débit adaptatif** : en
 mode « Auto » (défaut), le client baisse son débit Opus dès 5 % de pertes et
 le remonte après 15 s propres.
 
-**Moteur audio client** (`crates/voice`) : capture micro via cpal (WASAPI),
-conversion mono + rééchantillonnage 48 kHz, encodage Opus 64 kbps (mode voip,
-FEC intra-bande activée), jitter buffer de 40 ms par émetteur avec remise en
-ordre et dissimulation de perte (PLC), mixage multi-émetteurs, keepalive UDP
-pour la traversée NAT. Latence pipeline théorique : ~60-80 ms + réseau.
-Flags de test sans matériel audio : `--tone` (émet une sinusoïde 440 Hz) et
-`--deaf` (ne lit pas l'audio reçu).
+**Moteur audio client** (`crates/voice`) : capture et lecture par un **moteur
+WASAPI natif** écrit pour l'occasion — le même chemin que Discord, cpal ne
+servant plus que de secours —, conversion mono + rééchantillonnage 48 kHz,
+encodage Opus 64 kbps (mode voip, FEC intra-bande activée), jitter buffer
+adaptatif par émetteur avec remise en ordre et dissimulation de perte (PLC),
+mixage multi-émetteurs, keepalive UDP pour la traversée NAT. Latence pipeline
+théorique : ~60-80 ms + réseau. Flags de test sans matériel audio : `--tone`
+(émet une sinusoïde 440 Hz) et `--deaf` (ne lit pas l'audio reçu).
+
+Le moteur natif est né des jeux qui rebrassent l'audio (voir le docteur
+audio, plus bas) : noms de périphériques tolérants à la ré-énumération USB,
+réouverture sur un flux devenu muet, empreinte du périphérique relevée toutes
+les 3 s (un casque « rebranché par logiciel » quand Valorant ou Synapse
+l'ont rebrassé), redémarrages rangés en file, et **survie à la coupure
+réseau** : le moteur voix vit hors de la connexion, une reconnexion ne
+referme pas le micro. Le périphérique par défaut est demandé à Windows par
+le rôle des **jeux** (`eConsole`), pas celui des appels : la catégorie
+« communications » faisait baisser le son du jeu de 80 % chez certains, par
+à-coups, au rythme des silences de la sortie.
+
+**Annulation d'écho** (`crates/ki-aec`) : quelqu'un écoute sur haut-parleurs,
+son micro capte les autres, chacun s'entend revenir. L'annulateur (MDF de
+SpeexDSP) connaît ce qui vient d'être joué et soustrait son trajet acoustique
+de la capture — le son du jeu d'un stream, mixé dans la même sortie, y passe
+aussi.
+
+## Partage d'écran
+
+**Diffuser son écran** — bouton dans la barre vocale ou ⚙ « Diffusion
+d'écran » — et **regarder celui des autres** — clic droit sur un membre, ou
+sur le petit écran affiché à côté de son pseudo pendant qu'il diffuse. La
+diffusion est réservée au salon vocal du streamer, deux par salon au plus.
+
+**Capture** : Windows Graphics Capture (celle de la barre de jeu Xbox et
+d'OBS), écran entier ou fenêtre, curseur au choix. Chaque option n'est
+demandée à Windows que s'il sait la faire — bordure jaune, cadence minimale
+(Windows 11 24H2 seulement) : les mêmes réglages faisaient échouer la
+capture sur un Windows 10, « la diffusion ne marche pas pour tout le
+monde ». La cadence est tenue par nous, avant toute copie.
+
+**Encodage H.264** : **NVENC** sur les cartes NVIDIA — sans SDK ni CUDA à
+installer, l'API vidéo du pilote est chargée à la main (`nvEncodeAPI64.dll`),
+3,9 ms par image en 1080p sur une RTX 3080 — et openh264 (profil contenu
+d'écran temps réel) partout ailleurs, ou au choix dans les réglages. Avant
+l'encodeur, l'image peut être réduite (plafond de hauteur) par moitiés puis
+bilinéaire séparable. Réglages : source, résolution plafond, 15/30/60 i/s,
+débit 1–20 Mbit/s (6 par défaut), curseur, aperçu local, encodeur. Tout
+change à chaud, le stream continue, séquence comprise.
+
+**Transport** : une trame = **un flux QUIC unidirectionnel**, sur la même
+connexion (rien de plus à ouvrir que 9987/udp), priorité à la plus ancienne.
+Fiable par trame, sans blocage de tête de ligne entre trames ; la
+fragmentation en datagrammes a été disqualifiée à l'étude (19 % d'échec des
+trames clés à 1 % de perte, et l'éviction de la voix). Chaque trame est
+scellée en XChaCha20-Poly1305 sous une **clé générée par le streamer** et
+remise aux seuls spectateurs acceptés ; l'en-tête clair (32 octets) est
+l'AAD. Le serveur relaie sans déchiffrer : une tâche par spectateur nourrie
+par une file de deux trames — un spectateur lent voit SES trames jetées et
+repart d'une trame clé (demandée au streamer, une fois par demi-seconde au
+plus), les autres ne s'en aperçoivent pas. Une trame clé annule celles
+d'avant encore en vol (`RESET_STREAM`), une écriture qui bloque plus de
+400 ms est abandonnée, la fenêtre d'envoi est bornée à 1 Mio et le contrôle
+de congestion est BBR : c'est ce qui manquait quand la vidéo en retard
+faisait faire la queue à la voix de tout le salon.
+
+**Le son du jeu** voyage avec l'image : la **boucle par processus** de
+Windows (10 2004 et plus) capture tout ce que joue le PC **sauf ki-chat** —
+les spectateurs n'entendent pas leurs propres voix en retour —, Opus stéréo
+96 kbit/s en trames de 20 ms, datagrammes « KA » chiffrés sous la même clé,
+relayés tels quels. Chez le spectateur il est mixé dans la sortie du moteur
+vocal (même volume, même annulateur d'écho), avec un curseur « son du jeu »
+dans la fenêtre de visionnage. Case « Son du jeu dans le stream » chez le
+streamer, cochée par défaut.
+
+**Visionnage** : une fenêtre flottante par stream, croix pour partir,
+décodage sur un fil dédié (départ sur trame clé, remise en ordre, saut
+immédiat à une trame clé quand un trou se creuse), repeint au rythme du
+stream. Pendant une diffusion, une ligne de statistiques part au journal
+toutes les 10 s — images par seconde, kbit/s, images sautées à l'encodage,
+jetées au réseau — c'est ce que les diagnostics remontent quand « ça lag ».
+
+Reste à faire, dans cet ordre : le débit qui s'adapte de lui-même à la
+connexion la plus courte du salon, la synchronisation image/son par
+horodatage (transmis, pas encore exploité), la stéréo chez le spectateur.
+
+## Overlay « qui parle »
+
+Dans le jeu, savoir qui parle sans quitter la partie : une petite fenêtre à
+part, toujours au-dessus, sans bordure, **transparente aux clics et jamais
+active** — le jeu ne sait pas qu'elle existe, l'anti-triche non plus, rien
+n'est injecté nulle part. Un rond par voix (l'avatar, le pseudo si on le
+demande), rien au silence, dans le coin de son choix. Elle ne se montre que
+lorsque ki-chat n'a pas le focus et qu'on est en salon vocal, et se repeint
+dix fois par seconde quand quelqu'un parle, jamais plus.
+
+**Désactivé de base** : ⚙ « Afficher qui parle par-dessus le jeu » pour
+l'allumer. Il se voit partout où le jeu passe par le compositeur de Windows
+— fenêtré, fenêtré sans bordure, et « plein écran » avec les optimisations
+plein écran, le défaut. En **plein écran exclusif** (Valorant réglé sur
+« Plein écran » plutôt que « Fenêtré plein écran »), rien ne peut passer
+au-dessus : l'overlay le détecte et le dit dans ses réglages.
+
+La transparence n'est pas celle qu'on croit : une fenêtre transparente aux
+clics est « en couches » pour Windows, et cette couche ignore la
+transparence du rendu — d'où un carré noir au premier essai. La fenêtre est
+donc **découpée à la forme de ses ronds** (`SetWindowRgn`) : entre eux, il
+n'y a pas de fenêtre du tout. Et certains jeux se remettent au-dessus sans
+arrêt : l'overlay fait pareil, sans jamais prendre le focus.
 
 ## Sécurité
 
@@ -198,19 +316,34 @@ réinstalles le serveur en perdant `data/quic-cert.der`, son empreinte change :
 les clients refuseront de se connecter tant que le serveur n'aura pas été
 retiré puis rajouté à leur carnet. Sauvegarde ce fichier avec le reste.
 
-## Diagnostics partagés (opt-in)
+## Diagnostics partagés
 
 Chaque joueur peut cocher « Partager mes diagnostics avec l'admin du
 serveur » (⚙ Audio). Son client envoie alors toutes les 10 minutes son
 **journal technique** — périphériques ouverts/perdus, réouvertures, version,
-rapport du docteur audio — jamais les messages, jamais la voix. Le serveur
+rapport du docteur audio, ce que la diffusion d'écran a à dire (encodeur
+retenu, capture bridée, statistiques), et l'inventaire des cartes graphiques
+(modèle, VRAM, NVENC) — jamais les messages, jamais la voix. Le serveur
 archive tout dans `data/diag/`, un fichier JSONL par joueur, borné (~10 Mo,
 rotation).
 
+**Les rapports de plantage partent quoi qu'il en soit**, option cochée ou
+non — décision de l'admin du groupe : un plantage se corrige avec sa pile
+d'appels, pas avec un « ça a planté » de mémoire, et le rapport ne contient
+que du technique. Ils existent grâce au dispositif de secours
+(`secours.rs`) : le binaire de production n'a pas de console et le moindre
+panic le tuait sans un mot, quand un seul raté graphique — pilote
+réinitialisé sous un jeu, veille moderne, bascule iGPU/dGPU d'un portable —
+suffisait à eframe pour fermer la fenêtre « proprement ». Désormais un
+journal sur disque, un panic hook qui y écrit avant l'abort, et la
+**relance automatique** après une erreur de rendu (bornée : une erreur qui
+revient dès le démarrage épuise son budget et rend la main).
+
 Lecture : un compte **ADMINISTRATOR** a l'onglet « Diagnostics » dans le
-panneau d'administration — tout se récupère et se copie en deux clics. Et
-hors application, le porteur du jeton `data/diag.token` (généré au premier
-démarrage, à lire sur la machine du serveur) :
+panneau d'administration — chaque version y est résumée d'un coup d'œil,
+les plantages en tête (« ⚠ N PLANTAGES »), tout se récupère et se copie en
+deux clics. Et hors application, le porteur du jeton `data/diag.token`
+(généré au premier démarrage, à lire sur la machine du serveur) :
 
 ```bash
 curl -k -H "x-ki-admin: $(cat diag.token)" https://ton-serveur:8080/diag
@@ -246,10 +379,11 @@ docker run -d --name ki-chat --restart unless-stopped \
   ghcr.io/redik123/ki-chat-server:latest
 ```
 
-**Le port qui compte est 9987/udp.** Depuis la migration QUIC, l'auth, le chat
-et la voix y passent tous : sans UDP ouvert de bout en bout, personne ne se
-connecte — ce n'est plus « le chat marche, le vocal non ». Le 8080/tcp ne sert
-qu'à télécharger les fichiers partagés.
+**Le port qui compte est 9987/udp.** Depuis la migration QUIC, l'auth, le
+chat, la voix et le partage d'écran y passent tous : sans UDP ouvert de bout
+en bout, personne ne se connecte — ce n'est plus « le chat marche, le vocal
+non ». Le 8080/tcp ne sert qu'à télécharger les fichiers partagés et à lire
+les diagnostics.
 
 ### Mises à jour depuis GitHub
 
@@ -332,11 +466,12 @@ Le signeur est un exemple du crate client (`cargo run -p ki-client-gui
 bibliothèque de cryptographie que le code qui vérifie : une divergence entre
 signer et vérifier ne se verrait qu'en production, sur les machines des autres.
 
-> ⚠ **La vérification est en place mais pas encore armée** : tant qu'aucune clé
-> publique n'est gravée, le client le consigne dans ses traces et poursuit —
-> le comportement d'avant. L'armer demande trois gestes, décrits dans
-> [`deploy/SIGNATURE.md`](deploy/SIGNATURE.md), dont la génération d'une clé
-> privée qui ne doit passer par personne d'autre.
+> La vérification est **armée depuis la 0.1.12** : la clé publique est gravée
+> dans le binaire, et une release sans signature, ou signée par une autre clé,
+> est refusée. Changer de clé casserait la chaîne — les clients installés
+> n'ont aucun moyen d'apprendre la nouvelle. La procédure, et la génération
+> d'une clé privée qui ne doit passer par personne d'autre, sont décrites dans
+> [`deploy/SIGNATURE.md`](deploy/SIGNATURE.md).
 
 ### Publier une version
 
@@ -344,8 +479,9 @@ signer et vérifier ne se verrait qu'en production, sur les machines des autres.
 2. `git tag v0.2.0 && git push --tags`.
 
 Le workflow [`release.yml`](.github/workflows/release.yml) compile, fabrique
-l'installeur (Inno Setup) et publie `ki-chat.exe` + `ki-chat-setup.exe` sur la
-release. Il **refuse de publier si le tag et le `Cargo.toml` divergent** : un
+l'installeur (Inno Setup) et publie `ki-chat.exe` + `ki-chat-setup.exe` +
+`ki-chat.exe.sig` sur la release ; le même tag construit l'image docker du
+serveur. Il **refuse de publier si le tag et le `Cargo.toml` divergent** : un
 client à jour comparerait alors sa version à une étiquette plus haute et se
 croirait perpétuellement en retard, à proposer en boucle une mise à jour déjà
 installée.
@@ -419,6 +555,11 @@ n'a plus besoin de se repeindre pour savoir si l'on parle** : hors vocal, elle
 ne repeint plus du tout tant que rien ne bouge, au lieu de reconstruire vingt
 fois par seconde un écran identique — y compris réduite, pendant une partie.
 
+En salon vocal, ki-chat empêche aussi la **mise en veille** de la machine :
+pour Windows, parler n'est pas être actif, et un portable dont on ne touche
+pas le clavier s'endormait en pleine conversation. L'écran garde le droit de
+s'éteindre, et hors vocal rien n'est retenu.
+
 ### Docteur audio
 
 « Mon micro bugue quand je lance Valorant » est le problème le plus tenace du
@@ -441,7 +582,13 @@ peut seulement récupérer vite (ce que font les correctifs précédents) et
 - il rapporte ce que le moteur a **mesuré** : ouvertures du micro sans un seul
   bloc reçu (la signature d'une voie de capture volée), trames incomplètes
   parties vers la carte son (autant de craquements), et si le moteur natif
-  tourne vraiment ou si l'on est retombé sur le moteur de secours.
+  tourne vraiment ou si l'on est retombé sur le moteur de secours ;
+- il conseille la **sortie audio robuste** (⚙ Audio → Sortie) dès qu'une
+  trame incomplète est partie : 200 ms de tampon au lieu de 60, pour les
+  machines qu'un jeu sature ; et il nomme l'**Atténuation VoIP** de
+  Valorant quand « le son du jeu baisse par à-coups » — un micro de bureau
+  capte la fuite du casque, la détection vocale du jeu croit qu'on parle et
+  baisse le jeu, puis le remonte.
 
 Le tout se copie d'un bouton, comme le journal audio — c'est ce qu'on se fait
 envoyer par quelqu'un qui « a le bug » plutôt que de deviner.
@@ -480,6 +627,8 @@ envoyer par quelqu'un qui « a le bug » plutôt que de deviner.
   artéfacts de compression compris (borné à 250 ms) ;
 - volume de sortie global 0–200 %, avec **limiteur doux** (écrêtage progressif
   au-dessus de 85 % : plusieurs voix fortes saturent en douceur) ;
+- **annulation d'écho** pour ceux qui écoutent sur haut-parleurs, et
+  **sortie audio robuste** (tampon de 200 ms) pour les machines saturées ;
 - débit Opus réglable 24–128 kbps, à chaud ;
 - **tampon de gigue** : auto (adaptatif) ou fixé de 40 à 160 ms ;
 - stats réseau en direct : ping, gigue max, perdus/récupérés FEC/rejetés.
@@ -680,4 +829,9 @@ Coûts réels pour ~30 personnes :
 - [x] **M7** — livraison Windows : exécutable autonome (CRT statique, aucune dépendance à installer), icône et manifeste gravés dans le binaire, installeur Inno Setup sans droits d'administrateur, mise à jour automatique depuis les releases GitHub (proposée, jamais imposée), workflow de publication sur tag
 - [x] **M8** — modération et traçabilité : bannissement avec **motif et durée** (levée automatique à l'expiration, constatée à la connexion suivante), annulation d'un ban, expulsion motivée ; invitations à **usages multiples ou permanentes**, étiquetables et révocables, conservées une fois épuisées ; **journal d'audit** (`data/audit.jsonl`) consignant qui est entré par quel lien, et toute action d'administration ; panneau admin réorganisé en onglets. Robustesse au passage : écritures de fichiers atomiques, anti-spam du chat, sauvegardes sorties de la boucle asynchrone
 - [x] **M8.1** — corrections : l'indicateur « untel parle » ne s'allumait jamais pour les autres (la diffusion filtrait sur le salon **textuel** alors qu'on lui passait un identifiant de salon **vocal** — les deux jeux d'identifiants étant disjoints, la condition n'était jamais vraie) ; le nom et le logo du serveur n'apparaissaient qu'après qu'un admin les ait ré-enregistrés (le client jetait le champ pourtant présent dès le `Welcome`) ; la fenêtre revenait parfois minuscule en haut à gauche (géométrie restaurée sur un écran secondaire débranché depuis) ; le sélecteur d'image était partagé entre la photo de profil et le logo du serveur
-- [ ] **M9** — idées : overlay en jeu, rôles personnalisables avec couleur de pseudo, salons créés à la volée et salons privés, effets sonores, stockage S3 des médias
+- [x] **M9** — robustesse audio face aux jeux (0.1.6 → 0.1.11) : rebranchement logiciel du casque que Valorant ou Synapse rebrassent, moteur WASAPI natif, périphérique par défaut par le rôle des jeux, redémarrages du moteur rangés en file, docteur audio qui nomme le coupable ; puis (0.1.12) le moteur voix qui survit à la coupure et à la reconnexion, et la signature des mises à jour armée
+- [x] **M10** — ce que l'admin voit : dispositif de secours (journal sur disque, panic hook, relance après un raté graphique, anti-veille en vocal), diagnostics partagés classés par version avec leur onglet admin, rapports de plantage qui remontent toujours, annulation d'écho, inventaire des cartes graphiques dans les rapports, sortie audio robuste
+- [x] **S1–S2** — partage d'écran (0.1.17 → 0.1.23) : protocole et relais SFU vidéo, diffusion et visionnage, badge à côté du pseudo et réglages de diffusion, réduction d'image, NVENC sans SDK, capture qui ne demande à Windows que ce qu'il sait faire
+- [x] **M11** — overlay « qui parle » par-dessus le jeu (0.1.24), désactivé de base (0.1.25)
+- [x] **S3, entamé** — le son du jeu dans le stream (0.1.25) ; la vidéo en retard qui ne fait plus la queue devant la voix (0.1.26)
+- [ ] **Idées** : débit vidéo qui s'adapte à la connexion la plus courte du salon, synchronisation image/son, stéréo chez le spectateur, statut « en jeu », raccourcis globaux muet/sourdine, clip des 30 dernières secondes, stockage S3 des médias
