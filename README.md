@@ -557,7 +557,11 @@ l'audio.
 L'application retient serveur/pseudo et les réglages audio entre les
 sessions. Le push-to-talk est **global** : la touche fonctionne même quand la
 fenêtre n'a pas le focus (poll clavier système via GetAsyncKeyState), donc en
-plein jeu. Modes : micro ouvert ou push-to-talk, touche configurable.
+plein jeu. Modes : micro ouvert ou push-to-talk, touche configurable. Deux
+**raccourcis globaux** de plus, à régler à côté (aucune touche par défaut) :
+couper / rétablir le micro, et **se rendre sourd** — plus rien ne sort de la
+carte son, le micro se coupe avec, sortir du vocal rend l'écoute. Un bouton
+casque à côté du micro fait la même chose à la souris.
 
 Elle est surveillée sur son **propre fil, à 100 Hz**, et non dans la boucle de
 rendu. Deux conséquences. La touche ne rate plus une pression brève — à la
