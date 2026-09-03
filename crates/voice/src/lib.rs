@@ -732,6 +732,13 @@ impl VoiceEngine {
     }
 
     /// Volume du son du jeu reçu (1.0 = 100 %).
+    /// Échantillons de son du jeu en attente de lecture : c'est l'avance du
+    /// son sur la sortie, ce dont le spectateur retarde l'image pour que
+    /// les deux tombent ensemble.
+    pub fn aux_pending(&self) -> usize {
+        self.shared.aux_buf.lock().unwrap().len()
+    }
+
     pub fn set_aux_gain(&self, gain: f32) {
         self.shared.aux_gain.store(gain.to_bits(), Ordering::Relaxed);
     }

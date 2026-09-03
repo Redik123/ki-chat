@@ -374,6 +374,10 @@ pub struct GoLive {
     pub key: [u8; 32],
     /// Le son du jeu, tant qu'il est diffusé — indépendant de la vidéo.
     pub audio: Option<ki_voice::jeu::GameAudio>,
+    /// L'instant zéro des horodatages, commun à l'image et au son, et qui
+    /// survit aux changements de réglages : sans ça, chaque relance de la
+    /// capture remettait la vidéo à zéro pendant que le son continuait.
+    pub origine: std::time::Instant,
 }
 
 impl GoLive {
@@ -386,8 +390,20 @@ impl GoLive {
     /// sur la même séquence donneraient un salmigondis au décodeur. Le son
     /// du jeu, lui, continue sans interruption.
     pub fn reconfigurer(self, reglages: &Reglages) -> anyhow::Result<Self> {
-        let Self { boucle, stats, stream_id, apercu, emit, sink, force_idr, cadence, key, audio, .. } =
-            self;
+        let Self {
+            boucle,
+            stats,
+            stream_id,
+            apercu,
+            emit,
+            sink,
+            force_idr,
+            cadence,
+            key,
+            audio,
+            origine,
+            ..
+        } = self;
         boucle.stop();
         *apercu.lock().unwrap() = None;
         let boucle = StreamerLoop::start(
@@ -396,6 +412,7 @@ impl GoLive {
             emit.clone(),
             reglages.config(),
             force_idr.clone(),
+            origine,
         )?;
         Ok(Self {
             boucle,
@@ -409,6 +426,7 @@ impl GoLive {
             reglages: reglages.clone(),
             key,
             audio,
+            origine,
         })
     }
 }
@@ -485,18 +503,22 @@ impl Regard {
         let stop = Arc::new(AtomicBool::new(false));
         let image = Arc::new(Mutex::new(None));
         let images = Arc::new(AtomicU64::new(0));
+        // L'horloge du son : le fil du son y note où en est la lecture, le
+        // fil de l'image retient chaque image jusqu'à cet instant-là.
+        let horloge: Horloge = Arc::new(Mutex::new(None));
         let worker = {
-            let (stop, image, images) = (stop.clone(), image.clone(), images.clone());
+            let (stop, image, images, horloge) =
+                (stop.clone(), image.clone(), images.clone(), horloge.clone());
             std::thread::Builder::new()
                 .name("video-regard".into())
-                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx))
+                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx, horloge))
                 .ok()
         };
         let audio_worker = {
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name("audio-regard".into())
-                .spawn(move || fil_audio(stream_id, key, audio_rx, engine, stop))
+                .spawn(move || fil_audio(stream_id, key, audio_rx, engine, stop, horloge))
                 .ok()
         };
         Self { stream_id, streamer, image, images, stop, worker, audio_worker }
@@ -517,12 +539,29 @@ impl Regard {
 /// (même clé que la vidéo, domaine de nonce 2), décode, et verse dans la
 /// sortie du moteur vocal — qui mixe, règle le volume et annule l'écho
 /// comme pour tout le reste.
+/// Où en est la lecture du son du jeu : l'horodatage (µs, base du streamer)
+/// de ce qui sort de la carte son, et l'instant du relevé — entre deux
+/// relevés, l'horloge avance d'elle-même.
+type Horloge = Arc<Mutex<Option<(u64, std::time::Instant)>>>;
+
+/// L'horodatage du son en cours de lecture, extrapolé depuis le dernier
+/// relevé ; rien si le son s'est tu depuis plus d'une seconde et demie —
+/// l'image ne doit alors attendre personne.
+fn lire_horloge(horloge: &Horloge) -> Option<u64> {
+    let releve = *horloge.lock().unwrap();
+    releve.and_then(|(pts, quand)| {
+        let age = quand.elapsed();
+        (age < Duration::from_millis(1500)).then(|| pts + age.as_micros() as u64)
+    })
+}
+
 fn fil_audio(
     stream_id: u32,
     key: [u8; 32],
     rx: std_mpsc::Receiver<bytes::Bytes>,
     engine: Arc<Mutex<Option<ki_voice::VoiceEngine>>>,
     stop: Arc<AtomicBool>,
+    horloge: Horloge,
 ) {
     let cipher = XChaCha20Poly1305::new(&key.into());
     let mut lecteur = match ki_voice::jeu::Lecteur::new() {
@@ -557,6 +596,11 @@ fn fil_audio(
                 }
                 if let Some(e) = engine.lock().unwrap().as_ref() {
                     lecteur.jouer(h.seq, &opus, e);
+                    // Ce qui sort de la carte son en ce moment : cette trame
+                    // finit dans 20 ms, moins tout ce qui attend devant elle.
+                    let avance_us = e.aux_pending() as u64 * 1_000_000 / 48_000;
+                    let en_lecture = (h.pts_us + 20_000).saturating_sub(avance_us);
+                    *horloge.lock().unwrap() = Some((en_lecture, std::time::Instant::now()));
                 }
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
@@ -580,6 +624,14 @@ const ATTENTE_MAX: usize = 30;
 /// avance strictement en séquence ; un trou qui s'éternise se règle en
 /// sautant à la trame clé suivante (le serveur en a déjà demandé une si un
 /// envoi nous a été sacrifié).
+/// Une image décodée peut attendre le son jusqu'à cette avance ; au-delà,
+/// on l'affiche quand même — mieux vaut un léger décalage qu'une image
+/// figée si l'horloge du son déraille.
+const TOLERANCE_US: u64 = 15_000;
+/// Images décodées en attente d'affichage au plus (≈ 400 ms à 30 i/s).
+const FILE_AFFICHAGE_MAX: usize = 12;
+
+#[allow(clippy::too_many_arguments)]
 fn fil_decodeur(
     stream_id: u32,
     key: [u8; 32],
@@ -588,6 +640,7 @@ fn fil_decodeur(
     images: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     ctx: egui::Context,
+    horloge: Horloge,
 ) {
     let cipher = XChaCha20Poly1305::new(&key.into());
     let Ok(mut decodeur) = ViewerDecoder::new() else {
@@ -596,36 +649,42 @@ fn fil_decodeur(
     };
     let depart = std::time::Instant::now();
     let mut premiere = true;
-    // Les trames déchiffrées en attente de leur tour, par séquence.
-    let mut attente: BTreeMap<u64, (bool, Vec<u8>)> = BTreeMap::new();
+    // Les trames déchiffrées en attente de leur tour, par séquence :
+    // (trame clé ?, horodatage, octets).
+    let mut attente: BTreeMap<u64, (bool, u64, Vec<u8>)> = BTreeMap::new();
     let mut prochaine: Option<u64> = None;
+    // Les images décodées qui attendent leur instant sur l'horloge du son.
+    let mut a_afficher: std::collections::VecDeque<(u64, egui::ColorImage)> =
+        std::collections::VecDeque::new();
 
     loop {
-        match rx.recv_timeout(Duration::from_millis(200)) {
+        // Une image en attente : on se réveille souvent pour la poser à
+        // l'heure ; sinon, au rythme des trames.
+        let delai = if a_afficher.is_empty() { 200 } else { 5 };
+        match rx.recv_timeout(Duration::from_millis(delai)) {
             Ok(bytes) => {
-                let Some(h) = ki_protocol::parse_media_header(&bytes) else { continue };
-                if h.stream_id != stream_id {
-                    continue;
+                if let Some(h) = ki_protocol::parse_media_header(&bytes) {
+                    if h.stream_id == stream_id {
+                        let nonce = ki_protocol::nonce_for_media(
+                            ki_protocol::MEDIA_DOMAIN_VIDEO,
+                            stream_id,
+                            h.seq,
+                        );
+                        // L'en-tête est l'AAD : altéré en route, le tag le
+                        // trahit.
+                        let (aad, sealed) = bytes.split_at(ki_protocol::MEDIA_HEADER_LEN);
+                        if let Ok(clair) = cipher
+                            .decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
+                        {
+                            attente.insert(h.seq, (h.idr, h.pts_us, clair));
+                        }
+                    }
                 }
-                let nonce = ki_protocol::nonce_for_media(
-                    ki_protocol::MEDIA_DOMAIN_VIDEO,
-                    stream_id,
-                    h.seq,
-                );
-                // L'en-tête est l'AAD : altéré en route, le tag le trahit.
-                let (aad, sealed) = bytes.split_at(ki_protocol::MEDIA_HEADER_LEN);
-                let Ok(clair) =
-                    cipher.decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
-                else {
-                    continue;
-                };
-                attente.insert(h.seq, (h.idr, clair));
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
                     return;
                 }
-                continue;
             }
             Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
         }
@@ -635,75 +694,90 @@ fn fil_decodeur(
         if prochaine.is_none() {
             if let Some(s) = attente
                 .iter()
-                .find(|(_, (idr, _))| *idr)
+                .find(|(_, (idr, _, _))| *idr)
                 .map(|(s, _)| *s)
             {
                 attente.retain(|k, _| *k >= s);
                 prochaine = Some(s);
-            } else {
-                if attente.len() > 2 * ATTENTE_MAX {
-                    attente.clear();
-                }
-                continue;
+            } else if attente.len() > 2 * ATTENTE_MAX {
+                attente.clear();
             }
         }
-        let Some(mut next) = prochaine else { continue };
 
-        loop {
-            // Tout ce qui est contigu part au décodeur, dans l'ordre.
-            while let Some((_, clair)) = attente.remove(&next) {
-                if let Some(frame) = decodeur.decode(&clair) {
-                    if premiere {
-                        premiere = false;
-                        ki_video::journal(format!(
-                            "visionnage : première image {}x{} après {} ms",
-                            frame.width,
-                            frame.height,
-                            depart.elapsed().as_millis()
-                        ));
+        if let Some(mut next) = prochaine {
+            loop {
+                // Tout ce qui est contigu part au décodeur, dans l'ordre.
+                while let Some((_, pts, clair)) = attente.remove(&next) {
+                    if let Some(frame) = decodeur.decode(&clair) {
+                        // La conversion RGBA -> image egui (8 Mo en 1080p)
+                        // se paie ici, pas sur le fil d'interface.
+                        let prete = egui::ColorImage::from_rgba_unmultiplied(
+                            [frame.width, frame.height],
+                            &frame.rgba,
+                        );
+                        a_afficher.push_back((pts, prete));
                     }
-                    // La conversion RGBA -> image egui (8 Mo en 1080p) se
-                    // paie ici, pas sur le fil d'interface.
-                    let prete = egui::ColorImage::from_rgba_unmultiplied(
-                        [frame.width, frame.height],
-                        &frame.rgba,
-                    );
-                    *image.lock().unwrap() = Some(prete);
-                    images.fetch_add(1, Ordering::Relaxed);
-                    // Seul moyen de peindre au rythme du stream : la boucle
-                    // de repeint de l'application est plafonnée à 20 fps
-                    // sinon.
-                    ctx.request_repaint();
+                    next = next.wrapping_add(1);
                 }
-                next = next.wrapping_add(1);
+
+                // Une trame clé en attente au-delà d'un trou : on y saute
+                // tout de suite. Elle remet le décodeur à neuf, et les trames
+                // manquantes d'avant ne serviraient à rien — le serveur les
+                // annule d'ailleurs à chaque trame clé quand le lien ne suit
+                // pas. Attendre (c'était trente trames) ne faisait que geler
+                // l'image une seconde.
+                match attente
+                    .iter()
+                    .find(|(k, (idr, _, _))| **k > next && *idr)
+                    .map(|(s, _)| *s)
+                {
+                    Some(s) => {
+                        attente.retain(|k, _| *k >= s);
+                        next = s;
+                    }
+                    None => break,
+                }
             }
 
-            // Une trame clé en attente au-delà d'un trou : on y saute tout de
-            // suite. Elle remet le décodeur à neuf, et les trames manquantes
-            // d'avant ne serviraient à rien — le serveur les annule d'ailleurs
-            // à chaque trame clé quand le lien ne suit pas. Attendre (c'était
-            // trente trames) ne faisait que geler l'image une seconde.
-            match attente
-                .iter()
-                .find(|(k, (idr, _))| **k > next && *idr)
-                .map(|(s, _)| *s)
-            {
-                Some(s) => {
-                    attente.retain(|k, _| *k >= s);
-                    next = s;
-                }
-                None => break,
+            // Un trou qui s'éternise sans trame clé en réserve : table
+            // rase, la prochaine trame clé relancera la lecture.
+            if attente.len() > ATTENTE_MAX {
+                attente.clear();
+                prochaine = None;
+            } else {
+                prochaine = Some(next);
             }
         }
 
-        // Un trou qui s'éternise sans trame clé en réserve : table rase, la
-        // prochaine trame clé relancera la lecture.
-        if attente.len() > ATTENTE_MAX {
-            attente.clear();
-            prochaine = None;
-            continue;
+        // Présentation : chaque image attend que le son en soit au même
+        // point ; sans son (ou son tari), tout de suite. Une file qui
+        // déborde s'affiche quand même — l'horloge ne doit jamais figer
+        // l'image.
+        let maintenant = lire_horloge(&horloge);
+        while let Some((pts, _)) = a_afficher.front() {
+            let due = match maintenant {
+                Some(h) => *pts <= h + TOLERANCE_US,
+                None => true,
+            } || a_afficher.len() > FILE_AFFICHAGE_MAX;
+            if !due {
+                break;
+            }
+            let (_, prete) = a_afficher.pop_front().expect("file non vide");
+            if premiere {
+                premiere = false;
+                ki_video::journal(format!(
+                    "visionnage : première image {}x{} après {} ms",
+                    prete.size[0],
+                    prete.size[1],
+                    depart.elapsed().as_millis()
+                ));
+            }
+            *image.lock().unwrap() = Some(prete);
+            images.fetch_add(1, Ordering::Relaxed);
+            // Seul moyen de peindre au rythme du stream : la boucle de
+            // repeint de l'application est plafonnée à 20 fps sinon.
+            ctx.request_repaint();
         }
-        prochaine = Some(next);
     }
 }
 

@@ -411,12 +411,16 @@ impl StreamerLoop {
     /// `force_idr` est partagé avec l'appelant : la couche réseau le lève
     /// quand elle jette une trame (le spectateur suivant a besoin d'une
     /// trame clé), l'interface quand le serveur transmet KeyframeNeeded.
+    /// `origine` est l'instant zéro des horodatages : donné par l'appelant
+    /// pour être le même que celui du son du jeu, et survivre à une
+    /// relance de la capture.
     pub fn start(
         stats: Arc<StageStats>,
         preview: FrameSink,
         emit: FrameEmit,
         config: StreamConfig,
         force_idr: Arc<AtomicBool>,
+        origine: Instant,
     ) -> anyhow::Result<Self> {
         stats.mark_started();
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
@@ -442,6 +446,7 @@ impl StreamerLoop {
                 .spawn(move || {
                     streamer_pipeline(
                         stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr,
+                        origine,
                     )
                 })
                 .context("thread streamer vidéo")?
@@ -481,6 +486,7 @@ fn streamer_pipeline(
     recycle: std::sync::mpsc::Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
+    origine: Instant,
 ) {
     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
     // L'aperçu n'existe que si on le demande : sans lui, pas de décodeur.
@@ -500,9 +506,9 @@ fn streamer_pipeline(
     // Dimensions de la source, et celles que l'on émet (réduites ou non).
     let mut dims = (0u32, 0u32);
     let mut sortie = (0u32, 0u32);
-    // La base des horodatages : l'instant zéro du stream. Tout pts_us en
-    // découle — c'est lui qui portera la synchronisation A/V en S3.
-    let depart = Instant::now();
+    // La base des horodatages : l'instant zéro du stream, le même que celui
+    // du son du jeu — c'est lui qui porte la synchronisation image/son.
+    let depart = origine;
 
     loop {
         let frame = match frames.recv_timeout(Duration::from_millis(200)) {

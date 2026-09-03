@@ -196,9 +196,17 @@ client, BBR des deux côtés, table de trames en vol par spectateur avec
 écriture bornée à 400 ms (au-delà : trame annulée, spectateur remis en
 attente de trame clé), et le spectateur saute immédiatement à une trame
 clé en attente au lieu d'attendre trente trames derrière un trou.
+**Livré en 0.1.29 : la synchronisation image/son par `pts_us`.** Une
+origine d'horodatage commune au streamer (`GoLive.origine`, passée à la
+boucle vidéo et au son du jeu, qui survit aux relances de capture), le son
+daté de sa capture ; chez le spectateur, le fil du son publie l'horodatage
+en cours de lecture (trame versée + 20 ms − avance du mixeur, extrapolé
+entre deux relevés), le fil de l'image retient chaque image décodée dans
+une file jusqu'à cet instant (tolérance 15 ms, file bornée à 12, image
+immédiate sans son ou son tari depuis 1,5 s).
 Reste : ladder adaptatif complet (goodput → `StreamBudget` → encodeur,
 hystérésis, `StreamRung`) — c'est lui qui évitera de saturer un lien
-court plutôt que d'en gérer les dégâts ; sync A/V par `pts_us`.
+court plutôt que d'en gérer les dégâts ; stéréo chez le spectateur.
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 

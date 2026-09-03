@@ -6440,12 +6440,15 @@ impl KiApp {
             })
         };
         let reglages = self.diffusion.clone();
+        // L'instant zéro des horodatages, partagé par l'image et le son.
+        let origine = std::time::Instant::now();
         match ki_video::StreamerLoop::start(
             stats.clone(),
             sink.clone(),
             emit.clone(),
             reglages.config(),
             force_idr.clone(),
+            origine,
         ) {
             Ok(boucle) => {
                 let avec_son = reglages.son;
@@ -6461,13 +6464,14 @@ impl KiApp {
                     reglages,
                     key,
                     audio: None,
+                    origine,
                 });
                 self.cadence_live = partage::Cadence::new();
                 self.journal_flux = std::time::Instant::now();
                 ki_voice::journal(format!("diffusion démarrée (stream {stream_id})"));
                 self.info = Some("tu diffuses ton écran".into());
                 if avec_son {
-                    let audio = self.demarrer_son_du_jeu(stream_id, key);
+                    let audio = self.demarrer_son_du_jeu(stream_id, key, origine);
                     if let Some(g) = &mut self.go_live {
                         g.audio = audio;
                     }
@@ -6484,9 +6488,14 @@ impl KiApp {
     /// Le son du jeu : la boucle de tout le système sauf ki-chat, en Opus
     /// stéréo, chiffré avec la clé du stream. Un échec (Windows trop
     /// ancien, refus du système) n'empêche pas la vidéo — il se dit.
-    fn demarrer_son_du_jeu(&mut self, stream_id: u32, key: [u8; 32]) -> Option<ki_voice::jeu::GameAudio> {
+    fn demarrer_son_du_jeu(
+        &mut self,
+        stream_id: u32,
+        key: [u8; 32],
+        origine: std::time::Instant,
+    ) -> Option<ki_voice::jeu::GameAudio> {
         let emit = self.conn.as_ref()?.game_audio_emit(stream_id, key);
-        match ki_voice::jeu::GameAudio::start(96_000, emit) {
+        match ki_voice::jeu::GameAudio::start(96_000, emit, origine) {
             Ok(a) => Some(a),
             Err(e) => {
                 ki_voice::journal(format!("son du jeu indisponible : {e:#}"));
@@ -6511,7 +6520,7 @@ impl KiApp {
                 if !self.diffusion.son {
                     g.audio = None;
                 } else if g.audio.is_none() {
-                    g.audio = self.demarrer_son_du_jeu(g.stream_id, g.key);
+                    g.audio = self.demarrer_son_du_jeu(g.stream_id, g.key, g.origine);
                 }
                 // Cadence et débit changent tout de suite ; les dimensions,
                 // la couche réseau les annoncera d'elle-même à la première

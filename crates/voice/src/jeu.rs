@@ -30,8 +30,14 @@ pub struct GameAudio {
 
 impl GameAudio {
     /// Démarre la boucle (tout le système sauf ce processus) et l'encodage
-    /// à `bitrate` bits/s ; chaque paquet part par `emettre`.
-    pub fn start(bitrate: i32, emettre: PaquetAudio) -> anyhow::Result<Self> {
+    /// à `bitrate` bits/s ; chaque paquet part par `emettre`, horodaté
+    /// depuis `origine` — la même que la vidéo, c'est ce qui permet au
+    /// spectateur de les remettre ensemble.
+    pub fn start(
+        bitrate: i32,
+        emettre: PaquetAudio,
+        origine: std::time::Instant,
+    ) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(64);
         let alive = Arc::new(AtomicBool::new(true));
         let flux = wasapi::open_loopback(std::process::id(), tx, alive.clone())
@@ -53,10 +59,14 @@ impl GameAudio {
                 let _flux = flux;
                 let mut accum: Vec<f32> = Vec::with_capacity(TRAME * 2 * 4);
                 let mut sortie = vec![0u8; 1500];
-                let mut trames: u64 = 0;
                 while !stop_thread.load(Ordering::Relaxed) {
-                    match rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(bloc) => accum.extend_from_slice(&bloc),
+                    // L'instant (µs depuis l'origine) où finit ce qui attend
+                    // dans `accum` : le dernier bloc reçu vient d'être capturé.
+                    let fin_us = match rx.recv_timeout(Duration::from_millis(200)) {
+                        Ok(bloc) => {
+                            accum.extend_from_slice(&bloc);
+                            origine.elapsed().as_micros() as u64
+                        }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             if !alive.load(Ordering::Relaxed) {
                                 journal("son du jeu : la capture s'est arrêtée".into());
@@ -65,16 +75,17 @@ impl GameAudio {
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    }
-                    // Une trame Opus par 20 ms de stéréo entrelacée.
+                    };
+                    // Une trame Opus par 20 ms de stéréo entrelacée. Son
+                    // horodatage : la fin de l'attente vaut « maintenant »,
+                    // chaque trame remonte d'autant (stéréo : deux
+                    // échantillons par pas de temps).
                     while accum.len() >= TRAME * 2 {
+                        let pts_us = fin_us
+                            .saturating_sub(accum.len() as u64 * 1_000_000 / (2 * SAMPLE_RATE as u64));
                         let trame: Vec<f32> = accum.drain(..TRAME * 2).collect();
                         match enc.encode_float(&trame, &mut sortie) {
-                            Ok(n) => {
-                                let pts_us = trames * 20_000;
-                                trames += 1;
-                                emettre(&sortie[..n], pts_us);
-                            }
+                            Ok(n) => emettre(&sortie[..n], pts_us),
                             Err(e) => journal(format!("son du jeu : encodage raté ({e})")),
                         }
                     }
