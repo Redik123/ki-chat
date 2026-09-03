@@ -3509,14 +3509,6 @@ impl KiApp {
                     if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
                         self.ouvrir_recherche();
                     }
-                    if ui::button(ui, Icon::Sliders, "Audio").clicked() {
-                        self.show_settings = !self.show_settings;
-                        if self.show_settings {
-                            let (inputs, outputs) = ki_voice::list_devices();
-                            self.input_devices = inputs;
-                            self.output_devices = outputs;
-                        }
-                    }
                     if self.any_admin_power() && ui::button(ui, Icon::Crown, "Admin").clicked() {
                         self.show_admin = !self.show_admin;
                         if self.show_admin {
