@@ -42,6 +42,8 @@ pub mod perm {
     pub const MUTE_MEMBERS: u64 = 1 << 13;
     /// Déplacer quelqu'un d'un salon vocal à un autre, ou l'en sortir.
     pub const MOVE_MEMBERS: u64 = 1 << 14;
+    /// Supprimer les messages **des autres**. Les siens, chacun peut.
+    pub const DELETE_MESSAGES: u64 = 1 << 15;
     /// Tout permis. Placé au bit de poids fort pour que les permissions
     /// futures remplissent le bas sans jamais entrer en collision.
     pub const ADMINISTRATOR: u64 = 1 << 63;
@@ -67,7 +69,8 @@ pub mod perm {
         | KICK
         | RESET_PASSWORD
         | MUTE_MEMBERS
-        | MOVE_MEMBERS;
+        | MOVE_MEMBERS
+        | DELETE_MESSAGES;
 
     /// Liste ordonnée pour l'interface : (bit, intitulé, explication).
     pub const ALL: &[(u64, &str, &str)] = &[
@@ -86,6 +89,7 @@ pub mod perm {
         (VIEW_AUDIT_LOG, "Voir le journal", "consulter les actions d'administration"),
         (MUTE_MEMBERS, "Couper le micro", "faire taire ou rendre sourd, en vocal"),
         (MOVE_MEMBERS, "Déplacer en vocal", "changer quelqu'un de salon vocal, ou l'en sortir"),
+        (DELETE_MESSAGES, "Supprimer les messages", "effacer les messages des autres"),
         (ADMINISTRATOR, "Administrateur", "toutes les permissions, présentes et futures"),
     ];
 
@@ -132,8 +136,17 @@ pub enum ClientMsg {
     },
     /// Sortir du vocal.
     LeaveVoice,
-    /// Message texte dans le salon courant.
-    Chat { text: String },
+    /// Message texte dans le salon courant, en réponse à un autre ou non.
+    Chat {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<MsgRef>,
+    },
+    /// Poser (`on`) ou retirer sa réaction sur un message du salon courant.
+    React { message: MsgRef, emoji: String, on: bool },
+    /// Supprimer un message du salon courant : le sien, ou celui d'un autre
+    /// avec la permission `DELETE_MESSAGES`.
+    DeleteMessage { message: MsgRef },
     /// Demander l'historique du salon courant.
     History { limit: u32 },
     /// Chercher un texte dans l'historique.
@@ -393,7 +406,19 @@ pub enum ServerMsg {
         text: String,
         /// Millisecondes depuis l'époque Unix.
         ts: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<ReplyRef>,
     },
+    /// Quelqu'un a posé ou retiré une réaction sur un message du salon.
+    Reaction {
+        channel: ChannelId,
+        message: MsgRef,
+        emoji: String,
+        by: UserId,
+        on: bool,
+    },
+    /// Un message du salon a été supprimé : il disparaît chez tout le monde.
+    MessageDeleted { channel: ChannelId, message: MsgRef },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
     /// Résultats d'une recherche, du plus ancien au plus récent.
@@ -997,12 +1022,80 @@ pub struct SearchHit {
     pub record: ChatRecord,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRecord {
     pub user_id: UserId,
     pub username: String,
     pub text: String,
     pub ts: u64,
+    /// Réponse à un autre message : de qui, et un extrait, pour l'afficher
+    /// sans avoir à retrouver l'original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ReplyRef>,
+    /// Les réactions, par emoji. Absentes d'un journal antérieur.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+}
+
+/// La clé d'un message : son auteur et son horodatage. Le serveur rend
+/// l'horodatage unique par salon, ce qui rend la paire unique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MsgRef {
+    pub user_id: UserId,
+    pub ts: u64,
+}
+
+/// Le message auquel on répond, tel qu'on le rappelle sous la réponse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyRef {
+    pub user_id: UserId,
+    pub ts: u64,
+    pub username: String,
+    /// Le début du message d'origine, borné à [`MAX_EXCERPT`] caractères.
+    pub excerpt: String,
+}
+
+/// Une réaction : un emoji et ceux qui l'ont posé.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    pub emoji: String,
+    pub users: Vec<UserId>,
+}
+
+/// Longueur de l'extrait rappelé sous une réponse.
+pub const MAX_EXCERPT: usize = 120;
+
+/// Les réactions proposées d'un clic. Un client peut en envoyer d'autres
+/// (n'importe quel emoji), le serveur ne vérifie que la forme.
+pub const REACTIONS: &[&str] = &["👍", "👎", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀", "✅"];
+
+/// Emojis de réaction admis au plus par message : au-delà, ce n'est plus une
+/// réaction, c'est du bruit.
+pub const MAX_REACTIONS: usize = 20;
+
+/// Un emoji de réaction acceptable : court, sans caractère de contrôle ni
+/// blanc, un seul « caractère » à l'écran (les emojis composés comptent
+/// plusieurs points de code : ❤️ en fait deux).
+pub fn clean_emoji(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 16 || s.chars().count() > 4 {
+        return None;
+    }
+    if s.chars().any(|c| c.is_control() || c.is_whitespace() || c.is_ascii()) {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// Le début d'un texte, pour le rappeler sous une réponse : une seule
+/// ligne, coupée proprement à [`MAX_EXCERPT`] caractères.
+pub fn excerpt_of(text: &str) -> String {
+    let premiere = text.lines().next().unwrap_or("").trim();
+    let mut out: String = premiere.chars().take(MAX_EXCERPT).collect();
+    if premiere.chars().count() > MAX_EXCERPT || text.lines().count() > 1 {
+        out.push('…');
+    }
+    out
 }
 
 /// --- Protocole voix (datagrammes), version 2 ---
@@ -1313,6 +1406,63 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un journal d'avant les réactions se relit tel quel, et un message
+    /// d'aujourd'hui fait l'aller-retour avec sa réponse et ses réactions.
+    #[test]
+    fn un_message_ancien_se_relit_et_un_nouveau_fait_l_aller_retour() {
+        let ancien = r#"{"user_id":1,"username":"kevin","text":"yo","ts":42}"#;
+        let rec: ChatRecord = serde_json::from_str(ancien).unwrap();
+        assert!(rec.reply_to.is_none() && rec.reactions.is_empty());
+
+        let nouveau = ChatRecord {
+            user_id: 2,
+            username: "léa".into(),
+            text: "oui".into(),
+            ts: 43,
+            reply_to: Some(ReplyRef { user_id: 1, ts: 42, username: "kevin".into(), excerpt: "yo".into() }),
+            reactions: vec![Reaction { emoji: "👍".into(), users: vec![1, 3] }],
+        };
+        let ligne = serde_json::to_string(&nouveau).unwrap();
+        let relu: ChatRecord = serde_json::from_str(&ligne).unwrap();
+        assert_eq!(relu.reply_to, nouveau.reply_to);
+        assert_eq!(relu.reactions, nouveau.reactions);
+        // Et rien de tout ça n'alourdit un message ordinaire.
+        let simple = serde_json::to_string(&ChatRecord { ts: 1, ..Default::default() }).unwrap();
+        assert!(!simple.contains("reply_to") && !simple.contains("reactions"));
+    }
+
+    /// Une réaction, c'est un emoji : pas une phrase, pas une lettre, pas
+    /// un blanc. Et l'extrait d'une réponse tient sur une ligne bornée.
+    #[test]
+    fn l_emoji_de_reaction_est_borne_et_l_extrait_aussi() {
+        for ok in REACTIONS {
+            assert!(clean_emoji(ok).is_some(), "{ok}");
+        }
+        assert_eq!(clean_emoji(" 🎉 ").as_deref(), Some("🎉"));
+        assert!(clean_emoji("").is_none());
+        assert!(clean_emoji("a").is_none());
+        assert!(clean_emoji("👍👍👍👍👍").is_none());
+        assert!(clean_emoji("\u{7}").is_none());
+
+        assert_eq!(excerpt_of("salut\nça va"), "salut…");
+        let long = "x".repeat(MAX_EXCERPT + 5);
+        let e = excerpt_of(&long);
+        assert_eq!(e.chars().count(), MAX_EXCERPT + 1);
+        assert!(e.ends_with('…'));
+        assert_eq!(excerpt_of("court"), "court");
+    }
+
+    /// Supprimer les messages des autres est une autorité : jamais pour
+    /// `@everyone`, et connue de la liste des permissions.
+    #[test]
+    fn supprimer_les_messages_est_une_autorite() {
+        let refuse_a_tous = std::hint::black_box(perm::NOT_FOR_EVERYONE);
+        assert!(refuse_a_tous & perm::DELETE_MESSAGES != 0);
+        assert!(perm::ALL.iter().any(|(bit, _, _)| *bit == perm::DELETE_MESSAGES));
+        assert!(perm::has(perm::ADMINISTRATOR, perm::DELETE_MESSAGES));
+        assert!(!perm::has(perm::DEFAULT, perm::DELETE_MESSAGES));
+    }
 
     #[test]
     fn voice_roundtrip() {

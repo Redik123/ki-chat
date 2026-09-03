@@ -74,7 +74,8 @@ fn initial_roles() -> RolesFile {
                     | perm::BAN
                     | perm::CREATE_INVITE
                     | perm::MANAGE_INVITES
-                    | perm::VIEW_AUDIT_LOG,
+                    | perm::VIEW_AUDIT_LOG
+                    | perm::DELETE_MESSAGES,
                 system: false,
             },
         ],

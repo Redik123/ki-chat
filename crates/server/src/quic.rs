@@ -953,7 +953,7 @@ fn handle_msg(
         ClientMsg::Unwatch { stream_id } => {
             state.streams.unwatch(stream_id, user_id);
         }
-        ClientMsg::Chat { text } => {
+        ClientMsg::Chat { text, reply_to } => {
             if !require(state, user_id, tx, ki_protocol::perm::SEND_MESSAGE) {
                 return;
             }
@@ -981,19 +981,89 @@ fn handle_msg(
                     return;
                 }
             };
-            let ts = now_millis();
+            // Unique dans le salon : c'est la clé du message, celle sur
+            // laquelle les réactions et les réponses se posent.
+            let ts = state.history.unique_ts(channel, now_millis());
+            // La réponse rappelle l'original tel que le serveur le connaît,
+            // pas tel que le client le raconte : un message qui n'existe
+            // plus (ou pas) ne se cite pas.
+            let reply_to = reply_to.and_then(|m| {
+                state.history.resolve_reply(channel, m).map(|(username, excerpt)| {
+                    ki_protocol::ReplyRef { user_id: m.user_id, ts: m.ts, username, excerpt }
+                })
+            });
             let rec = ChatRecord {
                 user_id,
                 username: username.to_string(),
                 text: text.clone(),
                 ts,
+                reply_to: reply_to.clone(),
+                reactions: Vec::new(),
             };
             state.history.append(channel, &rec);
             state.broadcast(
                 channel,
                 None,
-                &ServerMsg::Chat { user_id, username: username.to_string(), text, ts },
+                &ServerMsg::Chat { user_id, username: username.to_string(), text, ts, reply_to },
             );
+        }
+        ClientMsg::React { message, emoji, on } => {
+            let Some(channel) = current_channel(state, user_id) else {
+                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                return;
+            };
+            // Une réaction coûte un jeton du budget de chat : réagir en
+            // rafale remplirait le journal et la bande passante comme des
+            // messages.
+            let allowed = {
+                let mut users = state.users.lock().unwrap();
+                users.get_mut(&user_id).is_some_and(|u| u.chat_budget.take())
+            };
+            if !allowed {
+                return;
+            }
+            let Some(emoji) = ki_protocol::clean_emoji(&emoji) else {
+                let _ = tx.send(ServerMsg::Error { message: "réaction invalide".into() });
+                return;
+            };
+            // Rien n'a changé (déjà posée, déjà retirée, message inconnu) :
+            // rien à dire à personne.
+            if state.history.react(channel, message, emoji.clone(), user_id, on).is_some() {
+                state.broadcast(
+                    channel,
+                    None,
+                    &ServerMsg::Reaction { channel, message, emoji, by: user_id, on },
+                );
+            }
+        }
+        ClientMsg::DeleteMessage { message } => {
+            let Some(channel) = current_channel(state, user_id) else {
+                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                return;
+            };
+            // Les siens, toujours ; ceux des autres, avec la permission.
+            if message.user_id != user_id
+                && !require(state, user_id, tx, ki_protocol::perm::DELETE_MESSAGES)
+            {
+                return;
+            }
+            // Ce qu'on efface, avant de l'effacer : le journal d'audit dit
+            // qui a retiré quoi, pas seulement qu'un message a disparu.
+            let origine = state.history.resolve_reply(channel, message);
+            if !state.history.delete(channel, message) {
+                let _ = tx.send(ServerMsg::Error { message: "ce message n'existe plus".into() });
+                return;
+            }
+            if message.user_id != user_id {
+                let (auteur, extrait) = origine.unwrap_or_else(|| (message.user_id.to_string(), String::new()));
+                state.audit.record(
+                    "message.delete",
+                    username,
+                    &auteur,
+                    &format!("salon {channel} : {extrait}"),
+                );
+            }
+            state.broadcast(channel, None, &ServerMsg::MessageDeleted { channel, message });
         }
         ClientMsg::History { limit } => {
             let Some(channel) = current_channel(state, user_id) else {

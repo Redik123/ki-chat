@@ -84,6 +84,16 @@ conservés sur disque mais inatteignables. Le serveur relit le fichier
 au-delà de ce qu'il garde en mémoire, et annonce quand le début du salon
 est atteint.
 
+**Clic droit sur un message** — comme sur Discord : **répondre** (l'original
+est rappelé au-dessus de la zone de saisie, puis sous la réponse, et un clic
+y ramène), **réagir** d'un emoji (pastilles sous le message avec le compte,
+la sienne se distingue et se retire d'un clic), **supprimer** — les siens,
+chacun peut ; ceux des autres demandent la permission « Supprimer les
+messages », que les modérateurs ont d'office, et le journal d'audit dit qui
+a retiré quoi. Le fichier d'historique reste append-only : réactions et
+suppressions sont des lignes d'événements, rejouées au démarrage, et un
+message supprimé ne se rend plus à personne — pas même à la recherche.
+
 **Voix** : format de paquet maison (voir `protocol/src/lib.rs`), transporté
 en datagrammes QUIC. Le client encode
 en Opus et envoie des trames de 20 ms. Les conversions de fréquence
@@ -662,7 +672,7 @@ chaud et mémorisé :
 un jeu de **permissions** cochables (voir les salons, écrire, rejoindre le
 vocal, partager des fichiers, créer des invitations, expulser, bannir,
 réinitialiser les mots de passe, gérer les salons, les rôles, le serveur,
-consulter le journal). Trois rôles existent au départ : `@everyone`
+consulter le journal, supprimer les messages des autres). Trois rôles existent au départ : `@everyone`
 (implicite, jamais attribué — c'est le socle de tout le monde), `Propriétaire`
 (le premier compte créé) et `Modérateur`. Onglet **Rôles** du panneau admin
 pour les créer, **Membres** pour les attribuer.

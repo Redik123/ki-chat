@@ -117,7 +117,19 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Le client en ligne de commande n'affiche pas d'images.
                 ServerMsg::Avatar { .. } => {}
-                ServerMsg::Chat { username, text, .. } => println!("<{username}> {text}"),
+                ServerMsg::Chat { username, text, reply_to, .. } => match reply_to {
+                    Some(r) => println!("<{username}> (↩ {} : {}) {text}", r.username, r.excerpt),
+                    None => println!("<{username}> {text}"),
+                },
+                ServerMsg::Reaction { emoji, by, on, message, .. } => println!(
+                    "* {by} {} {emoji} sur le message {} de {}",
+                    if on { "réagit" } else { "retire" },
+                    message.ts,
+                    message.user_id
+                ),
+                ServerMsg::MessageDeleted { message, .. } => {
+                    println!("* message {} de {} supprimé", message.ts, message.user_id)
+                }
                 ServerMsg::History { messages } => {
                     for m in messages {
                         println!("  [ancien] <{}> {}", m.username, m.text);
@@ -550,7 +562,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("! commande inconnue");
             continue;
         } else {
-            ClientMsg::Chat { text: line }
+            ClientMsg::Chat { reply_to: None, text: line }
         };
         if writer.send_msg(&msg).await.is_err() {
             break;

@@ -37,7 +37,7 @@ use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use icons::Icon;
 use ki_protocol::{
     AccountInfo, AuditRecord, ChannelId, ChannelInfo, ChannelKind, ChatRecord, ClientMsg,
-    IconChange, InviteInfo, Member, ServerInfo, ServerMsg, UserId,
+    IconChange, InviteInfo, Member, MsgRef, Reaction, ReplyRef, ServerInfo, ServerMsg, UserId,
 };
 use ptt::PttKey;
 use theme::{color_for, ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
@@ -497,6 +497,11 @@ struct KiApp {
     /// Tout le monde sur le serveur, pas seulement le salon courant.
     members: Vec<Member>,
     messages: Vec<ChatRecord>,
+    /// Le message auquel on est en train de répondre, rappelé au-dessus de
+    /// la zone de saisie jusqu'à l'envoi (ou Échap).
+    reponse_a: Option<ReplyRef>,
+    /// Le menu ouvert d'un clic droit sur un message.
+    menu_message: Option<MenuMessage>,
     /// Effets sonores : nom court -> PCM 48 kHz mono. Les défauts synthétisés
     /// sont toujours là ; un .wav déposé dans « sons » les remplace.
     sounds: HashMap<String, Vec<f32>>,
@@ -932,6 +937,8 @@ impl KiApp {
             audit: Vec::new(),
             admin_tab: AdminTab::Server,
             reglages_onglet: Onglet::depuis(&get("reglages_onglet", "audio")),
+            reponse_a: None,
+            menu_message: None,
             invite_uses: Some(1),
             invite_label: String::new(),
             ban_draft: None,
@@ -2178,6 +2185,7 @@ impl KiApp {
                 username,
                 text,
                 ts,
+                reply_to,
             } => {
                 // Être **nommé** n'est pas un message de plus : ça appelle une
                 // réponse. On prévient donc même fenêtre au premier plan, là où
@@ -2202,6 +2210,8 @@ impl KiApp {
                     username,
                     text,
                     ts,
+                    reply_to: reply_to.map(clean_reply),
+                    reactions: Vec::new(),
                 });
                 if self.messages.len() > 500 {
                     self.messages.remove(0);
@@ -2209,6 +2219,34 @@ impl KiApp {
             }
             ServerMsg::History { messages } => {
                 self.messages = messages.into_iter().map(clean_record).collect();
+            }
+            ServerMsg::Reaction { channel, message, emoji, by, on } => {
+                if self.current != Some(channel) {
+                    return;
+                }
+                if let Some(m) = self
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.user_id == message.user_id && m.ts == message.ts)
+                {
+                    reaction_locale(&mut m.reactions, &emoji, by, on);
+                    // La hauteur du message change avec sa rangée de
+                    // réactions : à remesurer.
+                    self.msg_heights.remove(&(message.user_id, message.ts));
+                }
+            }
+            ServerMsg::MessageDeleted { channel, message } => {
+                if self.current != Some(channel) {
+                    return;
+                }
+                self.messages.retain(|m| !(m.user_id == message.user_id && m.ts == message.ts));
+                self.msg_heights.remove(&(message.user_id, message.ts));
+                if self.reponse_a.as_ref().is_some_and(|r| r.user_id == message.user_id && r.ts == message.ts) {
+                    self.reponse_a = None;
+                }
+                if self.menu_message.as_ref().is_some_and(|m| m.message == message) {
+                    self.menu_message = None;
+                }
             }
             ServerMsg::SearchResults { query, hits, more } => {
                 // Une réponse à une requête qu'on ne pose plus est jetée : le
@@ -2690,7 +2728,7 @@ impl KiApp {
             })();
             match result {
                 Ok(url) => {
-                    let _ = sender.send(net::Cmd::Send(ClientMsg::Chat { text: url }));
+                    let _ = sender.send(net::Cmd::Send(ClientMsg::Chat { text: url, reply_to: None }));
                     *status.lock().unwrap() = None;
                 }
                 Err(e) => *status.lock().unwrap() = Some(format!("échec de l'envoi : {e}")),
@@ -3191,6 +3229,7 @@ impl KiApp {
         if self.show_settings {
             self.settings_window(ctx, voice);
         }
+        self.menu_message_ui(ctx);
         if self.show_admin {
             self.admin_window(ctx);
         }
@@ -4217,6 +4256,7 @@ impl KiApp {
             return;
         }
         let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
+        self.reply_bar(ui);
         egui::Frame::NONE
             .fill(theme::BG_RAISED)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
@@ -4284,10 +4324,141 @@ impl KiApp {
         if submit {
             let text = self.input.trim().to_string();
             if !text.is_empty() {
-                self.send(ClientMsg::Chat { text });
+                let reply_to =
+                    self.reponse_a.take().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
+                self.send(ClientMsg::Chat { text, reply_to });
                 self.input.clear();
             }
         }
+    }
+
+    /// Le menu d'un message, ouvert d'un clic droit : réagir, répondre, et
+    /// supprimer — le sien, ou celui d'un autre avec la permission. Il se
+    /// ferme sur Échap, sur un clic ailleurs, ou une fois la chose faite.
+    fn menu_message_ui(&mut self, ctx: &egui::Context) {
+        let Some(menu) = self.menu_message.clone() else { return };
+        let Some(msg) = self
+            .messages
+            .iter()
+            .find(|m| m.user_id == menu.message.user_id && m.ts == menu.message.ts)
+            .cloned()
+        else {
+            self.menu_message = None;
+            return;
+        };
+        let peut_supprimer =
+            Some(msg.user_id) == self.my_id || self.can(ki_protocol::perm::DELETE_MESSAGES);
+        let mut fermer = false;
+        let zone = egui::Area::new(egui::Id::new("menu-message"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(menu.pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(232.0);
+                    ui.label(RichText::new(&msg.username).strong());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(ki_protocol::excerpt_of(&msg.text))
+                                .color(TEXT_FAINT)
+                                .size(11.0),
+                        )
+                        .truncate(),
+                    );
+                    ui.add_space(4.0);
+                    // Réagir : les emojis du protocole, d'un clic. Celui
+                    // qu'on a déjà posé se retire.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for emoji in ki_protocol::REACTIONS {
+                            let deja = msg
+                                .reactions
+                                .iter()
+                                .any(|r| r.emoji == *emoji && self.my_id.is_some_and(|me| r.users.contains(&me)));
+                            let bouton = egui::Button::new(RichText::new(*emoji).size(16.0))
+                                .fill(if deja { theme::alpha(ACCENT, 40) } else { theme::BG_RAISED })
+                                .corner_radius(egui::CornerRadius::same(6));
+                            if ui.add(bouton).clicked() {
+                                self.send(ClientMsg::React {
+                                    message: menu.message,
+                                    emoji: (*emoji).to_string(),
+                                    on: !deja,
+                                });
+                                fermer = true;
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    if ui.button("↩ Répondre").clicked() {
+                        self.reponse_a = Some(ReplyRef {
+                            user_id: msg.user_id,
+                            ts: msg.ts,
+                            username: msg.username.clone(),
+                            excerpt: ki_protocol::excerpt_of(&msg.text),
+                        });
+                        self.focus_input = true;
+                        fermer = true;
+                    }
+                    if peut_supprimer {
+                        let rouge = Color32::from_rgb(232, 84, 84);
+                        if menu.confirmer {
+                            if ui
+                                .button(RichText::new("Confirmer la suppression").color(rouge))
+                                .clicked()
+                            {
+                                self.send(ClientMsg::DeleteMessage { message: menu.message });
+                                fermer = true;
+                            }
+                        } else if ui.button(RichText::new("Supprimer…").color(rouge)).clicked() {
+                            if let Some(m) = self.menu_message.as_mut() {
+                                m.confirmer = true;
+                            }
+                        }
+                    }
+                });
+            });
+        // Le clic droit qui vient d'ouvrir le menu n'est pas un clic
+        // ailleurs : seul un clic gauche hors du menu le ferme.
+        let ailleurs = ctx.input(|i| i.pointer.primary_clicked())
+            && !zone.response.contains_pointer();
+        if fermer || ailleurs || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.menu_message = None;
+        }
+    }
+
+    /// Le rappel « en réponse à… » au-dessus de la zone de saisie, tant
+    /// qu'une réponse est en cours. Échap ou la croix y renoncent.
+    fn reply_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(r) = self.reponse_a.clone() else { return };
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.reponse_a = None;
+            return;
+        }
+        egui::Frame::NONE
+            .fill(theme::BG_RAISED)
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("↩ Réponse à {} — {}", r.username, r.excerpt))
+                                .color(TEXT_DIM)
+                                .size(12.0),
+                        )
+                        .truncate(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(RichText::new("✕").color(TEXT_DIM))
+                            .on_hover_text("Ne plus répondre (Échap)")
+                            .clicked()
+                        {
+                            self.reponse_a = None;
+                        }
+                    });
+                });
+            });
+        ui.add_space(4.0);
     }
 
     fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
@@ -4363,6 +4534,10 @@ impl KiApp {
                     .my_id
                     .and_then(|id| membres_source.iter().find(|m| m.user_id == id))
                     .map(|m| m.username.clone());
+                let moi_id = self.my_id;
+                // Ce qu'un clic sur un message a demandé : exécuté après le
+                // rendu, quand les messages sont revenus dans l'état.
+                let mut demande: Option<(MsgRef, MessageAction)> = None;
 
                 let mut last_day = i32::MIN;
                 let mut previous: Option<(UserId, u64)> = None;
@@ -4430,10 +4605,14 @@ impl KiApp {
                                 color,
                                 membres: &membres,
                                 moi: moi.as_deref(),
+                                moi_id,
                             },
                             previews,
-                        );
+                        )
                     });
+                    if !matches!(bloc.inner, MessageAction::Rien) {
+                        demande = Some((MsgRef { user_id: msg.user_id, ts: msg.ts }, bloc.inner));
+                    }
                     // Mesurée séparateur compris : c'est le bloc entier qu'on
                     // sautera la prochaine fois.
                     self.msg_heights.insert(cle, bloc.response.rect.height());
@@ -4441,6 +4620,22 @@ impl KiApp {
                 self.messages = messages;
                 drop(membres);
                 self.members = membres_source;
+                if let Some((message, action)) = demande {
+                    match action {
+                        MessageAction::Menu(pos) => {
+                            self.menu_message = Some(MenuMessage { message, pos, confirmer: false });
+                        }
+                        MessageAction::Reagir(emoji, on) => {
+                            self.send(ClientMsg::React { message, emoji, on });
+                        }
+                        MessageAction::Aller(ts) => {
+                            if let Some(c) = self.current {
+                                self.sauter_a(c, ts);
+                            }
+                        }
+                        MessageAction::Rien => {}
+                    }
+                }
                 // Le cache ne garde que ce qui est encore affiché : sans ça,
                 // remonter un fil de plusieurs mois y laisserait une entrée
                 // par message lu, pour toujours.
@@ -7721,7 +7916,62 @@ fn load_sounds() -> HashMap<String, Vec<f32>> {
 fn clean_record(mut record: ChatRecord) -> ChatRecord {
     record.username = safe_name(&record.username);
     record.text = ki_protocol::safe_display(&record.text, ki_protocol::MAX_CHAT_TEXT);
+    record.reply_to = record.reply_to.map(clean_reply);
+    record.reactions.retain(|r| ki_protocol::clean_emoji(&r.emoji).is_some());
     record
+}
+
+/// Le rappel d'une réponse vient du serveur, qui l'a composé d'après
+/// autrui : mêmes règles d'affichage que le reste.
+fn clean_reply(mut r: ReplyRef) -> ReplyRef {
+    r.username = safe_name(&r.username);
+    r.excerpt = ki_protocol::safe_display(&r.excerpt, ki_protocol::MAX_EXCERPT + 1);
+    r
+}
+
+/// Applique chez nous ce que le serveur annonce : une réaction posée ou
+/// retirée par quelqu'un. Même règle que le serveur, pour afficher la même
+/// chose que lui.
+fn reaction_locale(reactions: &mut Vec<Reaction>, emoji: &str, by: UserId, on: bool) {
+    match reactions.iter_mut().position(|r| r.emoji == emoji) {
+        Some(i) => {
+            let r = &mut reactions[i];
+            if on {
+                if !r.users.contains(&by) {
+                    r.users.push(by);
+                }
+            } else {
+                r.users.retain(|u| *u != by);
+                if r.users.is_empty() {
+                    reactions.remove(i);
+                }
+            }
+        }
+        None if on => reactions.push(Reaction { emoji: emoji.to_string(), users: vec![by] }),
+        None => {}
+    }
+}
+
+/// Le menu d'un message, ouvert d'un clic droit.
+#[derive(Clone)]
+struct MenuMessage {
+    message: MsgRef,
+    pos: egui::Pos2,
+    /// « Supprimer » demande un second clic : le premier arme, le second fait.
+    confirmer: bool,
+}
+
+/// Ce qu'un clic sur un message demande à l'application. Le message est
+/// peint par une fonction libre, qui n'a pas la main sur l'état : elle rend
+/// la demande, l'appelant l'exécute.
+enum MessageAction {
+    Rien,
+    /// Clic droit : ouvrir le menu à cette position.
+    Menu(egui::Pos2),
+    /// Clic sur une pastille : poser (`true`) ou retirer sa réaction.
+    Reagir(String, bool),
+    /// Clic sur le rappel d'une réponse : aller au message d'origine.
+    Aller(u64),
 }
 
 /// Étiquette courte d'un bannissement : « banni » ou le temps restant.
@@ -8272,16 +8522,19 @@ struct MessageRow<'a> {
     membres: &'a [&'a str],
     /// Le pseudo de celui qui lit, pour distinguer sa propre mention.
     moi: Option<&'a str>,
+    /// Son identifiant, pour reconnaître ses propres réactions.
+    moi_id: Option<UserId>,
 }
 
 fn message_block(
     ui: &mut egui::Ui,
     row: MessageRow<'_>,
     previews: &mut images::Previews,
-) {
-    let MessageRow { msg, with_header, photo, color, membres, moi } = row;
+) -> MessageAction {
+    let MessageRow { msg, with_header, photo, color, membres, moi, moi_id } = row;
     const GUTTER: f32 = 36.0;
     let bg_slot = ui.painter().add(egui::Shape::Noop);
+    let mut action = MessageAction::Rien;
 
     let inner = ui.vertical(|ui| {
         ui.add_space(if with_header { 7.0 } else { 1.0 });
@@ -8312,12 +8565,56 @@ fn message_block(
                     });
                     ui.add_space(1.0);
                 }
+                // En réponse à… : le rappel de l'original, cliquable pour y
+                // aller.
+                if let Some(r) = &msg.reply_to {
+                    let rappel = ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("↩ {} — {}", r.username, r.excerpt))
+                                .color(TEXT_DIM)
+                                .size(11.5),
+                        )
+                        .sense(Sense::click())
+                        .truncate(),
+                    );
+                    if rappel
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("aller au message d'origine")
+                        .clicked()
+                    {
+                        action = MessageAction::Aller(r.ts);
+                    }
+                }
                 message_body(ui, &msg.text, membres, moi, (msg.user_id, msg.ts));
                 // Les images partagées s'affichent sous le message.
                 for (is_link, chunk) in split_links(&msg.text) {
                     if is_link && images::looks_like_image(chunk) {
                         image_preview(ui, chunk, previews);
                     }
+                }
+                // Les réactions, en pastilles : la sienne se distingue, et
+                // un clic la pose ou la retire.
+                if !msg.reactions.is_empty() {
+                    ui.add_space(3.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for r in &msg.reactions {
+                            let mienne = moi_id.is_some_and(|me| r.users.contains(&me));
+                            let texte = RichText::new(format!("{} {}", r.emoji, r.users.len()))
+                                .size(12.0)
+                                .color(if mienne { ACCENT } else { TEXT_DIM });
+                            let pastille = egui::Button::new(texte)
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .fill(if mienne { theme::alpha(ACCENT, 40) } else { theme::BG_RAISED })
+                                .stroke(egui::Stroke::new(
+                                    1.0_f32,
+                                    if mienne { theme::alpha(ACCENT, 160) } else { theme::BORDER },
+                                ));
+                            if ui.add(pastille).clicked() {
+                                action = MessageAction::Reagir(r.emoji.clone(), !mienne);
+                            }
+                        }
+                    });
                 }
             });
         });
@@ -8333,7 +8630,16 @@ fn message_block(
             bg_slot,
             egui::epaint::RectShape::filled(row, egui::CornerRadius::same(8), theme::BG_GHOST),
         );
+        // Clic droit n'importe où sur le message : son menu. Détecté à la
+        // main plutôt que par un widget englobant, qui volerait les clics
+        // des liens et des pastilles qu'il recouvre.
+        if ui.input(|i| i.pointer.secondary_clicked()) {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                action = MessageAction::Menu(pos);
+            }
+        }
     }
+    action
 }
 
 /// Corps d'un message : texte simple, ou texte + liens cliquables.

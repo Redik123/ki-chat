@@ -18,10 +18,84 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use ki_protocol::{ChannelId, ChannelInfo, ChatRecord};
+use ki_protocol::{ChannelId, ChannelInfo, ChatRecord, MsgRef, Reaction, UserId};
+use serde::{Deserialize, Serialize};
 
 /// Nombre max de messages gardés en mémoire par salon.
 const MEM_CAP: usize = 1000;
+
+/// Ce qui arrive à un message **après coup** : ses réactions, et sa
+/// suppression. Le journal est append-only et on y tient : plutôt que de
+/// réécrire un fichier de quinze mégaoctets pour retirer une ligne, on y
+/// ajoute une ligne d'événement, rejouée au démarrage. L'état vit en
+/// mémoire pour **tous** les messages du salon, pas seulement les mille
+/// derniers : c'est petit (il faut avoir réagi), et c'est ce qui permet de
+/// l'appliquer à une page relue depuis le disque.
+#[derive(Default, Clone)]
+struct Etat {
+    reactions: Vec<Reaction>,
+    supprime: bool,
+}
+
+type Etats = HashMap<MsgRef, Etat>;
+
+/// Une ligne du journal : un message, ou un événement sur un message.
+///
+/// `untagged` essaie dans l'ordre : une ligne d'événement n'a ni texte ni
+/// pseudo, elle ne passe pas pour un message. Et un serveur d'avant les
+/// réactions sautait ces lignes comme illisibles — sans casser.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Ligne {
+    Message(ChatRecord),
+    Reaction { react: EvReaction },
+    Suppression { del: MsgRef },
+}
+
+#[derive(Serialize, Deserialize)]
+struct EvReaction {
+    message: MsgRef,
+    emoji: String,
+    by: UserId,
+    on: bool,
+}
+
+/// Applique un événement à l'état d'un message. Rend vrai si quelque chose
+/// a changé — poser deux fois la même réaction n'en fait pas deux.
+fn appliquer_reaction(etats: &mut Etats, ev: &EvReaction) -> bool {
+    let etat = etats.entry(ev.message).or_default();
+    if etat.supprime {
+        return false;
+    }
+    match etat.reactions.iter_mut().position(|r| r.emoji == ev.emoji) {
+        Some(i) => {
+            let r = &mut etat.reactions[i];
+            let present = r.users.contains(&ev.by);
+            match (ev.on, present) {
+                (true, true) | (false, false) => false,
+                (true, false) => {
+                    r.users.push(ev.by);
+                    true
+                }
+                (false, true) => {
+                    r.users.retain(|u| *u != ev.by);
+                    if r.users.is_empty() {
+                        etat.reactions.remove(i);
+                    }
+                    true
+                }
+            }
+        }
+        None if ev.on => {
+            if etat.reactions.len() >= ki_protocol::MAX_REACTIONS {
+                return false;
+            }
+            etat.reactions.push(Reaction { emoji: ev.emoji.clone(), users: vec![ev.by] });
+            true
+        }
+        None => false,
+    }
+}
 
 /// Un message dans l'index : son horodatage et sa position dans le fichier.
 ///
@@ -95,7 +169,13 @@ fn fit_within(messages: Vec<ChatRecord>) -> (Vec<ChatRecord>, bool) {
 pub struct History {
     /// Les N derniers messages de chaque salon. Le fichier correspondant est
     /// tenu par le fil d'écriture, lui seul y touche.
+    ///
+    /// Les messages y sont **bruts** : réactions et suppressions vivent dans
+    /// `etats`, appliquées à la lecture. Une seule source de vérité, qui
+    /// vaut aussi pour les pages relues depuis le disque.
     logs: Mutex<HashMap<ChannelId, VecDeque<ChatRecord>>>,
+    /// Réactions et suppressions, par salon puis par message.
+    etats: Mutex<HashMap<ChannelId, Etats>>,
     /// Position de chaque message dans son fichier, par salon.
     ///
     /// Partagé avec le fil d'écriture : lui seul connaît la position d'une
@@ -128,12 +208,13 @@ pub struct History {
 /// n'est pas cosmétique : une erreur matérielle ne fait pas avancer le curseur,
 /// et l'ignorer ferait tourner la boucle indéfiniment — un serveur figé, plus
 /// difficile à diagnostiquer qu'un serveur qui refuse de démarrer.
-fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index, u64) {
+fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index, u64, Etats) {
     let mut recent = VecDeque::with_capacity(mem_cap);
     let mut index = Index::new();
     let mut offset = 0u64;
+    let mut etats = Etats::new();
 
-    let Ok(file) = File::open(path) else { return (recent, index, 0) };
+    let Ok(file) = File::open(path) else { return (recent, index, 0, etats) };
     let mut reader = BufReader::new(file);
     // Octets bruts, et non `read_line` : celui-ci échoue sur de l'UTF-8
     // invalide **sans dire combien d'octets il a consommés**, ce qui ne
@@ -154,12 +235,23 @@ fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index,
         };
         let debut = offset;
         offset += read as u64;
-        if let Ok(rec) = serde_json::from_slice::<ChatRecord>(trim_eol(&buf)) {
-            index.push(Entry { ts: rec.ts, offset: debut });
-            if recent.len() == mem_cap {
-                recent.pop_front();
+        match serde_json::from_slice::<Ligne>(trim_eol(&buf)) {
+            Ok(Ligne::Message(rec)) => {
+                index.push(Entry { ts: rec.ts, offset: debut });
+                if recent.len() == mem_cap {
+                    recent.pop_front();
+                }
+                recent.push_back(rec);
             }
-            recent.push_back(rec);
+            // Les événements se rejouent dans l'ordre du fichier : c'est
+            // l'ordre où ils ont été acceptés.
+            Ok(Ligne::Reaction { react }) => {
+                appliquer_reaction(&mut etats, &react);
+            }
+            Ok(Ligne::Suppression { del }) => {
+                etats.entry(del).or_default().supprime = true;
+            }
+            Err(_) => {}
         }
     }
     // Triés une fois : l'horloge murale peut avoir reculé, le fichier n'est
@@ -170,7 +262,7 @@ fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index,
     let mut recent: Vec<ChatRecord> = recent.into_iter().collect();
     recent.sort_by_key(|r| r.ts);
     let recent: VecDeque<ChatRecord> = recent.into();
-    (recent, index, offset)
+    (recent, index, offset, etats)
 }
 
 impl History {
@@ -180,16 +272,18 @@ impl History {
         let mut logs = HashMap::new();
         let mut files = HashMap::new();
         let mut index = HashMap::new();
+        let mut etats = HashMap::new();
         for ch in channels {
             let path = dir.join(format!("channel-{}.jsonl", ch.id));
             // Une seule lecture remplit le cache mémoire ET l'index : c'est
             // la lecture qu'on faisait déjà, à laquelle on note au passage la
             // position de chaque message.
-            let (recent, idx, taille) = scan(&path, MEM_CAP);
+            let (recent, idx, taille, etat) = scan(&path, MEM_CAP);
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
             files.insert(ch.id, Log { file, len: taille });
             index.insert(ch.id, idx);
             logs.insert(ch.id, recent);
+            etats.insert(ch.id, etat);
         }
         // Canal non borné : le chat est déjà limité en amont par le seau à
         // jetons de chaque client, et faire attendre l'appelant ici serait
@@ -204,10 +298,114 @@ impl History {
             })?;
         Ok(Self {
             logs: Mutex::new(logs),
+            etats: Mutex::new(etats),
             index,
             writes: Some(writes),
             writer: Some(writer),
         })
+    }
+
+    /// Un horodatage **unique dans le salon**, à partir de `now` : deux
+    /// messages du même auteur dans la même milliseconde partageraient
+    /// sinon leur clé — et une réaction ne saurait plus sur lequel se poser.
+    pub fn unique_ts(&self, channel: ChannelId, now: u64) -> u64 {
+        let logs = self.logs.lock().unwrap();
+        match logs.get(&channel).and_then(|r| r.back()) {
+            Some(dernier) if dernier.ts >= now => dernier.ts + 1,
+            _ => now,
+        }
+    }
+
+    /// Pose l'état après coup sur un message lu : ses réactions, et « garder
+    /// ou non » — un message supprimé ne se rend plus.
+    fn habiller(etats: &Etats, mut rec: ChatRecord) -> Option<ChatRecord> {
+        match etats.get(&MsgRef { user_id: rec.user_id, ts: rec.ts }) {
+            Some(e) if e.supprime => None,
+            Some(e) => {
+                rec.reactions = e.reactions.clone();
+                Some(rec)
+            }
+            None => Some(rec),
+        }
+    }
+
+    /// Le message d'origine d'une réponse, s'il est encore en mémoire : de
+    /// quoi rappeler sous la réponse qui a dit quoi, sans croire le client.
+    pub fn resolve_reply(&self, channel: ChannelId, message: MsgRef) -> Option<(String, String)> {
+        let logs = self.logs.lock().unwrap();
+        let recent = logs.get(&channel)?;
+        let rec = recent.iter().rev().find(|r| r.user_id == message.user_id && r.ts == message.ts)?;
+        if self.etats.lock().unwrap().get(&channel)?.get(&message).is_some_and(|e| e.supprime) {
+            return None;
+        }
+        Some((rec.username.clone(), ki_protocol::excerpt_of(&rec.text)))
+    }
+
+    /// Ce message existe-t-il dans le salon ? Le cache d'abord, l'index
+    /// ensuite (par l'horodatage seul : c'est lui que le serveur rend unique).
+    fn connu(&self, channel: ChannelId, message: MsgRef) -> bool {
+        if let Some(recent) = self.logs.lock().unwrap().get(&channel) {
+            if recent.iter().rev().any(|r| r.ts == message.ts && r.user_id == message.user_id) {
+                return true;
+            }
+        }
+        let index = self.index.lock().unwrap();
+        let Some(entries) = index.get(&channel) else { return false };
+        let pos = entries.partition_point(|e| e.ts < message.ts);
+        entries.get(pos).is_some_and(|e| e.ts == message.ts)
+    }
+
+    /// Pose ou retire la réaction `emoji` de `by` sur un message. Rend les
+    /// réactions à jour du message si quelque chose a changé.
+    pub fn react(
+        &self,
+        channel: ChannelId,
+        message: MsgRef,
+        emoji: String,
+        by: UserId,
+        on: bool,
+    ) -> Option<Vec<Reaction>> {
+        if !self.connu(channel, message) {
+            return None;
+        }
+        let ev = EvReaction { message, emoji, by, on };
+        let reactions = {
+            let mut etats = self.etats.lock().unwrap();
+            let etats = etats.entry(channel).or_default();
+            if !appliquer_reaction(etats, &ev) {
+                return None;
+            }
+            etats.get(&message).map(|e| e.reactions.clone()).unwrap_or_default()
+        };
+        if let Ok(line) = serde_json::to_string(&Ligne::Reaction { react: ev }) {
+            if let Some(writes) = &self.writes {
+                let _ = writes.send(WriteCmd::Event(channel, line));
+            }
+        }
+        Some(reactions)
+    }
+
+    /// Supprime un message : il ne se rend plus, à personne. Rend faux s'il
+    /// n'existe pas ou l'était déjà.
+    pub fn delete(&self, channel: ChannelId, message: MsgRef) -> bool {
+        if !self.connu(channel, message) {
+            return false;
+        }
+        {
+            let mut etats = self.etats.lock().unwrap();
+            let etat = etats.entry(channel).or_default().entry(message).or_default();
+            if etat.supprime {
+                return false;
+            }
+            etat.supprime = true;
+            etat.reactions.clear();
+        }
+        if let Ok(line) = serde_json::to_string(&Ligne::Suppression { del: message }) {
+            if let Some(writes) = &self.writes {
+                let _ = writes.send(WriteCmd::Event(channel, line));
+            }
+        }
+        true
     }
 
     pub fn append(&self, channel: ChannelId, rec: &ChatRecord) {
@@ -272,10 +470,16 @@ impl History {
 
     pub fn recent(&self, channel: ChannelId, limit: usize) -> Vec<ChatRecord> {
         let logs = self.logs.lock().unwrap();
+        let etats = self.etats.lock().unwrap();
         match logs.get(&channel) {
             Some(recent) => {
-                let skip = recent.len().saturating_sub(limit);
-                let msgs: Vec<ChatRecord> = recent.iter().skip(skip).cloned().collect();
+                let vide = Etats::new();
+                let etats = etats.get(&channel).unwrap_or(&vide);
+                // Habillés avant de compter : un message supprimé ne doit
+                // pas occuper une place de la page.
+                let mut msgs: Vec<ChatRecord> =
+                    recent.iter().rev().cloned().filter_map(|r| Self::habiller(etats, r)).take(limit).collect();
+                msgs.reverse();
                 // Borné à une ligne de contrôle. Le client complète en
                 // remontant le fil (`HistoryBefore`) si tout ne tient pas.
                 fit_within(msgs).0
@@ -299,13 +503,20 @@ impl History {
         before_ts: u64,
         limit: usize,
     ) -> (Vec<ChatRecord>, bool) {
+        // L'état après coup du salon, pour habiller ce qu'on rend — copié,
+        // pour ne pas tenir le verrou pendant une lecture disque.
+        let etats: Etats = self.etats.lock().unwrap().get(&channel).cloned().unwrap_or_default();
         // Le cache d'abord : le cas courant est de remonter de quelques
         // pages, ce qui ne touche pas le disque.
         let from_memory = {
             let logs = self.logs.lock().unwrap();
             let Some(recent) = logs.get(&channel) else { return (Vec::new(), false) };
-            let older: Vec<ChatRecord> =
-                recent.iter().filter(|r| r.ts < before_ts).cloned().collect();
+            let older: Vec<ChatRecord> = recent
+                .iter()
+                .filter(|r| r.ts < before_ts)
+                .cloned()
+                .filter_map(|r| Self::habiller(&etats, r))
+                .collect();
             // Le cache est plein ET on en a épuisé le début : le reste est
             // sur le disque, il faut aller le chercher.
             let exhausted = older.len() < limit && recent.len() == MEM_CAP;
@@ -352,11 +563,11 @@ impl History {
 
         let mut older = Vec::with_capacity(fenetre.len());
         for entry in &fenetre {
-            match read_record_at(&mut file, entry.offset) {
+            match read_record_at(&mut file, entry.offset).and_then(|r| Self::habiller(&etats, r)) {
                 Some(rec) => older.push(rec),
                 // Une position devenue fausse — fichier remplacé sous nos
-                // pieds, ligne illisible — ne doit pas faire perdre la page :
-                // on saute ce message.
+                // pieds, ligne illisible — ou un message supprimé ne doit
+                // pas faire perdre la page : on le saute.
                 None => continue,
             }
         }
@@ -415,6 +626,8 @@ impl History {
         let mut trouves: Vec<(ChannelId, ChatRecord)> = Vec::new();
         let mut deborde = false;
         for &channel in channels {
+            let etats: Etats =
+                self.etats.lock().unwrap().get(&channel).cloned().unwrap_or_default();
             // Fenêtre glissante sur les `limit` derniers résultats du salon :
             // c'est ce qui borne la mémoire quel que soit le nombre de
             // correspondances. Chercher « le » dans dix ans d'archives ne doit
@@ -443,6 +656,7 @@ impl History {
                             .iter()
                             .filter(|r| r.text.to_lowercase().contains(&besoin))
                             .cloned()
+                            .filter_map(|r| Self::habiller(&etats, r))
                             .collect::<Vec<ChatRecord>>(),
                         recent
                             .iter()
@@ -487,7 +701,9 @@ impl History {
                             continue;
                         }
                         if rec.text.to_lowercase().contains(&besoin) {
-                            garder(&mut par_salon, limit, rec, &mut deborde);
+                            if let Some(rec) = Self::habiller(&etats, rec) {
+                                garder(&mut par_salon, limit, rec, &mut deborde);
+                            }
                         }
                     }
                 }
@@ -653,6 +869,22 @@ fn writer_loop(
                     }
                 }
             }
+            // Une ligne d'événement (réaction, suppression) : écrite comme un
+            // message, mais sans entrée d'index — l'index ne situe que des
+            // messages, et une page ne doit jamais y tomber sur autre chose.
+            WriteCmd::Event(channel, line) => {
+                let Some(log) = files.get_mut(&channel) else { continue };
+                let debut = log.len;
+                if let Err(e) = writeln!(log.file, "{line}") {
+                    tracing::error!("écriture d'un événement du salon {channel} impossible : {e}");
+                    log.len = match log.file.metadata().map(|m| m.len()) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    continue;
+                }
+                log.len = debut + line.len() as u64 + 1;
+            }
             // L'ouverture passe par la même file que les écritures : c'est
             // ce qui garantit qu'aucune ligne ne peut la précéder.
             WriteCmd::Open(channel, file) => {
@@ -672,6 +904,8 @@ enum WriteCmd {
     /// L'horodatage voyage avec la ligne : c'est la clé de l'index, et le fil
     /// d'écriture ne va pas redésérialiser ce qu'on vient de sérialiser.
     Line(ChannelId, u64, String),
+    /// Une ligne d'événement : pas de position à retenir.
+    Event(ChannelId, String),
     Open(ChannelId, File),
     Close(ChannelId),
 }
@@ -709,15 +943,74 @@ mod tests {
     }
 
     fn record(text: &str) -> ChatRecord {
-        ChatRecord { user_id: 1, username: "kevin".into(), text: text.into(), ts: 42 }
+        ChatRecord {
+            user_id: 1,
+            username: "kevin".into(),
+            text: text.into(),
+            ts: 42,
+            ..Default::default()
+        }
     }
 
     fn stamped(n: u64) -> ChatRecord {
-        ChatRecord { user_id: 1, username: "kevin".into(), text: format!("m{n}"), ts: n }
+        ChatRecord {
+            user_id: 1,
+            username: "kevin".into(),
+            text: format!("m{n}"),
+            ts: n,
+            ..Default::default()
+        }
     }
 
     fn dit(user_id: ki_protocol::UserId, ts: u64, text: &str) -> ChatRecord {
-        ChatRecord { user_id, username: format!("u{user_id}"), text: text.into(), ts }
+        ChatRecord {
+            user_id,
+            username: format!("u{user_id}"),
+            text: text.into(),
+            ts,
+            ..Default::default()
+        }
+    }
+
+    /// Les réactions se posent et se retirent, une suppression fait
+    /// disparaître le message de partout — et tout survit au redémarrage,
+    /// puisque ce sont des lignes d'événements rejouées au chargement.
+    #[test]
+    fn les_reactions_et_les_suppressions_survivent_au_redemarrage() {
+        let dir = scratch("evenements");
+        let cle = |ts| MsgRef { user_id: 1, ts };
+        {
+            let history = History::open(&dir, &[text_channel(1)]).unwrap();
+            history.append(1, &stamped(10));
+            history.append(1, &stamped(20));
+            history.append(1, &stamped(30));
+            // Deux fois la même réaction n'en fait qu'une ; la retirer la
+            // retire ; réagir à un message inconnu ne fait rien.
+            assert!(history.react(1, cle(10), "👍".into(), 7, true).is_some());
+            assert!(history.react(1, cle(10), "👍".into(), 7, true).is_none());
+            assert!(history.react(1, cle(10), "🔥".into(), 8, true).is_some());
+            assert!(history.react(1, cle(10), "🔥".into(), 8, false).is_some());
+            assert!(history.react(1, cle(99), "👍".into(), 7, true).is_none());
+            assert!(history.delete(1, cle(20)));
+            assert!(!history.delete(1, cle(20)), "déjà supprimé");
+            let page = history.recent(1, 10);
+            assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![10, 30]);
+            assert_eq!(page[0].reactions, vec![Reaction { emoji: "👍".into(), users: vec![7] }]);
+            // Le fil d'écriture pose tout sur le disque avant de rendre la main.
+        }
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        let page = history.recent(1, 10);
+        assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![10, 30]);
+        assert_eq!(page[0].reactions, vec![Reaction { emoji: "👍".into(), users: vec![7] }]);
+        // La page relue depuis le disque et la recherche voient la même chose.
+        let (avant, _) = history.before(&dir, 1, 31, 10);
+        assert_eq!(avant.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![10, 30]);
+        let (hits, _) = history.search(&dir, &[1], "m20", 10);
+        assert!(hits.is_empty(), "un message supprimé ne se cherche plus");
+        // Et l'horodatage unique : deux messages dans la même milliseconde
+        // n'ont pas la même clé.
+        assert_eq!(history.unique_ts(1, 30), 31);
+        assert_eq!(history.unique_ts(1, 500), 500);
     }
 
     /// La recherche ignore la casse, traverse les salons, et rend les
@@ -1064,7 +1357,7 @@ mod tests {
         for n in 1..=100 {
             history.append(
                 1,
-                &ChatRecord { user_id: 1, username: "k".into(), text: big.clone(), ts: n },
+                &ChatRecord { user_id: 1, username: "k".into(), text: big.clone(), ts: n, ..Default::default() },
             );
         }
 
