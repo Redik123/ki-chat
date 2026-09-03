@@ -171,6 +171,58 @@ enum AdminTab {
     Diagnostics,
 }
 
+/// Les onglets de la fenêtre de réglages. Elle s'appelait « Réglages audio »
+/// et empilait huit sections dans une seule colonne à faire défiler : la
+/// moitié n'avait plus rien d'audio, et la diffusion se trouvait tout en bas.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Onglet {
+    Audio,
+    Reseau,
+    Diffusion,
+    Overlay,
+    Sons,
+    Aide,
+}
+
+impl Onglet {
+    const TOUS: [Onglet; 6] = [
+        Onglet::Audio,
+        Onglet::Reseau,
+        Onglet::Diffusion,
+        Onglet::Overlay,
+        Onglet::Sons,
+        Onglet::Aide,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Onglet::Audio => "Audio",
+            Onglet::Reseau => "Réseau & qualité",
+            Onglet::Diffusion => "Diffusion d'écran",
+            Onglet::Overlay => "Overlay en jeu",
+            Onglet::Sons => "Sons & notifications",
+            Onglet::Aide => "Aide & diagnostics",
+        }
+    }
+
+    /// La clé mémorisée : l'onglet ouvert revient à la session suivante —
+    /// qui règle sa diffusion retombe dessus.
+    fn cle(self) -> &'static str {
+        match self {
+            Onglet::Audio => "audio",
+            Onglet::Reseau => "reseau",
+            Onglet::Diffusion => "diffusion",
+            Onglet::Overlay => "overlay",
+            Onglet::Sons => "sons",
+            Onglet::Aide => "aide",
+        }
+    }
+
+    fn depuis(cle: &str) -> Self {
+        Self::TOUS.into_iter().find(|o| o.cle() == cle).unwrap_or(Onglet::Audio)
+    }
+}
+
 impl AdminTab {
     const ALL: [AdminTab; 7] = [
         AdminTab::Server,
@@ -598,6 +650,8 @@ struct KiApp {
     audit: Vec<AuditRecord>,
     /// Onglet ouvert dans la fenêtre d'administration.
     admin_tab: AdminTab,
+    /// L'onglet ouvert de la fenêtre de réglages, mémorisé.
+    reglages_onglet: Onglet,
     /// Réglages du prochain code d'invitation à créer.
     invite_uses: Option<u32>,
     invite_label: String,
@@ -877,6 +931,7 @@ impl KiApp {
             reset_password: String::new(),
             audit: Vec::new(),
             admin_tab: AdminTab::Server,
+            reglages_onglet: Onglet::depuis(&get("reglages_onglet", "audio")),
             invite_uses: Some(1),
             invite_label: String::new(),
             ban_draft: None,
@@ -3659,7 +3714,7 @@ impl KiApp {
                                     {
                                         self.disconnect(None);
                                     }
-                                    if ui::icon_button(ui, Icon::Gear, "Réglages audio").clicked()
+                                    if ui::icon_button(ui, Icon::Gear, "Réglages").clicked()
                                     {
                                         self.show_settings = !self.show_settings;
                                         if self.show_settings {
@@ -4660,7 +4715,9 @@ impl KiApp {
         }
     }
 
-    /// Fenêtre de réglages audio : périphériques, micro, sortie, qualité.
+    /// Fenêtre de réglages, en onglets : audio (périphériques, micro,
+    /// suppression de bruit, sortie), réseau & qualité, diffusion d'écran,
+    /// overlay, sons, aide & diagnostics.
     fn settings_window(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
         let mut restart = false;
         let mut apply = false;
@@ -4674,918 +4731,931 @@ impl KiApp {
         // déborder d'un petit. L'utilisateur peut ensuite redimensionner,
         // et egui retient la taille d'une session à l'autre.
         let roomy = (ctx.screen_rect().height() - 120.0).clamp(320.0, 900.0);
-        egui::Window::new("Réglages audio")
+        egui::Window::new("Réglages")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(420.0)
+            .default_width(460.0)
             .default_height(roomy)
             .min_width(340.0)
             .min_height(260.0)
             .show(ctx, |ui| {
+                // Onglets : une seule colonne à faire défiler ne se lisait
+                // plus une fois l'overlay, les sons et la diffusion venus se
+                // ranger sous « audio ».
+                ui.horizontal_wrapped(|ui| {
+                    for o in Onglet::TOUS {
+                        if ui.selectable_label(self.reglages_onglet == o, o.label()).clicked() {
+                            self.reglages_onglet = o;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                let onglet = self.reglages_onglet;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        // --- Périphériques ---
-                        ui::group_title(ui, Icon::Headphones, "Périphériques");
-                        // Le remède logiciel au « il faut débrancher/rebrancher
-                        // le casque » : certains pilotes (Razer…) laissent un
-                        // flux zombie après le passage d'un jeu.
-                        if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
-                            {
-                                if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                                    engine.reset_audio_devices();
-                                    self.info = Some(
-                                        "micro et sortie rouverts — comme un \
-                                         débranchement/rebranchement du casque"
-                                            .into(),
-                                    );
+                        if onglet == Onglet::Audio {
+                            // --- Périphériques ---
+                            ui::group_title(ui, Icon::Headphones, "Périphériques");
+                            // Le remède logiciel au « il faut débrancher/rebrancher
+                            // le casque » : certains pilotes (Razer…) laissent un
+                            // flux zombie après le passage d'un jeu.
+                            if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
+                                {
+                                    if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                                        engine.reset_audio_devices();
+                                        self.info = Some(
+                                            "micro et sortie rouverts — comme un \
+                                             débranchement/rebranchement du casque"
+                                                .into(),
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        ui::hint(
-                            ui,
-                            "si le son part en vrille quand un jeu se lance ou se ferme, \
-                             ce bouton rouvre tout sans toucher au câble",
-                        );
-                        ui.add_space(6.0);
-                        let device_combo = |ui: &mut egui::Ui,
-                                            id: &str,
-                                            label: &str,
-                                            devices: &[String],
-                                            sel: &mut Option<String>|
-                         -> bool {
-                            let mut changed = false;
-                            ui::field_label(ui, label);
-                            egui::ComboBox::from_id_salt(id)
-                                .width(ui.available_width() - 8.0)
-                                .selected_text(
-                                    RichText::new(
-                                        sel.clone().unwrap_or_else(|| "(défaut système)".into()),
+                            ui::hint(
+                                ui,
+                                "si le son part en vrille quand un jeu se lance ou se ferme, \
+                                 ce bouton rouvre tout sans toucher au câble",
+                            );
+                            ui.add_space(6.0);
+                            let device_combo = |ui: &mut egui::Ui,
+                                                id: &str,
+                                                label: &str,
+                                                devices: &[String],
+                                                sel: &mut Option<String>|
+                             -> bool {
+                                let mut changed = false;
+                                ui::field_label(ui, label);
+                                egui::ComboBox::from_id_salt(id)
+                                    .width(ui.available_width() - 8.0)
+                                    .selected_text(
+                                        RichText::new(
+                                            sel.clone().unwrap_or_else(|| "(défaut système)".into()),
+                                        )
+                                        .color(TEXT),
                                     )
-                                    .color(TEXT),
-                                )
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(sel.is_none(), "(défaut système)")
-                                        .clicked()
-                                    {
-                                        changed |= sel.is_some();
-                                        *sel = None;
-                                    }
-                                    for d in devices {
-                                        let active = sel.as_deref() == Some(d.as_str());
-                                        if ui.selectable_label(active, d).clicked() && !active {
-                                            *sel = Some(d.clone());
-                                            changed = true;
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(sel.is_none(), "(défaut système)")
+                                            .clicked()
+                                        {
+                                            changed |= sel.is_some();
+                                            *sel = None;
                                         }
-                                    }
-                                });
-                            ui.add_space(8.0);
-                            changed
-                        };
-                        restart |= device_combo(
-                            ui,
-                            "input_dev",
-                            "Micro",
-                            &self.input_devices.clone(),
-                            &mut self.pref_input,
-                        );
-                        restart |= device_combo(
-                            ui,
-                            "output_dev",
-                            "Sortie",
-                            &self.output_devices.clone(),
-                            &mut self.pref_output,
-                        );
-                        if ui::button(ui, Icon::Refresh, "Actualiser la liste").clicked() {
-                            let (inputs, outputs) = ki_voice::list_devices();
-                            self.input_devices = inputs;
-                            self.output_devices = outputs;
-                        }
-                        if cfg!(windows) {
-                            ui.add_space(8.0);
-                            if ui
-                                .checkbox(
-                                    &mut self.native_audio,
-                                    "Moteur audio natif (recommandé)",
-                                )
-                                .on_hover_text(
-                                    "parle à Windows comme Discord : suit le périphérique \
-                                     de communication, survit aux jeux qui changent le \
-                                     format audio. Décoche si le son se comporte moins \
-                                     bien qu'avant.",
-                                )
-                                .changed()
-                            {
-                                restart = true;
+                                        for d in devices {
+                                            let active = sel.as_deref() == Some(d.as_str());
+                                            if ui.selectable_label(active, d).clicked() && !active {
+                                                *sel = Some(d.clone());
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.add_space(8.0);
+                                changed
+                            };
+                            restart |= device_combo(
+                                ui,
+                                "input_dev",
+                                "Micro",
+                                &self.input_devices.clone(),
+                                &mut self.pref_input,
+                            );
+                            restart |= device_combo(
+                                ui,
+                                "output_dev",
+                                "Sortie",
+                                &self.output_devices.clone(),
+                                &mut self.pref_output,
+                            );
+                            if ui::button(ui, Icon::Refresh, "Actualiser la liste").clicked() {
+                                let (inputs, outputs) = ki_voice::list_devices();
+                                self.input_devices = inputs;
+                                self.output_devices = outputs;
                             }
-                            if self.native_audio
-                                && ui
+                            if cfg!(windows) {
+                                ui.add_space(8.0);
+                                if ui
                                     .checkbox(
-                                        &mut self.raw_mic,
-                                        "Micro brut (ignorer les effets du casque)",
+                                        &mut self.native_audio,
+                                        "Moteur audio natif (recommandé)",
                                     )
                                     .on_hover_text(
-                                        "court-circuite les traitements tiers (Sonar, \
-                                         Nahimic, Synapse…) sur le micro. À essayer si le \
-                                         micro bugue quand un jeu se lance.",
+                                        "parle à Windows comme Discord : suit le périphérique \
+                                         de communication, survit aux jeux qui changent le \
+                                         format audio. Décoche si le son se comporte moins \
+                                         bien qu'avant.",
                                     )
                                     .changed()
-                            {
-                                restart = true;
+                                {
+                                    restart = true;
+                                }
+                                if self.native_audio
+                                    && ui
+                                        .checkbox(
+                                            &mut self.raw_mic,
+                                            "Micro brut (ignorer les effets du casque)",
+                                        )
+                                        .on_hover_text(
+                                            "court-circuite les traitements tiers (Sonar, \
+                                             Nahimic, Synapse…) sur le micro. À essayer si le \
+                                             micro bugue quand un jeu se lance.",
+                                        )
+                                        .changed()
+                                {
+                                    restart = true;
+                                }
+                                if self.native_audio
+                                    && ui
+                                        .checkbox(
+                                            &mut self.comms_mic,
+                                            "Partager le micro avec la voix du jeu",
+                                        )
+                                        .on_hover_text(
+                                            "ouvre le micro dans la voie « communications » de \
+                                             Windows, celle des voix intégrées des jeux — \
+                                             nécessaire quand elles affament le micro (le \
+                                             moteur le fait tout seul au besoin, cette case le \
+                                             rend permanent). Revers : Windows peut baisser le \
+                                             volume des autres sons pendant le vocal → Panneau \
+                                             son → Communication → « Ne rien faire ».",
+                                        )
+                                        .changed()
+                                {
+                                    restart = true;
+                                }
                             }
-                            if self.native_audio
-                                && ui
-                                    .checkbox(
-                                        &mut self.comms_mic,
-                                        "Partager le micro avec la voix du jeu",
-                                    )
-                                    .on_hover_text(
-                                        "ouvre le micro dans la voie « communications » de \
-                                         Windows, celle des voix intégrées des jeux — \
-                                         nécessaire quand elles affament le micro (le \
-                                         moteur le fait tout seul au besoin, cette case le \
-                                         rend permanent). Revers : Windows peut baisser le \
-                                         volume des autres sons pendant le vocal → Panneau \
-                                         son → Communication → « Ne rien faire ».",
-                                    )
-                                    .changed()
-                            {
-                                restart = true;
-                            }
-                        }
 
-                        // --- Journal audio ---
-                        // Ce que l'audio a vécu (ouvertures, pertes, replis,
-                        // réouvertures) : les bugs « au lancement d'un jeu »
-                        // varient d'un casque à l'autre, et ce journal
-                        // remplace la divination — on se le fait copier-coller.
-                        ui.add_space(8.0);
-                        let label = if self.show_audio_journal {
-                            "Masquer le journal audio"
-                        } else {
-                            "Journal audio"
-                        };
-                        if ui::button(ui, Icon::Info, label).clicked() {
-                            self.show_audio_journal = !self.show_audio_journal;
                         }
-                        if self.show_audio_journal {
-                            let events = ki_voice::journal_snapshot();
-                            if events.is_empty() {
-                                ui::hint(ui, "rien à signaler pour l'instant");
+                        if onglet == Onglet::Aide {
+                            // --- Journal audio ---
+                            // Ce que l'audio a vécu (ouvertures, pertes, replis,
+                            // réouvertures) : les bugs « au lancement d'un jeu »
+                            // varient d'un casque à l'autre, et ce journal
+                            // remplace la divination — on se le fait copier-coller.
+                            ui.add_space(8.0);
+                            let label = if self.show_audio_journal {
+                                "Masquer le journal audio"
                             } else {
-                                if ui::button(ui, Icon::Copy, "Copier le journal").clicked() {
-                                    let text: String = events
-                                        .iter()
-                                        .map(|(ts, m)| {
-                                            format!("{} {m}\n", format_time_secs(*ts))
-                                        })
-                                        .collect();
-                                    ctx.copy_text(text);
-                                    self.info = Some("journal audio copié".into());
+                                "Journal audio"
+                            };
+                            if ui::button(ui, Icon::Info, label).clicked() {
+                                self.show_audio_journal = !self.show_audio_journal;
+                            }
+                            if self.show_audio_journal {
+                                let events = ki_voice::journal_snapshot();
+                                if events.is_empty() {
+                                    ui::hint(ui, "rien à signaler pour l'instant");
+                                } else {
+                                    if ui::button(ui, Icon::Copy, "Copier le journal").clicked() {
+                                        let text: String = events
+                                            .iter()
+                                            .map(|(ts, m)| {
+                                                format!("{} {m}\n", format_time_secs(*ts))
+                                            })
+                                            .collect();
+                                        ctx.copy_text(text);
+                                        self.info = Some("journal audio copié".into());
+                                    }
+                                    ui.add_space(4.0);
+                                    // Les plus récents d'abord : c'est eux qu'on
+                                    // vient voir quand ça vient de buguer.
+                                    for (ts, msg) in events.iter().rev().take(12) {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(format_time_secs(*ts))
+                                                    .color(TEXT_DIM)
+                                                    .monospace()
+                                                    .size(11.5),
+                                            );
+                                            ui.label(
+                                                RichText::new(msg.as_str()).color(TEXT).size(11.5),
+                                            );
+                                        });
+                                    }
+                                    if events.len() > 12 {
+                                        ui::hint(
+                                            ui,
+                                            "le bouton copie l'intégralité du journal",
+                                        );
+                                    }
+                                }
+                            }
+
+                            // --- Diagnostic partagé ---
+                            // Le journal ci-dessus se copie à la main ; ici, il
+                            // part tout seul vers le serveur — pour que l'admin
+                            // (et l'assistant qui débogue avec lui) lise ce qui
+                            // s'est passé sans rien demander à personne. Opt-in,
+                            // et technique seulement : jamais les messages, jamais
+                            // l'audio.
+                            ui.add_space(8.0);
+                            ui.checkbox(
+                                &mut self.diag_share,
+                                "Partager mes diagnostics avec l'admin du serveur",
+                            )
+                            .on_hover_text(
+                                "envoie toutes les 10 minutes le journal technique \
+                                 (périphériques, pertes, réouvertures, diffusion), la \
+                                 version et le rapport du docteur au serveur du groupe. \
+                                 Jamais tes messages, jamais ta voix. Décochable à tout \
+                                 moment.",
+                            );
+                            ui::hint(
+                                ui,
+                                "les rapports de plantage (l'erreur et sa pile d'appels, rien \
+                                 d'autre) partent toujours au serveur, option cochée ou non : \
+                                 c'est ce qui permet de corriger un crash sans rien te demander",
+                            );
+                            if self.diag_share
+                                && ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
+                                    .clicked()
+                            {
+                                self.flush_diag(true);
+                                self.info = Some("diagnostic envoyé au serveur".into());
+                            }
+
+                            // --- Docteur audio ---
+                            // Le journal ci-dessus raconte ce qui s'est passé ;
+                            // celui-ci dit ce qu'il faut FAIRE. Windows n'offre
+                            // aucune API de « priorité micro » : quand un autre
+                            // logiciel tient la voie de capture, on ne peut pas la
+                            // lui reprendre — seulement le nommer, et dire le
+                            // réglage qui rend la main.
+                            ui.add_space(8.0);
+                            let label = if self.show_docteur {
+                                "Masquer le docteur audio"
+                            } else {
+                                "Docteur audio — pourquoi mon micro bugue ?"
+                            };
+                            if ui::button(ui, Icon::Info, label).clicked() {
+                                self.show_docteur = !self.show_docteur;
+                                if self.show_docteur {
+                                    // Établi au clic : l'énumération des processus
+                                    // et la lecture du registre n'ont rien à faire
+                                    // dans une boucle de rendu.
+                                    self.docteur =
+                                        self.link.engine.lock().unwrap().as_ref().map(|e| e.docteur());
+                                }
+                            }
+                            if self.show_docteur {
+                                match &self.docteur {
+                                    None => ui::hint(
+                                        ui,
+                                        "le moteur audio n'est pas démarré — rejoins un \
+                                         salon vocal, puis reviens",
+                                    ),
+                                    Some(d) => {
+                                        if ui::button(ui, Icon::Copy, "Copier le diagnostic")
+                                            .clicked()
+                                        {
+                                            ctx.copy_text(d.rapport());
+                                            self.info = Some("diagnostic copié".into());
+                                        }
+                                        ui.add_space(4.0);
+                                        // Les conseils, numérotés, dans l'ordre où
+                                        // ils valent la peine d'être essayés.
+                                        for (i, conseil) in d.conseils().iter().enumerate() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{}.", i + 1))
+                                                        .color(ACCENT)
+                                                        .strong()
+                                                        .size(11.5),
+                                                );
+                                                ui.label(
+                                                    RichText::new(conseil.as_str())
+                                                        .color(TEXT)
+                                                        .size(11.5),
+                                                );
+                                            });
+                                            ui.add_space(3.0);
+                                        }
+                                        ui::hint(
+                                            ui,
+                                            "ki-chat ne touche à aucun réglage système : il \
+                                             te dit quoi regarder, tu décides.",
+                                        );
+                                    }
+                                }
+                            }
+
+                            // --- Relevé de performance ---
+                            // Même usage que le journal au-dessus : on se le fait
+                            // copier-coller. « Ça rame quand je joue » ne se
+                            // reproduit pas sur la machine de développement, et
+                            // une moyenne noierait justement l'image lente qu'on
+                            // vient chercher — d'où des quantiles.
+                            ui.add_space(8.0);
+                            let label = if self.show_perf {
+                                "Masquer le relevé de performance"
+                            } else {
+                                "Relevé de performance"
+                            };
+                            if ui::button(ui, Icon::Info, label).clicked() {
+                                self.show_perf = !self.show_perf;
+                            }
+                            if self.show_perf {
+                                let lignes = self.perf.lignes();
+                                if ui::button(ui, Icon::Copy, "Copier le relevé").clicked() {
+                                    let mut texte = format!(
+                                        "ki-chat {} — relevé de performance\n",
+                                        env!("CARGO_PKG_VERSION")
+                                    );
+                                    for (quoi, valeur) in &lignes {
+                                        texte.push_str(&format!("{quoi} : {valeur}\n"));
+                                    }
+                                    texte.push_str(&format!(
+                                        "Trames incomplètes (audio) : {}\n",
+                                        voice.stats.underruns
+                                    ));
+                                    // Le diagnostic voyage avec : celui qui reçoit
+                                    // ce relevé n'a alors plus rien à demander.
+                                    if let Some(d) = &self.docteur {
+                                        texte.push('\n');
+                                        texte.push_str(&d.rapport());
+                                    }
+                                    ctx.copy_text(texte);
+                                    self.info = Some("relevé copié".into());
                                 }
                                 ui.add_space(4.0);
-                                // Les plus récents d'abord : c'est eux qu'on
-                                // vient voir quand ça vient de buguer.
-                                for (ts, msg) in events.iter().rev().take(12) {
+                                for (quoi, valeur) in &lignes {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
-                                            RichText::new(format_time_secs(*ts))
-                                                .color(TEXT_DIM)
+                                            RichText::new(quoi.as_str()).color(TEXT_DIM).size(11.5),
+                                        );
+                                        ui.label(
+                                            RichText::new(valeur.as_str())
+                                                .color(TEXT)
                                                 .monospace()
                                                 .size(11.5),
                                         );
-                                        ui.label(
-                                            RichText::new(msg.as_str()).color(TEXT).size(11.5),
-                                        );
                                     });
                                 }
-                                if events.len() > 12 {
-                                    ui::hint(
-                                        ui,
-                                        "le bouton copie l'intégralité du journal",
-                                    );
-                                }
-                            }
-                        }
-
-                        // --- Diagnostic partagé ---
-                        // Le journal ci-dessus se copie à la main ; ici, il
-                        // part tout seul vers le serveur — pour que l'admin
-                        // (et l'assistant qui débogue avec lui) lise ce qui
-                        // s'est passé sans rien demander à personne. Opt-in,
-                        // et technique seulement : jamais les messages, jamais
-                        // l'audio.
-                        ui.add_space(8.0);
-                        ui.checkbox(
-                            &mut self.diag_share,
-                            "Partager mes diagnostics avec l'admin du serveur",
-                        )
-                        .on_hover_text(
-                            "envoie toutes les 10 minutes le journal technique \
-                             (périphériques, pertes, réouvertures, diffusion), la \
-                             version et le rapport du docteur au serveur du groupe. \
-                             Jamais tes messages, jamais ta voix. Décochable à tout \
-                             moment.",
-                        );
-                        ui::hint(
-                            ui,
-                            "les rapports de plantage (l'erreur et sa pile d'appels, rien \
-                             d'autre) partent toujours au serveur, option cochée ou non : \
-                             c'est ce qui permet de corriger un crash sans rien te demander",
-                        );
-                        if self.diag_share
-                            && ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
-                                .clicked()
-                        {
-                            self.flush_diag(true);
-                            self.info = Some("diagnostic envoyé au serveur".into());
-                        }
-
-                        // --- Docteur audio ---
-                        // Le journal ci-dessus raconte ce qui s'est passé ;
-                        // celui-ci dit ce qu'il faut FAIRE. Windows n'offre
-                        // aucune API de « priorité micro » : quand un autre
-                        // logiciel tient la voie de capture, on ne peut pas la
-                        // lui reprendre — seulement le nommer, et dire le
-                        // réglage qui rend la main.
-                        ui.add_space(8.0);
-                        let label = if self.show_docteur {
-                            "Masquer le docteur audio"
-                        } else {
-                            "Docteur audio — pourquoi mon micro bugue ?"
-                        };
-                        if ui::button(ui, Icon::Info, label).clicked() {
-                            self.show_docteur = !self.show_docteur;
-                            if self.show_docteur {
-                                // Établi au clic : l'énumération des processus
-                                // et la lecture du registre n'ont rien à faire
-                                // dans une boucle de rendu.
-                                self.docteur =
-                                    self.link.engine.lock().unwrap().as_ref().map(|e| e.docteur());
-                            }
-                        }
-                        if self.show_docteur {
-                            match &self.docteur {
-                                None => ui::hint(
-                                    ui,
-                                    "le moteur audio n'est pas démarré — rejoins un \
-                                     salon vocal, puis reviens",
-                                ),
-                                Some(d) => {
-                                    if ui::button(ui, Icon::Copy, "Copier le diagnostic")
-                                        .clicked()
-                                    {
-                                        ctx.copy_text(d.rapport());
-                                        self.info = Some("diagnostic copié".into());
-                                    }
-                                    ui.add_space(4.0);
-                                    // Les conseils, numérotés, dans l'ordre où
-                                    // ils valent la peine d'être essayés.
-                                    for (i, conseil) in d.conseils().iter().enumerate() {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                RichText::new(format!("{}.", i + 1))
-                                                    .color(ACCENT)
-                                                    .strong()
-                                                    .size(11.5),
-                                            );
-                                            ui.label(
-                                                RichText::new(conseil.as_str())
-                                                    .color(TEXT)
-                                                    .size(11.5),
-                                            );
-                                        });
-                                        ui.add_space(3.0);
-                                    }
-                                    ui::hint(
-                                        ui,
-                                        "ki-chat ne touche à aucun réglage système : il \
-                                         te dit quoi regarder, tu décides.",
-                                    );
-                                }
-                            }
-                        }
-
-                        // --- Relevé de performance ---
-                        // Même usage que le journal au-dessus : on se le fait
-                        // copier-coller. « Ça rame quand je joue » ne se
-                        // reproduit pas sur la machine de développement, et
-                        // une moyenne noierait justement l'image lente qu'on
-                        // vient chercher — d'où des quantiles.
-                        ui.add_space(8.0);
-                        let label = if self.show_perf {
-                            "Masquer le relevé de performance"
-                        } else {
-                            "Relevé de performance"
-                        };
-                        if ui::button(ui, Icon::Info, label).clicked() {
-                            self.show_perf = !self.show_perf;
-                        }
-                        if self.show_perf {
-                            let lignes = self.perf.lignes();
-                            if ui::button(ui, Icon::Copy, "Copier le relevé").clicked() {
-                                let mut texte = format!(
-                                    "ki-chat {} — relevé de performance\n",
-                                    env!("CARGO_PKG_VERSION")
-                                );
-                                for (quoi, valeur) in &lignes {
-                                    texte.push_str(&format!("{quoi} : {valeur}\n"));
-                                }
-                                texte.push_str(&format!(
-                                    "Trames incomplètes (audio) : {}\n",
-                                    voice.stats.underruns
-                                ));
-                                // Le diagnostic voyage avec : celui qui reçoit
-                                // ce relevé n'a alors plus rien à demander.
-                                if let Some(d) = &self.docteur {
-                                    texte.push('\n');
-                                    texte.push_str(&d.rapport());
-                                }
-                                ctx.copy_text(texte);
-                                self.info = Some("relevé copié".into());
-                            }
-                            ui.add_space(4.0);
-                            for (quoi, valeur) in &lignes {
+                                // Les trous audio vivent dans le moteur, pas dans
+                                // l'interface, mais c'est le même relevé pour qui
+                                // le lit. Zéro est la seule bonne valeur.
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(
-                                        RichText::new(quoi.as_str()).color(TEXT_DIM).size(11.5),
+                                        RichText::new("Trames incomplètes (audio)")
+                                            .color(TEXT_DIM)
+                                            .size(11.5),
                                     );
                                     ui.label(
-                                        RichText::new(valeur.as_str())
-                                            .color(TEXT)
+                                        RichText::new(voice.stats.underruns.to_string())
+                                            .color(if voice.stats.underruns == 0 {
+                                                SPEAK
+                                            } else {
+                                                DANGER
+                                            })
                                             .monospace()
                                             .size(11.5),
                                     );
                                 });
                             }
-                            // Les trous audio vivent dans le moteur, pas dans
-                            // l'interface, mais c'est le même relevé pour qui
-                            // le lit. Zéro est la seule bonne valeur.
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    RichText::new("Trames incomplètes (audio)")
-                                        .color(TEXT_DIM)
-                                        .size(11.5),
+
+                        }
+                        if onglet == Onglet::Audio {
+                            // --- Micro ---
+                            ui.add_space(12.0);
+                            ui::hairline(ui);
+                            ui.add_space(10.0);
+                            ui::group_title(ui, Icon::Mic, "Micro");
+
+                            // Vumètre en direct, avec repère du seuil d'activation.
+                            let above = self.mode == MicMode::Vad && mic_peak >= self.vad_threshold;
+                            let meter_color = if !engine_up {
+                                theme::BG_ACTIVE
+                            } else if above || (self.mode != MicMode::Vad && mic_peak > 0.01) {
+                                SPEAK
+                            } else {
+                                TEXT_DIM
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("niveau").color(TEXT_DIM).size(12.5));
+                                let threshold = (self.mode == MicMode::Vad)
+                                    .then(|| (self.vad_threshold * 3.0).min(1.0));
+                                ui::meter_with_threshold(
+                                    ui,
+                                    (mic_peak * 3.0).min(1.0),
+                                    threshold,
+                                    Vec2::new(ui.available_width().min(230.0), 9.0),
+                                    meter_color,
                                 );
-                                ui.label(
-                                    RichText::new(voice.stats.underruns.to_string())
-                                        .color(if voice.stats.underruns == 0 {
-                                            SPEAK
-                                        } else {
-                                            DANGER
-                                        })
-                                        .monospace()
-                                        .size(11.5),
-                                );
+                                if !engine_up {
+                                    ui.label(RichText::new("vocal inactif").color(WARN).size(11.0));
+                                }
                             });
-                        }
+                            ui.add_space(8.0);
 
-                        // --- Micro ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Mic, "Micro");
-
-                        // Vumètre en direct, avec repère du seuil d'activation.
-                        let above = self.mode == MicMode::Vad && mic_peak >= self.vad_threshold;
-                        let meter_color = if !engine_up {
-                            theme::BG_ACTIVE
-                        } else if above || (self.mode != MicMode::Vad && mic_peak > 0.01) {
-                            SPEAK
-                        } else {
-                            TEXT_DIM
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("niveau").color(TEXT_DIM).size(12.5));
-                            let threshold = (self.mode == MicMode::Vad)
-                                .then(|| (self.vad_threshold * 3.0).min(1.0));
-                            ui::meter_with_threshold(
-                                ui,
-                                (mic_peak * 3.0).min(1.0),
-                                threshold,
-                                Vec2::new(ui.available_width().min(230.0), 9.0),
-                                meter_color,
-                            );
-                            if !engine_up {
-                                ui.label(RichText::new("vocal inactif").color(WARN).size(11.0));
+                            // Calibration automatique des seuils sur le niveau ambiant.
+                            match self.calibrating {
+                                None => {
+                                    if engine_up
+                                    && ui::button(ui, Icon::Target, "Calibrer les seuils (5 s)")
+                                        .on_hover_text(
+                                            "reste silencieux — laisse le bruit ambiant ou l'autre \
+                                             voix de la pièce parler : je règle la porte de bruit \
+                                             juste au-dessus de ce niveau",
+                                        )
+                                        .clicked()
+                                {
+                                    self.start_calibration();
+                                }
+                                }
+                                Some((start, peak)) => {
+                                    let progress = (start.elapsed().as_secs_f32() / 5.0).min(1.0);
+                                    ui.horizontal(|ui| {
+                                        ui::meter(ui, progress, Vec2::new(180.0, 9.0), ACCENT);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "chut… ambiance {:.1} %",
+                                                peak * 100.0
+                                            ))
+                                            .color(TEXT_DIM)
+                                            .size(12.0),
+                                        );
+                                        if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
+                                            self.calibrating = None;
+                                            self.apply_audio_settings();
+                                        }
+                                    });
+                                }
                             }
-                        });
-                        ui.add_space(8.0);
+                            ui.add_space(8.0);
 
-                        // Calibration automatique des seuils sur le niveau ambiant.
-                        match self.calibrating {
-                            None => {
-                                if engine_up
-                                && ui::button(ui, Icon::Target, "Calibrer les seuils (5 s)")
-                                    .on_hover_text(
-                                        "reste silencieux — laisse le bruit ambiant ou l'autre \
-                                         voix de la pièce parler : je règle la porte de bruit \
-                                         juste au-dessus de ce niveau",
-                                    )
-                                    .clicked()
+                            if ui
+                                .checkbox(&mut self.aec_on, "Annulation d'écho")
+                                .on_hover_text(
+                                    "soustrait du micro ce que tes haut-parleurs jouent : \
+                                     les autres ne s'entendent plus revenir. Indispensable \
+                                     sans casque, sans effet notable avec.",
+                                )
+                                .changed()
                             {
-                                self.start_calibration();
+                                apply = true;
                             }
+                            if ui
+                                .checkbox(&mut self.agc, "Gain automatique (AGC)")
+                                .on_hover_text(
+                                    "normalise ta voix tout seul : fini les réglages manuels",
+                                )
+                                .changed()
+                            {
+                                apply = true;
                             }
-                            Some((start, peak)) => {
-                                let progress = (start.elapsed().as_secs_f32() / 5.0).min(1.0);
-                                ui.horizontal(|ui| {
-                                    ui::meter(ui, progress, Vec2::new(180.0, 9.0), ACCENT);
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "chut… ambiance {:.1} %",
-                                            peak * 100.0
-                                        ))
-                                        .color(TEXT_DIM)
-                                        .size(12.0),
-                                    );
-                                    if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
-                                        self.calibrating = None;
-                                        self.apply_audio_settings();
-                                    }
-                                });
+                            if self.agc {
+                                let mut target_pct = self.agc_target * 100.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut target_pct, 15.0..=50.0)
+                                            .text("niveau cible")
+                                            .suffix(" %")
+                                            .integer(),
+                                    )
+                                    .changed()
+                                {
+                                    self.agc_target = target_pct / 100.0;
+                                    apply = true;
+                                }
                             }
-                        }
-                        ui.add_space(8.0);
-
-                        if ui
-                            .checkbox(&mut self.aec_on, "Annulation d'écho")
-                            .on_hover_text(
-                                "soustrait du micro ce que tes haut-parleurs jouent : \
-                                 les autres ne s'entendent plus revenir. Indispensable \
-                                 sans casque, sans effet notable avec.",
-                            )
-                            .changed()
-                        {
-                            apply = true;
-                        }
-                        if ui
-                            .checkbox(&mut self.agc, "Gain automatique (AGC)")
-                            .on_hover_text(
-                                "normalise ta voix tout seul : fini les réglages manuels",
-                            )
-                            .changed()
-                        {
-                            apply = true;
-                        }
-                        if self.agc {
-                            let mut target_pct = self.agc_target * 100.0;
+                            let mut gain_pct = self.input_gain * 100.0;
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut target_pct, 15.0..=50.0)
-                                        .text("niveau cible")
+                                    egui::Slider::new(&mut gain_pct, 0.0..=200.0)
+                                        .text(if self.agc {
+                                            "pré-ampli"
+                                        } else {
+                                            "gain d'entrée"
+                                        })
                                         .suffix(" %")
                                         .integer(),
                                 )
                                 .changed()
                             {
-                                self.agc_target = target_pct / 100.0;
+                                self.input_gain = gain_pct / 100.0;
                                 apply = true;
                             }
-                        }
-                        let mut gain_pct = self.input_gain * 100.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut gain_pct, 0.0..=200.0)
-                                    .text(if self.agc {
-                                        "pré-ampli"
-                                    } else {
-                                        "gain d'entrée"
-                                    })
-                                    .suffix(" %")
-                                    .integer(),
-                            )
-                            .changed()
-                        {
-                            self.input_gain = gain_pct / 100.0;
-                            apply = true;
-                        }
 
-                        if self.mode == MicMode::Vad {
-                            let mut thr_pct = self.vad_threshold * 100.0;
+                            if self.mode == MicMode::Vad {
+                                let mut thr_pct = self.vad_threshold * 100.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut thr_pct, 0.5..=25.0)
+                                            .text("seuil d'activation")
+                                            .suffix(" %"),
+                                    )
+                                    .changed()
+                                {
+                                    self.vad_threshold = thr_pct / 100.0;
+                                    apply = true;
+                                }
+                                let mut hang = self.vad_hangover_ms as f32;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut hang, 100.0..=1000.0)
+                                            .text("maintien après la voix")
+                                            .suffix(" ms")
+                                            .step_by(50.0),
+                                    )
+                                    .changed()
+                                {
+                                    self.vad_hangover_ms = hang as u32;
+                                    apply = true;
+                                }
+                                ui::hint(
+                                ui,
+                                "parle : la jauge doit dépasser le repère orange quand ta voix passe",
+                            );
+                            }
+                            if self.mode == MicMode::Ptt {
+                                let mut rel = self.ptt_release_ms as f32;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut rel, 0.0..=500.0)
+                                            .text("relâchement du push-to-talk")
+                                            .suffix(" ms")
+                                            .step_by(25.0),
+                                    )
+                                    .changed()
+                                {
+                                    self.ptt_release_ms = rel as u32;
+                                }
+                            }
+
+                            // --- Suppression de bruit ---
+                            ui.add_space(12.0);
+                            ui::hairline(ui);
+                            ui.add_space(10.0);
+                            ui::group_title(ui, Icon::Volume, "Suppression de bruit");
+                            let noise_label = |m: u8| match m {
+                                ki_voice::NOISE_OFF => "Désactivée",
+                                ki_voice::NOISE_DEEP => "DeepFilterNet3 (studio, +30 ms)",
+                                _ => "RNNoise (léger)",
+                            };
+                            egui::ComboBox::from_id_salt("noise_mode")
+                                .width(270.0)
+                                .selected_text(RichText::new(noise_label(self.noise_mode)).color(TEXT))
+                                .show_ui(ui, |ui| {
+                                    for mode in [
+                                        ki_voice::NOISE_OFF,
+                                        ki_voice::NOISE_RNNOISE,
+                                        ki_voice::NOISE_DEEP,
+                                    ] {
+                                        if ui
+                                            .selectable_label(
+                                                self.noise_mode == mode,
+                                                noise_label(mode),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.noise_mode = mode;
+                                            apply = true;
+                                        }
+                                    }
+                                });
+                            if self.noise_mode == ki_voice::NOISE_DEEP {
+                                ui::hint(
+                                    ui,
+                                    "réseau de neurones DeepFilterNet3 : supprime clavier, ventilo, \
+                                 fond sonore — qualité Krisp/Discord, 100 % local",
+                                );
+                            }
+                            ui.add_space(6.0);
+                            let mut gate_pct = self.gate_threshold * 100.0;
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut thr_pct, 0.5..=25.0)
-                                        .text("seuil d'activation")
+                                    egui::Slider::new(&mut gate_pct, 0.0..=10.0)
+                                        .text("porte de bruit")
                                         .suffix(" %"),
                                 )
+                                .on_hover_text("0 % = désactivée ; coupe tout résidu sous ce niveau")
                                 .changed()
                             {
-                                self.vad_threshold = thr_pct / 100.0;
+                                self.gate_threshold = gate_pct / 100.0;
                                 apply = true;
                             }
-                            let mut hang = self.vad_hangover_ms as f32;
                             if ui
-                                .add(
-                                    egui::Slider::new(&mut hang, 100.0..=1000.0)
-                                        .text("maintien après la voix")
-                                        .suffix(" ms")
-                                        .step_by(50.0),
-                                )
-                                .changed()
-                            {
-                                self.vad_hangover_ms = hang as u32;
-                                apply = true;
-                            }
-                            ui::hint(
-                            ui,
-                            "parle : la jauge doit dépasser le repère orange quand ta voix passe",
-                        );
-                        }
-                        if self.mode == MicMode::Ptt {
-                            let mut rel = self.ptt_release_ms as f32;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut rel, 0.0..=500.0)
-                                        .text("relâchement du push-to-talk")
-                                        .suffix(" ms")
-                                        .step_by(25.0),
-                                )
-                                .changed()
-                            {
-                                self.ptt_release_ms = rel as u32;
-                            }
-                        }
-
-                        // --- Suppression de bruit ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Volume, "Suppression de bruit");
-                        let noise_label = |m: u8| match m {
-                            ki_voice::NOISE_OFF => "Désactivée",
-                            ki_voice::NOISE_DEEP => "DeepFilterNet3 (studio, +30 ms)",
-                            _ => "RNNoise (léger)",
-                        };
-                        egui::ComboBox::from_id_salt("noise_mode")
-                            .width(270.0)
-                            .selected_text(RichText::new(noise_label(self.noise_mode)).color(TEXT))
-                            .show_ui(ui, |ui| {
-                                for mode in [
-                                    ki_voice::NOISE_OFF,
-                                    ki_voice::NOISE_RNNOISE,
-                                    ki_voice::NOISE_DEEP,
-                                ] {
-                                    if ui
-                                        .selectable_label(
-                                            self.noise_mode == mode,
-                                            noise_label(mode),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.noise_mode = mode;
-                                        apply = true;
-                                    }
-                                }
-                            });
-                        if self.noise_mode == ki_voice::NOISE_DEEP {
-                            ui::hint(
-                                ui,
-                                "réseau de neurones DeepFilterNet3 : supprime clavier, ventilo, \
-                             fond sonore — qualité Krisp/Discord, 100 % local",
-                            );
-                        }
-                        ui.add_space(6.0);
-                        let mut gate_pct = self.gate_threshold * 100.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut gate_pct, 0.0..=10.0)
-                                    .text("porte de bruit")
-                                    .suffix(" %"),
-                            )
-                            .on_hover_text("0 % = désactivée ; coupe tout résidu sous ce niveau")
-                            .changed()
-                        {
-                            self.gate_threshold = gate_pct / 100.0;
-                            apply = true;
-                        }
-                        if ui
-                            .checkbox(&mut self.loopback, "S'écouter — aller-retour codec complet")
-                            .on_hover_text(
-                                "tu entends EXACTEMENT ce que les autres entendent : \
-                             filtres + encodage/décodage Opus au débit courant",
-                            )
-                            .changed()
-                        {
-                            apply = true;
-                        }
-
-                        // --- Sortie ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Headphones, "Sortie");
-                        let mut out_pct = self.output_gain * 100.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut out_pct, 0.0..=200.0)
-                                    .text("volume")
-                                    .suffix(" %")
-                                    .integer(),
-                            )
-                            .changed()
-                        {
-                            self.output_gain = out_pct / 100.0;
-                            apply = true;
-                        }
-                        ui.add_space(6.0);
-                        if ui::button(ui, Icon::Play, "Jouer un son de test").clicked() {
-                            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                                engine.play_test_tone();
-                            }
-                        }
-                        if self.native_audio {
-                            ui.add_space(6.0);
-                            if ui
-                                .checkbox(
-                                    &mut self.robust_output,
-                                    "Sortie audio robuste (plus de marge, +70 ms de latence)",
-                                )
+                                .checkbox(&mut self.loopback, "S'écouter — aller-retour codec complet")
                                 .on_hover_text(
-                                    "tampon de lecture trois fois plus profond : pour un PC \
-                                     que le jeu sature ou une carte son USB fragile, quand \
-                                     le docteur compte des trames incomplètes (craquements, \
-                                     micro-coupures dans ce que tu entends).",
+                                    "tu entends EXACTEMENT ce que les autres entendent : \
+                                 filtres + encodage/décodage Opus au débit courant",
                                 )
                                 .changed()
                             {
-                                restart = true;
+                                apply = true;
                             }
-                        }
 
-                        // --- Overlay en jeu ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::User, "Overlay en jeu");
-                        overlay::reglages_ui(ui, &mut self.overlay);
-
-                        // --- Effets sonores ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Play, "Sons & notifications");
-                        // L'état du système, en clair : si un jour « pas de
-                        // son », cette ligne dit immédiatement où chercher.
-                        let engine_ok = self.link.engine.lock().unwrap().is_some();
-                        ui::hint(
-                            ui,
-                            &format!(
-                                "{} sons chargés ({} perso) · sortie audio {}",
-                                self.sounds.len(),
-                                self.custom_sfx.len(),
-                                if engine_ok { "active" } else { "INACTIVE — connecte-toi" },
-                            ),
-                        );
-                        ui.checkbox(&mut self.sfx_on, "Jouer les sons");
-                        if self.sfx_on {
-                            let mut pct = self.sfx_volume * 100.0;
+                            // --- Sortie ---
+                            ui.add_space(12.0);
+                            ui::hairline(ui);
+                            ui.add_space(10.0);
+                            ui::group_title(ui, Icon::Headphones, "Sortie");
+                            let mut out_pct = self.output_gain * 100.0;
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut pct, 0.0..=100.0)
+                                    egui::Slider::new(&mut out_pct, 0.0..=200.0)
+                                        .text("volume")
                                         .suffix(" %")
-                                        .integer()
-                                        .text("volume des sons"),
+                                        .integer(),
                                 )
                                 .changed()
                             {
-                                self.sfx_volume = pct / 100.0;
+                                self.output_gain = out_pct / 100.0;
+                                apply = true;
                             }
                             ui.add_space(6.0);
+                            if ui::button(ui, Icon::Play, "Jouer un son de test").clicked() {
+                                if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                                    engine.play_test_tone();
+                                }
+                            }
+                            if self.native_audio {
+                                ui.add_space(6.0);
+                                if ui
+                                    .checkbox(
+                                        &mut self.robust_output,
+                                        "Sortie audio robuste (plus de marge, +70 ms de latence)",
+                                    )
+                                    .on_hover_text(
+                                        "tampon de lecture trois fois plus profond : pour un PC \
+                                         que le jeu sature ou une carte son USB fragile, quand \
+                                         le docteur compte des trames incomplètes (craquements, \
+                                         micro-coupures dans ce que tu entends).",
+                                    )
+                                    .changed()
+                                {
+                                    restart = true;
+                                }
+                            }
 
-                            // Un réglage par événement : à couper, à écouter,
-                            // et l'étiquette dit si le son est personnalisé.
-                            for (name, label) in [
-                                (sfx::MESSAGE, "Message reçu (fenêtre à l'arrière-plan)"),
-                                (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
-                                (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
-                                (sfx::SELF_JOIN, "Je rejoins un vocal"),
-                                (sfx::SELF_LEAVE, "Je quitte le vocal"),
-                                (sfx::MUTE, "Micro coupé"),
-                                (sfx::UNMUTE, "Micro réactivé"),
-                            ] {
-                                ui.horizontal(|ui| {
-                                    let mut enabled = !self.sfx_muted.contains(name);
-                                    if ui.checkbox(&mut enabled, label).changed() {
-                                        if enabled {
-                                            self.sfx_muted.remove(name);
-                                        } else {
-                                            self.sfx_muted.insert(name.to_string());
-                                        }
-                                    }
-                                    if self.custom_sfx.contains(name) {
-                                        ui.label(
-                                            RichText::new("perso")
-                                                .color(ACCENT)
-                                                .size(10.5),
-                                        );
-                                    }
-                                    if ui.small_button("▶").on_hover_text("écouter").clicked()
-                                    {
-                                        // La préécoute ignore la coupure de
-                                        // l'événement, pas le volume.
-                                        if let Some(pcm) = self.sounds.get(name) {
-                                            if let Some(engine) =
-                                                self.link.engine.lock().unwrap().as_ref()
-                                            {
-                                                engine.play_effect(pcm, self.sfx_volume);
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                            if self.conn.is_none() {
-                                ui::hint(ui, "connecte-toi pour la préécoute ▶");
-                            }
                         }
-
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            if ui::button(ui, Icon::Paperclip, "Dossier des sons").clicked() {
-                                if let Some(dir) = sound_dirs().into_iter().nth(1) {
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    let _ = std::process::Command::new("explorer")
-                                        .arg(&dir)
-                                        .spawn();
-                                }
-                            }
-                            if ui::button(ui, Icon::Refresh, "Recharger").clicked() {
-                                self.reload_sounds();
-                            }
-                        });
-                        ui::hint(
-                            ui,
-                            "les sons par défaut sont intégrés ; dépose des .wav (48 kHz \
-                             conseillé) nommés message, arrivee, depart, rejoint-vocal, \
-                             quitte-vocal, micro-coupe, micro-actif pour les remplacer",
-                        );
-
-                        // --- Réseau & qualité ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Info, "Réseau & qualité");
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("débit voix").color(TEXT_DIM).size(12.5));
-                            let selected = if self.bitrate == 0 {
-                                format!("Auto ({} kbps)", self.auto_bitrate / 1000)
-                            } else {
-                                format!("{} kbps", self.bitrate / 1000)
-                            };
-                            egui::ComboBox::from_id_salt("bitrate")
-                                .width(150.0)
-                                .selected_text(RichText::new(selected).color(TEXT))
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(self.bitrate == 0, "Auto").clicked() {
-                                        self.bitrate = 0;
-                                        apply = true;
-                                    }
-                                    for br in BITRATES {
-                                        if ui
-                                            .selectable_label(
-                                                self.bitrate == br,
-                                                format!("{} kbps", br / 1000),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.bitrate = br;
-                                            apply = true;
-                                        }
-                                    }
-                                });
-                        });
-                        ui::hint(ui, "Auto : s'adapte aux pertes mesurées par le serveur.");
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("protection pertes (DRED)")
-                                    .color(TEXT_DIM)
-                                    .size(12.5),
-                            );
-                            let dred_label = |m: u8| match m {
-                                0 => "Désactivée".to_string(),
-                                2 => "Toujours".to_string(),
-                                _ => "Auto (recommandé)".to_string(),
-                            };
-                            egui::ComboBox::from_id_salt("dred_mode")
-                                .width(150.0)
-                                .selected_text(
-                                    RichText::new(dred_label(self.dred_mode)).color(TEXT),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for mode in [1u8, 0, 2] {
-                                        if ui
-                                            .selectable_label(
-                                                self.dred_mode == mode,
-                                                dred_label(mode),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.dred_mode = mode;
-                                            apply = true;
-                                        }
-                                    }
-                                });
-                        });
-                        ui::hint(
-                            ui,
-                            match self.dred_mode {
-                                0 => "redondance neuronale coupée",
-                                2 => "≈1 s de voix re-transmise en continu dans chaque paquet",
-                                _ if self.dred_active => {
-                                    "ENGAGÉE — pertes détectées, la voix est protégée"
-                                }
-                                _ => "en veille : s'engage automatiquement dès 2 % de pertes",
-                            },
-                        );
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("tampon de gigue").color(TEXT_DIM).size(12.5));
-                            let jitter_label = |frames: usize| match frames {
-                                0 => "Auto (adaptatif)".to_string(),
-                                f => format!("{} ms", f * 20),
-                            };
-                            egui::ComboBox::from_id_salt("jitter")
-                                .width(150.0)
-                                .selected_text(
-                                    RichText::new(jitter_label(self.jitter_frames)).color(TEXT),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for frames in [0usize, 2, 3, 4, 6, 8] {
-                                        if ui
-                                            .selectable_label(
-                                                self.jitter_frames == frames,
-                                                jitter_label(frames),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.jitter_frames = frames;
-                                            apply = true;
-                                        }
-                                    }
-                                });
-                        });
-                        ui::hint(ui, "Auto recommandé ; fixe si la voix est hachée.");
-
-                        if engine_up {
-                            ui.add_space(10.0);
-                            let ping_txt = match voice.ping {
-                                Some(p) => format!("{p} ms"),
-                                None => "—".into(),
-                            };
-                            let upstream = match self.upstream_loss {
-                                Some(l) => format!(" · pertes montantes {l:.1} %"),
-                                None => String::new(),
-                            };
+                        if onglet == Onglet::Overlay {
+                            // --- Overlay en jeu ---
+                            ui::group_title(ui, Icon::User, "Overlay en jeu");
+                            overlay::reglages_ui(ui, &mut self.overlay);
+                        }
+                        if onglet == Onglet::Sons {
+                            // --- Effets sonores ---
+                            ui::group_title(ui, Icon::Play, "Sons & notifications");
+                            // L'état du système, en clair : si un jour « pas de
+                            // son », cette ligne dit immédiatement où chercher.
+                            let engine_ok = self.link.engine.lock().unwrap().is_some();
                             ui::hint(
                                 ui,
                                 &format!(
-                                    "ping {ping_txt} · gigue max {:.1} ms · perdus {} \
-                                 (récupérés FEC : {}) · rejetés {}{upstream}",
-                                    stats.worst_jitter_ms,
-                                    stats.packets_lost,
-                                    stats.packets_recovered,
-                                    stats.packets_rejected,
+                                    "{} sons chargés ({} perso) · sortie audio {}",
+                                    self.sounds.len(),
+                                    self.custom_sfx.len(),
+                                    if engine_ok { "active" } else { "INACTIVE — connecte-toi" },
                                 ),
                             );
-                        }
+                            ui.checkbox(&mut self.sfx_on, "Jouer les sons");
+                            if self.sfx_on {
+                                let mut pct = self.sfx_volume * 100.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut pct, 0.0..=100.0)
+                                            .suffix(" %")
+                                            .integer()
+                                            .text("volume des sons"),
+                                    )
+                                    .changed()
+                                {
+                                    self.sfx_volume = pct / 100.0;
+                                }
+                                ui.add_space(6.0);
 
-                        // --- Diffusion d'écran ---
-                        ui.add_space(12.0);
-                        ui::hairline(ui);
-                        ui.add_space(10.0);
-                        ui::group_title(ui, Icon::Screen, "Diffusion d'écran");
-                        if self.sources.perimees() {
-                            self.sources.rafraichir();
-                        }
-                        if partage::reglages_ui(ui, &mut self.diffusion, &mut self.sources) {
-                            self.rediffuser();
-                        }
-
-                        // --- Labo vidéo (S1a du partage d'écran) ---
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("🧪 labo vidéo").color(TEXT_DIM).size(12.5),
-                            );
-                            let running = self.labo.is_some();
-                            let label = if running { "Arrêter le test" } else { "Se voir (test local)" };
-                            if ui.button(label).clicked() {
-                                if running {
-                                    self.stop_labo();
-                                } else {
-                                    self.start_labo(ctx.clone());
+                                // Un réglage par événement : à couper, à écouter,
+                                // et l'étiquette dit si le son est personnalisé.
+                                for (name, label) in [
+                                    (sfx::MESSAGE, "Message reçu (fenêtre à l'arrière-plan)"),
+                                    (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
+                                    (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
+                                    (sfx::SELF_JOIN, "Je rejoins un vocal"),
+                                    (sfx::SELF_LEAVE, "Je quitte le vocal"),
+                                    (sfx::MUTE, "Micro coupé"),
+                                    (sfx::UNMUTE, "Micro réactivé"),
+                                ] {
+                                    ui.horizontal(|ui| {
+                                        let mut enabled = !self.sfx_muted.contains(name);
+                                        if ui.checkbox(&mut enabled, label).changed() {
+                                            if enabled {
+                                                self.sfx_muted.remove(name);
+                                            } else {
+                                                self.sfx_muted.insert(name.to_string());
+                                            }
+                                        }
+                                        if self.custom_sfx.contains(name) {
+                                            ui.label(
+                                                RichText::new("perso")
+                                                    .color(ACCENT)
+                                                    .size(10.5),
+                                            );
+                                        }
+                                        if ui.small_button("▶").on_hover_text("écouter").clicked()
+                                        {
+                                            // La préécoute ignore la coupure de
+                                            // l'événement, pas le volume.
+                                            if let Some(pcm) = self.sounds.get(name) {
+                                                if let Some(engine) =
+                                                    self.link.engine.lock().unwrap().as_ref()
+                                                {
+                                                    engine.play_effect(pcm, self.sfx_volume);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                                if self.conn.is_none() {
+                                    ui::hint(ui, "connecte-toi pour la préécoute ▶");
                                 }
                             }
-                        });
-                        ui::hint(
-                            ui,
-                            "capture ton écran principal et l'affiche après un aller-retour \
-                             H.264 complet — zéro réseau, c'est le banc d'essai du stream",
-                        );
+
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui::button(ui, Icon::Paperclip, "Dossier des sons").clicked() {
+                                    if let Some(dir) = sound_dirs().into_iter().nth(1) {
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        let _ = std::process::Command::new("explorer")
+                                            .arg(&dir)
+                                            .spawn();
+                                    }
+                                }
+                                if ui::button(ui, Icon::Refresh, "Recharger").clicked() {
+                                    self.reload_sounds();
+                                }
+                            });
+                            ui::hint(
+                                ui,
+                                "les sons par défaut sont intégrés ; dépose des .wav (48 kHz \
+                                 conseillé) nommés message, arrivee, depart, rejoint-vocal, \
+                                 quitte-vocal, micro-coupe, micro-actif pour les remplacer",
+                            );
+
+                        }
+                        if onglet == Onglet::Reseau {
+                            // --- Réseau & qualité ---
+                            ui::group_title(ui, Icon::Info, "Réseau & qualité");
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("débit voix").color(TEXT_DIM).size(12.5));
+                                let selected = if self.bitrate == 0 {
+                                    format!("Auto ({} kbps)", self.auto_bitrate / 1000)
+                                } else {
+                                    format!("{} kbps", self.bitrate / 1000)
+                                };
+                                egui::ComboBox::from_id_salt("bitrate")
+                                    .width(150.0)
+                                    .selected_text(RichText::new(selected).color(TEXT))
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_label(self.bitrate == 0, "Auto").clicked() {
+                                            self.bitrate = 0;
+                                            apply = true;
+                                        }
+                                        for br in BITRATES {
+                                            if ui
+                                                .selectable_label(
+                                                    self.bitrate == br,
+                                                    format!("{} kbps", br / 1000),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.bitrate = br;
+                                                apply = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui::hint(ui, "Auto : s'adapte aux pertes mesurées par le serveur.");
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("protection pertes (DRED)")
+                                        .color(TEXT_DIM)
+                                        .size(12.5),
+                                );
+                                let dred_label = |m: u8| match m {
+                                    0 => "Désactivée".to_string(),
+                                    2 => "Toujours".to_string(),
+                                    _ => "Auto (recommandé)".to_string(),
+                                };
+                                egui::ComboBox::from_id_salt("dred_mode")
+                                    .width(150.0)
+                                    .selected_text(
+                                        RichText::new(dred_label(self.dred_mode)).color(TEXT),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for mode in [1u8, 0, 2] {
+                                            if ui
+                                                .selectable_label(
+                                                    self.dred_mode == mode,
+                                                    dred_label(mode),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.dred_mode = mode;
+                                                apply = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui::hint(
+                                ui,
+                                match self.dred_mode {
+                                    0 => "redondance neuronale coupée",
+                                    2 => "≈1 s de voix re-transmise en continu dans chaque paquet",
+                                    _ if self.dred_active => {
+                                        "ENGAGÉE — pertes détectées, la voix est protégée"
+                                    }
+                                    _ => "en veille : s'engage automatiquement dès 2 % de pertes",
+                                },
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("tampon de gigue").color(TEXT_DIM).size(12.5));
+                                let jitter_label = |frames: usize| match frames {
+                                    0 => "Auto (adaptatif)".to_string(),
+                                    f => format!("{} ms", f * 20),
+                                };
+                                egui::ComboBox::from_id_salt("jitter")
+                                    .width(150.0)
+                                    .selected_text(
+                                        RichText::new(jitter_label(self.jitter_frames)).color(TEXT),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for frames in [0usize, 2, 3, 4, 6, 8] {
+                                            if ui
+                                                .selectable_label(
+                                                    self.jitter_frames == frames,
+                                                    jitter_label(frames),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.jitter_frames = frames;
+                                                apply = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui::hint(ui, "Auto recommandé ; fixe si la voix est hachée.");
+
+                            if engine_up {
+                                ui.add_space(10.0);
+                                let ping_txt = match voice.ping {
+                                    Some(p) => format!("{p} ms"),
+                                    None => "—".into(),
+                                };
+                                let upstream = match self.upstream_loss {
+                                    Some(l) => format!(" · pertes montantes {l:.1} %"),
+                                    None => String::new(),
+                                };
+                                ui::hint(
+                                    ui,
+                                    &format!(
+                                        "ping {ping_txt} · gigue max {:.1} ms · perdus {} \
+                                     (récupérés FEC : {}) · rejetés {}{upstream}",
+                                        stats.worst_jitter_ms,
+                                        stats.packets_lost,
+                                        stats.packets_recovered,
+                                        stats.packets_rejected,
+                                    ),
+                                );
+                            }
+
+                        }
+                        if onglet == Onglet::Diffusion {
+                            // --- Diffusion d'écran ---
+                            ui::group_title(ui, Icon::Screen, "Diffusion d'écran");
+                            if self.sources.perimees() {
+                                self.sources.rafraichir();
+                            }
+                            if partage::reglages_ui(ui, &mut self.diffusion, &mut self.sources) {
+                                self.rediffuser();
+                            }
+
+                            // --- Labo vidéo (S1a du partage d'écran) ---
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("🧪 labo vidéo").color(TEXT_DIM).size(12.5),
+                                );
+                                let running = self.labo.is_some();
+                                let label = if running { "Arrêter le test" } else { "Se voir (test local)" };
+                                if ui.button(label).clicked() {
+                                    if running {
+                                        self.stop_labo();
+                                    } else {
+                                        self.start_labo(ctx.clone());
+                                    }
+                                }
+                            });
+                            ui::hint(
+                                ui,
+                                "capture ton écran principal et l'affiche après un aller-retour \
+                                 H.264 complet — zéro réseau, c'est le banc d'essai du stream",
+                            );
+                        }
 
                         if let Some(info) = self.info.clone() {
                             ui.add_space(10.0);
@@ -6583,7 +6653,7 @@ impl KiApp {
         ui::hint(
             ui,
             "les journaux n'existent que pour ceux qui ont coché « Partager mes \
-             diagnostics » dans leurs réglages audio ; les rapports de plantage, eux, \
+             diagnostics » dans leurs réglages (Aide & diagnostics) ; les rapports de plantage, eux, \
              arrivent de tout le monde — technique seulement, jamais les messages ni la voix",
         );
         ui.add_space(6.0);
@@ -8756,6 +8826,7 @@ impl eframe::App for KiApp {
         storage.set_string("bitrate", format!("{}", self.bitrate));
         storage.set_string("agc", if self.agc { "on" } else { "off" }.into());
         storage.set_string("aec", if self.aec_on { "on" } else { "off" }.into());
+        storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
