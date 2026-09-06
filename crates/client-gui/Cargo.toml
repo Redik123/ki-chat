@@ -54,9 +54,24 @@ base64 = "0.22"
 # génération de clés : ce binaire ne fait que vérifier.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
-# Icône, bloc de version et manifeste gravés dans l'exécutable (voir build.rs).
+# Icône, bloc de version et manifeste gravés dans l'exécutable (voir build.rs) ;
+# sur macOS, le même dessin rendu en PNG pour l'icône du paquet.
 [build-dependencies]
 winresource = "0.1"
+png = "0.18"
+
+# macOS : la mise à jour remplace le paquet `.app` entier, livré archivé.
+# flate2 et tar sont déjà dans l'arbre (scripts de build de ki-opus) :
+# rien de plus à télécharger ni à auditer.
+[target.'cfg(target_os = "macos")'.dependencies]
+flate2 = "1"
+tar = "0.4"
+
+# Le nom de la machine (empreinte « même machine » du son du jeu), que la
+# libc donne — Unix ne l'exporte pas dans l'environnement d'une application
+# graphique.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Coffre à secrets natif : DPAPI protège les mots de passe mémorisés avec
 # une clé dérivée de la session Windows. Déjà tiré par eframe.

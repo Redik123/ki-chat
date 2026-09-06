@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Assistant d'installation macOS (productbuild).
+
+  Le parti pris est celui de l'installeur Windows : l'application se pose
+  dans le profil de l'utilisateur — `~/Applications`, jamais `/Applications`
+  — donc sans mot de passe d'administrateur, et surtout dans un dossier où
+  elle a le droit de se réécrire : c'est ce qui rend la mise à jour
+  automatique possible. `enable_currentUserHome` seul, sans
+  `enable_localSystem` : l'assistant ne propose même pas l'autre choix.
+-->
+<installer-gui-script minSpecVersion="1">
+    <title>ki-chat</title>
+    <domains enable_currentUserHome="true"/>
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="ki-chat"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="ki-chat" visible="false">
+        <pkg-ref id="com.github.redik123.ki-chat"/>
+    </choice>
+    <pkg-ref id="com.github.redik123.ki-chat" version="@VERSION@" onConclusion="none">ki-chat-component.pkg</pkg-ref>
+</installer-gui-script>

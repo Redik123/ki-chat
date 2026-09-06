@@ -14,6 +14,12 @@ license.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 openh264 = { version = "0.9", features = ["source"] }
+
+# La capture (Windows.Graphics.Capture) et NVENC (Direct3D 11) sont des
+# affaires de Windows : ailleurs, ces crates ne sont même pas lus. Le reste
+# du pipeline — codec, réduction d'image, décodeur du spectateur — est
+# portable, et c'est lui que macOS utilise pour *regarder* une diffusion.
+[target.'cfg(windows)'.dependencies]
 # Capture d'écran/fenêtre : Windows.Graphics.Capture (backend DXGI en secours).
 # API 2.x — les exemples web en 1.x (Settings à 5 paramètres) ne compilent pas.
 windows-capture = "2.0.1"

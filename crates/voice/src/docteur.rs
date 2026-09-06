@@ -340,6 +340,9 @@ fn virtuel(nom: &str, entree: bool) -> Option<&'static str> {
 /// remonté du terrain ou documenté comme s'interposant sur le chemin audio.
 /// Nommer un logiciel innocent ferait perdre du temps à quelqu'un, ce qui est
 /// exactement le contraire du but.
+// Hors Windows, seuls les tests la lisent : les suites qu'elle nomme n'y
+// existent pas.
+#[cfg_attr(not(windows), allow(dead_code))]
 const CONNUS: &[(&str, &str, &str)] = &[
     (
         "sonar",
@@ -434,6 +437,7 @@ const CONNUS: &[(&str, &str, &str)] = &[
 ///
 /// Isolé et testable exprès : la détection est la partie du docteur qui peut
 /// se tromper, et se tromper ici fait perdre du temps à quelqu'un.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn reconnaitre(processus: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
     let nom = processus
         .rsplit(['\\', '/'])

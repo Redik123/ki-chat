@@ -8,7 +8,9 @@
 //! que les pixels et le codec.
 
 pub mod capture;
+#[cfg(windows)]
 mod nvenc;
+#[cfg(windows)]
 mod nvenc_ffi;
 pub mod scale;
 pub mod stats;
@@ -16,6 +18,26 @@ pub mod stats;
 pub use capture::{list_monitors, list_windows, CaptureSource, MonitorInfo, WindowInfo};
 pub use nvenc::{inventaire, inventaire_lancer, inventaire_pret};
 pub use stats::StageStats;
+
+/// NVENC est l'encodeur des cartes NVIDIA **sous Windows** (Direct3D 11 en
+/// dessous). Ailleurs, l'inventaire matériel se réduit à ce que l'on sait :
+/// rien — et le pipeline prend l'encodeur logiciel sans poser de question.
+#[cfg(not(windows))]
+mod nvenc {
+    /// L'inventaire, en une ligne : la même forme que sous Windows, pour que
+    /// les rapports se lisent pareil.
+    pub fn inventaire() -> String {
+        format!("cartes graphiques : non relevées sur {} ; NVENC indisponible (Windows seulement)", std::env::consts::OS)
+    }
+
+    /// Rien à relever sur un fil à part : l'inventaire est immédiat.
+    pub fn inventaire_lancer() {}
+
+    pub fn inventaire_pret() -> Option<&'static str> {
+        static INVENTAIRE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        Some(INVENTAIRE.get_or_init(inventaire).as_str())
+    }
+}
 
 /// Le journal partagé de l'application, branché par l'interface : ce que la
 /// vidéo a d'important à dire (encodeur retenu, capture bridée par le
@@ -143,6 +165,13 @@ pub fn creer_encodeur(
     fps: u32,
     stats: &StageStats,
 ) -> anyhow::Result<Box<dyn VideoEncoder>> {
+    // NVENC n'existe que sous Windows ; ailleurs, l'exiger est une erreur
+    // franche, et « Auto » veut simplement dire « logiciel ».
+    #[cfg(not(windows))]
+    if choix == EncoderChoice::Nvenc {
+        anyhow::bail!("NVENC exigé par les réglages, mais indisponible sur {}", std::env::consts::OS);
+    }
+    #[cfg(windows)]
     if choix != EncoderChoice::Logiciel {
         match nvenc::Nvenc::new(width, height, bitrate_bps, fps) {
             Ok(e) => {
@@ -176,10 +205,7 @@ pub fn creer_encodeur(
 /// tout le travail (conversion, encodage, décodage) sur UN thread pipeline
 /// dédié — jamais sur le thread réseau ni sur l'UI.
 pub struct LocalLoop {
-    control: windows_capture::capture::CaptureControl<
-        capture::ScreenGrab,
-        Box<dyn std::error::Error + Send + Sync>,
-    >,
+    control: capture::Control,
     stop: Arc<AtomicBool>,
     worker: std::thread::JoinHandle<()>,
 }

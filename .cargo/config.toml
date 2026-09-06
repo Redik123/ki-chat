@@ -16,6 +16,13 @@ NASM = "C:\\Users\\drion\\AppData\\Local\\bin\\NASM\\nasm.exe"
 # Le libopus embarqué dans audiopus_sys déclare cmake_minimum_required < 3.5,
 # que cmake 4.x refuse par défaut. Cette variable rétablit la compatibilité.
 CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }
+# macOS : le plus ancien système sur lequel l'exécutable accepte de se
+# lancer. Sans cette variable, cc et cmake prennent la version du SDK de la
+# machine qui compile (26.x sur un Mac à jour) — et l'application refuse
+# alors de démarrer sur tout macOS plus vieux, y compris celui d'hier. Big
+# Sur (11.0) : le premier macOS des puces Apple, le plancher de l'exécutable
+# universel. Ignorée partout ailleurs ; l'environnement l'emporte.
+MACOSX_DEPLOYMENT_TARGET = "11.0"
 
 # Bibliothèque C liée statiquement : l'exécutable livré ne réclame alors que
 # des DLL présentes dans Windows, et se lance sur une machine où le

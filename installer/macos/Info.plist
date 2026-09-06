@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fiche d'identité du paquet ki-chat.app. `build-app.sh` remplace @VERSION@
+  par la version du Cargo.toml de la racine : c'est la seule chose qui bouge
+  d'une release à l'autre.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>fr</string>
+	<key>CFBundleDisplayName</key>
+	<string>ki-chat</string>
+	<key>CFBundleExecutable</key>
+	<string>ki-chat</string>
+	<key>CFBundleIconFile</key>
+	<string>ki-chat</string>
+	<!-- Ne doit jamais changer : c'est par lui que macOS reconnaît
+	     l'application d'une version à l'autre (préférences, autorisations
+	     accordées au micro, reçus de l'installeur). -->
+	<key>CFBundleIdentifier</key>
+	<string>com.github.redik123.ki-chat</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ki-chat</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.social-networking</string>
+	<!-- Big Sur : le premier macOS des puces Apple, et le plus ancien que
+	     l'exécutable universel vise. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT</string>
+	<!-- Sans cette phrase, macOS tue l'application au premier accès au
+	     micro au lieu de demander l'autorisation. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ki-chat a besoin du micro pour le salon vocal.</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

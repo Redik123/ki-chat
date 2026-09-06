@@ -144,6 +144,7 @@ mod tests {
 
     /// Phrase de test volontairement fictive, avec des caractères
     /// multi-octets : c'est l'encodage qu'on veut éprouver, pas un secret.
+    #[cfg(windows)]
     const SAMPLE: &str = "mot-de-passe-factice é€… 123";
 
     #[test]

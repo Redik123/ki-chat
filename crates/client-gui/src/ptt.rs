@@ -244,6 +244,54 @@ impl Drop for Watcher {
     }
 }
 
+/// Ouvre le clavier global. Windows le lit d'office (`GetAsyncKeyState`).
+///
+/// macOS ne laisse lire les touches destinées aux autres applications qu'aux
+/// applications que l'utilisateur a inscrites dans *Accessibilité*. Deux
+/// pièges, appris sur le terrain :
+///
+/// - `device_query::DeviceState::new()` **panique** sans l'autorisation ;
+/// - sa version vérifiée, `checked_new()`, **affiche la demande système à
+///   chaque appel** tant que l'autorisation manque. Appelée toutes les
+///   secondes, elle empilait des dizaines de fenêtres « Accès
+///   d'accessibilité » que rien ne fermait.
+///
+/// D'où la règle : la demande (avec sa fenêtre et son bouton vers les
+/// Réglages) part **une fois**, au premier besoin ; ensuite on interroge le
+/// système en silence (`AXIsProcessTrusted`, sans fenêtre) et l'on n'ouvre
+/// le clavier que le jour où il dit oui — sans redémarrer.
+#[cfg(target_os = "macos")]
+fn ouvrir_clavier(deja_demande: bool) -> Option<DeviceState> {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        /// `Boolean` en C : un octet, 0 ou 1.
+        fn AXIsProcessTrusted() -> u8;
+    }
+    // SAFETY : aucun argument, aucun état — une simple question au système.
+    let accorde = unsafe { AXIsProcessTrusted() } != 0;
+    if accorde || !deja_demande {
+        DeviceState::checked_new()
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ouvrir_clavier(_deja_demande: bool) -> Option<DeviceState> {
+    Some(DeviceState::new())
+}
+
+/// Le clavier est refusé, et il y a une touche à surveiller : on le dit au
+/// journal, qui voyage avec les diagnostics. Sur macOS, la fenêtre du
+/// système vient d'être montrée par `ouvrir_clavier` — rien à ajouter.
+fn clavier_refuse() {
+    ki_voice::journal(
+        "push-to-talk : le clavier n'est pas lisible — sur macOS, autoriser ki-chat dans \
+         Réglages Système → Confidentialité et sécurité → Accessibilité"
+            .to_string(),
+    );
+}
+
 /// L'indice d'une touche dans [`PttKey::ALL`], ou [`AUCUNE`].
 fn index_de(key: Option<PttKey>) -> u8 {
     key.and_then(|k| PttKey::ALL.iter().position(|c| *c == k))
@@ -259,7 +307,11 @@ fn boucle(
     bascules: Arc<[(AtomicU8, AtomicU32); 2]>,
     stop: Arc<AtomicBool>,
 ) {
-    let device = DeviceState::new();
+    // Le clavier n'est pas toujours lisible : voir `ouvrir_clavier`. On
+    // l'ouvre au premier besoin, et on réessaie tant qu'il refuse — sur
+    // macOS, l'autorisation peut être accordée pendant que l'on tourne.
+    let mut device: Option<DeviceState> = None;
+    let mut prevenu = false;
     let mut dernier_appui: Option<Instant> = None;
     // Les bascules réagissent au front : une touche tenue enfoncée ne
     // bascule qu'une fois.
@@ -284,7 +336,18 @@ fn boucle(
             }
             continue;
         }
-        let touches = device.get_keys();
+        if device.is_none() {
+            device = ouvrir_clavier(prevenu);
+            if device.is_none() {
+                if !prevenu {
+                    prevenu = true;
+                    clavier_refuse();
+                }
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        }
+        let touches = device.as_ref().expect("clavier ouvert à l'instant").get_keys();
 
         let voulu = if index == AUCUNE {
             dernier_appui = None;

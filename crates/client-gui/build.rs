@@ -24,12 +24,21 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/appicon.rs");
 
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+
+    // macOS : le paquet `.app` veut un `.icns`, que seul `iconutil` (livré
+    // avec le système) sait assembler correctement — à partir d'un dossier
+    // `.iconset` de PNG aux tailles convenues. On rend ici le dossier ;
+    // `installer/macos/build-app.sh` le retrouve et appelle iconutil.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        iconset(&out.join("ki-chat.iconset"));
+        return;
+    }
+
     // Les ressources Win32 n'ont de sens que pour une cible Windows.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let icon = out.join("ki-chat.ico");
     std::fs::write(&icon, ico(&SIZES)).expect("écriture de l'icône");
 
@@ -81,6 +90,25 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
   </compatibility>
 </assembly>
 "#;
+
+/// Les dix images d'un `.iconset` macOS : cinq tailles logiques, chacune en
+/// simple et double densité. `iconutil` refuse un dossier où il en manque.
+fn iconset(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("dossier .iconset");
+    for logique in [16u32, 32, 128, 256, 512] {
+        for (suffixe, facteur) in [("", 1), ("@2x", 2)] {
+            let taille = logique * facteur;
+            let nom = format!("icon_{logique}x{logique}{suffixe}.png");
+            let fichier = std::fs::File::create(dir.join(nom)).expect("fichier PNG de l'iconset");
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(fichier), taille, taille);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .and_then(|mut w| w.write_image_data(&appicon::render(taille)))
+                .expect("écriture PNG de l'iconset");
+        }
+    }
+}
 
 /// Assemble un `.ico` : un en-tête, un descripteur par taille, puis les
 /// images elles-mêmes.

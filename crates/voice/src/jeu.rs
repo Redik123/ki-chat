@@ -8,13 +8,21 @@
 //! moteur vocal — même volume général, même annulateur d'écho.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+#[cfg(windows)]
+use std::sync::mpsc;
+use std::sync::Arc;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use anyhow::Context;
-use ki_opus::{Application, Bitrate, Channels, Decoder, Encoder};
+#[cfg(windows)]
+use ki_opus::{Application, Bitrate, Encoder};
+use ki_opus::{Channels, Decoder};
 
-use crate::{journal, wasapi, VoiceEngine, SAMPLE_RATE};
+#[cfg(windows)]
+use crate::{journal, wasapi};
+use crate::{VoiceEngine, SAMPLE_RATE};
 
 /// Un paquet Opus encodé et son horodatage (µs depuis le début), à emporter.
 pub type PaquetAudio = Arc<dyn Fn(&[u8], u64) + Send + Sync>;
@@ -23,6 +31,11 @@ pub type PaquetAudio = Arc<dyn Fn(&[u8], u64) + Send + Sync>;
 const TRAME: usize = (SAMPLE_RATE / 50) as usize;
 
 /// La capture et l'encodage du son du jeu, tant que la poignée vit.
+///
+/// La boucle « tout le système sauf ce processus » est une capacité de
+/// WASAPI : hors Windows, `start` refuse en le disant, et la diffusion
+/// part sans son — la vidéo, elle, n'en dépend pas.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct GameAudio {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -33,6 +46,18 @@ impl GameAudio {
     /// à `bitrate` bits/s ; chaque paquet part par `emettre`, horodaté
     /// depuis `origine` — la même que la vidéo, c'est ce qui permet au
     /// spectateur de les remettre ensemble.
+    #[cfg(not(windows))]
+    pub fn start(
+        _bitrate: i32,
+        _emettre: PaquetAudio,
+        _origine: std::time::Instant,
+    ) -> anyhow::Result<Self> {
+        anyhow::bail!(
+            "la capture du son du jeu n'existe que sous Windows (boucle WASAPI par processus)"
+        )
+    }
+
+    #[cfg(windows)]
     pub fn start(
         bitrate: i32,
         emettre: PaquetAudio,
@@ -161,11 +186,16 @@ impl Lecteur {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ki_opus::{Application, Bitrate, Encoder};
+    #[cfg(windows)]
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// La boucle par processus s'ouvre sur cette machine — ou dit pourquoi
     /// pas (pas de périphérique de sortie, Windows trop ancien). On ne
     /// demande pas de son : rien ne joue pendant les tests.
     #[test]
+    #[cfg(windows)]
     fn la_boucle_du_systeme_s_ouvre_ou_dit_pourquoi_pas() {
         let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(8);
         let alive = Arc::new(AtomicBool::new(true));

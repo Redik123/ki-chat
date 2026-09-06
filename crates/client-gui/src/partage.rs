@@ -153,14 +153,37 @@ impl Reglages {
 /// spectateur coupe le son du jeu chez lui au lieu de le renvoyer en boucle
 /// dans la capture du streamer. FNV-1a, comme les vignettes.
 pub fn empreinte_machine() -> u64 {
-    let nom = std::env::var("COMPUTERNAME").unwrap_or_default();
-    let compte = std::env::var("USERNAME").unwrap_or_default();
+    let nom = nom_machine();
+    let compte = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_default();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in nom.bytes().chain([0u8]).chain(compte.bytes()) {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h.max(1)
+}
+
+/// Le nom de la machine, tel que le système le donne.
+#[cfg(windows)]
+fn nom_machine() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+/// Unix n'exporte pas le nom d'hôte dans l'environnement d'une application
+/// graphique : on le demande à la libc.
+#[cfg(unix)]
+fn nom_machine() -> String {
+    let mut tampon = [0u8; 256];
+    // SAFETY : le tampon est le nôtre, sa longueur est passée avec lui, et
+    // gethostname n'écrit jamais au-delà.
+    let rc = unsafe { libc::gethostname(tampon.as_mut_ptr().cast(), tampon.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let fin = tampon.iter().position(|&b| b == 0).unwrap_or(tampon.len());
+    String::from_utf8_lossy(&tampon[..fin]).into_owned()
 }
 
 /// Écrans et fenêtres capturables, relevés à l'ouverture du sélecteur et

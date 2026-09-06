@@ -8071,6 +8071,17 @@ fn sound_dirs() -> Vec<std::path::PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs.push(std::path::PathBuf::from(appdata).join("ki-chat").join("sons"));
     }
+    // macOS : là où eframe range déjà les réglages.
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(
+            std::path::PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("ki-chat")
+                .join("sons"),
+        );
+    }
     dirs
 }
 

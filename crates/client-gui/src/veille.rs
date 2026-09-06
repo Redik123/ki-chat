@@ -60,7 +60,42 @@ fn appliquer(actif: bool) {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS : `caffeinate -i` tient la machine éveillée tant qu'il tourne —
+/// c'est l'outil du système, celui qui pose l'assertion d'alimentation
+/// (`IOPMAssertion`) qu'une application d'appel poserait elle-même. On le
+/// lance en entrant en vocal, on l'arrête en sortant ; `-w` le lie à notre
+/// processus, pour qu'il ne survive pas à un plantage.
+#[cfg(target_os = "macos")]
+fn appliquer(actif: bool) {
+    use std::sync::Mutex;
+    static ENFANT: Mutex<Option<std::process::Child>> = Mutex::new(None);
+    let mut garde = ENFANT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mut ancien) = garde.take() {
+        let _ = ancien.kill();
+        let _ = ancien.wait();
+    }
+    if !actif {
+        tracing::info!("veille système rendue");
+        return;
+    }
+    match std::process::Command::new("/usr/bin/caffeinate")
+        .args(["-i", "-w", &std::process::id().to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(enfant) => {
+            *garde = Some(enfant);
+            tracing::info!("veille système suspendue (salon vocal)");
+        }
+        // Refus rarissime ; on le note et la vie continue — au pire, on
+        // retrouve le comportement d'avant.
+        Err(e) => tracing::warn!("caffeinate indisponible : {e}"),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn appliquer(_actif: bool) {}
 
 #[cfg(test)]

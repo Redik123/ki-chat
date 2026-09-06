@@ -16,7 +16,8 @@ crates/
                 buffer, annulation d'écho, docteur audio, son du jeu (indépendant
                 du transport)
   video/        capture d'écran (Windows Graphics Capture), réduction d'image,
-                encodage H.264 — NVENC sans SDK, openh264 en secours
+                encodage H.264 — NVENC sans SDK, openh264 en secours ; hors
+                Windows, le décodage seul (regarder, pas diffuser)
   ki-opus/      libopus 1.6.1 compilé depuis les sources (DRED, Deep PLC, OSCE)
   ki-aec/       annulation d'écho acoustique (annulateur MDF de SpeexDSP)
   client-quic/  connexion QUIC cliente partagée (contrôle + datagrammes)
@@ -425,6 +426,8 @@ sauvegarde du volume, dépannage — est dans
 
 ## Installer (côté joueur)
 
+### Windows
+
 Télécharger **`ki-chat-setup.exe`** depuis la [dernière
 release](https://github.com/Redik123/ki-chat/releases/latest) et le
 double-cliquer. C'est tout : ni compilateur, ni redistribuable, ni droits
@@ -449,6 +452,64 @@ n'aurait jamais lieu.
 > même*. L'avertissement disparaît de lui-même à mesure que le fichier
 > circule.
 
+### macOS
+
+Une ligne dans le Terminal, et c'est installé :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Redik123/ki-chat/main/installer/macos/install.sh | sh
+```
+
+Le script télécharge la dernière release, pose `ki-chat.app` dans
+**`~/Applications`** (le dossier de l'utilisateur, pas `/Applications` : même
+raison qu'avec `Program Files` sous Windows — c'est là que l'application a le
+droit de se réécrire, donc de se mettre à jour toute seule) et la lance. Aucun
+mot de passe demandé, rien ne touche au système. Relancer la même ligne met à
+jour. `KI_CHAT_DIR=…` installe ailleurs, `KI_CHAT_NO_LAUNCH=1` n'ouvre pas
+l'application à la fin.
+
+Pour qui préfère double-cliquer, la release publie aussi **`ki-chat-macos.pkg`**,
+un assistant d'installation classique qui pose la même chose au même endroit.
+
+> Le paquet n'a pas d'identité Apple (un certificat de développeur coûte 99 $
+> par an) : téléchargé depuis un navigateur, macOS l'arrête au premier
+> lancement — « Apple ne peut pas vérifier… ». Sur macOS 15 et plus, aller
+> dans *Réglages Système* → *Confidentialité et sécurité*, descendre jusqu'au
+> bouton **Ouvrir quand même**, puis relancer. C'est l'équivalent du
+> SmartScreen de Windows, et c'est précisément ce que la ligne `curl` évite :
+> ce que `curl` télécharge ne porte pas la marque de quarantaine du
+> navigateur, donc Gatekeeper ne s'en mêle pas.
+
+L'exécutable est **universel** : puces Apple et Intel dans le même fichier, à
+partir de macOS 11 (Big Sur). Au premier salon vocal, macOS demande l'accès au
+micro — une fois. Le **push-to-talk** et les raccourcis globaux lisent le
+clavier pendant qu'une autre application a le focus : macOS ne le permet
+qu'aux applications inscrites dans *Réglages Système* → *Confidentialité et
+sécurité* → **Accessibilité**. Sans cela, la touche n'est pas lue (le mode
+« activation vocale » marche, lui). macOS pose la question **une fois**, au
+premier lancement ; ki-chat prend l'autorisation en compte dès qu'elle est
+accordée, sans redémarrer.
+
+> Le paquet n'ayant pas d'identité Apple, macOS reconnaît l'application à
+> l'empreinte de son exécutable : une **mise à jour peut faire oublier
+> l'autorisation**. Si la case est cochée mais que la touche ne répond plus,
+> retirer ki-chat de la liste (bouton « − ») et l'y remettre.
+
+**Ce qui ne marche pas encore sur Mac**, et le dit au lieu de faire semblant :
+
+- **diffuser** son écran (la capture est écrite contre Windows.Graphics.Capture ;
+  l'équivalent serait ScreenCaptureKit) — **regarder** la diffusion d'un
+  autre, avec son son, marche ;
+- le son du jeu dans le stream (boucle WASAPI par processus) ;
+- l'overlay « qui parle » par-dessus le jeu, et le mode exclusif du micro ;
+- mémoriser un mot de passe : le coffre à secrets est DPAPI, le Trousseau n'est
+  pas encore branché — le client refuse de mémoriser plutôt que d'écrire en
+  clair, et redemande le mot de passe à chaque fois.
+
+Le reste — chat, vocal avec son moteur complet (Opus, DeepFilterNet, annulation
+d'écho, docteur), fichiers, photos, carnet de serveurs, anti-veille en vocal
+(`caffeinate`), mise à jour signée — est le même code que sous Windows.
+
 ### Mise à jour automatique
 
 Au démarrage, le client demande à GitHub la dernière release publiée et
@@ -465,6 +526,11 @@ balayé au démarrage suivant — moment où il n'est plus chargé. Un
 téléchargement tronqué (connexion coupée) est rejeté sur sa taille au lieu
 d'être installé : mieux vaut pas de mise à jour qu'un binaire à moitié écrit.
 
+Sur macOS, l'actif est l'archive du paquet entier (`ki-chat-macos.tar.gz`),
+et c'est `ki-chat.app` qui est remplacé par le même jeu de renommages, dans
+`~/Applications`. L'archive est vérifiée avant d'être déballée ; le déballage
+refuse de lui-même tout chemin qui sortirait du dossier.
+
 La vérification part sur un fil séparé et ne retarde pas l'ouverture de la
 fenêtre ; sans réseau, elle échoue en silence.
 
@@ -472,7 +538,7 @@ fenêtre ; sans réseau, elle échoue en silence.
 exécutable ne peut pas se contenter de TLS : quiconque obtient le droit de
 publier une release — compte compromis, jeton d'action fuité, actif remplacé
 après coup — exécuterait du code arbitraire chez tout le monde. Chaque release
-porte donc une **signature Ed25519** (`ki-chat.exe.sig`), que le client vérifie
+porte donc une **signature Ed25519** (`ki-chat.exe.sig`, `ki-chat-macos.tar.gz.sig`), que le client vérifie
 avec une clé publique gravée dans son propre binaire avant de remplacer quoi
 que ce soit. La clé privée ne vit que dans le coffre de GitHub.
 
@@ -493,19 +559,35 @@ signer et vérifier ne se verrait qu'en production, sur les machines des autres.
 1. Monter `version` dans le `Cargo.toml` de la racine ;
 2. `git tag v0.2.0 && git push --tags`.
 
-Le workflow [`release.yml`](.github/workflows/release.yml) compile, fabrique
-l'installeur (Inno Setup) et publie `ki-chat.exe` + `ki-chat-setup.exe` +
-`ki-chat.exe.sig` sur la release ; le même tag construit l'image docker du
-serveur. Il **refuse de publier si le tag et le `Cargo.toml` divergent** : un
+Le workflow [`release.yml`](.github/workflows/release.yml) compile sur
+Windows et sur macOS, fabrique les installeurs (Inno Setup d'un côté,
+`installer/macos/build-app.sh` de l'autre : paquet `.app`, archive et
+assistant `.pkg`) et publie d'un seul geste `ki-chat.exe` +
+`ki-chat-setup.exe` + `ki-chat.exe.sig` et `ki-chat-macos.tar.gz` +
+`ki-chat-macos.pkg` + `ki-chat-macos.tar.gz.sig` sur la release ; le même tag
+construit l'image docker du serveur. Il **refuse de publier si le tag et le `Cargo.toml` divergent** : un
 client à jour comparerait alors sa version à une étiquette plus haute et se
 croirait perpétuellement en retard, à proposer en boucle une mise à jour déjà
 installée.
 
 L'icône de l'application n'est pas un fichier du dépôt : elle est rendue par
-[`build.rs`](crates/client-gui/build.rs) aux sept tailles que réclame le shell,
-avec le code qui dessine déjà l'icône de fenêtre
+[`build.rs`](crates/client-gui/build.rs) aux sept tailles que réclame le shell
+Windows — et, sur macOS, en un dossier `.iconset` de dix PNG que `iconutil`
+assemble en `.icns` — avec le code qui dessine déjà l'icône de fenêtre
 ([`appicon.rs`](crates/client-gui/src/appicon.rs)). Un seul dessin, rien à
 régénérer à la main.
+
+**Compiler sur un Mac.** Le coureur de release est Apple Silicon et compile
+aussi la tranche Intel (`--target x86_64-apple-darwin`), que `lipo` recolle.
+En local, `.cargo/config.toml` grave les chemins Windows de cmake et de nasm :
+il faut les recouvrir par ceux du Mac —
+
+```bash
+CMAKE=cmake NASM=nasm cargo build --release -p ki-client-gui && installer/macos/build-app.sh
+```
+
+(`cmake` par Homebrew ou `pip3 install cmake` ; `nasm` est facultatif tant
+que la capture d'écran n'existe pas sur Mac, puisque rien n'y encode.)
 
 ## Lancer
 
@@ -861,4 +943,5 @@ Coûts réels pour ~30 personnes :
 - [x] **S1–S2** — partage d'écran (0.1.17 → 0.1.23) : protocole et relais SFU vidéo, diffusion et visionnage, badge à côté du pseudo et réglages de diffusion, réduction d'image, NVENC sans SDK, capture qui ne demande à Windows que ce qu'il sait faire
 - [x] **M11** — overlay « qui parle » par-dessus le jeu (0.1.24), désactivé de base (0.1.25)
 - [x] **S3, entamé** — le son du jeu dans le stream (0.1.25) ; la vidéo en retard qui ne fait plus la queue devant la voix (0.1.26)
+- [x] **M12** — livraison macOS (0.1.30) : le client compile hors Windows (capture, NVENC, son du jeu, coffre, veille derrière leurs `#[cfg]`, chacun avec un remplaçant qui dit ce qu'il ne sait pas faire), exécutable universel, paquet `ki-chat.app` avec icône et demande d'accès au micro, installation en une ligne dans `~/Applications` sans mot de passe, assistant `.pkg`, mise à jour signée qui remplace le paquet entier
 - [ ] **Idées** : débit vidéo qui s'adapte à la connexion la plus courte du salon, synchronisation image/son, stéréo chez le spectateur, statut « en jeu », raccourcis globaux muet/sourdine, clip des 30 dernières secondes, stockage S3 des médias

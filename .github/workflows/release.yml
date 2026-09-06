@@ -1,10 +1,14 @@
-# Compile l'application de bureau et publie la release Windows.
+# Compile l'application de bureau pour Windows et macOS, et publie la release.
 #
 # C'est cette release que le client interroge au démarrage : il télécharge
-# l'actif nommé exactement `ki-chat.exe` et compare l'étiquette du tag à la
-# version gravée dans son binaire. Les deux doivent donc coïncider, sans quoi
-# un client à jour se croirait indéfiniment en retard — d'où le contrôle qui
-# ouvre le travail.
+# l'actif nommé exactement `ki-chat.exe` (Windows) ou `ki-chat-macos.tar.gz`
+# (macOS) et compare l'étiquette du tag à la version gravée dans son binaire.
+# Les deux doivent donc coïncider, sans quoi un client à jour se croirait
+# indéfiniment en retard — d'où le contrôle qui ouvre chaque compilation.
+#
+# Trois travaux : `windows` et `macos` compilent et déposent leurs artefacts ;
+# `publish` attend les deux et crée la release d'un seul geste — deux
+# travaux qui créeraient chacun la release se marcheraient dessus.
 
 name: release
 
@@ -155,24 +159,125 @@ jobs:
             target/x86_64-pc-windows-msvc/release/ki-chat.exe.sig
             installer/Output/ki-chat-setup.exe
 
+  # ---------------------------------------------------------------------
+  # macOS : un exécutable universel (puces Apple et Intel dans le même
+  # fichier), assemblé en `ki-chat.app`, livré archivé (c'est l'actif de
+  # mise à jour) et sous forme d'assistant `.pkg`.
+  #
+  # Un seul coureur, Apple Silicon, compile les deux architectures : la
+  # chaîne Rust sait viser l'autre, et les bibliothèques C (opus, speexdsp,
+  # openh264) passent par cmake et cc, qui suivent la cible. `lipo` recolle
+  # les deux tranches. Un seul actif à publier, un seul à télécharger.
+  # ---------------------------------------------------------------------
+  macos:
+    needs: ci
+    runs-on: macos-latest
+    env:
+      # `.cargo/config.toml` grave les chemins Windows de cmake et de nasm
+      # (ceux d'une machine précise, sans `force`) : ici, ceux du PATH.
+      CMAKE: cmake
+      NASM: nasm
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Établir la version
+        id: version
+        run: |
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            tag="${{ github.ref_name }}"; tag="${tag#v}"
+            if [[ "$tag" != "$manifest" ]]; then
+              echo "::error::tag $tag mais Cargo.toml en $manifest : un client à jour se croirait perpétuellement en retard"
+              exit 1
+            fi
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+          echo "version $manifest"
+
+      # nasm : sans lui, openh264 compile quand même mais encode ~3× plus
+      # lentement — dégradation silencieuse à interdire. cmake est déjà sur
+      # les coureurs macOS.
+      - name: Installer nasm
+        run: brew install nasm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compiler (puces Apple)
+        run: cargo build --release --locked --target aarch64-apple-darwin -p ki-client-gui
+
+      - name: Compiler (Intel)
+        run: cargo build --release --locked --target x86_64-apple-darwin -p ki-client-gui
+
+      - name: Recoller en exécutable universel
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/ki-chat \
+            target/x86_64-apple-darwin/release/ki-chat \
+            -output target/ki-chat-universal
+          lipo -info target/ki-chat-universal
+
+      - name: Construire le paquet, l'archive et l'assistant
+        run: installer/macos/build-app.sh target/ki-chat-universal
+
+      # Même signature Ed25519 que sous Windows, sur l'archive entière : c'est
+      # elle que le client télécharge et vérifie avant de déballer quoi que
+      # ce soit. Même signeur, même clé, même règle : sans le secret, on
+      # prévient et on ne signe pas (deploy/SIGNATURE.md).
+      - name: Signer l'archive
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [[ -z "$SIGNING_KEY" ]]; then
+            echo "::warning::RELEASE_SIGNING_KEY absent : release macOS NON SIGNÉE (deploy/SIGNATURE.md)"
+            exit 0
+          fi
+          archive=installer/Output/ki-chat-macos.tar.gz
+          cargo run --release --locked --target aarch64-apple-darwin -p ki-client-gui --example signer -- "$archive" "$archive.sig"
+          test -s "$archive.sig"
+
+      - name: Déposer les artefacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ki-chat-macos
+          path: |
+            installer/Output/ki-chat-macos.tar.gz
+            installer/Output/ki-chat-macos.tar.gz.sig
+            installer/Output/ki-chat-macos.pkg
+
+  # ---------------------------------------------------------------------
+  # La release elle-même, une fois que tout le monde a livré.
+  # ---------------------------------------------------------------------
+  publish:
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: artefacts
+
       - name: Publier la release
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $files = @(
-            "target\$env:TARGET\release\ki-chat.exe",
-            "installer\Output\ki-chat-setup.exe"
-          )
-          # Le client la cherche sous ce nom exact, a cote de l'executable.
-          $sig = "target\$env:TARGET\release\ki-chat.exe.sig"
-          if (Test-Path $sig) { $files += $sig }
+          tag="${{ github.ref_name }}"
+          # Les noms sont ceux que les clients cherchent — `ki-chat.exe`,
+          # `ki-chat-macos.tar.gz` — et leurs signatures à côté. Une
+          # signature absente (secret non posé) n'empêche pas de publier.
+          files=$(find artefacts -type f \( -name 'ki-chat.exe' -o -name 'ki-chat.exe.sig' \
+            -o -name 'ki-chat-setup.exe' -o -name 'ki-chat-macos.tar.gz' \
+            -o -name 'ki-chat-macos.tar.gz.sig' -o -name 'ki-chat-macos.pkg' \))
+          echo "$files"
           # Le tag peut avoir été poussé après une release créée à la main.
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @files --clobber
-          } else {
-            gh release create $tag @files --title $tag --generate-notes
-          }
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" $files --clobber
+          else
+            gh release create "$tag" $files --title "$tag" --generate-notes
+          fi

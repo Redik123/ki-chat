@@ -24,8 +24,8 @@ pub mod resample;
 pub mod silero;
 #[cfg(windows)]
 mod wasapi;
-/// Le son du jeu dans le stream : capture en boucle et lecteur.
-#[cfg(windows)]
+/// Le son du jeu dans le stream : capture en boucle (Windows) et lecteur
+/// (partout).
 pub mod jeu;
 
 use std::collections::HashMap;
@@ -88,6 +88,9 @@ pub fn journal(msg: String) {
 /// Comme `journal`, mais avale les répétitions immédiates : les échecs
 /// réessayés à la seconde (micro débranché, moteur natif indisponible)
 /// rempliraient sinon le journal à eux seuls et en évinceraient l'histoire.
+///
+/// Ses appelants sont tous du côté WASAPI : ailleurs, elle attend.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn journal_if_new(msg: String) {
     let mut last = LAST_DEDUP.lock().unwrap();
     if *last == msg {
@@ -1327,10 +1330,13 @@ fn capture_loop(
                 sh.input_lost.store(false, Ordering::Relaxed);
                 sh.input_fallback.store(parts.fallback, Ordering::Relaxed);
                 // Ce qui s'est réellement ouvert, et non ce qu'on a demandé.
+                #[cfg(windows)]
                 sh.counters.native_ok.store(
                     matches!(parts.stream, InputStream::Native(_)),
                     Ordering::Relaxed,
                 );
+                #[cfg(not(windows))]
+                sh.counters.native_ok.store(false, Ordering::Relaxed);
                 parts
             }
             Err(e) => {
@@ -2483,7 +2489,7 @@ fn open_output(
         }
     }
     #[cfg(not(windows))]
-    let _ = native;
+    let _ = (native, robust);
     let host = cpal::default_host();
     let (device, fallback) = pick_device(&host, device_name, false);
     if fallback {

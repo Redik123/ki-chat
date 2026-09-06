@@ -15,6 +15,11 @@
 //! Tout se joue à côté de l'exécutable, sans élévation : l'installeur pose
 //! l'application dans le profil de l'utilisateur (`%LOCALAPPDATA%`), pas dans
 //! `Program Files`, précisément pour qu'elle puisse se remplacer toute seule.
+//!
+//! Sur macOS, c'est le paquet `ki-chat.app` entier qui est remplacé — la
+//! release le livre archivé — par le même jeu de renommages, dans
+//! `~/Applications`, où l'installeur le pose pour la même raison. Tout ce qui
+//! dépend du système tient dans le module `plateforme`, en bas.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,10 +31,25 @@ use eframe::egui;
 
 /// Dépôt qui publie les releases.
 const REPO: &str = "Redik123/ki-chat";
-/// Nom de l'exécutable attaché à chaque release.
+/// Nom de l'actif attaché à chaque release, et de sa signature détachée,
+/// publiée à côté. Un par plateforme : le client ne regarde que le sien.
+#[cfg(windows)]
 const ASSET: &str = "ki-chat.exe";
-/// Signature détachée de l'exécutable, publiée à côté de lui.
+#[cfg(windows)]
 const SIGNATURE_ASSET: &str = "ki-chat.exe.sig";
+/// macOS : l'application entière, archivée. Un exécutable nu ne suffirait
+/// pas — l'icône, l'identité et la demande d'accès au micro vivent dans le
+/// paquet `.app`, et c'est lui que le Finder et le Dock connaissent.
+#[cfg(target_os = "macos")]
+const ASSET: &str = "ki-chat-macos.tar.gz";
+#[cfg(target_os = "macos")]
+const SIGNATURE_ASSET: &str = "ki-chat-macos.tar.gz.sig";
+/// Pas de release publiée pour les autres systèmes : la vérification
+/// conclut « pas d'actif pour moi » et se tait, comme sans réseau.
+#[cfg(not(any(windows, target_os = "macos")))]
+const ASSET: &str = "ki-chat-linux";
+#[cfg(not(any(windows, target_os = "macos")))]
+const SIGNATURE_ASSET: &str = "ki-chat-linux.sig";
 
 /// Clé publique Ed25519 des releases, en hexadécimal (32 octets, 64
 /// caractères). Vide = vérification pas encore activée.
@@ -126,7 +146,7 @@ impl Updater {
     /// Lance la vérification en tâche de fond. Ne bloque jamais le démarrage :
     /// l'application s'ouvre pendant que la requête part.
     pub fn start(skipped: Option<String>, ctx: egui::Context) -> Self {
-        sweep();
+        plateforme::sweep();
 
         let state = Arc::new(Mutex::new(Status::Idle));
         let slot = state.clone();
@@ -167,7 +187,8 @@ impl Updater {
                 // qu'il arrive : un binaire non signé ne doit pas rester à
                 // traîner à côté de l'exécutable sous un nom presque
                 // identique.
-                let verdict = verify(&staged, &release).and_then(|()| install(&staged));
+                let verdict =
+                    verify(&staged, &release).and_then(|()| plateforme::install(&staged));
                 let _ = std::fs::remove_file(&staged);
                 verdict
             });
@@ -227,17 +248,6 @@ pub fn relaunch_if_requested() {
     }
 }
 
-/// Efface ce qu'une mise à jour a laissé derrière elle : le binaire écarté,
-/// et un téléchargement resté en plan. Au démarrage, plus rien de tout ça
-/// n'est chargé, donc tout est effaçable.
-fn sweep() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let _ = std::fs::remove_file(exe.with_extension("old"));
-    let _ = std::fs::remove_file(exe.with_extension("new"));
-}
-
 /// Interroge GitHub. `Ok(None)` = on est déjà à jour.
 fn fetch_latest() -> anyhow::Result<Option<Release>> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
@@ -290,7 +300,7 @@ fn fetch_latest() -> anyhow::Result<Option<Release>> {
 /// remplacement se fera par un simple renommage, sans copie ni fenêtre où le
 /// fichier serait à moitié écrit.
 fn download(release: &Release, state: &Arc<Mutex<Status>>) -> anyhow::Result<PathBuf> {
-    let staged = std::env::current_exe()?.with_extension("new");
+    let staged = plateforme::staged()?;
 
     // `DOWNLOAD_TIMEOUT` et non `TIMEOUT` : trente mégaoctets ne passent pas
     // en dix secondes sur une ligne ordinaire. Mais un délai il en faut un —
@@ -416,27 +426,149 @@ fn parse_signature(raw: &[u8]) -> anyhow::Result<ed25519_dalek::Signature> {
     Ok(ed25519_dalek::Signature::from_bytes(&bytes))
 }
 
-/// Met le binaire téléchargé à la place du binaire courant.
-fn install(staged: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    let old = exe.with_extension("old");
-    let _ = std::fs::remove_file(&old);
+// ---------------------------------------------------------------------
+// Ce qui dépend du système : où télécharger, quoi balayer, comment
+// remplacer. Trois fonctions, deux versions.
+// ---------------------------------------------------------------------
 
-    std::fs::rename(&exe, &old).map_err(|e| {
-        anyhow::anyhow!("écriture impossible dans {} : {e}", parent(&exe))
-    })?;
-    if let Err(e) = std::fs::rename(staged, &exe) {
-        // Remettre l'ancien en place : une version dépassée vaut mieux
-        // qu'un dossier d'installation sans exécutable.
-        let _ = std::fs::rename(&old, &exe);
-        anyhow::bail!("remplacement impossible : {e}");
+/// Windows (et tout ce qui n'est pas macOS) : l'actif est l'exécutable
+/// lui-même, remplacé à côté de lui.
+#[cfg(not(target_os = "macos"))]
+mod plateforme {
+    use std::path::{Path, PathBuf};
+
+    /// Le téléchargement se pose à côté de l'exécutable — même volume, donc
+    /// le remplacement sera un simple renommage, sans copie ni fenêtre où
+    /// le fichier serait à moitié écrit.
+    pub fn staged() -> anyhow::Result<PathBuf> {
+        Ok(std::env::current_exe()?.with_extension("new"))
     }
-    Ok(())
+
+    /// Efface ce qu'une mise à jour a laissé derrière elle : le binaire
+    /// écarté, et un téléchargement resté en plan. Au démarrage, plus rien
+    /// de tout ça n'est chargé, donc tout est effaçable.
+    pub fn sweep() {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let _ = std::fs::remove_file(exe.with_extension("old"));
+        let _ = std::fs::remove_file(exe.with_extension("new"));
+    }
+
+    /// Met le binaire téléchargé à la place du binaire courant.
+    pub fn install(staged: &Path) -> anyhow::Result<()> {
+        let exe = std::env::current_exe()?;
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+
+        std::fs::rename(&exe, &old).map_err(|e| {
+            anyhow::anyhow!("écriture impossible dans {} : {e}", parent(&exe))
+        })?;
+        if let Err(e) = std::fs::rename(staged, &exe) {
+            // Remettre l'ancien en place : une version dépassée vaut mieux
+            // qu'un dossier d'installation sans exécutable.
+            let _ = std::fs::rename(&old, &exe);
+            anyhow::bail!("remplacement impossible : {e}");
+        }
+        Ok(())
+    }
+
+    /// Dossier d'un chemin, pour les messages d'erreur.
+    fn parent(path: &Path) -> String {
+        path.parent().unwrap_or(path).display().to_string()
+    }
 }
 
-/// Dossier d'un chemin, pour les messages d'erreur.
-fn parent(path: &Path) -> String {
-    path.parent().unwrap_or(path).display().to_string()
+/// macOS : l'actif est une archive du paquet `ki-chat.app`, et c'est le
+/// paquet entier qui est remplacé, à côté de lui-même.
+///
+/// Le renommage d'un paquet dont l'exécutable tourne est permis — macOS ne
+/// verrouille pas les fichiers ouverts — et l'exécutable en cours continue
+/// de vivre sur son ancien inode jusqu'au redémarrage. Le résidu est balayé
+/// tout de suite si possible, au démarrage suivant sinon.
+#[cfg(target_os = "macos")]
+mod plateforme {
+    use std::path::{Path, PathBuf};
+
+    /// Le paquet qui contient l'exécutable courant :
+    /// `ki-chat.app/Contents/MacOS/ki-chat`, trois niveaux au-dessus.
+    ///
+    /// Hors d'un paquet (`cargo run`, binaire nu), il n'y a rien à
+    /// remplacer proprement : on le dit, et l'utilisateur fait à la main.
+    fn bundle() -> anyhow::Result<PathBuf> {
+        let exe = std::env::current_exe()?;
+        exe.ancestors()
+            .nth(3)
+            .filter(|p| p.extension().is_some_and(|e| e == "app"))
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "l'exécutable ne tourne pas depuis un paquet .app : mise à jour à la main"
+                )
+            })
+    }
+
+    /// `ki-chat.app.download`, à côté du paquet : même volume, donc le
+    /// remplacement final sera un renommage.
+    pub fn staged() -> anyhow::Result<PathBuf> {
+        Ok(bundle()?.with_extension("app.download"))
+    }
+
+    pub fn sweep() {
+        let Ok(bundle) = bundle() else {
+            return;
+        };
+        let _ = std::fs::remove_dir_all(bundle.with_extension("app.old"));
+        let _ = std::fs::remove_dir_all(bundle.with_extension("app.new"));
+        let _ = std::fs::remove_file(bundle.with_extension("app.download"));
+    }
+
+    /// Déballe l'archive vérifiée à côté du paquet, puis échange les deux.
+    pub fn install(staged: &Path) -> anyhow::Result<()> {
+        let bundle = bundle()?;
+        let fresh = bundle.with_extension("app.new");
+        let old = bundle.with_extension("app.old");
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::remove_dir_all(&old);
+
+        // `unpack` refuse de lui-même les chemins qui sortiraient du
+        // dossier (`..`, absolus) : l'archive a beau être signée, elle est
+        // déballée comme si elle ne l'était pas.
+        let fichier = std::fs::File::open(staged)?;
+        tar::Archive::new(flate2::read::GzDecoder::new(fichier))
+            .unpack(&fresh)
+            .map_err(|e| anyhow::anyhow!("déballage dans {} : {e}", fresh.display()))?;
+
+        let app = std::fs::read_dir(&fresh)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+            .ok_or_else(|| anyhow::anyhow!("l'archive ne contient pas d'application"))?;
+        anyhow::ensure!(
+            app.join("Contents").join("MacOS").join("ki-chat").is_file(),
+            "l'archive ne contient pas l'exécutable attendu"
+        );
+
+        std::fs::rename(&bundle, &old).map_err(|e| {
+            anyhow::anyhow!("écriture impossible dans {} : {e}", parent(&bundle))
+        })?;
+        if let Err(e) = std::fs::rename(&app, &bundle) {
+            // Remettre l'ancien en place : une version dépassée vaut mieux
+            // qu'un dossier Applications sans ki-chat.
+            let _ = std::fs::rename(&old, &bundle);
+            anyhow::bail!("remplacement impossible : {e}");
+        }
+        // Le ménage, tout de suite si le système le permet ; `sweep` finira
+        // au prochain démarrage sinon.
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::remove_dir_all(&old);
+        Ok(())
+    }
+
+    /// Dossier d'un chemin, pour les messages d'erreur.
+    fn parent(path: &Path) -> String {
+        path.parent().unwrap_or(path).display().to_string()
+    }
 }
 
 /// `a` est-il strictement postérieur à `b` ?
