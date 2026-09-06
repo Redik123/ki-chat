@@ -66,6 +66,8 @@ png = "0.18"
 [target.'cfg(target_os = "macos")'.dependencies]
 flate2 = "1"
 tar = "0.4"
+# Le Trousseau (Security.framework) : il garde la clé du coffre à secrets.
+security-framework = "3"
 
 # Le nom de la machine (empreinte « même machine » du son du jeu), que la
 # libc donne — Unix ne l'exporte pas dans l'environnement d'une application

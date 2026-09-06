@@ -285,13 +285,15 @@ dimensions et en allocation, ce qui neutralise les bombes de décompression.
 
 **Mots de passe mémorisés côté client** : jamais en clair sur le disque. Le
 client les confie au coffre natif du système — DPAPI sur Windows, qui dérive
-la clé de la session de l'utilisateur sans jamais l'exposer au processus. Le
-blob stocké est donc illisible sur une autre machine **et** sous un autre
-compte du même poste, même si le fichier de configuration est copié.
-`crates/client-gui/src/secret.rs` isole ce mécanisme derrière une porte
-unique (`protect` / `reveal` / `available`) : brancher le Trousseau macOS/iOS
-ou le Keystore Android sera un `#[cfg]` de plus, pas une refonte. Là où aucun
-coffre n'existe, on refuse simplement de mémoriser — pas de repli en clair.
+la clé de la session de l'utilisateur sans jamais l'exposer au processus ; le
+Trousseau sur macOS, qui garde une clé tirée au hasard avec laquelle les
+secrets sont chiffrés (XChaCha20-Poly1305), une seule entrée « ki-chat » et
+une seule autorisation à donner. Le blob stocké est donc illisible sur une
+autre machine **et** sous un autre compte du même poste, même si le fichier de
+configuration est copié. `crates/client-gui/src/secret.rs` isole ce mécanisme
+derrière une porte unique (`protect` / `reveal` / `available`) : brancher le
+Keystore Android sera un `#[cfg]` de plus, pas une refonte. Là où aucun coffre
+n'existe, on refuse simplement de mémoriser — pas de repli en clair.
 
 > Dériver la clé d'un identifiant matériel (adresse MAC, numéro de série) a
 > été écarté : ces valeurs ne sont pas secrètes — la MAC est diffusée dans
@@ -501,14 +503,16 @@ accordée, sans redémarrer.
   l'équivalent serait ScreenCaptureKit) — **regarder** la diffusion d'un
   autre, avec son son, marche ;
 - le son du jeu dans le stream (boucle WASAPI par processus) ;
-- l'overlay « qui parle » par-dessus le jeu, et le mode exclusif du micro ;
-- mémoriser un mot de passe : le coffre à secrets est DPAPI, le Trousseau n'est
-  pas encore branché — le client refuse de mémoriser plutôt que d'écrire en
-  clair, et redemande le mot de passe à chaque fois.
+- l'overlay « qui parle » par-dessus le jeu, et le mode exclusif du micro.
 
 Le reste — chat, vocal avec son moteur complet (Opus, DeepFilterNet, annulation
-d'écho, docteur), fichiers, photos, carnet de serveurs, anti-veille en vocal
-(`caffeinate`), mise à jour signée — est le même code que sous Windows.
+d'écho, docteur), fichiers, photos, carnet de serveurs, mots de passe
+mémorisés dans le Trousseau, anti-veille en vocal (`caffeinate`), mise à jour
+signée — est le même code que sous Windows.
+
+> Le Trousseau demande une fois « ki-chat veut utiliser vos informations
+> confidentielles » : répondre *Toujours autoriser*. Le paquet étant signé ad
+> hoc, la question revient après chaque mise à jour — une fois.
 
 ### Mise à jour automatique
 
@@ -933,7 +937,7 @@ Coûts réels pour ~30 personnes :
 - [x] **M6.1** — carnet de serveurs (`servers.rs`) : plusieurs serveurs nommés dans un seul client, identifiants (et mot de passe, si demandé) mémorisés par serveur, état et ping mesurés **avant** de se connecter par une poignée de main QUIC de test
 - [x] **M6.5** — salons textuels et vocaux distincts : le vocal se rejoint à la demande, plus à la connexion ; liste des connectés au serveur en colonne de droite, occupants affichés sous chaque salon vocal
 - [x] **M6.4** — photos de profil : chacun choisit la sienne depuis « Mon compte », le serveur la range dans le compte (`data/users.json`) et la diffuse ; la liste des membres ne porte qu'une empreinte, le client ne réclame que les vignettes qui lui manquent
-- [x] **M6.3** — mots de passe mémorisés scellés par le coffre natif (DPAPI sur Windows), derrière une abstraction prête pour le Trousseau macOS/iOS et le Keystore Android ; les anciens mots de passe en clair sont chiffrés au chargement et effacés du fichier
+- [x] **M6.3** — mots de passe mémorisés scellés par le coffre natif (DPAPI sur Windows, Trousseau sur macOS depuis M12), derrière une abstraction prête pour le Keystore Android ; les anciens mots de passe en clair sont chiffrés au chargement et effacés du fichier
 - [x] **M6.2** — identité de serveur : nom + logo persistés côté serveur (`data/server.json`), réglés par les admins et poussés à tous les membres ; vignette PNG 64×64 aux coins arrondis, monogramme coloré à défaut. Côté client, seul un **alias local** est modifiable — le logo ne l'est pas, pour qu'un serveur ne puisse pas en imiter un autre
 - [x] **M7** — livraison Windows : exécutable autonome (CRT statique, aucune dépendance à installer), icône et manifeste gravés dans le binaire, installeur Inno Setup sans droits d'administrateur, mise à jour automatique depuis les releases GitHub (proposée, jamais imposée), workflow de publication sur tag
 - [x] **M8** — modération et traçabilité : bannissement avec **motif et durée** (levée automatique à l'expiration, constatée à la connexion suivante), annulation d'un ban, expulsion motivée ; invitations à **usages multiples ou permanentes**, étiquetables et révocables, conservées une fois épuisées ; **journal d'audit** (`data/audit.jsonl`) consignant qui est entré par quel lien, et toute action d'administration ; panneau admin réorganisé en onglets. Robustesse au passage : écritures de fichiers atomiques, anti-spam du chat, sauvegardes sorties de la boucle asynchrone
@@ -943,5 +947,5 @@ Coûts réels pour ~30 personnes :
 - [x] **S1–S2** — partage d'écran (0.1.17 → 0.1.23) : protocole et relais SFU vidéo, diffusion et visionnage, badge à côté du pseudo et réglages de diffusion, réduction d'image, NVENC sans SDK, capture qui ne demande à Windows que ce qu'il sait faire
 - [x] **M11** — overlay « qui parle » par-dessus le jeu (0.1.24), désactivé de base (0.1.25)
 - [x] **S3, entamé** — le son du jeu dans le stream (0.1.25) ; la vidéo en retard qui ne fait plus la queue devant la voix (0.1.26)
-- [x] **M12** — livraison macOS (0.1.30) : le client compile hors Windows (capture, NVENC, son du jeu, coffre, veille derrière leurs `#[cfg]`, chacun avec un remplaçant qui dit ce qu'il ne sait pas faire), exécutable universel, paquet `ki-chat.app` avec icône et demande d'accès au micro, installation en une ligne dans `~/Applications` sans mot de passe, assistant `.pkg`, mise à jour signée qui remplace le paquet entier
+- [x] **M12** — livraison macOS (0.1.30) : le client compile hors Windows (capture, NVENC, son du jeu, coffre, veille derrière leurs `#[cfg]`, chacun avec un remplaçant qui dit ce qu'il ne sait pas faire), exécutable universel, paquet `ki-chat.app` avec icône et demande d'accès au micro, installation en une ligne dans `~/Applications` sans mot de passe, assistant `.pkg`, mise à jour signée qui remplace le paquet entier, mots de passe mémorisés dans le Trousseau
 - [ ] **Idées** : débit vidéo qui s'adapte à la connexion la plus courte du salon, synchronisation image/son, stéréo chez le spectateur, statut « en jeu », raccourcis globaux muet/sourdine, clip des 30 dernières secondes, stockage S3 des médias
