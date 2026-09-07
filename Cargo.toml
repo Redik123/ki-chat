@@ -12,6 +12,9 @@ members = [
     "crates/client-gui",
     "crates/load",
 ]
+# Le harnais de fuzzing du protocole a sa propre chaîne (nightly, libFuzzer)
+# et son propre espace de travail : voir crates/protocol/fuzz/README.md.
+exclude = ["crates/protocol/fuzz"]
 
 [workspace.package]
 version = "0.1.29"

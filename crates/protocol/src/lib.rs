@@ -1400,7 +1400,10 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 }
 
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    // `from_str_radix` accepte un signe devant le nombre : « +a » se lisait
+    // comme 0x0a. Trouvé par le fuzzing (crates/protocol/fuzz). Un
+    // hexadécimal, c'est des chiffres hexadécimaux et rien d'autre.
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..s.len())
@@ -1412,6 +1415,22 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L'hexadécimal, strictement : ce que `hex_encode` écrit, en
+    /// majuscules ou non — et pas le « +a » que `from_str_radix` tolère.
+    #[test]
+    fn hex_decode_ne_prend_que_des_chiffres_hexadecimaux() {
+        assert_eq!(hex_decode("0aFF"), Some(vec![0x0a, 0xff]));
+        assert_eq!(hex_decode(""), Some(vec![]));
+        assert_eq!(hex_decode("+a"), None);
+        assert_eq!(hex_decode("-1"), None);
+        assert_eq!(hex_decode(" a"), None);
+        assert_eq!(hex_decode("abc"), None);
+        assert_eq!(hex_decode("zz"), None);
+        assert_eq!(hex_decode("é"), None);
+        let octets: Vec<u8> = (0..=255).collect();
+        assert_eq!(hex_decode(&hex_encode(&octets)).as_deref(), Some(octets.as_slice()));
+    }
 
     /// Un journal d'avant les réactions se relit tel quel, et un message
     /// d'aujourd'hui fait l'aller-retour avec sa réponse et ses réactions.

@@ -1,0 +1,57 @@
+# CodeQL : analyse statique du code Rust, à la recherche de flux de données
+# non fiables vers des endroits sensibles — un chemin de fichier venu du
+# réseau, un secret dans un journal, une archive déballée sans contrôle.
+#
+# « Advanced setup » : ce fichier tient lieu de configuration. Ne pas
+# activer en plus le « Default setup » dans les réglages du dépôt, les deux
+# se marcheraient dessus.
+#
+# `build-mode: none` : pour Rust, CodeQL lit les sources sans compiler —
+# donc sans cmake, sans nasm, sans les crates Windows, et en quelques
+# minutes sur un coureur Linux. Ce qui est derrière un #[cfg(windows)] est
+# lu aussi.
+#
+# Ce que CodeQL ne voit pas : la sûreté mémoire de l'unsafe (WASAPI, NVENC),
+# et la logique du protocole — c'est le rôle du fuzzing (ci.yml, job fuzz).
+
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Le lundi matin : les requêtes de CodeQL évoluent même quand le code
+    # ne bouge pas.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyse (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+          build-mode: none
+          # `security-extended` : les requêtes de précision moyenne en plus
+          # des sûres. Quelques faux positifs à trier, mais c'est là que
+          # sont les flux qui nous intéressent.
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:rust"

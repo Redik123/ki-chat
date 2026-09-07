@@ -142,6 +142,75 @@ jobs:
         run: cargo test -p ki-client-gui --locked
 
   # ---------------------------------------------------------------------
+  # Les dépendances : avis de sécurité RustSec, licences, sources. Plus de
+  # mille crates dans l'arbre — c'est par là qu'une faille connue arrive,
+  # et personne ne relit le Cargo.lock à la main. Politique : deny.toml.
+  # ---------------------------------------------------------------------
+  deny:
+    name: dépendances (cargo deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # ---------------------------------------------------------------------
+  # Fuzzing du protocole : ce que le serveur lit d'un client qu'il ne
+  # connaît pas encore, et ce que le client lit d'un serveur qu'il n'a pas
+  # à croire. Une minute par cible à chaque poussée — pas pour explorer (le
+  # corpus repart de zéro), pour attraper une régression sur ce que le
+  # fuzzing a déjà trouvé une fois. Voir crates/protocol/fuzz/README.md.
+  # ---------------------------------------------------------------------
+  fuzz:
+    name: fuzzing du protocole
+    if: ${{ !inputs.only_server }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # libFuzzer réclame nightly (-Zsanitizer) ; le reste du dépôt n'en
+      # dépend pas.
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/protocol/fuzz
+          # cargo-fuzz lui-même vit dans ~/.cargo/bin, que le cache garde.
+          cache-bin: true
+
+      - name: Installer cargo-fuzz
+        run: command -v cargo-fuzz >/dev/null || cargo install cargo-fuzz --locked
+
+      - name: Fuzzer chaque cible une minute
+        working-directory: crates/protocol
+        run: |
+          for cible in texte image datagrammes messages; do
+            echo "::group::$cible"
+            # libFuzzer exige que le dossier de corpus existe déjà.
+            mkdir -p fuzz/corpus/"$cible"
+            graines=fuzz/seeds/$cible
+            [ -d "$graines" ] || graines=""
+            cargo fuzz run "$cible" fuzz/corpus/"$cible" $graines -- -max_total_time=60 -rss_limit_mb=2048
+            echo "::endgroup::"
+          done
+
+      # Une entrée qui fait planter est un fichier de quelques octets : on
+      # le garde, c'est lui qui permet de rejouer le plantage en local.
+      - name: Conserver les entrées fautives
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artefacts
+          path: crates/protocol/fuzz/artifacts
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------
   # Linux : le serveur seul, parce que c'est là qu'il tourne pour de vrai.
   #
   # `docker.yml` le compile déjà, mais dans un conteneur, sans exécuter ses

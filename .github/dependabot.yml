@@ -1,0 +1,29 @@
+# Dependabot : les mises à jour de dépendances, proposées en pull requests.
+#
+# Deux écosystèmes : les crates Rust (Cargo.lock) et les actions des
+# workflows. Une fois par semaine, groupées, pour que la boîte de réception
+# ne se remplisse pas d'une PR par crate — l'arbre en compte plus de mille.
+# Les alertes de sécurité, elles, ne passent pas par ce fichier : GitHub les
+# lève de lui-même sur un dépôt public dès que Dependabot est activé.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      rust:
+        patterns: ["*"]
+    # Les versions majeures cassent : on les regarde à la main.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]

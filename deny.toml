@@ -1,0 +1,75 @@
+# cargo-deny : ce que l'on accepte dans l'arbre des dépendances.
+#
+#   cargo deny check          en local (cargo install cargo-deny)
+#
+# Quatre contrôles. Les avis de sécurité (RustSec) sont le vrai sujet : plus
+# de mille crates dans l'arbre, c'est par là qu'une faille connue arrive. Les
+# licences ensuite, parce que le dépôt est public et sous MIT. Les sources,
+# pour qu'une dépendance git ne se glisse pas sans être nommée ici. Les
+# doublons de versions, en avertissement seulement : un arbre de cette
+# taille en a toujours, et les faire tous disparaître ne vaut pas le temps.
+
+[graph]
+# Les cibles que l'on livre vraiment. Sans cette liste, cargo-deny examine
+# aussi les dépendances d'Android, de WebAssembly, etc.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = false
+
+[advisories]
+version = 2
+db-path = "$CARGO_HOME/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Un crate plus maintenu n'est pas une faille : on le note, on ne bloque pas.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # tract-nnef 0.19 : débordement d'entier en lisant un modèle NNEF
+    # forgé. Le seul modèle que tract lit chez nous est celui de
+    # DeepFilterNet, embarqué dans l'exécutable à la compilation — jamais
+    # un fichier venu de l'extérieur. Le correctif est dans tract 0.21+,
+    # que deep_filter 0.5.6 ne prend pas ; à lever le jour où deep_filter
+    # suit.
+    { id = "RUSTSEC-2026-0217", reason = "modèle embarqué, jamais lu depuis l'extérieur" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+    "BSL-1.0",
+    # Les polices embarquées par egui (Ubuntu, Noto, Emoji).
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # Les certificats racines de Mozilla, via webpki-roots (TLS de ureq).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Un arbre de cette taille a toujours des doublons (quatre `windows`, cinq
+# `hashbrown`) ; les lister à chaque exécution noierait ce qui compte.
+multiple-versions = "allow"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# DeepFilterNet : le débruiteur, épinglé sur un tag précis (crates/voice).
+allow-git = ["https://github.com/Rikorose/DeepFilterNet.git"]

@@ -333,6 +333,29 @@ réinstalles le serveur en perdant `data/quic-cert.der`, son empreinte change :
 les clients refuseront de se connecter tant que le serveur n'aura pas été
 retiré puis rajouté à leur carnet. Sauvegarde ce fichier avec le reste.
 
+### Ce qui surveille le code
+
+Trois filets, en plus de clippy et des tests, tous dans le CI :
+
+- **`cargo deny`** ([`deny.toml`](deny.toml)) : avis de sécurité RustSec sur
+  les mille crates de l'arbre, licences autorisées, sources connues. Sa
+  première exécution a relevé un crate retiré de crates.io (`chacha20`) et un
+  débordement dans `tract-nnef`, sans effet ici (le modèle est embarqué,
+  jamais lu depuis l'extérieur — l'exception est justifiée dans le fichier).
+- **Fuzzing du protocole** ([`crates/protocol/fuzz`](crates/protocol/fuzz/README.md)) :
+  libFuzzer jette des millions d'entrées aléatoires sur ce que le serveur lit
+  d'un client inconnu — en-têtes binaires des datagrammes, messages JSON,
+  nettoyage des textes, contrôle des vignettes PNG — et vérifie que rien ne
+  panique et que chaque promesse tient (longueurs bornées, aller-retour exact).
+  Une minute par cible à chaque poussée ; l'exploration longue se fait sur une
+  machine qu'on laisse tourner.
+- **CodeQL** ([`codeql.yml`](.github/workflows/codeql.yml)) : suit les données
+  non fiables jusqu'aux endroits sensibles (un chemin de fichier venu du
+  réseau, une archive déballée). Il ne voit ni l'`unsafe` ni la logique du
+  protocole — c'est le rôle des deux précédents. **Dependabot**
+  ([`dependabot.yml`](.github/dependabot.yml)) propose les mises à jour de
+  dépendances chaque lundi, groupées.
+
 ## Diagnostics partagés
 
 Chaque joueur peut cocher « Partager mes diagnostics avec l'admin du
