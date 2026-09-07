@@ -47,10 +47,9 @@ jobs:
         with:
           languages: rust
           build-mode: none
-          # `security-extended` : les requêtes de précision moyenne en plus
-          # des sûres. Quelques faux positifs à trier, mais c'est là que
-          # sont les flux qui nous intéressent.
-          queries: security-extended
+          # Les requêtes (security-extended) et ce qu'on en écarte : voir
+          # le fichier, qui explique chaque exclusion.
+          config-file: .github/codeql/codeql-config.yml
 
       - uses: github/codeql-action/analyze@v4
         with:

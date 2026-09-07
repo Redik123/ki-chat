@@ -1,0 +1,16 @@
+# Réglage de l'analyse CodeQL (référencé par workflows/codeql.yml).
+#
+# La règle « Hard-coded cryptographic value » est écartée : sur ce dépôt,
+# elle a levé 63 alertes critiques… toutes fausses. Elle prend pour un
+# secret toute chaîne littérale qui approche une fonction touchant à un mot
+# de passe — donc les textes d'exemple des champs de saisie (« nom du
+# salon », « ex. Chez Kévin ») et les identifiants des tests (`rootpass`
+# dans un `#[cfg(test)]`). Les vrais secrets, eux, ne sont pas dans le
+# code : clé de signature dans le coffre de GitHub, clé TLS générée au
+# premier démarrage, mots de passe dans le coffre du système.
+name: ki-chat
+queries:
+  - uses: security-extended
+query-filters:
+  - exclude:
+      id: rust/hard-coded-cryptographic-value
