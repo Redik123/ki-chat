@@ -19,9 +19,11 @@ rand = "0.9"
 cpal = "0.16"
 dasp_sample = "0.11"
 # Suppression de bruit RNNoise, port Rust pur (mode léger).
-nnnoiseless = "0.5"
-# Décodage WAV des effets sonores : pur Rust, et déjà dans l'arbre via
-# nnnoiseless — l'exiger directement ne compile donc rien de neuf.
+# Sans ses fonctionnalités par défaut : « bin » tire clap 3 et, derrière
+# lui, atty (RUSTSEC-2021-0145) pour un outil en ligne de commande que l'on
+# ne compile pas ; « dasp » n'est qu'un réexport que l'on n'utilise pas.
+nnnoiseless = { version = "0.5", default-features = false }
+# Décodage WAV des effets sonores : pur Rust.
 hound = "3.5"
 # Suppression de bruit DeepFilterNet3 (mode studio) : réseau de neurones,
 # inférence tract 100 % Rust, modèle embarqué dans le binaire (~2 Mo).
