@@ -1181,9 +1181,14 @@ impl JeuStatut {
         }
     }
 
-    /// Le nom français de la file.
-    pub fn libelle_file(&self) -> &str {
-        match self.file.as_str() {
+    /// Le nom français de la file. Les files console portent un préfixe
+    /// (`console_competitive`) : même nom, avec la mention.
+    pub fn libelle_file(&self) -> String {
+        let (file, console) = match self.file.strip_prefix("console_") {
+            Some(reste) => (reste, true),
+            None => (self.file.as_str(), false),
+        };
+        let nom = match file {
             "competitive" => "compétitive",
             "unrated" => "non classée",
             "swiftplay" => "swiftplay",
@@ -1196,6 +1201,11 @@ impl JeuStatut {
             "" if self.custom => "personnalisée",
             "" => "",
             autre => autre,
+        };
+        if console && !nom.is_empty() {
+            format!("{nom} (console)")
+        } else {
+            nom.to_string()
         }
     }
 
@@ -1208,6 +1218,7 @@ impl JeuStatut {
         } else {
             String::new()
         };
+        let file = file.as_str();
         match self.etat {
             JeuEtat::Menus if file.is_empty() => format!("Valorant · au menu{party}"),
             JeuEtat::Menus => format!("Valorant · en file {file}{party}"),

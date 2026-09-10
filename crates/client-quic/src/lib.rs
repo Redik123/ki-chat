@@ -58,6 +58,25 @@ pub fn pinned_tls_config(expected: Option<&str>) -> Arc<rustls::ClientConfig> {
     Arc::new(config)
 }
 
+/// La configuration TLS pour un service **local** à certificat auto-signé —
+/// le client Riot sur `127.0.0.1` : n'importe quel certificat est accepté
+/// (c'est la boucle locale, pas le réseau), et TLS 1.2 reste admis, ce que
+/// la configuration épinglée, taillée pour notre serveur, refuse.
+pub fn local_tls_config() -> Arc<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+        .expect("versions TLS")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinVerify {
+            provider,
+            expected: None,
+            seen: Arc::new(std::sync::Mutex::new(None)),
+        }))
+        .with_no_client_auth();
+    Arc::new(config)
+}
+
 /// Empreinte SHA-256 d'un certificat, en hexadécimal groupé par octets.
 ///
 /// Lisible à voix haute : c'est ainsi qu'on compare deux empreintes quand on

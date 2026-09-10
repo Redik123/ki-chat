@@ -110,7 +110,7 @@ struct Client {
 impl Client {
     fn new(lf: &Lockfile) -> Self {
         let agent = ureq::AgentBuilder::new()
-            .tls_config(ki_client_quic::pinned_tls_config(None))
+            .tls_config(ki_client_quic::local_tls_config())
             .timeout(Duration::from_secs(3))
             .build();
         let auth = format!(
@@ -153,10 +153,15 @@ struct Presence {
 }
 
 /// Le JSON de la présence VALORANT, une fois décodé. Tous les champs sont
-/// facultatifs : le format n'est documenté par personne d'officiel.
+/// facultatifs : le format n'est documenté par personne d'officiel, et il a
+/// déjà changé — les clients de 2026 (13.x) rangent l'essentiel dans des
+/// blocs (`matchPresenceData`, `partyPresenceData`, `playerPresenceData`),
+/// les anciens mettaient tout à plat. On lit les deux : le bloc d'abord, le
+/// champ à plat en repli.
 #[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct Prive {
+    // --- À plat (anciens clients) ---
     session_loop_state: String,
     party_owner_match_map: String,
     match_map: String,
@@ -166,9 +171,49 @@ pub(crate) struct Prive {
     party_size: u32,
     max_party_size: u32,
     party_accessibility: String,
+    party_state: String,
     competitive_tier: u32,
     account_level: u32,
     provisioning_flow: String,
+    // --- En blocs (clients 13.x) ---
+    match_presence_data: MatchPresence,
+    party_presence_data: PartyPresence,
+    player_presence_data: PlayerPresence,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(rename_all = "camelCase", default)]
+struct MatchPresence {
+    session_loop_state: String,
+    match_map: String,
+    queue_id: String,
+    provisioning_flow: String,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(rename_all = "camelCase", default)]
+struct PartyPresence {
+    party_owner_match_map: String,
+    /// `DEFAULT` au repos, `MATCHMAKING` en file d'attente.
+    party_state: String,
+    party_accessibility: String,
+    /// « Looking for more » : la party cherche du monde.
+    party_lfm: bool,
+    party_size: u32,
+    max_party_size: u32,
+    custom_game_name: String,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(rename_all = "camelCase", default)]
+struct PlayerPresence {
+    account_level: u32,
+    competitive_tier: u32,
+}
+
+/// Le premier texte non vide, ou vide.
+fn premier<'a>(candidats: &[&'a str]) -> &'a str {
+    candidats.iter().copied().find(|s| !s.is_empty()).unwrap_or("")
 }
 
 pub(crate) fn decoder_prive(b64: &str) -> Option<Prive> {
@@ -208,26 +253,47 @@ pub(crate) fn nom_de_carte(chemin: &str) -> String {
 
 /// De la présence brute au statut qu'on partage. `None` : pas en jeu.
 pub(crate) fn normaliser(p: &Prive) -> Option<JeuStatut> {
-    let etat = match p.session_loop_state.as_str() {
+    let m = &p.match_presence_data;
+    let pa = &p.party_presence_data;
+    let pl = &p.player_presence_data;
+    let etat = match premier(&[&m.session_loop_state, &p.session_loop_state]) {
         "MENUS" => JeuEtat::Menus,
         "PREGAME" => JeuEtat::PreGame,
         "INGAME" => JeuEtat::EnJeu,
         _ => return None,
     };
-    let carte = if p.match_map.is_empty() { &p.party_owner_match_map } else { &p.match_map };
-    let custom = p.provisioning_flow == "CustomGame" || (p.queue_id.is_empty() && etat != JeuEtat::Menus);
+    let carte = premier(&[&m.match_map, &p.match_map, &pa.party_owner_match_map, &p.party_owner_match_map]);
+    let file = premier(&[&m.queue_id, &p.queue_id]);
+    let flux = premier(&[&m.provisioning_flow, &p.provisioning_flow]);
+    // Au menu, la file annoncée n'est que le mode sélectionné : on ne la
+    // dit qu'en file d'attente réelle.
+    let en_file = premier(&[&pa.party_state, &p.party_state]) == "MATCHMAKING";
+    let custom = flux == "CustomGame"
+        || !pa.custom_game_name.is_empty()
+        || (file.is_empty() && etat != JeuEtat::Menus);
+    let (taille, max) = if pa.party_size > 0 {
+        (pa.party_size, pa.max_party_size)
+    } else {
+        (p.party_size, p.max_party_size)
+    };
+    let acces = premier(&[&pa.party_accessibility, &p.party_accessibility]);
+    let (rang, niveau) = if pl.competitive_tier > 0 || pl.account_level > 0 {
+        (pl.competitive_tier, pl.account_level)
+    } else {
+        (p.competitive_tier, p.account_level)
+    };
     Some(
         JeuStatut {
             etat,
-            file: p.queue_id.clone(),
+            file: if etat == JeuEtat::Menus && !en_file { String::new() } else { file.to_string() },
             carte: if etat == JeuEtat::Menus { String::new() } else { nom_de_carte(carte) },
             score_allie: p.party_owner_match_score_ally_team.min(99) as u8,
             score_adverse: p.party_owner_match_score_enemy_team.min(99) as u8,
-            party_taille: p.party_size.min(10) as u8,
-            party_max: p.max_party_size.min(10) as u8,
-            party_ouverte: p.party_accessibility == "OPEN",
-            rang: p.competitive_tier.min(27) as u8,
-            niveau: p.account_level.min(9999),
+            party_taille: taille.min(10) as u8,
+            party_max: max.min(10) as u8,
+            party_ouverte: acces == "OPEN" || pa.party_lfm,
+            rang: rang.min(27) as u8,
+            niveau: niveau.min(9999),
             custom,
         }
         .nettoyer(),
@@ -252,6 +318,16 @@ fn boucle(
     // PUUID de la personne — pour reconnaître sa propre présence parmi
     // celles de ses amis.
     let mut client: Option<(Lockfile, Client, String)> = None;
+    // Le dernier ennui consigné : on ne le répète pas à chaque tour, mais un
+    // ennui différent se dit — c'est ce qui fera comprendre, à distance,
+    // pourquoi le statut reste vide.
+    let mut dernier_ennui = String::new();
+    let mut ennui = |quoi: String| {
+        if quoi != dernier_ennui {
+            ki_voice::journal(format!("Valorant : {quoi}"));
+            dernier_ennui = quoi;
+        }
+    };
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(PERIODE);
@@ -264,10 +340,20 @@ fn boucle(
         if client.as_ref().is_none_or(|(ouvert, _, _)| *ouvert != lf) {
             let c = Client::new(&lf);
             match c.get::<Session>("/chat/v1/session") {
-                Ok(s) if !s.puuid.is_empty() => client = Some((lf, c, s.puuid)),
-                _ => {
+                Ok(s) if !s.puuid.is_empty() => {
+                    ennui("client Riot joint, session lue".into());
+                    client = Some((lf, c, s.puuid));
+                }
+                Ok(_) => {
+                    ennui("session sans identifiant (le client démarre ?)".into());
+                    client = None;
+                    publier(None);
+                    continue;
+                }
+                Err(e) => {
                     // Le client démarre encore, ou refuse : on réessaie au
                     // prochain tour.
+                    ennui(format!("session locale injoignable : {e}"));
                     client = None;
                     publier(None);
                     continue;
@@ -276,15 +362,22 @@ fn boucle(
         }
         let Some((_, c, puuid)) = client.as_ref() else { continue };
         let nouveau = match c.get::<Presences>("/chat/v4/presences") {
-            Ok(p) => p
-                .presences
-                .iter()
-                .find(|x| x.puuid == *puuid && x.product == "valorant")
-                .and_then(|x| x.private.as_deref())
-                .and_then(decoder_prive)
-                .and_then(|pr| normaliser(&pr)),
-            Err(_) => {
+            Ok(p) => {
+                let mienne = p.presences.iter().find(|x| x.puuid == *puuid && x.product == "valorant");
+                match mienne.and_then(|x| x.private.as_deref()) {
+                    None => None,
+                    Some(prive) => match decoder_prive(prive) {
+                        Some(pr) => normaliser(&pr),
+                        None => {
+                            ennui("présence illisible (le format a changé ?)".into());
+                            None
+                        }
+                    },
+                }
+            }
+            Err(e) => {
                 // Le client s'est fermé ou rechargé : on repartira du lockfile.
+                ennui(format!("présences injoignables : {e}"));
                 client = None;
                 None
             }
@@ -326,6 +419,33 @@ mod tests {
         // Au menu, sans file : la carte n'a pas de sens, et rien d'autre.
         let menu = Prive { session_loop_state: "MENUS".into(), ..Default::default() };
         assert_eq!(normaliser(&menu).unwrap().ligne(), "Valorant · au menu");
+
+        // Le format des clients 13.x (2026) : tout en blocs, et au menu la
+        // file n'est que le mode sélectionné — pas une attente.
+        let json = r#"{"isIdle":false,"isValid":true,"maxPartySize":5,
+            "partyOwnerMatchScoreAllyTeam":7,"partyOwnerMatchScoreEnemyTeam":8,"partySize":2,
+            "provisioningFlow":"Matchmaking","queueId":"console_competitive",
+            "matchPresenceData":{"gameScoreType":"Rounds","matchMap":"/Game/Maps/Infinity/Infinity",
+              "provisioningFlow":"Matchmaking","queueId":"console_competitive","sessionLoopState":"INGAME"},
+            "partyPresenceData":{"customGameName":"","isPartyOwner":true,"maxPartySize":5,
+              "partyAccessibility":"CLOSED","partyLFM":false,"partyOwnerMatchMap":"/Game/Maps/Infinity/Infinity",
+              "partyOwnerSessionLoopState":"INGAME","partySize":2,"partyState":"DEFAULT"},
+            "playerPresenceData":{"accountLevel":82,"competitiveTier":10,"platformOverride":"playstation"},
+            "premierPresenceData":{"division":0}}"#;
+        let prive = decoder_prive(&base64::engine::general_purpose::STANDARD.encode(json)).unwrap();
+        let s = normaliser(&prive).unwrap();
+        assert_eq!(s.ligne(), "compétitive (console) · Abyss · 7-8 · party 2/5");
+        assert_eq!((s.rang, s.niveau), (10, 82));
+
+        let json = r#"{"isValid":true,"queueId":"unrated","partySize":1,"maxPartySize":5,
+            "matchPresenceData":{"matchMap":"","provisioningFlow":"Invalid","queueId":"unrated","sessionLoopState":"MENUS"},
+            "partyPresenceData":{"partyState":"DEFAULT","partySize":1,"maxPartySize":5,"partyAccessibility":"CLOSED"},
+            "playerPresenceData":{"accountLevel":210,"competitiveTier":15}}"#;
+        let prive = decoder_prive(&base64::engine::general_purpose::STANDARD.encode(json)).unwrap();
+        assert_eq!(normaliser(&prive).unwrap().ligne(), "Valorant · au menu");
+        let json = json.replace("\"partyState\":\"DEFAULT\"", "\"partyState\":\"MATCHMAKING\"");
+        let prive = decoder_prive(&base64::engine::general_purpose::STANDARD.encode(json)).unwrap();
+        assert_eq!(normaliser(&prive).unwrap().ligne(), "Valorant · en file non classée");
         // Un état inconnu (le format a changé) : pas de statut, pas de bruit.
         let inconnu = Prive { session_loop_state: "AUTRE".into(), ..Default::default() };
         assert!(normaliser(&inconnu).is_none());
