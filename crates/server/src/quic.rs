@@ -292,6 +292,7 @@ async fn handle_connection(
                 speaking: false,
                 muted: false,
                 streaming: None,
+                jeu: None,
                 force_muted,
                 force_deafened,
                 roles: auth.roles.clone(),
@@ -1203,6 +1204,25 @@ fn handle_msg(
                     .collect();
                 let _ = tx.send(ServerMsg::SearchResults { query, hits, more });
             });
+        }
+        ClientMsg::GameStatus { jeu } => {
+            // Ce que le client raconte de sa partie : borné, assaini, et
+            // relayé à tout le monde seulement s'il change — la liste des
+            // membres l'affiche sous le pseudo.
+            let jeu = jeu.map(|j| j.nettoyer());
+            let changed = {
+                let mut users = state.users.lock().unwrap();
+                let Some(u) = users.get_mut(&user_id) else { return };
+                if u.jeu == jeu {
+                    false
+                } else {
+                    u.jeu = jeu;
+                    true
+                }
+            };
+            if changed {
+                state.broadcast_member(user_id);
+            }
         }
         ClientMsg::VoiceState { speaking, muted } => {
             let changed = {

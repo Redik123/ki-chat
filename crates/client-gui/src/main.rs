@@ -19,6 +19,7 @@ mod sfxgen;
 mod theme;
 mod ui;
 mod update;
+mod valorant;
 mod veille;
 
 /// Sous `--features mesures`, toutes les allocations du processus passent par
@@ -180,16 +181,18 @@ enum Onglet {
     Reseau,
     Diffusion,
     Overlay,
+    Jeu,
     Sons,
     Aide,
 }
 
 impl Onglet {
-    const TOUS: [Onglet; 6] = [
+    const TOUS: [Onglet; 7] = [
         Onglet::Audio,
         Onglet::Reseau,
         Onglet::Diffusion,
         Onglet::Overlay,
+        Onglet::Jeu,
         Onglet::Sons,
         Onglet::Aide,
     ];
@@ -200,6 +203,7 @@ impl Onglet {
             Onglet::Reseau => "Réseau & qualité",
             Onglet::Diffusion => "Diffusion d'écran",
             Onglet::Overlay => "Overlay en jeu",
+            Onglet::Jeu => "Jeu",
             Onglet::Sons => "Sons & notifications",
             Onglet::Aide => "Aide & diagnostics",
         }
@@ -213,6 +217,7 @@ impl Onglet {
             Onglet::Reseau => "reseau",
             Onglet::Diffusion => "diffusion",
             Onglet::Overlay => "overlay",
+            Onglet::Jeu => "jeu",
             Onglet::Sons => "sons",
             Onglet::Aide => "aide",
         }
@@ -596,6 +601,14 @@ struct KiApp {
     /// L'avertissement « pilote NVIDIA trop ancien pour NVENC » a été
     /// montré (une fois par session).
     pilote_averti: bool,
+    /// Partager son activité VALORANT (lue dans son propre client Riot).
+    /// Désactivé de base : personne ne partage sans l'avoir choisi.
+    valorant_presence: bool,
+    /// Le fil qui lit le client Riot, tant que l'option est cochée.
+    veilleur_valorant: Option<valorant::Veilleur>,
+    /// La version du statut déjà envoyée au serveur, et ce statut.
+    jeu_version_envoyee: u64,
+    jeu_envoye: Option<ki_protocol::JeuStatut>,
     /// Volume du son du jeu du stream que je regarde (1.0 = 100 %).
     regard_volume: f32,
     /// Le streamer est sur ce PC (un second ki-chat) : son son du jeu est
@@ -935,6 +948,10 @@ impl KiApp {
             cadence_regard: partage::Cadence::new(),
             journal_flux: std::time::Instant::now(),
             pilote_averti: false,
+            valorant_presence: get("valorant_presence", "off") == "on",
+            veilleur_valorant: None,
+            jeu_version_envoyee: 0,
+            jeu_envoye: None,
             regard_volume: 1.0,
             regard_meme_machine: false,
             regard: None,
@@ -1900,6 +1917,32 @@ impl KiApp {
         }
     }
 
+    /// Le statut VALORANT : le fil de lecture vit tant que l'option est
+    /// cochée, et chaque statut différent part au serveur — y compris
+    /// « plus rien » quand le jeu se ferme ou qu'on décoche.
+    fn tick_valorant(&mut self) {
+        if self.valorant_presence {
+            if self.veilleur_valorant.is_none() {
+                self.veilleur_valorant = Some(valorant::Veilleur::demarrer(self.app_ctx.clone()));
+            }
+        } else {
+            let etait_actif = self.veilleur_valorant.take().is_some();
+            if (etait_actif || self.jeu_envoye.is_some()) && self.welcomed {
+                self.send(ClientMsg::GameStatus { jeu: None });
+            }
+            self.jeu_envoye = None;
+            self.jeu_version_envoyee = 0;
+            return;
+        }
+        let Some(veilleur) = &self.veilleur_valorant else { return };
+        let (version, statut) = veilleur.releve();
+        if version != self.jeu_version_envoyee && self.welcomed {
+            self.jeu_version_envoyee = version;
+            self.jeu_envoye = statut.clone();
+            self.send(ClientMsg::GameStatus { jeu: statut });
+        }
+    }
+
     /// Reprendre la session d'avant sans rien cliquer : au lancement, si
     /// l'on a quitté l'application connecté — et non déconnecté depuis
     /// elle —, on se reconnecte au même serveur, pourvu que son mot de
@@ -2187,6 +2230,9 @@ impl KiApp {
                 // Connecté : on y reviendra tout seul au prochain lancement,
                 // si le mot de passe est mémorisé — sans lui, impossible.
                 self.session_auto = self.selected.filter(|_| self.remember_password);
+                // Une nouvelle connexion ne connaît pas notre statut de jeu :
+                // il repartira au prochain tour.
+                self.jeu_version_envoyee = 0;
                 self.my_id = Some(user_id);
                 // `is_admin` reste la réponse d'un serveur antérieur aux
                 // rôles : sans permissions annoncées, on lui accorde tout
@@ -6035,6 +6081,26 @@ impl KiApp {
                                  H.264 complet — zéro réseau, c'est le banc d'essai du stream",
                             );
                         }
+                        if onglet == Onglet::Jeu {
+                            ui::group_title(ui, Icon::Target, "Valorant");
+                            ui.checkbox(&mut self.valorant_presence, "Partager mon activité Valorant")
+                                .on_hover_text(
+                                    "lu dans ton propre client Riot, sur ce PC, en lecture seule : \
+                                     l'état de ta partie, la file, la carte, le score de ton équipe, \
+                                     ta party. Rien sur les adversaires, jamais.",
+                                );
+                            ui::hint(
+                                ui,
+                                "les membres du serveur voient ta partie sous ton pseudo — \
+                                 « compétitive · Ascent · 7-5 ». Décoche, et ça s'efface partout.",
+                            );
+                            let etat = match (&self.veilleur_valorant, &self.jeu_envoye) {
+                                (None, _) => "désactivé".to_string(),
+                                (Some(_), None) => "actif — client Riot fermé, ou pas en jeu".to_string(),
+                                (Some(_), Some(j)) => j.ligne(),
+                            };
+                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
+                        }
 
                         if let Some(info) = self.info.clone() {
                             ui.add_space(10.0);
@@ -8616,16 +8682,30 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     let galley = ui.fonts(|f| f.layout_no_wrap(member.username.clone(), font, color));
     let name_width = galley.size().x;
     let name_left = avatar_rect.right() + 9.0;
+    // En jeu : le pseudo monte d'un cran, et la partie se lit dessous —
+    // « compétitive · Ascent · 7-5 », ce que son client Riot raconte.
+    let jeu = member.jeu.as_ref().filter(|_| member.online);
+    let name_y = if jeu.is_some() { rect.center().y - 7.0 } else { rect.center().y };
     painter.galley(
-        egui::pos2(name_left, rect.center().y - galley.size().y / 2.0),
+        egui::pos2(name_left, name_y - galley.size().y / 2.0),
         galley,
         color,
     );
+    if let Some(j) = jeu {
+        let teinte = if j.etat == ki_protocol::JeuEtat::EnJeu { TEXT_DIM } else { TEXT_FAINT };
+        painter.text(
+            egui::pos2(name_left, rect.center().y + 8.0),
+            egui::Align2::LEFT_CENTER,
+            j.ligne(),
+            egui::FontId::proportional(10.5),
+            teinte,
+        );
+    }
 
     let mut apres_nom = name_left + name_width + 5.0;
     if member.admin {
         let badge = egui::Rect::from_min_size(
-            egui::pos2(apres_nom, rect.center().y - 6.5),
+            egui::pos2(apres_nom, name_y - 6.5),
             Vec2::splat(13.0),
         );
         icons::draw(painter, badge, Icon::Crown, ACCENT);
@@ -8638,7 +8718,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     let mut regarder = false;
     if member.streaming.is_some() && member.online {
         let badge = egui::Rect::from_min_size(
-            egui::pos2(apres_nom, rect.center().y - 7.0),
+            egui::pos2(apres_nom, name_y - 7.0),
             Vec2::splat(14.0),
         );
         let hit = ui.interact(badge.expand(3.0), response.id.with("diffuse"), Sense::click());
@@ -9319,6 +9399,7 @@ impl eframe::App for KiApp {
         // personne ne fait tourner ne sonne jamais.
         self.tick_reprise(ctx);
         self.auto_connexion(ctx);
+        self.tick_valorant();
         self.update_voice();
         // Un seul instantané par image, pris ici : l'écran principal l'affiche,
         // et c'est lui qui dit s'il faut une image de plus.
@@ -9406,6 +9487,7 @@ impl eframe::App for KiApp {
         storage.set_string("agc", if self.agc { "on" } else { "off" }.into());
         storage.set_string("aec", if self.aec_on { "on" } else { "off" }.into());
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
+        storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));

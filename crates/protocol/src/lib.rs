@@ -180,6 +180,13 @@ pub enum ClientMsg {
         #[serde(default)]
         channel: ChannelId,
     },
+    /// Le client raconte où il en est dans VALORANT — ce qu'il a lu dans son
+    /// propre client Riot, et qu'il a choisi de partager. `None` : il ne
+    /// joue plus, ou ne partage plus.
+    GameStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jeu: Option<JeuStatut>,
+    },
     /// Le client annonce son état vocal : émission en cours, et micro coupé
     /// volontairement — pour que les autres distinguent « muet » de « parti ».
     VoiceState {
@@ -994,6 +1001,11 @@ pub struct Member {
     /// sans être en vocal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<ChannelId>,
+    /// Où en est ce membre dans VALORANT, s'il partage son activité —
+    /// voir [`JeuStatut`]. Absent d'un serveur antérieur, ou s'il ne
+    /// partage pas, ou s'il ne joue pas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jeu: Option<JeuStatut>,
     #[serde(default)]
     pub roles: Vec<RoleId>,
     /// Vrai si la personne est connectée au serveur. Le roster liste AUSSI
@@ -1096,6 +1108,124 @@ pub fn excerpt_of(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// Où en est un joueur dans VALORANT : l'état de sa session, sa file, sa
+/// carte, le score de son équipe, sa party. C'est ce que son propre client
+/// Riot raconte à ses amis ; ki-chat le relaie aux membres du serveur, avec
+/// son accord — rien sur les adversaires, jamais.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JeuStatut {
+    pub etat: JeuEtat,
+    /// La file : « competitive », « unrated », « swiftplay », « deathmatch »…
+    /// Vide en partie personnalisée.
+    #[serde(default)]
+    pub file: String,
+    /// La carte, en nom d'affichage (« Ascent »). Vide hors partie.
+    #[serde(default)]
+    pub carte: String,
+    #[serde(default)]
+    pub score_allie: u8,
+    #[serde(default)]
+    pub score_adverse: u8,
+    #[serde(default)]
+    pub party_taille: u8,
+    #[serde(default)]
+    pub party_max: u8,
+    /// Party ouverte : n'importe quel ami peut la rejoindre.
+    #[serde(default)]
+    pub party_ouverte: bool,
+    /// Rang compétitif tel que le client l'annonce : 0 = non classé, puis
+    /// Fer 1 (3) … Radiant (27). Icône côté client, valorant-api.com.
+    #[serde(default)]
+    pub rang: u8,
+    #[serde(default)]
+    pub niveau: u32,
+    /// Partie personnalisée (pas de file).
+    #[serde(default)]
+    pub custom: bool,
+}
+
+/// L'état de session VALORANT, tel que la présence le nomme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JeuEtat {
+    /// Dans les menus (ou en file d'attente).
+    Menus,
+    /// Sélection des agents.
+    PreGame,
+    /// En partie.
+    EnJeu,
+}
+
+/// Longueur admise pour la file et la carte : ce sont des identifiants
+/// courts, tout ce qui dépasse est suspect.
+pub const MAX_JEU_TEXTE: usize = 32;
+
+impl JeuStatut {
+    /// Le statut tel que le serveur le garde : textes bornés et assainis,
+    /// nombres plafonnés — il vient d'un client, comme tout le reste.
+    pub fn nettoyer(&self) -> Self {
+        Self {
+            etat: self.etat,
+            file: safe_display(&self.file, MAX_JEU_TEXTE),
+            carte: safe_display(&self.carte, MAX_JEU_TEXTE),
+            score_allie: self.score_allie.min(99),
+            score_adverse: self.score_adverse.min(99),
+            party_taille: self.party_taille.min(10),
+            party_max: self.party_max.min(10),
+            party_ouverte: self.party_ouverte,
+            rang: self.rang.min(27),
+            niveau: self.niveau.min(9999),
+            custom: self.custom,
+        }
+    }
+
+    /// Le nom français de la file.
+    pub fn libelle_file(&self) -> &str {
+        match self.file.as_str() {
+            "competitive" => "compétitive",
+            "unrated" => "non classée",
+            "swiftplay" => "swiftplay",
+            "spikerush" => "spike rush",
+            "deathmatch" => "deathmatch",
+            "ggteam" => "escalade",
+            "hurm" => "team deathmatch",
+            "premier" => "Premier",
+            "newmap" => "nouvelle carte",
+            "" if self.custom => "personnalisée",
+            "" => "",
+            autre => autre,
+        }
+    }
+
+    /// Une ligne pour la liste des membres : « compétitive · Ascent · 7-5 »,
+    /// « sélection des agents », « au menu »…
+    pub fn ligne(&self) -> String {
+        let file = self.libelle_file();
+        let party = if self.party_taille > 1 {
+            format!(" · party {}/{}", self.party_taille, self.party_max.max(self.party_taille))
+        } else {
+            String::new()
+        };
+        match self.etat {
+            JeuEtat::Menus if file.is_empty() => format!("Valorant · au menu{party}"),
+            JeuEtat::Menus => format!("Valorant · en file {file}{party}"),
+            JeuEtat::PreGame => {
+                let ou = if self.carte.is_empty() { String::new() } else { format!(" · {}", self.carte) };
+                format!("{file} · sélection des agents{ou}{party}")
+            }
+            JeuEtat::EnJeu => {
+                let ou = if self.carte.is_empty() { String::new() } else { format!(" · {}", self.carte) };
+                let score = if self.custom && self.score_allie == 0 && self.score_adverse == 0 {
+                    String::new()
+                } else {
+                    format!(" · {}-{}", self.score_allie, self.score_adverse)
+                };
+                format!("{file}{ou}{score}{party}")
+            }
+        }
+    }
 }
 
 /// --- Protocole voix (datagrammes), version 2 ---
@@ -1476,6 +1606,52 @@ mod tests {
         assert_eq!(e.chars().count(), MAX_EXCERPT + 1);
         assert!(e.ends_with('…'));
         assert_eq!(excerpt_of("court"), "court");
+    }
+
+    /// Le statut de jeu fait l'aller-retour, se nettoie, et se raconte en
+    /// une ligne lisible ; un membre d'un serveur antérieur n'en a pas.
+    #[test]
+    fn le_statut_de_jeu_se_raconte_en_une_ligne() {
+        let s = JeuStatut {
+            etat: JeuEtat::EnJeu,
+            file: "competitive".into(),
+            carte: "Ascent".into(),
+            score_allie: 7,
+            score_adverse: 5,
+            party_taille: 3,
+            party_max: 5,
+            party_ouverte: true,
+            rang: 15,
+            niveau: 120,
+            custom: false,
+        };
+        assert_eq!(s.ligne(), "compétitive · Ascent · 7-5 · party 3/5");
+        let relu: JeuStatut = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(relu, s);
+
+        let menu = JeuStatut { etat: JeuEtat::Menus, file: String::new(), party_taille: 1, ..s.clone() };
+        assert_eq!(menu.ligne(), "Valorant · au menu");
+        let file = JeuStatut { etat: JeuEtat::Menus, ..s.clone() };
+        assert_eq!(file.ligne(), "Valorant · en file compétitive · party 3/5");
+        let choix = JeuStatut { etat: JeuEtat::PreGame, party_taille: 1, ..s.clone() };
+        assert_eq!(choix.ligne(), "compétitive · sélection des agents · Ascent");
+
+        let sale = JeuStatut {
+            file: "x".repeat(200),
+            carte: "Asc\u{7}ent".into(),
+            score_allie: 250,
+            rang: 99,
+            ..s.clone()
+        };
+        let propre = sale.nettoyer();
+        // Tronqué à la borne, plus le signe qui dit qu'il l'a été.
+        assert!(propre.file.chars().count() <= MAX_JEU_TEXTE + 1 && propre.file.ends_with('…'));
+        assert_eq!(propre.carte, "Ascent");
+        assert_eq!((propre.score_allie, propre.rang), (99, 27));
+
+        let ancien = r#"{"user_id":1,"username":"k","speaking":false}"#;
+        let m: Member = serde_json::from_str(ancien).unwrap();
+        assert!(m.jeu.is_none());
     }
 
     /// Supprimer les messages des autres est une autorité : jamais pour

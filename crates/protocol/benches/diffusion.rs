@@ -27,6 +27,7 @@ fn roster(n: usize) -> Vec<Member> {
             speaking: i % 7 == 0,
             muted: i % 11 == 0,
             streaming: (i % 13 == 0).then_some(1),
+            jeu: None,
             force_muted: false,
             force_deafened: false,
             admin: i == 0,

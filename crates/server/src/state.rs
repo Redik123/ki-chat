@@ -178,6 +178,8 @@ pub struct ConnectedUser {
     pub muted: bool,
     /// Identifiant du partage d'écran en cours, s'il diffuse.
     pub streaming: Option<u32>,
+    /// Son statut VALORANT, s'il le partage (voir ki_protocol::JeuStatut).
+    pub jeu: Option<ki_protocol::JeuStatut>,
     /// Sanctions vocales posées par un modérateur, relues du compte à la
     /// connexion. Elles ne sont **pas** annoncées par le client et ne peuvent
     /// donc pas être désavouées par lui.
@@ -773,6 +775,7 @@ impl AppState {
             speaking: u.speaking,
             muted: u.muted,
             streaming: u.streaming,
+            jeu: u.jeu.clone(),
             force_muted: u.force_muted,
             force_deafened: u.force_deafened,
             admin: u.admin,
@@ -809,6 +812,7 @@ impl AppState {
                 speaking: u.speaking,
                 muted: u.muted,
                 streaming: u.streaming,
+                jeu: u.jeu.clone(),
                 force_muted: u.force_muted,
                 force_deafened: u.force_deafened,
                 admin: u.admin,
@@ -835,6 +839,7 @@ impl AppState {
                 speaking: false,
                 muted: false,
                 streaming: None,
+                jeu: None,
                 // Les sanctions d'un compte hors ligne se lisent quand même :
                 // elles l'attendent au retour, et le modérateur doit pouvoir
                 // les lever sans attendre qu'il revienne.
