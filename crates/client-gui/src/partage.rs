@@ -25,7 +25,7 @@ use ki_video::{
     StreamerLoop, ViewerDecoder, WindowInfo,
 };
 
-use crate::theme::{TEXT, TEXT_DIM};
+use crate::theme::{TEXT, TEXT_DIM, WARN};
 use crate::ui;
 
 // ---------------------------------------------------------------------
@@ -335,6 +335,18 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
         "NVENC encode sur la carte graphique : le processeur reste au jeu. Sans carte \
          NVIDIA, l'encodeur logiciel prend le relais tout seul.",
     );
+    // L'état réel de NVENC sur cette machine, tel que l'inventaire l'a
+    // relevé au démarrage : disponible sur telle carte, ou pourquoi pas —
+    // un pilote trop ancien se voit ici avant de se subir en diffusant.
+    if let Some(inventaire) = ki_video::inventaire_pret() {
+        let etat = inventaire.split("; ").nth(1).unwrap_or(inventaire);
+        let vieux = etat.contains("trop ancien");
+        ui.label(
+            RichText::new(etat)
+                .color(if vieux { WARN } else { TEXT_DIM })
+                .size(11.5),
+        );
+    }
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {

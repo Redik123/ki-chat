@@ -16,7 +16,7 @@ pub mod scale;
 pub mod stats;
 
 pub use capture::{list_monitors, list_windows, CaptureSource, MonitorInfo, WindowInfo};
-pub use nvenc::{inventaire, inventaire_lancer, inventaire_pret};
+pub use nvenc::{avertissement_pilote, inventaire, inventaire_lancer, inventaire_pret};
 pub use stats::StageStats;
 
 /// NVENC est l'encodeur des cartes NVIDIA **sous Windows** (Direct3D 11 en
@@ -36,6 +36,11 @@ mod nvenc {
     pub fn inventaire_pret() -> Option<&'static str> {
         static INVENTAIRE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         Some(INVENTAIRE.get_or_init(inventaire).as_str())
+    }
+
+    /// Pas de pilote NVIDIA à surveiller ailleurs que sous Windows.
+    pub fn avertissement_pilote() -> Option<String> {
+        None
     }
 }
 
@@ -188,7 +193,15 @@ pub fn creer_encodeur(
             Err(e) if choix == EncoderChoice::Nvenc => {
                 return Err(e.context("NVENC exigé par les réglages"));
             }
-            Err(e) => journal(format!("NVENC indisponible ({e:#}) : encodeur logiciel")),
+            Err(e) => {
+                journal(format!("NVENC indisponible ({e:#}) : encodeur logiciel"));
+                // Un pilote trop vieux se dit à la personne qui diffuse, pas
+                // seulement au journal : c'est elle qui peut y remédier.
+                let raison = format!("{e:#}");
+                if raison.contains("trop ancien") {
+                    stats.poser_avis(format!("{raison} — en attendant, encodage logiciel"));
+                }
+            }
         }
     }
     stats.materiel.store(false, Ordering::Relaxed);

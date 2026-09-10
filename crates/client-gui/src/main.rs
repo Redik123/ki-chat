@@ -587,6 +587,9 @@ struct KiApp {
     cadence_regard: partage::Cadence,
     /// Dernière ligne de stats de diffusion consignée au journal.
     journal_flux: std::time::Instant,
+    /// L'avertissement « pilote NVIDIA trop ancien pour NVENC » a été
+    /// montré (une fois par session).
+    pilote_averti: bool,
     /// Volume du son du jeu du stream que je regarde (1.0 = 100 %).
     regard_volume: f32,
     /// Le streamer est sur ce PC (un second ki-chat) : son son du jeu est
@@ -923,6 +926,7 @@ impl KiApp {
             cadence_live: partage::Cadence::new(),
             cadence_regard: partage::Cadence::new(),
             journal_flux: std::time::Instant::now(),
+            pilote_averti: false,
             regard_volume: 1.0,
             regard_meme_machine: false,
             regard: None,
@@ -9215,6 +9219,16 @@ impl eframe::App for KiApp {
         // Diagnostic partagé : si l'option est cochée, le journal technique
         // part vers le serveur à son rythme (une minute, et que du neuf).
         self.maybe_flush_diag();
+
+        // Une carte NVIDIA au pilote trop vieux pour NVENC : le dire une
+        // fois, au démarrage, plutôt que de laisser la diffusion ramer en
+        // logiciel sans explication.
+        if !self.pilote_averti && ki_video::inventaire_pret().is_some() {
+            self.pilote_averti = true;
+            if let Some(avertissement) = ki_video::avertissement_pilote() {
+                self.info = Some(avertissement);
+            }
+        }
 
         // La surveillance du clavier démarre à la première image : elle a
         // besoin du contexte pour réveiller la fenêtre, et lui seul sait

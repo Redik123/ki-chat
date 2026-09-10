@@ -66,7 +66,8 @@ fn charger() -> Result<Api, String> {
         let requis = (ffi::NVENCAPI_MAJOR_VERSION << 4) | ffi::NVENCAPI_MINOR_VERSION;
         if version < requis {
             return Err(format!(
-                "pilote NVIDIA trop ancien : NVENC {}.{} offert, {}.{} requis — mets à jour le pilote",
+                "pilote NVIDIA trop ancien : NVENC {}.{} offert, {}.{} requis — mets à jour \
+                 le pilote (NVIDIA App → Pilotes)",
                 version >> 4,
                 version & 0xf,
                 ffi::NVENCAPI_MAJOR_VERSION,
@@ -154,6 +155,22 @@ pub fn inventaire_lancer() {
 /// L'inventaire, une fois relevé.
 pub fn inventaire_pret() -> Option<&'static str> {
     INVENTAIRE.get().map(String::as_str)
+}
+
+/// Ce qu'il faut dire d'emblée à qui a une carte NVIDIA dont le pilote est
+/// trop vieux pour NVENC : sans ça, la personne découvre le problème en
+/// diffusant — ou ne le découvre pas, et son stream rame en logiciel sans
+/// qu'elle sache pourquoi. Rien tant que l'inventaire n'est pas relevé,
+/// rien si tout va bien.
+pub fn avertissement_pilote() -> Option<String> {
+    INVENTAIRE.get()?;
+    match API.get()? {
+        Err(e) if e.contains("trop ancien") => Some(format!(
+            "Ta carte NVIDIA pourrait encoder tes streams, mais son {e}. Sans ça, la diffusion \
+             passe par le processeur et peut saccader."
+        )),
+        _ => None,
+    }
 }
 
 /// Un device Direct3D 11 sur la première carte NVIDIA matérielle, et son nom.

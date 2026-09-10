@@ -164,7 +164,12 @@ d'écran temps réel) partout ailleurs, ou au choix dans les réglages. Avant
 l'encodeur, l'image peut être réduite (plafond de hauteur) par moitiés puis
 bilinéaire séparable. Réglages : source, résolution plafond, 15/30/60 i/s,
 débit 1–20 Mbit/s (6 par défaut), curseur, aperçu local, encodeur. Tout
-change à chaud, le stream continue, séquence comprise.
+change à chaud, le stream continue, séquence comprise. NVENC demande un
+pilote NVIDIA de fin 2022 ou plus récent (API 12.0) : avec un pilote trop
+vieux, ki-chat le dit au démarrage et dans les réglages de diffusion (« mets
+à jour le pilote, NVIDIA App → Pilotes »), et encode en logiciel en
+attendant ; un encodeur qui ne s'ouvre pas ne laisse jamais un stream vide
+sans le dire.
 
 **Transport** : une trame = **un flux QUIC unidirectionnel**, sur la même
 connexion (rien de plus à ouvrir que 9987/udp), priorité à la plus ancienne.
