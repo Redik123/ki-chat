@@ -187,12 +187,21 @@ party à côté des ronds), dans la fenêtre de visionnage d'un stream.
 **Validation** : deux membres en partie, le statut suit à la seconde ; fermer
 le jeu efface ; décocher efface chez tout le monde.
 
-### V2 — Identité et fiche joueur
-« Lier mon compte Riot » dans Mon compte ; HenrikDev côté serveur (clé,
-seau, file, cache) ; images valorant-api.com en cache ; fiche au clic droit
-(rang avec icône, RR, courbe de RR, derniers matchs) ; icône de rang à côté
-du pseudo pour qui a lié. **Validation** : trente fiches ouvertes en rafale
-ne coûtent aucune requête ; une clé absente ne casse rien.
+### V2 — Identité et fiche joueur — en test (0.1.32)
+« Compte Riot » dans ⚙ → Jeu : on tape « Pseudo#TAG », le serveur le
+résout par HenrikDev (`crates/server/src/valorant.rs` : clé lue dans
+`KI_HENRIK_KEY` ou `data/henrik.key`, un fil unique, vingt requêtes par
+minute glissante, file de travaux) et garde la fiche dans
+`data/valorant/fiches.json` — rang courant et pic, dix derniers mouvements
+de RR, cinq derniers matchs résumés à la ligne du membre. Le roster porte
+`riot_id` et `rang_valorant` ; le pseudo prend son rang en petit, à la
+couleur du palier ; clic droit → « Fiche VALORANT » ouvre la fiche depuis
+le cache, sans requête. Rafraîchissement toutes les trente minutes pour les
+membres liés en ligne. Délier : soi-même, ou un admin (audité). Reste à
+faire, en V4 : les icônes de rang de valorant-api.com à la place du texte.
+**Validation** : trente fiches ouvertes en rafale ne coûtent aucune requête
+(elles viennent du cache) ; sans clé, la liaison répond « demande à
+l'admin » et rien d'autre ne change.
 
 ### V3 — Le fil de jeu
 Fin de partie détectée → message automatique dans un salon choisi par

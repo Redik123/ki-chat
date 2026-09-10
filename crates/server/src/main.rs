@@ -6,6 +6,7 @@
 //!   KI_HTTP_PORT        port HTTP (partage de fichiers, défaut 8080)
 //!   KI_UDP_PORT         port QUIC (contrôle + voix, défaut 9987)
 //!   KI_DATA_DIR         dossier de persistance (défaut ./data)
+//!   KI_HENRIK_KEY       clé HenrikDev pour les fiches VALORANT (sinon data/henrik.key ; absente : liaisons fermées)
 //!   KI_FILES_MAX_BYTES  plafond global de data/files/ (défaut 2 Gio, 0 =
 //!                       illimité) — au-delà, les partages les plus anciens
 //!                       sont supprimés et les nouveaux envois refusés
@@ -25,6 +26,7 @@ mod state;
 mod store;
 mod stream;
 mod throttle;
+mod valorant;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -107,6 +109,36 @@ async fn main() -> anyhow::Result<()> {
     // Le jeton d'accès aux diagnostics existe dès le démarrage : l'admin
     // sait où le lire avant le premier besoin.
     diag::init(&state);
+
+    // Ce que le fil HenrikDev rapporte (liaison faite, fiche refaite) est
+    // relayé d'ici : réponse à l'intéressé, roster à tout le monde. Et
+    // chaque minute, les membres liés en ligne dont la fiche a plus d'une
+    // demi-heure repassent en file.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tours: u32 = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                for r in state.valorant.resultats() {
+                    match r {
+                        valorant::Resultat::Liaison { user_id, ok, message, riot_id } => {
+                            state.send_to(user_id, &ki_protocol::ServerMsg::LiaisonRiot { ok, message, riot_id });
+                            state.broadcast_member(user_id);
+                        }
+                        valorant::Resultat::Fiche { user_id } => state.broadcast_member(user_id),
+                    }
+                }
+                tours = tours.wrapping_add(1);
+                if tours.is_multiple_of(120) {
+                    let en_ligne: Vec<ki_protocol::UserId> = state.users.lock().unwrap().keys().copied().collect();
+                    for id in state.valorant.a_rafraichir(&en_ligne, std::time::Duration::from_secs(30 * 60)) {
+                        state.valorant.rafraichir(id);
+                    }
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(|| async { "ki-chat server" }))

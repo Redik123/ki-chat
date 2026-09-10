@@ -187,6 +187,17 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         jeu: Option<JeuStatut>,
     },
+    /// Lier son compte Riot (« Pseudo#TAG ») : le serveur le résout et
+    /// tient à jour sa fiche (rang, matchs) par HenrikDev. La réponse vient
+    /// à part, `LiaisonRiot`, une fois le compte trouvé.
+    LierRiot { riot_id: String },
+    /// Délier son compte — ou, pour un administrateur, celui de `user_id`.
+    DelierRiot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<UserId>,
+    },
+    /// La fiche VALORANT d'un membre lié, telle que le serveur la garde.
+    FicheValorant { user_id: UserId },
     /// Le client annonce son état vocal : émission en cours, et micro coupé
     /// volontairement — pour que les autres distinguent « muet » de « parti ».
     VoiceState {
@@ -426,6 +437,19 @@ pub enum ServerMsg {
     },
     /// Un message du salon a été supprimé : il disparaît chez tout le monde.
     MessageDeleted { channel: ChannelId, message: MsgRef },
+    /// Réponse à `LierRiot` / `DelierRiot` : réussi ou non, et pourquoi.
+    LiaisonRiot {
+        ok: bool,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        riot_id: Option<String>,
+    },
+    /// La fiche d'un membre (`None` : pas lié, ou rien encore).
+    FicheValorant {
+        user_id: UserId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fiche: Option<FicheValorant>,
+    },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
     /// Résultats d'une recherche, du plus ancien au plus récent.
@@ -1006,6 +1030,12 @@ pub struct Member {
     /// partage pas, ou s'il ne joue pas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jeu: Option<JeuStatut>,
+    /// Son Riot ID (« Pseudo#TAG ») s'il a lié son compte, et son rang
+    /// compétitif d'après la dernière fiche (0 = non classé, 27 = Radiant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub riot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rang_valorant: Option<u8>,
     #[serde(default)]
     pub roles: Vec<RoleId>,
     /// Vrai si la personne est connectée au serveur. Le roster liste AUSSI
@@ -1144,6 +1174,104 @@ pub struct JeuStatut {
     /// Partie personnalisée (pas de file).
     #[serde(default)]
     pub custom: bool,
+}
+
+/// La fiche VALORANT d'un membre, telle que le serveur la garde d'après
+/// HenrikDev : rang courant et pic, derniers mouvements de RR, derniers
+/// matchs résumés — la ligne du membre seulement, jamais les neuf autres.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FicheValorant {
+    pub riot_id: String,
+    pub region: String,
+    pub plateforme: String,
+    #[serde(default)]
+    pub niveau: u32,
+    #[serde(default)]
+    pub rang: RangValorant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pic: Option<RangValorant>,
+    #[serde(default)]
+    pub historique_rr: Vec<PointRR>,
+    #[serde(default)]
+    pub matchs: Vec<MatchResume>,
+    /// Dernière mise à jour, en millisecondes Unix.
+    #[serde(default)]
+    pub maj: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RangValorant {
+    /// 0 = non classé … 27 = Radiant.
+    pub tier: u8,
+    pub rr: u16,
+    /// Variation au dernier match classé.
+    #[serde(default)]
+    pub delta: i32,
+    #[serde(default)]
+    pub elo: u32,
+    /// La saison (« E9A2 »), pour le pic.
+    #[serde(default)]
+    pub saison: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PointRR {
+    pub date: u64,
+    pub tier: u8,
+    pub rr: u16,
+    pub delta: i32,
+    #[serde(default)]
+    pub carte: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MatchResume {
+    pub id: String,
+    pub date: u64,
+    pub carte: String,
+    pub mode: String,
+    pub agent: String,
+    pub kills: u16,
+    pub deaths: u16,
+    pub assists: u16,
+    pub score: u32,
+    /// Pourcentage de tirs à la tête.
+    #[serde(default)]
+    pub tete_pct: u8,
+    /// Manches gagnées / perdues par son équipe.
+    pub manches: (u8, u8),
+    /// `None` : match nul ou inconnu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gagne: Option<bool>,
+    #[serde(default)]
+    pub tier: u8,
+    #[serde(default)]
+    pub duree_s: u32,
+}
+
+/// Le nom français d'un rang compétitif (0 = non classé, 3 = Fer 1 …
+/// 27 = Radiant ; 1 et 2 n'existent pas).
+pub fn nom_de_rang(tier: u8) -> String {
+    let paliers = ["Fer", "Bronze", "Argent", "Or", "Platine", "Diamant", "Ascendant", "Immortel"];
+    match tier {
+        0..=2 => "Non classé".to_string(),
+        27.. => "Radiant".to_string(),
+        t => {
+            let i = (t - 3) as usize;
+            format!("{} {}", paliers[i / 3], i % 3 + 1)
+        }
+    }
+}
+
+/// Le Riot ID « Pseudo#TAG » découpé et vérifié : un pseudo de 3 à 16
+/// caractères, un tag de 3 à 5 lettres ou chiffres.
+pub fn parser_riot_id(s: &str) -> Option<(String, String)> {
+    let (nom, tag) = s.trim().rsplit_once('#')?;
+    let (nom, tag) = (nom.trim(), tag.trim());
+    let nom_ok = (3..=16).contains(&nom.chars().count())
+        && !nom.chars().any(|c| c.is_control() || c == '#' || c == '/');
+    let tag_ok = (3..=5).contains(&tag.chars().count()) && tag.chars().all(|c| c.is_ascii_alphanumeric());
+    (nom_ok && tag_ok).then(|| (nom.to_string(), tag.to_uppercase()))
 }
 
 /// L'état de session VALORANT, tel que la présence le nomme.
@@ -1662,7 +1790,26 @@ mod tests {
 
         let ancien = r#"{"user_id":1,"username":"k","speaking":false}"#;
         let m: Member = serde_json::from_str(ancien).unwrap();
-        assert!(m.jeu.is_none());
+        assert!(m.jeu.is_none() && m.riot_id.is_none() && m.rang_valorant.is_none());
+    }
+
+    /// Les rangs ont leur nom français, et le Riot ID se découpe en
+    /// pseudo et tag — ou se refuse.
+    #[test]
+    fn les_rangs_et_les_riot_id_se_lisent() {
+        assert_eq!(nom_de_rang(0), "Non classé");
+        assert_eq!(nom_de_rang(3), "Fer 1");
+        assert_eq!(nom_de_rang(14), "Or 3");
+        assert_eq!(nom_de_rang(24), "Immortel 1");
+        assert_eq!(nom_de_rang(27), "Radiant");
+        assert_eq!(parser_riot_id(" Redik#6162 "), Some(("Redik".into(), "6162".into())));
+        assert_eq!(parser_riot_id("Jean Michel#eu w"), None);
+        assert_eq!(parser_riot_id("Jean Michel#euw"), Some(("Jean Michel".into(), "EUW".into())));
+        assert!(parser_riot_id("sansTag").is_none());
+        assert!(parser_riot_id("ab#123").is_none());
+        let f = FicheValorant { riot_id: "Redik#6162".into(), ..Default::default() };
+        let relu: FicheValorant = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert_eq!(relu, f);
     }
 
     /// Supprimer les messages des autres est une autorité : jamais pour

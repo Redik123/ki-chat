@@ -399,6 +399,8 @@ pub struct AppState {
     pub history: History,
     /// Journal des actions d'administration.
     pub audit: crate::audit::Audit,
+    /// Comptes Riot liés et fiches VALORANT (HenrikDev).
+    pub valorant: crate::valorant::Valorant,
 }
 
 impl AppState {
@@ -438,6 +440,7 @@ impl AppState {
             streams: crate::stream::Streams::new(),
             history,
             audit,
+            valorant: crate::valorant::Valorant::open(data_dir),
         })
     }
 
@@ -776,6 +779,8 @@ impl AppState {
             muted: u.muted,
             streaming: u.streaming,
             jeu: u.jeu.clone(),
+            riot_id: self.valorant.riot_id(user_id),
+            rang_valorant: self.valorant.rang(user_id),
             force_muted: u.force_muted,
             force_deafened: u.force_deafened,
             admin: u.admin,
@@ -813,6 +818,8 @@ impl AppState {
                 muted: u.muted,
                 streaming: u.streaming,
                 jeu: u.jeu.clone(),
+                riot_id: self.valorant.riot_id(*id),
+                rang_valorant: self.valorant.rang(*id),
                 force_muted: u.force_muted,
                 force_deafened: u.force_deafened,
                 admin: u.admin,
@@ -840,6 +847,8 @@ impl AppState {
                 muted: false,
                 streaming: None,
                 jeu: None,
+                riot_id: self.valorant.riot_id(account.user_id),
+                rang_valorant: self.valorant.rang(account.user_id),
                 // Les sanctions d'un compte hors ligne se lisent quand même :
                 // elles l'attendent au retour, et le modérateur doit pouvoir
                 // les lever sans attendre qu'il revienne.

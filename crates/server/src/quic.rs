@@ -1066,6 +1066,50 @@ fn handle_msg(
             }
             state.broadcast(channel, None, &ServerMsg::MessageDeleted { channel, message });
         }
+        ClientMsg::LierRiot { riot_id } => {
+            let Some((nom, tag)) = ki_protocol::parser_riot_id(&riot_id) else {
+                let _ = tx.send(ServerMsg::LiaisonRiot {
+                    ok: false,
+                    message: "écris ton Riot ID comme « Pseudo#TAG »".into(),
+                    riot_id: None,
+                });
+                return;
+            };
+            // La réponse définitive vient du fil HenrikDev, par main.rs ;
+            // ici on dit seulement que la recherche est partie.
+            let (ok, message) = match state.valorant.lier(user_id, nom, tag) {
+                Ok(()) => (true, "recherche du compte…".to_string()),
+                Err(e) => (false, e),
+            };
+            let _ = tx.send(ServerMsg::LiaisonRiot { ok, message, riot_id: None });
+        }
+        ClientMsg::DelierRiot { user_id: cible } => {
+            let cible = cible.unwrap_or(user_id);
+            if cible != user_id && !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
+                return;
+            }
+            let ancien = state.valorant.riot_id(cible);
+            let ok = state.valorant.delier(cible);
+            if ok && cible != user_id {
+                let qui = state
+                    .accounts
+                    .list(&state.roles)
+                    .into_iter()
+                    .find(|a| a.user_id == cible)
+                    .map(|a| a.username)
+                    .unwrap_or_else(|| cible.to_string());
+                state.audit.record("valorant.unlink", username, &qui, ancien.as_deref().unwrap_or(""));
+            }
+            let message = if ok { "compte Riot délié".to_string() } else { "aucun compte Riot lié".to_string() };
+            let _ = tx.send(ServerMsg::LiaisonRiot { ok, message, riot_id: None });
+            if ok {
+                state.broadcast_member(cible);
+            }
+        }
+        ClientMsg::FicheValorant { user_id: cible } => {
+            let fiche = state.valorant.fiche(cible);
+            let _ = tx.send(ServerMsg::FicheValorant { user_id: cible, fiche });
+        }
         ClientMsg::History { limit } => {
             let Some(channel) = current_channel(state, user_id) else {
                 let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });

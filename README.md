@@ -250,9 +250,22 @@ la file, la carte, le score de sa party, la taille de la party et le rang,
 et l'envoie au serveur à chaque changement, qui le relaie comme l'état
 vocal. Aucun jeton ne quitte la machine, rien n'est écrit vers le client
 Riot, rien sur les adversaires. Ce n'est pas supporté par Riot : un format
-qui change éteint le statut sans bruit. La suite (fiche joueur, rangs,
-matchs via HenrikDev côté serveur, fil de fin de partie, classement du
-groupe) est dans le plan.
+qui change éteint le statut sans bruit.
+
+Livré aussi : la **fiche joueur**. Chacun lie son Riot ID (⚙ → Jeu →
+Compte Riot, « Pseudo#TAG ») ; le serveur le résout par
+[HenrikDev](https://docs.henrikdev.xyz) — la clé d'API reste sur le
+serveur, dans `KI_HENRIK_KEY` ou `data/henrik.key`, jamais dans le client
+ni dans le dépôt — et garde une fiche par membre lié : rang courant et
+pic, derniers mouvements de RR, derniers matchs résumés à sa ligne
+seulement, jamais celles des autres joueurs. Le pseudo prend son rang en
+petit dans la liste des membres ; clic droit → « Fiche VALORANT » l'ouvre
+depuis le cache du serveur, sans toucher à l'API. Le serveur rafraîchit
+les fiches des membres liés en ligne toutes les trente minutes et se tient
+à vingt requêtes par minute, sous les trente de la clé. Sans clé, la
+liaison répond « demande à l'admin » et tout le reste fonctionne. La
+suite (fil de fin de partie, classement du groupe, icônes de rang) est
+dans le plan.
 
 ## Sécurité
 
@@ -939,6 +952,7 @@ Variables d'environnement du serveur :
 | `KI_UDP_PORT`  | `9987`     | port QUIC (contrôle + voix)   |
 | `KI_DATA_DIR`  | `./data`   | persistance (comptes, historique, certificat TLS, identité du serveur) |
 | `KI_FILES_MAX_BYTES` | `2 Gio` | plafond global du partage de fichiers ; `0` = illimité |
+| `KI_HENRIK_KEY` | — | clé HenrikDev pour les fiches VALORANT (sinon `data/henrik.key`) ; absente, les liaisons de compte Riot sont fermées |
 | `KI_FILES_TTL_DAYS`  | `30`    | âge au-delà duquel un fichier partagé est effacé ; `0` = jamais |
 
 Les deux dernières bornent le disque : sans elles, `data/files/` grandissait

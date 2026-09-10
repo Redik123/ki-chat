@@ -21,6 +21,8 @@ services:
       # Bornes du partage de fichiers : sans elles le volume grandit jusqu'à
       # saturer le disque. 0 lève la limite correspondante.
       KI_FILES_MAX_BYTES: ${KI_FILES_MAX_BYTES:-2147483648}
+      # Clé HenrikDev (fiches VALORANT). Vide : liaisons fermées, rien d'autre ne change.
+      KI_HENRIK_KEY: ${KI_HENRIK_KEY:-}
       KI_FILES_TTL_DAYS: ${KI_FILES_TTL_DAYS:-30}
       # Verbosité : info par défaut, `debug` pour enquêter.
       RUST_LOG: ${RUST_LOG:-info}

@@ -604,6 +604,12 @@ struct KiApp {
     /// Partager son activité VALORANT (lue dans son propre client Riot).
     /// Désactivé de base : personne ne partage sans l'avoir choisi.
     valorant_presence: bool,
+    /// Le Riot ID en cours de saisie dans ⚙ → Jeu, et la dernière réponse
+    /// du serveur à une liaison (réussie ou non, et pourquoi).
+    riot_saisie: String,
+    riot_message: Option<(bool, String)>,
+    /// La fiche VALORANT ouverte au clic droit sur un membre.
+    fiche: Option<FicheOuverte>,
     /// Le fil qui lit le client Riot, tant que l'option est cochée.
     veilleur_valorant: Option<valorant::Veilleur>,
     /// La version du statut déjà envoyée au serveur, et ce statut.
@@ -949,6 +955,9 @@ impl KiApp {
             journal_flux: std::time::Instant::now(),
             pilote_averti: false,
             valorant_presence: get("valorant_presence", "off") == "on",
+            riot_saisie: String::new(),
+            riot_message: None,
+            fiche: None,
             veilleur_valorant: None,
             jeu_version_envoyee: 0,
             jeu_envoye: None,
@@ -1385,6 +1394,43 @@ impl KiApp {
         ureq::AgentBuilder::new()
             .tls_config(ki_client_quic::pinned_tls_config(expected))
             .build()
+    }
+
+    /// La fiche VALORANT d'un membre, telle que le serveur la garde :
+    /// rang, pic, derniers RR, derniers matchs. Elle vient du cache du
+    /// serveur, l'ouvrir ne coûte rien à personne.
+    fn fiche_window(&mut self, ctx: &egui::Context) {
+        let Some(f) = &self.fiche else { return };
+        let mut open = true;
+        let titre = format!("VALORANT — {}", f.username);
+        let (recue, fiche) = (f.recue, f.fiche.clone());
+        egui::Window::new(titre)
+            .id(egui::Id::new("fiche_valorant"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .open(&mut open)
+            .show(ctx, |ui| match (recue, &fiche) {
+                (false, _) => {
+                    ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
+                }
+                (true, None) => {
+                    ui.label(
+                        RichText::new("pas de compte Riot lié — ou pas encore de fiche.")
+                            .color(TEXT_DIM),
+                    );
+                }
+                (true, Some(fiche)) => fiche_ui(ui, fiche),
+            });
+        if !open {
+            self.fiche = None;
+        }
+    }
+
+    /// Ouvre la fiche VALORANT d'un membre et la demande au serveur.
+    fn ouvrir_fiche(&mut self, user_id: UserId, username: String) {
+        self.fiche = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
+        self.send(ClientMsg::FicheValorant { user_id });
     }
 
     fn send(&self, msg: ClientMsg) {
@@ -2524,6 +2570,17 @@ impl KiApp {
                 }
             }
             ServerMsg::StreamMetaChanged { .. } => {}
+            ServerMsg::LiaisonRiot { ok, message, .. } => {
+                self.riot_message = Some((ok, message));
+            }
+            ServerMsg::FicheValorant { user_id, fiche } => {
+                if let Some(f) = &mut self.fiche {
+                    if f.user_id == user_id {
+                        f.recue = true;
+                        f.fiche = fiche;
+                    }
+                }
+            }
             ServerMsg::Error { message } => {
                 let message = ki_protocol::safe_display(&message, 300);
                 // Avant le Welcome, une erreur = échec de connexion (jeton...).
@@ -3339,6 +3396,7 @@ impl KiApp {
         self.comms_popup(ctx, voice);
         self.partage_windows(ctx);
         self.diffusion_window(ctx);
+        self.fiche_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
         if self.show_settings {
@@ -4007,6 +4065,17 @@ impl KiApp {
             }
             if !m.online {
                 ui.label(RichText::new("hors ligne").color(TEXT_FAINT).size(11.0));
+            }
+            // Sa fiche VALORANT, s'il a lié son compte Riot : le serveur la
+            // garde, l'ouvrir ne coûte aucune requête.
+            if let Some(riot) = &m.riot_id {
+                ui.add_space(4.0);
+                let rang = m.rang_valorant.map(ki_protocol::nom_de_rang).unwrap_or_default();
+                let texte = if rang.is_empty() { riot.clone() } else { format!("{riot} · {rang}") };
+                ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.0));
+                if ui::button(ui, Icon::Screen, "Fiche VALORANT").clicked() {
+                    self.ouvrir_fiche(m.user_id, m.username.clone());
+                }
             }
             // Le volume ne concerne que quelqu'un qu'on peut entendre.
             if m.online {
@@ -6100,6 +6169,70 @@ impl KiApp {
                                 (Some(_), Some(j)) => j.ligne(),
                             };
                             ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
+
+                            // Le compte Riot : lié, le serveur tient la fiche
+                            // par HenrikDev et la montre aux membres. Ce que le
+                            // serveur en sait vient du roster, pas d'un état à
+                            // part — délier chez l'admin s'y voit aussi.
+                            ui.add_space(12.0);
+                            ui::group_title(ui, Icon::Target, "Compte Riot");
+                            let moi = self
+                                .my_id
+                                .and_then(|id| self.members.iter().find(|m| m.user_id == id))
+                                .map(|m| (m.user_id, m.username.clone(), m.riot_id.clone(), m.rang_valorant));
+                            match moi {
+                                Some((user_id, username, Some(riot), rang)) => {
+                                    let rang = rang.filter(|t| *t >= 3).map(ki_protocol::nom_de_rang);
+                                    let texte = match rang {
+                                        Some(r) => format!("lié : {riot} · {r}"),
+                                        None => format!("lié : {riot}"),
+                                    };
+                                    ui.label(RichText::new(texte).color(TEXT_DIM));
+                                    ui::hint(
+                                        ui,
+                                        "le serveur garde ton rang, tes derniers RR et tes derniers                                          matchs — ta ligne seulement — et les montre aux membres au                                          clic droit sur ton pseudo.",
+                                    );
+                                    ui.horizontal(|ui| {
+                                        if ui::button(ui, Icon::Screen, "Ma fiche").clicked() {
+                                            self.ouvrir_fiche(user_id, username.clone());
+                                        }
+                                        if ui::button(ui, Icon::Close, "Délier").clicked() {
+                                            self.send(ClientMsg::DelierRiot { user_id: None });
+                                            self.riot_message = None;
+                                        }
+                                    });
+                                }
+                                _ => {
+                                    ui::hint(
+                                        ui,
+                                        "ton Riot ID, « Pseudo#TAG » : le serveur le cherche par                                          HenrikDev et garde ton rang et tes derniers matchs. Rien                                          n'est stocké sur les autres joueurs.",
+                                    );
+                                    ui.horizontal(|ui| {
+                                        let champ = ui.add(
+                                            egui::TextEdit::singleline(&mut self.riot_saisie)
+                                                .hint_text("Pseudo#TAG")
+                                                .desired_width(200.0),
+                                        );
+                                        let entree = champ.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                        let valide = ki_protocol::parser_riot_id(&self.riot_saisie).is_some();
+                                        let clic = ui
+                                            .add_enabled_ui(valide, |ui| ui::button(ui, Icon::Check, "Lier"))
+                                            .inner
+                                            .clicked();
+                                        if (clic || entree) && valide {
+                                            self.send(ClientMsg::LierRiot {
+                                                riot_id: self.riot_saisie.trim().to_string(),
+                                            });
+                                            self.riot_message = Some((true, "recherche du compte…".into()));
+                                        }
+                                    });
+                                }
+                            }
+                            if let Some((ok, message)) = &self.riot_message {
+                                let teinte = if *ok { TEXT_DIM } else { DANGER };
+                                ui.label(RichText::new(message).color(teinte).size(11.5));
+                            }
                         }
 
                         if let Some(info) = self.info.clone() {
@@ -8651,6 +8784,134 @@ impl<'a> MemberRow<'a> {
 /// Ligne de membre : avatar, pseudo, badges, vumètre pendant qu'il parle.
 /// Rend la réponse de la ligne, et `true` si l'on a cliqué l'icône
 /// « diffuse » à côté du pseudo.
+/// La couleur d'un palier VALORANT, proche de celle du jeu : du gris du
+/// Fer au jaune du Radiant.
+fn couleur_de_rang(tier: u8) -> egui::Color32 {
+    match tier {
+        3..=5 => egui::Color32::from_rgb(0x8f, 0x8f, 0x8f),
+        6..=8 => egui::Color32::from_rgb(0xb5, 0x7f, 0x4a),
+        9..=11 => egui::Color32::from_rgb(0xc8, 0xd0, 0xd8),
+        12..=14 => egui::Color32::from_rgb(0xe8, 0xc0, 0x40),
+        15..=17 => egui::Color32::from_rgb(0x3f, 0xb8, 0xc8),
+        18..=20 => egui::Color32::from_rgb(0xb0, 0x7c, 0xf0),
+        21..=23 => egui::Color32::from_rgb(0x4f, 0xc8, 0x6a),
+        24..=26 => egui::Color32::from_rgb(0xe0, 0x4a, 0x5a),
+        27.. => egui::Color32::from_rgb(0xff, 0xf2, 0x9a),
+        _ => TEXT_FAINT,
+    }
+}
+
+/// La fiche d'un membre, ouverte au clic droit : on l'a demandée au
+/// serveur, et on attend — puis on l'a, ou on sait qu'il n'y en a pas.
+struct FicheOuverte {
+    user_id: UserId,
+    username: String,
+    recue: bool,
+    fiche: Option<ki_protocol::FicheValorant>,
+}
+
+/// « il y a 3 min », « il y a 2 h », « il y a 5 j » — pour dater une
+/// fiche ou un match sans afficher d'horodatage.
+fn il_y_a(ms: u64) -> String {
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let s = maintenant.saturating_sub(ms) / 1000;
+    match s {
+        0..=59 => "à l'instant".to_string(),
+        60..=3599 => format!("il y a {} min", s / 60),
+        3600..=86_399 => format!("il y a {} h", s / 3600),
+        _ => format!("il y a {} j", s / 86_400),
+    }
+}
+
+/// Le corps de la fiche : ce que le serveur sait, et rien de plus.
+fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant) {
+    use ki_protocol::nom_de_rang;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&fiche.riot_id).strong().size(16.0));
+        let mut detail = format!("{} · {}", fiche.region.to_uppercase(), fiche.plateforme.to_uppercase());
+        if fiche.niveau > 0 {
+            detail.push_str(&format!(" · niveau {}", fiche.niveau));
+        }
+        ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.5));
+    });
+    ui.add_space(6.0);
+
+    // Le rang : gros, à la couleur du palier, avec le dernier mouvement.
+    let r = &fiche.rang;
+    ui.horizontal(|ui| {
+        let nom = nom_de_rang(r.tier);
+        ui.label(RichText::new(&nom).color(couleur_de_rang(r.tier)).strong().size(20.0));
+        if r.tier >= 3 {
+            ui.label(RichText::new(format!("{} RR", r.rr)).color(TEXT_DIM).size(15.0));
+            if r.delta != 0 {
+                let (texte, teinte) =
+                    if r.delta > 0 { (format!("+{}", r.delta), SPEAK) } else { (r.delta.to_string(), DANGER) };
+                ui.label(RichText::new(format!("{texte} au dernier match")).color(teinte).size(11.5));
+            }
+        }
+    });
+    if let Some(pic) = &fiche.pic {
+        let mut texte = format!("pic : {}", nom_de_rang(pic.tier));
+        if pic.tier >= 3 {
+            texte.push_str(&format!(" · {} RR", pic.rr));
+        }
+        if !pic.saison.is_empty() {
+            texte.push_str(&format!(" · {}", pic.saison));
+        }
+        ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.5));
+    }
+
+    // Les derniers mouvements de RR, du plus récent au plus ancien : vert
+    // quand ça monte, rouge quand ça descend, la carte au survol.
+    if !fiche.historique_rr.is_empty() {
+        ui.add_space(10.0);
+        ui.label(RichText::new("Derniers classés").color(TEXT_DIM).size(11.5));
+        ui.horizontal_wrapped(|ui| {
+            for p in &fiche.historique_rr {
+                let (texte, teinte) = if p.delta > 0 {
+                    (format!("+{}", p.delta), SPEAK)
+                } else if p.delta < 0 {
+                    (p.delta.to_string(), DANGER)
+                } else {
+                    ("±0".to_string(), TEXT_FAINT)
+                };
+                let info = format!("{} · {} · {} RR · {}", p.carte, nom_de_rang(p.tier), p.rr, il_y_a(p.date));
+                ui.label(RichText::new(texte).color(teinte).strong()).on_hover_text(info);
+            }
+        });
+    }
+
+    // Les derniers matchs, sa ligne seulement.
+    if !fiche.matchs.is_empty() {
+        ui.add_space(10.0);
+        ui.label(RichText::new("Derniers matchs").color(TEXT_DIM).size(11.5));
+        egui::Grid::new("fiche_matchs").num_columns(7).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+            for m in &fiche.matchs {
+                let (score, teinte) = match m.gagne {
+                    Some(true) => (format!("{}-{}", m.manches.0, m.manches.1), SPEAK),
+                    Some(false) => (format!("{}-{}", m.manches.0, m.manches.1), DANGER),
+                    None => (format!("{}-{}", m.manches.0, m.manches.1), TEXT_DIM),
+                };
+                ui.label(RichText::new(il_y_a(m.date)).color(TEXT_FAINT).size(11.0));
+                ui.label(RichText::new(&m.mode).size(11.5));
+                ui.label(RichText::new(&m.carte).size(11.5));
+                ui.label(RichText::new(&m.agent).color(TEXT_DIM).size(11.5));
+                ui.label(RichText::new(format!("{}/{}/{}", m.kills, m.deaths, m.assists)).size(11.5))
+                    .on_hover_text(format!("éliminations / morts / assistances — {} % de tirs à la tête, {} points", m.tete_pct, m.score));
+                ui.label(RichText::new(score).color(teinte).strong().size(11.5));
+                let rang = if m.tier >= 3 { nom_de_rang(m.tier) } else { String::new() };
+                ui.label(RichText::new(rang).color(couleur_de_rang(m.tier)).size(11.0));
+                ui.end_row();
+            }
+        });
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new(format!("mis à jour {} · HenrikDev", il_y_a(fiche.maj))).color(TEXT_FAINT).size(10.5));
+}
+
 fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     let MemberRow { member, speaking, muted, is_me, level, volume, photo } = row;
     let height = 38.0;
@@ -8710,6 +8971,25 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         );
         icons::draw(painter, badge, Icon::Crown, ACCENT);
         apres_nom += 18.0;
+    }
+
+    // Son rang VALORANT, s'il a lié son compte : « Or 2 » en petit après
+    // le pseudo, à la couleur du palier. Non classé ne montre rien.
+    if let Some(tier) = member.rang_valorant.filter(|t| *t >= 3) {
+        let galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                ki_protocol::nom_de_rang(tier),
+                egui::FontId::proportional(10.0),
+                couleur_de_rang(tier),
+            )
+        });
+        let largeur = galley.size().x;
+        painter.galley(
+            egui::pos2(apres_nom + 1.0, name_y - galley.size().y / 2.0 + 1.0),
+            galley,
+            couleur_de_rang(tier),
+        );
+        apres_nom += largeur + 8.0;
     }
 
     // Il diffuse son écran : un petit écran à côté du pseudo, cliquable —
