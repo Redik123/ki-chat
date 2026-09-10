@@ -164,13 +164,17 @@ remonter ses propres statistiques avec ses propres jetons, en lecture.
 
 ## Jalons
 
-### V1 — Statut en jeu — écrite le 2026-09-10, en test
+### V1 — Statut en jeu — livrée en 0.1.31 (2026-09-10)
 Livré tel que prévu, à deux écarts près : sondage HTTP toutes les deux
 secondes plutôt qu'une WebSocket (plus simple, coût nul), et la case dans
 un onglet **Jeu** de ⚙ (le premier habitant de l'onglet ; le Riot ID et le
 salon du fil de jeu y viendront). Le statut ne s'affiche encore que dans la
 liste des membres — overlay et fenêtre de stream attendent le retour du
-terrain.
+terrain. Appris en route : la présence des clients 13.x (2026) est rangée
+en blocs (`matchPresenceData`, `partyPresenceData`, `playerPresenceData`),
+la lecture accepte les deux dispositions ; au menu, `queueId` n'est que le
+mode sélectionné (« en file » seulement si `partyState` = `MATCHMAKING`) ;
+les files console portent le préfixe `console_`.
 
 Module client `valorant/` : surveillance du lockfile (apparition,
 disparition), WebSocket de présence, normalisation en `JeuStatut`, envoi au
