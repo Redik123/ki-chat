@@ -187,7 +187,7 @@ party à côté des ronds), dans la fenêtre de visionnage d'un stream.
 **Validation** : deux membres en partie, le statut suit à la seconde ; fermer
 le jeu efface ; décocher efface chez tout le monde.
 
-### V2 — Identité et fiche joueur — en test (0.1.32)
+### V2 — Identité et fiche joueur — livrée en 0.1.32 (2026-09-10)
 « Compte Riot » dans ⚙ → Jeu : on tape « Pseudo#TAG », le serveur le
 résout par HenrikDev (`crates/server/src/valorant.rs` : clé lue dans
 `KI_HENRIK_KEY` ou `data/henrik.key`, un fil unique, vingt requêtes par
