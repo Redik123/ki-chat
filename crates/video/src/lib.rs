@@ -606,8 +606,38 @@ fn streamer_pipeline(
             ) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
-                    tracing::error!("encodeur H.264 : {e:#}");
-                    return;
+                    // L'encodeur exigé ne s'ouvre pas — pilote NVIDIA trop
+                    // ancien, session refusée par la carte… Le dire, à la
+                    // personne qui diffuse comme au journal, et continuer en
+                    // logiciel plutôt que de laisser un stream « en cours »
+                    // qui n'émet plus une image. C'était le silence : le fil
+                    // s'arrêtait, et l'interface n'en savait rien.
+                    journal(format!("encodeur H.264 : {e:#}"));
+                    if config.encoder == EncoderChoice::Logiciel {
+                        stats.poser_avis(format!("diffusion impossible : {e:#}"));
+                        return;
+                    }
+                    match creer_encodeur(
+                        EncoderChoice::Logiciel,
+                        ow,
+                        oh,
+                        config.bitrate_bps,
+                        config.fps,
+                        &stats,
+                    ) {
+                        Ok(logiciel) => {
+                            stats.poser_avis(format!(
+                                "NVENC indisponible : {e:#} — encodage logiciel à la place \
+                                 (passe en 720p si ça saccade)"
+                            ));
+                            encoder.insert(logiciel)
+                        }
+                        Err(e2) => {
+                            journal(format!("encodeur logiciel : {e2:#}"));
+                            stats.poser_avis(format!("diffusion impossible : {e2:#}"));
+                            return;
+                        }
+                    }
                 }
             },
         };

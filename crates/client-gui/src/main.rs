@@ -6794,6 +6794,12 @@ impl KiApp {
                 self.journal_flux = std::time::Instant::now();
                 ki_voice::journal(format!("diffusion : {etat}"));
             }
+            // Ce que le fil vidéo a à dire à la personne qui diffuse : un
+            // encodeur qui n'a pas pu s'ouvrir, un repli.
+            if let Some(avis) = g.stats.prendre_avis() {
+                ki_voice::journal(format!("diffusion : {avis}"));
+                self.info = Some(avis);
+            }
             let mut arreter = false;
             let mut reglages = false;
             let mut ouvert = true;

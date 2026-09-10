@@ -58,9 +58,22 @@ pub struct StageStats {
     dims: AtomicU64,
     /// Départ de la session (pour les débits moyens).
     started: std::sync::OnceLock<Instant>,
+    /// Un mot pour la personne qui diffuse — « NVENC indisponible, encodage
+    /// logiciel » — posé par le fil vidéo, relevé (une fois) par l'interface.
+    avis: std::sync::Mutex<Option<String>>,
 }
 
 impl StageStats {
+    /// Un message pour la personne qui diffuse ; le dernier posé gagne.
+    pub fn poser_avis(&self, message: String) {
+        *self.avis.lock().unwrap() = Some(message);
+    }
+
+    /// Le message en attente, s'il y en a un — relevé une seule fois.
+    pub fn prendre_avis(&self) -> Option<String> {
+        self.avis.lock().unwrap().take()
+    }
+
     pub fn mark_started(&self) {
         let _ = self.started.set(Instant::now());
     }
