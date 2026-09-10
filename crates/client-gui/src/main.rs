@@ -426,6 +426,12 @@ struct KiApp {
     book: Vec<servers::Server>,
     /// Serveur sélectionné dans le lanceur.
     selected: Option<u64>,
+    /// Le serveur où l'on était quand l'application a été quittée : au
+    /// lancement suivant, on s'y reconnecte sans rien cliquer. Effacé par
+    /// une déconnexion voulue depuis l'application — et par elle seule.
+    session_auto: Option<u64>,
+    /// La reprise de session n'est tentée qu'une fois par lancement.
+    auto_tente: bool,
     probes: servers::Probes,
     /// Formulaire ouvert par le bouton « + » ou le crayon.
     draft: Option<ServerDraft>,
@@ -858,6 +864,8 @@ impl KiApp {
             remember_password: active.is_some_and(|s| s.secret.is_some()),
             book,
             selected,
+            session_auto: get("session_auto", "").parse().ok(),
+            auto_tente: false,
             probes: servers::Probes::default(),
             draft: None,
             icon_textures: HashMap::new(),
@@ -1892,6 +1900,29 @@ impl KiApp {
         }
     }
 
+    /// Reprendre la session d'avant sans rien cliquer : au lancement, si
+    /// l'on a quitté l'application connecté — et non déconnecté depuis
+    /// elle —, on se reconnecte au même serveur, pourvu que son mot de
+    /// passe soit mémorisé. Une seule tentative ; si elle échoue, le
+    /// lanceur dit pourquoi, comme d'habitude.
+    fn auto_connexion(&mut self, ctx: &egui::Context) {
+        if self.auto_tente {
+            return;
+        }
+        self.auto_tente = true;
+        let Some(id) = self.session_auto else { return };
+        if self.conn.is_some() || self.connecting {
+            return;
+        }
+        let memorise = self.book.iter().any(|s| s.id == id && s.secret.is_some());
+        if !memorise {
+            self.session_auto = None;
+            return;
+        }
+        self.select_server(id);
+        self.connect(ctx);
+    }
+
     /// Bascule sur un serveur : ses identifiants remplissent le formulaire.
     fn select_server(&mut self, id: u64) {
         let Some(server) = self.book.iter().find(|s| s.id == id) else { return };
@@ -2153,6 +2184,9 @@ impl KiApp {
                 self.connect_started = None;
                 self.error = None;
                 self.remember_connection();
+                // Connecté : on y reviendra tout seul au prochain lancement,
+                // si le mot de passe est mémorisé — sans lui, impossible.
+                self.session_auto = self.selected.filter(|_| self.remember_password);
                 self.my_id = Some(user_id);
                 // `is_admin` reste la réponse d'un serveur antérieur aux
                 // rôles : sans permissions annoncées, on lui accorde tout
@@ -3222,6 +3256,7 @@ impl KiApp {
                 .on_hover_text("Annuler la connexion")
                 .clicked();
             if annule {
+                self.session_auto = None;
                 self.disconnect(None);
             }
             // Jamais « se connecter » : la tentative est déjà en cours.
@@ -3779,6 +3814,9 @@ impl KiApp {
                                 |ui| {
                                     if ui::icon_button(ui, Icon::Logout, "Se déconnecter").clicked()
                                     {
+                                        // Voulu : on ne reviendra pas tout
+                                        // seul au prochain lancement.
+                                        self.session_auto = None;
                                         self.disconnect(None);
                                     }
                                     if ui::icon_button(ui, Icon::Gear, "Réglages").clicked()
@@ -9280,6 +9318,7 @@ impl eframe::App for KiApp {
         // `repaint_delay`). Ce serait faux ailleurs — une horloge que
         // personne ne fait tourner ne sonne jamais.
         self.tick_reprise(ctx);
+        self.auto_connexion(ctx);
         self.update_voice();
         // Un seul instantané par image, pris ici : l'écran principal l'affiche,
         // et c'est lui qui dit s'il faut une image de plus.
@@ -9333,6 +9372,10 @@ impl eframe::App for KiApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         servers::save(storage, &self.book);
+        storage.set_string(
+            "session_auto",
+            self.session_auto.map(|id| id.to_string()).unwrap_or_default(),
+        );
         storage.set_string(
             "window_maximized",
             if self.maximized { "on" } else { "off" }.into(),

@@ -41,7 +41,9 @@ chaque serveur y est enregistré avec son adresse et les identifiants associés
 connecter, le client ouvre une poignée de main QUIC de test vers chaque
 serveur enregistré et affiche son état et son ping — le serveur libère
 aussitôt une connexion qui ne s'authentifie pas, rien n'est enregistré de son
-côté.
+côté. Quitter l'application connecté, c'est la retrouver connectée au
+lancement suivant (mot de passe mémorisé obligatoire) ; seule la déconnexion
+depuis l'application y renonce.
 
 **Photos de profil** : chacun règle la sienne et elle suit le compte, pas la
 machine — on la retrouve depuis n'importe quel poste. Les vignettes ne
