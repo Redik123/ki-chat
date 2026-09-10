@@ -164,7 +164,14 @@ remonter ses propres statistiques avec ses propres jetons, en lecture.
 
 ## Jalons
 
-### V1 — Statut en jeu
+### V1 — Statut en jeu — écrite le 2026-09-10, en test
+Livré tel que prévu, à deux écarts près : sondage HTTP toutes les deux
+secondes plutôt qu'une WebSocket (plus simple, coût nul), et la case dans
+un onglet **Jeu** de ⚙ (le premier habitant de l'onglet ; le Riot ID et le
+salon du fil de jeu y viendront). Le statut ne s'affiche encore que dans la
+liste des membres — overlay et fenêtre de stream attendent le retour du
+terrain.
+
 Module client `valorant/` : surveillance du lockfile (apparition,
 disparition), WebSocket de présence, normalisation en `JeuStatut`, envoi au
 serveur aux changements (et au plus une fois par seconde). Case « Partager

@@ -237,6 +237,23 @@ donc **découpée à la forme de ses ronds** (`SetWindowRgn`) : entre eux, il
 n'y a pas de fenêtre du tout. Et certains jeux se remettent au-dessus sans
 arrêt : l'overlay fait pareil, sans jamais prendre le focus.
 
+## VALORANT
+
+Le chantier a son document, [`PLAN-VALORANT.md`](PLAN-VALORANT.md) :
+sources, lignes rouges de Riot, architecture, jalons. Livré : le **statut
+en jeu** sous le pseudo, dans la liste des membres — « compétitive · Ascent
+· 7-5 · party 3/5 », « sélection des agents », « au menu ». Chacun le
+partage ou non (⚙ → Jeu, décoché de base) : son client ki-chat lit son
+**propre** client Riot, en local et en lecture seule — le lockfile, la
+session, la présence que le jeu montre aux amis —, n'en garde que l'état,
+la file, la carte, le score de sa party, la taille de la party et le rang,
+et l'envoie au serveur à chaque changement, qui le relaie comme l'état
+vocal. Aucun jeton ne quitte la machine, rien n'est écrit vers le client
+Riot, rien sur les adversaires. Ce n'est pas supporté par Riot : un format
+qui change éteint le statut sans bruit. La suite (fiche joueur, rangs,
+matchs via HenrikDev côté serveur, fil de fin de partie, classement du
+groupe) est dans le plan.
+
 ## Sécurité
 
 **Comptes** : pseudo + mot de passe, hachés en Argon2id (`data/users.json`).
@@ -739,9 +756,9 @@ envoyer par quelqu'un qui « a le bug » plutôt que de deviner.
 `cargo run -p ki-voice --example sonde-audio`.
 
 **Réglages audio** (⚙ → Audio ; la fenêtre ⚙ se range en onglets : Audio,
-Réseau & qualité, Diffusion d'écran, Overlay en jeu, Sons & notifications,
-Aide & diagnostics, l'onglet ouvert étant mémorisé) — tout est appliqué à
-chaud et mémorisé :
+Réseau & qualité, Diffusion d'écran, Overlay en jeu, Jeu, Sons &
+notifications, Aide & diagnostics, l'onglet ouvert étant mémorisé) — tout
+est appliqué à chaud et mémorisé :
 - périphériques d'entrée/sortie (avec actualisation de la liste) ;
 - vumètre micro en direct, gain d'entrée 0–200 % ;
 - trois modes : micro ouvert, push-to-talk (touche globale), **activation
