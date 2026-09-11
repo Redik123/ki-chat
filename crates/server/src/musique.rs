@@ -638,8 +638,22 @@ pub async fn boucle(state: Arc<AppState>) {
         }
     };
     let mut lecteur: Option<Lecteur> = None;
-    let mut cadence = tokio::time::interval(Duration::from_millis(20));
-    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // La cadence se tient à l'horloge, pas au minuteur. Sur Windows le
+    // minuteur a un grain de 15,6 ms : un intervalle de 20 ms « en retard »
+    // y prenait 31 ms, le flux tournait aux deux tiers de sa vitesse et le
+    // client se retrouvait à sec toutes les secondes — la « pause de 0,1 s »
+    // du premier essai. Ici on dort jusqu'à l'échéance, puis on envoie
+    // **toutes** les trames dues : réveillé avec 30 ms de retard, deux
+    // trames partent d'un coup, et le débit moyen reste exact. Une machine
+    // en retard de plus d'une seconde (veille, pause du débogueur) se recale
+    // sans rafale.
+    #[cfg(windows)]
+    unsafe {
+        // Le grain du minuteur Windows passe à 1 ms pour ce processus : la
+        // machine de développement cadence aussi bien que le serveur Linux.
+        windows::Win32::Media::timeBeginPeriod(1);
+    }
+    let mut echeance = tokio::time::Instant::now();
     let mut derniere_publication = Instant::now();
     loop {
         tokio::select! {
@@ -647,54 +661,69 @@ pub async fn boucle(state: Arc<AppState>) {
                 let Some(commande) = commande else { break };
                 appliquer(&state, &outils, &mut lecteur, commande);
             }
-            _ = cadence.tick() => {
-                let (lecture, salon, volume) = {
-                    let e = state.musique.etat.lock().unwrap();
-                    (e.lecture, e.salon, e.volume)
-                };
-                let Some(l) = lecteur.as_mut() else { continue };
-                if l.fini.load(Ordering::Relaxed) && l.rx.try_recv().is_err() {
-                    // Terminée (ou ratée) et vidée : la suivante.
-                    let erreur = l.erreur.lock().unwrap().clone();
-                    if let Some(e) = &erreur {
-                        tracing::warn!("musique : piste abandonnée : {e}");
-                    }
-                    suivante(&state, &outils, &mut lecteur, erreur);
-                    continue;
+            _ = tokio::time::sleep_until(echeance) => {
+                let maintenant = tokio::time::Instant::now();
+                if maintenant.duration_since(echeance) > Duration::from_secs(1) {
+                    echeance = maintenant;
                 }
-                if !l.pret.load(Ordering::Relaxed) {
-                    if l.demarre.elapsed() > DELAI_PREMIER_SON {
-                        suivante(&state, &outils, &mut lecteur, Some("pas de son au bout d'une minute".into()));
-                    }
-                    continue;
-                }
-                if !lecture {
-                    continue;
-                }
-                match l.rx.try_recv() {
-                    Ok(pcm) if pcm.is_empty() => {}
-                    Ok(mut pcm) => {
-                        let gain = volume as f32 / 100.0;
-                        if gain < 0.999 {
-                            for s in pcm.iter_mut() {
-                                *s *= gain;
-                            }
-                        }
-                        if let (Some(salon), Some(paquet)) = (salon, emetteur.trame(&pcm)) {
-                            envoyer(&state, salon, paquet);
-                        }
-                        l.position_ms += 20;
-                    }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {}
+                while echeance <= maintenant {
+                    echeance += Duration::from_millis(20);
+                    pas(&state, &outils, &mut lecteur, &mut emetteur);
                 }
                 if derniere_publication.elapsed() >= PUBLICATION {
                     derniere_publication = Instant::now();
-                    state.musique.etat.lock().unwrap().position_ms = l.position_ms;
-                    publier(&state, false);
+                    if let Some(l) = &lecteur {
+                        state.musique.etat.lock().unwrap().position_ms = l.position_ms;
+                        publier(&state, false);
+                    }
                 }
             }
         }
+    }
+}
+
+/// Une échéance de 20 ms : une trame part si la piste en cours en a une ;
+/// une piste finie laisse la place à la suivante.
+fn pas(state: &Arc<AppState>, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur>, emetteur: &mut Emetteur) {
+    let (lecture, salon, volume) = {
+        let e = state.musique.etat.lock().unwrap();
+        (e.lecture, e.salon, e.volume)
+    };
+    let Some(l) = lecteur.as_mut() else { return };
+    if l.fini.load(Ordering::Relaxed) && l.rx.try_recv().is_err() {
+        // Terminée (ou ratée) et vidée : la suivante.
+        let erreur = l.erreur.lock().unwrap().clone();
+        if let Some(e) = &erreur {
+            tracing::warn!("musique : piste abandonnée : {e}");
+        }
+        suivante(state, outils, lecteur, erreur);
+        return;
+    }
+    if !l.pret.load(Ordering::Relaxed) {
+        if l.demarre.elapsed() > DELAI_PREMIER_SON {
+            suivante(state, outils, lecteur, Some("pas de son au bout d'une minute".into()));
+        }
+        return;
+    }
+    if !lecture {
+        return;
+    }
+    match l.rx.try_recv() {
+        Ok(pcm) if pcm.is_empty() => {}
+        Ok(mut pcm) => {
+            let gain = volume as f32 / 100.0;
+            if gain < 0.999 {
+                for s in pcm.iter_mut() {
+                    *s *= gain;
+                }
+            }
+            if let (Some(salon), Some(paquet)) = (salon, emetteur.trame(&pcm)) {
+                envoyer(state, salon, paquet);
+            }
+            l.position_ms += 20;
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {}
     }
 }
 

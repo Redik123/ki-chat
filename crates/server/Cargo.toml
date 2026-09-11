@@ -30,3 +30,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 bytes = "1"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+
+# Le grain du minuteur Windows (15,6 ms) est trop grossier pour cadencer le
+# bot musique à 20 ms : `timeBeginPeriod(1)` sur la machine de développement.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Media"] }
