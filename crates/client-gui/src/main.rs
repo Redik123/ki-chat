@@ -1583,13 +1583,30 @@ impl KiApp {
                 Some(p) => {
                     // La progression, peinte : une barre fine, le temps à côté.
                     let duree = p.duree_s as u64;
-                    let (barre, _) = ui.allocate_exact_size(Vec2::new(120.0, 6.0), Sense::hover());
+                    // La barre se clique (ou se tire) pour avancer dans la
+                    // piste — dix minutes de morceau, ça s'écoute par morceaux.
+                    let (barre, reponse) = ui.allocate_exact_size(
+                        Vec2::new(160.0, 10.0),
+                        if peut && duree > 0 { Sense::click_and_drag() } else { Sense::hover() },
+                    );
                     let painter = ui.painter();
-                    painter.rect_filled(barre, egui::CornerRadius::same(3), theme::BG_DEEP);
+                    let fine = egui::Rect::from_center_size(barre.center(), Vec2::new(barre.width(), 6.0));
+                    painter.rect_filled(fine, egui::CornerRadius::same(3), theme::BG_DEEP);
                     if duree > 0 {
                         let part = (position as f32 / duree as f32).clamp(0.0, 1.0);
-                        let plein = egui::Rect::from_min_size(barre.min, Vec2::new(barre.width() * part, barre.height()));
+                        let plein = egui::Rect::from_min_size(fine.min, Vec2::new(fine.width() * part, fine.height()));
                         painter.rect_filled(plein, egui::CornerRadius::same(3), ACCENT);
+                        if let Some(pos) = reponse.hover_pos().filter(|_| peut) {
+                            let vise = ((pos.x - fine.left()) / fine.width()).clamp(0.0, 1.0);
+                            painter.circle_filled(egui::pos2(fine.left() + fine.width() * vise, fine.center().y), 4.0, TEXT);
+                            reponse.clone().on_hover_text(format!("aller à {}", mmss((vise * duree as f32) as u64)));
+                        }
+                        if reponse.clicked() || reponse.drag_stopped() {
+                            if let Some(pos) = reponse.interact_pointer_pos() {
+                                let vise = ((pos.x - fine.left()) / fine.width()).clamp(0.0, 1.0);
+                                self.commander_musique(C::Position { secondes: (vise * duree as f32) as u32 });
+                            }
+                        }
                     }
                     let temps = if duree > 0 { format!("{} / {}", mmss(position), mmss(duree)) } else { mmss(position) };
                     ui.label(RichText::new(temps).color(TEXT_FAINT).size(11.0));

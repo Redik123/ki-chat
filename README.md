@@ -334,7 +334,8 @@ serveur ki-chat. Il faut VALORANT ouvert ; fermé, la section le dit.
 Le chantier a son document, [`PLAN-MUSIQUE.md`](PLAN-MUSIQUE.md). Livré
 (M1 et M2) : un membre virtuel **« Musique »** dans le salon vocal, piloté
 depuis une **bannière au-dessus du chat**. Repliée, une ligne : lecture ou
-pause, suivante, la progression, le titre, son propre volume, un chevron.
+pause, suivante, la progression — qui se clique pour avancer dans la
+piste —, le titre, son propre volume, un chevron.
 Déroulée : la pochette, la file d'attente qu'on réordonne, la recherche
 YouTube ou SoundCloud avec ses résultats à ajouter d'un clic, le volume
 global. Les commandes demandent la permission « Contrôler la musique »,

@@ -1382,6 +1382,7 @@ fn handle_msg(
                 C::Lecture => "lecture",
                 C::Pause => "pause",
                 C::Suivant => "suivant",
+                C::Position { .. } => "position",
                 C::Vider => "vider",
                 C::Volume { .. } => "volume",
                 C::Arreter => "arrêter",
@@ -1390,6 +1391,7 @@ fn handle_msg(
                 C::Ajouter { url, .. } => url.clone(),
                 C::AjouterPiste { piste, .. } => piste.url.clone(),
                 C::Volume { pour_cent } => format!("{pour_cent} %"),
+                C::Position { secondes } => format!("{secondes} s"),
                 C::PlaylistEnregistrer { nom } | C::PlaylistCharger { nom, .. } | C::PlaylistSupprimer { nom } => nom.clone(),
                 C::PlaylistAjouterPiste { nom, piste } => format!("{nom} ← {}", piste.url),
                 _ => String::new(),
@@ -1569,6 +1571,7 @@ fn handle_msg(
                 C::Lecture => state.musique.commander(crate::musique::Commande::Lecture),
                 C::Pause => state.musique.commander(crate::musique::Commande::Pause),
                 C::Suivant => state.musique.commander(crate::musique::Commande::Suivant),
+                C::Position { secondes } => state.musique.commander(crate::musique::Commande::Position(secondes)),
                 C::Vider => state.musique.commander(crate::musique::Commande::Vider),
                 C::Volume { pour_cent } => state
                     .musique

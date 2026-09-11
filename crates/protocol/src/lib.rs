@@ -1498,6 +1498,8 @@ pub enum CommandeMusique {
     Lecture,
     Pause,
     Suivant,
+    /// Avancer ou reculer dans la piste en cours.
+    Position { secondes: u32 },
     Vider,
     Volume { pour_cent: u8 },
     Arreter,

@@ -113,6 +113,7 @@ pub enum Commande {
     Lecture,
     Pause,
     Suivant,
+    Position(u32),
     Vider,
     Volume(u8),
     Arreter,
@@ -601,7 +602,8 @@ struct Lecteur {
 }
 
 impl Lecteur {
-    fn demarrer(outils: Arc<Outils>, url: String) -> Self {
+    /// Lit `url` à partir de `depart_s` secondes.
+    fn demarrer(outils: Arc<Outils>, url: String, depart_s: u32) -> Self {
         let (tx, rx) = canal::sync_channel::<Vec<f32>>(TAMPON_BLOCS);
         let pret = Arc::new(AtomicBool::new(false));
         let fini = Arc::new(AtomicBool::new(false));
@@ -623,7 +625,7 @@ impl Lecteur {
                 };
                 let mut derniere = None;
                 for client in clients {
-                    match pomper(&outils, &url, *client, &tx, &p) {
+                    match pomper(&outils, &url, *client, depart_s, &tx, &p) {
                         Ok(envoyes) if envoyes > 0 => {
                             derniere = None;
                             break;
@@ -650,7 +652,7 @@ impl Lecteur {
             pret,
             fini,
             erreur,
-            position_ms: 0,
+            position_ms: depart_s as u64 * 1000,
             demarre: Instant::now(),
             mesure: false,
         }
@@ -667,6 +669,38 @@ impl Drop for Enfant {
     }
 }
 
+/// Lit le PCM par blocs de 20 ms et les pousse dans le canal jusqu'à la fin
+/// du flux ou jusqu'à ce que le récepteur soit lâché. Rend le nombre de
+/// blocs envoyés.
+fn pousser_blocs(mut pcm: impl Read, tx: &canal::SyncSender<Vec<f32>>, pret: &AtomicBool) -> usize {
+    let mut octets = vec![0u8; TRAME * 4];
+    let mut envoyes = 0usize;
+    loop {
+        let mut lu = 0;
+        while lu < octets.len() {
+            match pcm.read(&mut octets[lu..]) {
+                Ok(0) => break,
+                Ok(n) => lu += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if lu == 0 {
+            break;
+        }
+        octets[lu..].fill(0);
+        let bloc: Vec<f32> = octets.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        if tx.send(bloc).is_err() {
+            return envoyes.max(1);
+        }
+        envoyes += 1;
+        if envoyes == AMORCE_BLOCS {
+            pret.store(true, Ordering::Relaxed);
+        }
+    }
+    envoyes
+}
+
 /// yt-dlp → ffmpeg → blocs de 20 ms dans le canal. Rend le nombre de blocs
 /// envoyés quand la piste est finie ou que le récepteur a été lâché ; une
 /// erreur avant le premier bloc dit pourquoi. `client` : le client YouTube
@@ -675,6 +709,7 @@ fn pomper(
     outils: &Outils,
     url: &str,
     client: Option<&str>,
+    depart_s: u32,
     tx: &canal::SyncSender<Vec<f32>>,
     pret: &AtomicBool,
 ) -> Result<usize, String> {
@@ -692,58 +727,20 @@ fn pomper(
     let flux = yt.0.stdout.take().expect("stdout yt-dlp");
     let mut yt_err = yt.0.stderr.take().expect("stderr yt-dlp");
     let mut ff = Command::new(&outils.ffmpeg);
-    ff.args([
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-f",
-        "f32le",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "pipe:1",
-    ])
-    .stdin(Stdio::from(flux))
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
-    let mut ff = Enfant(ff.spawn().map_err(|e| format!("ffmpeg : {e}"))?);
-    let mut pcm = ff.0.stdout.take().expect("stdout ffmpeg");
-
-    let mut octets = vec![0u8; TRAME * 4];
-    let mut envoyes = 0usize;
-    loop {
-        // Un bloc entier, ou ce qui reste à la fin.
-        let mut lu = 0;
-        while lu < octets.len() {
-            match pcm.read(&mut octets[lu..]) {
-                Ok(0) => break,
-                Ok(n) => lu += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        if lu == 0 {
-            break;
-        }
-        octets[lu..].fill(0);
-        let bloc: Vec<f32> = octets
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect();
-        if tx.send(bloc).is_err() {
-            // Le cadenceur a lâché le canal : on arrête tout.
-            return Ok(envoyes.max(1));
-        }
-        envoyes += 1;
-        if envoyes == AMORCE_BLOCS {
-            pret.store(true, Ordering::Relaxed);
-        }
+    ff.args(["-loglevel", "error"]);
+    // Avancer dans la piste : le tube ne se rembobine pas, ffmpeg lit et
+    // jette jusqu'à l'instant voulu — yt-dlp télécharge bien plus vite que
+    // le temps réel, dix minutes passent en quelques secondes.
+    if depart_s > 0 {
+        ff.args(["-ss", &depart_s.to_string()]);
     }
+    ff.args(["-i", "pipe:0", "-vn", "-f", "f32le", "-ar", "48000", "-ac", "2", "pipe:1"])
+        .stdin(Stdio::from(flux))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut ff = Enfant(ff.spawn().map_err(|e| format!("ffmpeg : {e}"))?);
+    let pcm = ff.0.stdout.take().expect("stdout ffmpeg");
+    let envoyes = pousser_blocs(pcm, tx, pret);
     if envoyes == 0 {
         let mut err = Vec::new();
         let _ = yt_err.read_to_end(&mut err);
@@ -849,7 +846,7 @@ fn suivante(
     };
     if let Some(p) = prochaine {
         tracing::info!("musique : lecture de « {} »", p.titre);
-        *lecteur = Some(Lecteur::demarrer(Arc::clone(outils), p.url));
+        *lecteur = Some(Lecteur::demarrer(Arc::clone(outils), p.url, 0));
     }
     state.musique.sauver_file();
     publier(state, true);
@@ -953,6 +950,20 @@ fn appliquer(
             publier(state, true);
         }
         Commande::Suivant => suivante(state, outils, lecteur, None),
+        Commande::Position(secondes) => {
+            // Repartir de là : un nouveau lecteur sur la même piste, l'ancien
+            // lâché — ses enfants meurent avec lui.
+            let piste = {
+                let mut e = state.musique.etat.lock().unwrap();
+                let Some(p) = e.en_cours.clone() else { return };
+                let secondes = if p.duree_s > 0 { secondes.min(p.duree_s.saturating_sub(1)) } else { secondes };
+                e.position_ms = secondes as u64 * 1000;
+                e.erreur = None;
+                (p.url, secondes)
+            };
+            *lecteur = Some(Lecteur::demarrer(Arc::clone(outils), piste.0, piste.1));
+            publier(state, false);
+        }
         Commande::Vider => {
             state.musique.etat.lock().unwrap().file.clear();
             publier(state, false);
@@ -1283,7 +1294,7 @@ mod tests {
             "https://www.youtube.com/watch?v=GDAGQOAVWa8&list=RDGDAGQOAVWa8",
         ] {
             let debut = Instant::now();
-            let lecteur = Lecteur::demarrer(Arc::clone(&outils), url.into());
+            let lecteur = Lecteur::demarrer(Arc::clone(&outils), url.into(), 60);
             while !lecteur.pret.load(Ordering::Relaxed) {
                 assert!(
                     debut.elapsed() < DELAI_PREMIER_SON,
@@ -1291,8 +1302,10 @@ mod tests {
                 );
                 std::thread::sleep(Duration::from_millis(50));
             }
-            println!("premier son après {:?}", debut.elapsed());
-            assert!(lecteur.erreur.lock().unwrap().is_none());
+            println!("premier son après {:?} (départ à 60 s)", debut.elapsed());
+        assert_eq!(lecteur.position_ms, 60_000);
+            let erreur = lecteur.erreur.lock().unwrap().clone();
+        assert!(erreur.is_none(), "{erreur:?}");
             let mut emetteur = Emetteur::new(&[3u8; 32]).unwrap();
             let mut trames = 0;
             let mut energie = 0f32;
