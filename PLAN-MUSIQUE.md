@@ -293,6 +293,37 @@ par source, temps de démarrage d'une piste). **Validation** : une semaine
 sans intervention ; une casse YouTube se répare seule à la mise à jour
 suivante ou bascule sur les cookies.
 
+### M5 — La voix
+Piloter le bot à la voix, en pleine partie, sans lâcher la souris :
+**commandes de base seulement** — suivante, pause ou coupe, reprends,
+arrête, plus fort, moins fort. Pas de recherche de titre à la voix : le
+vocabulaire ouvert demande de gros modèles et se trompe sur les titres,
+le choix des morceaux reste à la bannière (décision du 2026-09-11).
+
+Le plus léger possible, c'est la contrainte. Whisper n'est pas le bon
+outil : il transcrit des phrases entières avec un gros modèle et coûte un
+cœur par phrase. Le choix : **Vosk** (Kaldi) avec une **grammaire
+fermée** — le mot d'appel suivi de chaque commande, plus un joker pour
+tout le reste —, en flux continu, **ouvert seulement quand le VAD Silero
+voit de la parole** : rien au silence, quelques pour cent d'un cœur en
+parole, la commande reconnue pendant qu'on la dit. Tout tourne **chez
+soi**, sur son propre micro ; le client envoie au serveur la même
+commande que la bannière, les droits ne changent pas. Modèle
+`vosk-model-small-fr` (~40 Mo) et bibliothèque (~10 Mo) téléchargés à
+l'activation, option décochée par défaut, rien dans l'exécutable.
+
+Deux modes, dans cet ordre : **une touche maintenue** (on tient la
+touche, on parle, on lâche — aucune écoute de fond), puis **le mot
+d'appel** pour qui a le CPU. Le mot d'appel se choisit tôt : deux
+syllabes nettes, rares en conversation, pour ne pas se déclencher en
+partie. Le bot confirme par un petit son, pas par une voix.
+**Validation** : dix commandes d'affilée pendant une partie de VALORANT,
+au moins neuf reconnues, aucun déclenchement sur la conversation
+ordinaire d'une demi-heure, charge CPU mesurée avant et pendant.
+
+En repli si Vosk coince à l'empaquetage : sherpa-onnx, qui a un détecteur
+de mot d'appel dédié, plus lourd à embarquer.
+
 ## Risques et parades
 
 - **YouTube bloque le serveur** (anti-robot, PO token) → clients sans
@@ -311,9 +342,9 @@ suivante ou bascule sur les cookies.
 
 ## Questions ouvertes
 
-- Un seul bot pour tout le serveur, ou un par salon vocal ? Un seul pour
-  commencer ; la question revient si deux salons veulent de la musique en
-  même temps.
+- Un seul bot pour tout le serveur, ou un par salon vocal ? **Un seul
+  pour commencer**, nommé « Musique » sauf avis contraire ; la question
+  revient si deux salons veulent de la musique en même temps.
 - Le vote pour passer une piste (les non-modérateurs votent « suivant »,
   majorité des présents) — sympathique, à voir en M3.
 - La stéréo chez l'auditeur : elle viendra avec celle du son du jeu (même
