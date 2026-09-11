@@ -109,6 +109,7 @@ pub enum Commande {
     PlaylistEnregistrer(String),
     PlaylistCharger(String, bool),
     PlaylistSupprimer(String),
+    PlaylistAjouterPiste(String, Piste),
     Lecture,
     Pause,
     Suivant,
@@ -1024,6 +1025,26 @@ fn appliquer(
         Commande::PlaylistSupprimer(nom) => {
             state.musique.playlists.lock().unwrap().remove(&nom);
             state.musique.sauver_playlists();
+            publier(state, false);
+        }
+        Commande::PlaylistAjouterPiste(nom, piste) => {
+            let mut playlists = state.musique.playlists.lock().unwrap();
+            let message = if !playlists.contains_key(&nom) && playlists.len() >= ki_protocol::MAX_PLAYLISTS {
+                Some("trop de playlists — supprime-en une".to_string())
+            } else {
+                let liste = playlists.entry(nom.clone()).or_default();
+                if liste.iter().any(|p| p.url == piste.url) {
+                    Some(format!("déjà dans « {nom} »"))
+                } else if liste.len() >= ki_protocol::MAX_PISTES_PLAYLIST {
+                    Some(format!("« {nom} » est pleine"))
+                } else {
+                    liste.push(piste);
+                    None
+                }
+            };
+            drop(playlists);
+            state.musique.sauver_playlists();
+            state.musique.etat.lock().unwrap().erreur = message;
             publier(state, false);
         }
     }

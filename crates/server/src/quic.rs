@@ -1378,6 +1378,7 @@ fn handle_msg(
                 C::PlaylistEnregistrer { .. } => "playlist.enregistrer",
                 C::PlaylistCharger { .. } => "playlist.charger",
                 C::PlaylistSupprimer { .. } => "playlist.supprimer",
+                C::PlaylistAjouterPiste { .. } => "playlist.ajouter",
                 C::Lecture => "lecture",
                 C::Pause => "pause",
                 C::Suivant => "suivant",
@@ -1390,6 +1391,7 @@ fn handle_msg(
                 C::AjouterPiste { piste, .. } => piste.url.clone(),
                 C::Volume { pour_cent } => format!("{pour_cent} %"),
                 C::PlaylistEnregistrer { nom } | C::PlaylistCharger { nom, .. } | C::PlaylistSupprimer { nom } => nom.clone(),
+                C::PlaylistAjouterPiste { nom, piste } => format!("{nom} ← {}", piste.url),
                 _ => String::new(),
             };
             // Chercher n'est pas une action sur le bot : pas d'audit, mais
@@ -1453,7 +1455,10 @@ fn handle_msg(
                     state.musique.commander(crate::musique::Commande::Ajouter { piste, maintenant });
                 }
                 C::Deplacer { de, vers } => state.musique.commander(crate::musique::Commande::Deplacer(de, vers)),
-                C::PlaylistEnregistrer { nom } | C::PlaylistCharger { nom, .. } | C::PlaylistSupprimer { nom }
+                C::PlaylistEnregistrer { nom }
+                | C::PlaylistCharger { nom, .. }
+                | C::PlaylistSupprimer { nom }
+                | C::PlaylistAjouterPiste { nom, .. }
                     if nom.trim().is_empty()
                         || nom.chars().count() > ki_protocol::MAX_NOM_PLAYLIST
                         || nom.chars().any(char::is_control) =>
@@ -1475,6 +1480,17 @@ fn handle_msg(
                 }
                 C::PlaylistSupprimer { nom } => {
                     state.musique.commander(crate::musique::Commande::PlaylistSupprimer(nom.trim().to_string()))
+                }
+                C::PlaylistAjouterPiste { nom, mut piste } => {
+                    if !ki_protocol::url_musique_valide(&piste.url) {
+                        let _ = tx.send(ServerMsg::Error { message: "adresse refusée".into() });
+                        return;
+                    }
+                    piste.titre = ki_protocol::safe_display(&piste.titre, 160);
+                    piste.artiste = ki_protocol::safe_display(&piste.artiste, 80);
+                    piste.vignette = piste.vignette.filter(|v| v.starts_with("/musique/vignette/") && v.len() < 64);
+                    piste.ajoute_par = Some(username.to_string());
+                    state.musique.commander(crate::musique::Commande::PlaylistAjouterPiste(nom.trim().to_string(), piste))
                 }
                 C::Rejoindre => {
                     let Some(salon) = mon_salon else {

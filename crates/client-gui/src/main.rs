@@ -1521,6 +1521,18 @@ impl KiApp {
         self.send(ClientMsg::Musique { commande });
     }
 
+    /// L'étoile : la piste va dans la playlist « Favoris » du groupe.
+    fn etoile_musique(&self, ui: &mut egui::Ui, piste: &ki_protocol::Piste, peut: bool) {
+        ui.add_enabled_ui(peut, |ui| {
+            if ui::icon_button_ex(ui, Icon::Star, 18.0, "ajouter aux Favoris", None).clicked() {
+                self.commander_musique(ki_protocol::CommandeMusique::PlaylistAjouterPiste {
+                    nom: ki_protocol::PLAYLIST_FAVORIS.to_string(),
+                    piste: piste.clone(),
+                });
+            }
+        });
+    }
+
     /// La bannière du bot, au-dessus du chat. Repliée : une ligne — lecture,
     /// suivant, la progression, le titre, mon volume, le chevron. Déroulée :
     /// la pochette, la file d'attente, la recherche, le volume global.
@@ -1583,6 +1595,7 @@ impl KiApp {
                     ui.label(RichText::new(temps).color(TEXT_FAINT).size(11.0));
                     let titre = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
                     ui.add(egui::Label::new(RichText::new(titre).color(TEXT).size(13.0)).truncate());
+                    self.etoile_musique(ui, p, peut);
                 }
                 None => {
                     ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(12.5));
@@ -1682,6 +1695,7 @@ impl KiApp {
                             ui.add(egui::Label::new(RichText::new(nom).size(12.0)).truncate())
                                 .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.ajoute_par.as_deref().unwrap_or("?")));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                self.etoile_musique(ui, p, peut);
                                 ui.add_enabled_ui(peut, |ui| {
                                     if ui::icon_button_ex(ui, Icon::Close, 18.0, "retirer", None).clicked() {
                                         self.commander_musique(C::Retirer { index: i });
@@ -1798,6 +1812,7 @@ impl KiApp {
                                         self.commander_musique(C::AjouterPiste { piste: p.clone(), maintenant: false });
                                     }
                                 });
+                                self.etoile_musique(ui, p, peut);
                                 ui.label(RichText::new(mmss(p.duree_s as u64)).color(TEXT_FAINT).size(10.5));
                             });
                         });

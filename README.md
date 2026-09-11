@@ -358,7 +358,8 @@ VALORANT.
 
 Et le confort (M3) : les **playlists du groupe** — la file s'enregistre
 sous un nom, une playlist se joue à la place de la file ou à sa suite,
-se supprime — gardées sur le serveur ; l'admin peut laisser **les
+se supprime — gardées sur le serveur, et une étoile à côté de chaque
+piste l'envoie dans la playlist « Favoris » du groupe ; l'admin peut laisser **les
 membres chercher et ajouter** des morceaux en fin de file sans piloter
 (♛ Admin → Bot musique) ; seul dans le salon cinq minutes, le bot se met
 en pause et reprend quand quelqu'un revient, seul trente minutes il s'en

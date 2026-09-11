@@ -1493,6 +1493,8 @@ pub enum CommandeMusique {
         remplacer: bool,
     },
     PlaylistSupprimer { nom: String },
+    /// Une piste de plus dans une playlist — créée s'il le faut. L'étoile.
+    PlaylistAjouterPiste { nom: String, piste: Piste },
     Lecture,
     Pause,
     Suivant,
@@ -1505,6 +1507,8 @@ pub enum CommandeMusique {
 pub const MAX_RECHERCHE_MUSIQUE: usize = 80;
 /// La file d'attente ne dépasse pas ça, playlists comprises.
 pub const MAX_FILE_MUSIQUE: usize = 300;
+/// La playlist de l'étoile.
+pub const PLAYLIST_FAVORIS: &str = "Favoris";
 /// Les playlists du groupe : combien, de quelle taille, quel nom.
 pub const MAX_PLAYLISTS: usize = 50;
 pub const MAX_PISTES_PLAYLIST: usize = 200;

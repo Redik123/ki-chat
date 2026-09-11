@@ -11,6 +11,7 @@ use eframe::egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, St
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
+    Star,
     Mic,
     MicOff,
     Headphones,
@@ -232,6 +233,15 @@ impl Pen<'_> {
                 self.solid(&[(3.2, 16.5), (4.4, 6.8), (10.0, 16.5)]);
                 self.solid(&[(20.8, 16.5), (19.6, 6.8), (14.0, 16.5)]);
                 self.solid(&[(6.2, 16.5), (12.0, 4.6), (17.8, 16.5)]);
+            }
+            Icon::Star => {
+                // Non convexe : le cœur en pentagone, cinq pointes à part.
+                self.solid(&[(14.5, 9.1), (16.1, 13.9), (12.0, 16.9), (7.9, 13.9), (9.5, 9.1)]);
+                self.solid(&[(12.0, 2.8), (9.5, 9.1), (14.5, 9.1)]);
+                self.solid(&[(21.3, 9.6), (14.5, 9.1), (16.1, 13.9)]);
+                self.solid(&[(17.8, 20.5), (16.1, 13.9), (12.0, 16.9)]);
+                self.solid(&[(6.2, 20.5), (12.0, 16.9), (7.9, 13.9)]);
+                self.solid(&[(2.7, 9.6), (7.9, 13.9), (9.5, 9.1)]);
             }
             Icon::Paperclip => {
                 let mut pts = vec![(16.8, 7.5), (16.8, 15.2)];
