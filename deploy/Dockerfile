@@ -22,13 +22,16 @@ RUN set -eux; \
     echo "$target" > /target; \
     rustup target add "$target"; \
     apt-get update; \
-    apt-get install -y --no-install-recommends cmake make; \
+    apt-get install -y --no-install-recommends cmake make g++; \
     if [ "$target" = aarch64-unknown-linux-gnu ] && [ "$(uname -m)" != aarch64 ]; then \
-      apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross; \
+      apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; \
     fi; \
     rm -rf /var/lib/apt/lists/*
+# libopus est du C, mais CMake veut aussi un compilateur C++ pour se
+# configurer : g++ pour l'hôte, sa version croisée pour l'ARM.
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
 
 COPY . .
 
