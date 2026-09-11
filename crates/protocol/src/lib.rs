@@ -198,6 +198,8 @@ pub enum ClientMsg {
     },
     /// La fiche VALORANT d'un membre lié, telle que le serveur la garde.
     FicheValorant { user_id: UserId },
+    /// Toutes les fiches des membres liés, pour la page de stats.
+    StatsValorant,
     /// Le client annonce son état vocal : émission en cours, et micro coupé
     /// volontairement — pour que les autres distinguent « muet » de « parti ».
     VoiceState {
@@ -450,6 +452,8 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fiche: Option<FicheValorant>,
     },
+    /// Toutes les fiches du groupe, pour la page de stats.
+    StatsValorant { fiches: Vec<FicheMembre> },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
     /// Résultats d'une recherche, du plus ancien au plus récent.
@@ -1247,6 +1251,15 @@ pub struct MatchResume {
     pub tier: u8,
     #[serde(default)]
     pub duree_s: u32,
+}
+
+/// La fiche d'un membre avec son identité, pour la page de stats du
+/// groupe.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FicheMembre {
+    pub user_id: UserId,
+    pub username: String,
+    pub fiche: FicheValorant,
 }
 
 /// Le nom français d'un rang compétitif (0 = non classé, 3 = Fer 1 …

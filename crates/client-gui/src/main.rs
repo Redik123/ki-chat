@@ -610,6 +610,12 @@ struct KiApp {
     riot_message: Option<(bool, String)>,
     /// La fiche VALORANT ouverte au clic droit sur un membre.
     fiche: Option<FicheOuverte>,
+    /// Le dernier message envoyé : un toutes les 1,5 s, pas plus.
+    dernier_envoi: Option<std::time::Instant>,
+    /// La page de stats du groupe et ce que le serveur en a envoyé.
+    show_stats: bool,
+    stats: Vec<ki_protocol::FicheMembre>,
+    stats_recu: bool,
     /// Le contrôle de démarrage (diffusion précédente interrompue ?) est
     /// fait une fois, à la première image.
     demarrage_verifie: bool,
@@ -961,6 +967,10 @@ impl KiApp {
             riot_saisie: String::new(),
             riot_message: None,
             fiche: None,
+            dernier_envoi: None,
+            show_stats: false,
+            stats: Vec::new(),
+            stats_recu: false,
             demarrage_verifie: false,
             veilleur_valorant: None,
             jeu_version_envoyee: 0,
@@ -1457,6 +1467,88 @@ impl KiApp {
             );
         }
         self.info = Some(message);
+    }
+
+    /// Ouvre la page de stats du groupe et demande les fiches au serveur —
+    /// elles viennent de son cache, HenrikDev n'est pas sollicité.
+    fn ouvrir_stats(&mut self) {
+        self.show_stats = true;
+        self.stats_recu = false;
+        self.send(ClientMsg::StatsValorant);
+    }
+
+    /// La page de stats : le groupe sur VALORANT d'après les fiches que le
+    /// serveur garde — trois records, le classement, les derniers matchs
+    /// de tout le monde. La ligne de chacun, jamais celles des adversaires.
+    fn stats_window(&mut self, ctx: &egui::Context) {
+        if !self.show_stats {
+            return;
+        }
+        let mut open = true;
+        let mut actualiser = false;
+        let mut ouvrir: Option<(UserId, String)> = None;
+        let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
+        // Du plus haut rang au plus bas ; à rang égal, les RR départagent.
+        let mut fiches: Vec<&ki_protocol::FicheMembre> = self.stats.iter().collect();
+        fiches.sort_by_key(|f| std::cmp::Reverse((f.fiche.rang.tier, f.fiche.rang.rr)));
+        let recu = self.stats_recu;
+        egui::Window::new("Stats VALORANT")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(820.0)
+            .default_height(roomy)
+            .min_width(600.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Le groupe sur VALORANT").strong().size(17.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui::button(ui, Icon::Refresh, "Actualiser").clicked() {
+                            actualiser = true;
+                        }
+                        let n = fiches.len();
+                        let s = if n > 1 { "s" } else { "" };
+                        ui.label(
+                            RichText::new(format!("{n} joueur{s} lié{s}")).color(TEXT_FAINT).size(11.5),
+                        );
+                    });
+                });
+                ui::hint(
+                    ui,
+                    "d'après les fiches que le serveur tient à jour par HenrikDev — la ligne de \
+                     chacun dans ses matchs, jamais celles des adversaires",
+                );
+                ui.add_space(8.0);
+                if !recu {
+                    ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
+                    return;
+                }
+                if fiches.is_empty() {
+                    ui.label(
+                        RichText::new("personne n'a encore lié son compte Riot — ⚙ → Jeu → Compte Riot")
+                            .color(TEXT_DIM),
+                    );
+                    return;
+                }
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    stats_records(ui, &fiches);
+                    ui.add_space(14.0);
+                    if let Some(qui) = stats_classement(ui, &fiches) {
+                        ouvrir = Some(qui);
+                    }
+                    ui.add_space(14.0);
+                    stats_matchs(ui, &fiches);
+                });
+            });
+        if actualiser {
+            self.ouvrir_stats();
+        }
+        if let Some((user_id, username)) = ouvrir {
+            self.ouvrir_fiche(user_id, username);
+        }
+        if !open {
+            self.show_stats = false;
+        }
     }
 
     /// Ouvre la fiche VALORANT d'un membre et la demande au serveur.
@@ -2613,6 +2705,10 @@ impl KiApp {
                     }
                 }
             }
+            ServerMsg::StatsValorant { fiches } => {
+                self.stats = fiches;
+                self.stats_recu = true;
+            }
             ServerMsg::Error { message } => {
                 let message = ki_protocol::safe_display(&message, 300);
                 // Avant le Welcome, une erreur = échec de connexion (jeton...).
@@ -3429,6 +3525,7 @@ impl KiApp {
         self.partage_windows(ctx);
         self.diffusion_window(ctx);
         self.fiche_window(ctx);
+        self.stats_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
         if self.show_settings {
@@ -3488,6 +3585,7 @@ impl KiApp {
                         .margin(egui::Margin::symmetric(10, 7))
                         .desired_width(f32::INFINITY),
                 );
+                menu_edition(&response, &mut prompt.password, true);
                 response.request_focus();
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     submit = true;
@@ -3754,6 +3852,9 @@ impl KiApp {
                     ui.add_space(6.0);
                     if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
                         self.ouvrir_recherche();
+                    }
+                    if ui::button(ui, Icon::Target, "Stats").clicked() {
+                        self.ouvrir_stats();
                     }
                     if self.any_admin_power() && ui::button(ui, Icon::Crown, "Admin").clicked() {
                         self.show_admin = !self.show_admin;
@@ -4044,7 +4145,6 @@ impl KiApp {
             // filet si un `VoiceState` se perd, et retombe de lui-même.
             let speaking =
                 if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
-            let volume = self.volume_of(m.user_id);
             let photo = self.avatar_of(m.user_id);
             // Cette liste ne contient que des occupants du vocal : l'icône
             // « muet » s'y montre sans autre condition. Pour soi, l'état
@@ -4052,7 +4152,7 @@ impl KiApp {
             let muted = if is_me { self.muted } else { m.muted };
             let (response, regarder) = member_row(
                 ui,
-                MemberRow { member: m, speaking, muted, is_me, level, volume, photo },
+                MemberRow { member: m, speaking, muted, is_me, photo },
             );
             if regarder {
                 self.regarder(m);
@@ -4344,7 +4444,6 @@ impl KiApp {
                         };
                         let speaking =
                             if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
-                        let volume = self.volume_of(m.user_id);
                         let photo = self.avatar_of(m.user_id);
                         // « Muet » n'a de sens qu'en vocal : hors salon, un
                         // micro coupé résiduel n'apprend rien à personne.
@@ -4357,8 +4456,6 @@ impl KiApp {
                                 speaking: speaking && audible,
                                 muted,
                                 is_me,
-                                level,
-                                volume,
                                 photo,
                             },
                         );
@@ -4513,6 +4610,9 @@ impl KiApp {
                             .margin(egui::Margin::symmetric(4, 4))
                             .hint_text(format!("Message dans #{channel_name}")),
                     );
+                    if menu_edition(&response, &mut self.input, false) {
+                        self.focus_input = true;
+                    }
                     // Entrée envoie, Maj+Entrée va à la ligne. La zone
                     // multiligne consomme Entrée pour son propre compte : on
                     // intercepte donc AVANT elle, et l'on retire le saut de
@@ -4533,9 +4633,21 @@ impl KiApp {
                         response.request_focus();
                     }
 
-                    let tint = if filled { Some(ACCENT) } else { None };
-                    if ui::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne", tint).clicked()
-                    {
+                    // En attente de cadence, le bouton passe à l'ambre et le
+                    // dit : le message reste écrit, il partira dans un instant.
+                    let reste = self
+                        .dernier_envoi
+                        .map(|t| CADENCE_CHAT.saturating_sub(t.elapsed()))
+                        .filter(|r| !r.is_zero());
+                    let (tint, aide) = match reste {
+                        Some(r) => {
+                            ui.ctx().request_repaint_after(r);
+                            (Some(WARN), "un message toutes les 1,5 s — encore un instant")
+                        }
+                        None if filled => (Some(ACCENT), "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
+                        None => (None, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
+                    };
+                    if ui::icon_button_ex(ui, Icon::Send, 32.0, aide, tint).clicked() {
                         submit = true;
                         self.focus_input = true;
                     }
@@ -4544,11 +4656,16 @@ impl KiApp {
 
         if submit {
             let text = self.input.trim().to_string();
-            if !text.is_empty() {
+            // Un message toutes les 1,5 s : le serveur tient la même
+            // cadence, mais c'est ici qu'on l'apprend — le texte reste dans
+            // le champ, Entrée à nouveau l'enverra.
+            let trop_tot = self.dernier_envoi.is_some_and(|t| t.elapsed() < CADENCE_CHAT);
+            if !text.is_empty() && !trop_tot {
                 let reply_to =
                     self.reponse_a.take().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
                 self.send(ClientMsg::Chat { text, reply_to });
                 self.input.clear();
+                self.dernier_envoi = Some(std::time::Instant::now());
             }
         }
     }
@@ -4639,6 +4756,10 @@ impl KiApp {
                         }
                     });
                     ui.add_space(4.0);
+                    if ui.button("⧉ Copier le texte").clicked() {
+                        ctx.copy_text(msg.text.clone());
+                        fermer = true;
+                    }
                     if ui.button("↩ Répondre").clicked() {
                         self.reponse_a = Some(ReplyRef {
                             user_id: msg.user_id,
@@ -5033,6 +5154,7 @@ impl KiApp {
             .min_width(320.0)
             .show(ctx, |ui| {
                 let champ = ui.add(ui::text_field(&mut self.search_query, "chercher…", false));
+                menu_edition(&champ, &mut self.search_query, false);
                 if std::mem::take(&mut self.search_focus) {
                     champ.request_focus();
                 }
@@ -6245,6 +6367,7 @@ impl KiApp {
                                                 .hint_text("Pseudo#TAG")
                                                 .desired_width(200.0),
                                         );
+                                        menu_edition(&champ, &mut self.riot_saisie, false);
                                         let entree = champ.lost_focus()
                                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                         let valide = ki_protocol::parser_riot_id(&self.riot_saisie).is_some();
@@ -8235,13 +8358,14 @@ impl KiApp {
             ui.add_space(8.0);
             ui::field_label(ui, &format!("Nouveau mot de passe pour {target}"));
             ui.horizontal(|ui| {
-                ui.add(
+                let champ = ui.add(
                     egui::TextEdit::singleline(&mut self.reset_password)
                         .password(true)
                         .margin(egui::Margin::symmetric(10, 7))
                         .background_color(theme::BG_DEEP)
                         .desired_width(170.0),
                 );
+                menu_edition(&champ, &mut self.reset_password, true);
                 let ok = self.reset_password.len() >= 6;
                 let clicked = ui
                     .add_enabled_ui(ok, |ui| {
@@ -8792,10 +8916,6 @@ struct MemberRow<'a> {
     speaking: bool,
     muted: bool,
     is_me: bool,
-    /// Niveau instantané, pour le vumètre (0..1).
-    level: f32,
-    /// Volume personnalisé appliqué à cette personne (1.0 = 100 %).
-    volume: f32,
     photo: Option<&'a egui::TextureHandle>,
 }
 
@@ -8808,8 +8928,6 @@ impl<'a> MemberRow<'a> {
             speaking: false,
             muted: false,
             is_me: false,
-            level: 0.0,
-            volume: 1.0,
             photo,
         }
     }
@@ -8818,6 +8936,10 @@ impl<'a> MemberRow<'a> {
 /// Ligne de membre : avatar, pseudo, badges, vumètre pendant qu'il parle.
 /// Rend la réponse de la ligne, et `true` si l'on a cliqué l'icône
 /// « diffuse » à côté du pseudo.
+/// Deux messages ne partent pas à moins de 1,5 s d'écart — la même cadence
+/// que le serveur exige.
+const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// La couleur d'un palier VALORANT, proche de celle du jeu : du gris du
 /// Fer au jaune du Radiant.
 fn couleur_de_rang(tier: u8) -> egui::Color32 {
@@ -8842,6 +8964,235 @@ struct FicheOuverte {
     username: String,
     recue: bool,
     fiche: Option<ki_protocol::FicheValorant>,
+}
+
+/// Ce que le presse-papiers contient, s'il contient du texte.
+fn presse_papiers() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok().filter(|t| !t.is_empty())
+}
+
+/// Le menu d'édition d'un champ de texte, au clic droit : couper, copier,
+/// coller — ce que Ctrl+X/C/V font déjà, pour qui ne les connaît pas ou
+/// travaille à la souris. `secret` : un mot de passe, qu'on colle mais
+/// qu'on ne recopie pas. Rend `true` si le texte a changé.
+fn menu_edition(reponse: &egui::Response, texte: &mut String, secret: bool) -> bool {
+    let id = reponse.id;
+    let mut modifie = false;
+    reponse.context_menu(|ui| {
+        ui.set_width(150.0);
+        let mut etat = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        // La sélection courante, en indices de caractères, ordonnée.
+        let selection = etat.cursor.char_range().map(|r| {
+            let (a, b) = (r.primary.index, r.secondary.index);
+            (a.min(b), a.max(b))
+        });
+        let curseur = selection.map(|(a, _)| a).unwrap_or_else(|| texte.chars().count());
+        let selection = selection.filter(|(a, b)| a < b);
+        let extrait = |texte: &String, (a, b): (usize, usize)| -> String {
+            texte.chars().skip(a).take(b - a).collect()
+        };
+        let retirer = |texte: &mut String, (a, b): (usize, usize)| {
+            let debut = texte.char_indices().nth(a).map(|(i, _)| i).unwrap_or(texte.len());
+            let fin = texte.char_indices().nth(b).map(|(i, _)| i).unwrap_or(texte.len());
+            texte.replace_range(debut..fin, "");
+        };
+        // Où poser le curseur après l'action, s'il y en a une.
+        let mut nouveau_curseur: Option<usize> = None;
+        if !secret {
+            if ui.add_enabled(selection.is_some(), egui::Button::new("Couper")).clicked() {
+                if let Some(sel) = selection {
+                    ui.ctx().copy_text(extrait(texte, sel));
+                    retirer(texte, sel);
+                    nouveau_curseur = Some(sel.0);
+                    modifie = true;
+                }
+            }
+            if ui.add_enabled(selection.is_some(), egui::Button::new("Copier")).clicked() {
+                if let Some(sel) = selection {
+                    ui.ctx().copy_text(extrait(texte, sel));
+                }
+            }
+        }
+        if ui.button("Coller").clicked() {
+            if let Some(colle) = presse_papiers() {
+                let mut ou = curseur;
+                if let Some(sel) = selection {
+                    retirer(texte, sel);
+                    ou = sel.0;
+                }
+                let debut = texte.char_indices().nth(ou).map(|(i, _)| i).unwrap_or(texte.len());
+                texte.insert_str(debut, &colle);
+                nouveau_curseur = Some(ou + colle.chars().count());
+                modifie = true;
+            }
+        }
+        if let Some(ou) = nouveau_curseur {
+            etat.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(ou))));
+            etat.store(ui.ctx(), id);
+        }
+    });
+    modifie
+}
+
+/// Les records du groupe, en trois cartes : le plus haut rang, le plus
+/// gros gain de RR au dernier match, le meilleur ratio récent.
+fn stats_records(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) {
+    let meilleur = fiches.first().filter(|f| f.fiche.rang.tier >= 3);
+    let gain = fiches.iter().filter(|f| f.fiche.rang.delta > 0).max_by_key(|f| f.fiche.rang.delta);
+    let ratio = fiches
+        .iter()
+        .filter_map(|f| {
+            let (k, d) = f
+                .fiche
+                .matchs
+                .iter()
+                .fold((0u32, 0u32), |(k, d), m| (k + m.kills as u32, d + m.deaths as u32));
+            (k + d > 0).then(|| (f, k as f32 / d.max(1) as f32))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    ui.columns(3, |cols| {
+        match meilleur {
+            Some(f) => stats_carte(
+                &mut cols[0],
+                "Plus haut rang",
+                &format!("{} · {} RR", ki_protocol::nom_de_rang(f.fiche.rang.tier), f.fiche.rang.rr),
+                couleur_de_rang(f.fiche.rang.tier),
+                &f.username,
+            ),
+            None => stats_carte(&mut cols[0], "Plus haut rang", "—", TEXT_FAINT, "personne n'est classé"),
+        }
+        match gain {
+            Some(f) => stats_carte(
+                &mut cols[1],
+                "Plus gros gain récent",
+                &format!("+{} RR", f.fiche.rang.delta),
+                SPEAK,
+                &f.username,
+            ),
+            None => stats_carte(&mut cols[1], "Plus gros gain récent", "—", TEXT_FAINT, "pas de gain au dernier match"),
+        }
+        match ratio {
+            Some((f, r)) => stats_carte(&mut cols[2], "Meilleur K/D récent", &format!("{r:.2}"), ACCENT, &f.username),
+            None => stats_carte(&mut cols[2], "Meilleur K/D récent", "—", TEXT_FAINT, "aucun match connu"),
+        }
+    });
+}
+
+fn stats_carte(ui: &mut egui::Ui, titre: &str, valeur: &str, teinte: Color32, qui: &str) {
+    egui::Frame::new()
+        .fill(theme::BG_RAISED)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
+            ui.label(RichText::new(valeur).color(teinte).strong().size(21.0));
+            ui.label(RichText::new(qui).color(TEXT_DIM).size(12.0));
+        });
+}
+
+/// Le classement : une ligne par membre lié. Rend le membre dont on a
+/// demandé la fiche.
+fn stats_classement(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) -> Option<(UserId, String)> {
+    use ki_protocol::nom_de_rang;
+    let mut ouvrir = None;
+    ui.label(RichText::new("Classement").strong().size(13.5));
+    ui.add_space(4.0);
+    egui::Grid::new("stats_classement").striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+        for titre in ["#", "Joueur", "Rang", "Dernier", "Pic", "Bilan récent", "K/D", "Tête", "Niveau", ""] {
+            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
+        }
+        ui.end_row();
+        for (i, f) in fiches.iter().enumerate() {
+            let r = &f.fiche.rang;
+            ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT));
+            let nom = ui
+                .add(egui::Label::new(RichText::new(&f.username).strong()).sense(Sense::click()))
+                .on_hover_text(&f.fiche.riot_id);
+            if nom.clicked() {
+                ouvrir = Some((f.user_id, f.username.clone()));
+            }
+            let rang = if r.tier >= 3 {
+                format!("{} · {} RR", nom_de_rang(r.tier), r.rr)
+            } else {
+                nom_de_rang(0)
+            };
+            ui.label(RichText::new(rang).color(couleur_de_rang(r.tier)).strong());
+            let (delta, teinte) = if r.delta > 0 {
+                (format!("+{}", r.delta), SPEAK)
+            } else if r.delta < 0 {
+                (r.delta.to_string(), DANGER)
+            } else {
+                ("—".to_string(), TEXT_FAINT)
+            };
+            ui.label(RichText::new(delta).color(teinte));
+            match &f.fiche.pic {
+                Some(p) if p.tier >= 3 => {
+                    ui.label(RichText::new(nom_de_rang(p.tier)).color(couleur_de_rang(p.tier)));
+                }
+                _ => {
+                    ui.label(RichText::new("—").color(TEXT_FAINT));
+                }
+            }
+            let (v, d) = f.fiche.matchs.iter().fold((0u32, 0u32), |(v, d), m| match m.gagne {
+                Some(true) => (v + 1, d),
+                Some(false) => (v, d + 1),
+                None => (v, d),
+            });
+            ui.label(if v + d > 0 { format!("{v} V · {d} D") } else { "—".to_string() });
+            let (k, morts, tetes, n) = f.fiche.matchs.iter().fold((0u32, 0u32, 0u32, 0u32), |(k, d, t, n), m| {
+                (k + m.kills as u32, d + m.deaths as u32, t + m.tete_pct as u32, n + 1)
+            });
+            ui.label(if n > 0 { format!("{:.2}", k as f32 / morts.max(1) as f32) } else { "—".to_string() });
+            ui.label(tetes.checked_div(n).map(|t| format!("{t} %")).unwrap_or_else(|| "—".to_string()));
+            ui.label(
+                RichText::new(if f.fiche.niveau > 0 { f.fiche.niveau.to_string() } else { "—".to_string() })
+                    .color(TEXT_DIM),
+            );
+            if ui.add(egui::Button::new(RichText::new("fiche").size(11.0)).small()).clicked() {
+                ouvrir = Some((f.user_id, f.username.clone()));
+            }
+            ui.end_row();
+        }
+    });
+    ouvrir
+}
+
+/// Les derniers matchs de tout le groupe, du plus récent au plus ancien.
+fn stats_matchs(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) {
+    let mut tous: Vec<(&str, &ki_protocol::MatchResume)> = fiches
+        .iter()
+        .flat_map(|f| f.fiche.matchs.iter().map(move |m| (f.username.as_str(), m)))
+        .collect();
+    tous.sort_by_key(|(_, m)| std::cmp::Reverse(m.date));
+    tous.truncate(15);
+    if tous.is_empty() {
+        return;
+    }
+    ui.label(RichText::new("Derniers matchs du groupe").strong().size(13.5));
+    ui.add_space(4.0);
+    egui::Grid::new("stats_matchs").striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
+        for titre in ["Quand", "Joueur", "Mode", "Carte", "Agent", "K / D / A", "Tête", "Score"] {
+            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
+        }
+        ui.end_row();
+        for (qui, m) in tous {
+            ui.label(RichText::new(il_y_a(m.date)).color(TEXT_FAINT).size(11.5));
+            ui.label(RichText::new(qui).strong());
+            ui.label(&m.mode);
+            ui.label(&m.carte);
+            ui.label(RichText::new(&m.agent).color(TEXT_DIM));
+            ui.label(format!("{} / {} / {}", m.kills, m.deaths, m.assists));
+            ui.label(RichText::new(format!("{} %", m.tete_pct)).color(TEXT_DIM));
+            let teinte = match m.gagne {
+                Some(true) => SPEAK,
+                Some(false) => DANGER,
+                None => TEXT_DIM,
+            };
+            ui.label(RichText::new(format!("{}-{}", m.manches.0, m.manches.1)).color(teinte).strong());
+            ui.end_row();
+        }
+    });
 }
 
 /// « il y a 3 min », « il y a 2 h », « il y a 5 j » — pour dater une
@@ -8947,7 +9298,7 @@ fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant) {
 }
 
 fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
-    let MemberRow { member, speaking, muted, is_me, level, volume, photo } = row;
+    let MemberRow { member, speaking, muted, is_me, photo } = row;
     let height = 38.0;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
@@ -9065,30 +9416,15 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         }
     }
 
+    // Qui parle se voit à l'anneau de l'avatar ; le vumètre et le
+    // pourcentage de volume qui s'affichaient ici encombraient la ligne
+    // sans rien apprendre — le volume se règle au clic droit.
     if muted {
         let badge = egui::Rect::from_min_size(
             egui::pos2(right - 14.0, rect.center().y - 7.0),
             Vec2::splat(14.0),
         );
         icons::draw(painter, badge, Icon::MicOff, DANGER);
-        right -= 20.0;
-    }
-    if speaking {
-        let meter = egui::Rect::from_min_size(
-            egui::pos2(right - 34.0, rect.center().y - 3.0),
-            Vec2::new(34.0, 6.0),
-        );
-        ui::paint_meter(painter, meter, (level * 3.0).min(1.0), SPEAK);
-        right -= 40.0;
-    }
-    if !is_me && (volume - 1.0).abs() > 0.001 {
-        painter.text(
-            egui::pos2(right, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            format!("{:.0} %", volume * 100.0),
-            egui::FontId::proportional(10.5),
-            TEXT_FAINT,
-        );
     }
     (response.on_hover_cursor(egui::CursorIcon::PointingHand), regarder)
 }

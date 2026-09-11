@@ -248,9 +248,11 @@ impl TokenBucket {
 }
 
 impl Default for TokenBucket {
-    /// Le budget du chat : cinq messages par seconde en régime, dix en rafale.
+    /// Le budget du chat : un message toutes les 1,5 s en régime, deux
+    /// d'un coup au plus — le client tient la même cadence et le dit ; ici
+    /// c'est pour les clients qui ne joueraient pas le jeu.
     fn default() -> Self {
-        Self::new(5.0, 10.0)
+        Self::new(1.0 / 1.5, 2.0)
     }
 }
 
@@ -1028,12 +1030,12 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(budget.take(), "la réserve doit se reconstituer avec le temps");
 
-        // Le budget du chat reste celui d'avant : rafale de 10.
+        // Le budget du chat : deux messages d'un coup, pas trois — le
+        // troisième attend la cadence d'un toutes les 1,5 s.
         let mut chat = TokenBucket::default();
-        for _ in 0..10 {
-            assert!(chat.take());
-        }
-        assert!(!chat.take());
+        assert!(chat.take());
+        assert!(chat.take());
+        assert!(!chat.take(), "le troisième message d'affilée doit attendre");
     }
 
     /// La comparaison du mot de passe de salon doit rendre le bon verdict —

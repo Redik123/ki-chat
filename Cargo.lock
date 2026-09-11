@@ -2749,6 +2749,7 @@ name = "ki-client-gui"
 version = "0.1.32"
 dependencies = [
  "anyhow",
+ "arboard",
  "base64",
  "bytes",
  "chacha20poly1305",

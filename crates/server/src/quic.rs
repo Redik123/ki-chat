@@ -1110,6 +1110,26 @@ fn handle_msg(
             let fiche = state.valorant.fiche(cible);
             let _ = tx.send(ServerMsg::FicheValorant { user_id: cible, fiche });
         }
+        ClientMsg::StatsValorant => {
+            // Les fiches du cache, avec le pseudo de chacun : rien ne part
+            // vers HenrikDev pour ouvrir la page.
+            let pseudos: std::collections::HashMap<_, _> = state
+                .accounts
+                .list(&state.roles)
+                .into_iter()
+                .map(|a| (a.user_id, a.username))
+                .collect();
+            let fiches = state
+                .valorant
+                .toutes()
+                .into_iter()
+                .filter_map(|(user_id, fiche)| {
+                    let username = pseudos.get(&user_id)?.clone();
+                    Some(ki_protocol::FicheMembre { user_id, username, fiche })
+                })
+                .collect();
+            let _ = tx.send(ServerMsg::StatsValorant { fiches });
+        }
         ClientMsg::History { limit } => {
             let Some(channel) = current_channel(state, user_id) else {
                 let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });

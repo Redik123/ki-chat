@@ -41,6 +41,9 @@ device_query = "2"
 rfd = "0.15"
 # Client HTTP bloquant pour l'upload de fichiers.
 ureq = { version = "2", features = ["json"] }
+# Lire le presse-papiers pour « Coller » au clic droit : egui ne le lit
+# que sur Ctrl+V.
+arboard = "3"
 # Logos de serveurs : décodage PNG/JPEG puis réencodage en vignette PNG.
 # Les deux formats sont déjà tirés par eframe, aucun téléchargement en plus.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

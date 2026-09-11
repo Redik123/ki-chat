@@ -129,6 +129,11 @@ impl Valorant {
         self.etat.fiches.lock().unwrap().get(&user_id).cloned()
     }
 
+    /// Toutes les fiches, pour la page de stats du groupe.
+    pub fn toutes(&self) -> Vec<(UserId, FicheValorant)> {
+        self.etat.fiches.lock().unwrap().iter().map(|(id, f)| (*id, f.clone())).collect()
+    }
+
     /// Met la liaison en file. Refuse sans clé, ou si ce Riot ID est déjà
     /// celui d'un autre membre.
     pub fn lier(&self, user_id: UserId, nom: String, tag: String) -> Result<(), String> {

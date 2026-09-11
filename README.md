@@ -96,6 +96,12 @@ messages », que les modérateurs ont d'office, et le journal d'audit dit qui
 a retiré quoi. Le fichier d'historique reste append-only : réactions et
 suppressions sont des lignes d'événements, rejouées au démarrage, et un
 message supprimé ne se rend plus à personne — pas même à la recherche.
+Le même menu **copie le texte** d'un message, et un clic droit dans un
+champ de saisie (message, recherche, mots de passe) propose couper, copier,
+coller — ce que Ctrl+X/C/V font déjà, pour qui travaille à la souris. Le
+chat tient une cadence d'**un message toutes les 1,5 s** : le bouton
+d'envoi passe à l'ambre le temps de l'attente, le texte reste écrit, et le
+serveur exige la même cadence des clients qui ne joueraient pas le jeu.
 
 **Voix** : format de paquet maison (voir `protocol/src/lib.rs`), transporté
 en datagrammes QUIC. Le client encode
@@ -272,9 +278,16 @@ petit dans la liste des membres ; clic droit → « Fiche VALORANT » l'ouvre
 depuis le cache du serveur, sans toucher à l'API. Le serveur rafraîchit
 les fiches des membres liés en ligne toutes les trente minutes et se tient
 à vingt requêtes par minute, sous les trente de la clé. Sans clé, la
-liaison répond « demande à l'admin » et tout le reste fonctionne. La
-suite (fil de fin de partie, classement du groupe, icônes de rang) est
-dans le plan.
+liaison répond « demande à l'admin » et tout le reste fonctionne.
+
+Et la page **Stats**, à côté de « Chercher » : le groupe sur VALORANT
+d'après ces fiches — trois records (plus haut rang, plus gros gain de RR
+au dernier match, meilleur K/D récent), le classement des membres liés
+(rang et RR, dernier mouvement, pic, bilan et ratio des derniers matchs,
+pourcentage de tirs à la tête, niveau ; un clic sur le pseudo ouvre la
+fiche), et les quinze derniers matchs de tout le monde. Ouvrir la page ne
+coûte aucune requête : tout vient du cache du serveur. La suite (fil de
+fin de partie, icônes de rang) est dans le plan.
 
 ## Sécurité
 
@@ -834,7 +847,7 @@ est appliqué à chaud et mémorisé :
   données de redondance du paquet suivant (et non plus seulement masquée) ;
 - **ping vocal en direct** dans la barre du bas, mesuré sur le vrai chemin UDP
   (keepalive horodaté, écho serveur) — vert < 30 ms, orange < 80, rouge au-delà ;
-- **vumètres par locuteur** dans la liste des membres pendant qu'ils parlent.
+- **qui parle** se voit à l'anneau de l'avatar dans la liste des membres ; le vumètre et le pourcentage de volume qui s'y affichaient ont été retirés (0.1.33), la ligne reste au pseudo et à ses badges.
 **Rôles** : chaque rôle porte un nom, une **couleur de pseudo**, un **rang** et
 un jeu de **permissions** cochables (voir les salons, écrire, rejoindre le
 vocal, partager des fichiers, créer des invitations, expulser, bannir,
