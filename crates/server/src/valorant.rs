@@ -849,6 +849,18 @@ fn fil(
                         Err(e) => echecs.push(e.message()),
                     }
                 }
+                // La source officielle en panne, VLR prend le relais : les
+                // événements à venir ou en cours, puis leurs matchs.
+                if matchs.is_none() {
+                    match calendrier_vlr(&mut api, maintenant_ms()) {
+                        Ok(liste) if !liste.is_empty() => {
+                            tracing::info!("VALORANT : calendrier esport lu chez VLR ({} matchs)", liste.len());
+                            matchs = Some(liste);
+                        }
+                        Ok(_) => echecs.push("VLR : rien à venir".into()),
+                        Err(e) => echecs.push(format!("VLR : {}", e.message())),
+                    }
+                }
                 if matchs.is_none() {
                     echecs.dedup();
                     tracing::warn!(
@@ -1115,6 +1127,99 @@ pub fn calendrier_esport(v: &Value, maintenant: u64) -> Vec<MatchEsport> {
     matchs.sort_by_key(|m| m.date);
     matchs.truncate(ESPORTS_MAX);
     matchs
+}
+
+/// Le calendrier par VLR (esports v2 de HenrikDev) : les événements en
+/// cours ou à venir, puis les matchs des cinq premiers — six requêtes au
+/// plus, une fois par heure, seulement quand la source officielle tombe.
+fn calendrier_vlr(api: &mut Api, maintenant: u64) -> Result<Vec<MatchEsport>, Erreur> {
+    let evenements = api.get("/valorant/v2/esports/vlr/events?type=upcoming")?;
+    let mut candidats: Vec<(u64, String, String, bool)> = evenements["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let statut = e["status"].as_str().unwrap_or("");
+            if statut != "ongoing" && statut != "upcoming" {
+                return None;
+            }
+            Some((
+                e["id"].as_u64()?,
+                e["title"].as_str().unwrap_or("").to_string(),
+                region_vlr(e["region"].as_str().unwrap_or("")),
+                statut == "ongoing",
+            ))
+        })
+        .collect();
+    // Les événements en cours d'abord : c'est là que sont les matchs du soir.
+    candidats.sort_by_key(|(_, _, _, en_cours)| !en_cours);
+    candidats.truncate(5);
+    let mut matchs = Vec::new();
+    let mut date_illisible: Option<String> = None;
+    for (id, titre, region, _) in candidats {
+        let reponse = api.get(&format!("/valorant/v2/esports/vlr/events/{id}/matches"))?;
+        for m in reponse["data"].as_array().into_iter().flatten() {
+            let brut = m["date"].as_str().unwrap_or("");
+            let date = iso_vers_ms(brut);
+            if date == 0 {
+                if !brut.is_empty() {
+                    date_illisible.get_or_insert_with(|| brut.to_string());
+                }
+                continue;
+            }
+            if date + 3 * 3_600_000 < maintenant {
+                continue;
+            }
+            let equipes: Vec<String> = m["teams"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t["name"].as_str().filter(|n| !n.is_empty() && *n != "TBD").map(str::to_string))
+                .take(2)
+                .collect();
+            if equipes.len() < 2 {
+                continue;
+            }
+            let commence = m["teams"].as_array().is_some_and(|ts| ts.iter().any(|t| t["score"].as_u64().is_some()));
+            matchs.push(MatchEsport {
+                date,
+                ligue: titre.clone(),
+                region: region.clone(),
+                tournoi: m["series"].as_str().unwrap_or("").to_string(),
+                equipes,
+                etat: if commence && date <= maintenant { "inProgress" } else { "unstarted" }.to_string(),
+                format: String::new(),
+            });
+        }
+    }
+    if matchs.is_empty() {
+        if let Some(d) = date_illisible {
+            tracing::warn!("VALORANT : VLR date un match « {d} », un format qu'on ne lit pas");
+        }
+    }
+    matchs.sort_by_key(|m| m.date);
+    matchs.truncate(ESPORTS_MAX);
+    Ok(matchs)
+}
+
+/// Les régions de VLR, en clair.
+fn region_vlr(r: &str) -> String {
+    match r {
+        "europe" => "EMEA",
+        "north_america" => "Amériques",
+        "asia_pacific" => "Pacifique",
+        "brazil" => "Brésil",
+        "korea" => "Corée",
+        "japan" => "Japon",
+        "latin_america" => "Amérique latine",
+        "oceania" => "Océanie",
+        "mena" => "MENA",
+        "gc" => "Game Changers",
+        "collegiate" => "Universitaire",
+        "" => "",
+        autre => autre,
+    }
+    .to_string()
 }
 
 /// Les autres membres liés qui jouaient ce match, reconnus à leur puuid.

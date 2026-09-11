@@ -318,7 +318,7 @@ Deux compléments : une party ouverte et pas pleine, au menu, se lit
 rejoint jamais une party à votre place ; et la page Valorant finit par les
 **prochains matchs d'esport** (VCT et ligues, en cours ou à venir), que le
 serveur relit chez HenrikDev une fois par heure tant que quelqu'un est
-connecté. Le résumé des diagnostics (`/diag-resume`) dit ce que le service
+connecté — par la source officielle, ou par VLR quand elle est en panne. Le résumé des diagnostics (`/diag-resume`) dit ce que le service
 coûte : requêtes depuis le démarrage, refus 429, erreurs, annonces en
 attente.
 
