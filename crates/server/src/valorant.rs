@@ -684,15 +684,26 @@ fn fil(cle: String, etat: Arc<Etat>, rx: Receiver<Travail>, tx: Sender<Resultat>
                 let _ = tx.send(Resultat::Liaison { user_id, ok, message, riot_id });
             }
             Travail::Esports => {
-                // Même raté, le calendrier est daté de maintenant : on ne
-                // réessaie pas avant une heure.
-                let matchs = match api.get("/valorant/v1/esports/schedule") {
-                    Ok(v) => calendrier_esport(&v, maintenant_ms()),
-                    Err(e) => {
-                        tracing::warn!("VALORANT : calendrier esport illisible : {}", e.message());
-                        etat.esports.lock().unwrap().1.clone()
+                // Le calendrier complet d'abord ; s'il tombe (HenrikDev a
+                // renvoyé 500 sur l'ensemble un soir de septembre 2026), la
+                // seule région qui nous intéresse, puis l'international.
+                // Même raté, il est daté de maintenant : pas de nouvel essai
+                // avant une heure.
+                let mut matchs = None;
+                for filtre in ["", "?region=emea", "?region=international"] {
+                    match api.get(&format!("/valorant/v1/esports/schedule{filtre}")) {
+                        Ok(v) => {
+                            matchs = Some(calendrier_esport(&v, maintenant_ms()));
+                            break;
+                        }
+                        Err(e) => tracing::warn!(
+                            "VALORANT : calendrier esport illisible ({}) : {}",
+                            if filtre.is_empty() { "complet" } else { filtre },
+                            e.message()
+                        ),
                     }
-                };
+                }
+                let matchs = matchs.unwrap_or_else(|| etat.esports.lock().unwrap().1.clone());
                 *etat.esports.lock().unwrap() = (maintenant_ms(), matchs);
                 etat.esports_en_cours.store(false, Ordering::Relaxed);
             }
