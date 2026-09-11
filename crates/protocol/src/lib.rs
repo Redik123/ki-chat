@@ -364,6 +364,9 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<ChannelId>,
     },
+    /// Les membres peuvent-ils ajouter des morceaux au bot musique ?
+    /// Permission « gérer le serveur ».
+    AdminSetMusique { membres_ajoutent: bool },
     /// Change son propre mot de passe (l'ancien est vérifié).
     ChangePassword { old_password: String, new_password: String },
     /// Définit ou retire sa propre photo de profil. Chacun ne règle que la
@@ -634,6 +637,10 @@ pub struct ServerInfo {
     /// finies des membres liés. `None` = fil éteint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fil_valorant: Option<ChannelId>,
+    /// Les membres sans « Contrôler la musique » peuvent chercher et
+    /// ajouter des morceaux en fin de file — pas piloter.
+    #[serde(default)]
+    pub musique_membres_ajoutent: bool,
 }
 
 /// Ce qu'un admin veut faire du logo du serveur.
@@ -1477,6 +1484,15 @@ pub enum CommandeMusique {
         #[serde(default)]
         source: String,
     },
+    /// La file (et la piste en cours) devient une playlist du groupe.
+    PlaylistEnregistrer { nom: String },
+    /// Une playlist en file — à la place de la file, ou à sa suite.
+    PlaylistCharger {
+        nom: String,
+        #[serde(default)]
+        remplacer: bool,
+    },
+    PlaylistSupprimer { nom: String },
     Lecture,
     Pause,
     Suivant,
@@ -1487,6 +1503,19 @@ pub enum CommandeMusique {
 
 /// Longueur maximale d'une recherche de musique, en caractères.
 pub const MAX_RECHERCHE_MUSIQUE: usize = 80;
+/// Les playlists du groupe : combien, de quelle taille, quel nom.
+pub const MAX_PLAYLISTS: usize = 50;
+pub const MAX_PISTES_PLAYLIST: usize = 200;
+pub const MAX_NOM_PLAYLIST: usize = 40;
+
+/// Une playlist du groupe, en résumé — le contenu ne voyage qu'à la
+/// demande, en file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResumePlaylist {
+    pub nom: String,
+    pub pistes: u32,
+    pub duree_s: u32,
+}
 
 /// Ce que le bot a fait depuis le démarrage du serveur — pour sa fiche.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1540,6 +1569,8 @@ pub struct EtatMusique {
     pub erreur: Option<String>,
     #[serde(default)]
     pub compteurs: CompteursMusique,
+    #[serde(default)]
+    pub playlists: Vec<ResumePlaylist>,
 }
 
 /// Une adresse que le bot accepte : YouTube ou SoundCloud, en HTTPS,

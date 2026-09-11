@@ -297,7 +297,7 @@ dans le salon sans coupure, chacun règle son volume, le bot coupé chez
 l'un ne l'est pas chez l'autre ; un yt-dlp tué en pleine piste ne fait pas
 tomber le serveur.
 
-### M2 — La file et la bannière — en test (2026-09-11)
+### M2 — La file et la bannière — livré (2026-09-11)
 File d'attente, lecture/pause/suivant, recherche YouTube et SoundCloud,
 vignettes par le serveur, la bannière repliée et déroulée, les boutons
 grisés sans permission, l'audit ; et le bot qui ne ressemble plus à un
@@ -306,7 +306,7 @@ VALORANT. **Validation** : trente minutes de soirée
 avec des ajouts à la volée par deux modérateurs, aucun blocage, la barre
 de progression juste à la seconde, la bannière lisible en fenêtre étroite.
 
-### M3 — Les playlists et le confort
+### M3 — Les playlists et le confort — en test (2026-09-11)
 Playlists du groupe, « les membres peuvent ajouter », glisser-déposer dans
 la file, pause automatique quand le salon se vide, reprise après
 redémarrage. **Validation** : une playlist de vingt pistes enregistrée,

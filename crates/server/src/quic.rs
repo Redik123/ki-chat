@@ -1268,6 +1268,29 @@ fn handle_msg(
                 fiche,
             });
         }
+        ClientMsg::AdminSetMusique { membres_ajoutent } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
+                return;
+            }
+            let (state, tx) = (state.clone(), tx.clone());
+            let actor = username.to_string();
+            tokio::task::spawn_blocking(move || match state.meta.set_musique_membres_ajoutent(membres_ajoutent) {
+                Ok(()) => {
+                    state.audit.record("server.musique", &actor, "", if membres_ajoutent { "les membres ajoutent" } else { "modérateurs seuls" });
+                    state.broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
+                    let _ = tx.send(ServerMsg::Info {
+                        message: if membres_ajoutent {
+                            "les membres peuvent ajouter des morceaux".into()
+                        } else {
+                            "seuls les modérateurs touchent au bot musique".into()
+                        },
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e.to_string() });
+                }
+            });
+        }
         ClientMsg::AdminSetFilValorant { channel } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
                 return;
@@ -1316,7 +1339,22 @@ fn handle_msg(
         }
         ClientMsg::Musique { commande } => {
             use ki_protocol::CommandeMusique as C;
-            if !require(state, user_id, tx, ki_protocol::perm::CONTROL_MUSIC) {
+            // Piloter demande la permission ; chercher et ajouter en fin de
+            // file peuvent être ouverts à tous par l'admin.
+            let controle = {
+                let users = state.users.lock().unwrap();
+                users
+                    .get(&user_id)
+                    .is_some_and(|u| ki_protocol::perm::has(u.perms, ki_protocol::perm::CONTROL_MUSIC))
+            };
+            let ajout_simple = matches!(
+                &commande,
+                C::Chercher { .. } | C::Ajouter { maintenant: false, .. } | C::AjouterPiste { maintenant: false, .. }
+            );
+            if !controle && !(ajout_simple && state.meta.get().musique_membres_ajoutent) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "réservé aux modérateurs — l'admin peut autoriser les membres à ajouter des morceaux".into(),
+                });
                 return;
             }
             if !state.musique.disponible() {
@@ -1337,6 +1375,9 @@ fn handle_msg(
                 C::Retirer { .. } => "retirer",
                 C::Deplacer { .. } => "déplacer",
                 C::Chercher { .. } => "chercher",
+                C::PlaylistEnregistrer { .. } => "playlist.enregistrer",
+                C::PlaylistCharger { .. } => "playlist.charger",
+                C::PlaylistSupprimer { .. } => "playlist.supprimer",
                 C::Lecture => "lecture",
                 C::Pause => "pause",
                 C::Suivant => "suivant",
@@ -1348,6 +1389,7 @@ fn handle_msg(
                 C::Ajouter { url, .. } => url.clone(),
                 C::AjouterPiste { piste, .. } => piste.url.clone(),
                 C::Volume { pour_cent } => format!("{pour_cent} %"),
+                C::PlaylistEnregistrer { nom } | C::PlaylistCharger { nom, .. } | C::PlaylistSupprimer { nom } => nom.clone(),
                 _ => String::new(),
             };
             // Chercher n'est pas une action sur le bot : pas d'audit, mais
@@ -1411,6 +1453,29 @@ fn handle_msg(
                     state.musique.commander(crate::musique::Commande::Ajouter { piste, maintenant });
                 }
                 C::Deplacer { de, vers } => state.musique.commander(crate::musique::Commande::Deplacer(de, vers)),
+                C::PlaylistEnregistrer { nom } | C::PlaylistCharger { nom, .. } | C::PlaylistSupprimer { nom }
+                    if nom.trim().is_empty()
+                        || nom.chars().count() > ki_protocol::MAX_NOM_PLAYLIST
+                        || nom.chars().any(char::is_control) =>
+                {
+                    let _ = tx.send(ServerMsg::Error { message: "nom de playlist vide ou trop long".into() });
+                }
+                C::PlaylistEnregistrer { nom } => {
+                    state.musique.commander(crate::musique::Commande::PlaylistEnregistrer(nom.trim().to_string()))
+                }
+                C::PlaylistCharger { nom, remplacer } => {
+                    if state.musique.etat().salon.is_none() {
+                        let Some(salon) = mon_salon else {
+                            let _ = tx.send(ServerMsg::Error { message: "rejoins un salon vocal d'abord".into() });
+                            return;
+                        };
+                        state.musique.commander(crate::musique::Commande::Rejoindre { salon });
+                    }
+                    state.musique.commander(crate::musique::Commande::PlaylistCharger(nom.trim().to_string(), remplacer))
+                }
+                C::PlaylistSupprimer { nom } => {
+                    state.musique.commander(crate::musique::Commande::PlaylistSupprimer(nom.trim().to_string()))
+                }
                 C::Rejoindre => {
                     let Some(salon) = mon_salon else {
                         let _ = tx.send(ServerMsg::Error {

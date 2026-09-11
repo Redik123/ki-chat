@@ -628,6 +628,7 @@ struct KiApp {
     musique_soundcloud: bool,
     musique_resultats: Vec<ki_protocol::Piste>,
     musique_resultats_pour: String,
+    musique_playlist_nom: String,
     /// La fiche d'un bot, ouverte depuis la liste des membres.
     fiche_bot: Option<UserId>,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
@@ -996,6 +997,7 @@ impl KiApp {
             musique_soundcloud: false,
             musique_resultats: Vec::new(),
             musique_resultats_pour: String::new(),
+            musique_playlist_nom: String::new(),
             fiche_bot: None,
             show_stats: false,
             stats: Vec::new(),
@@ -1527,6 +1529,9 @@ impl KiApp {
     fn bandeau_musique(&mut self, ui: &mut egui::Ui) {
         use ki_protocol::CommandeMusique as C;
         let peut = self.can(ki_protocol::perm::CONTROL_MUSIC);
+        // Chercher et ajouter en fin de file : ouvert à tous si l'admin
+        // l'a voulu ; piloter reste aux modérateurs.
+        let peut_ajouter = peut || self.server_info.musique_membres_ajoutent;
         let etat = self.musique.clone();
         let en_cours = etat.en_cours.clone();
         let position = self.musique_position_s();
@@ -1693,10 +1698,53 @@ impl KiApp {
                     }
                 });
             }
+            // Les playlists du groupe, sous la file.
+            {
+                let ui = &mut cols[1];
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("Playlists · {}", etat.playlists.len())).strong().size(13.0));
+                for pl in &etat.playlists {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(RichText::new(&pl.nom).size(12.0)).truncate())
+                            .on_hover_text(format!("{} pistes · {}", pl.pistes, mmss(pl.duree_s as u64)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_enabled_ui(peut, |ui| {
+                                if ui::icon_button_ex(ui, Icon::Trash, 18.0, "supprimer la playlist", None).clicked() {
+                                    self.commander_musique(C::PlaylistSupprimer { nom: pl.nom.clone() });
+                                }
+                                if ui.small_button("+").on_hover_text("à la suite de la file").clicked() {
+                                    self.commander_musique(C::PlaylistCharger { nom: pl.nom.clone(), remplacer: false });
+                                }
+                                if ui.small_button("▶").on_hover_text("jouer à la place de la file").clicked() {
+                                    self.commander_musique(C::PlaylistCharger { nom: pl.nom.clone(), remplacer: true });
+                                }
+                            });
+                            ui.label(RichText::new(format!("{}", pl.pistes)).color(TEXT_FAINT).size(10.5));
+                        });
+                    });
+                }
+                if peut && (en_cours.is_some() || !etat.file.is_empty()) {
+                    ui.horizontal(|ui| {
+                        let champ = ui.add(
+                            egui::TextEdit::singleline(&mut self.musique_playlist_nom)
+                                .hint_text("nom de la playlist")
+                                .desired_width(140.0)
+                                .char_limit(ki_protocol::MAX_NOM_PLAYLIST),
+                        );
+                        menu_edition(&champ, &mut self.musique_playlist_nom, false);
+                        let nom = self.musique_playlist_nom.trim().to_string();
+                        let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.add_enabled(!nom.is_empty(), egui::Button::new("Enregistrer la file")).clicked() || (entree && !nom.is_empty()) {
+                            self.commander_musique(C::PlaylistEnregistrer { nom });
+                            self.musique_playlist_nom.clear();
+                        }
+                    });
+                }
+            }
             // La recherche.
             {
                 let ui = &mut cols[2];
-                ui.add_enabled_ui(peut, |ui| {
+                ui.add_enabled_ui(peut_ajouter, |ui| {
                     let champ = ui.add(
                         egui::TextEdit::singleline(&mut self.musique_recherche)
                             .hint_text("chercher un morceau, ou coller une adresse…")
@@ -1726,7 +1774,7 @@ impl KiApp {
                         }
                     }
                 });
-                if !peut {
+                if !peut_ajouter {
                     ui.label(RichText::new("réservé aux modérateurs").color(TEXT_FAINT).size(11.0));
                 }
                 if !self.musique_resultats.is_empty() {
@@ -1744,6 +1792,8 @@ impl KiApp {
                                     if ui.small_button("▶").on_hover_text("jouer maintenant").clicked() {
                                         self.commander_musique(C::AjouterPiste { piste: p.clone(), maintenant: true });
                                     }
+                                });
+                                ui.add_enabled_ui(peut_ajouter, |ui| {
                                     if ui.small_button("+").on_hover_text("ajouter à la file").clicked() {
                                         self.commander_musique(C::AjouterPiste { piste: p.clone(), maintenant: false });
                                     }
@@ -7279,6 +7329,20 @@ impl KiApp {
              un même message. Les modes d'arcade ne sont pas annoncés.",
         );
 
+        // Le bot musique : qui peut y ajouter des morceaux.
+        ui.add_space(14.0);
+        ui::hairline(ui);
+        ui.add_space(8.0);
+        ui::field_label(ui, "Bot musique");
+        let mut ajoutent = self.server_info.musique_membres_ajoutent;
+        if ui.checkbox(&mut ajoutent, "Les membres peuvent chercher et ajouter des morceaux").changed() {
+            to_send.push(ClientMsg::AdminSetMusique { membres_ajoutent: ajoutent });
+        }
+        ui::hint(
+            ui,
+            "en fin de file seulement : lecture, pause, ordre, volume et playlists restent aux \
+             rôles qui ont « Contrôler la musique ».",
+        );
     }
 
     // -----------------------------------------------------------------

@@ -354,9 +354,18 @@ Un bot ne passe jamais pour un membre : pastille **BOT** à côté du nom,
 une note à la place de la photo, ni rôle ni rang, et un menu réduit à son
 volume et à sa **fiche** — ce qu'il fait, qui le pilote, comment il marche,
 ses compteurs. La même pastille marque les messages du fil de jeu
-VALORANT. Les playlists et la voix sont les jalons suivants. Télécharger
-de YouTube reste contraire à ses conditions d'utilisation : usage privé
-entre amis, décision de l'admin du serveur.
+VALORANT.
+
+Et le confort (M3) : les **playlists du groupe** — la file s'enregistre
+sous un nom, une playlist se joue à la place de la file ou à sa suite,
+se supprime — gardées sur le serveur ; l'admin peut laisser **les
+membres chercher et ajouter** des morceaux en fin de file sans piloter
+(♛ Admin → Bot musique) ; seul dans le salon cinq minutes, le bot se met
+en pause et reprend quand quelqu'un revient, seul trente minutes il s'en
+va ; et un redémarrage du serveur retrouve la file, le salon et le
+volume, en pause, prêts à repartir. La voix est le jalon suivant.
+Télécharger de YouTube reste contraire à ses conditions d'utilisation :
+usage privé entre amis, décision de l'admin du serveur.
 
 ## Sécurité
 

@@ -18,7 +18,7 @@
 //! Sans yt-dlp ou ffmpeg sur la machine, le bot n'existe pas : l'état dit
 //! « indisponible » et les commandes répondent poliment.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -29,7 +29,10 @@ use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ki_protocol::{ChannelId, CompteursMusique, EtatMusique, Piste, ServerMsg, MUSIQUE_ID, VOICE_HEADER_LEN};
+use ki_protocol::{
+    ChannelId, CompteursMusique, EtatMusique, Piste, ResumePlaylist, ServerMsg, MUSIQUE_ID, VOICE_HEADER_LEN,
+};
+use serde::{Deserialize, Serialize};
 use rand::Rng;
 
 use crate::state::AppState;
@@ -94,6 +97,9 @@ pub enum Commande {
     },
     Retirer(usize),
     Deplacer(usize, usize),
+    PlaylistEnregistrer(String),
+    PlaylistCharger(String, bool),
+    PlaylistSupprimer(String),
     Lecture,
     Pause,
     Suivant,
@@ -129,6 +135,24 @@ struct Vignettes {
 const VIGNETTES_MAX: usize = 200;
 const VIGNETTE_OCTETS_MAX: u64 = 600 * 1024;
 
+/// Ce qui survit à un redémarrage : le salon, la file (piste en cours en
+/// tête), le volume. Rien de la position — la piste reprend du début, en
+/// pause, quand un modérateur le demande.
+#[derive(Default, Serialize, Deserialize)]
+struct Sauvegarde {
+    #[serde(default)]
+    salon: Option<ChannelId>,
+    #[serde(default)]
+    file: Vec<Piste>,
+    #[serde(default)]
+    volume: u8,
+}
+
+/// Seul dans le salon depuis ce temps, le bot se met en pause ; depuis
+/// celui-là, il s'en va.
+const SOLITUDE_PAUSE: Duration = Duration::from_secs(5 * 60);
+const SOLITUDE_DEPART: Duration = Duration::from_secs(30 * 60);
+
 pub struct Musique {
     etat: Mutex<EtatMusique>,
     tx: tokio::sync::mpsc::UnboundedSender<Commande>,
@@ -136,6 +160,9 @@ pub struct Musique {
     outils: Option<Arc<Outils>>,
     compteurs: Compteurs,
     vignettes: Mutex<Vignettes>,
+    /// Les playlists du groupe, par nom.
+    playlists: Mutex<BTreeMap<String, Vec<Piste>>>,
+    dossier: PathBuf,
 }
 
 impl Musique {
@@ -144,11 +171,27 @@ impl Musique {
     pub fn new(data_dir: &str) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let outils = detecter(data_dir).map(Arc::new);
+        let dossier = PathBuf::from(data_dir).join("musique");
+        let playlists: BTreeMap<String, Vec<Piste>> = std::fs::read_to_string(dossier.join("playlists.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let sauve: Sauvegarde = std::fs::read_to_string(dossier.join("file.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        // La file d'avant le redémarrage attend, en pause, que quelqu'un
+        // relance ; le salon aussi, si le bot en avait un.
         let etat = EtatMusique {
             disponible: outils.is_some(),
-            volume: 60,
+            volume: if sauve.volume == 0 { 60 } else { sauve.volume.min(100) },
+            salon: sauve.salon.filter(|_| outils.is_some() && !sauve.file.is_empty()),
+            file: sauve.file,
             ..Default::default()
         };
+        if !etat.file.is_empty() {
+            tracing::info!("musique : {} piste(s) en file reprises du redémarrage, en pause", etat.file.len());
+        }
         Self {
             etat: Mutex::new(etat),
             tx,
@@ -156,6 +199,33 @@ impl Musique {
             outils,
             compteurs: Compteurs::default(),
             vignettes: Mutex::new(Vignettes::default()),
+            playlists: Mutex::new(playlists),
+            dossier,
+        }
+    }
+
+    fn sauver_playlists(&self) {
+        let playlists = self.playlists.lock().unwrap();
+        if let Ok(json) = serde_json::to_vec_pretty(&*playlists) {
+            let _ = std::fs::create_dir_all(&self.dossier);
+            if let Err(e) = crate::store::write_atomic(&self.dossier.join("playlists.json"), &json) {
+                tracing::warn!("musique : playlists non écrites : {e}");
+            }
+        }
+    }
+
+    /// La file telle qu'elle est, pour la retrouver au redémarrage.
+    fn sauver_file(&self) {
+        let e = self.etat.lock().unwrap();
+        let mut file = e.file.clone();
+        if let Some(p) = &e.en_cours {
+            file.insert(0, p.clone());
+        }
+        let sauve = Sauvegarde { salon: e.salon, file, volume: e.volume };
+        drop(e);
+        if let Ok(json) = serde_json::to_vec_pretty(&sauve) {
+            let _ = std::fs::create_dir_all(&self.dossier);
+            let _ = crate::store::write_atomic(&self.dossier.join("file.json"), &json);
         }
     }
 
@@ -221,6 +291,17 @@ impl Musique {
 
     pub fn etat(&self) -> EtatMusique {
         let mut e = self.etat.lock().unwrap().clone();
+        e.playlists = self
+            .playlists
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(nom, pistes)| ResumePlaylist {
+                nom: nom.clone(),
+                pistes: pistes.len() as u32,
+                duree_s: pistes.iter().map(|p| p.duree_s).sum(),
+            })
+            .collect();
         let n = self.compteurs.premier_son_n.load(Ordering::Relaxed);
         e.compteurs = CompteursMusique {
             pistes_jouees: self.compteurs.pistes_jouees.load(Ordering::Relaxed),
@@ -729,6 +810,7 @@ fn suivante(
         tracing::info!("musique : lecture de « {} »", p.titre);
         *lecteur = Some(Lecteur::demarrer(Arc::clone(outils), p.url));
     }
+    state.musique.sauver_file();
     publier(state, true);
 }
 
@@ -828,8 +910,58 @@ fn appliquer(
         Commande::Erreur(message) => {
             state.musique.etat.lock().unwrap().erreur = Some(message);
             publier(state, false);
+            return;
+        }
+        Commande::PlaylistEnregistrer(nom) => {
+            let pistes: Vec<Piste> = {
+                let e = state.musique.etat.lock().unwrap();
+                e.en_cours.iter().chain(e.file.iter()).take(ki_protocol::MAX_PISTES_PLAYLIST).cloned().collect()
+            };
+            let mut playlists = state.musique.playlists.lock().unwrap();
+            if pistes.is_empty() {
+                state.musique.etat.lock().unwrap().erreur = Some("rien à enregistrer : la file est vide".into());
+            } else if !playlists.contains_key(&nom) && playlists.len() >= ki_protocol::MAX_PLAYLISTS {
+                state.musique.etat.lock().unwrap().erreur = Some("trop de playlists — supprime-en une".into());
+            } else {
+                playlists.insert(nom, pistes);
+            }
+            drop(playlists);
+            state.musique.sauver_playlists();
+            publier(state, false);
+        }
+        Commande::PlaylistCharger(nom, remplacer) => {
+            let pistes = state.musique.playlists.lock().unwrap().get(&nom).cloned();
+            let Some(pistes) = pistes else {
+                state.musique.etat.lock().unwrap().erreur = Some("playlist inconnue".into());
+                publier(state, false);
+                return;
+            };
+            let demarrer = {
+                let mut e = state.musique.etat.lock().unwrap();
+                e.erreur = None;
+                if remplacer {
+                    e.file = pistes;
+                    e.lecture = true;
+                    true
+                } else {
+                    e.file.extend(pistes);
+                    e.en_cours.is_none()
+                }
+            };
+            if demarrer {
+                state.musique.etat.lock().unwrap().lecture = true;
+                suivante(state, outils, lecteur, None);
+            } else {
+                publier(state, false);
+            }
+        }
+        Commande::PlaylistSupprimer(nom) => {
+            state.musique.playlists.lock().unwrap().remove(&nom);
+            state.musique.sauver_playlists();
+            publier(state, false);
         }
     }
+    state.musique.sauver_file();
 }
 
 /// La tâche du bot : commandes d'un côté, cadence de 20 ms de l'autre.
@@ -865,6 +997,12 @@ pub async fn boucle(state: Arc<AppState>) {
     }
     let mut echeance = tokio::time::Instant::now();
     let mut derniere_publication = Instant::now();
+    // Seul dans le salon : en pause au bout de cinq minutes, parti au bout
+    // de trente. Quelqu'un revient : la lecture reprend d'elle-même si
+    // c'est la solitude qui l'avait arrêtée.
+    let mut controle_salon = Instant::now();
+    let mut seul_depuis: Option<Instant> = None;
+    let mut pause_solitude = false;
     loop {
         tokio::select! {
             commande = rx.recv() => {
@@ -885,6 +1023,45 @@ pub async fn boucle(state: Arc<AppState>) {
                     if let Some(l) = &lecteur {
                         state.musique.etat.lock().unwrap().position_ms = l.position_ms;
                         publier(&state, false);
+                    }
+                }
+                if controle_salon.elapsed() >= Duration::from_secs(1) {
+                    controle_salon = Instant::now();
+                    let (salon, lecture) = {
+                        let e = state.musique.etat.lock().unwrap();
+                        (e.salon, e.lecture)
+                    };
+                    if let Some(salon) = salon {
+                        let pairs = state.voice_routes.read().unwrap().peers.get(&salon).map_or(0, |p| p.len());
+                        if pairs == 0 {
+                            let depuis = *seul_depuis.get_or_insert_with(Instant::now);
+                            if depuis.elapsed() >= SOLITUDE_DEPART {
+                                tracing::info!("musique : seul depuis trente minutes, le bot s'en va");
+                                seul_depuis = None;
+                                pause_solitude = false;
+                                appliquer(&state, &outils, &mut lecteur, Commande::Arreter);
+                            } else if lecture && depuis.elapsed() >= SOLITUDE_PAUSE {
+                                pause_solitude = true;
+                                let mut e = state.musique.etat.lock().unwrap();
+                                e.lecture = false;
+                                e.erreur = Some("en pause : plus personne dans le salon".into());
+                                drop(e);
+                                publier(&state, true);
+                            }
+                        } else {
+                            seul_depuis = None;
+                            if pause_solitude {
+                                pause_solitude = false;
+                                let mut e = state.musique.etat.lock().unwrap();
+                                e.lecture = true;
+                                e.erreur = None;
+                                drop(e);
+                                publier(&state, true);
+                            }
+                        }
+                    } else {
+                        seul_depuis = None;
+                        pause_solitude = false;
                     }
                 }
             }

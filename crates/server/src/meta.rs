@@ -44,6 +44,11 @@ impl ServerMeta {
         self.update(|info| info.icon = icon)
     }
 
+    /// Les membres peuvent-ils ajouter des morceaux au bot musique ?
+    pub fn set_musique_membres_ajoutent(&self, oui: bool) -> anyhow::Result<()> {
+        self.update(|info| info.musique_membres_ajoutent = oui)
+    }
+
     /// Le salon du fil de jeu VALORANT, ou rien.
     pub fn set_fil_valorant(&self, channel: Option<ki_protocol::ChannelId>) -> anyhow::Result<()> {
         self.update(|info| info.fil_valorant = channel)
