@@ -11,6 +11,7 @@ mod overlay;
 mod partage;
 mod perf;
 mod photos;
+mod boutique;
 mod ptt;
 mod rangs;
 mod secours;
@@ -615,6 +616,8 @@ struct KiApp {
     dernier_envoi: Option<std::time::Instant>,
     /// Les icônes de rang VALORANT, téléchargées une fois.
     rangs: rangs::Rangs,
+    /// La boutique du jour, lue dans son propre client Riot.
+    boutique: boutique::Lecteur,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
@@ -973,6 +976,7 @@ impl KiApp {
             fiche: None,
             dernier_envoi: None,
             rangs: rangs::Rangs::new(),
+            boutique: boutique::Lecteur::new(),
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
@@ -6434,6 +6438,16 @@ impl KiApp {
                                 let teinte = if *ok { TEXT_DIM } else { DANGER };
                                 ui.label(RichText::new(message).color(teinte).size(11.5));
                             }
+
+                            // La boutique du jour : lue dans son propre client
+                            // Riot, pour soi seul — rien ne part vers le serveur.
+                            ui.add_space(12.0);
+                            ui::group_title(ui, Icon::Target, "Boutique du jour");
+                            ui::hint(
+                                ui,
+                                "lue dans ton client Riot, sur ce PC, avec ses jetons qui ne quittent                                  pas la machine — pour toi seul, rien ne part vers le serveur. Il faut                                  VALORANT ouvert.",
+                            );
+                            self.boutique.ui(ui);
                         }
 
                         if let Some(info) = self.info.clone() {

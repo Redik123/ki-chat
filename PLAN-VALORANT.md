@@ -227,9 +227,11 @@ Livré : « cherche des joueurs » lu dans la party ouverte (affichage
 seulement) ; esports par HenrikDev (`/valorant/v1/esports/schedule`, relu
 toutes les heures, vingt matchs à venir ou en cours sur la page Stats) ;
 console dès la liaison (HenrikDev `platform=console`) ; compteurs
-HenrikDev dans `/diag-resume`. Reste : la boutique du jour perso (par le
-client local, pour soi) — à sonder avec un client Riot ouvert, l'endpoint
-storefront a changé de version en 2024.
+HenrikDev dans `/diag-resume` ; et la boutique du jour perso
+(`client-gui/src/boutique.rs`) : lockfile → session → `/entitlements/v1/token`
+→ région `-ares-deployment` → `POST pd.<région>.a.pvp.net/store/v3/storefront/<puuid>`
+avec le User-Agent du jeu (sans lui, Cloudflare 1010), noms et images
+par valorant-api.com. Sondé le 2026-09-11 : 200, quatre offres. V4 close.
 
 ## Risques et parades
 

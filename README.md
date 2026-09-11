@@ -322,6 +322,13 @@ connecté. Le résumé des diagnostics (`/diag-resume`) dit ce que le service
 coûte : requêtes depuis le démarrage, refus 429, erreurs, annonces en
 attente.
 
+Enfin la **boutique du jour**, dans ⚙ → Jeu : les quatre skins du jour,
+leur prix en VP, l'heure du renouvellement. Elle se lit dans son propre
+client Riot, sur ce PC, avec ses jetons qui ne quittent pas la machine —
+ni journalisés, ni gardés — et le nom et l'image de chaque skin viennent
+de valorant-api.com, en français. Pour soi seul : rien ne part vers le
+serveur ki-chat. Il faut VALORANT ouvert ; fermé, la section le dit.
+
 ## Sécurité
 
 **Comptes** : pseudo + mot de passe, hachés en Argon2id (`data/users.json`).

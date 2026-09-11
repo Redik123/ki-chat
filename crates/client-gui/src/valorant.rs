@@ -72,7 +72,7 @@ impl Drop for Veilleur {
 
 /// Ce que le lockfile dit : où joindre le client, et comment.
 #[derive(Clone, PartialEq, Eq)]
-struct Lockfile {
+pub(crate) struct Lockfile {
     port: u16,
     password: String,
 }
@@ -87,7 +87,7 @@ fn parser_lockfile(contenu: &str) -> Option<Lockfile> {
     (!password.is_empty()).then_some(Lockfile { port, password })
 }
 
-fn lire_lockfile() -> Option<Lockfile> {
+pub(crate) fn lire_lockfile() -> Option<Lockfile> {
     let base = std::env::var_os("LOCALAPPDATA")?;
     let chemin = std::path::PathBuf::from(base)
         .join("Riot Games")
@@ -101,14 +101,14 @@ fn lire_lockfile() -> Option<Lockfile> {
 /// Le client HTTP vers l'API locale : certificat auto-signé du client Riot
 /// accepté (c'est la boucle locale, pas le réseau), mot de passe du lockfile
 /// en Basic.
-struct Client {
+pub(crate) struct Client {
     agent: ureq::Agent,
     base: String,
     auth: String,
 }
 
 impl Client {
-    fn new(lf: &Lockfile) -> Self {
+    pub(crate) fn new(lf: &Lockfile) -> Self {
         let agent = ureq::AgentBuilder::new()
             .tls_config(ki_client_quic::local_tls_config())
             .timeout(Duration::from_secs(3))
@@ -120,7 +120,7 @@ impl Client {
         Self { agent, base: format!("https://127.0.0.1:{}", lf.port), auth }
     }
 
-    fn get<T: serde::de::DeserializeOwned>(&self, chemin: &str) -> anyhow::Result<T> {
+    pub(crate) fn get<T: serde::de::DeserializeOwned>(&self, chemin: &str) -> anyhow::Result<T> {
         let reponse = self
             .agent
             .get(&format!("{}{chemin}", self.base))
@@ -131,9 +131,9 @@ impl Client {
 }
 
 #[derive(Deserialize)]
-struct Session {
+pub(crate) struct Session {
     #[serde(default)]
-    puuid: String,
+    pub(crate) puuid: String,
 }
 
 #[derive(Deserialize)]
