@@ -1503,6 +1503,8 @@ pub enum CommandeMusique {
 
 /// Longueur maximale d'une recherche de musique, en caractères.
 pub const MAX_RECHERCHE_MUSIQUE: usize = 80;
+/// La file d'attente ne dépasse pas ça, playlists comprises.
+pub const MAX_FILE_MUSIQUE: usize = 300;
 /// Les playlists du groupe : combien, de quelle taille, quel nom.
 pub const MAX_PLAYLISTS: usize = 50;
 pub const MAX_PISTES_PLAYLIST: usize = 200;

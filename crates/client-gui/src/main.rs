@@ -1747,7 +1747,7 @@ impl KiApp {
                 ui.add_enabled_ui(peut_ajouter, |ui| {
                     let champ = ui.add(
                         egui::TextEdit::singleline(&mut self.musique_recherche)
-                            .hint_text("chercher un morceau, ou coller une adresse…")
+                            .hint_text("chercher, ou coller l'adresse d'un morceau ou d'une playlist…")
                             .desired_width(f32::INFINITY),
                     );
                     menu_edition(&champ, &mut self.musique_recherche, false);

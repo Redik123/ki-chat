@@ -69,10 +69,17 @@ pub struct Outils {
 }
 
 impl Outils {
-    /// Les arguments communs à tout appel de yt-dlp.
+    /// Les arguments communs à tout appel de yt-dlp — une seule vidéo,
+    /// même si l'adresse porte une liste.
     fn args_yt_dlp(&self) -> Vec<String> {
+        let mut args = self.args_yt_dlp_liste();
+        args.insert(0, "--no-playlist".to_string());
+        args
+    }
+
+    /// Les mêmes, pour une adresse de playlist.
+    fn args_yt_dlp_liste(&self) -> Vec<String> {
         let mut args = vec![
-            "--no-playlist".to_string(),
             "--no-warnings".to_string(),
             "--no-progress".to_string(),
             "--cache-dir".to_string(),
@@ -95,6 +102,8 @@ pub enum Commande {
         piste: Piste,
         maintenant: bool,
     },
+    /// Une playlist entière — devant la file si `maintenant`.
+    AjouterPlusieurs(Vec<Piste>, bool),
     Retirer(usize),
     Deplacer(usize, usize),
     PlaylistEnregistrer(String),
@@ -431,6 +440,14 @@ pub async fn vignette(
         .into_response()
 }
 
+/// Une adresse de playlist : YouTube (`/playlist?list=…`, YouTube Music
+/// compris) ou un « set » SoundCloud. Une vidéo avec `list=` dans
+/// l'adresse reste une vidéo — c'est un lien partagé, pas une playlist.
+pub fn est_liste(url: &str) -> bool {
+    let chemin = url.strip_prefix("https://").and_then(|r| r.find('/').map(|i| &r[i..])).unwrap_or("");
+    chemin.starts_with("/playlist") || chemin.contains("/sets/")
+}
+
 /// Cherche dix pistes sur YouTube ou SoundCloud, sans rien télécharger :
 /// yt-dlp en mode « liste à plat », une ligne JSON par résultat.
 /// Bloquant : hors de la boucle asynchrone.
@@ -441,15 +458,38 @@ pub fn chercher(outils: &Outils, texte: &str, source: &str) -> Result<Vec<Piste>
         .args(["-j", "--flat-playlist", "--skip-download", "--"])
         .arg(format!("{prefixe}{texte}"));
     let sortie = executer_borne(&mut cmd, DELAI_RESOLUTION)?;
+    Ok(pistes_a_plat(&sortie, nom_source))
+}
+
+/// Toutes les pistes d'une playlist, à plat — deux cents au plus — sans
+/// rien télécharger. Bloquant.
+pub fn resoudre_liste(outils: &Outils, url: &str) -> Result<Vec<Piste>, String> {
+    let source = if url.contains("soundcloud.com") { "soundcloud" } else { "youtube" };
+    let mut cmd = Command::new(&outils.yt_dlp);
+    cmd.args(outils.args_yt_dlp_liste())
+        .args(["-j", "--flat-playlist", "--skip-download", "--playlist-end"])
+        .arg(ki_protocol::MAX_PISTES_PLAYLIST.to_string())
+        .arg("--")
+        .arg(url);
+    let sortie = executer_borne(&mut cmd, Duration::from_secs(60))?;
+    let pistes = pistes_a_plat(&sortie, source);
+    if pistes.is_empty() {
+        return Err("playlist vide ou introuvable".into());
+    }
+    Ok(pistes)
+}
+
+/// Les lignes JSON d'une sortie « à plat », en pistes.
+fn pistes_a_plat(sortie: &[u8], nom_source: &str) -> Vec<Piste> {
     let mut pistes = Vec::new();
-    for ligne in String::from_utf8_lossy(&sortie).lines() {
+    for ligne in String::from_utf8_lossy(sortie).lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(ligne) else { continue };
         let Some(url) = v["webpage_url"].as_str().or_else(|| v["url"].as_str()) else { continue };
         if !ki_protocol::url_musique_valide(url) {
             continue;
         }
         let titre = v["title"].as_str().unwrap_or("").to_string();
-        if titre.is_empty() {
+        if titre.is_empty() || titre == "[Private video]" || titre == "[Deleted video]" {
             continue;
         }
         let artiste = ["artist", "uploader", "channel", "creator"]
@@ -467,7 +507,7 @@ pub fn chercher(outils: &Outils, texte: &str, source: &str) -> Result<Vec<Piste>
             ajoute_par: None,
         });
     }
-    Ok(pistes)
+    pistes
 }
 
 /// Parmi les vignettes d'un résultat, une de taille moyenne : chez YouTube
@@ -851,6 +891,32 @@ fn appliquer(
                 publier(state, false);
             }
         }
+        Commande::AjouterPlusieurs(pistes, maintenant) => {
+            let demarrer = {
+                let mut e = state.musique.etat.lock().unwrap();
+                e.erreur = None;
+                let place = ki_protocol::MAX_FILE_MUSIQUE.saturating_sub(e.file.len());
+                let pistes: Vec<Piste> = pistes.into_iter().take(place).collect();
+                if pistes.is_empty() {
+                    e.erreur = Some("la file est pleine".into());
+                    false
+                } else if maintenant {
+                    let reste = std::mem::take(&mut e.file);
+                    e.file = pistes;
+                    e.file.extend(reste);
+                    true
+                } else {
+                    e.file.extend(pistes);
+                    e.en_cours.is_none()
+                }
+            };
+            if demarrer {
+                state.musique.etat.lock().unwrap().lecture = true;
+                suivante(state, outils, lecteur, None);
+            } else {
+                publier(state, false);
+            }
+        }
         Commande::Retirer(index) => {
             let mut e = state.musique.etat.lock().unwrap();
             if index < e.file.len() {
@@ -1229,6 +1295,21 @@ mod tests {
             drop(lecteur);
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+
+    /// Une playlist se reconnaît à son chemin ; une vidéo avec `list=`
+    /// reste une vidéo.
+    #[test]
+    fn les_playlists_se_reconnaissent() {
+        assert!(est_liste("https://music.youtube.com/playlist?list=OLAK5uy_x"));
+        assert!(est_liste("https://www.youtube.com/playlist?list=PLx"));
+        assert!(est_liste("https://soundcloud.com/forss/sets/soulhack"));
+        assert!(!est_liste("https://www.youtube.com/watch?v=a&list=RDa"));
+        assert!(!est_liste("https://soundcloud.com/forss/flickermood"));
+        let plat = b"{\"title\":\"A\",\"url\":\"https://www.youtube.com/watch?v=1\",\"duration\":10,\"uploader\":\"X\"}\n{\"title\":\"[Private video]\",\"url\":\"https://www.youtube.com/watch?v=2\"}\n";
+        let pistes = pistes_a_plat(plat, "youtube");
+        assert_eq!(pistes.len(), 1);
+        assert_eq!((pistes[0].titre.as_str(), pistes[0].artiste.as_str(), pistes[0].duree_s), ("A", "X", 10));
     }
 
     /// Les vignettes ont un identifiant stable, et SoundCloud passe en 300×300.

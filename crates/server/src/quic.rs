@@ -1507,12 +1507,26 @@ fn handle_msg(
                             .commander(crate::musique::Commande::Rejoindre { salon });
                     }
                     // Résoudre l'adresse prend quelques secondes de yt-dlp :
-                    // hors de la boucle, puis la piste part en file.
+                    // hors de la boucle, puis la piste part en file. Une
+                    // playlist arrive entière, dans l'ordre.
                     let Some(outils) = state.musique.outils() else {
                         return;
                     };
                     let state = state.clone();
                     let qui = username.to_string();
+                    if crate::musique::est_liste(&url) {
+                        tokio::task::spawn_blocking(move || match crate::musique::resoudre_liste(&outils, &url) {
+                            Ok(mut pistes) => {
+                                for p in &mut pistes {
+                                    p.ajoute_par = Some(qui.clone());
+                                    state.musique.localiser_vignette(p);
+                                }
+                                state.musique.commander(crate::musique::Commande::AjouterPlusieurs(pistes, maintenant));
+                            }
+                            Err(e) => state.musique.commander(crate::musique::Commande::Erreur(format!("playlist illisible : {e}"))),
+                        });
+                        return;
+                    }
                     tokio::task::spawn_blocking(move || {
                         match crate::musique::resoudre(&outils, &url) {
                             Ok(mut piste) => {
