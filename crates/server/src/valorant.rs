@@ -836,20 +836,25 @@ fn fil(
                 // renvoyé 500 sur l'ensemble un soir de septembre 2026), la
                 // seule région qui nous intéresse, puis l'international.
                 // Même raté, il est daté de maintenant : pas de nouvel essai
-                // avant une heure.
+                // avant une heure — et une seule ligne de journal pour les
+                // trois essais.
                 let mut matchs = None;
+                let mut echecs = Vec::new();
                 for filtre in ["", "?region=emea", "?region=international"] {
                     match api.get(&format!("/valorant/v1/esports/schedule{filtre}")) {
                         Ok(v) => {
                             matchs = Some(calendrier_esport(&v, maintenant_ms()));
                             break;
                         }
-                        Err(e) => tracing::warn!(
-                            "VALORANT : calendrier esport illisible ({}) : {}",
-                            if filtre.is_empty() { "complet" } else { filtre },
-                            e.message()
-                        ),
+                        Err(e) => echecs.push(e.message()),
                     }
+                }
+                if matchs.is_none() {
+                    echecs.dedup();
+                    tracing::warn!(
+                        "VALORANT : calendrier esport illisible chez HenrikDev ({}) — nouvel essai dans une heure",
+                        echecs.join(" ; ")
+                    );
                 }
                 let matchs = matchs.unwrap_or_else(|| etat.esports.lock().unwrap().1.clone());
                 *etat.esports.lock().unwrap() = (maintenant_ms(), matchs);
