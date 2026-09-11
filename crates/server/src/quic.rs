@@ -1110,6 +1110,43 @@ fn handle_msg(
             let fiche = state.valorant.fiche(cible);
             let _ = tx.send(ServerMsg::FicheValorant { user_id: cible, fiche });
         }
+        ClientMsg::AdminSetFilValorant { channel } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
+                return;
+            }
+            let nom = match channel {
+                None => None,
+                Some(id) => {
+                    let salon = state
+                        .channels
+                        .list()
+                        .into_iter()
+                        .find(|c| c.id == id && c.kind == ki_protocol::ChannelKind::Text);
+                    let Some(salon) = salon else {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "ce salon n'existe pas, ou n'est pas un salon texte".into(),
+                        });
+                        return;
+                    };
+                    Some(salon.name)
+                }
+            };
+            // server.json porte aussi le logo : l'écriture sort de la boucle
+            // asynchrone, comme pour l'identité.
+            let (state, tx) = (state.clone(), tx.clone());
+            let actor = username.to_string();
+            tokio::task::spawn_blocking(move || match state.meta.set_fil_valorant(channel) {
+                Ok(()) => {
+                    let ou = nom.as_deref().map(|n| format!("#{n}")).unwrap_or_else(|| "éteint".into());
+                    state.audit.record("server.fil_valorant", &actor, "", &ou);
+                    state.broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
+                    let _ = tx.send(ServerMsg::Info { message: format!("fil de jeu VALORANT : {ou}") });
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e.to_string() });
+                }
+            });
+        }
         ClientMsg::StatsValorant => {
             // Les fiches du cache, avec le pseudo de chacun : rien ne part
             // vers HenrikDev pour ouvrir la page.
@@ -1274,18 +1311,28 @@ fn handle_msg(
             // relayé à tout le monde seulement s'il change — la liste des
             // membres l'affiche sous le pseudo.
             let jeu = jeu.map(|j| j.nettoyer());
+            let en_jeu = |j: &Option<ki_protocol::JeuStatut>| {
+                j.as_ref().is_some_and(|j| j.etat == ki_protocol::JeuEtat::EnJeu)
+            };
+            let mut partie_finie = false;
             let changed = {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else { return };
                 if u.jeu == jeu {
                     false
                 } else {
+                    // Sorti d'une partie : le fil de jeu relira sa fiche
+                    // dans un instant, le temps que HenrikDev voie le match.
+                    partie_finie = en_jeu(&u.jeu) && !en_jeu(&jeu);
                     u.jeu = jeu;
                     true
                 }
             };
             if changed {
                 state.broadcast_member(user_id);
+            }
+            if partie_finie {
+                state.valorant.fin_de_partie(user_id);
             }
         }
         ClientMsg::VoiceState { speaking, muted } => {

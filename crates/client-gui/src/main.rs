@@ -4950,11 +4950,16 @@ impl KiApp {
                     let photo = self.avatars.get(&msg.user_id).map(|(_, t)| t.clone());
                     // L'auteur peut avoir quitté le serveur : on retombe
                     // alors sur son pseudo, plutôt que de perdre la couleur.
-                    let color = self
-                        .author_colors
-                        .get(&msg.user_id)
-                        .copied()
-                        .unwrap_or_else(|| color_for(&msg.username));
+                    // Le serveur lui-même (le fil de jeu, identifiant 0)
+                    // parle en couleur d'accent : ce n'est pas un membre.
+                    let color = if msg.user_id == 0 {
+                        ACCENT
+                    } else {
+                        self.author_colors
+                            .get(&msg.user_id)
+                            .copied()
+                            .unwrap_or_else(|| color_for(&msg.username))
+                    };
 
                     // `scope` et non une mesure du curseur : c'est ce qui rend
                     // les deux chemins interchangeables. Le curseur, lui,
@@ -6783,6 +6788,44 @@ impl KiApp {
                 icon: std::mem::take(&mut self.admin_icon),
             });
         }
+
+        // Le fil de jeu VALORANT : le salon où le serveur annonce les
+        // parties finies des membres liés. Le choix part tout de suite, le
+        // serveur le confirme en repoussant son identité à tout le monde.
+        ui.add_space(14.0);
+        ui::hairline(ui);
+        ui.add_space(8.0);
+        ui::field_label(ui, "Fil de jeu VALORANT");
+        let actuel = self.server_info.fil_valorant;
+        let nom_du_salon = |id: ChannelId| -> String {
+            self.channels
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| format!("#{}", c.name))
+                .unwrap_or_else(|| format!("salon {id}"))
+        };
+        let mut choix = actuel;
+        egui::ComboBox::from_id_salt("fil_valorant")
+            .width(240.0)
+            .selected_text(match choix {
+                None => "aucun — fil éteint".to_string(),
+                Some(id) => nom_du_salon(id),
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut choix, None, "aucun — fil éteint");
+                for c in self.channels.iter().filter(|c| c.kind == ki_protocol::ChannelKind::Text) {
+                    ui.selectable_value(&mut choix, Some(c.id), format!("#{}", c.name));
+                }
+            });
+        if choix != actuel {
+            to_send.push(ClientMsg::AdminSetFilValorant { channel: choix });
+        }
+        ui::hint(
+            ui,
+            "à chaque partie finie d'un membre qui a lié son compte Riot, le serveur poste \
+             le résultat, sa ligne et ses RR dans ce salon — les coéquipiers du groupe sur \
+             un même message. Les modes d'arcade ne sont pas annoncés.",
+        );
     }
 
     // -----------------------------------------------------------------

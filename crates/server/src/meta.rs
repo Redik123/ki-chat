@@ -41,6 +41,11 @@ impl ServerMeta {
         self.update(|info| info.icon = icon)
     }
 
+    /// Le salon du fil de jeu VALORANT, ou rien.
+    pub fn set_fil_valorant(&self, channel: Option<ki_protocol::ChannelId>) -> anyhow::Result<()> {
+        self.update(|info| info.fil_valorant = channel)
+    }
+
     /// Le verrou est tenu **pendant** l'écriture, comme dans les trois autres
     /// magasins. Le relâcher avant permettait à deux admins simultanés de
     /// publier chacun son instantané : la mémoire gardait le dernier

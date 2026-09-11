@@ -203,12 +203,20 @@ faire, en V4 : les icônes de rang de valorant-api.com à la place du texte.
 (elles viennent du cache) ; sans clé, la liaison répond « demande à
 l'admin » et rien d'autre ne change.
 
-### V3 — Le fil de jeu
-Fin de partie détectée → message automatique dans un salon choisi par
-l'admin (« Jerem : victoire 13-9 sur Ascent, Jett 24/12/6, +18 RR ») ;
-classement du groupe (rang, RR, évolution de la semaine) dans un onglet ;
-historique de RR par membre. **Validation** : une partie finie apparaît en
-moins de trois minutes, sans doublon.
+### V3 — Le fil de jeu — livré en 0.1.33 (2026-09-11)
+Fin de partie détectée par la présence → relecture de la fiche à 75 s
+(jusqu'à trois fois) → message du serveur (pseudo « VALORANT », id 0)
+dans le salon choisi par l'admin (`ServerInfo.fil_valorant`,
+`AdminSetFilValorant`) : « 🏆 Victoire 13-9 sur Ascent · Compétitif »
+puis une ligne par membre du groupe, RR compris en classé
+(`PointRR.match_id` fait le lien). Les coéquipiers liés sont reconnus à
+leur puuid dans le match, relus aussitôt, attendus deux minutes.
+`fil.json` note ce qui a été annoncé ; première fois : l'existant est
+réputé connu. Modes d'arcade et matchs de plus de six heures : notés,
+pas annoncés. Le classement du groupe est la page Stats (0.1.33).
+Reste : l'évolution de la semaine et une courbe de RR dans la fiche.
+**Validation** : une partie finie apparaît en moins de trois minutes,
+sans doublon — à vérifier sur une vraie soirée.
 
 ### V4 — Confort
 « Cherche des joueurs » depuis la party ouverte ; boutique du jour perso

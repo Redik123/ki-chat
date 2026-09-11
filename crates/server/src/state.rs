@@ -797,6 +797,46 @@ impl AppState {
 
     /// Diffuse le changement d'**un** membre, ou la liste entière s'il vient
     /// de se déconnecter (son état ne se déduit plus des connectés).
+    /// Un message du serveur lui-même dans un salon — le fil de jeu. Ni
+    /// permission ni budget : c'est le serveur qui parle, sous un pseudo
+    /// réservé et l'identifiant 0, qu'aucun compte ne porte. Un salon
+    /// disparu ou non textuel avale le message sans bruit.
+    pub fn poster_systeme(&self, channel: ChannelId, username: &str, text: &str) {
+        let textuel = self
+            .channels
+            .list()
+            .iter()
+            .any(|c| c.id == channel && c.kind == ki_protocol::ChannelKind::Text);
+        if !textuel {
+            return;
+        }
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let ts = self.history.unique_ts(channel, maintenant);
+        let rec = ki_protocol::ChatRecord {
+            user_id: 0,
+            username: username.to_string(),
+            text: text.to_string(),
+            ts,
+            reply_to: None,
+            reactions: Vec::new(),
+        };
+        self.history.append(channel, &rec);
+        self.broadcast(
+            channel,
+            None,
+            &ServerMsg::Chat {
+                user_id: 0,
+                username: username.to_string(),
+                text: text.to_string(),
+                ts,
+                reply_to: None,
+            },
+        );
+    }
+
     pub fn broadcast_member(&self, user_id: UserId) {
         match self.member_of(user_id) {
             Some(member) => self.broadcast_all(&ServerMsg::MemberUpdate { member }),

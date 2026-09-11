@@ -129,6 +129,25 @@ async fn main() -> anyhow::Result<()> {
                         valorant::Resultat::Fiche { user_id } => state.broadcast_member(user_id),
                     }
                 }
+                // Le fil de jeu : relances après une fin de partie, et les
+                // annonces prêtes, postées dans le salon choisi par l'admin.
+                let annonces = state.valorant.tick();
+                if !annonces.is_empty() {
+                    if let Some(channel) = state.meta.get().fil_valorant {
+                        let pseudos: std::collections::HashMap<_, _> = state
+                            .accounts
+                            .list(&state.roles)
+                            .into_iter()
+                            .map(|a| (a.user_id, a.username))
+                            .collect();
+                        for annonce in &annonces {
+                            let texte = valorant::composer(annonce, |id| {
+                                pseudos.get(&id).cloned().unwrap_or_else(|| format!("membre {id}"))
+                            });
+                            state.poster_systeme(channel, valorant::PSEUDO_DU_FIL, &texte);
+                        }
+                    }
+                }
                 tours = tours.wrapping_add(1);
                 if tours.is_multiple_of(120) {
                     let en_ligne: Vec<ki_protocol::UserId> = state.users.lock().unwrap().keys().copied().collect();

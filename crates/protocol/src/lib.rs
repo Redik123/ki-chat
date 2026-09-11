@@ -352,6 +352,12 @@ pub enum ClientMsg {
         #[serde(default)]
         icon: IconChange,
     },
+    /// Choisit le salon du fil de jeu VALORANT (`None` : fil éteint).
+    /// Permission « gérer le serveur ».
+    AdminSetFilValorant {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<ChannelId>,
+    },
     /// Change son propre mot de passe (l'ancien est vérifié).
     ChangePassword { old_password: String, new_password: String },
     /// Définit ou retire sa propre photo de profil. Chacun ne règle que la
@@ -609,6 +615,10 @@ pub struct ServerInfo {
     /// Logo : vignette PNG carrée encodée en base64. `None` = pas de logo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Le salon du fil de jeu VALORANT : le serveur y annonce les parties
+    /// finies des membres liés. `None` = fil éteint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fil_valorant: Option<ChannelId>,
 }
 
 /// Ce qu'un admin veut faire du logo du serveur.
@@ -1220,6 +1230,10 @@ pub struct RangValorant {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PointRR {
+    /// Le match qui a produit ce mouvement — pour le retrouver dans les
+    /// derniers matchs et l'annoncer avec ses RR.
+    #[serde(default)]
+    pub match_id: String,
     pub date: u64,
     pub tier: u8,
     pub rr: u16,

@@ -286,8 +286,23 @@ au dernier match, meilleur K/D récent), le classement des membres liés
 (rang et RR, dernier mouvement, pic, bilan et ratio des derniers matchs,
 pourcentage de tirs à la tête, niveau ; un clic sur le pseudo ouvre la
 fiche), et les quinze derniers matchs de tout le monde. Ouvrir la page ne
-coûte aucune requête : tout vient du cache du serveur. La suite (fil de
-fin de partie, icônes de rang) est dans le plan.
+coûte aucune requête : tout vient du cache du serveur.
+
+Et le **fil de jeu** : l'admin choisit un salon (♛ Admin → Fil de jeu
+VALORANT), et à chaque partie finie d'un membre lié le serveur y poste,
+sous le pseudo « VALORANT », le résultat, sa ligne et ses RR — « 🏆
+Victoire 13-9 sur Ascent · Compétitif / Jerem — Jett 24/12/6 · +18 RR (Or
+2, 57 RR) ». Le déclencheur est la présence (⚙ → Jeu) : sorti d'une
+partie, la fiche est relue au bout de 75 s, le temps que HenrikDev voie le
+match, jusqu'à trois fois ; sans présence partagée, le rafraîchissement
+périodique rattrape la partie plus tard. Les coéquipiers du groupe sont
+reconnus à leur puuid dans le même match : leur fiche est relue aussitôt
+et l'annonce les attend, deux minutes au plus, pour ne faire qu'un
+message — et si le groupe jouait des deux côtés, chaque ligne dit son
+issue. Les modes d'arcade ne s'annoncent pas, un match fini depuis plus
+de six heures non plus, et ce qui a été annoncé est noté dans
+`data/valorant/fil.json` : un redémarrage ne rejoue pas la soirée. La
+suite (icônes de rang) est dans le plan.
 
 ## Sécurité
 
