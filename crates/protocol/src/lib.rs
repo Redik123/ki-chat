@@ -458,8 +458,13 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fiche: Option<FicheValorant>,
     },
-    /// Toutes les fiches du groupe, pour la page de stats.
-    StatsValorant { fiches: Vec<FicheMembre> },
+    /// Toutes les fiches du groupe, pour la page de stats — et les
+    /// prochains matchs d'esport, si le serveur les a.
+    StatsValorant {
+        fiches: Vec<FicheMembre>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        esports: Vec<MatchEsport>,
+    },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
     /// Résultats d'une recherche, du plus ancien au plus récent.
@@ -1158,7 +1163,7 @@ pub fn excerpt_of(text: &str) -> String {
 /// carte, le score de son équipe, sa party. C'est ce que son propre client
 /// Riot raconte à ses amis ; ki-chat le relaie aux membres du serveur, avec
 /// son accord — rien sur les adversaires, jamais.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JeuStatut {
     pub etat: JeuEtat,
     /// La file : « competitive », « unrated », « swiftplay », « deathmatch »…
@@ -1276,6 +1281,26 @@ pub struct FicheMembre {
     pub fiche: FicheValorant,
 }
 
+/// Un match d'esport à venir ou en cours, d'après HenrikDev — pour la
+/// page Stats.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MatchEsport {
+    pub date: u64,
+    pub ligue: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub tournoi: String,
+    /// Les deux équipes, par leur code (« FNC », « TH »).
+    pub equipes: Vec<String>,
+    /// « unstarted » ou « inProgress ».
+    #[serde(default)]
+    pub etat: String,
+    /// « BO3 », « BO5 » — vide si inconnu.
+    #[serde(default)]
+    pub format: String,
+}
+
 /// Le nom français d'un rang compétitif (0 = non classé, 3 = Fer 1 …
 /// 27 = Radiant ; 1 et 2 n'existent pas).
 pub fn nom_de_rang(tier: u8) -> String {
@@ -1302,10 +1327,11 @@ pub fn parser_riot_id(s: &str) -> Option<(String, String)> {
 }
 
 /// L'état de session VALORANT, tel que la présence le nomme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JeuEtat {
     /// Dans les menus (ou en file d'attente).
+    #[default]
     Menus,
     /// Sélection des agents.
     PreGame,
@@ -1374,9 +1400,20 @@ impl JeuStatut {
             String::new()
         };
         let file = file.as_str();
+        // Une party ouverte et pas pleine, au menu — pas en file, où elle
+        // est verrouillée : elle cherche du monde.
+        let cherche = if matches!(self.etat, JeuEtat::Menus)
+            && file.is_empty()
+            && self.party_ouverte
+            && self.party_taille < self.party_max
+        {
+            " · cherche des joueurs"
+        } else {
+            ""
+        };
         match self.etat {
-            JeuEtat::Menus if file.is_empty() => format!("Valorant · au menu{party}"),
-            JeuEtat::Menus => format!("Valorant · en file {file}{party}"),
+            JeuEtat::Menus if file.is_empty() => format!("Valorant · au menu{party}{cherche}"),
+            JeuEtat::Menus => format!("Valorant · en file {file}{party}{cherche}"),
             JeuEtat::PreGame => {
                 let ou = if self.carte.is_empty() { String::new() } else { format!(" · {}", self.carte) };
                 format!("{file} · sélection des agents{ou}{party}")
@@ -1796,7 +1833,8 @@ mod tests {
         assert_eq!(relu, s);
 
         let menu = JeuStatut { etat: JeuEtat::Menus, file: String::new(), party_taille: 1, ..s.clone() };
-        assert_eq!(menu.ligne(), "Valorant · au menu");
+        // Sa party est ouverte et il est seul : il cherche du monde.
+        assert_eq!(menu.ligne(), "Valorant · au menu · cherche des joueurs");
         let file = JeuStatut { etat: JeuEtat::Menus, ..s.clone() };
         assert_eq!(file.ligne(), "Valorant · en file compétitive · party 3/5");
         let choix = JeuStatut { etat: JeuEtat::PreGame, party_taille: 1, ..s.clone() };
@@ -1818,6 +1856,27 @@ mod tests {
         let ancien = r#"{"user_id":1,"username":"k","speaking":false}"#;
         let m: Member = serde_json::from_str(ancien).unwrap();
         assert!(m.jeu.is_none() && m.riot_id.is_none() && m.rang_valorant.is_none());
+    }
+
+    /// Une party ouverte et pas pleine, au menu, cherche des joueurs — en
+    /// partie, non.
+    #[test]
+    fn la_party_ouverte_cherche_des_joueurs() {
+        let mut j = JeuStatut {
+            etat: JeuEtat::Menus,
+            party_ouverte: true,
+            party_taille: 3,
+            party_max: 5,
+            ..Default::default()
+        };
+        assert_eq!(j.ligne(), "Valorant · au menu · party 3/5 · cherche des joueurs");
+        j.party_taille = 5;
+        assert_eq!(j.ligne(), "Valorant · au menu · party 5/5");
+        j.party_taille = 3;
+        j.etat = JeuEtat::EnJeu;
+        j.file = "competitive".into();
+        j.carte = "Ascent".into();
+        assert!(!j.ligne().contains("cherche"));
     }
 
     /// Les rangs ont leur nom français, et le Riot ID se découpe en

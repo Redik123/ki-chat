@@ -222,10 +222,14 @@ courbe de RR de la fiche sont venues dans la même version.
 **Validation** : une partie finie apparaît en moins de trois minutes,
 sans doublon — à vérifier sur une vraie soirée.
 
-### V4 — Confort
-« Cherche des joueurs » depuis la party ouverte ; boutique du jour perso
-(par le client local, pour soi) ; esports si une source propre existe ;
-console (HenrikDev `platform=console`).
+### V4 — Confort — en partie (0.1.33)
+Livré : « cherche des joueurs » lu dans la party ouverte (affichage
+seulement) ; esports par HenrikDev (`/valorant/v1/esports/schedule`, relu
+toutes les heures, vingt matchs à venir ou en cours sur la page Stats) ;
+console dès la liaison (HenrikDev `platform=console`) ; compteurs
+HenrikDev dans `/diag-resume`. Reste : la boutique du jour perso (par le
+client local, pour soi) — à sonder avec un client Riot ouvert, l'endpoint
+storefront a changé de version en 2024.
 
 ## Risques et parades
 

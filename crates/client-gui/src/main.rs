@@ -619,6 +619,7 @@ struct KiApp {
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
     stats_recu: bool,
+    esports: Vec<ki_protocol::MatchEsport>,
     /// Le contrôle de démarrage (diffusion précédente interrompue ?) est
     /// fait une fois, à la première image.
     demarrage_verifie: bool,
@@ -975,6 +976,7 @@ impl KiApp {
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
+            esports: Vec::new(),
             demarrage_verifie: false,
             veilleur_valorant: None,
             jeu_version_envoyee: 0,
@@ -1507,6 +1509,7 @@ impl KiApp {
             self.rangs.preparer(ctx, f.fiche.rang.tier);
         }
         let rangs = &self.rangs;
+        let esports = &self.esports;
         egui::Window::new("Stats VALORANT")
             .open(&mut open)
             .collapsible(false)
@@ -1543,6 +1546,8 @@ impl KiApp {
                         RichText::new("personne n'a encore lié son compte Riot — ⚙ → Jeu → Compte Riot")
                             .color(TEXT_DIM),
                     );
+                    ui.add_space(14.0);
+                    stats_esports(ui, esports);
                     return;
                 }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1553,6 +1558,8 @@ impl KiApp {
                     }
                     ui.add_space(14.0);
                     stats_matchs(ui, &fiches);
+                    ui.add_space(14.0);
+                    stats_esports(ui, esports);
                 });
             });
         if actualiser {
@@ -2720,8 +2727,9 @@ impl KiApp {
                     }
                 }
             }
-            ServerMsg::StatsValorant { fiches } => {
+            ServerMsg::StatsValorant { fiches, esports } => {
                 self.stats = fiches;
+                self.esports = esports;
                 self.stats_recu = true;
             }
             ServerMsg::Error { message } => {
@@ -9313,6 +9321,36 @@ fn stats_matchs(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) {
                 None => TEXT_DIM,
             };
             ui.label(RichText::new(format!("{}-{}", m.manches.0, m.manches.1)).color(teinte).strong());
+            ui.end_row();
+        }
+    });
+}
+
+/// Les prochains matchs d'esport, tels que le serveur les a lus chez
+/// HenrikDev — rien si le serveur n'en a pas.
+fn stats_esports(ui: &mut egui::Ui, matchs: &[ki_protocol::MatchEsport]) {
+    if matchs.is_empty() {
+        return;
+    }
+    ui.label(RichText::new("Esports — prochains matchs").strong().size(13.5));
+    ui.add_space(4.0);
+    egui::Grid::new("stats_esports").striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
+        for titre in ["Quand", "Affiche", "Ligue", "Tournoi", "Format"] {
+            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
+        }
+        ui.end_row();
+        for m in matchs {
+            let quand = if m.etat == "inProgress" {
+                RichText::new("en cours").color(SPEAK).strong().size(11.5)
+            } else {
+                RichText::new(format!("{} · {}", day_label(m.date), format_time(m.date))).color(TEXT_DIM).size(11.5)
+            };
+            ui.label(quand);
+            ui.label(RichText::new(m.equipes.join("  vs  ")).strong());
+            let ligue = if m.region.is_empty() { m.ligue.clone() } else { format!("{} · {}", m.ligue, m.region) };
+            ui.label(RichText::new(ligue).color(TEXT_DIM));
+            ui.label(RichText::new(&m.tournoi).color(TEXT_FAINT).size(11.5));
+            ui.label(RichText::new(&m.format).color(TEXT_FAINT).size(11.5));
             ui.end_row();
         }
     });

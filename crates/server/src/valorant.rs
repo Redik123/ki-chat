@@ -36,11 +36,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ki_protocol::{FicheValorant, MatchResume, PointRR, RangValorant, UserId};
+use ki_protocol::{FicheValorant, MatchEsport, MatchResume, PointRR, RangValorant, UserId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,6 +68,10 @@ const RELANCE_DELAI: Duration = Duration::from_secs(75);
 const RELANCES_MAX: u32 = 3;
 /// Identifiants de matchs gardés par membre dans `fil.json`.
 const ANNONCES_GARDEES: usize = 30;
+/// Le calendrier esport se relit toutes les heures, et l'on en garde
+/// autant de matchs.
+const ESPORTS_AGE: Duration = Duration::from_secs(3600);
+const ESPORTS_MAX: usize = 20;
 
 /// Le compte Riot lié à un membre, tel que HenrikDev l'a résolu.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +99,18 @@ enum Travail {
     /// `relance` : la énième relecture après une fin de partie, s'il s'agit
     /// de ça — pour savoir s'il faut relire encore.
     Rafraichir { user_id: UserId, relance: Option<u32> },
+    /// Le calendrier esport.
+    Esports,
+}
+
+/// Ce que HenrikDev a coûté depuis le démarrage — lisible dans le résumé
+/// des diagnostics.
+#[derive(Default)]
+struct Compteurs {
+    requetes: AtomicU64,
+    refus_429: AtomicU64,
+    erreurs: AtomicU64,
+    derniere_ms: AtomicU64,
 }
 
 /// La ligne d'un membre dans un match annoncé, avec ses RR après coup
@@ -142,6 +159,11 @@ struct Etat {
     comptes: Mutex<BTreeMap<UserId, CompteRiot>>,
     fiches: Mutex<BTreeMap<UserId, FicheValorant>>,
     fil: Fil,
+    compteurs: Arc<Compteurs>,
+    /// Le calendrier esport : quand il a été lu (0 : jamais), et ce qu'il
+    /// contient. `en_cours` évite deux lectures à la fois.
+    esports: Mutex<(u64, Vec<MatchEsport>)>,
+    esports_en_cours: std::sync::atomic::AtomicBool,
 }
 
 pub struct Valorant {
@@ -174,6 +196,9 @@ impl Valorant {
             comptes: Mutex::new(comptes),
             fiches: Mutex::new(fiches),
             fil: Fil { annonces: Mutex::new(annonces), ..Default::default() },
+            compteurs: Arc::default(),
+            esports: Mutex::new((0, Vec::new())),
+            esports_en_cours: std::sync::atomic::AtomicBool::new(false),
         });
         let (tx_res, rx_res) = mpsc::channel();
         let cle = cle_henrik(data_dir);
@@ -256,6 +281,43 @@ impl Valorant {
                 let _ = travaux.send(Travail::Rafraichir { user_id, relance: None });
             }
         }
+    }
+
+    /// Le calendrier esport tel qu'on l'a — vide tant qu'il n'a pas été lu.
+    pub fn esports(&self) -> Vec<MatchEsport> {
+        self.etat.esports.lock().unwrap().1.clone()
+    }
+
+    /// Relit le calendrier esport s'il a plus d'une heure (ou jamais été
+    /// lu) et qu'aucune lecture n'est en cours.
+    pub fn rafraichir_esports(&self) {
+        let Some(travaux) = &self.travaux else { return };
+        let perime = maintenant_ms().saturating_sub(self.etat.esports.lock().unwrap().0) > ESPORTS_AGE.as_millis() as u64;
+        if perime && !self.etat.esports_en_cours.swap(true, Ordering::Relaxed) {
+            let _ = travaux.send(Travail::Esports);
+        }
+    }
+
+    /// L'état du service en une ligne, pour le résumé des diagnostics.
+    pub fn compteurs_texte(&self) -> String {
+        let c = &self.etat.compteurs;
+        let derniere = match c.derniere_ms.load(Ordering::Relaxed) {
+            0 => "jamais".to_string(),
+            t => format!("il y a {} min", maintenant_ms().saturating_sub(t) / 60_000),
+        };
+        let attente = self.etat.fil.en_attente.lock().unwrap().len();
+        format!(
+            "VALORANT : clé HenrikDev {} · {} membres liés, {} fiches · requêtes depuis le démarrage : {} \
+             (refus 429 : {}, erreurs : {}), dernière {} · annonces en attente : {}",
+            if self.travaux.is_some() { "présente" } else { "absente" },
+            self.etat.comptes.lock().unwrap().len(),
+            self.etat.fiches.lock().unwrap().len(),
+            c.requetes.load(Ordering::Relaxed),
+            c.refus_429.load(Ordering::Relaxed),
+            c.erreurs.load(Ordering::Relaxed),
+            derniere,
+            attente,
+        )
     }
 
     /// Le membre sort d'une partie : sa fiche sera relue dans 75 s, puis
@@ -553,6 +615,7 @@ struct Api {
     agent: ureq::Agent,
     cle: String,
     seau: Seau,
+    compteurs: Arc<Compteurs>,
 }
 
 impl Api {
@@ -562,17 +625,24 @@ impl Api {
         loop {
             self.seau.prendre();
             essais += 1;
+            self.compteurs.requetes.fetch_add(1, Ordering::Relaxed);
+            self.compteurs.derniere_ms.store(maintenant_ms(), Ordering::Relaxed);
             match self.agent.get(&url).set("Authorization", &self.cle).call() {
                 Ok(reponse) => {
                     return reponse.into_json::<Value>().map_err(|e| Erreur::Autre(e.to_string()));
                 }
                 Err(ureq::Error::Status(404, _)) => return Err(Erreur::Introuvable),
                 Err(ureq::Error::Status(429, _)) if essais < 2 => {
+                    self.compteurs.refus_429.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!("VALORANT : HenrikDev renvoie 429, pause de trente secondes");
                     std::thread::sleep(Duration::from_secs(30));
                 }
-                Err(ureq::Error::Status(429, _)) => return Err(Erreur::Limite),
+                Err(ureq::Error::Status(429, _)) => {
+                    self.compteurs.refus_429.fetch_add(1, Ordering::Relaxed);
+                    return Err(Erreur::Limite);
+                }
                 Err(ureq::Error::Status(code, reponse)) => {
+                    self.compteurs.erreurs.fetch_add(1, Ordering::Relaxed);
                     let detail = reponse
                         .into_json::<Value>()
                         .ok()
@@ -580,7 +650,10 @@ impl Api {
                         .unwrap_or_default();
                     return Err(Erreur::Autre(format!("HTTP {code} {detail}").trim().to_string()));
                 }
-                Err(e) => return Err(Erreur::Autre(e.to_string())),
+                Err(e) => {
+                    self.compteurs.erreurs.fetch_add(1, Ordering::Relaxed);
+                    return Err(Erreur::Autre(e.to_string()));
+                }
             }
         }
     }
@@ -591,7 +664,7 @@ fn fil(cle: String, etat: Arc<Etat>, rx: Receiver<Travail>, tx: Sender<Resultat>
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("ki-chat-server/", env!("CARGO_PKG_VERSION")))
         .build();
-    let mut api = Api { agent, cle, seau: Seau::new() };
+    let mut api = Api { agent, cle, seau: Seau::new(), compteurs: Arc::clone(&etat.compteurs) };
     for travail in rx {
         match travail {
             Travail::Lier { user_id, nom, tag } => {
@@ -609,6 +682,19 @@ fn fil(cle: String, etat: Arc<Etat>, rx: Receiver<Travail>, tx: Sender<Resultat>
                     Err(e) => (false, e.message(), None),
                 };
                 let _ = tx.send(Resultat::Liaison { user_id, ok, message, riot_id });
+            }
+            Travail::Esports => {
+                // Même raté, le calendrier est daté de maintenant : on ne
+                // réessaie pas avant une heure.
+                let matchs = match api.get("/valorant/v1/esports/schedule") {
+                    Ok(v) => calendrier_esport(&v, maintenant_ms()),
+                    Err(e) => {
+                        tracing::warn!("VALORANT : calendrier esport illisible : {}", e.message());
+                        etat.esports.lock().unwrap().1.clone()
+                    }
+                };
+                *etat.esports.lock().unwrap() = (maintenant_ms(), matchs);
+                etat.esports_en_cours.store(false, Ordering::Relaxed);
             }
             Travail::Rafraichir { user_id, relance } => {
                 let compte = etat.comptes.lock().unwrap().get(&user_id).cloned();
@@ -770,6 +856,56 @@ fn construire(
         }
     }
     Ok((fiche, co_membres))
+}
+
+/// Le calendrier esport de HenrikDev réduit à ce qu'on montre : les
+/// matchs à venir ou en cours, du plus proche au plus lointain, vingt au
+/// plus. Un match fini, ou daté d'il y a plus de trois heures, n'y est pas.
+pub fn calendrier_esport(v: &Value, maintenant: u64) -> Vec<MatchEsport> {
+    let mut matchs: Vec<MatchEsport> = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let etat = m["state"].as_str().unwrap_or("").to_string();
+            if etat != "unstarted" && etat != "inProgress" {
+                return None;
+            }
+            let date = iso_vers_ms(m["date"].as_str().unwrap_or(""));
+            if date == 0 || date + 3 * 3_600_000 < maintenant {
+                return None;
+            }
+            let equipes: Vec<String> = m["match"]["teams"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| {
+                    t["code"].as_str().filter(|c| !c.is_empty()).or_else(|| t["name"].as_str()).map(str::to_string)
+                })
+                .take(2)
+                .collect();
+            if equipes.len() < 2 {
+                return None;
+            }
+            let format = match (m["match"]["game_type"]["type"].as_str(), m["match"]["game_type"]["count"].as_u64()) {
+                (Some("bestOf"), Some(n)) if n > 0 => format!("BO{n}"),
+                (Some("playAll"), Some(n)) if n > 0 => format!("{n} cartes"),
+                _ => String::new(),
+            };
+            Some(MatchEsport {
+                date,
+                ligue: m["league"]["name"].as_str().unwrap_or("").to_string(),
+                region: m["league"]["region"].as_str().unwrap_or("").to_string(),
+                tournoi: m["tournament"]["name"].as_str().unwrap_or("").to_string(),
+                equipes,
+                etat,
+                format,
+            })
+        })
+        .collect();
+    matchs.sort_by_key(|m| m.date);
+    matchs.truncate(ESPORTS_MAX);
+    matchs
 }
 
 /// Les autres membres liés qui jouaient ce match, reconnus à leur puuid.
@@ -1030,6 +1166,25 @@ mod tests {
         assert!(fil.pretes().is_empty());
     }
 
+    /// Le calendrier ne garde que l'à-venir et l'en-cours, dans l'ordre,
+    /// avec les codes d'équipe et le format.
+    #[test]
+    fn le_calendrier_esport_se_reduit() {
+        let maintenant = 1_800_000_000_000u64;
+        let v = serde_json::json!({ "data": [
+            { "date": "2027-01-20T18:00:00.000Z", "state": "completed", "league": {"name": "VCT EMEA"}, "match": {"teams": [{"code": "FNC"}, {"code": "TH"}]} },
+            { "date": "2027-01-21T18:00:00.000Z", "state": "unstarted", "league": {"name": "VCT EMEA", "region": "EMEA"},
+              "tournament": {"name": "Kickoff"}, "match": {"game_type": {"type": "bestOf", "count": 3}, "teams": [{"code": "FNC", "name": "Fnatic"}, {"code": "", "name": "Team Heretics"}]} },
+            { "date": "2027-01-21T15:00:00.000Z", "state": "inProgress", "league": {"name": "VCT Pacific"}, "match": {"game_type": {"type": "playAll", "count": 2}, "teams": [{"code": "PRX"}, {"code": "DRX"}]} }
+        ]});
+        let c = calendrier_esport(&v, maintenant);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].equipes, vec!["PRX", "DRX"]);
+        assert_eq!(c[0].format, "2 cartes");
+        assert_eq!(c[1].equipes, vec!["FNC", "Team Heretics"]);
+        assert_eq!((c[1].format.as_str(), c[1].region.as_str(), c[1].tournoi.as_str()), ("BO3", "EMEA", "Kickoff"));
+    }
+
     /// Sans clé, le service reste ouvert en lecture et ferme les liaisons.
     #[test]
     fn sans_cle_rien_ne_casse() {
@@ -1043,6 +1198,9 @@ mod tests {
         assert!(v.resultats().is_empty());
         v.fin_de_partie(1);
         assert!(v.tick().is_empty());
+        v.rafraichir_esports();
+        assert!(v.esports().is_empty());
+        assert!(v.compteurs_texte().contains("clé HenrikDev absente"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

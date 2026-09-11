@@ -154,6 +154,11 @@ async fn main() -> anyhow::Result<()> {
                     for id in state.valorant.a_rafraichir(&en_ligne, std::time::Duration::from_secs(30 * 60)) {
                         state.valorant.rafraichir(id);
                     }
+                    // Le calendrier esport, une fois par heure tant que
+                    // quelqu'un est là pour le lire.
+                    if !en_ligne.is_empty() {
+                        state.valorant.rafraichir_esports();
+                    }
                 }
             }
         });

@@ -313,6 +313,15 @@ présence le porte. La fiche trace la **courbe des RR** des derniers
 classés, la page Stats compte les RR de la semaine, et un admin peut
 délier le compte Riot d'un membre au clic droit, ce qui s'audite.
 
+Deux compléments : une party ouverte et pas pleine, au menu, se lit
+« cherche des joueurs » sous le pseudo — affichage seulement, ki-chat ne
+rejoint jamais une party à votre place ; et la page Stats finit par les
+**prochains matchs d'esport** (VCT et ligues, en cours ou à venir), que le
+serveur relit chez HenrikDev une fois par heure tant que quelqu'un est
+connecté. Le résumé des diagnostics (`/diag-resume`) dit ce que le service
+coûte : requêtes depuis le démarrage, refus 429, erreurs, annonces en
+attente.
+
 ## Sécurité
 
 **Comptes** : pseudo + mot de passe, hachés en Argon2id (`data/users.json`).

@@ -451,11 +451,15 @@ pub async fn resume(
     let texte = tokio::task::spawn_blocking(move || resume_versions(&dir))
         .await
         .unwrap_or_default();
-    let texte = if texte.is_empty() {
+    let mut texte = if texte.is_empty() {
         "aucune archive de diagnostic pour l'instant".to_string()
     } else {
         texte
     };
+    // Et l'état du service VALORANT : le budget HenrikDev se surveille
+    // ici, les soirs de pointe.
+    texte.push_str("\n\n");
+    texte.push_str(&state.valorant.compteurs_texte());
     (StatusCode::OK, texte).into_response()
 }
 

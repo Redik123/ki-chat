@@ -1165,7 +1165,8 @@ fn handle_msg(
                     Some(ki_protocol::FicheMembre { user_id, username, fiche })
                 })
                 .collect();
-            let _ = tx.send(ServerMsg::StatsValorant { fiches });
+            let esports = state.valorant.esports();
+            let _ = tx.send(ServerMsg::StatsValorant { fiches, esports });
         }
         ClientMsg::History { limit } => {
             let Some(channel) = current_channel(state, user_id) else {
