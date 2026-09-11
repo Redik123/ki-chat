@@ -29,9 +29,12 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 # libopus est du C, mais CMake veut aussi un compilateur C++ pour se
 # configurer : g++ pour l'hôte, sa version croisée pour l'ARM.
+# `.cargo/config.toml` pointe CMAKE vers le chemin Windows de la machine de
+# développement ; sans `force`, une variable d'environnement l'emporte.
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
-    CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+    CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+    CMAKE=cmake
 
 COPY . .
 
