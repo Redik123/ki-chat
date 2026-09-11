@@ -171,7 +171,16 @@ pilote NVIDIA de fin 2022 ou plus récent (API 12.0) : avec un pilote trop
 vieux, ki-chat le dit au démarrage et dans les réglages de diffusion (« mets
 à jour le pilote, NVIDIA App → Pilotes »), et encode en logiciel en
 attendant ; un encodeur qui ne s'ouvre pas ne laisse jamais un stream vide
-sans le dire.
+sans le dire. Les images entrent dans NVENC par une **texture NV12
+Direct3D enregistrée** (le chemin d'OBS et des exemples NVIDIA) ; le tampon
+d'entrée historique reste en réserve. Un pilote qui refuse d'encoder a
+droit à deux essais, un par chemin, puis c'est l'encodage logiciel et la
+personne qui diffuse le lit dans ses réglages — une RTX 2070 sous
+Windows 10 avait passé une diffusion entière à recréer sa session sans
+émettre une image. Et si ki-chat ou la machine tombe en pleine diffusion,
+le démarrage suivant le sait (un marqueur posé au lancement du stream,
+levé à l'arrêt), le note pour les diagnostics partagés, et passe
+l'encodeur en logiciel pour la fois d'après.
 
 **Transport** : une trame = **un flux QUIC unidirectionnel**, sur la même
 connexion (rien de plus à ouvrir que 9987/udp), priorité à la plus ancienne.

@@ -16,7 +16,7 @@ pub mod scale;
 pub mod stats;
 
 pub use capture::{list_monitors, list_windows, CaptureSource, MonitorInfo, WindowInfo};
-pub use nvenc::{avertissement_pilote, inventaire, inventaire_lancer, inventaire_pret};
+pub use nvenc::{avertissement_pilote, inventaire, inventaire_lancer, inventaire_pret, sonde};
 pub use stats::StageStats;
 
 /// NVENC est l'encodeur des cartes NVIDIA **sous Windows** (Direct3D 11 en
@@ -32,6 +32,11 @@ mod nvenc {
 
     /// Rien à relever sur un fil à part : l'inventaire est immédiat.
     pub fn inventaire_lancer() {}
+
+    /// Pas de NVENC à sonder ici.
+    pub fn sonde() -> String {
+        format!("NVENC indisponible sur {} (Windows seulement)", std::env::consts::OS)
+    }
 
     pub fn inventaire_pret() -> Option<&'static str> {
         static INVENTAIRE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -162,6 +167,10 @@ impl VideoEncoder for Logiciel {
 
 /// Crée l'encodeur demandé. En « Auto », NVENC si la machine l'offre, le
 /// logiciel sinon — et l'on dit lequel, au journal comme aux stats.
+///
+/// `tentative` compte les échecs NVENC précédents sur ce flux : à zéro on
+/// entre par la texture (le chemin standard), ensuite par le tampon
+/// historique — deux pilotes différents ne refusent pas la même chose.
 pub fn creer_encodeur(
     choix: EncoderChoice,
     width: u32,
@@ -169,21 +178,29 @@ pub fn creer_encodeur(
     bitrate_bps: u32,
     fps: u32,
     stats: &StageStats,
+    tentative: u32,
 ) -> anyhow::Result<Box<dyn VideoEncoder>> {
     // NVENC n'existe que sous Windows ; ailleurs, l'exiger est une erreur
     // franche, et « Auto » veut simplement dire « logiciel ».
+    #[cfg(not(windows))]
+    let _ = tentative;
     #[cfg(not(windows))]
     if choix == EncoderChoice::Nvenc {
         anyhow::bail!("NVENC exigé par les réglages, mais indisponible sur {}", std::env::consts::OS);
     }
     #[cfg(windows)]
     if choix != EncoderChoice::Logiciel {
-        match nvenc::Nvenc::new(width, height, bitrate_bps, fps) {
+        let entree = if tentative == 0 { nvenc::Entree::Texture } else { nvenc::Entree::Tampon };
+        match nvenc::Nvenc::avec_entree(width, height, bitrate_bps, fps, entree) {
             Ok(e) => {
                 let (maj, min) = e.version_pilote();
+                let chemin = match e.entree() {
+                    nvenc::Entree::Texture => "texture",
+                    nvenc::Entree::Tampon => "tampon",
+                };
                 journal(format!(
                     "encodeur : NVENC sur {} (API {maj}.{min}), {width}x{height} à {fps} i/s, \
-                     {} kbit/s",
+                     {} kbit/s, entrée par {chemin}",
                     e.carte,
                     bitrate_bps / 1000
                 ));
@@ -336,7 +353,7 @@ fn pipeline_loop(
         //    le labo teste ce qui partira réellement.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, &stats) {
+            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, &stats, 0) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -528,6 +545,11 @@ fn streamer_pipeline(
     origine: Instant,
 ) {
     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
+    // L'encodeur voulu, et les refus de NVENC en cours de route : au second
+    // (un par chemin d'entrée), on passe au logiciel et on le dit — plutôt
+    // que de recréer une session à chaque image sans jamais émettre.
+    let mut choix = config.encoder;
+    let mut echecs_nvenc: u32 = 0;
     // L'aperçu n'existe que si on le demande : sans lui, pas de décodeur.
     let mut decoder = if config.preview {
         match Decoder::new() {
@@ -610,12 +632,13 @@ fn streamer_pipeline(
         let enc = match encoder.as_mut() {
             Some(e) => e,
             None => match creer_encodeur(
-                config.encoder,
+                choix,
                 ow,
                 oh,
                 config.bitrate_bps,
                 config.fps,
                 &stats,
+                echecs_nvenc,
             ) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
@@ -626,7 +649,7 @@ fn streamer_pipeline(
                     // qui n'émet plus une image. C'était le silence : le fil
                     // s'arrêtait, et l'interface n'en savait rien.
                     journal(format!("encodeur H.264 : {e:#}"));
-                    if config.encoder == EncoderChoice::Logiciel {
+                    if choix == EncoderChoice::Logiciel {
                         stats.poser_avis(format!("diffusion impossible : {e:#}"));
                         return;
                     }
@@ -637,6 +660,7 @@ fn streamer_pipeline(
                         config.bitrate_bps,
                         config.fps,
                         &stats,
+                        0,
                     ) {
                         Ok(logiciel) => {
                             stats.poser_avis(format!(
@@ -678,8 +702,27 @@ fn streamer_pipeline(
             }
             Err(e) => {
                 // Un encodeur qui lâche (carte perdue, pilote) se recrée à
-                // la trame suivante — et retombe sur le logiciel s'il faut.
-                journal(format!("encodage : {e:#} — encodeur recréé"));
+                // la trame suivante. NVENC a droit à deux refus — un par
+                // chemin d'entrée — puis c'est le logiciel, et la personne
+                // qui diffuse le sait : une RTX 2070 a passé une diffusion
+                // entière à recréer sa session, sans une image émise.
+                if stats.materiel.load(Ordering::Relaxed) {
+                    echecs_nvenc += 1;
+                    if echecs_nvenc >= 2 {
+                        journal(format!("encodage : {e:#} — NVENC abandonné, encodeur logiciel"));
+                        stats.poser_avis(format!(
+                            "NVENC refuse d'encoder ({e:#}) — encodage logiciel à la place \
+                             (passe en 720p si ça saccade)"
+                        ));
+                        choix = EncoderChoice::Logiciel;
+                    } else {
+                        journal(format!(
+                            "encodage : {e:#} — encodeur recréé, entrée par tampon"
+                        ));
+                    }
+                } else {
+                    journal(format!("encodage : {e:#} — encodeur recréé"));
+                }
                 encoder = None;
                 force_idr.store(true, Ordering::Relaxed);
                 continue;

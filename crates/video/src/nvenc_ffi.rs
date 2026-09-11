@@ -34,6 +34,8 @@ pub const NV_ENC_RC_PARAMS_VER: u32 = struct_version(1);
 pub const NV_ENC_CREATE_INPUT_BUFFER_VER: u32 = struct_version(1);
 pub const NV_ENC_CREATE_BITSTREAM_BUFFER_VER: u32 = struct_version(1);
 pub const NV_ENC_LOCK_INPUT_BUFFER_VER: u32 = struct_version(1);
+pub const NV_ENC_REGISTER_RESOURCE_VER: u32 = struct_version(4);
+pub const NV_ENC_MAP_INPUT_RESOURCE_VER: u32 = struct_version(4);
 pub const NV_ENC_LOCK_BITSTREAM_VER: u32 = struct_version(2);
 pub const NV_ENCODE_API_FUNCTION_LIST_VER: u32 = struct_version(2);
 
@@ -100,6 +102,11 @@ pub fn status_name(st: NVENCSTATUS) -> &'static str {
 
 pub const NV_ENC_DEVICE_TYPE_DIRECTX: u32 = 0;
 pub const NV_ENC_BUFFER_FORMAT_IYUV: u32 = 0x100;
+pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x1;
+/// `NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX` : une texture Direct3D.
+pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0;
+/// `NV_ENC_BUFFER_USAGE::NV_ENC_INPUT_IMAGE`.
+pub const NV_ENC_INPUT_IMAGE: u32 = 0;
 pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 1;
 pub const NV_ENC_PIC_TYPE_I: u32 = 2;
 pub const NV_ENC_PIC_TYPE_IDR: u32 = 3;
@@ -324,6 +331,37 @@ pub struct NV_ENC_CREATE_BITSTREAM_BUFFER {
     pub reserved2: [*mut c_void; 64],
 }
 
+/// Enregistrement d'une texture Direct3D comme entrée (API 12.0, version
+/// 4 de la structure : sans les `chromaOffset` venus en 12.2).
+#[repr(C)]
+pub struct NV_ENC_REGISTER_RESOURCE {
+    pub version: u32,
+    pub resourceType: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub subResourceIndex: u32,
+    pub resourceToRegister: *mut c_void,
+    pub registeredResource: *mut c_void,
+    pub bufferFormat: u32,
+    pub bufferUsage: u32,
+    pub pInputFencePoint: *mut c_void,
+    pub reserved1: [u32; 247],
+    pub reserved2: [*mut c_void; 61],
+}
+
+#[repr(C)]
+pub struct NV_ENC_MAP_INPUT_RESOURCE {
+    pub version: u32,
+    pub subResourceIndex: u32,
+    pub inputResource: *mut c_void,
+    pub registeredResource: *mut c_void,
+    pub mappedResource: *mut c_void,
+    pub mappedBufferFmt: u32,
+    pub reserved1: [u32; 251],
+    pub reserved2: [*mut c_void; 63],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NV_ENC_LOCK_INPUT_BUFFER {
@@ -443,6 +481,10 @@ pub type PfnLockInputBuffer =
     unsafe extern "system" fn(*mut c_void, *mut NV_ENC_LOCK_INPUT_BUFFER) -> NVENCSTATUS;
 /// Détruire un tampon, déverrouiller un tampon : (session, tampon).
 pub type PfnSessionPtr = unsafe extern "system" fn(*mut c_void, *mut c_void) -> NVENCSTATUS;
+pub type PfnRegisterResource =
+    unsafe extern "system" fn(*mut c_void, *mut NV_ENC_REGISTER_RESOURCE) -> NVENCSTATUS;
+pub type PfnMapInputResource =
+    unsafe extern "system" fn(*mut c_void, *mut NV_ENC_MAP_INPUT_RESOURCE) -> NVENCSTATUS;
 pub type PfnDestroyEncoder = unsafe extern "system" fn(*mut c_void) -> NVENCSTATUS;
 pub type PfnGetLastErrorString = unsafe extern "system" fn(*mut c_void) -> *const c_char;
 
@@ -479,13 +521,13 @@ pub struct NV_ENCODE_API_FUNCTION_LIST {
     pub nvEncGetSequenceParams: *const c_void,
     pub nvEncRegisterAsyncEvent: *const c_void,
     pub nvEncUnregisterAsyncEvent: *const c_void,
-    pub nvEncMapInputResource: *const c_void,
-    pub nvEncUnmapInputResource: *const c_void,
+    pub nvEncMapInputResource: Option<PfnMapInputResource>,
+    pub nvEncUnmapInputResource: Option<PfnSessionPtr>,
     pub nvEncDestroyEncoder: Option<PfnDestroyEncoder>,
     pub nvEncInvalidateRefFrames: *const c_void,
     pub nvEncOpenEncodeSessionEx: Option<PfnOpenEncodeSessionEx>,
-    pub nvEncRegisterResource: *const c_void,
-    pub nvEncUnregisterResource: *const c_void,
+    pub nvEncRegisterResource: Option<PfnRegisterResource>,
+    pub nvEncUnregisterResource: Option<PfnSessionPtr>,
     pub nvEncReconfigureEncoder: *const c_void,
     pub reserved1: *const c_void,
     pub nvEncCreateMVBuffer: *const c_void,
@@ -510,6 +552,8 @@ const _: () = assert!(std::mem::size_of::<NV_ENC_RC_PARAMS>() == 128);
 const _: () = assert!(std::mem::size_of::<NV_ENC_CONFIG_H264_VUI_PARAMETERS>() == 112);
 const _: () = assert!(std::mem::size_of::<NV_ENC_CONFIG_H264>() == 1792);
 const _: () = assert!(std::mem::size_of::<NV_ENC_CONFIG>() == 3584);
+const _: () = assert!(std::mem::size_of::<NV_ENC_REGISTER_RESOURCE>() == 1536);
+const _: () = assert!(std::mem::size_of::<NV_ENC_MAP_INPUT_RESOURCE>() == 1544);
 const _: () = assert!(std::mem::size_of::<NV_ENC_PRESET_CONFIG>() == 5128);
 const _: () = assert!(std::mem::size_of::<NV_ENC_INITIALIZE_PARAMS>() == 1808);
 const _: () = assert!(std::mem::size_of::<NV_ENC_CREATE_INPUT_BUFFER>() == 776);

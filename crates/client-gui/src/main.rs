@@ -610,6 +610,9 @@ struct KiApp {
     riot_message: Option<(bool, String)>,
     /// La fiche VALORANT ouverte au clic droit sur un membre.
     fiche: Option<FicheOuverte>,
+    /// Le contrôle de démarrage (diffusion précédente interrompue ?) est
+    /// fait une fois, à la première image.
+    demarrage_verifie: bool,
     /// Le fil qui lit le client Riot, tant que l'option est cochée.
     veilleur_valorant: Option<valorant::Veilleur>,
     /// La version du statut déjà envoyée au serveur, et ce statut.
@@ -958,6 +961,7 @@ impl KiApp {
             riot_saisie: String::new(),
             riot_message: None,
             fiche: None,
+            demarrage_verifie: false,
             veilleur_valorant: None,
             jeu_version_envoyee: 0,
             jeu_envoye: None,
@@ -1425,6 +1429,34 @@ impl KiApp {
         if !open {
             self.fiche = None;
         }
+    }
+
+    /// Une fois par session : si la précédente est morte en pleine
+    /// diffusion, le dire au journal (donc aux diagnostics partagés) et à la
+    /// personne — et passer l'encodeur en logiciel pour la prochaine fois,
+    /// puisqu'un écran bleu au lancement d'un stream désigne d'abord le
+    /// pilote de la carte. Elle remet NVENC dans les réglages si elle veut.
+    fn verifier_diffusion_precedente(&mut self) {
+        if self.demarrage_verifie {
+            return;
+        }
+        self.demarrage_verifie = true;
+        let Some(encodeur) = secours::diffusion_interrompue() else { return };
+        ki_voice::journal(format!(
+            "la session précédente s'est terminée brutalement pendant une diffusion \
+             (encodeur {encodeur}) : ki-chat tué ou machine tombée"
+        ));
+        let mut message = "la dernière diffusion s'est terminée brutalement (ki-chat fermé de \
+                           force, ou le PC tombé)"
+            .to_string();
+        if encodeur != "Logiciel" && self.diffusion.encodeur != ki_video::EncoderChoice::Logiciel {
+            self.diffusion.encodeur = ki_video::EncoderChoice::Logiciel;
+            message.push_str(
+                " : l'encodeur passe en logiciel pour la prochaine — remets NVENC dans les \
+                 réglages de diffusion si tu veux réessayer",
+            );
+        }
+        self.info = Some(message);
     }
 
     /// Ouvre la fiche VALORANT d'un membre et la demande au serveur.
@@ -6715,6 +6747,7 @@ impl KiApp {
                 self.cadence_live = partage::Cadence::new();
                 self.journal_flux = std::time::Instant::now();
                 ki_voice::journal(format!("diffusion démarrée (stream {stream_id})"));
+                secours::marquer_diffusion(&format!("{:?}", self.diffusion.encodeur));
                 self.info = Some("tu diffuses ton écran".into());
                 if avec_son {
                     let audio = self.demarrer_son_du_jeu(stream_id, key, origine);
@@ -6812,6 +6845,7 @@ impl KiApp {
 
     /// Arrête sa propre diffusion, côté capture ET côté serveur.
     fn arreter_diffusion(&mut self) {
+        secours::lever_diffusion();
         if let Some(g) = self.go_live.take() {
             ki_voice::journal(format!(
                 "diffusion arrêtée (stream {}) : {} trames encodées, sautées capture {} / \
@@ -9680,6 +9714,7 @@ impl eframe::App for KiApp {
         self.tick_reprise(ctx);
         self.auto_connexion(ctx);
         self.tick_valorant();
+        self.verifier_diffusion_precedente();
         self.update_voice();
         // Un seul instantané par image, pris ici : l'écran principal l'affiche,
         // et c'est lui qui dit s'il faut une image de plus.

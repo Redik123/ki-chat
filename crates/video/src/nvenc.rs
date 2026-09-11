@@ -19,8 +19,11 @@ use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT,
 };
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
@@ -207,13 +210,35 @@ fn device_nvidia() -> anyhow::Result<(ID3D11Device, String)> {
     }
 }
 
+/// Par où les images entrent dans le pilote.
+///
+/// **Texture** : une texture NV12 Direct3D enregistrée auprès de NVENC,
+/// remplie par `UpdateSubresource` — le chemin que suivent OBS et les
+/// exemples NVIDIA, le plus éprouvé. **Tampon** : le tampon d'entrée
+/// historique (`nvEncCreateInputBuffer`, IYUV), verrouillé et rempli à la
+/// main — ce que ki-chat faisait seul jusqu'en 0.1.32, et qu'une RTX 2070
+/// sous Windows 10 refusait à chaque image (`NV_ENC_ERR_INVALID_DEVICE`).
+/// On garde les deux : si l'un refuse, l'autre est essayé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entree {
+    Texture,
+    Tampon,
+}
+
 /// Une session d'encodage H.264 sur la carte NVIDIA.
 pub struct Nvenc {
     api: &'static Api,
     /// Le device sous la session : il doit lui survivre.
-    _device: ID3D11Device,
+    device: ID3D11Device,
+    contexte: ID3D11DeviceContext,
     session: *mut c_void,
+    /// Le tampon d'entrée historique (chemin `Tampon`), sinon nul.
     entree: *mut c_void,
+    /// La texture NV12 et son enregistrement (chemin `Texture`), sinon rien.
+    texture: Option<ID3D11Texture2D>,
+    enregistree: *mut c_void,
+    /// L'image repliée en NV12 avant l'envoi vers la texture.
+    nv12: Vec<u8>,
     sortie: *mut c_void,
     width: u32,
     height: u32,
@@ -227,11 +252,29 @@ pub struct Nvenc {
 unsafe impl Send for Nvenc {}
 
 impl Nvenc {
+    /// Le chemin d'entrée effectivement ouvert.
+    pub fn entree(&self) -> Entree {
+        if self.texture.is_some() {
+            Entree::Texture
+        } else {
+            Entree::Tampon
+        }
+    }
+
     /// Ouvre une session pour des images `width`×`height`, à `fps` images
-    /// par seconde, en débit constant `bitrate_bps`.
-    pub fn new(width: u32, height: u32, bitrate_bps: u32, fps: u32) -> anyhow::Result<Self> {
+    /// par seconde, en débit constant `bitrate_bps`, en choisissant par où
+    /// les images entrent. Une texture qui ne s'enregistre pas retombe sur
+    /// le tampon, et le dit.
+    pub fn avec_entree(
+        width: u32,
+        height: u32,
+        bitrate_bps: u32,
+        fps: u32,
+        entree: Entree,
+    ) -> anyhow::Result<Self> {
         let api = api()?;
         let (device, carte) = device_nvidia()?;
+        let contexte = unsafe { device.GetImmediateContext() }.context("contexte Direct3D 11")?;
         unsafe {
             let ouvrir = api.fl.nvEncOpenEncodeSessionEx.context("nvEncOpenEncodeSessionEx absent")?;
             let mut params: ffi::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS = std::mem::zeroed();
@@ -246,9 +289,13 @@ impl Nvenc {
             }
             let mut moi = Self {
                 api,
-                _device: device,
+                device,
+                contexte,
                 session,
                 entree: null_mut(),
+                texture: None,
+                enregistree: null_mut(),
+                nv12: Vec::new(),
                 sortie: null_mut(),
                 width,
                 height,
@@ -256,6 +303,18 @@ impl Nvenc {
                 carte,
             };
             moi.initialiser(bitrate_bps, fps.clamp(1, 120))?;
+            let mut par_tampon = entree == Entree::Tampon;
+            if !par_tampon {
+                if let Err(e) = moi.preparer_texture() {
+                    crate::journal(format!(
+                        "NVENC : texture d'entrée refusée ({e:#}), tampon d'entrée à la place"
+                    ));
+                    par_tampon = true;
+                }
+            }
+            if par_tampon {
+                moi.preparer_tampon()?;
+            }
             Ok(moi)
         }
     }
@@ -274,7 +333,87 @@ impl Nvenc {
                 }
             })
             .unwrap_or_default();
-        anyhow!("NVENC {quoi} : {} {detail}", ffi::status_name(st))
+        // Un device Direct3D retiré (TDR, carte perdue) explique bien des
+        // « device invalide » : on le dit quand c'est le cas, pour que le
+        // journal distingue le pilote qui refuse du pilote qui est tombé.
+        let device = match unsafe { self.device.GetDeviceRemovedReason() } {
+            Ok(()) => String::new(),
+            Err(e) => format!(" (device Direct3D retiré : {})", e.code()),
+        };
+        anyhow!("NVENC {quoi} : {} {detail}{device}", ffi::status_name(st))
+    }
+
+    /// Le chemin standard : une texture NV12 que le pilote connaît.
+    unsafe fn preparer_texture(&mut self) -> anyhow::Result<()> {
+        let fl = &self.api.fl;
+        let enregistrer = fl.nvEncRegisterResource.context("nvEncRegisterResource absent")?;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: self.width,
+            Height: self.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        self.device
+            .CreateTexture2D(&desc, None, Some(&mut texture))
+            .context("texture NV12 d'entrée")?;
+        let texture = texture.context("texture NV12 absente")?;
+        let mut rr: Box<ffi::NV_ENC_REGISTER_RESOURCE> = Box::new(std::mem::zeroed());
+        rr.version = ffi::NV_ENC_REGISTER_RESOURCE_VER;
+        rr.resourceType = ffi::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+        rr.width = self.width;
+        rr.height = self.height;
+        rr.pitch = 0;
+        rr.subResourceIndex = 0;
+        rr.resourceToRegister = texture.as_raw();
+        rr.bufferFormat = ffi::NV_ENC_BUFFER_FORMAT_NV12;
+        rr.bufferUsage = ffi::NV_ENC_INPUT_IMAGE;
+        self.verif(enregistrer(self.session, &mut *rr), "enregistrement de la texture")?;
+        self.enregistree = rr.registeredResource;
+        self.texture = Some(texture);
+        self.nv12 = vec![0u8; (self.width * self.height * 3 / 2) as usize];
+        Ok(())
+    }
+
+    /// Le chemin historique : le tampon d'entrée du pilote, en IYUV.
+    unsafe fn preparer_tampon(&mut self) -> anyhow::Result<()> {
+        let fl = &self.api.fl;
+        let creer_entree = fl.nvEncCreateInputBuffer.context("nvEncCreateInputBuffer absent")?;
+        let mut ci: ffi::NV_ENC_CREATE_INPUT_BUFFER = std::mem::zeroed();
+        ci.version = ffi::NV_ENC_CREATE_INPUT_BUFFER_VER;
+        ci.width = self.width;
+        ci.height = self.height;
+        ci.bufferFmt = ffi::NV_ENC_BUFFER_FORMAT_IYUV;
+        self.verif(creer_entree(self.session, &mut ci), "tampon d'entrée")?;
+        self.entree = ci.inputBuffer;
+        Ok(())
+    }
+
+    /// L'image I420 repliée en NV12 : le luma tel quel, puis U et V
+    /// entrelacés, au pas de la largeur.
+    fn replier_nv12(&mut self, src: &dyn YUVSource) {
+        let (w, h) = src.dimensions();
+        let (ys, us, vs) = src.strides();
+        let (y, u, v) = (src.y(), src.u(), src.v());
+        let (luma, chroma) = self.nv12.split_at_mut(w * h);
+        for r in 0..h {
+            luma[r * w..(r + 1) * w].copy_from_slice(&y[r * ys..r * ys + w]);
+        }
+        let (cw, ch) = (w / 2, h / 2);
+        for r in 0..ch {
+            let ligne = &mut chroma[r * w..r * w + 2 * cw];
+            let (ul, vl) = (&u[r * us..r * us + cw], &v[r * vs..r * vs + cw]);
+            for (paire, (uu, vv)) in ligne.as_chunks_mut::<2>().0.iter_mut().zip(ul.iter().zip(vl)) {
+                paire[0] = *uu;
+                paire[1] = *vv;
+            }
+        }
     }
 
     fn verif(&self, st: ffi::NVENCSTATUS, quoi: &str) -> anyhow::Result<()> {
@@ -348,15 +487,6 @@ impl Nvenc {
         init.tuningInfo = ffi::NV_ENC_TUNING_INFO_LOW_LATENCY;
         self.verif(initialiser(self.session, &mut *init), "initialisation")?;
 
-        let creer_entree = fl.nvEncCreateInputBuffer.context("nvEncCreateInputBuffer absent")?;
-        let mut ci: ffi::NV_ENC_CREATE_INPUT_BUFFER = std::mem::zeroed();
-        ci.version = ffi::NV_ENC_CREATE_INPUT_BUFFER_VER;
-        ci.width = self.width;
-        ci.height = self.height;
-        ci.bufferFmt = ffi::NV_ENC_BUFFER_FORMAT_IYUV;
-        self.verif(creer_entree(self.session, &mut ci), "tampon d'entrée")?;
-        self.entree = ci.inputBuffer;
-
         let creer_sortie =
             fl.nvEncCreateBitstreamBuffer.context("nvEncCreateBitstreamBuffer absent")?;
         let mut cb: ffi::NV_ENC_CREATE_BITSTREAM_BUFFER = std::mem::zeroed();
@@ -384,67 +514,107 @@ impl VideoEncoder for Nvenc {
         }
         let fl = &self.api.fl;
         unsafe {
-            // 1. L'image dans le tampon d'entrée du pilote : trois plans,
-            //    le luma au pitch donné, les chromas à la moitié.
-            let verrouiller = fl.nvEncLockInputBuffer.context("nvEncLockInputBuffer absent")?;
-            let mut li: ffi::NV_ENC_LOCK_INPUT_BUFFER = std::mem::zeroed();
-            li.version = ffi::NV_ENC_LOCK_INPUT_BUFFER_VER;
-            li.inputBuffer = self.entree;
-            self.verif(verrouiller(self.session, &mut li), "verrou du tampon d'entrée")?;
-            let pitch = li.pitch as usize;
-            let dst = li.bufferDataPtr as *mut u8;
-            let (ys, us, vs) = src.strides();
-            let (y, u, v) = (src.y(), src.u(), src.v());
-            for r in 0..h {
-                std::ptr::copy_nonoverlapping(y.as_ptr().add(r * ys), dst.add(r * pitch), w);
-            }
-            let (cw, ch, cp) = (w / 2, h / 2, pitch / 2);
-            let base_u = dst.add(pitch * h);
-            let base_v = base_u.add(cp * ch);
-            for r in 0..ch {
-                std::ptr::copy_nonoverlapping(u.as_ptr().add(r * us), base_u.add(r * cp), cw);
-                std::ptr::copy_nonoverlapping(v.as_ptr().add(r * vs), base_v.add(r * cp), cw);
-            }
-            let deverrouiller = fl.nvEncUnlockInputBuffer.context("nvEncUnlockInputBuffer absent")?;
-            self.verif(deverrouiller(self.session, self.entree), "libération du tampon d'entrée")?;
+            // 1. L'image chez le pilote — par la texture NV12 enregistrée,
+            //    ou par le tampon d'entrée historique.
+            let (entree, format, pitch, mappee) = if let Some(texture) = self.texture.clone() {
+                self.replier_nv12(src);
+                self.contexte.UpdateSubresource(
+                    &texture,
+                    0,
+                    None,
+                    self.nv12.as_ptr() as *const c_void,
+                    self.width,
+                    0,
+                );
+                let mapper = fl.nvEncMapInputResource.context("nvEncMapInputResource absent")?;
+                let mut mp: Box<ffi::NV_ENC_MAP_INPUT_RESOURCE> = Box::new(std::mem::zeroed());
+                mp.version = ffi::NV_ENC_MAP_INPUT_RESOURCE_VER;
+                mp.registeredResource = self.enregistree;
+                self.verif(mapper(self.session, &mut *mp), "mappage de la texture")?;
+                (mp.mappedResource, mp.mappedBufferFmt, 0, Some(mp.mappedResource))
+            } else {
+                // Trois plans dans le tampon verrouillé : le luma au pitch
+                // donné, les chromas à la moitié.
+                let verrouiller = fl.nvEncLockInputBuffer.context("nvEncLockInputBuffer absent")?;
+                let mut li: ffi::NV_ENC_LOCK_INPUT_BUFFER = std::mem::zeroed();
+                li.version = ffi::NV_ENC_LOCK_INPUT_BUFFER_VER;
+                li.inputBuffer = self.entree;
+                self.verif(verrouiller(self.session, &mut li), "verrou du tampon d'entrée")?;
+                let pitch = li.pitch as usize;
+                let dst = li.bufferDataPtr as *mut u8;
+                let (ys, us, vs) = src.strides();
+                let (y, u, v) = (src.y(), src.u(), src.v());
+                for r in 0..h {
+                    std::ptr::copy_nonoverlapping(y.as_ptr().add(r * ys), dst.add(r * pitch), w);
+                }
+                let (cw, ch, cp) = (w / 2, h / 2, pitch / 2);
+                let base_u = dst.add(pitch * h);
+                let base_v = base_u.add(cp * ch);
+                for r in 0..ch {
+                    std::ptr::copy_nonoverlapping(u.as_ptr().add(r * us), base_u.add(r * cp), cw);
+                    std::ptr::copy_nonoverlapping(v.as_ptr().add(r * vs), base_v.add(r * cp), cw);
+                }
+                let deverrouiller =
+                    fl.nvEncUnlockInputBuffer.context("nvEncUnlockInputBuffer absent")?;
+                self.verif(deverrouiller(self.session, self.entree), "libération du tampon d'entrée")?;
+                (self.entree, ffi::NV_ENC_BUFFER_FORMAT_IYUV, li.pitch, None)
+            };
 
-            // 2. L'encodage, synchrone : le verrou du flux attend la fin.
-            let encoder = fl.nvEncEncodePicture.context("nvEncEncodePicture absent")?;
-            let mut pp: ffi::NV_ENC_PIC_PARAMS = std::mem::zeroed();
-            pp.version = ffi::NV_ENC_PIC_PARAMS_VER;
-            pp.inputWidth = self.width;
-            pp.inputHeight = self.height;
-            pp.inputPitch = li.pitch;
-            pp.encodePicFlags = if force_idr { ffi::NV_ENC_PIC_FLAG_FORCEIDR } else { 0 };
-            pp.frameIdx = self.trame as u32;
-            pp.inputTimeStamp = self.trame;
-            pp.inputBuffer = self.entree;
-            pp.outputBitstream = self.sortie;
-            pp.bufferFmt = ffi::NV_ENC_BUFFER_FORMAT_IYUV;
-            pp.pictureStruct = ffi::NV_ENC_PIC_STRUCT_FRAME;
-            self.trame += 1;
-            let st = encoder(self.session, &mut pp);
-            if st == ffi::NV_ENC_ERR_NEED_MORE_INPUT {
-                return Ok(None);
+            // 2 et 3. L'encodage puis la lecture du flux ; la texture mappée
+            //    est rendue quoi qu'il arrive, sinon le pilote la garde.
+            let resultat = self.encoder_et_lire(entree, format, pitch, force_idr);
+            if let (Some(m), Some(demapper)) = (mappee, fl.nvEncUnmapInputResource) {
+                demapper(self.session, m);
             }
-            self.verif(st, "encodage")?;
-
-            // 3. Le flux produit.
-            let lire = fl.nvEncLockBitstream.context("nvEncLockBitstream absent")?;
-            let mut lb: ffi::NV_ENC_LOCK_BITSTREAM = std::mem::zeroed();
-            lb.version = ffi::NV_ENC_LOCK_BITSTREAM_VER;
-            lb.outputBitstream = self.sortie;
-            self.verif(lire(self.session, &mut lb), "lecture du flux")?;
-            let data = std::slice::from_raw_parts(
-                lb.bitstreamBufferPtr as *const u8,
-                lb.bitstreamSizeInBytes as usize,
-            )
-            .to_vec();
-            let idr = lb.pictureType == ffi::NV_ENC_PIC_TYPE_IDR;
-            let relacher = fl.nvEncUnlockBitstream.context("nvEncUnlockBitstream absent")?;
-            self.verif(relacher(self.session, self.sortie), "libération du flux")?;
-            Ok(Some(Paquet { data, idr }))
+            resultat
         }
+    }
+}
+
+impl Nvenc {
+    /// L'encodage, synchrone, puis le flux produit.
+    unsafe fn encoder_et_lire(
+        &mut self,
+        entree: *mut c_void,
+        format: u32,
+        pitch: u32,
+        force_idr: bool,
+    ) -> anyhow::Result<Option<Paquet>> {
+        let fl = &self.api.fl;
+        let encoder = fl.nvEncEncodePicture.context("nvEncEncodePicture absent")?;
+        let mut pp: ffi::NV_ENC_PIC_PARAMS = std::mem::zeroed();
+        pp.version = ffi::NV_ENC_PIC_PARAMS_VER;
+        pp.inputWidth = self.width;
+        pp.inputHeight = self.height;
+        pp.inputPitch = pitch;
+        pp.encodePicFlags = if force_idr { ffi::NV_ENC_PIC_FLAG_FORCEIDR } else { 0 };
+        pp.frameIdx = self.trame as u32;
+        pp.inputTimeStamp = self.trame;
+        pp.inputBuffer = entree;
+        pp.outputBitstream = self.sortie;
+        pp.bufferFmt = format;
+        pp.pictureStruct = ffi::NV_ENC_PIC_STRUCT_FRAME;
+        self.trame += 1;
+        let st = encoder(self.session, &mut pp);
+        if st == ffi::NV_ENC_ERR_NEED_MORE_INPUT {
+            return Ok(None);
+        }
+        self.verif(st, "encodage")?;
+
+        let lire = fl.nvEncLockBitstream.context("nvEncLockBitstream absent")?;
+        let mut lb: ffi::NV_ENC_LOCK_BITSTREAM = std::mem::zeroed();
+        lb.version = ffi::NV_ENC_LOCK_BITSTREAM_VER;
+        lb.outputBitstream = self.sortie;
+        self.verif(lire(self.session, &mut lb), "lecture du flux")?;
+        let data = std::slice::from_raw_parts(
+            lb.bitstreamBufferPtr as *const u8,
+            lb.bitstreamSizeInBytes as usize,
+        )
+        .to_vec();
+        let idr = lb.pictureType == ffi::NV_ENC_PIC_TYPE_IDR;
+        let relacher = fl.nvEncUnlockBitstream.context("nvEncUnlockBitstream absent")?;
+        self.verif(relacher(self.session, self.sortie), "libération du flux")?;
+        Ok(Some(Paquet { data, idr }))
     }
 }
 
@@ -452,6 +622,12 @@ impl Drop for Nvenc {
     fn drop(&mut self) {
         let fl = &self.api.fl;
         unsafe {
+            if !self.enregistree.is_null() {
+                if let Some(f) = fl.nvEncUnregisterResource {
+                    f(self.session, self.enregistree);
+                }
+            }
+            self.texture = None;
             if !self.entree.is_null() {
                 if let Some(f) = fl.nvEncDestroyInputBuffer {
                     f(self.session, self.entree);
@@ -467,6 +643,94 @@ impl Drop for Nvenc {
             }
         }
     }
+}
+
+/// Une image de synthèse I420 : un dégradé qui bouge, pour sonder.
+struct Synthese {
+    w: usize,
+    h: usize,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+impl Synthese {
+    fn new(w: usize, h: usize, phase: u8) -> Self {
+        let y = (0..w * h).map(|i| ((i % w) as u8).wrapping_add(phase)).collect();
+        let u = (0..w * h / 4).map(|i| (i / (w / 2)) as u8).collect();
+        let v = vec![128u8; w * h / 4];
+        Self { w, h, y, u, v }
+    }
+}
+
+impl YUVSource for Synthese {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.w, self.h)
+    }
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.w, self.w / 2, self.w / 2)
+    }
+    fn y(&self) -> &[u8] {
+        &self.y
+    }
+    fn u(&self) -> &[u8] {
+        &self.u
+    }
+    fn v(&self) -> &[u8] {
+        &self.v
+    }
+}
+
+/// Sonde les deux chemins d'entrée de NVENC sur cette machine : ouvre une
+/// session 1280×720, encode dix images de synthèse par chacun, et raconte
+/// ce qui s'est passé — tailles, temps, refus. Pour le banc d'essai et
+/// pour un diagnostic à distance, sans rien diffuser.
+pub fn sonde() -> String {
+    let mut rapport = vec![inventaire().to_string()];
+    for entree in [Entree::Texture, Entree::Tampon] {
+        let nom = match entree {
+            Entree::Texture => "texture",
+            Entree::Tampon => "tampon",
+        };
+        let mut enc = match Nvenc::avec_entree(1280, 720, 4_000_000, 30, entree) {
+            Ok(e) => e,
+            Err(e) => {
+                rapport.push(format!("entrée par {nom} : session refusée — {e:#}"));
+                continue;
+            }
+        };
+        let ouvert = match enc.entree() {
+            Entree::Texture => "texture",
+            Entree::Tampon => "tampon",
+        };
+        let debut = std::time::Instant::now();
+        let mut tailles = Vec::new();
+        let mut erreur = None;
+        for i in 0..10u8 {
+            let image = Synthese::new(1280, 720, i.wrapping_mul(7));
+            match enc.encode(&image, i == 0) {
+                Ok(Some(p)) => tailles.push(format!("{}{}", p.data.len(), if p.idr { "*" } else { "" })),
+                Ok(None) => tailles.push("-".into()),
+                Err(e) => {
+                    erreur = Some(format!("{e:#}"));
+                    break;
+                }
+            }
+        }
+        let ms = debut.elapsed().as_secs_f32() * 1000.0;
+        match erreur {
+            Some(e) => rapport.push(format!(
+                "entrée par {nom} (ouverte : {ouvert}) : {} image(s) puis refus — {e}",
+                tailles.len()
+            )),
+            None => rapport.push(format!(
+                "entrée par {nom} (ouverte : {ouvert}) : {} images en {ms:.0} ms, octets : {}",
+                tailles.len(),
+                tailles.join(" ")
+            )),
+        }
+    }
+    rapport.join("\n")
 }
 
 #[cfg(test)]
@@ -490,7 +754,7 @@ mod tests {
     #[test]
     fn une_session_encode_une_trame_cle_ou_dit_pourquoi_elle_ne_peut_pas() {
         let (w, h) = (640u32, 360u32);
-        let mut enc = match Nvenc::new(w, h, 2_000_000, 30) {
+        let mut enc = match Nvenc::avec_entree(w, h, 2_000_000, 30, Entree::Texture) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("NVENC indisponible ici : {e:#}");
@@ -521,7 +785,7 @@ mod tests {
     #[test]
     fn le_flux_nvenc_se_decode_avec_openh264() {
         let (w, h) = (1920u32, 1080u32);
-        let Ok(mut enc) = Nvenc::new(w, h, 6_000_000, 30) else { return };
+        let Ok(mut enc) = Nvenc::avec_entree(w, h, 6_000_000, 30, Entree::Texture) else { return };
         let mut dec = openh264::decoder::Decoder::new().unwrap();
         let mut img = crate::scale::I420::new(w as usize, h as usize);
         img.u.fill(128);

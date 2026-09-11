@@ -96,6 +96,39 @@ pub fn chemin_crash() -> Option<PathBuf> {
     Some(eframe::storage_dir("ki-chat")?.join("ki-chat.crash"))
 }
 
+/// Le marqueur d'une diffusion en cours, à côté du journal. Posé quand le
+/// stream démarre, levé quand il s'arrête proprement : s'il est encore là
+/// au démarrage suivant, la session précédente est morte en pleine
+/// diffusion — ki-chat tué, ou la machine entière (écran bleu), ce que ni
+/// le panic hook ni le journal audio ne peuvent raconter.
+fn chemin_diffusion() -> Option<PathBuf> {
+    Some(eframe::storage_dir("ki-chat")?.join("diffusion.en-cours"))
+}
+
+/// Pose le marqueur : `quoi` dit avec quel encodeur (« Nvenc », « Auto »,
+/// « Logiciel »).
+pub fn marquer_diffusion(quoi: &str) {
+    if let Some(chemin) = chemin_diffusion() {
+        let _ = std::fs::write(chemin, quoi);
+    }
+}
+
+/// Lève le marqueur : la diffusion s'est arrêtée proprement.
+pub fn lever_diffusion() {
+    if let Some(chemin) = chemin_diffusion() {
+        let _ = std::fs::remove_file(chemin);
+    }
+}
+
+/// Au démarrage : le marqueur de la session précédente, s'il est resté —
+/// et on le lève, pour ne le signaler qu'une fois.
+pub fn diffusion_interrompue() -> Option<String> {
+    let chemin = chemin_diffusion()?;
+    let quoi = std::fs::read_to_string(&chemin).ok()?;
+    let _ = std::fs::remove_file(chemin);
+    Some(quoi.trim().to_string())
+}
+
 /// Consigne un plantage dans le rapport dédié, en plus du journal. Appelé
 /// par le panic hook et par `main` quand la boucle graphique meurt : ce sont
 /// les deux seules plumes de ce fichier, il ne contient donc que du
