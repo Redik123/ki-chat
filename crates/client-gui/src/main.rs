@@ -1554,6 +1554,15 @@ impl KiApp {
                 }
             });
             match &en_cours {
+                // Le bot n'est nulle part : on peut le faire venir.
+                None if etat.salon.is_none() => {
+                    ui.label(RichText::new("Musique").color(ACCENT).strong().size(13.0));
+                    pastille_bot(ui);
+                    ui.label(RichText::new("le bot n'est dans aucun salon").color(TEXT_FAINT).size(12.0));
+                    if peut && ui.button("Venir dans mon salon").clicked() {
+                        self.commander_musique(C::Rejoindre);
+                    }
+                }
                 Some(p) => {
                     // La progression, peinte : une barre fine, le temps à côté.
                     let duree = p.duree_s as u64;
@@ -4943,8 +4952,14 @@ impl KiApp {
                         }
                     });
 
-                // --- Musique : la bannière, quand le bot est quelque part ---
-                if self.musique.salon.is_some() {
+                // --- Musique : la bannière, quand le bot est quelque part — ou
+                // quand on peut le faire venir : en vocal, avec la permission.
+                let en_vocal = self
+                    .my_id
+                    .and_then(|me| self.members.iter().find(|m| m.user_id == me))
+                    .is_some_and(|m| m.voice.is_some());
+                let peut_appeler = self.musique.disponible && en_vocal && self.can(ki_protocol::perm::CONTROL_MUSIC);
+                if self.musique.salon.is_some() || peut_appeler {
                     egui::TopBottomPanel::top("chat_musique")
                         .frame(
                             egui::Frame::NONE
