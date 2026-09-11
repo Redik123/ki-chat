@@ -621,7 +621,15 @@ struct KiApp {
     /// L'état du bot musique, tel que le serveur le pousse, et l'adresse
     /// qu'on lui prépare.
     musique: ki_protocol::EtatMusique,
-    musique_url: String,
+    /// Quand l'état est arrivé : la barre de progression avance depuis.
+    musique_recu: std::time::Instant,
+    musique_deroulee: bool,
+    musique_recherche: String,
+    musique_soundcloud: bool,
+    musique_resultats: Vec<ki_protocol::Piste>,
+    musique_resultats_pour: String,
+    /// La fiche d'un bot, ouverte depuis la liste des membres.
+    fiche_bot: Option<UserId>,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
@@ -982,7 +990,13 @@ impl KiApp {
             rangs: rangs::Rangs::new(),
             boutique: boutique::Lecteur::new(),
             musique: ki_protocol::EtatMusique::default(),
-            musique_url: String::new(),
+            musique_recu: std::time::Instant::now(),
+            musique_deroulee: false,
+            musique_recherche: String::new(),
+            musique_soundcloud: false,
+            musique_resultats: Vec::new(),
+            musique_resultats_pour: String::new(),
+            fiche_bot: None,
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
@@ -1490,6 +1504,306 @@ impl KiApp {
             );
         }
         self.info = Some(message);
+    }
+
+    /// La position de lecture, avancée depuis le dernier état reçu.
+    fn musique_position_s(&self) -> u64 {
+        let base = self.musique.position_ms;
+        let avance = if self.musique.lecture { self.musique_recu.elapsed().as_millis() as u64 } else { 0 };
+        let duree = self.musique.en_cours.as_ref().map(|p| p.duree_s as u64).unwrap_or(0);
+        let pos = (base + avance) / 1000;
+        if duree > 0 { pos.min(duree) } else { pos }
+    }
+
+    fn commander_musique(&self, commande: ki_protocol::CommandeMusique) {
+        self.send(ClientMsg::Musique { commande });
+    }
+
+    /// La bannière du bot, au-dessus du chat. Repliée : une ligne — lecture,
+    /// suivant, la progression, le titre, mon volume, le chevron. Déroulée :
+    /// la pochette, la file d'attente, la recherche, le volume global.
+    /// Sans la permission, les commandes sont grisées ; le volume perso et
+    /// le chevron restent à tous.
+    fn bandeau_musique(&mut self, ui: &mut egui::Ui) {
+        use ki_protocol::CommandeMusique as C;
+        let peut = self.can(ki_protocol::perm::CONTROL_MUSIC);
+        let etat = self.musique.clone();
+        let en_cours = etat.en_cours.clone();
+        let position = self.musique_position_s();
+        if etat.lecture && en_cours.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        let salon_nom = etat
+            .salon
+            .and_then(|id| self.channels.iter().find(|c| c.id == id))
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let mon_salon = self.my_id.and_then(|me| self.members.iter().find(|m| m.user_id == me)).and_then(|m| m.voice);
+        let ailleurs = etat.salon.is_some() && mon_salon != etat.salon;
+
+        // --- La ligne ---
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.add_enabled_ui(peut, |ui| {
+                let (glyphe, aide) = if etat.lecture { ("⏸", "pause") } else { ("▶", "lecture") };
+                if ui.add(egui::Button::new(RichText::new(glyphe).size(15.0)).frame(false)).on_hover_text(aide).clicked() {
+                    self.commander_musique(if etat.lecture { C::Pause } else { C::Lecture });
+                }
+                if ui.add(egui::Button::new(RichText::new("⏭").size(15.0)).frame(false)).on_hover_text("suivante").clicked() {
+                    self.commander_musique(C::Suivant);
+                }
+            });
+            match &en_cours {
+                Some(p) => {
+                    // La progression, peinte : une barre fine, le temps à côté.
+                    let duree = p.duree_s as u64;
+                    let (barre, _) = ui.allocate_exact_size(Vec2::new(120.0, 6.0), Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect_filled(barre, egui::CornerRadius::same(3), theme::BG_DEEP);
+                    if duree > 0 {
+                        let part = (position as f32 / duree as f32).clamp(0.0, 1.0);
+                        let plein = egui::Rect::from_min_size(barre.min, Vec2::new(barre.width() * part, barre.height()));
+                        painter.rect_filled(plein, egui::CornerRadius::same(3), ACCENT);
+                    }
+                    let temps = if duree > 0 { format!("{} / {}", mmss(position), mmss(duree)) } else { mmss(position) };
+                    ui.label(RichText::new(temps).color(TEXT_FAINT).size(11.0));
+                    let titre = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
+                    ui.add(egui::Label::new(RichText::new(titre).color(TEXT).size(13.0)).truncate());
+                }
+                None => {
+                    ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(12.5));
+                    if !etat.file.is_empty() {
+                        ui.label(RichText::new(format!("{} en file", etat.file.len())).color(TEXT_FAINT).size(11.0));
+                    }
+                }
+            }
+            if let Some(e) = &etat.erreur {
+                ui.label(RichText::new(e).color(DANGER).size(11.0));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let chevron = if self.musique_deroulee { "˄" } else { "˅" };
+                if ui.add(egui::Button::new(RichText::new(chevron).size(15.0)).frame(false)).on_hover_text("détails").clicked() {
+                    self.musique_deroulee = !self.musique_deroulee;
+                }
+                // Mon volume : le mien, pas celui du bot.
+                let mut pct = self.volume_of(ki_protocol::MUSIQUE_ID) * 100.0;
+                if ui.add(egui::Slider::new(&mut pct, 0.0..=200.0).show_value(false)).on_hover_text(format!("mon volume : {pct:.0} %")).changed() {
+                    self.set_volume(ki_protocol::MUSIQUE_ID, pct / 100.0);
+                }
+                ui::glyph(ui, Icon::Volume, 14.0, TEXT_FAINT);
+                if ailleurs {
+                    ui.label(RichText::new(format!("dans #{salon_nom}")).color(TEXT_FAINT).size(11.0));
+                }
+            });
+        });
+
+        if !self.musique_deroulee {
+            return;
+        }
+        ui.add_space(8.0);
+        ui::hairline(ui);
+        ui.add_space(8.0);
+
+        // --- Le détail, sur trois colonnes ---
+        ui.columns(3, |cols| {
+            // La pochette et ce qui joue.
+            {
+                let ui = &mut cols[0];
+                match &en_cours {
+                    Some(p) => {
+                        if let Some(chemin) = &p.vignette {
+                            if let Some(images::Preview::Ready(tex)) = self.previews.chez_nous(ui.ctx(), chemin) {
+                                ui.add(egui::Image::new(&tex).fit_to_exact_size(Vec2::new(200.0, 112.0)).corner_radius(6.0));
+                            }
+                        }
+                        ui.label(RichText::new(&p.titre).strong().size(13.0));
+                        if !p.artiste.is_empty() {
+                            ui.label(RichText::new(&p.artiste).color(TEXT_DIM).size(12.0));
+                        }
+                        let mut infos = p.source.clone();
+                        if let Some(qui) = &p.ajoute_par {
+                            infos.push_str(&format!(" · ajoutée par {qui}"));
+                        }
+                        ui.label(RichText::new(infos).color(TEXT_FAINT).size(11.0));
+                    }
+                    None => {
+                        ui.label(RichText::new("rien en cours").color(TEXT_FAINT));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.add_enabled_ui(peut, |ui| {
+                    ui.label(RichText::new("volume du bot").color(TEXT_FAINT).size(11.0));
+                    let mut v = etat.volume as f32;
+                    if ui.add(egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %").integer()).drag_stopped() {
+                        self.commander_musique(C::Volume { pour_cent: v as u8 });
+                    }
+                    ui.horizontal(|ui| {
+                        if ailleurs && ui.button("Venir dans mon salon").clicked() {
+                            self.commander_musique(C::Rejoindre);
+                        }
+                        if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                            self.commander_musique(C::Arreter);
+                        }
+                    });
+                });
+            }
+            // La file d'attente.
+            {
+                let ui = &mut cols[1];
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("File d'attente · {}", etat.file.len())).strong().size(13.0));
+                    if peut && !etat.file.is_empty() && ui.small_button("vider").clicked() {
+                        self.commander_musique(C::Vider);
+                    }
+                });
+                egui::ScrollArea::vertical().id_salt("musique_file").max_height(170.0).auto_shrink([false, true]).show(ui, |ui| {
+                    if etat.file.is_empty() {
+                        ui.label(RichText::new("vide — cherche un morceau à droite").color(TEXT_FAINT).size(11.5));
+                    }
+                    let n = etat.file.len();
+                    for (i, p) in etat.file.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT).size(11.0));
+                            let nom = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
+                            ui.add(egui::Label::new(RichText::new(nom).size(12.0)).truncate())
+                                .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.ajoute_par.as_deref().unwrap_or("?")));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_enabled_ui(peut, |ui| {
+                                    if ui.small_button("✕").on_hover_text("retirer").clicked() {
+                                        self.commander_musique(C::Retirer { index: i });
+                                    }
+                                    if i + 1 < n && ui.small_button("▼").clicked() {
+                                        self.commander_musique(C::Deplacer { de: i, vers: i + 1 });
+                                    }
+                                    if i > 0 && ui.small_button("▲").clicked() {
+                                        self.commander_musique(C::Deplacer { de: i, vers: i - 1 });
+                                    }
+                                });
+                            });
+                        });
+                    }
+                });
+            }
+            // La recherche.
+            {
+                let ui = &mut cols[2];
+                ui.add_enabled_ui(peut, |ui| {
+                    ui.horizontal(|ui| {
+                        let champ = ui.add(
+                            egui::TextEdit::singleline(&mut self.musique_recherche)
+                                .hint_text("chercher un morceau…")
+                                .desired_width(ui.available_width() - 150.0),
+                        );
+                        menu_edition(&champ, &mut self.musique_recherche, false);
+                        let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.selectable_value(&mut self.musique_soundcloud, false, "YouTube");
+                        ui.selectable_value(&mut self.musique_soundcloud, true, "SoundCloud");
+                        let texte = self.musique_recherche.trim().to_string();
+                        if (entree || ui::icon_button_ex(ui, Icon::Loupe, 24.0, "chercher", None).clicked()) && !texte.is_empty() {
+                            let source = if self.musique_soundcloud { "soundcloud" } else { "youtube" }.to_string();
+                            self.commander_musique(C::Chercher { texte, source });
+                        }
+                    });
+                });
+                if !peut {
+                    ui.label(RichText::new("réservé aux modérateurs").color(TEXT_FAINT).size(11.0));
+                }
+                if !self.musique_resultats.is_empty() {
+                    ui.label(RichText::new(format!("résultats pour « {} »", self.musique_resultats_pour)).color(TEXT_FAINT).size(11.0));
+                }
+                let resultats = self.musique_resultats.clone();
+                egui::ScrollArea::vertical().id_salt("musique_resultats").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for p in &resultats {
+                        ui.horizontal(|ui| {
+                            let nom = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
+                            ui.add(egui::Label::new(RichText::new(nom).size(12.0)).truncate())
+                                .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.url));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_enabled_ui(peut, |ui| {
+                                    if ui.small_button("▶").on_hover_text("jouer maintenant").clicked() {
+                                        self.commander_musique(C::AjouterPiste { piste: p.clone(), maintenant: true });
+                                    }
+                                    if ui.small_button("+").on_hover_text("ajouter à la file").clicked() {
+                                        self.commander_musique(C::AjouterPiste { piste: p.clone(), maintenant: false });
+                                    }
+                                });
+                                ui.label(RichText::new(mmss(p.duree_s as u64)).color(TEXT_FAINT).size(10.5));
+                            });
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    /// La fiche d'un bot : ce qu'il est, ce qu'il fait, qui le pilote, et
+    /// comment il marche — en quelques lignes honnêtes.
+    fn fiche_bot_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.fiche_bot else { return };
+        let mut open = true;
+        let etat = self.musique.clone();
+        let pilotes: Vec<String> = self
+            .roles
+            .iter()
+            .filter(|r| r.perms & (ki_protocol::perm::CONTROL_MUSIC | ki_protocol::perm::ADMINISTRATOR) != 0)
+            .map(|r| r.name.clone())
+            .collect();
+        let titre = if id == ki_protocol::MUSIQUE_ID { "Musique" } else { "VALORANT" };
+        egui::Window::new(format!("{titre} · bot"))
+            .id(egui::Id::new("fiche_bot"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(titre).strong().size(16.0));
+                    pastille_bot(ui);
+                });
+                ui.label(RichText::new("Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe.").color(TEXT_DIM).size(12.0));
+                ui.add_space(8.0);
+                if id == ki_protocol::MUSIQUE_ID {
+                    ui.label(RichText::new("Ce qu'il fait").strong());
+                    match &etat.en_cours {
+                        Some(p) => {
+                            ui.label(format!("joue « {} » {}", p.titre, if p.artiste.is_empty() { String::new() } else { format!("de {}", p.artiste) }));
+                        }
+                        None => {
+                            ui.label(RichText::new("rien en ce moment").color(TEXT_DIM));
+                        }
+                    }
+                    ui.label(RichText::new(format!("{} en file · volume global {} %", etat.file.len(), etat.volume)).color(TEXT_DIM).size(12.0));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Qui le pilote").strong());
+                    ui.label(RichText::new(if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }).color(TEXT_DIM).size(12.0));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Comment il marche").strong());
+                    ui.label(RichText::new(
+                        "Le serveur tire le flux audio de YouTube ou SoundCloud avec yt-dlp, le décode avec ffmpeg, \
+                         l'encode en Opus et l'envoie dans le salon chiffré comme la voix de n'importe qui. Aucun fichier \
+                         audio n'est écrit, aucun client ne télécharge rien, et le flux brut ne contient pas de publicité. \
+                         Chacun le règle ou le coupe comme un membre.",
+                    ).color(TEXT_DIM).size(12.0));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Depuis le démarrage du serveur").strong());
+                    let c = &etat.compteurs;
+                    ui.label(RichText::new(format!(
+                        "{} piste{} jouée{} · {} échec{} · premier son en {:.1} s en moyenne",
+                        c.pistes_jouees, if c.pistes_jouees > 1 { "s" } else { "" }, if c.pistes_jouees > 1 { "s" } else { "" },
+                        c.echecs, if c.echecs > 1 { "s" } else { "" },
+                        c.premier_son_ms as f32 / 1000.0
+                    )).color(TEXT_DIM).size(12.0));
+                } else {
+                    ui.label(RichText::new("Ce qu'il fait").strong());
+                    ui.label(RichText::new("Il poste le fil de jeu : à chaque partie finie d'un membre qui a lié son compte Riot, le résultat, sa ligne et ses RR.").color(TEXT_DIM).size(12.0));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Comment il marche").strong());
+                    ui.label(RichText::new("Les données viennent de HenrikDev, à partir du Riot ID que chacun a lié lui-même. Le serveur ne garde que la ligne du membre dans ses matchs, jamais celles des adversaires, et délier efface tout.").color(TEXT_DIM).size(12.0));
+                }
+            });
+        if !open {
+            self.fiche_bot = None;
+        }
     }
 
     /// Ouvre la page de stats du groupe et demande les fiches au serveur —
@@ -2751,6 +3065,11 @@ impl KiApp {
             }
             ServerMsg::MusiqueEtat { etat } => {
                 self.musique = etat;
+                self.musique_recu = std::time::Instant::now();
+            }
+            ServerMsg::MusiqueResultats { texte, pistes } => {
+                self.musique_resultats = pistes;
+                self.musique_resultats_pour = texte;
             }
             ServerMsg::StatsValorant { fiches, esports } => {
                 self.stats = fiches;
@@ -3574,6 +3893,7 @@ impl KiApp {
         self.diffusion_window(ctx);
         self.fiche_window(ctx);
         self.stats_window(ctx);
+        self.fiche_bot_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
         if self.show_settings {
@@ -4237,6 +4557,31 @@ impl KiApp {
             (false, true) => response.on_hover_text("rendu sourd par un modérateur"),
             (false, false) => response,
         };
+        // Un bot n'a pas le menu d'un membre : son volume, sa fiche, c'est
+        // tout — ni rôles, ni expulsion, ni compte Riot.
+        if est_bot(m.user_id) {
+            response.context_menu(|ui| {
+                ui.set_width(228.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&m.username).color(ACCENT).strong());
+                    pastille_bot(ui);
+                });
+                ui.label(RichText::new("le serveur, qui joue de la musique dans ce salon").color(TEXT_FAINT).size(11.0));
+                ui.add_space(4.0);
+                let mut pct = self.volume_of(m.user_id) * 100.0;
+                if ui
+                    .add(egui::Slider::new(&mut pct, 0.0..=200.0).suffix(" %").integer().text("volume"))
+                    .changed()
+                {
+                    self.set_volume(m.user_id, pct / 100.0);
+                }
+                if ui::button(ui, Icon::Info, "Fiche du bot").clicked() {
+                    self.fiche_bot = Some(m.user_id);
+                    ui.close();
+                }
+            });
+            return;
+        }
         response.context_menu(|ui| {
             ui.set_width(228.0);
             ui.label(RichText::new(&m.username).color(self.color_of(m)).strong());
@@ -4597,6 +4942,17 @@ impl KiApp {
                             }
                         }
                     });
+
+                // --- Musique : la bannière, quand le bot est quelque part ---
+                if self.musique.salon.is_some() {
+                    egui::TopBottomPanel::top("chat_musique")
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(theme::BG_RAISED)
+                                .inner_margin(egui::Margin::symmetric(14, 8)),
+                        )
+                        .show_inside(ui, |ui| self.bandeau_musique(ui));
+                }
 
                 // --- Saisie ---
                 egui::TopBottomPanel::bottom("chat_input")
@@ -6896,97 +7252,6 @@ impl KiApp {
              un même message. Les modes d'arcade ne sont pas annoncés.",
         );
 
-        // Le bot musique, jalon M1 : un panneau provisoire, le temps que la
-        // bannière au-dessus du chat existe. Réservé à « Contrôler la
-        // musique ».
-        if self.can(ki_protocol::perm::CONTROL_MUSIC) {
-            ui.add_space(14.0);
-            ui::hairline(ui);
-            ui.add_space(8.0);
-            ui::field_label(ui, "Musique (essai)");
-            if !self.musique.disponible {
-                ui::hint(ui, "le serveur n'a pas yt-dlp et ffmpeg : le bot n'existe pas ici");
-            } else {
-                let etat = self.musique.clone();
-                match &etat.en_cours {
-                    Some(p) => {
-                        let pos = etat.position_ms / 1000;
-                        ui.label(
-                            RichText::new(format!(
-                                "{} {} — {} · {}:{:02} / {}:{:02}",
-                                if etat.lecture { "▶" } else { "⏸" },
-                                p.titre,
-                                p.artiste,
-                                pos / 60,
-                                pos % 60,
-                                p.duree_s / 60,
-                                p.duree_s % 60
-                            ))
-                            .color(TEXT_DIM)
-                            .size(12.0),
-                        );
-                    }
-                    None => {
-                        ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(12.0));
-                    }
-                }
-                if let Some(salon) = etat.salon {
-                    let nom = self.channels.iter().find(|c| c.id == salon).map(|c| c.name.clone()).unwrap_or_default();
-                    ui.label(RichText::new(format!("dans #{nom} · {} en file · volume {} %", etat.file.len(), etat.volume)).color(TEXT_FAINT).size(11.0));
-                }
-                if let Some(e) = &etat.erreur {
-                    ui.label(RichText::new(e).color(DANGER).size(11.0));
-                }
-                ui.horizontal(|ui| {
-                    let champ = ui.add(
-                        egui::TextEdit::singleline(&mut self.musique_url)
-                            .hint_text("https://www.youtube.com/watch?v=… ou soundcloud.com/…")
-                            .desired_width(300.0),
-                    );
-                    menu_edition(&champ, &mut self.musique_url, false);
-                    let valide = ki_protocol::url_musique_valide(&self.musique_url);
-                    if ui.add_enabled(valide, egui::Button::new("Jouer maintenant")).clicked() {
-                        to_send.push(ClientMsg::Musique {
-                            commande: ki_protocol::CommandeMusique::Ajouter { url: self.musique_url.trim().to_string(), maintenant: true },
-                        });
-                        self.musique_url.clear();
-                    }
-                    if ui.add_enabled(valide, egui::Button::new("Ajouter à la file")).clicked() {
-                        to_send.push(ClientMsg::Musique {
-                            commande: ki_protocol::CommandeMusique::Ajouter { url: self.musique_url.trim().to_string(), maintenant: false },
-                        });
-                        self.musique_url.clear();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    use ki_protocol::CommandeMusique as C;
-                    if ui.button("Venir dans mon salon").clicked() {
-                        to_send.push(ClientMsg::Musique { commande: C::Rejoindre });
-                    }
-                    if ui.button(if etat.lecture { "Pause" } else { "Lecture" }).clicked() {
-                        to_send.push(ClientMsg::Musique { commande: if etat.lecture { C::Pause } else { C::Lecture } });
-                    }
-                    if ui.button("Suivant").clicked() {
-                        to_send.push(ClientMsg::Musique { commande: C::Suivant });
-                    }
-                    if ui.button("Vider la file").clicked() {
-                        to_send.push(ClientMsg::Musique { commande: C::Vider });
-                    }
-                    if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
-                        to_send.push(ClientMsg::Musique { commande: C::Arreter });
-                    }
-                });
-                let mut volume = etat.volume as f32;
-                if ui.add(egui::Slider::new(&mut volume, 0.0..=100.0).suffix(" %").integer().text("volume du bot")).drag_stopped() {
-                    to_send.push(ClientMsg::Musique { commande: ki_protocol::CommandeMusique::Volume { pour_cent: volume as u8 } });
-                }
-                ui::hint(
-                    ui,
-                    "YouTube et SoundCloud. Le serveur tire le son, l'encode et le joue dans le salon \
-                     comme un membre « Musique » : chacun le règle ou le coupe au clic droit.",
-                );
-            }
-        }
     }
 
     // -----------------------------------------------------------------
@@ -9156,6 +9421,29 @@ impl<'a> MemberRow<'a> {
 /// que le serveur exige.
 const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// Ce qui vient du serveur lui-même : le fil de jeu (identifiant 0) et le
+/// bot musique. Jamais un compte, jamais un membre.
+fn est_bot(user_id: UserId) -> bool {
+    user_id == 0 || user_id == ki_protocol::MUSIQUE_ID
+}
+
+/// La pastille « BOT », à la couleur d'accent, à côté d'un nom.
+fn pastille_bot(ui: &mut egui::Ui) -> egui::Response {
+    egui::Frame::new()
+        .fill(ACCENT)
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new("BOT").size(9.5).strong().color(theme::BG_DEEP));
+        })
+        .response
+}
+
+/// « 3:56 » — une durée en minutes et secondes.
+fn mmss(secondes: u64) -> String {
+    format!("{}:{:02}", secondes / 60, secondes % 60)
+}
+
 /// La couleur d'un palier VALORANT, proche de celle du jeu : du gris du
 /// Fer au jaune du Radiant.
 fn couleur_de_rang(tier: u8) -> egui::Color32 {
@@ -9638,7 +9926,23 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         egui::pos2(rect.left() + 14.0, rect.center().y - 13.0),
         Vec2::splat(26.0),
     );
-    ui::paint_avatar(painter, avatar_rect, &member.username, speaking, photo, theme::BG_SIDE);
+    if est_bot(member.user_id) {
+        // Un bot n'a pas de photo : un disque à la couleur d'accent, une
+        // note dedans — et l'anneau de parole comme les autres.
+        painter.circle_filled(avatar_rect.center(), 13.0, theme::alpha(ACCENT, 60));
+        if speaking {
+            painter.circle_stroke(avatar_rect.center(), 14.5, egui::Stroke::new(2.0_f32, SPEAK));
+        }
+        painter.text(
+            avatar_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "♪",
+            egui::FontId::proportional(16.0),
+            ACCENT,
+        );
+    } else {
+        ui::paint_avatar(painter, avatar_rect, &member.username, speaking, photo, theme::BG_SIDE);
+    }
 
     // La couleur vient du rôle quand le serveur en donne une ; sinon
     // c'est le hachage du pseudo, comme avant les rôles. Hors ligne, la
@@ -9673,7 +9977,22 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     }
 
     let mut apres_nom = name_left + name_width + 5.0;
-    if member.admin {
+    if est_bot(member.user_id) {
+        // La pastille BOT, franche : personne ne le prend pour un membre.
+        let galley = ui.fonts(|f| f.layout_no_wrap("BOT".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
+        let pastille = egui::Rect::from_min_size(
+            egui::pos2(apres_nom + 1.0, name_y - 7.0),
+            Vec2::new(galley.size().x + 8.0, 14.0),
+        );
+        painter.rect_filled(pastille, egui::CornerRadius::same(4), ACCENT);
+        painter.galley(
+            egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
+            galley,
+            theme::BG_DEEP,
+        );
+        apres_nom += pastille.width() + 6.0;
+    }
+    if member.admin && !est_bot(member.user_id) {
         let badge = egui::Rect::from_min_size(
             egui::pos2(apres_nom, name_y - 6.5),
             Vec2::splat(13.0),
@@ -9685,7 +10004,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     // Son rang VALORANT — de sa fiche, ou de sa présence : l'icône du
     // palier quand elle est là, puis « Or 2 » en petit, à la couleur du
     // palier. Non classé ne montre rien.
-    if let Some(tier) = palier_de(member) {
+    if let Some(tier) = palier_de(member).filter(|_| !est_bot(member.user_id)) {
         if let Some(icone) = rang_icone {
             let cadre = egui::Rect::from_min_size(egui::pos2(apres_nom, name_y - 8.0), Vec2::splat(16.0));
             painter.image(icone.id(), cadre, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
@@ -9854,6 +10173,11 @@ fn message_block(
                                 .size(14.0)
                                 .strong(),
                         );
+                        if est_bot(msg.user_id) {
+                            pastille_bot(ui).on_hover_text(
+                                "le serveur lui-même : il poste le fil de jeu, il n'a pas de compte",
+                            );
+                        }
                         ui.label(
                             RichText::new(format_time(msg.ts))
                                 .color(TEXT_FAINT)

@@ -101,6 +101,13 @@ impl Previews {
         self.to_pinned(url)
     }
 
+    /// Une image servie par notre serveur, désignée par son chemin
+    /// (« /musique/vignette/… ») : l'origine est celle de la connexion.
+    pub fn chez_nous(&mut self, ctx: &egui::Context, chemin: &str) -> Option<Preview> {
+        let origin = self.origin.clone()?;
+        self.get(ctx, &format!("{origin}{chemin}"))
+    }
+
     /// L'URL ramenée au serveur courant, en TLS, ou `None` si elle vise
     /// ailleurs.
     ///

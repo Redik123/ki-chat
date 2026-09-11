@@ -18,17 +18,18 @@
 //! Sans yt-dlp ou ffmpeg sur la machine, le bot n'existe pas : l'état dit
 //! « indisponible » et les commandes répondent poliment.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self as canal, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ki_protocol::{ChannelId, EtatMusique, Piste, ServerMsg, MUSIQUE_ID, VOICE_HEADER_LEN};
+use ki_protocol::{ChannelId, CompteursMusique, EtatMusique, Piste, ServerMsg, MUSIQUE_ID, VOICE_HEADER_LEN};
 use rand::Rng;
 
 use crate::state::AppState;
@@ -92,6 +93,7 @@ pub enum Commande {
         maintenant: bool,
     },
     Retirer(usize),
+    Deplacer(usize, usize),
     Lecture,
     Pause,
     Suivant,
@@ -102,11 +104,38 @@ pub enum Commande {
     Erreur(String),
 }
 
+/// Ce que le bot a fait depuis le démarrage, pour sa fiche.
+#[derive(Default)]
+struct Compteurs {
+    pistes_jouees: AtomicU32,
+    echecs: AtomicU32,
+    premier_son_total_ms: AtomicU64,
+    premier_son_n: AtomicU32,
+}
+
+/// Les vignettes connues : notre identifiant → l'adresse d'origine, et les
+/// octets une fois tirés. Les clients ne parlent qu'à ki-chat ; c'est le
+/// serveur qui va chercher l'image chez YouTube ou SoundCloud, une fois.
+/// L'adresse d'origine d'une vignette, et ses octets une fois tirés.
+type Vignette = (String, Option<Arc<Vec<u8>>>);
+
+#[derive(Default)]
+struct Vignettes {
+    entrees: HashMap<String, Vignette>,
+    ordre: VecDeque<String>,
+}
+
+/// Entrées gardées, et octets gardés (les plus récentes).
+const VIGNETTES_MAX: usize = 200;
+const VIGNETTE_OCTETS_MAX: u64 = 600 * 1024;
+
 pub struct Musique {
     etat: Mutex<EtatMusique>,
     tx: tokio::sync::mpsc::UnboundedSender<Commande>,
     rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Commande>>>,
     outils: Option<Arc<Outils>>,
+    compteurs: Compteurs,
+    vignettes: Mutex<Vignettes>,
 }
 
 impl Musique {
@@ -125,7 +154,65 @@ impl Musique {
             tx,
             rx: Mutex::new(Some(rx)),
             outils,
+            compteurs: Compteurs::default(),
+            vignettes: Mutex::new(Vignettes::default()),
         }
+    }
+
+    /// Remplace la vignette d'une piste (une adresse chez YouTube ou
+    /// SoundCloud) par un chemin chez nous, que le client demandera au
+    /// serveur.
+    pub fn localiser_vignette(&self, piste: &mut Piste) {
+        let Some(url) = piste.vignette.take() else { return };
+        if !url.starts_with("https://") || url.len() > 400 {
+            return;
+        }
+        let id = empreinte(&url);
+        let mut v = self.vignettes.lock().unwrap();
+        if !v.entrees.contains_key(&id) {
+            v.entrees.insert(id.clone(), (url, None));
+            v.ordre.push_back(id.clone());
+            while v.ordre.len() > VIGNETTES_MAX {
+                if let Some(vieille) = v.ordre.pop_front() {
+                    v.entrees.remove(&vieille);
+                }
+            }
+        }
+        piste.vignette = Some(format!("/musique/vignette/{id}.jpg"));
+    }
+
+    /// L'image d'une vignette, tirée une fois chez sa source. Bloquant.
+    fn vignette_octets(&self, id: &str) -> Option<Arc<Vec<u8>>> {
+        let (url, octets) = self.vignettes.lock().unwrap().entrees.get(id).cloned()?;
+        if let Some(o) = octets {
+            return Some(o);
+        }
+        let mut corps = Vec::new();
+        ureq::get(&url)
+            .set("User-Agent", "ki-chat")
+            .timeout(Duration::from_secs(10))
+            .call()
+            .ok()?
+            .into_reader()
+            .take(VIGNETTE_OCTETS_MAX)
+            .read_to_end(&mut corps)
+            .ok()?;
+        if corps.is_empty() {
+            return None;
+        }
+        let corps = Arc::new(corps);
+        let mut v = self.vignettes.lock().unwrap();
+        if let Some(e) = v.entrees.get_mut(id) {
+            e.1 = Some(Arc::clone(&corps));
+        }
+        // Les octets ne sont gardés que pour les vignettes récentes.
+        let gardees: Vec<String> = v.ordre.iter().rev().take(64).cloned().collect();
+        for (k, e) in v.entrees.iter_mut() {
+            if !gardees.contains(k) {
+                e.1 = None;
+            }
+        }
+        Some(corps)
     }
 
     pub fn disponible(&self) -> bool {
@@ -133,7 +220,18 @@ impl Musique {
     }
 
     pub fn etat(&self) -> EtatMusique {
-        self.etat.lock().unwrap().clone()
+        let mut e = self.etat.lock().unwrap().clone();
+        let n = self.compteurs.premier_son_n.load(Ordering::Relaxed);
+        e.compteurs = CompteursMusique {
+            pistes_jouees: self.compteurs.pistes_jouees.load(Ordering::Relaxed),
+            echecs: self.compteurs.echecs.load(Ordering::Relaxed),
+            premier_son_ms: if n > 0 {
+                (self.compteurs.premier_son_total_ms.load(Ordering::Relaxed) / n as u64) as u32
+            } else {
+                0
+            },
+        };
+        e
     }
 
     pub fn commander(&self, commande: Commande) {
@@ -214,6 +312,105 @@ fn executer_borne(cmd: &mut Command, delai: Duration) -> Result<Vec<u8>, String>
     }
 }
 
+/// FNV-1a sur 64 bits, en hexadécimal : l'identifiant d'une vignette.
+fn empreinte(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for o in s.bytes() {
+        h ^= o as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// `GET /musique/vignette/<id>.jpg` : l'image d'une piste, servie par
+/// ki-chat pour que les clients ne parlent jamais à YouTube.
+pub async fn vignette(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let id = id.trim_end_matches(".jpg").to_string();
+    if id.len() != 16 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    let s = state.clone();
+    let octets = tokio::task::spawn_blocking(move || s.musique.vignette_octets(&id)).await.ok().flatten();
+    let Some(octets) = octets else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    let genre = match octets.get(..4) {
+        Some([0x89, b'P', b'N', b'G']) => "image/png",
+        Some([b'R', b'I', b'F', b'F']) => "image/webp",
+        _ => "image/jpeg",
+    };
+    (
+        [(axum::http::header::CONTENT_TYPE, genre), (axum::http::header::CACHE_CONTROL, "public, max-age=86400")],
+        octets.as_ref().clone(),
+    )
+        .into_response()
+}
+
+/// Cherche dix pistes sur YouTube ou SoundCloud, sans rien télécharger :
+/// yt-dlp en mode « liste à plat », une ligne JSON par résultat.
+/// Bloquant : hors de la boucle asynchrone.
+pub fn chercher(outils: &Outils, texte: &str, source: &str) -> Result<Vec<Piste>, String> {
+    let (prefixe, nom_source) = if source == "soundcloud" { ("scsearch10:", "soundcloud") } else { ("ytsearch10:", "youtube") };
+    let mut cmd = Command::new(&outils.yt_dlp);
+    cmd.args(outils.args_yt_dlp())
+        .args(["-j", "--flat-playlist", "--skip-download", "--"])
+        .arg(format!("{prefixe}{texte}"));
+    let sortie = executer_borne(&mut cmd, DELAI_RESOLUTION)?;
+    let mut pistes = Vec::new();
+    for ligne in String::from_utf8_lossy(&sortie).lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(ligne) else { continue };
+        let Some(url) = v["webpage_url"].as_str().or_else(|| v["url"].as_str()) else { continue };
+        if !ki_protocol::url_musique_valide(url) {
+            continue;
+        }
+        let titre = v["title"].as_str().unwrap_or("").to_string();
+        if titre.is_empty() {
+            continue;
+        }
+        let artiste = ["artist", "uploader", "channel", "creator"]
+            .iter()
+            .find_map(|k| v[*k].as_str())
+            .unwrap_or("")
+            .to_string();
+        pistes.push(Piste {
+            source: nom_source.to_string(),
+            url: url.to_string(),
+            titre: ki_protocol::safe_display(&titre, 160),
+            artiste: ki_protocol::safe_display(&artiste, 80),
+            duree_s: v["duration"].as_f64().unwrap_or(0.0).max(0.0) as u32,
+            vignette: meilleure_vignette(&v),
+            ajoute_par: None,
+        });
+    }
+    Ok(pistes)
+}
+
+/// Parmi les vignettes d'un résultat, une de taille moyenne : chez YouTube
+/// la première d'au moins 300 px de large ; chez SoundCloud, qui ne liste
+/// que des miniatures, la même adresse en 300×300.
+fn meilleure_vignette(v: &serde_json::Value) -> Option<String> {
+    if let Some(t) = v["thumbnail"].as_str() {
+        return Some(t.to_string());
+    }
+    let liste = v["thumbnails"].as_array()?;
+    let moyenne = liste
+        .iter()
+        .filter(|t| t["width"].as_u64().is_some_and(|w| w >= 300))
+        .min_by_key(|t| t["width"].as_u64().unwrap_or(u64::MAX))
+        .or_else(|| liste.last())?;
+    let url = moyenne["url"].as_str()?;
+    if url.contains("sndcdn.com") {
+        if let Some(pos) = url.rfind('-') {
+            return Some(format!("{}-t300x300.jpg", &url[..pos]));
+        }
+    }
+    Some(url.to_string())
+}
+
 /// La dernière ligne utile de la sortie d'erreur, bornée.
 fn resume_erreur(stderr: &[u8]) -> String {
     let texte = String::from_utf8_lossy(stderr);
@@ -277,6 +474,8 @@ struct Lecteur {
     erreur: Arc<Mutex<Option<String>>>,
     position_ms: u64,
     demarre: Instant,
+    /// Le délai jusqu'au premier son a été compté.
+    mesure: bool,
 }
 
 impl Lecteur {
@@ -331,6 +530,7 @@ impl Lecteur {
             erreur,
             position_ms: 0,
             demarre: Instant::now(),
+            mesure: false,
         }
     }
 }
@@ -577,6 +777,16 @@ fn appliquer(
             drop(e);
             publier(state, false);
         }
+        Commande::Deplacer(de, vers) => {
+            let mut e = state.musique.etat.lock().unwrap();
+            if de < e.file.len() {
+                let p = e.file.remove(de);
+                let vers = vers.min(e.file.len());
+                e.file.insert(vers, p);
+            }
+            drop(e);
+            publier(state, false);
+        }
         Commande::Lecture => {
             let relancer = {
                 let mut e = state.musique.etat.lock().unwrap();
@@ -695,9 +905,17 @@ fn pas(state: &Arc<AppState>, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur
         let erreur = l.erreur.lock().unwrap().clone();
         if let Some(e) = &erreur {
             tracing::warn!("musique : piste abandonnée : {e}");
+            state.musique.compteurs.echecs.fetch_add(1, Ordering::Relaxed);
+        } else {
+            state.musique.compteurs.pistes_jouees.fetch_add(1, Ordering::Relaxed);
         }
         suivante(state, outils, lecteur, erreur);
         return;
+    }
+    if !l.mesure && l.pret.load(Ordering::Relaxed) {
+        l.mesure = true;
+        state.musique.compteurs.premier_son_total_ms.fetch_add(l.demarre.elapsed().as_millis() as u64, Ordering::Relaxed);
+        state.musique.compteurs.premier_son_n.fetch_add(1, Ordering::Relaxed);
     }
     if !l.pret.load(Ordering::Relaxed) {
         if l.demarre.elapsed() > DELAI_PREMIER_SON {
@@ -834,6 +1052,24 @@ mod tests {
             drop(lecteur);
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+
+    /// Les vignettes ont un identifiant stable, et SoundCloud passe en 300×300.
+    #[test]
+    fn les_vignettes_se_choisissent() {
+        assert_eq!(empreinte("a"), empreinte("a"));
+        assert_ne!(empreinte("a"), empreinte("b"));
+        assert_eq!(empreinte("x").len(), 16);
+        let yt = serde_json::json!({"thumbnails": [
+            {"url": "https://i.ytimg.com/vi/x/hq720.jpg?a", "width": 360, "height": 202},
+            {"url": "https://i.ytimg.com/vi/x/hq720.jpg?b", "width": 720, "height": 404}
+        ]});
+        assert_eq!(meilleure_vignette(&yt).as_deref(), Some("https://i.ytimg.com/vi/x/hq720.jpg?a"));
+        let sc = serde_json::json!({"thumbnails": [
+            {"url": "https://i1.sndcdn.com/artworks-abc-mini.jpg", "width": 16, "height": 16},
+            {"url": "https://i1.sndcdn.com/artworks-abc-small.jpg", "width": 32, "height": 32}
+        ]});
+        assert_eq!(meilleure_vignette(&sc).as_deref(), Some("https://i1.sndcdn.com/artworks-abc-t300x300.jpg"));
     }
 
     /// Une commande qui n'existe pas se tue au bout du délai.

@@ -332,21 +332,31 @@ serveur ki-chat. Il faut VALORANT ouvert ; fermé, la section le dit.
 ## Bot musique
 
 Le chantier a son document, [`PLAN-MUSIQUE.md`](PLAN-MUSIQUE.md). Livré
-(M1, la chaîne) : un membre virtuel **« Musique »** dans le salon vocal.
-Un modérateur — permission « Contrôler la musique », à donner dans les
-rôles — colle une adresse YouTube ou SoundCloud dans ♛ Admin →
-Musique ; le serveur résout le titre avec yt-dlp, tire le flux audio brut
-(donc sans publicité), le décode avec ffmpeg, l'encode en Opus stéréo avec
-libopus et l'émet dans le salon chiffré comme la voix de n'importe qui,
-sous l'identifiant réservé du bot : chacun le règle ou le coupe au clic
-droit. File d'attente, lecture, pause, suivant, volume global. Aucun
-client ne télécharge rien, aucun fichier audio n'est écrit sur disque, un
+(M1 et M2) : un membre virtuel **« Musique »** dans le salon vocal, piloté
+depuis une **bannière au-dessus du chat**. Repliée, une ligne : lecture ou
+pause, suivante, la progression, le titre, son propre volume, un chevron.
+Déroulée : la pochette, la file d'attente qu'on réordonne, la recherche
+YouTube ou SoundCloud avec ses résultats à ajouter d'un clic, le volume
+global. Les commandes demandent la permission « Contrôler la musique »,
+à donner dans les rôles ; sans elle, elles sont grisées, le volume perso
+et le chevron restent à tous. Le serveur résout le titre avec yt-dlp,
+tire le flux audio brut (donc sans publicité), le décode avec ffmpeg,
+l'encode en Opus stéréo avec libopus et l'émet dans le salon chiffré
+comme la voix de n'importe qui, sous l'identifiant réservé du bot :
+chacun le règle ou le coupe au clic droit. Les vignettes passent par le
+serveur, les clients ne parlent jamais à YouTube. Aucun client ne
+télécharge rien, aucun fichier audio n'est écrit sur disque, un
 extracteur qui traîne est tué au bout du délai. Sans yt-dlp et ffmpeg sur
 la machine du serveur (l'image Docker les embarque, avec deno pour les
-défis JavaScript de YouTube), le bot n'existe pas et le dit. La bannière
-au-dessus du chat, la recherche et les playlists sont les jalons suivants.
-Télécharger de YouTube reste contraire à ses conditions d'utilisation :
-usage privé entre amis, décision de l'admin du serveur.
+défis JavaScript de YouTube), le bot n'existe pas et le dit.
+
+Un bot ne passe jamais pour un membre : pastille **BOT** à côté du nom,
+une note à la place de la photo, ni rôle ni rang, et un menu réduit à son
+volume et à sa **fiche** — ce qu'il fait, qui le pilote, comment il marche,
+ses compteurs. La même pastille marque les messages du fil de jeu
+VALORANT. Les playlists et la voix sont les jalons suivants. Télécharger
+de YouTube reste contraire à ses conditions d'utilisation : usage privé
+entre amis, décision de l'admin du serveur.
 
 ## Sécurité
 

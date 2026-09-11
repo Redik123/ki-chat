@@ -287,7 +287,7 @@ et l'entend.
 
 ## Jalons
 
-### M1 — La chaîne — en test (2026-09-11)
+### M1 — La chaîne — livré (2026-09-11)
 yt-dlp, ffmpeg et deno dans l'image ; `musique.rs` lit une URL, décode,
 encode, chiffre, émet dans le salon comme membre virtuel « Musique » ;
 la permission `CONTROL_MUSIC` ; une commande minimale (Rejoindre + Ajouter
@@ -297,7 +297,7 @@ dans le salon sans coupure, chacun règle son volume, le bot coupé chez
 l'un ne l'est pas chez l'autre ; un yt-dlp tué en pleine piste ne fait pas
 tomber le serveur.
 
-### M2 — La file et la bannière
+### M2 — La file et la bannière — en test (2026-09-11)
 File d'attente, lecture/pause/suivant, recherche YouTube et SoundCloud,
 vignettes par le serveur, la bannière repliée et déroulée, les boutons
 grisés sans permission, l'audit ; et le bot qui ne ressemble plus à un

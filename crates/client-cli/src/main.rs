@@ -131,7 +131,10 @@ async fn main() -> anyhow::Result<()> {
                     println!("* message {} de {} supprimé", message.ts, message.user_id)
                 }
                 ServerMsg::LiaisonRiot { message, .. } => println!("[Riot] {message}"),
-                ServerMsg::FicheValorant { .. } | ServerMsg::StatsValorant { .. } | ServerMsg::MusiqueEtat { .. } => {}
+                ServerMsg::FicheValorant { .. }
+                | ServerMsg::StatsValorant { .. }
+                | ServerMsg::MusiqueEtat { .. }
+                | ServerMsg::MusiqueResultats { .. } => {}
                 ServerMsg::History { messages } => {
                     for m in messages {
                         println!("  [ancien] <{}> {}", m.username, m.text);

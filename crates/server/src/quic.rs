@@ -1333,8 +1333,10 @@ fn handle_msg(
                 .and_then(|u| u.voice);
             let quoi = match &commande {
                 C::Rejoindre => "rejoindre",
-                C::Ajouter { .. } => "ajouter",
+                C::Ajouter { .. } | C::AjouterPiste { .. } => "ajouter",
                 C::Retirer { .. } => "retirer",
+                C::Deplacer { .. } => "déplacer",
+                C::Chercher { .. } => "chercher",
                 C::Lecture => "lecture",
                 C::Pause => "pause",
                 C::Suivant => "suivant",
@@ -1344,13 +1346,71 @@ fn handle_msg(
             };
             let detail = match &commande {
                 C::Ajouter { url, .. } => url.clone(),
+                C::AjouterPiste { piste, .. } => piste.url.clone(),
                 C::Volume { pour_cent } => format!("{pour_cent} %"),
                 _ => String::new(),
             };
-            state
-                .audit
-                .record(&format!("musique.{quoi}"), username, "", &detail);
+            // Chercher n'est pas une action sur le bot : pas d'audit, mais
+            // le budget du chat, pour ne pas faire tourner yt-dlp en rafale.
+            if !matches!(commande, C::Chercher { .. }) {
+                state.audit.record(&format!("musique.{quoi}"), username, "", &detail);
+            }
             match commande {
+                C::Chercher { texte, source } => {
+                    let texte = texte.trim().to_string();
+                    if texte.is_empty()
+                        || texte.chars().count() > ki_protocol::MAX_RECHERCHE_MUSIQUE
+                        || texte.chars().any(char::is_control)
+                    {
+                        let _ = tx.send(ServerMsg::Error { message: "recherche vide ou trop longue".into() });
+                        return;
+                    }
+                    let allowed = {
+                        let mut users = state.users.lock().unwrap();
+                        users.get_mut(&user_id).is_some_and(|u| u.chat_budget.take())
+                    };
+                    if !allowed {
+                        let _ = tx.send(ServerMsg::Error { message: "doucement sur la recherche".into() });
+                        return;
+                    }
+                    let Some(outils) = state.musique.outils() else { return };
+                    let (state, tx) = (state.clone(), tx.clone());
+                    tokio::task::spawn_blocking(move || match crate::musique::chercher(&outils, &texte, &source) {
+                        Ok(mut pistes) => {
+                            for p in &mut pistes {
+                                state.musique.localiser_vignette(p);
+                            }
+                            let _ = tx.send(ServerMsg::MusiqueResultats { texte, pistes });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ServerMsg::Error { message: format!("recherche impossible : {e}") });
+                        }
+                    });
+                }
+                C::AjouterPiste { mut piste, maintenant } => {
+                    // Un résultat de recherche revient tel quel : on ne relit
+                    // pas l'adresse, mais on n'en croit que ce qui est sûr.
+                    if !ki_protocol::url_musique_valide(&piste.url) {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "adresse refusée : YouTube ou SoundCloud, en https".into(),
+                        });
+                        return;
+                    }
+                    if state.musique.etat().salon.is_none() {
+                        let Some(salon) = mon_salon else {
+                            let _ = tx.send(ServerMsg::Error { message: "rejoins un salon vocal d'abord".into() });
+                            return;
+                        };
+                        state.musique.commander(crate::musique::Commande::Rejoindre { salon });
+                    }
+                    piste.titre = ki_protocol::safe_display(&piste.titre, 160);
+                    piste.artiste = ki_protocol::safe_display(&piste.artiste, 80);
+                    piste.source = if piste.url.contains("soundcloud.com") { "soundcloud" } else { "youtube" }.to_string();
+                    piste.vignette = piste.vignette.filter(|v| v.starts_with("/musique/vignette/") && v.len() < 64);
+                    piste.ajoute_par = Some(username.to_string());
+                    state.musique.commander(crate::musique::Commande::Ajouter { piste, maintenant });
+                }
+                C::Deplacer { de, vers } => state.musique.commander(crate::musique::Commande::Deplacer(de, vers)),
                 C::Rejoindre => {
                     let Some(salon) = mon_salon else {
                         let _ = tx.send(ServerMsg::Error {
@@ -1392,6 +1452,7 @@ fn handle_msg(
                         match crate::musique::resoudre(&outils, &url) {
                             Ok(mut piste) => {
                                 piste.ajoute_par = Some(qui);
+                                state.musique.localiser_vignette(&mut piste);
                                 state.musique.commander(crate::musique::Commande::Ajouter {
                                     piste,
                                     maintenant,

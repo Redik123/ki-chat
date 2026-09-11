@@ -466,6 +466,8 @@ pub enum ServerMsg {
     },
     /// L'état du bot musique, à la connexion et à chaque changement.
     MusiqueEtat { etat: EtatMusique },
+    /// Les résultats d'une recherche du bot, au demandeur.
+    MusiqueResultats { texte: String, pistes: Vec<Piste> },
     /// Toutes les fiches du groupe, pour la page de stats — et les
     /// prochains matchs d'esport, si le serveur les a.
     StatsValorant {
@@ -1460,12 +1462,42 @@ pub enum CommandeMusique {
         maintenant: bool,
     },
     Retirer { index: usize },
+    /// Une piste de la file change de place.
+    Deplacer { de: usize, vers: usize },
+    /// Une piste déjà résolue — un résultat de recherche — en file, ou
+    /// tout de suite.
+    AjouterPiste {
+        piste: Piste,
+        #[serde(default)]
+        maintenant: bool,
+    },
+    /// Chercher sur YouTube (« youtube ») ou SoundCloud (« soundcloud »).
+    Chercher {
+        texte: String,
+        #[serde(default)]
+        source: String,
+    },
     Lecture,
     Pause,
     Suivant,
     Vider,
     Volume { pour_cent: u8 },
     Arreter,
+}
+
+/// Longueur maximale d'une recherche de musique, en caractères.
+pub const MAX_RECHERCHE_MUSIQUE: usize = 80;
+
+/// Ce que le bot a fait depuis le démarrage du serveur — pour sa fiche.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompteursMusique {
+    #[serde(default)]
+    pub pistes_jouees: u32,
+    #[serde(default)]
+    pub echecs: u32,
+    /// Délai moyen entre la demande et le premier son, en millisecondes.
+    #[serde(default)]
+    pub premier_son_ms: u32,
 }
 
 /// Une piste, telle que le serveur l'a résolue.
@@ -1506,6 +1538,8 @@ pub struct EtatMusique {
     pub volume: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub erreur: Option<String>,
+    #[serde(default)]
+    pub compteurs: CompteursMusique,
 }
 
 /// Une adresse que le bot accepte : YouTube ou SoundCloud, en HTTPS,
