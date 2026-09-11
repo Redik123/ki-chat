@@ -339,6 +339,7 @@ async fn handle_connection(
     if let Some(member) = state.member_of(user_id) {
         state.broadcast_all_except(user_id, &ServerMsg::MemberUpdate { member });
     }
+    let _ = tx.send(ServerMsg::MusiqueEtat { etat: state.musique.etat() });
 
     // Tâche d'écriture : verse sur le flux de contrôle des lignes **déjà
     // prêtes**.
@@ -1146,6 +1147,82 @@ fn handle_msg(
                     let _ = tx.send(ServerMsg::Error { message: e.to_string() });
                 }
             });
+        }
+        ClientMsg::Musique { commande } => {
+            use ki_protocol::CommandeMusique as C;
+            if !require(state, user_id, tx, ki_protocol::perm::CONTROL_MUSIC) {
+                return;
+            }
+            if !state.musique.disponible() {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "le bot musique n'est pas installé sur ce serveur (yt-dlp ou ffmpeg absents)".into(),
+                });
+                return;
+            }
+            let mon_salon = state.users.lock().unwrap().get(&user_id).and_then(|u| u.voice);
+            let quoi = match &commande {
+                C::Rejoindre => "rejoindre",
+                C::Ajouter { .. } => "ajouter",
+                C::Retirer { .. } => "retirer",
+                C::Lecture => "lecture",
+                C::Pause => "pause",
+                C::Suivant => "suivant",
+                C::Vider => "vider",
+                C::Volume { .. } => "volume",
+                C::Arreter => "arrêter",
+            };
+            let detail = match &commande {
+                C::Ajouter { url, .. } => url.clone(),
+                C::Volume { pour_cent } => format!("{pour_cent} %"),
+                _ => String::new(),
+            };
+            state.audit.record(&format!("musique.{quoi}"), username, "", &detail);
+            match commande {
+                C::Rejoindre => {
+                    let Some(salon) = mon_salon else {
+                        let _ = tx.send(ServerMsg::Error { message: "rejoins un salon vocal d'abord".into() });
+                        return;
+                    };
+                    state.musique.commander(crate::musique::Commande::Rejoindre { salon });
+                }
+                C::Ajouter { url, maintenant } => {
+                    if !ki_protocol::url_musique_valide(&url) {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "adresse refusée : YouTube ou SoundCloud, en https".into(),
+                        });
+                        return;
+                    }
+                    // Sans salon, le bot vient dans le mien.
+                    if state.musique.etat().salon.is_none() {
+                        let Some(salon) = mon_salon else {
+                            let _ = tx.send(ServerMsg::Error { message: "rejoins un salon vocal d'abord".into() });
+                            return;
+                        };
+                        state.musique.commander(crate::musique::Commande::Rejoindre { salon });
+                    }
+                    // Résoudre l'adresse prend quelques secondes de yt-dlp :
+                    // hors de la boucle, puis la piste part en file.
+                    let Some(outils) = state.musique.outils() else { return };
+                    let state = state.clone();
+                    let qui = username.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        match crate::musique::resoudre(&outils, &url) {
+                            Ok(mut piste) => {
+                                piste.ajoute_par = Some(qui);
+                                state.musique.commander(crate::musique::Commande::Ajouter { piste, maintenant });
+                            }
+                            Err(e) => state.musique.commander(crate::musique::Commande::Erreur(format!("adresse illisible : {e}"))),
+                        }
+                    });
+                }
+                C::Retirer { index } => state.musique.commander(crate::musique::Commande::Retirer(index)),
+                C::Lecture => state.musique.commander(crate::musique::Commande::Lecture),
+                C::Pause => state.musique.commander(crate::musique::Commande::Pause),
+                C::Suivant => state.musique.commander(crate::musique::Commande::Suivant),
+                C::Vider => state.musique.commander(crate::musique::Commande::Vider),
+                C::Volume { pour_cent } => state.musique.commander(crate::musique::Commande::Volume(pour_cent)),
+                C::Arreter => state.musique.commander(crate::musique::Commande::Arreter),
+            }
         }
         ClientMsg::StatsValorant => {
             // Les fiches du cache, avec le pseudo de chacun : rien ne part

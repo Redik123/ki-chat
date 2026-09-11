@@ -13,6 +13,9 @@ use ki_protocol::{ClientMsg, MediaHeader, ServerMsg, StreamMeta};
 use ki_voice::{VoiceConfig, VoiceEngine};
 use tokio::sync::mpsc as tokio_mpsc;
 
+// Un message du serveur est bien plus gros qu'une erreur ou une empreinte ;
+// le mettre en boîte coûterait une allocation par message pour rien.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Msg(ServerMsg),
     ConnectFailed(String),

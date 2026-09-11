@@ -403,6 +403,8 @@ pub struct AppState {
     pub audit: crate::audit::Audit,
     /// Comptes Riot liés et fiches VALORANT (HenrikDev).
     pub valorant: crate::valorant::Valorant,
+    /// Le bot musique.
+    pub musique: crate::musique::Musique,
 }
 
 impl AppState {
@@ -443,6 +445,7 @@ impl AppState {
             history,
             audit,
             valorant: crate::valorant::Valorant::open(data_dir),
+            musique: crate::musique::Musique::new(data_dir),
         })
     }
 
@@ -910,6 +913,30 @@ impl AppState {
         // O(n log n) allocations pour trier un roster diffusé à chaque
         // entrée et sortie de vocal. Ici, une par membre.
         members.sort_by_cached_key(|m| m.username.to_lowercase());
+        // Le bot musique, membre virtuel du salon où il joue : chacun le
+        // voit, le règle et le coupe comme un membre.
+        let musique = self.musique.etat();
+        if let Some(salon) = musique.salon {
+            members.push(Member {
+                user_id: ki_protocol::MUSIQUE_ID,
+                username: ki_protocol::MUSIQUE_NOM.to_string(),
+                speaking: musique.lecture && musique.en_cours.is_some(),
+                muted: false,
+                streaming: None,
+                jeu: None,
+                riot_id: None,
+                rang_valorant: None,
+                force_muted: false,
+                force_deafened: false,
+                admin: false,
+                avatar: None,
+                voice: Some(salon),
+                roles: Vec::new(),
+                online: true,
+                color: None,
+                rank: 0,
+            });
+        }
         members
     }
 

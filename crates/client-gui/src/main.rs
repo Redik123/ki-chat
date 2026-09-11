@@ -618,6 +618,10 @@ struct KiApp {
     rangs: rangs::Rangs,
     /// La boutique du jour, lue dans son propre client Riot.
     boutique: boutique::Lecteur,
+    /// L'état du bot musique, tel que le serveur le pousse, et l'adresse
+    /// qu'on lui prépare.
+    musique: ki_protocol::EtatMusique,
+    musique_url: String,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
@@ -977,6 +981,8 @@ impl KiApp {
             dernier_envoi: None,
             rangs: rangs::Rangs::new(),
             boutique: boutique::Lecteur::new(),
+            musique: ki_protocol::EtatMusique::default(),
+            musique_url: String::new(),
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
@@ -2742,6 +2748,9 @@ impl KiApp {
                         f.fiche = fiche;
                     }
                 }
+            }
+            ServerMsg::MusiqueEtat { etat } => {
+                self.musique = etat;
             }
             ServerMsg::StatsValorant { fiches, esports } => {
                 self.stats = fiches;
@@ -6886,6 +6895,98 @@ impl KiApp {
              le résultat, sa ligne et ses RR dans ce salon — les coéquipiers du groupe sur \
              un même message. Les modes d'arcade ne sont pas annoncés.",
         );
+
+        // Le bot musique, jalon M1 : un panneau provisoire, le temps que la
+        // bannière au-dessus du chat existe. Réservé à « Contrôler la
+        // musique ».
+        if self.can(ki_protocol::perm::CONTROL_MUSIC) {
+            ui.add_space(14.0);
+            ui::hairline(ui);
+            ui.add_space(8.0);
+            ui::field_label(ui, "Musique (essai)");
+            if !self.musique.disponible {
+                ui::hint(ui, "le serveur n'a pas yt-dlp et ffmpeg : le bot n'existe pas ici");
+            } else {
+                let etat = self.musique.clone();
+                match &etat.en_cours {
+                    Some(p) => {
+                        let pos = etat.position_ms / 1000;
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {} — {} · {}:{:02} / {}:{:02}",
+                                if etat.lecture { "▶" } else { "⏸" },
+                                p.titre,
+                                p.artiste,
+                                pos / 60,
+                                pos % 60,
+                                p.duree_s / 60,
+                                p.duree_s % 60
+                            ))
+                            .color(TEXT_DIM)
+                            .size(12.0),
+                        );
+                    }
+                    None => {
+                        ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(12.0));
+                    }
+                }
+                if let Some(salon) = etat.salon {
+                    let nom = self.channels.iter().find(|c| c.id == salon).map(|c| c.name.clone()).unwrap_or_default();
+                    ui.label(RichText::new(format!("dans #{nom} · {} en file · volume {} %", etat.file.len(), etat.volume)).color(TEXT_FAINT).size(11.0));
+                }
+                if let Some(e) = &etat.erreur {
+                    ui.label(RichText::new(e).color(DANGER).size(11.0));
+                }
+                ui.horizontal(|ui| {
+                    let champ = ui.add(
+                        egui::TextEdit::singleline(&mut self.musique_url)
+                            .hint_text("https://www.youtube.com/watch?v=… ou soundcloud.com/…")
+                            .desired_width(300.0),
+                    );
+                    menu_edition(&champ, &mut self.musique_url, false);
+                    let valide = ki_protocol::url_musique_valide(&self.musique_url);
+                    if ui.add_enabled(valide, egui::Button::new("Jouer maintenant")).clicked() {
+                        to_send.push(ClientMsg::Musique {
+                            commande: ki_protocol::CommandeMusique::Ajouter { url: self.musique_url.trim().to_string(), maintenant: true },
+                        });
+                        self.musique_url.clear();
+                    }
+                    if ui.add_enabled(valide, egui::Button::new("Ajouter à la file")).clicked() {
+                        to_send.push(ClientMsg::Musique {
+                            commande: ki_protocol::CommandeMusique::Ajouter { url: self.musique_url.trim().to_string(), maintenant: false },
+                        });
+                        self.musique_url.clear();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    use ki_protocol::CommandeMusique as C;
+                    if ui.button("Venir dans mon salon").clicked() {
+                        to_send.push(ClientMsg::Musique { commande: C::Rejoindre });
+                    }
+                    if ui.button(if etat.lecture { "Pause" } else { "Lecture" }).clicked() {
+                        to_send.push(ClientMsg::Musique { commande: if etat.lecture { C::Pause } else { C::Lecture } });
+                    }
+                    if ui.button("Suivant").clicked() {
+                        to_send.push(ClientMsg::Musique { commande: C::Suivant });
+                    }
+                    if ui.button("Vider la file").clicked() {
+                        to_send.push(ClientMsg::Musique { commande: C::Vider });
+                    }
+                    if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                        to_send.push(ClientMsg::Musique { commande: C::Arreter });
+                    }
+                });
+                let mut volume = etat.volume as f32;
+                if ui.add(egui::Slider::new(&mut volume, 0.0..=100.0).suffix(" %").integer().text("volume du bot")).drag_stopped() {
+                    to_send.push(ClientMsg::Musique { commande: ki_protocol::CommandeMusique::Volume { pour_cent: volume as u8 } });
+                }
+                ui::hint(
+                    ui,
+                    "YouTube et SoundCloud. Le serveur tire le son, l'encode et le joue dans le salon \
+                     comme un membre « Musique » : chacun le règle ou le coupe au clic droit.",
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------

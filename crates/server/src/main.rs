@@ -20,6 +20,7 @@ mod diag;
 mod files;
 mod history;
 mod meta;
+mod musique;
 mod quic;
 mod roles;
 mod state;
@@ -109,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
     // Le jeton d'accès aux diagnostics existe dès le démarrage : l'admin
     // sait où le lire avant le premier besoin.
     diag::init(&state);
+    // Le bot musique : sa tâche vit tant que le serveur tourne, et ne fait
+    // rien tant qu'on ne lui demande rien.
+    tokio::spawn(musique::boucle(state.clone()));
 
     // Ce que le fil HenrikDev rapporte (liaison faite, fiche refaite) est
     // relayé d'ici : réponse à l'intéressé, roster à tout le monde. Et

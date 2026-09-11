@@ -43,6 +43,15 @@ Chez un hébergeur, il faut donc :
 Le port 8080 reste facultatif : sans lui, tout fonctionne sauf le
 téléchargement des fichiers partagés.
 
+## Le bot musique
+
+L'image embarque yt-dlp, ffmpeg et deno : le bot musique existe dès que le
+serveur démarre (journal : « musique : yt-dlp … · ffmpeg … »). Si YouTube
+réclame un compte (« Sign in to confirm you're not a bot »), déposer les
+cookies d'un compte Google **jetable** — jamais le principal — au format
+Netscape dans le volume : `/data/musique/cookies.txt`. Rien d'autre à
+régler ; la permission « Contrôler la musique » se donne dans les rôles.
+
 ## Route 1 — Portainer, stack collée (la plus simple)
 
 *Stacks* → *Add stack* → nom `ki-chat` → *Web editor* → colle le contenu de

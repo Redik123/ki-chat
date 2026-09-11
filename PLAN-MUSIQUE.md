@@ -262,7 +262,7 @@ et l'entend.
 
 ## Jalons
 
-### M1 — La chaîne
+### M1 — La chaîne — en test (2026-09-11)
 yt-dlp, ffmpeg et deno dans l'image ; `musique.rs` lit une URL, décode,
 encode, chiffre, émet dans le salon comme membre virtuel « Musique » ;
 la permission `CONTROL_MUSIC` ; une commande minimale (Rejoindre + Ajouter

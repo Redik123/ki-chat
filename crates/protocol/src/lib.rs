@@ -44,6 +44,8 @@ pub mod perm {
     pub const MOVE_MEMBERS: u64 = 1 << 14;
     /// Supprimer les messages **des autres**. Les siens, chacun peut.
     pub const DELETE_MESSAGES: u64 = 1 << 15;
+    /// Piloter le bot musique : lecture, file d'attente, volume global.
+    pub const CONTROL_MUSIC: u64 = 1 << 16;
     /// Tout permis. Placé au bit de poids fort pour que les permissions
     /// futures remplissent le bas sans jamais entrer en collision.
     pub const ADMINISTRATOR: u64 = 1 << 63;
@@ -61,6 +63,7 @@ pub mod perm {
     /// sous son propre rang. La règle vit ici pour que le serveur la fasse
     /// respecter et que l'interface cesse de proposer ce qui sera refusé.
     pub const NOT_FOR_EVERYONE: u64 = ADMINISTRATOR
+        | CONTROL_MUSIC
         | MANAGE_ROLES
         | MANAGE_CHANNELS
         | MANAGE_SERVER
@@ -90,6 +93,7 @@ pub mod perm {
         (MUTE_MEMBERS, "Couper le micro", "faire taire ou rendre sourd, en vocal"),
         (MOVE_MEMBERS, "Déplacer en vocal", "changer quelqu'un de salon vocal, ou l'en sortir"),
         (DELETE_MESSAGES, "Supprimer les messages", "effacer les messages des autres"),
+        (CONTROL_MUSIC, "Contrôler la musique", "piloter le bot musique : lecture, file, volume"),
         (ADMINISTRATOR, "Administrateur", "toutes les permissions, présentes et futures"),
     ];
 
@@ -200,6 +204,8 @@ pub enum ClientMsg {
     FicheValorant { user_id: UserId },
     /// Toutes les fiches des membres liés, pour la page de stats.
     StatsValorant,
+    /// Une commande au bot musique (permission « Contrôler la musique »).
+    Musique { commande: CommandeMusique },
     /// Le client annonce son état vocal : émission en cours, et micro coupé
     /// volontairement — pour que les autres distinguent « muet » de « parti ».
     VoiceState {
@@ -458,6 +464,8 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fiche: Option<FicheValorant>,
     },
+    /// L'état du bot musique, à la connexion et à chaque changement.
+    MusiqueEtat { etat: EtatMusique },
     /// Toutes les fiches du groupe, pour la page de stats — et les
     /// prochains matchs d'esport, si le serveur les a.
     StatsValorant {
@@ -1431,6 +1439,97 @@ impl JeuStatut {
     }
 }
 
+// --- Le bot musique (voir PLAN-MUSIQUE.md) ---
+
+/// L'identifiant du membre virtuel « Musique », hors de la plage des
+/// comptes : c'est lui que porte l'en-tête voix des trames du bot, et que
+/// chacun règle ou coupe comme un membre.
+pub const MUSIQUE_ID: UserId = u64::MAX - 1;
+pub const MUSIQUE_NOM: &str = "Musique";
+
+/// Ce qu'on demande au bot. Tout demande « Contrôler la musique ».
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum CommandeMusique {
+    /// Le bot vient dans mon salon vocal.
+    Rejoindre,
+    /// Une adresse YouTube ou SoundCloud en fin de file — ou tout de suite.
+    Ajouter {
+        url: String,
+        #[serde(default)]
+        maintenant: bool,
+    },
+    Retirer { index: usize },
+    Lecture,
+    Pause,
+    Suivant,
+    Vider,
+    Volume { pour_cent: u8 },
+    Arreter,
+}
+
+/// Une piste, telle que le serveur l'a résolue.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Piste {
+    /// « youtube », « soundcloud ».
+    pub source: String,
+    pub url: String,
+    pub titre: String,
+    #[serde(default)]
+    pub artiste: String,
+    #[serde(default)]
+    pub duree_s: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vignette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ajoute_par: Option<String>,
+}
+
+/// L'état du bot, poussé à tout le monde à chaque changement.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EtatMusique {
+    /// Le serveur a les outils (yt-dlp, ffmpeg) ; sinon le bot n'existe pas.
+    #[serde(default)]
+    pub disponible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salon: Option<ChannelId>,
+    #[serde(default)]
+    pub lecture: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub en_cours: Option<Piste>,
+    #[serde(default)]
+    pub position_ms: u64,
+    #[serde(default)]
+    pub file: Vec<Piste>,
+    /// Volume global du bot, 0–100.
+    #[serde(default)]
+    pub volume: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub erreur: Option<String>,
+}
+
+/// Une adresse que le bot accepte : YouTube ou SoundCloud, en HTTPS,
+/// courte et sans rien d'exotique — c'est un argument de ligne de commande.
+pub fn url_musique_valide(url: &str) -> bool {
+    let url = url.trim();
+    if url.len() > 300 || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let Some(reste) = url.strip_prefix("https://") else { return false };
+    let hote = reste.split(['/', '?', '#']).next().unwrap_or("");
+    const HOTES: [&str; 8] = [
+        "www.youtube.com",
+        "youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+        "soundcloud.com",
+        "m.soundcloud.com",
+        "on.soundcloud.com",
+    ];
+    HOTES.contains(&hote)
+}
+
 /// --- Protocole voix (datagrammes), version 2 ---
 ///
 /// Chaque paquet voix a un en-tête binaire fixe suivi de la trame Opus
@@ -1856,6 +1955,22 @@ mod tests {
         let ancien = r#"{"user_id":1,"username":"k","speaking":false}"#;
         let m: Member = serde_json::from_str(ancien).unwrap();
         assert!(m.jeu.is_none() && m.riot_id.is_none() && m.rang_valorant.is_none());
+    }
+
+    /// Le bot n'accepte que YouTube et SoundCloud, en HTTPS, sans espace.
+    #[test]
+    fn les_adresses_du_bot_sont_filtrees() {
+        assert!(url_musique_valide("https://www.youtube.com/watch?v=abc"));
+        assert!(url_musique_valide("https://youtu.be/abc"));
+        assert!(url_musique_valide("https://soundcloud.com/artiste/titre"));
+        assert!(!url_musique_valide("http://www.youtube.com/watch?v=abc"));
+        assert!(!url_musique_valide("https://evil.com/?youtube.com"));
+        assert!(!url_musique_valide("https://youtube.com.evil.com/x"));
+        assert!(!url_musique_valide("https://www.youtube.com/watch?v=abc --exec rm"));
+        let cmd: ClientMsg = serde_json::from_str(r#"{"type":"musique","commande":{"op":"ajouter","url":"https://youtu.be/x"}}"#).unwrap();
+        assert!(matches!(cmd, ClientMsg::Musique { commande: CommandeMusique::Ajouter { maintenant: false, .. } }));
+        let cmd: ClientMsg = serde_json::from_str(r#"{"type":"musique","commande":{"op":"suivant"}}"#).unwrap();
+        assert!(matches!(cmd, ClientMsg::Musique { commande: CommandeMusique::Suivant }));
     }
 
     /// Une party ouverte et pas pleine, au menu, cherche des joueurs — en

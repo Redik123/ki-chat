@@ -11,6 +11,9 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "2", features = ["json"] }
+# Le bot musique : encodage Opus et chiffrement des trames, comme un membre.
+ki-opus = { path = "../ki-opus" }
+chacha20poly1305 = "0.10"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
