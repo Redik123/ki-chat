@@ -187,6 +187,31 @@ Les boutons de contrôle sont **grisés sans la permission**, avec l'aide
 « réservé aux modérateurs » ; la recherche et les playlists aussi. Le
 volume perso et le chevron restent à tous.
 
+### Le bot dans la liste des membres
+
+Un bot ne doit **jamais passer pour un membre** (demande du 2026-09-11).
+Dans la liste des membres et dans le chat, tout ce qui vient du serveur —
+« Musique » dans le salon vocal, « VALORANT » qui poste le fil de jeu —
+se distingue au premier coup d'œil :
+
+- **une pastille « BOT »** franche, à côté du nom, à la couleur d'accent,
+  et un avatar qui n'est pas une photo mais un symbole (une note pour
+  Musique, une cible pour VALORANT), sur fond distinct ;
+- **pas de couleur de rôle, pas de rang**, pas de menu « expulser » ou
+  « rôles » : le menu d'un bot n'a que ce qui le concerne ;
+- **un clic ouvre sa fiche**, comme celle d'un membre ouvre la sienne :
+  ce qu'il est (« le serveur joue de la musique dans ce salon »), ce qu'il
+  fait maintenant (piste, file, qui a ajouté, volume global), qui peut le
+  piloter (la permission, et les rôles qui l'ont), et **comment il marche**
+  en quelques lignes honnêtes — d'où vient le son, ce qui n'est jamais
+  stocké, ce que voient les clients — avec ses compteurs (pistes jouées,
+  échecs par source, temps moyen avant le premier son). La même fiche pour
+  le bot VALORANT : ce qu'il annonce, d'où viennent les données, ce qu'il
+  ne garde pas.
+
+Ça vaut pour tout bot à venir : un identifiant réservé, un nom, un
+symbole, une fiche — pas un compte.
+
 ## Droits
 
 - Nouvelle permission `CONTROL_MUSIC` (bit suivant dans `perm`), dans
@@ -275,7 +300,9 @@ tomber le serveur.
 ### M2 — La file et la bannière
 File d'attente, lecture/pause/suivant, recherche YouTube et SoundCloud,
 vignettes par le serveur, la bannière repliée et déroulée, les boutons
-grisés sans permission, l'audit. **Validation** : trente minutes de soirée
+grisés sans permission, l'audit ; et le bot qui ne ressemble plus à un
+membre — pastille « BOT », symbole, fiche au clic, pour Musique comme pour
+VALORANT. **Validation** : trente minutes de soirée
 avec des ajouts à la volée par deux modérateurs, aucun blocage, la barre
 de progression juste à la seconde, la bannière lisible en fenêtre étroite.
 
