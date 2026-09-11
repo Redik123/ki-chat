@@ -235,7 +235,7 @@ fn fetch(
 /// l'utilisateur y met — mais les dimensions et l'allocation le sont : une
 /// image de quelques kilo-octets peut sinon en réclamer plusieurs
 /// gigaoctets au décodage.
-fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
+pub(crate) fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;

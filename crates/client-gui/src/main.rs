@@ -12,6 +12,7 @@ mod partage;
 mod perf;
 mod photos;
 mod ptt;
+mod rangs;
 mod secours;
 mod secret;
 mod servers;
@@ -612,6 +613,8 @@ struct KiApp {
     fiche: Option<FicheOuverte>,
     /// Le dernier message envoyé : un toutes les 1,5 s, pas plus.
     dernier_envoi: Option<std::time::Instant>,
+    /// Les icônes de rang VALORANT, téléchargées une fois.
+    rangs: rangs::Rangs,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
@@ -968,6 +971,7 @@ impl KiApp {
             riot_message: None,
             fiche: None,
             dernier_envoi: None,
+            rangs: rangs::Rangs::new(),
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
@@ -1418,6 +1422,13 @@ impl KiApp {
         let mut open = true;
         let titre = format!("VALORANT — {}", f.username);
         let (recue, fiche) = (f.recue, f.fiche.clone());
+        if let Some(fiche) = &fiche {
+            self.rangs.preparer(ctx, fiche.rang.tier);
+            if let Some(pic) = &fiche.pic {
+                self.rangs.preparer(ctx, pic.tier);
+            }
+        }
+        let rangs = &self.rangs;
         egui::Window::new(titre)
             .id(egui::Id::new("fiche_valorant"))
             .collapsible(false)
@@ -1434,7 +1445,7 @@ impl KiApp {
                             .color(TEXT_DIM),
                     );
                 }
-                (true, Some(fiche)) => fiche_ui(ui, fiche),
+                (true, Some(fiche)) => fiche_ui(ui, fiche, rangs),
             });
         if !open {
             self.fiche = None;
@@ -1492,6 +1503,10 @@ impl KiApp {
         let mut fiches: Vec<&ki_protocol::FicheMembre> = self.stats.iter().collect();
         fiches.sort_by_key(|f| std::cmp::Reverse((f.fiche.rang.tier, f.fiche.rang.rr)));
         let recu = self.stats_recu;
+        for f in &self.stats {
+            self.rangs.preparer(ctx, f.fiche.rang.tier);
+        }
+        let rangs = &self.rangs;
         egui::Window::new("Stats VALORANT")
             .open(&mut open)
             .collapsible(false)
@@ -1533,7 +1548,7 @@ impl KiApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     stats_records(ui, &fiches);
                     ui.add_space(14.0);
-                    if let Some(qui) = stats_classement(ui, &fiches) {
+                    if let Some(qui) = stats_classement(ui, &fiches, rangs) {
                         ouvrir = Some(qui);
                     }
                     ui.add_space(14.0);
@@ -4152,7 +4167,7 @@ impl KiApp {
             let muted = if is_me { self.muted } else { m.muted };
             let (response, regarder) = member_row(
                 ui,
-                MemberRow { member: m, speaking, muted, is_me, photo },
+                MemberRow { member: m, speaking, muted, is_me, photo, rang_icone: None },
             );
             if regarder {
                 self.regarder(m);
@@ -4207,6 +4222,14 @@ impl KiApp {
                 ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.0));
                 if ui::button(ui, Icon::Screen, "Fiche VALORANT").clicked() {
                     self.ouvrir_fiche(m.user_id, m.username.clone());
+                }
+                // Un admin délie le compte d'un autre — audité côté serveur.
+                if !is_me
+                    && self.can(ki_protocol::perm::MANAGE_SERVER)
+                    && ui::tinted_button(ui, Some(Icon::Close), "Délier son compte Riot", Tone::Danger).clicked()
+                {
+                    self.send(ClientMsg::DelierRiot { user_id: Some(m.user_id) });
+                    ui.close();
                 }
             }
             // Le volume ne concerne que quelqu'un qu'on peut entendre.
@@ -4444,6 +4467,10 @@ impl KiApp {
                         };
                         let speaking =
                             if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
+                        if let Some(tier) = palier_de(m) {
+                            self.rangs.preparer(ui.ctx(), tier);
+                        }
+                        let rang_icone = palier_de(m).and_then(|t| self.rangs.texture(t));
                         let photo = self.avatar_of(m.user_id);
                         // « Muet » n'a de sens qu'en vocal : hors salon, un
                         // micro coupé résiduel n'apprend rien à personne.
@@ -4457,6 +4484,7 @@ impl KiApp {
                                 muted,
                                 is_me,
                                 photo,
+                                rang_icone,
                             },
                         );
                         if regarder {
@@ -4481,8 +4509,13 @@ impl KiApp {
                         });
                         ui.add_space(2.0);
                         for m in &offline {
+                            if let Some(tier) = palier_de(m) {
+                                self.rangs.preparer(ui.ctx(), tier);
+                            }
                             let photo = self.avatar_of(m.user_id);
-                            let (response, _) = member_row(ui, MemberRow::offline(m, photo));
+                            let mut ligne = MemberRow::offline(m, photo);
+                            ligne.rang_icone = palier_de(m).and_then(|t| self.rangs.texture(t));
+                            let (response, _) = member_row(ui, ligne);
                             self.member_menu(response, m, false);
                         }
                     }
@@ -8960,6 +8993,17 @@ struct MemberRow<'a> {
     muted: bool,
     is_me: bool,
     photo: Option<&'a egui::TextureHandle>,
+    /// L'icône de son rang, si elle est prête.
+    rang_icone: Option<&'a egui::TextureHandle>,
+}
+
+/// Le palier à montrer pour un membre : sa fiche s'il a lié son compte,
+/// sinon ce que sa présence dit — s'il la partage et qu'il est là.
+fn palier_de(member: &Member) -> Option<u8> {
+    member
+        .rang_valorant
+        .or_else(|| member.jeu.as_ref().filter(|_| member.online).map(|j| j.rang))
+        .filter(|t| *t >= 3)
 }
 
 impl<'a> MemberRow<'a> {
@@ -8972,6 +9016,7 @@ impl<'a> MemberRow<'a> {
             muted: false,
             is_me: false,
             photo,
+            rang_icone: None,
         }
     }
 }
@@ -9136,13 +9181,22 @@ fn stats_carte(ui: &mut egui::Ui, titre: &str, valeur: &str, teinte: Color32, qu
 
 /// Le classement : une ligne par membre lié. Rend le membre dont on a
 /// demandé la fiche.
-fn stats_classement(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) -> Option<(UserId, String)> {
+fn stats_classement(
+    ui: &mut egui::Ui,
+    fiches: &[&ki_protocol::FicheMembre],
+    rangs: &rangs::Rangs,
+) -> Option<(UserId, String)> {
     use ki_protocol::nom_de_rang;
     let mut ouvrir = None;
+    let maintenant = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let semaine = 7 * 24 * 3600 * 1000;
     ui.label(RichText::new("Classement").strong().size(13.5));
     ui.add_space(4.0);
     egui::Grid::new("stats_classement").striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-        for titre in ["#", "Joueur", "Rang", "Dernier", "Pic", "Bilan récent", "K/D", "Tête", "Niveau", ""] {
+        for titre in ["#", "Joueur", "Rang", "Dernier", "7 jours", "Pic", "Bilan récent", "K/D", "Tête", "Niveau", ""] {
             ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
         }
         ui.end_row();
@@ -9160,7 +9214,12 @@ fn stats_classement(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) -> 
             } else {
                 nom_de_rang(0)
             };
-            ui.label(RichText::new(rang).color(couleur_de_rang(r.tier)).strong());
+            ui.horizontal(|ui| {
+                if let Some(icone) = rangs.texture(r.tier) {
+                    ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(18.0)));
+                }
+                ui.label(RichText::new(rang).color(couleur_de_rang(r.tier)).strong());
+            });
             let (delta, teinte) = if r.delta > 0 {
                 (format!("+{}", r.delta), SPEAK)
             } else if r.delta < 0 {
@@ -9169,6 +9228,27 @@ fn stats_classement(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) -> 
                 ("—".to_string(), TEXT_FAINT)
             };
             ui.label(RichText::new(delta).color(teinte));
+            // Les RR gagnés ou perdus sur sept jours, d'après les derniers
+            // classés connus — dix au plus, donc une semaine chargée peut
+            // en montrer moins.
+            let sept_jours: i32 = f
+                .fiche
+                .historique_rr
+                .iter()
+                .filter(|p| maintenant.saturating_sub(p.date) < semaine)
+                .map(|p| p.delta)
+                .sum();
+            let joue = f.fiche.historique_rr.iter().any(|p| maintenant.saturating_sub(p.date) < semaine);
+            let (texte, teinte) = if !joue {
+                ("—".to_string(), TEXT_FAINT)
+            } else if sept_jours > 0 {
+                (format!("+{sept_jours}"), SPEAK)
+            } else if sept_jours < 0 {
+                (sept_jours.to_string(), DANGER)
+            } else {
+                ("±0".to_string(), TEXT_DIM)
+            };
+            ui.label(RichText::new(texte).color(teinte));
             match &f.fiche.pic {
                 Some(p) if p.tier >= 3 => {
                     ui.label(RichText::new(nom_de_rang(p.tier)).color(couleur_de_rang(p.tier)));
@@ -9254,8 +9334,45 @@ fn il_y_a(ms: u64) -> String {
     }
 }
 
+/// La courbe des RR sur les derniers classés, du plus ancien au plus
+/// récent : une ligne, un point par match, vert quand ça monte, rouge
+/// quand ça descend. L'échelle est celle du palier — cent RR par rang.
+fn courbe_rr(ui: &mut egui::Ui, points: &[ki_protocol::PointRR]) {
+    let mut serie: Vec<&ki_protocol::PointRR> = points.iter().collect();
+    serie.sort_by_key(|p| p.date);
+    if serie.len() < 2 {
+        return;
+    }
+    let valeur = |p: &ki_protocol::PointRR| p.tier as f32 * 100.0 + p.rr as f32;
+    let (min, max) = serie.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(valeur(p)), hi.max(valeur(p))));
+    let (min, max) = if max - min < 20.0 { (min - 10.0, max + 10.0) } else { (min, max) };
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(320.0), 56.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(6), theme::BG_DEEP);
+    let interieur = rect.shrink2(Vec2::new(10.0, 8.0));
+    let pos = |i: usize, p: &ki_protocol::PointRR| {
+        let x = interieur.left() + interieur.width() * i as f32 / (serie.len() - 1) as f32;
+        let y = interieur.bottom() - interieur.height() * (valeur(p) - min) / (max - min);
+        egui::pos2(x, y)
+    };
+    for (i, paire) in serie.windows(2).enumerate() {
+        let teinte = if paire[1].delta >= 0 { SPEAK } else { DANGER };
+        painter.line_segment([pos(i, paire[0]), pos(i + 1, paire[1])], egui::Stroke::new(2.0_f32, teinte));
+    }
+    for (i, p) in serie.iter().enumerate() {
+        painter.circle_filled(pos(i, p), 3.0, if p.delta >= 0 { SPEAK } else { DANGER });
+    }
+    painter.text(
+        egui::pos2(interieur.right(), interieur.top() - 4.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{} → {} RR", serie[0].rr, serie[serie.len() - 1].rr),
+        egui::FontId::proportional(10.0),
+        TEXT_FAINT,
+    );
+}
+
 /// Le corps de la fiche : ce que le serveur sait, et rien de plus.
-fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant) {
+fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant, rangs: &rangs::Rangs) {
     use ki_protocol::nom_de_rang;
     ui.horizontal(|ui| {
         ui.label(RichText::new(&fiche.riot_id).strong().size(16.0));
@@ -9267,9 +9384,13 @@ fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant) {
     });
     ui.add_space(6.0);
 
-    // Le rang : gros, à la couleur du palier, avec le dernier mouvement.
+    // Le rang : l'icône du palier, le nom en gros à sa couleur, le
+    // dernier mouvement.
     let r = &fiche.rang;
     ui.horizontal(|ui| {
+        if let Some(icone) = rangs.texture(r.tier) {
+            ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(30.0)));
+        }
         let nom = nom_de_rang(r.tier);
         ui.label(RichText::new(&nom).color(couleur_de_rang(r.tier)).strong().size(20.0));
         if r.tier >= 3 {
@@ -9293,10 +9414,12 @@ fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant) {
     }
 
     // Les derniers mouvements de RR, du plus récent au plus ancien : vert
-    // quand ça monte, rouge quand ça descend, la carte au survol.
+    // quand ça monte, rouge quand ça descend, la carte au survol — et la
+    // courbe qui va avec.
     if !fiche.historique_rr.is_empty() {
         ui.add_space(10.0);
         ui.label(RichText::new("Derniers classés").color(TEXT_DIM).size(11.5));
+        courbe_rr(ui, &fiche.historique_rr);
         ui.horizontal_wrapped(|ui| {
             for p in &fiche.historique_rr {
                 let (texte, teinte) = if p.delta > 0 {
@@ -9341,7 +9464,7 @@ fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant) {
 }
 
 fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
-    let MemberRow { member, speaking, muted, is_me, photo } = row;
+    let MemberRow { member, speaking, muted, is_me, photo, rang_icone } = row;
     let height = 38.0;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
@@ -9401,9 +9524,15 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         apres_nom += 18.0;
     }
 
-    // Son rang VALORANT, s'il a lié son compte : « Or 2 » en petit après
-    // le pseudo, à la couleur du palier. Non classé ne montre rien.
-    if let Some(tier) = member.rang_valorant.filter(|t| *t >= 3) {
+    // Son rang VALORANT — de sa fiche, ou de sa présence : l'icône du
+    // palier quand elle est là, puis « Or 2 » en petit, à la couleur du
+    // palier. Non classé ne montre rien.
+    if let Some(tier) = palier_de(member) {
+        if let Some(icone) = rang_icone {
+            let cadre = egui::Rect::from_min_size(egui::pos2(apres_nom, name_y - 8.0), Vec2::splat(16.0));
+            painter.image(icone.id(), cadre, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            apres_nom += 18.0;
+        }
         let galley = ui.fonts(|f| {
             f.layout_no_wrap(
                 ki_protocol::nom_de_rang(tier),

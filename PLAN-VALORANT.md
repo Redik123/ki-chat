@@ -197,8 +197,11 @@ de RR, cinq derniers matchs résumés à la ligne du membre. Le roster porte
 `riot_id` et `rang_valorant` ; le pseudo prend son rang en petit, à la
 couleur du palier ; clic droit → « Fiche VALORANT » ouvre la fiche depuis
 le cache, sans requête. Rafraîchissement toutes les trente minutes pour les
-membres liés en ligne. Délier : soi-même, ou un admin (audité). Reste à
-faire, en V4 : les icônes de rang de valorant-api.com à la place du texte.
+membres liés en ligne. Délier : soi-même, ou un admin (audité). Les
+icônes de rang de valorant-api.com sont venues en 0.1.33
+(`client-gui/src/rangs.rs`, cache disque, texte coloré en attendant),
+avec le palier lu dans la présence pour les non-liés et « Délier son
+compte Riot » pour les admins au clic droit.
 **Validation** : trente fiches ouvertes en rafale ne coûtent aucune requête
 (elles viennent du cache) ; sans clé, la liaison répond « demande à
 l'admin » et rien d'autre ne change.
@@ -214,7 +217,8 @@ leur puuid dans le match, relus aussitôt, attendus deux minutes.
 `fil.json` note ce qui a été annoncé ; première fois : l'existant est
 réputé connu. Modes d'arcade et matchs de plus de six heures : notés,
 pas annoncés. Le classement du groupe est la page Stats (0.1.33).
-Reste : l'évolution de la semaine et une courbe de RR dans la fiche.
+L'évolution de la semaine (colonne « 7 jours » de la page Stats) et la
+courbe de RR de la fiche sont venues dans la même version.
 **Validation** : une partie finie apparaît en moins de trois minutes,
 sans doublon — à vérifier sur une vraie soirée.
 

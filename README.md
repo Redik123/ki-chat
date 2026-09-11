@@ -301,8 +301,17 @@ et l'annonce les attend, deux minutes au plus, pour ne faire qu'un
 message — et si le groupe jouait des deux côtés, chaque ligne dit son
 issue. Les modes d'arcade ne s'annoncent pas, un match fini depuis plus
 de six heures non plus, et ce qui a été annoncé est noté dans
-`data/valorant/fil.json` : un redémarrage ne rejoue pas la soirée. La
-suite (icônes de rang) est dans le plan.
+`data/valorant/fil.json` : un redémarrage ne rejoue pas la soirée.
+
+Les **icônes de rang** viennent de valorant-api.com (miroir communautaire
+des ressources du jeu, sans clé) : vingt-cinq petits PNG téléchargés une
+fois sur un fil à part et gardés à côté des réglages, montrés à côté du
+pseudo, dans la fiche et sur la page Stats ; tant qu'ils ne sont pas là,
+le nom du rang en couleur tient la place. Un membre qui partage sa
+présence sans avoir lié son compte montre quand même son palier, la
+présence le porte. La fiche trace la **courbe des RR** des derniers
+classés, la page Stats compte les RR de la semaine, et un admin peut
+délier le compte Riot d'un membre au clic droit, ce qui s'audite.
 
 ## Sécurité
 
