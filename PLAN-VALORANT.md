@@ -216,8 +216,8 @@ puis une ligne par membre du groupe, RR compris en classé
 leur puuid dans le match, relus aussitôt, attendus deux minutes.
 `fil.json` note ce qui a été annoncé ; première fois : l'existant est
 réputé connu. Modes d'arcade et matchs de plus de six heures : notés,
-pas annoncés. Le classement du groupe est la page Stats (0.1.33).
-L'évolution de la semaine (colonne « 7 jours » de la page Stats) et la
+pas annoncés. Le classement du groupe est la page Valorant (0.1.33).
+L'évolution de la semaine (colonne « 7 jours » de la page Valorant) et la
 courbe de RR de la fiche sont venues dans la même version.
 **Validation** : une partie finie apparaît en moins de trois minutes,
 sans doublon — à vérifier sur une vraie soirée.
@@ -225,7 +225,7 @@ sans doublon — à vérifier sur une vraie soirée.
 ### V4 — Confort — en partie (0.1.33)
 Livré : « cherche des joueurs » lu dans la party ouverte (affichage
 seulement) ; esports par HenrikDev (`/valorant/v1/esports/schedule`, relu
-toutes les heures, vingt matchs à venir ou en cours sur la page Stats) ;
+toutes les heures, vingt matchs à venir ou en cours sur la page Valorant) ;
 console dès la liaison (HenrikDev `platform=console`) ; compteurs
 HenrikDev dans `/diag-resume` ; et la boutique du jour perso
 (`client-gui/src/boutique.rs`) : lockfile → session → `/entitlements/v1/token`

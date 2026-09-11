@@ -48,8 +48,13 @@ enum Etat {
     Vide,
     EnCours,
     Prete(Boutique),
-    Erreur(String),
+    /// Ratée, et depuis quand : on réessaie tout seul au bout d'un moment
+    /// — VALORANT vient peut-être d'être lancé.
+    Erreur(String, std::time::Instant),
 }
+
+/// Le temps avant de retenter après un échec, tant que la page est ouverte.
+const NOUVEL_ESSAI: Duration = Duration::from_secs(45);
 
 /// La lecture, et ce qu'elle a donné.
 pub struct Lecteur {
@@ -90,7 +95,7 @@ impl Lecteur {
                     }
                     Err(err) => {
                         ki_voice::journal(format!("boutique VALORANT : {err:#}"));
-                        Etat::Erreur(format!("{err:#}"))
+                        Etat::Erreur(format!("{err:#}"), std::time::Instant::now())
                     }
                 };
                 ctx.request_repaint();
@@ -107,7 +112,8 @@ impl Lecteur {
             match &*etat {
                 Etat::Vide => true,
                 Etat::Prete(b) => b.expire_ms <= maintenant,
-                _ => false,
+                Etat::Erreur(_, depuis) => depuis.elapsed() >= NOUVEL_ESSAI,
+                Etat::EnCours => false,
             }
         };
         if relire {
@@ -118,8 +124,9 @@ impl Lecteur {
             Etat::Vide | Etat::EnCours => {
                 ui.label(RichText::new("lecture dans ton client Riot…").color(TEXT_DIM).size(11.5));
             }
-            Etat::Erreur(e) => {
+            Etat::Erreur(e, _) => {
                 ui.label(RichText::new(format!("indisponible : {e}")).color(TEXT_DIM).size(11.5));
+                ui.ctx().request_repaint_after(NOUVEL_ESSAI);
                 if ui.button("Réessayer").clicked() {
                     *etat = Etat::Vide;
                 }

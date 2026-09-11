@@ -280,7 +280,7 @@ les fiches des membres liés en ligne toutes les trente minutes et se tient
 à vingt requêtes par minute, sous les trente de la clé. Sans clé, la
 liaison répond « demande à l'admin » et tout le reste fonctionne.
 
-Et la page **Stats**, à côté de « Chercher » : le groupe sur VALORANT
+Et la page **Valorant**, à côté de « Chercher » : le groupe sur VALORANT
 d'après ces fiches — trois records (plus haut rang, plus gros gain de RR
 au dernier match, meilleur K/D récent), le classement des membres liés
 (rang et RR, dernier mouvement, pic, bilan et ratio des derniers matchs,
@@ -306,23 +306,23 @@ de six heures non plus, et ce qui a été annoncé est noté dans
 Les **icônes de rang** viennent de valorant-api.com (miroir communautaire
 des ressources du jeu, sans clé) : vingt-cinq petits PNG téléchargés une
 fois sur un fil à part et gardés à côté des réglages, montrés à côté du
-pseudo, dans la fiche et sur la page Stats ; tant qu'ils ne sont pas là,
+pseudo, dans la fiche et sur la page Valorant ; tant qu'ils ne sont pas là,
 le nom du rang en couleur tient la place. Un membre qui partage sa
 présence sans avoir lié son compte montre quand même son palier, la
 présence le porte. La fiche trace la **courbe des RR** des derniers
-classés, la page Stats compte les RR de la semaine, et un admin peut
+classés, la page Valorant compte les RR de la semaine, et un admin peut
 délier le compte Riot d'un membre au clic droit, ce qui s'audite.
 
 Deux compléments : une party ouverte et pas pleine, au menu, se lit
 « cherche des joueurs » sous le pseudo — affichage seulement, ki-chat ne
-rejoint jamais une party à votre place ; et la page Stats finit par les
+rejoint jamais une party à votre place ; et la page Valorant finit par les
 **prochains matchs d'esport** (VCT et ligues, en cours ou à venir), que le
 serveur relit chez HenrikDev une fois par heure tant que quelqu'un est
 connecté. Le résumé des diagnostics (`/diag-resume`) dit ce que le service
 coûte : requêtes depuis le démarrage, refus 429, erreurs, annonces en
 attente.
 
-Enfin la **boutique du jour**, dans ⚙ → Jeu : les quatre skins du jour,
+Enfin la **boutique du jour**, en tête de la page Valorant : les quatre skins du jour,
 leur prix en VP, l'heure du renouvellement. Elle se lit dans son propre
 client Riot, sur ce PC, avec ses jetons qui ne quittent pas la machine —
 ni journalisés, ni gardés — et le nom et l'image de chaque skin viennent

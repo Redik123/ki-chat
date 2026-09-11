@@ -1512,9 +1512,12 @@ impl KiApp {
         for f in &self.stats {
             self.rangs.preparer(ctx, f.fiche.rang.tier);
         }
+        // La boutique est à soi : elle sort de `self` le temps de la fenêtre,
+        // les fiches et les icônes n'y sont lues qu'en lecture.
+        let mut ma_boutique = std::mem::take(&mut self.boutique);
         let rangs = &self.rangs;
         let esports = &self.esports;
-        egui::Window::new("Stats VALORANT")
+        egui::Window::new("VALORANT")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -1541,31 +1544,40 @@ impl KiApp {
                      chacun dans ses matchs, jamais celles des adversaires",
                 );
                 ui.add_space(8.0);
-                if !recu {
-                    ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
-                    return;
-                }
-                if fiches.is_empty() {
-                    ui.label(
-                        RichText::new("personne n'a encore lié son compte Riot — ⚙ → Jeu → Compte Riot")
-                            .color(TEXT_DIM),
-                    );
-                    ui.add_space(14.0);
-                    stats_esports(ui, esports);
-                    return;
-                }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    stats_records(ui, &fiches);
+                    // Sa boutique du jour d'abord : la seule partie de la page
+                    // qui est à soi — lue dans son propre client Riot.
+                    ui.label(RichText::new("Ma boutique du jour").strong().size(13.5));
+                    ui::hint(
+                        ui,
+                        "lue dans ton client Riot, sur ce PC, pour toi seul — rien ne part vers le \
+                         serveur ; il faut VALORANT ouvert",
+                    );
+                    ma_boutique.ui(ui);
                     ui.add_space(14.0);
-                    if let Some(qui) = stats_classement(ui, &fiches, rangs) {
-                        ouvrir = Some(qui);
+                    if !recu {
+                        ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
+                        return;
                     }
-                    ui.add_space(14.0);
-                    stats_matchs(ui, &fiches);
+                    if fiches.is_empty() {
+                        ui.label(
+                            RichText::new("personne n'a encore lié son compte Riot — ⚙ → Jeu → Compte Riot")
+                                .color(TEXT_DIM),
+                        );
+                    } else {
+                        stats_records(ui, &fiches);
+                        ui.add_space(14.0);
+                        if let Some(qui) = stats_classement(ui, &fiches, rangs) {
+                            ouvrir = Some(qui);
+                        }
+                        ui.add_space(14.0);
+                        stats_matchs(ui, &fiches);
+                    }
                     ui.add_space(14.0);
                     stats_esports(ui, esports);
                 });
             });
+        self.boutique = ma_boutique;
         if actualiser {
             self.ouvrir_stats();
         }
@@ -3880,7 +3892,7 @@ impl KiApp {
                     if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
                         self.ouvrir_recherche();
                     }
-                    if ui::button(ui, Icon::Target, "Stats").clicked() {
+                    if ui::button(ui, Icon::Target, "Valorant").clicked() {
                         self.ouvrir_stats();
                     }
                     if self.any_admin_power() && ui::button(ui, Icon::Crown, "Admin").clicked() {
@@ -6439,15 +6451,8 @@ impl KiApp {
                                 ui.label(RichText::new(message).color(teinte).size(11.5));
                             }
 
-                            // La boutique du jour : lue dans son propre client
-                            // Riot, pour soi seul — rien ne part vers le serveur.
-                            ui.add_space(12.0);
-                            ui::group_title(ui, Icon::Target, "Boutique du jour");
-                            ui::hint(
-                                ui,
-                                "lue dans ton client Riot, sur ce PC, avec ses jetons qui ne quittent                                  pas la machine — pour toi seul, rien ne part vers le serveur. Il faut                                  VALORANT ouvert.",
-                            );
-                            self.boutique.ui(ui);
+                            ui.add_space(8.0);
+                            ui::hint(ui, "ta boutique du jour est dans la page Valorant, à côté de « Chercher »");
                         }
 
                         if let Some(info) = self.info.clone() {
