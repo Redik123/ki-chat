@@ -306,7 +306,7 @@ VALORANT. **Validation** : trente minutes de soirée
 avec des ajouts à la volée par deux modérateurs, aucun blocage, la barre
 de progression juste à la seconde, la bannière lisible en fenêtre étroite.
 
-### M3 — Les playlists et le confort — en test (2026-09-11)
+### M3 — Les playlists et le confort — livré (0.1.34, 2026-09-11)
 Playlists du groupe, « les membres peuvent ajouter », glisser-déposer dans
 la file, pause automatique quand le salon se vide, reprise après
 redémarrage. **Validation** : une playlist de vingt pistes enregistrée,
