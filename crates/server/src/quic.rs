@@ -51,8 +51,7 @@ pub async fn run(
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?,
     ));
-    let transport = Arc::get_mut(&mut server_config.transport)
-        .expect("transport config unique");
+    let transport = Arc::get_mut(&mut server_config.transport).expect("transport config unique");
     // Quinze secondes d'inactivité tolérée, deux de battement — voir le
     // client, qui porte le raisonnement. Ici l'enjeu est le **fantôme** : un
     // client parti brutalement restait trente secondes dans la liste des
@@ -131,10 +130,7 @@ where
     Ok(Some(String::from_utf8(buf)?))
 }
 
-async fn handle_connection(
-    state: Arc<AppState>,
-    incoming: quinn::Incoming,
-) -> anyhow::Result<()> {
+async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> anyhow::Result<()> {
     let conn = incoming.await.context("poignée de main QUIC")?;
     let peer = conn.remote_address().ip();
 
@@ -170,12 +166,18 @@ async fn handle_connection(
         .context("délai d'authentification dépassé")?
         .context("flux fermé")?
         .unwrap_or_default();
-    let Ok(ClientMsg::Auth { username, password, invite }) =
-        serde_json::from_str::<ClientMsg>(&first)
+    let Ok(ClientMsg::Auth {
+        username,
+        password,
+        invite,
+    }) = serde_json::from_str::<ClientMsg>(&first)
     else {
-        send_direct(&mut send, &ServerMsg::Error {
-            message: "le premier message doit être auth".into(),
-        })
+        send_direct(
+            &mut send,
+            &ServerMsg::Error {
+                message: "le premier message doit être auth".into(),
+            },
+        )
         .await;
         return Ok(());
     };
@@ -186,18 +188,35 @@ async fn handle_connection(
         || username.chars().count() > ki_protocol::MAX_USERNAME
         || username.chars().any(|c| c.is_control())
     {
-        send_direct(&mut send, &ServerMsg::Error { message: "pseudo invalide".into() }).await;
+        send_direct(
+            &mut send,
+            &ServerMsg::Error {
+                message: "pseudo invalide".into(),
+            },
+        )
+        .await;
         return Ok(());
     }
     if password.len() > ki_protocol::MAX_PASSWORD {
-        send_direct(&mut send, &ServerMsg::Error { message: "mot de passe trop long".into() })
-            .await;
+        send_direct(
+            &mut send,
+            &ServerMsg::Error {
+                message: "mot de passe trop long".into(),
+            },
+        )
+        .await;
         return Ok(());
     }
-    if invite.as_ref().is_some_and(|c| c.len() > ki_protocol::MAX_INVITE) {
-        send_direct(&mut send, &ServerMsg::Error {
-            message: "code d'invitation invalide".into(),
-        })
+    if invite
+        .as_ref()
+        .is_some_and(|c| c.len() > ki_protocol::MAX_INVITE)
+    {
+        send_direct(
+            &mut send,
+            &ServerMsg::Error {
+                message: "code d'invitation invalide".into(),
+            },
+        )
         .await;
         return Ok(());
     }
@@ -205,12 +224,15 @@ async fn handle_connection(
     // tentative bloquée ne coûte alors qu'une recherche dans une table,
     // là où un Argon2id coûte de la mémoire et du temps par essai.
     if let Err(wait) = state.throttle.check(peer, &username) {
-        send_direct(&mut send, &ServerMsg::Error {
-            message: format!(
-                "trop de tentatives — réessaie dans {} s",
-                wait.as_secs().max(1)
-            ),
-        })
+        send_direct(
+            &mut send,
+            &ServerMsg::Error {
+                message: format!(
+                    "trop de tentatives — réessaie dans {} s",
+                    wait.as_secs().max(1)
+                ),
+            },
+        )
         .await;
         tracing::warn!("tentative bloquée : {username} depuis {peer}");
         return Ok(());
@@ -246,9 +268,12 @@ async fn handle_connection(
     // trace : on consigne ici quel code a créé quel compte, depuis quelle
     // adresse. C'est la contrepartie de la permanence.
     if let Some(code) = &auth.created_with {
-        state
-            .audit
-            .record("invite.use", &username, "", &format!("{code} depuis {peer}"));
+        state.audit.record(
+            "invite.use",
+            &username,
+            "",
+            &format!("{code} depuis {peer}"),
+        );
     }
     // Une session déjà ouverte sur ce compte cède la place à la nouvelle.
     //
@@ -330,16 +355,23 @@ async fn handle_connection(
     });
     tracing::info!("connexion : {username} (id {user_id})");
     // La liste du serveur vient de changer, pour tout le monde.
-    state.broadcast_all(&ServerMsg::UserJoined { user_id, username: username.clone() });
+    state.broadcast_all(&ServerMsg::UserJoined {
+        user_id,
+        username: username.clone(),
+    });
     // Le nouveau venu reçoit la liste **entière** : il n'a rien à mettre à
     // jour, il part de rien. Les autres n'ont besoin que de la fiche qui
     // change — la leur n'a pas bougé, ni celle des deux cents comptes hors
     // ligne que porte le roster.
-    let _ = tx.send(ServerMsg::Members { members: state.roster() });
+    let _ = tx.send(ServerMsg::Members {
+        members: state.roster(),
+    });
     if let Some(member) = state.member_of(user_id) {
         state.broadcast_all_except(user_id, &ServerMsg::MemberUpdate { member });
     }
-    let _ = tx.send(ServerMsg::MusiqueEtat { etat: state.musique.etat() });
+    let _ = tx.send(ServerMsg::MusiqueEtat {
+        etat: state.musique.etat(),
+    });
 
     // Tâche d'écriture : verse sur le flux de contrôle des lignes **déjà
     // prêtes**.
@@ -361,8 +393,12 @@ async fn handle_connection(
 
     // Tâche vidéo : les trames du partage d'écran arrivent chacune dans son
     // flux QUIC unidirectionnel — ingestion durcie, puis relais.
-    let stream_in =
-        tokio::spawn(stream_ingest_task(state.clone(), conn.clone(), user_id, tx.clone()));
+    let stream_in = tokio::spawn(stream_ingest_task(
+        state.clone(),
+        conn.clone(),
+        user_id,
+        tx.clone(),
+    ));
 
     // Boucle de contrôle.
     //
@@ -383,7 +419,9 @@ async fn handle_connection(
     let mut budget = crate::state::TokenBucket::new(100.0, 200.0);
     while let Ok(Some(line)) = read_line(&mut lines).await {
         let Ok(msg) = serde_json::from_str::<ClientMsg>(&line) else {
-            let _ = tx.send(ServerMsg::Error { message: "message invalide".into() });
+            let _ = tx.send(ServerMsg::Error {
+                message: "message invalide".into(),
+            });
             continue;
         };
         if !budget.take() {
@@ -420,7 +458,9 @@ async fn stream_ingest_task(
     // 90 trames/s : au-delà du 60 fps + rattrapages, c'est un arrosage.
     let mut budget = crate::state::TokenBucket::new(90.0, 120.0);
     loop {
-        let Ok(mut uni) = conn.accept_uni().await else { return };
+        let Ok(mut uni) = conn.accept_uni().await else {
+            return;
+        };
         // Un compte qui ne diffuse rien n'a rien à envoyer ici : coupé sans
         // lire un octet.
         if state.streams.stream_of(user_id).is_none() {
@@ -439,13 +479,17 @@ async fn stream_ingest_task(
         )
         .await;
         let Ok(Ok(bytes)) = lu else { continue };
-        let Some(header) = ki_protocol::parse_media_header(&bytes) else { continue };
+        let Some(header) = ki_protocol::parse_media_header(&bytes) else {
+            continue;
+        };
         if let crate::stream::Ingest::Ok { ask_idr: true } =
             state.streams.ingest(user_id, &header, bytes)
         {
             // Un spectateur (nouveau, lent, ou sacrifié par le plafond
             // mémoire) attend une trame décodable : prier le streamer.
-            let _ = tx.send(ServerMsg::KeyframeNeeded { stream_id: header.stream_id });
+            let _ = tx.send(ServerMsg::KeyframeNeeded {
+                stream_id: header.stream_id,
+            });
         }
     }
 }
@@ -494,7 +538,9 @@ async fn voice_task(
         if dat.len() > ki_protocol::VOICE_MAX_PACKET {
             continue;
         }
-        let Some(pkt) = parse_voice_packet(&dat) else { continue };
+        let Some(pkt) = parse_voice_packet(&dat) else {
+            continue;
+        };
         // Anti-usurpation : l'en-tête doit porter l'identité de la connexion.
         if pkt.id != user_id || pkt.payload.is_empty() {
             continue;
@@ -538,7 +584,9 @@ async fn voice_task(
             if expected >= 50 {
                 let loss_pct =
                     (100.0 * (1.0 - received as f64 / expected as f64)).clamp(0.0, 100.0);
-                let _ = tx.send(ServerMsg::NetQuality { loss_pct: loss_pct as f32 });
+                let _ = tx.send(ServerMsg::NetQuality {
+                    loss_pct: loss_pct as f32,
+                });
                 if loss_pct >= 5.0 {
                     tracing::info!("pertes montantes de l'utilisateur {user_id} : {loss_pct:.1} %");
                 }
@@ -598,7 +646,12 @@ pub fn load_or_create_cert(
 // ---------------------------------------------------------------------------
 
 fn current_channel(state: &Arc<AppState>, user_id: UserId) -> Option<ki_protocol::ChannelId> {
-    let channel = state.users.lock().unwrap().get(&user_id).and_then(|u| u.channel)?;
+    let channel = state
+        .users
+        .lock()
+        .unwrap()
+        .get(&user_id)
+        .and_then(|u| u.channel)?;
     // Revérifié à chaque usage, et pas seulement au `Join` : ce champ a été
     // posé par un `Join` autrefois valide, qu'un changement de rôle ou une
     // restriction posée depuis a pu périmer. C'est ce qui protège d'un coup
@@ -615,10 +668,14 @@ fn require(
 ) -> bool {
     let ok = {
         let users = state.users.lock().unwrap();
-        users.get(&user_id).is_some_and(|u| ki_protocol::perm::has(u.perms, need))
+        users
+            .get(&user_id)
+            .is_some_and(|u| ki_protocol::perm::has(u.perms, need))
     };
     if !ok {
-        let _ = tx.send(ServerMsg::Error { message: "tu n'as pas cette permission".into() });
+        let _ = tx.send(ServerMsg::Error {
+            message: "tu n'as pas cette permission".into(),
+        });
     }
     ok
 }
@@ -626,7 +683,9 @@ fn require(
 /// Consomme un jeton du budget d'entrées et sorties de vocal.
 fn take_voice_budget(state: &Arc<AppState>, user_id: UserId) -> bool {
     let mut users = state.users.lock().unwrap();
-    users.get_mut(&user_id).is_some_and(|u| u.voice_budget.take())
+    users
+        .get_mut(&user_id)
+        .is_some_and(|u| u.voice_budget.take())
 }
 
 /// Rang d'un connecté, et rang associé à un compte (même hors ligne).
@@ -661,7 +720,10 @@ fn outranks_account(
 /// Identifiant d'un compte **connecté**, ou `None` s'il ne l'est pas.
 fn id_of_connected(state: &Arc<AppState>, target: &str) -> Option<UserId> {
     let users = state.users.lock().unwrap();
-    users.iter().find(|(_, u)| u.username == target).map(|(id, _)| *id)
+    users
+        .iter()
+        .find(|(_, u)| u.username == target)
+        .map(|(id, _)| *id)
 }
 
 /// Pose ou lève une sanction vocale : sur le compte d'abord, en mémoire
@@ -710,8 +772,12 @@ fn sanctionner_la_voix(
             (_, Some(d)) => ("voice.deafen", d),
             _ => return,
         };
-        state.audit.record(quoi, &acteur, &cible, if pose { "posé" } else { "levé" });
-        state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+        state
+            .audit
+            .record(quoi, &acteur, &cible, if pose { "posé" } else { "levé" });
+        state.broadcast_all(&ServerMsg::Members {
+            members: state.roster(),
+        });
     });
 }
 
@@ -724,7 +790,10 @@ fn send_admin_info(state: &Arc<AppState>, tx: &crate::state::Outbox) {
             u.online = connected.contains_key(&u.user_id);
         }
     }
-    let _ = tx.send(ServerMsg::AdminInfo { users, invites: state.accounts.invites() });
+    let _ = tx.send(ServerMsg::AdminInfo {
+        users,
+        invites: state.accounts.invites(),
+    });
 }
 /// Résume un changement d'identité pour le journal d'audit. Le logo n'y
 /// entre que par sa présence : y recopier plusieurs dizaines de kilo-octets
@@ -768,7 +837,10 @@ fn apply_server_info(
             // l'en-tête : il redistribue ce blob à tous les membres, il
             // n'a pas le droit de leur transmettre n'importe quoi.
             ki_protocol::check_thumbnail(&data)?;
-            state.meta.set_icon(Some(data)).map_err(|e| format!("{e:#}"))?;
+            state
+                .meta
+                .set_icon(Some(data))
+                .map_err(|e| format!("{e:#}"))?;
         }
     }
     Ok(())
@@ -783,7 +855,9 @@ fn handle_msg(
 ) {
     match msg {
         ClientMsg::Auth { .. } => {
-            let _ = tx.send(ServerMsg::Error { message: "déjà authentifié".into() });
+            let _ = tx.send(ServerMsg::Error {
+                message: "déjà authentifié".into(),
+            });
         }
         ClientMsg::Join { channel } => {
             // Ouvrir un salon textuel ne concerne que celui qui le lit :
@@ -795,7 +869,9 @@ fn handle_msg(
             if !state.channel_is(channel, ki_protocol::ChannelKind::Text)
                 || !state.can_view(user_id, channel)
             {
-                let _ = tx.send(ServerMsg::Error { message: "salon textuel inconnu".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "salon textuel inconnu".into(),
+                });
                 return;
             }
             let mut users = state.users.lock().unwrap();
@@ -818,7 +894,9 @@ fn handle_msg(
             if !state.channel_is(channel, ki_protocol::ChannelKind::Voice)
                 || !state.can_view(user_id, channel)
             {
-                let _ = tx.send(ServerMsg::Error { message: "salon vocal inconnu".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "salon vocal inconnu".into(),
+                });
                 return;
             }
             if let Err(wrong) = state.check_voice_lock(user_id, channel, password.as_deref()) {
@@ -834,7 +912,9 @@ fn handle_msg(
                 users.get(&user_id).and_then(|u| u.voice) == Some(channel)
             };
             if already {
-                let _ = tx.send(ServerMsg::Members { members: state.roster() });
+                let _ = tx.send(ServerMsg::Members {
+                    members: state.roster(),
+                });
                 return;
             }
             if !take_voice_budget(state, user_id) {
@@ -845,7 +925,9 @@ fn handle_msg(
             }
             {
                 let mut users = state.users.lock().unwrap();
-                let Some(u) = users.get_mut(&user_id) else { return };
+                let Some(u) = users.get_mut(&user_id) else {
+                    return;
+                };
                 u.voice = Some(channel);
                 u.speaking = false;
             }
@@ -895,7 +977,9 @@ fn handle_msg(
             // La clé est opaque pour le serveur, mais sa forme ne l'est pas :
             // 32 octets hex, sinon les spectateurs ne pourront jamais déchiffrer.
             if ki_protocol::hex_decode(&stream_key).map(|k| k.len()) != Some(32) {
-                let _ = tx.send(ServerMsg::Error { message: "clé de stream invalide".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "clé de stream invalide".into(),
+                });
                 return;
             }
             match state.streams.start(user_id, channel, stream_key, meta) {
@@ -909,7 +993,11 @@ fn handle_msg(
                     let _ = tx.send(ServerMsg::StreamGranted { stream_id });
                     state.broadcast_all_except(
                         user_id,
-                        &ServerMsg::StreamStarted { stream_id, user_id, meta },
+                        &ServerMsg::StreamStarted {
+                            stream_id,
+                            user_id,
+                            meta,
+                        },
                     );
                     state.broadcast_member(user_id);
                     tracing::info!("{username} diffuse son écran (stream {stream_id})");
@@ -935,10 +1023,16 @@ fn handle_msg(
                 let users = state.users.lock().unwrap();
                 users.get(&user_id).map(|u| (u.voice, u.conn.clone()))
             };
-            let Some((channel, conn)) = viewer else { return };
+            let Some((channel, conn)) = viewer else {
+                return;
+            };
             match state.streams.watch(stream_id, user_id, channel, conn) {
                 Ok((stream_key, meta, ask_idr, streamer)) => {
-                    let _ = tx.send(ServerMsg::WatchAccepted { stream_id, stream_key, meta });
+                    let _ = tx.send(ServerMsg::WatchAccepted {
+                        stream_id,
+                        stream_key,
+                        meta,
+                    });
                     if ask_idr {
                         // Le nouveau venu a besoin d'une trame décodable.
                         state.send_to(streamer, &ServerMsg::KeyframeNeeded { stream_id });
@@ -960,17 +1054,23 @@ fn handle_msg(
                 return;
             }
             let Some(channel) = current_channel(state, user_id) else {
-                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "rejoins un salon d'abord".into(),
+                });
                 return;
             };
             // Anti-spam : sans quoi un client modifié remplit l'historique
             // et la bande passante de tout le monde aussi vite qu'il veut.
             let allowed = {
                 let mut users = state.users.lock().unwrap();
-                users.get_mut(&user_id).is_some_and(|u| u.chat_budget.take())
+                users
+                    .get_mut(&user_id)
+                    .is_some_and(|u| u.chat_budget.take())
             };
             if !allowed {
-                let _ = tx.send(ServerMsg::Error { message: "tu écris trop vite".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "tu écris trop vite".into(),
+                });
                 return;
             }
             // Le texte est relayé à tout le salon **et** gardé en mémoire
@@ -990,9 +1090,15 @@ fn handle_msg(
             // pas tel que le client le raconte : un message qui n'existe
             // plus (ou pas) ne se cite pas.
             let reply_to = reply_to.and_then(|m| {
-                state.history.resolve_reply(channel, m).map(|(username, excerpt)| {
-                    ki_protocol::ReplyRef { user_id: m.user_id, ts: m.ts, username, excerpt }
-                })
+                state
+                    .history
+                    .resolve_reply(channel, m)
+                    .map(|(username, excerpt)| ki_protocol::ReplyRef {
+                        user_id: m.user_id,
+                        ts: m.ts,
+                        username,
+                        excerpt,
+                    })
             });
             let rec = ChatRecord {
                 user_id,
@@ -1006,12 +1112,20 @@ fn handle_msg(
             state.broadcast(
                 channel,
                 None,
-                &ServerMsg::Chat { user_id, username: username.to_string(), text, ts, reply_to },
+                &ServerMsg::Chat {
+                    user_id,
+                    username: username.to_string(),
+                    text,
+                    ts,
+                    reply_to,
+                },
             );
         }
         ClientMsg::React { message, emoji, on } => {
             let Some(channel) = current_channel(state, user_id) else {
-                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "rejoins un salon d'abord".into(),
+                });
                 return;
             };
             // Une réaction coûte un jeton du budget de chat : réagir en
@@ -1019,28 +1133,44 @@ fn handle_msg(
             // messages.
             let allowed = {
                 let mut users = state.users.lock().unwrap();
-                users.get_mut(&user_id).is_some_and(|u| u.chat_budget.take())
+                users
+                    .get_mut(&user_id)
+                    .is_some_and(|u| u.chat_budget.take())
             };
             if !allowed {
                 return;
             }
             let Some(emoji) = ki_protocol::clean_emoji(&emoji) else {
-                let _ = tx.send(ServerMsg::Error { message: "réaction invalide".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "réaction invalide".into(),
+                });
                 return;
             };
             // Rien n'a changé (déjà posée, déjà retirée, message inconnu) :
             // rien à dire à personne.
-            if state.history.react(channel, message, emoji.clone(), user_id, on).is_some() {
+            if state
+                .history
+                .react(channel, message, emoji.clone(), user_id, on)
+                .is_some()
+            {
                 state.broadcast(
                     channel,
                     None,
-                    &ServerMsg::Reaction { channel, message, emoji, by: user_id, on },
+                    &ServerMsg::Reaction {
+                        channel,
+                        message,
+                        emoji,
+                        by: user_id,
+                        on,
+                    },
                 );
             }
         }
         ClientMsg::DeleteMessage { message } => {
             let Some(channel) = current_channel(state, user_id) else {
-                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "rejoins un salon d'abord".into(),
+                });
                 return;
             };
             // Les siens, toujours ; ceux des autres, avec la permission.
@@ -1053,11 +1183,14 @@ fn handle_msg(
             // qui a retiré quoi, pas seulement qu'un message a disparu.
             let origine = state.history.resolve_reply(channel, message);
             if !state.history.delete(channel, message) {
-                let _ = tx.send(ServerMsg::Error { message: "ce message n'existe plus".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "ce message n'existe plus".into(),
+                });
                 return;
             }
             if message.user_id != user_id {
-                let (auteur, extrait) = origine.unwrap_or_else(|| (message.user_id.to_string(), String::new()));
+                let (auteur, extrait) =
+                    origine.unwrap_or_else(|| (message.user_id.to_string(), String::new()));
                 state.audit.record(
                     "message.delete",
                     username,
@@ -1065,7 +1198,11 @@ fn handle_msg(
                     &format!("salon {channel} : {extrait}"),
                 );
             }
-            state.broadcast(channel, None, &ServerMsg::MessageDeleted { channel, message });
+            state.broadcast(
+                channel,
+                None,
+                &ServerMsg::MessageDeleted { channel, message },
+            );
         }
         ClientMsg::LierRiot { riot_id } => {
             let Some((nom, tag)) = ki_protocol::parser_riot_id(&riot_id) else {
@@ -1082,7 +1219,11 @@ fn handle_msg(
                 Ok(()) => (true, "recherche du compte…".to_string()),
                 Err(e) => (false, e),
             };
-            let _ = tx.send(ServerMsg::LiaisonRiot { ok, message, riot_id: None });
+            let _ = tx.send(ServerMsg::LiaisonRiot {
+                ok,
+                message,
+                riot_id: None,
+            });
         }
         ClientMsg::DelierRiot { user_id: cible } => {
             let cible = cible.unwrap_or(user_id);
@@ -1099,17 +1240,33 @@ fn handle_msg(
                     .find(|a| a.user_id == cible)
                     .map(|a| a.username)
                     .unwrap_or_else(|| cible.to_string());
-                state.audit.record("valorant.unlink", username, &qui, ancien.as_deref().unwrap_or(""));
+                state.audit.record(
+                    "valorant.unlink",
+                    username,
+                    &qui,
+                    ancien.as_deref().unwrap_or(""),
+                );
             }
-            let message = if ok { "compte Riot délié".to_string() } else { "aucun compte Riot lié".to_string() };
-            let _ = tx.send(ServerMsg::LiaisonRiot { ok, message, riot_id: None });
+            let message = if ok {
+                "compte Riot délié".to_string()
+            } else {
+                "aucun compte Riot lié".to_string()
+            };
+            let _ = tx.send(ServerMsg::LiaisonRiot {
+                ok,
+                message,
+                riot_id: None,
+            });
             if ok {
                 state.broadcast_member(cible);
             }
         }
         ClientMsg::FicheValorant { user_id: cible } => {
             let fiche = state.valorant.fiche(cible);
-            let _ = tx.send(ServerMsg::FicheValorant { user_id: cible, fiche });
+            let _ = tx.send(ServerMsg::FicheValorant {
+                user_id: cible,
+                fiche,
+            });
         }
         ClientMsg::AdminSetFilValorant { channel } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
@@ -1138,13 +1295,22 @@ fn handle_msg(
             let actor = username.to_string();
             tokio::task::spawn_blocking(move || match state.meta.set_fil_valorant(channel) {
                 Ok(()) => {
-                    let ou = nom.as_deref().map(|n| format!("#{n}")).unwrap_or_else(|| "éteint".into());
+                    let ou = nom
+                        .as_deref()
+                        .map(|n| format!("#{n}"))
+                        .unwrap_or_else(|| "éteint".into());
                     state.audit.record("server.fil_valorant", &actor, "", &ou);
-                    state.broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
-                    let _ = tx.send(ServerMsg::Info { message: format!("fil de jeu VALORANT : {ou}") });
+                    state.broadcast_all(&ServerMsg::ServerInfo {
+                        server: state.meta.get(),
+                    });
+                    let _ = tx.send(ServerMsg::Info {
+                        message: format!("fil de jeu VALORANT : {ou}"),
+                    });
                 }
                 Err(e) => {
-                    let _ = tx.send(ServerMsg::Error { message: e.to_string() });
+                    let _ = tx.send(ServerMsg::Error {
+                        message: e.to_string(),
+                    });
                 }
             });
         }
@@ -1159,7 +1325,12 @@ fn handle_msg(
                 });
                 return;
             }
-            let mon_salon = state.users.lock().unwrap().get(&user_id).and_then(|u| u.voice);
+            let mon_salon = state
+                .users
+                .lock()
+                .unwrap()
+                .get(&user_id)
+                .and_then(|u| u.voice);
             let quoi = match &commande {
                 C::Rejoindre => "rejoindre",
                 C::Ajouter { .. } => "ajouter",
@@ -1176,14 +1347,20 @@ fn handle_msg(
                 C::Volume { pour_cent } => format!("{pour_cent} %"),
                 _ => String::new(),
             };
-            state.audit.record(&format!("musique.{quoi}"), username, "", &detail);
+            state
+                .audit
+                .record(&format!("musique.{quoi}"), username, "", &detail);
             match commande {
                 C::Rejoindre => {
                     let Some(salon) = mon_salon else {
-                        let _ = tx.send(ServerMsg::Error { message: "rejoins un salon vocal d'abord".into() });
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "rejoins un salon vocal d'abord".into(),
+                        });
                         return;
                     };
-                    state.musique.commander(crate::musique::Commande::Rejoindre { salon });
+                    state
+                        .musique
+                        .commander(crate::musique::Commande::Rejoindre { salon });
                 }
                 C::Ajouter { url, maintenant } => {
                     if !ki_protocol::url_musique_valide(&url) {
@@ -1195,32 +1372,51 @@ fn handle_msg(
                     // Sans salon, le bot vient dans le mien.
                     if state.musique.etat().salon.is_none() {
                         let Some(salon) = mon_salon else {
-                            let _ = tx.send(ServerMsg::Error { message: "rejoins un salon vocal d'abord".into() });
+                            let _ = tx.send(ServerMsg::Error {
+                                message: "rejoins un salon vocal d'abord".into(),
+                            });
                             return;
                         };
-                        state.musique.commander(crate::musique::Commande::Rejoindre { salon });
+                        state
+                            .musique
+                            .commander(crate::musique::Commande::Rejoindre { salon });
                     }
                     // Résoudre l'adresse prend quelques secondes de yt-dlp :
                     // hors de la boucle, puis la piste part en file.
-                    let Some(outils) = state.musique.outils() else { return };
+                    let Some(outils) = state.musique.outils() else {
+                        return;
+                    };
                     let state = state.clone();
                     let qui = username.to_string();
                     tokio::task::spawn_blocking(move || {
                         match crate::musique::resoudre(&outils, &url) {
                             Ok(mut piste) => {
                                 piste.ajoute_par = Some(qui);
-                                state.musique.commander(crate::musique::Commande::Ajouter { piste, maintenant });
+                                state.musique.commander(crate::musique::Commande::Ajouter {
+                                    piste,
+                                    maintenant,
+                                });
                             }
-                            Err(e) => state.musique.commander(crate::musique::Commande::Erreur(format!("adresse illisible : {e}"))),
+                            Err(e) => {
+                                state
+                                    .musique
+                                    .commander(crate::musique::Commande::Erreur(format!(
+                                        "adresse illisible : {e}"
+                                    )))
+                            }
                         }
                     });
                 }
-                C::Retirer { index } => state.musique.commander(crate::musique::Commande::Retirer(index)),
+                C::Retirer { index } => state
+                    .musique
+                    .commander(crate::musique::Commande::Retirer(index)),
                 C::Lecture => state.musique.commander(crate::musique::Commande::Lecture),
                 C::Pause => state.musique.commander(crate::musique::Commande::Pause),
                 C::Suivant => state.musique.commander(crate::musique::Commande::Suivant),
                 C::Vider => state.musique.commander(crate::musique::Commande::Vider),
-                C::Volume { pour_cent } => state.musique.commander(crate::musique::Commande::Volume(pour_cent)),
+                C::Volume { pour_cent } => state
+                    .musique
+                    .commander(crate::musique::Commande::Volume(pour_cent)),
                 C::Arreter => state.musique.commander(crate::musique::Commande::Arreter),
             }
         }
@@ -1239,7 +1435,11 @@ fn handle_msg(
                 .into_iter()
                 .filter_map(|(user_id, fiche)| {
                     let username = pseudos.get(&user_id)?.clone();
-                    Some(ki_protocol::FicheMembre { user_id, username, fiche })
+                    Some(ki_protocol::FicheMembre {
+                        user_id,
+                        username,
+                        fiche,
+                    })
                 })
                 .collect();
             let esports = state.valorant.esports();
@@ -1247,15 +1447,21 @@ fn handle_msg(
         }
         ClientMsg::History { limit } => {
             let Some(channel) = current_channel(state, user_id) else {
-                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "rejoins un salon d'abord".into(),
+                });
                 return;
             };
             let messages = state.history.recent(channel, limit.min(1000) as usize);
             let _ = tx.send(ServerMsg::History { messages });
         }
-        ClientMsg::HistoryBefore { before_ts, limit, .. } => {
+        ClientMsg::HistoryBefore {
+            before_ts, limit, ..
+        } => {
             let Some(channel) = current_channel(state, user_id) else {
-                let _ = tx.send(ServerMsg::Error { message: "rejoins un salon d'abord".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "rejoins un salon d'abord".into(),
+                });
                 return;
             };
             // Remonter le fil peut demander de relire tout le fichier du
@@ -1264,28 +1470,43 @@ fn handle_msg(
             let limit = limit.clamp(1, 200) as usize;
             tokio::task::spawn_blocking(move || {
                 let (messages, more) =
-                    state.history.before(&state.data_dir, channel, before_ts, limit);
+                    state
+                        .history
+                        .before(&state.data_dir, channel, before_ts, limit);
                 // Le salon voyage avec la page : la réponse sort d'ici hors de
                 // l'ordre du flux, et peut donc arriver après que le
                 // destinataire a changé de salon.
-                let _ = tx.send(ServerMsg::HistoryPage { messages, more, channel });
+                let _ = tx.send(ServerMsg::HistoryPage {
+                    messages,
+                    more,
+                    channel,
+                });
             });
         }
-        ClientMsg::AdminVoiceMute { username: target, muted } => {
+        ClientMsg::AdminVoiceMute {
+            username: target,
+            muted,
+        } => {
             if require(state, user_id, tx, ki_protocol::perm::MUTE_MEMBERS)
                 && outranks_account(state, user_id, &target, tx)
             {
                 sanctionner_la_voix(state, username, &target, Some(muted), None, tx);
             }
         }
-        ClientMsg::AdminVoiceDeafen { username: target, deafened } => {
+        ClientMsg::AdminVoiceDeafen {
+            username: target,
+            deafened,
+        } => {
             if require(state, user_id, tx, ki_protocol::perm::MUTE_MEMBERS)
                 && outranks_account(state, user_id, &target, tx)
             {
                 sanctionner_la_voix(state, username, &target, None, Some(deafened), tx);
             }
         }
-        ClientMsg::AdminVoiceMove { username: target, channel } => {
+        ClientMsg::AdminVoiceMove {
+            username: target,
+            channel,
+        } => {
             if !require(state, user_id, tx, ki_protocol::perm::MOVE_MEMBERS)
                 || !outranks_account(state, user_id, &target, tx)
             {
@@ -1302,7 +1523,9 @@ fn handle_msg(
             };
             if let Some(channel) = channel {
                 if !state.channel_is(channel, ki_protocol::ChannelKind::Voice) {
-                    let _ = tx.send(ServerMsg::Error { message: "salon vocal inconnu".into() });
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "salon vocal inconnu".into(),
+                    });
                     return;
                 }
                 // Le déplacer là où il serait aussitôt ressorti ne rendrait
@@ -1347,14 +1570,24 @@ fn handle_msg(
             state.audit.record("voice.move", username, &target, &ou);
             // Le client suit le roster pour savoir où il est : le diffuser
             // suffit à ce que la personne déplacée change de salon chez elle.
-            state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+            state.broadcast_all(&ServerMsg::Members {
+                members: state.roster(),
+            });
         }
-        ClientMsg::Search { query, channel, limit } => {
+        ClientMsg::Search {
+            query,
+            channel,
+            limit,
+        } => {
             // Bornée avant tout le reste : une requête d'un mégaoctet ferait
             // parcourir tous les journaux avec une aiguille absurde.
             let query: String = query.chars().take(ki_protocol::MAX_SEARCH_QUERY).collect();
             if query.trim().is_empty() {
-                let _ = tx.send(ServerMsg::SearchResults { query, hits: Vec::new(), more: false });
+                let _ = tx.send(ServerMsg::SearchResults {
+                    query,
+                    hits: Vec::new(),
+                    more: false,
+                });
                 return;
             }
             // **La** garde de cette fonctionnalité : on ne cherche que dans ce
@@ -1376,7 +1609,9 @@ fn handle_msg(
             // asynchrone, comme la pagination.
             let (state, tx) = (state.clone(), tx.clone());
             tokio::task::spawn_blocking(move || {
-                let (trouves, more) = state.history.search(&state.data_dir, &salons, &query, limit);
+                let (trouves, more) = state
+                    .history
+                    .search(&state.data_dir, &salons, &query, limit);
                 let hits = trouves
                     .into_iter()
                     .map(|(channel, record)| ki_protocol::SearchHit { channel, record })
@@ -1390,12 +1625,15 @@ fn handle_msg(
             // membres l'affiche sous le pseudo.
             let jeu = jeu.map(|j| j.nettoyer());
             let en_jeu = |j: &Option<ki_protocol::JeuStatut>| {
-                j.as_ref().is_some_and(|j| j.etat == ki_protocol::JeuEtat::EnJeu)
+                j.as_ref()
+                    .is_some_and(|j| j.etat == ki_protocol::JeuEtat::EnJeu)
             };
             let mut partie_finie = false;
             let changed = {
                 let mut users = state.users.lock().unwrap();
-                let Some(u) = users.get_mut(&user_id) else { return };
+                let Some(u) = users.get_mut(&user_id) else {
+                    return;
+                };
                 if u.jeu == jeu {
                     false
                 } else {
@@ -1416,7 +1654,9 @@ fn handle_msg(
         ClientMsg::VoiceState { speaking, muted } => {
             let changed = {
                 let mut users = state.users.lock().unwrap();
-                let Some(u) = users.get_mut(&user_id) else { return };
+                let Some(u) = users.get_mut(&user_id) else {
+                    return;
+                };
                 // On ne « parle » que depuis un salon vocal. Et on ne relaie
                 // qu'un vrai changement : notre client ne transmet déjà que
                 // les transitions, mais rien n'oblige l'autre bout à être lui.
@@ -1435,11 +1675,18 @@ fn handle_msg(
             if changed {
                 state.broadcast_all_except(
                     user_id,
-                    &ServerMsg::VoiceState { user_id, speaking, muted },
+                    &ServerMsg::VoiceState {
+                        user_id,
+                        speaking,
+                        muted,
+                    },
                 );
             }
         }
-        ClientMsg::Kick { user_id: target, reason } => {
+        ClientMsg::Kick {
+            user_id: target,
+            reason,
+        } => {
             if !require(state, user_id, tx, ki_protocol::perm::KICK) {
                 return;
             }
@@ -1452,18 +1699,24 @@ fn handle_msg(
                 return;
             }
             if target == user_id {
-                let _ = tx.send(ServerMsg::Error { message: "impossible de s'expulser soi-même".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "impossible de s'expulser soi-même".into(),
+                });
                 return;
             }
             let reason = ki_protocol::safe_display(&reason, MAX_REASON);
             let target_tx = {
                 let users = state.users.lock().unwrap();
-                users.get(&target).map(|u| (u.username.clone(), u.tx.clone()))
+                users
+                    .get(&target)
+                    .map(|u| (u.username.clone(), u.tx.clone()))
             };
             match target_tx {
                 Some((target_name, t)) => {
                     tracing::info!("expulsion de l'utilisateur {target} par {username}");
-                    state.audit.record("member.kick", username, &target_name, &reason);
+                    state
+                        .audit
+                        .record("member.kick", username, &target_name, &reason);
                     // Le motif ne se réémet pas : s'il n'a pas pu être déposé,
                     // l'intéressé ne verra qu'une coupure sans explication, et
                     // il faut au moins que le journal le dise.
@@ -1475,7 +1728,9 @@ fn handle_msg(
                     state.disconnect(target);
                 }
                 None => {
-                    let _ = tx.send(ServerMsg::Error { message: "utilisateur introuvable".into() });
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "utilisateur introuvable".into(),
+                    });
                 }
             }
         }
@@ -1487,10 +1742,16 @@ fn handle_msg(
         ClientMsg::AdminAuditLog { limit } => {
             if require(state, user_id, tx, ki_protocol::perm::VIEW_AUDIT_LOG) {
                 let limit = limit.clamp(1, 500) as usize;
-                let _ = tx.send(ServerMsg::AuditLog { records: state.audit.recent(limit) });
+                let _ = tx.send(ServerMsg::AuditLog {
+                    records: state.audit.recent(limit),
+                });
             }
         }
-        ClientMsg::AdminCreateInvite { uses, label, ttl_secs } => {
+        ClientMsg::AdminCreateInvite {
+            uses,
+            label,
+            ttl_secs,
+        } => {
             if require(state, user_id, tx, ki_protocol::perm::CREATE_INVITE) {
                 let label = ki_protocol::safe_display(&label, MAX_REASON);
                 let (state, tx) = (state.clone(), tx.clone());
@@ -1499,8 +1760,7 @@ fn handle_msg(
                     // Une invitation que le disque n'a pas acceptée est un
                     // lien qui meurt au prochain redémarrage : mieux vaut le
                     // dire tout de suite que le laisser circuler.
-                    let code = match state.accounts.create_invite(&actor, uses, &label, ttl_secs)
-                    {
+                    let code = match state.accounts.create_invite(&actor, uses, &label, ttl_secs) {
                         Ok(code) => code,
                         Err(e) => {
                             let _ = tx.send(ServerMsg::Error { message: e });
@@ -1531,23 +1791,24 @@ fn handle_msg(
             if require(state, user_id, tx, ki_protocol::perm::MANAGE_INVITES) {
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
-                tokio::task::spawn_blocking(move || {
-                    match state.accounts.revoke_invite(&code) {
-                        Ok(()) => {
-                            state.audit.record("invite.revoke", &actor, "", &code);
-                            let _ = tx.send(ServerMsg::Info {
-                                message: format!("invitation {code} révoquée"),
-                            });
-                            send_admin_info(&state, &tx);
-                        }
-                        Err(e) => {
-                            let _ = tx.send(ServerMsg::Error { message: e });
-                        }
+                tokio::task::spawn_blocking(move || match state.accounts.revoke_invite(&code) {
+                    Ok(()) => {
+                        state.audit.record("invite.revoke", &actor, "", &code);
+                        let _ = tx.send(ServerMsg::Info {
+                            message: format!("invitation {code} révoquée"),
+                        });
+                        send_admin_info(&state, &tx);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ServerMsg::Error { message: e });
                     }
                 });
             }
         }
-        ClientMsg::AdminResetPassword { username: target, new_password } => {
+        ClientMsg::AdminResetPassword {
+            username: target,
+            new_password,
+        } => {
             if require(state, user_id, tx, ki_protocol::perm::RESET_PASSWORD)
                 && (target == username || outranks_account(state, user_id, &target, tx))
             {
@@ -1558,9 +1819,14 @@ fn handle_msg(
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
                 tokio::task::spawn_blocking(move || {
-                    match state.accounts.reset_password(&actor, &target, &new_password) {
+                    match state
+                        .accounts
+                        .reset_password(&actor, &target, &new_password)
+                    {
                         Ok(()) => {
-                            state.audit.record("member.password_reset", &actor, &target, "");
+                            state
+                                .audit
+                                .record("member.password_reset", &actor, &target, "");
                             let _ = tx.send(ServerMsg::Info {
                                 message: format!("mot de passe de {target} réinitialisé"),
                             });
@@ -1575,15 +1841,32 @@ fn handle_msg(
         }
         // Conservé pour les clients antérieurs à `AdminBan` : un blocage sans
         // motif ni durée, c'est-à-dire un bannissement définitif.
-        ClientMsg::AdminSetBanned { username: target, banned } => {
+        ClientMsg::AdminSetBanned {
+            username: target,
+            banned,
+        } => {
             if banned {
-                let msg = ClientMsg::AdminBan { username: target, reason: String::new(), duration_secs: 0 };
+                let msg = ClientMsg::AdminBan {
+                    username: target,
+                    reason: String::new(),
+                    duration_secs: 0,
+                };
                 handle_msg(state, user_id, username, msg, tx);
             } else {
-                handle_msg(state, user_id, username, ClientMsg::AdminUnban { username: target }, tx);
+                handle_msg(
+                    state,
+                    user_id,
+                    username,
+                    ClientMsg::AdminUnban { username: target },
+                    tx,
+                );
             }
         }
-        ClientMsg::AdminBan { username: target, reason, duration_secs } => {
+        ClientMsg::AdminBan {
+            username: target,
+            reason,
+            duration_secs,
+        } => {
             if require(state, user_id, tx, ki_protocol::perm::BAN)
                 && outranks_account(state, user_id, &target, tx)
             {
@@ -1625,11 +1908,14 @@ fn handle_msg(
                                     .map(|(id, u)| (*id, u.tx.clone()))
                             };
                             if let Some((target_id, target_tx)) = online {
-                                let _ =
-                                    target_tx.send(ServerMsg::Kicked { reason: reason.clone() });
+                                let _ = target_tx.send(ServerMsg::Kicked {
+                                    reason: reason.clone(),
+                                });
                                 state.disconnect(target_id);
                             }
-                            let _ = tx.send(ServerMsg::Info { message: format!("{target} banni") });
+                            let _ = tx.send(ServerMsg::Info {
+                                message: format!("{target} banni"),
+                            });
                             send_admin_info(&state, &tx);
                         }
                         Err(e) => {
@@ -1649,17 +1935,16 @@ fn handle_msg(
             {
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
-                tokio::task::spawn_blocking(move || {
-                    match state.accounts.unban(&actor, &target) {
-                        Ok(()) => {
-                            state.audit.record("member.unban", &actor, &target, "");
-                            let _ =
-                                tx.send(ServerMsg::Info { message: format!("{target} débanni") });
-                            send_admin_info(&state, &tx);
-                        }
-                        Err(e) => {
-                            let _ = tx.send(ServerMsg::Error { message: e });
-                        }
+                tokio::task::spawn_blocking(move || match state.accounts.unban(&actor, &target) {
+                    Ok(()) => {
+                        state.audit.record("member.unban", &actor, &target, "");
+                        let _ = tx.send(ServerMsg::Info {
+                            message: format!("{target} débanni"),
+                        });
+                        send_admin_info(&state, &tx);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ServerMsg::Error { message: e });
                     }
                 });
             }
@@ -1677,8 +1962,9 @@ fn handle_msg(
                         Ok(()) => {
                             state.audit.record("server.info", &actor, "", &changed);
                             // L'identité est publique : tout le monde la reçoit.
-                            state
-                                .broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
+                            state.broadcast_all(&ServerMsg::ServerInfo {
+                                server: state.meta.get(),
+                            });
                             let _ = tx.send(ServerMsg::Info {
                                 message: "identité du serveur mise à jour".into(),
                             });
@@ -1714,8 +2000,14 @@ fn handle_msg(
                         // n'ont pas à la redemander.
                         let data = state.accounts.avatar_of(user_id);
                         let hash = ki_protocol::avatar_hash(data.as_deref()).unwrap_or_default();
-                        state.broadcast_all(&ServerMsg::Avatar { user_id, hash, data });
-                        let _ = tx.send(ServerMsg::Info { message: "photo mise à jour".into() });
+                        state.broadcast_all(&ServerMsg::Avatar {
+                            user_id,
+                            hash,
+                            data,
+                        });
+                        let _ = tx.send(ServerMsg::Info {
+                            message: "photo mise à jour".into(),
+                        });
                     }
                     Err(e) => {
                         let _ = tx.send(ServerMsg::Error { message: e });
@@ -1729,31 +2021,50 @@ fn handle_msg(
             // 64 copies d'une vignette pouvant peser 96 Kio, soit plusieurs
             // mégaoctets engendrés par une requête de deux cents octets.
             let mut seen = std::collections::HashSet::new();
-            let unique: Vec<UserId> =
-                user_ids.into_iter().filter(|id| seen.insert(*id)).collect();
+            let unique: Vec<UserId> = user_ids.into_iter().filter(|id| seen.insert(*id)).collect();
             for target in unique.into_iter().take(64) {
                 let data = state.accounts.avatar_of(target);
-                let Some(hash) = ki_protocol::avatar_hash(data.as_deref()) else { continue };
-                let _ = tx.send(ServerMsg::Avatar { user_id: target, hash, data });
+                let Some(hash) = ki_protocol::avatar_hash(data.as_deref()) else {
+                    continue;
+                };
+                let _ = tx.send(ServerMsg::Avatar {
+                    user_id: target,
+                    hash,
+                    data,
+                });
             }
         }
-        ClientMsg::ChangePassword { old_password, new_password } => {
+        ClientMsg::ChangePassword {
+            old_password,
+            new_password,
+        } => {
             // Deux hachages Argon2id : hors de la boucle asynchrone.
             let (state, tx) = (state.clone(), tx.clone());
             let username = username.to_string();
             tokio::task::spawn_blocking(move || {
                 let outcome =
-                    state.accounts.change_password(&username, &old_password, &new_password);
+                    state
+                        .accounts
+                        .change_password(&username, &old_password, &new_password);
                 let _ = tx.send(match outcome {
-                    Ok(()) => ServerMsg::Info { message: "mot de passe changé".into() },
+                    Ok(()) => ServerMsg::Info {
+                        message: "mot de passe changé".into(),
+                    },
                     Err(e) => ServerMsg::Error { message: e },
                 });
             });
         }
         ClientMsg::AdminListRoles => {
-            let _ = tx.send(ServerMsg::Roles { roles: state.roles.list() });
+            let _ = tx.send(ServerMsg::Roles {
+                roles: state.roles.list(),
+            });
         }
-        ClientMsg::AdminCreateRole { name, color, rank, perms } => {
+        ClientMsg::AdminCreateRole {
+            name,
+            color,
+            rank,
+            perms,
+        } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_ROLES) {
                 return;
             }
@@ -1768,11 +2079,15 @@ fn handle_msg(
                 });
                 return;
             }
-            let Some(perms) = grantable(state, user_id, perms, tx) else { return };
+            let Some(perms) = grantable(state, user_id, perms, tx) else {
+                return;
+            };
             match state.roles.create(&name, color, rank, perms) {
                 Ok(role) => {
                     state.audit.record("role.create", username, &role.name, "");
-                    state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
+                    state.broadcast_all(&ServerMsg::Roles {
+                        roles: state.roles.list(),
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(ServerMsg::Error { message: e });
@@ -1824,7 +2139,9 @@ fn handle_msg(
             match state.roles.edit(role) {
                 Ok(()) => {
                     state.audit.record("role.edit", username, &name, "");
-                    state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
+                    state.broadcast_all(&ServerMsg::Roles {
+                        roles: state.roles.list(),
+                    });
                     refresh_everyone(state);
                     state.reconcile_memberships();
                     // Les rangs affichés dans le panneau viennent des comptes :
@@ -1871,7 +2188,9 @@ fn handle_msg(
                         });
                     }
                     state.audit.record("role.delete", username, &role.name, "");
-                    state.broadcast_all(&ServerMsg::Roles { roles: state.roles.list() });
+                    state.broadcast_all(&ServerMsg::Roles {
+                        roles: state.roles.list(),
+                    });
                     refresh_everyone(state);
                     state.reconcile_memberships();
                     send_admin_info(state, tx);
@@ -1881,7 +2200,10 @@ fn handle_msg(
                 }
             }
         }
-        ClientMsg::AdminSetUserRoles { username: target, roles } => {
+        ClientMsg::AdminSetUserRoles {
+            username: target,
+            roles,
+        } => {
             // Jamais sur soi-même. Le rang ne suffit pas à l'interdire : entre
             // l'enregistrement d'une rétrogradation et le rafraîchissement des
             // sessions, on se compare à une version périmée de soi et l'on
@@ -1900,7 +2222,10 @@ fn handle_msg(
             // On n'attribue que des rôles strictement sous son propre rang.
             let mine = rank_of(state, user_id);
             let wanted = state.roles.sanitize(&roles);
-            if wanted.iter().any(|id| state.roles.get(*id).is_some_and(|r| r.rank >= mine)) {
+            if wanted
+                .iter()
+                .any(|id| state.roles.get(*id).is_some_and(|r| r.rank >= mine))
+            {
                 let _ = tx.send(ServerMsg::Error {
                     message: "tu ne peux attribuer qu'un rôle sous ton rang".into(),
                 });
@@ -1942,7 +2267,11 @@ fn handle_msg(
                 }
             }
         }
-        ClientMsg::AdminCreateChannel { name, kind, allowed_roles } => {
+        ClientMsg::AdminCreateChannel {
+            name,
+            kind,
+            allowed_roles,
+        } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
                 return;
             }
@@ -1956,7 +2285,9 @@ fn handle_msg(
                             tracing::error!("journal du salon {} : {e:#}", channel.id);
                         }
                     }
-                    state.audit.record("channel.create", username, &channel.name, "");
+                    state
+                        .audit
+                        .record("channel.create", username, &channel.name, "");
                     state.push_channels();
                 }
                 Err(e) => {
@@ -2011,12 +2342,18 @@ fn handle_msg(
                 }
             }
         }
-        ClientMsg::AdminSetVoicePassword { channel, password, ttl_secs } => {
+        ClientMsg::AdminSetVoicePassword {
+            channel,
+            password,
+            ttl_secs,
+        } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
                 return;
             }
             if !state.channel_is(channel, ki_protocol::ChannelKind::Voice) {
-                let _ = tx.send(ServerMsg::Error { message: "salon vocal inconnu".into() });
+                let _ = tx.send(ServerMsg::Error {
+                    message: "salon vocal inconnu".into(),
+                });
                 return;
             }
             match password {
@@ -2034,7 +2371,11 @@ fn handle_msg(
                     state.audit.record(
                         "channel.voice_password",
                         username,
-                        &state.channels.get(channel).map(|c| c.name).unwrap_or_default(),
+                        &state
+                            .channels
+                            .get(channel)
+                            .map(|c| c.name)
+                            .unwrap_or_default(),
                         &format!("verrou posé pour {} min", ttl / 60),
                     );
                     let _ = tx.send(ServerMsg::Info {
@@ -2046,10 +2387,16 @@ fn handle_msg(
                     state.audit.record(
                         "channel.voice_password",
                         username,
-                        &state.channels.get(channel).map(|c| c.name).unwrap_or_default(),
+                        &state
+                            .channels
+                            .get(channel)
+                            .map(|c| c.name)
+                            .unwrap_or_default(),
                         "verrou retiré",
                     );
-                    let _ = tx.send(ServerMsg::Info { message: "verrou retiré".into() });
+                    let _ = tx.send(ServerMsg::Info {
+                        message: "verrou retiré".into(),
+                    });
                 }
             }
             state.push_channels();

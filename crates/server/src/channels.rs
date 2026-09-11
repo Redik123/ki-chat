@@ -105,7 +105,10 @@ impl Channels {
             .max(FIRST_FREE_ID);
         compact_positions(&mut file.channels);
 
-        let channels = Self { path, inner: Mutex::new(file) };
+        let channels = Self {
+            path,
+            inner: Mutex::new(file),
+        };
         // La migration est écrite tout de suite : sans ça, `next_id` ne serait
         // fixé sur disque qu'à la première modification, et un redémarrage
         // entre-temps repartirait d'un fichier absent.
@@ -129,7 +132,11 @@ impl Channels {
 
     pub fn get(&self, id: ChannelId) -> Option<ChannelInfo> {
         let inner = self.inner.lock().unwrap();
-        inner.channels.iter().find(|c| c.id == id).map(StoredChannel::info)
+        inner
+            .channels
+            .iter()
+            .find(|c| c.id == id)
+            .map(StoredChannel::info)
     }
 
     /// Vrai si le salon existe **et** est de la nature attendue : on ne parle
@@ -288,7 +295,9 @@ impl Channels {
         let mut inner = self.inner.lock().unwrap();
         let mut changed = false;
         for channel in inner.channels.iter_mut() {
-            let Some(roles) = &mut channel.allowed_roles else { continue };
+            let Some(roles) = &mut channel.allowed_roles else {
+                continue;
+            };
             let before = roles.len();
             roles.retain(|r| *r != role);
             changed |= roles.len() != before;
@@ -364,7 +373,9 @@ fn default_channels() -> ChannelsFile {
 /// `channel-N.jsonl` existe — même renommé en `.deleted-…` — le numéro N ne
 /// peut plus être réattribué.
 fn highest_logged_id(dir: &Path) -> ChannelId {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     let mut highest = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -374,7 +385,9 @@ fn highest_logged_id(dir: &Path) -> ChannelId {
         if !name.ends_with(".jsonl") {
             continue;
         }
-        let Some(rest) = name.strip_prefix("channel-") else { continue };
+        let Some(rest) = name.strip_prefix("channel-") else {
+            continue;
+        };
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         // Le nombre doit aller jusqu'au séparateur, sinon `channel-12bis` se
         // ferait lire comme le salon 12.
@@ -394,7 +407,10 @@ fn archive_log(dir: &Path, id: ChannelId) {
     if !live.exists() {
         return;
     }
-    let archived = dir.join(format!("channel-{id}.deleted-{}.jsonl", crate::state::now_millis()));
+    let archived = dir.join(format!(
+        "channel-{id}.deleted-{}.jsonl",
+        crate::state::now_millis()
+    ));
     // Un échec ne fait pas échouer la suppression : le salon a disparu de la
     // liste, et le journal resté en place garde de toute façon son numéro
     // réservé. On le signale, c'est tout.
@@ -437,8 +453,10 @@ fn normalize_roles(roles: Option<Vec<RoleId>>) -> Option<Vec<RoleId>> {
 /// ce qui est écrit. Il laisse en revanche passer sauts de ligne et
 /// tabulations, sans objet sur une ligne de liste.
 fn clean_name(name: &str) -> Result<String, String> {
-    let flat: String =
-        name.chars().map(|c| if c == '\n' || c == '\t' { ' ' } else { c }).collect();
+    let flat: String = name
+        .chars()
+        .map(|c| if c == '\n' || c == '\t' { ' ' } else { c })
+        .collect();
     // Une borne au-delà du maximum : le nom trop long est refusé, pas tronqué
     // en douce, sinon l'admin ne voit pas ce qu'il a réellement créé.
     let cleaned = ki_protocol::safe_display(&flat, MAX_NAME + 1);
@@ -447,7 +465,9 @@ fn clean_name(name: &str) -> Result<String, String> {
         return Err("nom de salon vide".into());
     }
     if cleaned.chars().count() > MAX_NAME {
-        return Err(format!("nom de salon trop long ({MAX_NAME} caractères maximum)"));
+        return Err(format!(
+            "nom de salon trop long ({MAX_NAME} caractères maximum)"
+        ));
     }
     Ok(cleaned.to_string())
 }
@@ -475,8 +495,10 @@ mod tests {
         let dir = scratch("migration");
         let channels = Channels::open(&dir).unwrap();
         let list = channels.list();
-        let seen: Vec<(ChannelId, &str, u32)> =
-            list.iter().map(|c| (c.id, c.name.as_str(), c.position)).collect();
+        let seen: Vec<(ChannelId, &str, u32)> = list
+            .iter()
+            .map(|c| (c.id, c.name.as_str(), c.position))
+            .collect();
         assert_eq!(
             seen,
             vec![
@@ -499,7 +521,9 @@ mod tests {
         // bien de 104.
         assert!(log_path(&dir, "channels.json").exists());
         let after_restart = Channels::open(&dir).unwrap();
-        let neuf = after_restart.create("neuf", ChannelKind::Text, None).unwrap();
+        let neuf = after_restart
+            .create("neuf", ChannelKind::Text, None)
+            .unwrap();
         assert_eq!(neuf.id, 104);
     }
 
@@ -518,14 +542,21 @@ mod tests {
         .unwrap();
         // Deux journaux plus récents : un vivant, un archivé.
         std::fs::write(log_path(&dir, "channel-150.jsonl"), "{}\n").unwrap();
-        std::fs::write(log_path(&dir, "channel-207.deleted-1700000000000.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            log_path(&dir, "channel-207.deleted-1700000000000.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
         // Pièges : ni l'un ni l'autre ne désigne un salon.
         std::fs::write(log_path(&dir, "channel-900bis.jsonl"), "").unwrap();
         std::fs::write(log_path(&dir, "channel-800.txt"), "").unwrap();
 
         let channels = Channels::open(&dir).unwrap();
         let created = channels.create("suite", ChannelKind::Text, None).unwrap();
-        assert_eq!(created.id, 208, "l'archive du 207 réserve encore son numéro");
+        assert_eq!(
+            created.id, 208,
+            "l'archive du 207 réserve encore son numéro"
+        );
 
         // Et l'effacement pur et simple de channels.json ne rouvre pas le
         // trou : le dossier suffit à retenir les numéros.
@@ -541,8 +572,14 @@ mod tests {
     fn deleting_a_channel_archives_its_log_instead_of_erasing_it() {
         let dir = scratch("archive");
         let channels = Channels::open(&dir).unwrap();
-        let salon = channels.create("éphémère", ChannelKind::Text, None).unwrap();
-        std::fs::write(log_path(&dir, &format!("channel-{}.jsonl", salon.id)), "{}\n").unwrap();
+        let salon = channels
+            .create("éphémère", ChannelKind::Text, None)
+            .unwrap();
+        std::fs::write(
+            log_path(&dir, &format!("channel-{}.jsonl", salon.id)),
+            "{}\n",
+        )
+        .unwrap();
 
         let removed = channels.delete(&dir, salon.id).unwrap();
         assert_eq!(removed.id, salon.id);
@@ -556,9 +593,19 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(&format!("channel-{}.deleted-", salon.id)))
             .collect();
-        assert_eq!(archives.len(), 1, "le journal doit être renommé, pas effacé");
-        assert!(archives[0].ends_with(".jsonl"), "sinon le scan ne le verrait plus");
-        assert_eq!(std::fs::read_to_string(log_path(&dir, &archives[0])).unwrap(), "{}\n");
+        assert_eq!(
+            archives.len(),
+            1,
+            "le journal doit être renommé, pas effacé"
+        );
+        assert!(
+            archives[0].ends_with(".jsonl"),
+            "sinon le scan ne le verrait plus"
+        );
+        assert_eq!(
+            std::fs::read_to_string(log_path(&dir, &archives[0])).unwrap(),
+            "{}\n"
+        );
 
         // Le salon suivant ne récupère pas le numéro libéré.
         let suivant = channels.create("suivant", ChannelKind::Text, None).unwrap();
@@ -589,22 +636,35 @@ mod tests {
         let mut intrus = ids.clone();
         intrus[0] = 4242;
         assert!(channels.reorder(&intrus).is_err());
-        assert_eq!(channels.list().iter().map(|c| c.id).collect::<Vec<_>>(), ids);
+        assert_eq!(
+            channels.list().iter().map(|c| c.id).collect::<Vec<_>>(),
+            ids
+        );
 
         // Permutation exacte : acceptée, et l'ordre suit.
         let mut inverse = ids.clone();
         inverse.reverse();
         channels.reorder(&inverse).unwrap();
-        assert_eq!(channels.list().iter().map(|c| c.id).collect::<Vec<_>>(), inverse);
+        assert_eq!(
+            channels.list().iter().map(|c| c.id).collect::<Vec<_>>(),
+            inverse
+        );
         // Les positions restent compactes, sans trou ni égalité.
         assert_eq!(
-            channels.list().iter().map(|c| c.position).collect::<Vec<_>>(),
+            channels
+                .list()
+                .iter()
+                .map(|c| c.position)
+                .collect::<Vec<_>>(),
             (0..ids.len() as u32).collect::<Vec<_>>()
         );
 
         // Et l'ordre survit au redémarrage.
         let apres = Channels::open(&dir).unwrap();
-        assert_eq!(apres.list().iter().map(|c| c.id).collect::<Vec<_>>(), inverse);
+        assert_eq!(
+            apres.list().iter().map(|c| c.id).collect::<Vec<_>>(),
+            inverse
+        );
     }
 
     /// Un salon réservé disparaît de la liste de qui n'a pas le rôle, mais
@@ -613,7 +673,9 @@ mod tests {
     fn a_restricted_channel_hides_from_outsiders_but_never_from_managers() {
         let dir = scratch("visibilite");
         let channels = Channels::open(&dir).unwrap();
-        let prive = channels.create("staff", ChannelKind::Text, Some(vec![7])).unwrap();
+        let prive = channels
+            .create("staff", ChannelKind::Text, Some(vec![7]))
+            .unwrap();
 
         // Sans le rôle : le salon n'existe pas.
         let vu = channels.visible_to(&[3], false);
@@ -621,12 +683,21 @@ mod tests {
         // Avec le rôle : il apparaît, mais la composition de la restriction
         // ne lui est pas envoyée.
         let vu = channels.visible_to(&[3, 7], false);
-        let trouve = vu.iter().find(|c| c.id == prive.id).expect("le rôle 7 y donne accès");
-        assert!(trouve.allowed_roles.is_none(), "un membre n'a pas à connaître les rôles listés");
+        let trouve = vu
+            .iter()
+            .find(|c| c.id == prive.id)
+            .expect("le rôle 7 y donne accès");
+        assert!(
+            trouve.allowed_roles.is_none(),
+            "un membre n'a pas à connaître les rôles listés"
+        );
         // Qui gère les salons voit tout, restriction comprise : c'est la
         // porte de secours contre le salon rendu orphelin par mégarde.
         let vu = channels.visible_to(&[], true);
-        let trouve = vu.iter().find(|c| c.id == prive.id).expect("porte de secours");
+        let trouve = vu
+            .iter()
+            .find(|c| c.id == prive.id)
+            .expect("porte de secours");
         assert_eq!(trouve.allowed_roles.as_deref(), Some(&[7][..]));
         // Les salons ouverts restent visibles de tous.
         assert!(channels.visible_to(&[], false).iter().any(|c| c.id == 1));
@@ -634,10 +705,22 @@ mod tests {
         // Le rôle supprimé s'efface partout ; le salon devient alors le
         // domaine des seuls gestionnaires, pas celui de tout le monde.
         assert!(channels.forget_role(7).unwrap());
-        assert!(!channels.forget_role(7).unwrap(), "rien à refaire au second passage");
-        assert_eq!(channels.get(prive.id).unwrap().allowed_roles.as_deref(), Some(&[][..]));
-        assert!(!channels.visible_to(&[7], false).iter().any(|c| c.id == prive.id));
-        assert!(channels.visible_to(&[], true).iter().any(|c| c.id == prive.id));
+        assert!(
+            !channels.forget_role(7).unwrap(),
+            "rien à refaire au second passage"
+        );
+        assert_eq!(
+            channels.get(prive.id).unwrap().allowed_roles.as_deref(),
+            Some(&[][..])
+        );
+        assert!(!channels
+            .visible_to(&[7], false)
+            .iter()
+            .any(|c| c.id == prive.id));
+        assert!(channels
+            .visible_to(&[], true)
+            .iter()
+            .any(|c| c.id == prive.id));
     }
 
     /// Le nom part dans la barre latérale de tout le monde : vide, trop long
@@ -648,10 +731,14 @@ mod tests {
         let channels = Channels::open(&dir).unwrap();
 
         assert!(channels.create("   ", ChannelKind::Text, None).is_err());
-        assert!(channels.create(&"x".repeat(MAX_NAME + 1), ChannelKind::Text, None).is_err());
+        assert!(channels
+            .create(&"x".repeat(MAX_NAME + 1), ChannelKind::Text, None)
+            .is_err());
         // Les commandes bidirectionnelles disparaissent : elles font lire à
         // l'écran autre chose que ce qui est écrit.
-        let propre = channels.create("  sa\u{202e}lon\n2  ", ChannelKind::Text, None).unwrap();
+        let propre = channels
+            .create("  sa\u{202e}lon\n2  ", ChannelKind::Text, None)
+            .unwrap();
         assert_eq!(propre.name, "salon 2");
 
         // Les mêmes règles à l'édition, et la nature ne se change pas.

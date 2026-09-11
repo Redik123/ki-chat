@@ -101,7 +101,10 @@ pub enum Ingest {
 impl Streams {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Inner { next_id: 1, by_id: HashMap::new() }),
+            inner: Mutex::new(Inner {
+                next_id: 1,
+                by_id: HashMap::new(),
+            }),
             mem: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -109,7 +112,11 @@ impl Streams {
     /// Le stream que diffuse ce compte, s'il y en a un.
     pub fn stream_of(&self, user: UserId) -> Option<u32> {
         let inner = self.inner.lock().unwrap();
-        inner.by_id.iter().find(|(_, l)| l.streamer == user).map(|(id, _)| *id)
+        inner
+            .by_id
+            .iter()
+            .find(|(_, l)| l.streamer == user)
+            .map(|(id, _)| *id)
     }
 
     /// Démarre une diffusion. Idempotent : rediffuser renvoie l'existant.
@@ -124,8 +131,11 @@ impl Streams {
         if let Some((id, _)) = inner.by_id.iter().find(|(_, l)| l.streamer == streamer) {
             return Ok(*id);
         }
-        let dans_le_salon =
-            inner.by_id.values().filter(|l| l.channel == channel).count();
+        let dans_le_salon = inner
+            .by_id
+            .values()
+            .filter(|l| l.channel == channel)
+            .count();
         if dans_le_salon >= MAX_PAR_SALON {
             return Err("deux diffusions tournent déjà dans ce salon");
         }
@@ -150,7 +160,10 @@ impl Streams {
     /// rediffusion au salon.
     pub fn meta_update(&self, streamer: UserId, meta: StreamMeta) -> Option<u32> {
         let mut inner = self.inner.lock().unwrap();
-        let (id, live) = inner.by_id.iter_mut().find(|(_, l)| l.streamer == streamer)?;
+        let (id, live) = inner
+            .by_id
+            .iter_mut()
+            .find(|(_, l)| l.streamer == streamer)?;
         live.meta = meta;
         Some(*id)
     }
@@ -204,7 +217,10 @@ impl Streams {
         conn: quinn::Connection,
     ) -> Result<(String, StreamMeta, bool, UserId), &'static str> {
         let mut inner = self.inner.lock().unwrap();
-        let live = inner.by_id.get_mut(&stream_id).ok_or("cette diffusion est terminée")?;
+        let live = inner
+            .by_id
+            .get_mut(&stream_id)
+            .ok_or("cette diffusion est terminée")?;
         if live.streamer == user {
             return Err("tu es le streamer : ton aperçu est local");
         }
@@ -219,7 +235,15 @@ impl Streams {
         let needs_idr = Arc::new(AtomicBool::new(true));
         let seq_start = live.seq_start.unwrap_or(0);
         let task = tokio::spawn(diffuser(conn.clone(), rx, seq_start, needs_idr.clone()));
-        live.viewers.insert(user, Viewer { tx, needs_idr, task, conn });
+        live.viewers.insert(
+            user,
+            Viewer {
+                tx,
+                needs_idr,
+                task,
+                conn,
+            },
+        );
         let ask = live.last_idr_ask.elapsed() >= IDR_COOLDOWN;
         if ask {
             live.last_idr_ask = Instant::now();
@@ -233,7 +257,9 @@ impl Streams {
     /// la voix. `false` si ce compte ne diffuse pas ce stream.
     pub fn relayer_audio(&self, streamer: UserId, stream_id: u32, dat: &bytes::Bytes) -> bool {
         let inner = self.inner.lock().unwrap();
-        let Some(live) = inner.by_id.get(&stream_id) else { return false };
+        let Some(live) = inner.by_id.get(&stream_id) else {
+            return false;
+        };
         if live.streamer != streamer {
             return false;
         }
@@ -272,8 +298,12 @@ impl Streams {
             return Ingest::Ok { ask_idr: ask };
         }
         self.mem.fetch_add(taille, Ordering::Relaxed);
-        let trame =
-            Arc::new(Trame { bytes, seq: header.seq, idr: header.idr, mem: self.mem.clone() });
+        let trame = Arc::new(Trame {
+            bytes,
+            seq: header.seq,
+            idr: header.idr,
+            mem: self.mem.clone(),
+        });
 
         let mut ask = false;
         let mut partis: Vec<UserId> = Vec::new();
@@ -356,7 +386,9 @@ async fn diffuser(
                 let _ = vieux.reset(quinn::VarInt::from_u32(0));
             }
         }
-        let Ok(mut flux) = conn.open_uni().await else { return };
+        let Ok(mut flux) = conn.open_uni().await else {
+            return;
+        };
         let _ = flux.set_priority(priorite(trame.seq, seq_start));
         match tokio::time::timeout(ECRITURE_MAX, flux.write_all(&trame.bytes)).await {
             Ok(Ok(())) => {}
@@ -382,7 +414,13 @@ mod tests {
     use super::*;
 
     fn meta() -> StreamMeta {
-        StreamMeta { width: 1920, height: 1080, fps: 30, kbps: 6000, ..Default::default() }
+        StreamMeta {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            kbps: 6000,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -419,7 +457,12 @@ mod tests {
     fn la_memoire_se_rend_au_drop() {
         let mem = Arc::new(AtomicUsize::new(0));
         mem.fetch_add(1000, Ordering::Relaxed);
-        let t = Arc::new(Trame { bytes: vec![0u8; 1000], seq: 1, idr: false, mem: mem.clone() });
+        let t = Arc::new(Trame {
+            bytes: vec![0u8; 1000],
+            seq: 1,
+            idr: false,
+            mem: mem.clone(),
+        });
         let t2 = t.clone();
         drop(t);
         assert_eq!(mem.load(Ordering::Relaxed), 1000, "une copie vit encore");

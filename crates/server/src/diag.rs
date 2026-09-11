@@ -74,7 +74,8 @@ fn segment_version_valide(v: &str) -> bool {
         && v.len() <= 24
         && v != ".."
         && v != "."
-        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// Nom de fichier d'un utilisateur : identifiant + pseudo assaini. C'est
@@ -83,7 +84,13 @@ fn segment_version_valide(v: &str) -> bool {
 fn fichier_de(user_id: u64, username: &str) -> String {
     let propre: String = username
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(40)
         .collect();
     format!("{user_id:08}-{propre}.jsonl")
@@ -113,9 +120,7 @@ pub async fn upload(
         return (StatusCode::BAD_REQUEST, "le lot doit être du texte UTF-8").into_response();
     };
 
-    let version = version_propre(
-        headers.get("x-ki-version").and_then(|v| v.to_str().ok()),
-    );
+    let version = version_propre(headers.get("x-ki-version").and_then(|v| v.to_str().ok()));
     let dir = diag_dir(&state).join(&version);
     let chemin = dir.join(fichier_de(user_id, &username));
     let recu = std::time::SystemTime::now()
@@ -138,7 +143,10 @@ pub async fn upload(
         std::fs::create_dir_all(&dir)?;
         rotate_si_plein(&chemin)?;
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&chemin)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&chemin)?;
         f.write_all(enveloppe.as_bytes())?;
         f.write_all(texte.as_bytes())?;
         if !texte.ends_with('\n') {
@@ -175,7 +183,10 @@ fn jeton_admin(state: &AppState) -> std::io::Result<String> {
         _ => {
             let neuf = format!("{:032x}", rand::rng().random::<u128>());
             std::fs::write(&chemin, &neuf)?;
-            tracing::info!("jeton d'accès aux diagnostics généré : {}", chemin.display());
+            tracing::info!(
+                "jeton d'accès aux diagnostics généré : {}",
+                chemin.display()
+            );
             Ok(neuf)
         }
     }
@@ -212,10 +223,7 @@ fn lecteur_autorise(state: &AppState, headers: &HeaderMap) -> bool {
 }
 
 /// GET /diag — la liste des archives : une ligne par fichier, taille et date.
-pub async fn lister(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn lister(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if !lecteur_autorise(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
     }
@@ -224,14 +232,18 @@ pub async fn lister(
     // Une ligne par archive, « version/fichier », triée — les versions se
     // lisent groupées, l'historique des bugs saute aux yeux.
     let liste = tokio::task::spawn_blocking(move || {
-        let Ok(versions) = std::fs::read_dir(&dir) else { return String::new() };
+        let Ok(versions) = std::fs::read_dir(&dir) else {
+            return String::new();
+        };
         let mut lignes: Vec<String> = Vec::new();
         for vdir in versions.flatten() {
             if !vdir.path().is_dir() {
                 continue;
             }
             let version = vdir.file_name().to_string_lossy().to_string();
-            let Ok(entrees) = std::fs::read_dir(vdir.path()) else { continue };
+            let Ok(entrees) = std::fs::read_dir(vdir.path()) else {
+                continue;
+            };
             for e in entrees.flatten() {
                 let Ok(meta) = e.metadata() else { continue };
                 let age = meta
@@ -387,20 +399,28 @@ fn fin_de_fichier(chemin: &FsPath, max: u64) -> std::io::Result<String> {
     let mut octets = Vec::with_capacity(max as usize);
     f.read_to_end(&mut octets)?;
     let texte = String::from_utf8_lossy(&octets);
-    Ok(texte.split_once('\n').map(|(_, reste)| reste).unwrap_or("").to_owned())
+    Ok(texte
+        .split_once('\n')
+        .map(|(_, reste)| reste)
+        .unwrap_or("")
+        .to_owned())
 }
 
 /// Construit le résumé : une ligne tabulée par version, triée, sous une
 /// ligne d'en-tête. Vide s'il n'y a aucune archive.
 fn resume_versions(dir: &FsPath) -> String {
-    let Ok(versions) = std::fs::read_dir(dir) else { return String::new() };
+    let Ok(versions) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
     let mut lignes: Vec<String> = Vec::new();
     for vdir in versions.flatten() {
         if !vdir.path().is_dir() {
             continue;
         }
         let version = vdir.file_name().to_string_lossy().to_string();
-        let Ok(entrees) = std::fs::read_dir(vdir.path()) else { continue };
+        let Ok(entrees) = std::fs::read_dir(vdir.path()) else {
+            continue;
+        };
         let mut joueurs = 0u64;
         let mut taille = 0u64;
         let mut compte = Compte::default();
@@ -438,10 +458,7 @@ fn resume_versions(dir: &FsPath) -> String {
 /// GET /diag-resume — l'état des lieux en un écran : une ligne par version,
 /// les compteurs qui disent la santé de chaque livraison, avant de plonger
 /// dans le détail des archives.
-pub async fn resume(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn resume(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if !lecteur_autorise(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
     }
@@ -560,12 +577,24 @@ mod tests {
 
         let resume = resume_versions(&dir);
         let lignes: Vec<&str> = resume.lines().collect();
-        assert_eq!(lignes.len(), 3, "en-tête + une ligne par version : {resume}");
+        assert_eq!(
+            lignes.len(),
+            3,
+            "en-tête + une ligne par version : {resume}"
+        );
         assert!(lignes[0].starts_with("version\tjoueurs\tsessions\t"));
         // Triées par version, colonnes : joueurs, sessions, réouvertures,
         // famines, erreurs, crashs.
-        assert!(lignes[1].starts_with("0.1.14\t1\t1\t0\t0\t1\t0\t"), "0.1.14 : {}", lignes[1]);
-        assert!(lignes[2].starts_with("0.1.15\t2\t2\t1\t1\t1\t1\t"), "0.1.15 : {}", lignes[2]);
+        assert!(
+            lignes[1].starts_with("0.1.14\t1\t1\t0\t0\t1\t0\t"),
+            "0.1.14 : {}",
+            lignes[1]
+        );
+        assert!(
+            lignes[2].starts_with("0.1.15\t2\t2\t1\t1\t1\t1\t"),
+            "0.1.15 : {}",
+            lignes[2]
+        );
 
         // Et sans archives du tout, rien — l'appelant mettra les mots.
         let vide = std::env::temp_dir().join("ki-chat-diag-resume-vide");
@@ -607,7 +636,9 @@ mod tests {
                 .or_else(|| f.strip_suffix(".jsonl.old"))
                 .is_some_and(|base| {
                     !base.is_empty()
-                        && base.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+                        && base
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
                 })
         };
         assert!(valide("00000007-r_dik.jsonl"));

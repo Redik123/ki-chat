@@ -95,10 +95,17 @@ impl CompteRiot {
 
 /// Ce que le fil HenrikDev a à faire.
 enum Travail {
-    Lier { user_id: UserId, nom: String, tag: String },
+    Lier {
+        user_id: UserId,
+        nom: String,
+        tag: String,
+    },
     /// `relance` : la énième relecture après une fin de partie, s'il s'agit
     /// de ça — pour savoir s'il faut relire encore.
-    Rafraichir { user_id: UserId, relance: Option<u32> },
+    Rafraichir {
+        user_id: UserId,
+        relance: Option<u32>,
+    },
     /// Le calendrier esport.
     Esports,
 }
@@ -150,8 +157,15 @@ struct Fil {
 
 /// Ce qu'il rapporte, à relayer aux clients.
 pub enum Resultat {
-    Liaison { user_id: UserId, ok: bool, message: String, riot_id: Option<String> },
-    Fiche { user_id: UserId },
+    Liaison {
+        user_id: UserId,
+        ok: bool,
+        message: String,
+        riot_id: Option<String>,
+    },
+    Fiche {
+        user_id: UserId,
+    },
 }
 
 struct Etat {
@@ -195,7 +209,10 @@ impl Valorant {
             dossier,
             comptes: Mutex::new(comptes),
             fiches: Mutex::new(fiches),
-            fil: Fil { annonces: Mutex::new(annonces), ..Default::default() },
+            fil: Fil {
+                annonces: Mutex::new(annonces),
+                ..Default::default()
+            },
             compteurs: Arc::default(),
             esports: Mutex::new((0, Vec::new())),
             esports_en_cours: std::sync::atomic::AtomicBool::new(false),
@@ -217,15 +234,29 @@ impl Valorant {
         } else {
             tracing::info!("VALORANT : pas de clé HenrikDev (KI_HENRIK_KEY ou data/henrik.key), liaisons fermées");
         }
-        Self { etat, travaux, resultats: Mutex::new(rx_res) }
+        Self {
+            etat,
+            travaux,
+            resultats: Mutex::new(rx_res),
+        }
     }
 
     pub fn riot_id(&self, user_id: UserId) -> Option<String> {
-        self.etat.comptes.lock().unwrap().get(&user_id).map(CompteRiot::riot_id)
+        self.etat
+            .comptes
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .map(CompteRiot::riot_id)
     }
 
     pub fn rang(&self, user_id: UserId) -> Option<u8> {
-        self.etat.fiches.lock().unwrap().get(&user_id).map(|f| f.rang.tier)
+        self.etat
+            .fiches
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .map(|f| f.rang.tier)
     }
 
     pub fn fiche(&self, user_id: UserId) -> Option<FicheValorant> {
@@ -234,7 +265,13 @@ impl Valorant {
 
     /// Toutes les fiches, pour la page de stats du groupe.
     pub fn toutes(&self) -> Vec<(UserId, FicheValorant)> {
-        self.etat.fiches.lock().unwrap().iter().map(|(id, f)| (*id, f.clone())).collect()
+        self.etat
+            .fiches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, f)| (*id, f.clone()))
+            .collect()
     }
 
     /// Met la liaison en file. Refuse sans clé, ou si ce Riot ID est déjà
@@ -246,7 +283,9 @@ impl Valorant {
         {
             let comptes = self.etat.comptes.lock().unwrap();
             let deja = comptes.iter().any(|(id, c)| {
-                *id != user_id && c.nom.eq_ignore_ascii_case(&nom) && c.tag.eq_ignore_ascii_case(&tag)
+                *id != user_id
+                    && c.nom.eq_ignore_ascii_case(&nom)
+                    && c.tag.eq_ignore_ascii_case(&tag)
             });
             if deja {
                 return Err("ce compte Riot est déjà lié à un autre membre".into());
@@ -261,7 +300,15 @@ impl Valorant {
     pub fn delier(&self, user_id: UserId) -> bool {
         let retire = self.etat.comptes.lock().unwrap().remove(&user_id).is_some();
         let fiche = self.etat.fiches.lock().unwrap().remove(&user_id).is_some();
-        if self.etat.fil.annonces.lock().unwrap().remove(&user_id).is_some() {
+        if self
+            .etat
+            .fil
+            .annonces
+            .lock()
+            .unwrap()
+            .remove(&user_id)
+            .is_some()
+        {
             self.etat.sauver_fil();
         }
         self.etat.fil.relances.lock().unwrap().remove(&user_id);
@@ -278,7 +325,10 @@ impl Valorant {
     pub fn rafraichir(&self, user_id: UserId) {
         if let Some(travaux) = &self.travaux {
             if self.etat.comptes.lock().unwrap().contains_key(&user_id) {
-                let _ = travaux.send(Travail::Rafraichir { user_id, relance: None });
+                let _ = travaux.send(Travail::Rafraichir {
+                    user_id,
+                    relance: None,
+                });
             }
         }
     }
@@ -292,7 +342,8 @@ impl Valorant {
     /// lu) et qu'aucune lecture n'est en cours.
     pub fn rafraichir_esports(&self) {
         let Some(travaux) = &self.travaux else { return };
-        let perime = maintenant_ms().saturating_sub(self.etat.esports.lock().unwrap().0) > ESPORTS_AGE.as_millis() as u64;
+        let perime = maintenant_ms().saturating_sub(self.etat.esports.lock().unwrap().0)
+            > ESPORTS_AGE.as_millis() as u64;
         if perime && !self.etat.esports_en_cours.swap(true, Ordering::Relaxed) {
             let _ = travaux.send(Travail::Esports);
         }
@@ -326,25 +377,38 @@ impl Valorant {
         if self.travaux.is_none() || !self.etat.comptes.lock().unwrap().contains_key(&user_id) {
             return;
         }
-        self.etat.fil.relances.lock().unwrap().insert(user_id, (Instant::now() + RELANCE_DELAI, 0));
+        self.etat
+            .fil
+            .relances
+            .lock()
+            .unwrap()
+            .insert(user_id, (Instant::now() + RELANCE_DELAI, 0));
     }
 
     /// À appeler régulièrement : lance les relectures dues et rend les
     /// annonces prêtes — complètes, ou qui ont assez attendu.
     pub fn tick(&self) -> Vec<Annonce> {
-        let Some(travaux) = &self.travaux else { return Vec::new() };
+        let Some(travaux) = &self.travaux else {
+            return Vec::new();
+        };
         let maintenant = Instant::now();
         let dues: Vec<(UserId, u32)> = {
             let mut relances = self.etat.fil.relances.lock().unwrap();
-            let dues: Vec<_> =
-                relances.iter().filter(|(_, (quand, _))| *quand <= maintenant).map(|(id, (_, n))| (*id, *n)).collect();
+            let dues: Vec<_> = relances
+                .iter()
+                .filter(|(_, (quand, _))| *quand <= maintenant)
+                .map(|(id, (_, n))| (*id, *n))
+                .collect();
             for (id, _) in &dues {
                 relances.remove(id);
             }
             dues
         };
         for (user_id, essais) in dues {
-            let _ = travaux.send(Travail::Rafraichir { user_id, relance: Some(essais) });
+            let _ = travaux.send(Travail::Rafraichir {
+                user_id,
+                relance: Some(essais),
+            });
         }
         self.etat.fil.pretes()
     }
@@ -396,7 +460,12 @@ impl Etat {
     /// Les puuid des membres liés — pour reconnaître les coéquipiers du
     /// groupe dans un match.
     fn lies(&self) -> Vec<(UserId, String)> {
-        self.comptes.lock().unwrap().iter().map(|(id, c)| (*id, c.puuid.clone())).collect()
+        self.comptes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, c)| (*id, c.puuid.clone()))
+            .collect()
     }
 }
 
@@ -442,8 +511,21 @@ impl Fil {
                 .historique_rr
                 .iter()
                 .find(|p| p.match_id == m.id)
-                .map(|p| (p.delta, RangValorant { tier: p.tier, rr: p.rr, ..Default::default() }));
-            let autres = co.iter().find(|(id, _)| *id == m.id).map(|(_, v)| v.clone()).unwrap_or_default();
+                .map(|p| {
+                    (
+                        p.delta,
+                        RangValorant {
+                            tier: p.tier,
+                            rr: p.rr,
+                            ..Default::default()
+                        },
+                    )
+                });
+            let autres = co
+                .iter()
+                .find(|(id, _)| *id == m.id)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
             let mut attente = self.en_attente.lock().unwrap();
             let e = attente.entry(m.id.clone()).or_insert_with(|| Attente {
                 depuis: Instant::now(),
@@ -452,11 +534,18 @@ impl Fil {
             });
             e.attendus.remove(&user_id);
             if !e.lignes.iter().any(|l| l.user_id == user_id) {
-                e.lignes.push(LigneAnnonce { user_id, resume: m.clone(), rr });
+                e.lignes.push(LigneAnnonce {
+                    user_id,
+                    resume: m.clone(),
+                    rr,
+                });
             }
             for autre in autres {
                 if !e.lignes.iter().any(|l| l.user_id == autre) && e.attendus.insert(autre) {
-                    let _ = travaux.send(Travail::Rafraichir { user_id: autre, relance: None });
+                    let _ = travaux.send(Travail::Rafraichir {
+                        user_id: autre,
+                        relance: None,
+                    });
                 }
             }
         }
@@ -473,7 +562,12 @@ impl Fil {
             .collect();
         mures
             .into_iter()
-            .filter_map(|id| attente.remove(&id).map(|a| Annonce { match_id: id, lignes: a.lignes }))
+            .filter_map(|id| {
+                attente.remove(&id).map(|a| Annonce {
+                    match_id: id,
+                    lignes: a.lignes,
+                })
+            })
             .filter(|a| !a.lignes.is_empty())
             .collect()
     }
@@ -485,7 +579,9 @@ impl Fil {
 pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
     let mut lignes: Vec<&LigneAnnonce> = a.lignes.iter().collect();
     lignes.sort_by_key(|l| std::cmp::Reverse(l.resume.score));
-    let Some(premier) = lignes.first().map(|l| &l.resume) else { return String::new() };
+    let Some(premier) = lignes.first().map(|l| &l.resume) else {
+        return String::new();
+    };
     let issue = |m: &MatchResume| -> String {
         let (g, p) = m.manches;
         match m.gagne {
@@ -494,7 +590,9 @@ pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
             None => format!("égalité {g}-{p}"),
         }
     };
-    let meme_camp = lignes.iter().all(|l| l.resume.gagne == premier.gagne && l.resume.manches == premier.manches);
+    let meme_camp = lignes
+        .iter()
+        .all(|l| l.resume.gagne == premier.gagne && l.resume.manches == premier.manches);
     let mut texte = if meme_camp {
         let emoji = match premier.gagne {
             Some(true) => "🏆",
@@ -507,17 +605,31 @@ pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
         }
         format!("{emoji} {i} sur {} · {}", premier.carte, premier.mode)
     } else {
-        format!("⚔️ {} · {} — le groupe des deux côtés", premier.carte, premier.mode)
+        format!(
+            "⚔️ {} · {} — le groupe des deux côtés",
+            premier.carte, premier.mode
+        )
     };
     for l in lignes {
         let m = &l.resume;
-        texte.push_str(&format!("\n{} — {} {}/{}/{}", pseudo(l.user_id), m.agent, m.kills, m.deaths, m.assists));
+        texte.push_str(&format!(
+            "\n{} — {} {}/{}/{}",
+            pseudo(l.user_id),
+            m.agent,
+            m.kills,
+            m.deaths,
+            m.assists
+        ));
         if !meme_camp {
             texte.push_str(&format!(" · {}", issue(m)));
         }
         if let Some((delta, rang)) = &l.rr {
             let signe = if *delta >= 0 { "+" } else { "" };
-            texte.push_str(&format!(" · {signe}{delta} RR ({}, {} RR)", ki_protocol::nom_de_rang(rang.tier), rang.rr));
+            texte.push_str(&format!(
+                " · {signe}{delta} RR ({}, {} RR)",
+                ki_protocol::nom_de_rang(rang.tier),
+                rang.rr
+            ));
         }
     }
     texte
@@ -526,7 +638,10 @@ pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
 fn lire<T: serde::de::DeserializeOwned>(chemin: &std::path::Path) -> BTreeMap<UserId, T> {
     match std::fs::read_to_string(chemin) {
         Ok(texte) => serde_json::from_str(&texte).unwrap_or_else(|e| {
-            tracing::warn!("VALORANT : {} illisible ({e}), reparti de zéro", chemin.display());
+            tracing::warn!(
+                "VALORANT : {} illisible ({e}), reparti de zéro",
+                chemin.display()
+            );
             BTreeMap::new()
         }),
         Err(_) => BTreeMap::new(),
@@ -540,7 +655,10 @@ fn ecrire<T: Serialize>(chemin: &std::path::Path, valeur: &BTreeMap<UserId, T>) 
     match serde_json::to_vec_pretty(valeur) {
         Ok(octets) => {
             if let Err(e) = crate::store::write_atomic(chemin, &octets) {
-                tracing::warn!("VALORANT : écriture de {} impossible : {e}", chemin.display());
+                tracing::warn!(
+                    "VALORANT : écriture de {} impossible : {e}",
+                    chemin.display()
+                );
             }
         }
         Err(e) => tracing::warn!("VALORANT : sérialisation impossible : {e}"),
@@ -550,7 +668,10 @@ fn ecrire<T: Serialize>(chemin: &std::path::Path, valeur: &BTreeMap<UserId, T>) 
 /// La clé : la variable d'environnement d'abord, le fichier ensuite.
 /// Jamais dans le binaire ni dans le dépôt.
 fn cle_henrik(data_dir: &str) -> Option<String> {
-    let env = std::env::var("KI_HENRIK_KEY").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let env = std::env::var("KI_HENRIK_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     env.or_else(|| {
         std::fs::read_to_string(PathBuf::from(data_dir).join("henrik.key"))
             .ok()
@@ -560,7 +681,10 @@ fn cle_henrik(data_dir: &str) -> Option<String> {
 }
 
 pub fn maintenant_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +699,9 @@ struct Seau {
 
 impl Seau {
     fn new() -> Self {
-        Self { passees: VecDeque::with_capacity(BUDGET_PAR_MINUTE) }
+        Self {
+            passees: VecDeque::with_capacity(BUDGET_PAR_MINUTE),
+        }
     }
 
     fn prendre(&mut self) {
@@ -626,10 +752,14 @@ impl Api {
             self.seau.prendre();
             essais += 1;
             self.compteurs.requetes.fetch_add(1, Ordering::Relaxed);
-            self.compteurs.derniere_ms.store(maintenant_ms(), Ordering::Relaxed);
+            self.compteurs
+                .derniere_ms
+                .store(maintenant_ms(), Ordering::Relaxed);
             match self.agent.get(&url).set("Authorization", &self.cle).call() {
                 Ok(reponse) => {
-                    return reponse.into_json::<Value>().map_err(|e| Erreur::Autre(e.to_string()));
+                    return reponse
+                        .into_json::<Value>()
+                        .map_err(|e| Erreur::Autre(e.to_string()));
                 }
                 Err(ureq::Error::Status(404, _)) => return Err(Erreur::Introuvable),
                 Err(ureq::Error::Status(429, _)) if essais < 2 => {
@@ -648,7 +778,9 @@ impl Api {
                         .ok()
                         .and_then(|v| v["errors"][0]["message"].as_str().map(str::to_string))
                         .unwrap_or_default();
-                    return Err(Erreur::Autre(format!("HTTP {code} {detail}").trim().to_string()));
+                    return Err(Erreur::Autre(
+                        format!("HTTP {code} {detail}").trim().to_string(),
+                    ));
                 }
                 Err(e) => {
                     self.compteurs.erreurs.fetch_add(1, Ordering::Relaxed);
@@ -659,12 +791,23 @@ impl Api {
     }
 }
 
-fn fil(cle: String, etat: Arc<Etat>, rx: Receiver<Travail>, tx: Sender<Resultat>, travaux: Sender<Travail>) {
+fn fil(
+    cle: String,
+    etat: Arc<Etat>,
+    rx: Receiver<Travail>,
+    tx: Sender<Resultat>,
+    travaux: Sender<Travail>,
+) {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("ki-chat-server/", env!("CARGO_PKG_VERSION")))
         .build();
-    let mut api = Api { agent, cle, seau: Seau::new(), compteurs: Arc::clone(&etat.compteurs) };
+    let mut api = Api {
+        agent,
+        cle,
+        seau: Seau::new(),
+        compteurs: Arc::clone(&etat.compteurs),
+    };
     for travail in rx {
         match travail {
             Travail::Lier { user_id, nom, tag } => {
@@ -681,7 +824,12 @@ fn fil(cle: String, etat: Arc<Etat>, rx: Receiver<Travail>, tx: Sender<Resultat>
                     }
                     Err(e) => (false, e.message(), None),
                 };
-                let _ = tx.send(Resultat::Liaison { user_id, ok, message, riot_id });
+                let _ = tx.send(Resultat::Liaison {
+                    user_id,
+                    ok,
+                    message,
+                    riot_id,
+                });
             }
             Travail::Esports => {
                 // Le calendrier complet d'abord ; s'il tombe (HenrikDev a
@@ -733,7 +881,11 @@ fn fil(cle: String, etat: Arc<Etat>, rx: Receiver<Travail>, tx: Sender<Resultat>
                         let _ = tx.send(Resultat::Fiche { user_id });
                     }
                     Err(e) => {
-                        tracing::warn!("VALORANT : fiche de {} non rafraîchie : {}", compte.riot_id(), e.message());
+                        tracing::warn!(
+                            "VALORANT : fiche de {} non rafraîchie : {}",
+                            compte.riot_id(),
+                            e.message()
+                        );
                         // Qu'on ne réessaie pas à chaque minute : la fiche
                         // est datée de maintenant même si elle n'a pas changé.
                         if let Some(f) = etat.fiches.lock().unwrap().get_mut(&user_id) {
@@ -755,18 +907,28 @@ fn resume_rang(r: &RangValorant) -> String {
 }
 
 /// Résout le compte, construit la fiche, enregistre les deux.
-fn lier(api: &mut Api, etat: &Etat, user_id: UserId, nom: &str, tag: &str) -> Result<FicheValorant, Erreur> {
+fn lier(
+    api: &mut Api,
+    etat: &Etat,
+    user_id: UserId,
+    nom: &str,
+    tag: &str,
+) -> Result<FicheValorant, Erreur> {
     let compte = api.get(&format!("/valorant/v2/account/{}/{}", enc(nom), enc(tag)))?;
     let d = &compte["data"];
     let puuid = d["puuid"].as_str().ok_or(Erreur::Introuvable)?.to_string();
     let region = d["region"].as_str().unwrap_or("eu").to_string();
-    let plateformes: Vec<&str> = d["platforms"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    let plateforme = if plateformes.iter().any(|p| p.eq_ignore_ascii_case("pc")) || plateformes.is_empty() {
-        "pc"
-    } else {
-        "console"
-    }
-    .to_string();
+    let plateformes: Vec<&str> = d["platforms"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let plateforme =
+        if plateformes.iter().any(|p| p.eq_ignore_ascii_case("pc")) || plateformes.is_empty() {
+            "pc"
+        } else {
+            "console"
+        }
+        .to_string();
     let compte = CompteRiot {
         nom: d["name"].as_str().unwrap_or(nom).to_string(),
         tag: d["tag"].as_str().unwrap_or(tag).to_string(),
@@ -797,10 +959,20 @@ fn construire(
     niveau: Option<u32>,
     lies: &[(UserId, String)],
 ) -> Result<(FicheValorant, CoMembres), Erreur> {
-    let suffixe = format!("{}/{}/{}/{}", compte.region, compte.plateforme, enc(&compte.nom), enc(&compte.tag));
+    let suffixe = format!(
+        "{}/{}/{}/{}",
+        compte.region,
+        compte.plateforme,
+        enc(&compte.nom),
+        enc(&compte.tag)
+    );
     let mmr = api.get(&format!("/valorant/v3/mmr/{suffixe}"))?;
-    let historique = api.get(&format!("/valorant/v2/mmr-history/{suffixe}")).unwrap_or(Value::Null);
-    let matchs = api.get(&format!("/valorant/v4/matches/{suffixe}?size={MATCHS_MAX}")).unwrap_or(Value::Null);
+    let historique = api
+        .get(&format!("/valorant/v2/mmr-history/{suffixe}"))
+        .unwrap_or(Value::Null);
+    let matchs = api
+        .get(&format!("/valorant/v4/matches/{suffixe}?size={MATCHS_MAX}"))
+        .unwrap_or(Value::Null);
 
     let mut fiche = FicheValorant {
         riot_id: compte.riot_id(),
@@ -848,11 +1020,22 @@ fn construire(
         .unwrap_or_default();
     fiche.matchs = matchs["data"]
         .as_array()
-        .map(|liste| liste.iter().filter_map(|m| resumer_match(m, &compte.puuid)).take(MATCHS_MAX).collect())
+        .map(|liste| {
+            liste
+                .iter()
+                .filter_map(|m| resumer_match(m, &compte.puuid))
+                .take(MATCHS_MAX)
+                .collect()
+        })
         .unwrap_or_default();
     let co_membres: CoMembres = matchs["data"]
         .as_array()
-        .map(|liste| liste.iter().filter_map(|m| co_membres(m, &compte.puuid, lies)).collect())
+        .map(|liste| {
+            liste
+                .iter()
+                .filter_map(|m| co_membres(m, &compte.puuid, lies))
+                .collect()
+        })
         .unwrap_or_default();
     if niveau.is_none() {
         // Le niveau de compte vient avec chaque match : le plus récent.
@@ -860,7 +1043,10 @@ fn construire(
             .as_array()
             .and_then(|l| l.first())
             .and_then(|m| m["players"].as_array())
-            .and_then(|ps| ps.iter().find(|p| p["puuid"].as_str() == Some(&compte.puuid)))
+            .and_then(|ps| {
+                ps.iter()
+                    .find(|p| p["puuid"].as_str() == Some(&compte.puuid))
+            })
             .and_then(|p| p["account_level"].as_u64())
         {
             fiche.niveau = n as u32;
@@ -891,14 +1077,21 @@ pub fn calendrier_esport(v: &Value, maintenant: u64) -> Vec<MatchEsport> {
                 .into_iter()
                 .flatten()
                 .filter_map(|t| {
-                    t["code"].as_str().filter(|c| !c.is_empty()).or_else(|| t["name"].as_str()).map(str::to_string)
+                    t["code"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .or_else(|| t["name"].as_str())
+                        .map(str::to_string)
                 })
                 .take(2)
                 .collect();
             if equipes.len() < 2 {
                 return None;
             }
-            let format = match (m["match"]["game_type"]["type"].as_str(), m["match"]["game_type"]["count"].as_u64()) {
+            let format = match (
+                m["match"]["game_type"]["type"].as_str(),
+                m["match"]["game_type"]["count"].as_u64(),
+            ) {
                 (Some("bestOf"), Some(n)) if n > 0 => format!("BO{n}"),
                 (Some("playAll"), Some(n)) if n > 0 => format!("{n} cartes"),
                 _ => String::new(),
@@ -923,7 +1116,11 @@ pub fn calendrier_esport(v: &Value, maintenant: u64) -> Vec<MatchEsport> {
 /// `None` s'il n'y en a pas.
 fn co_membres(m: &Value, moi: &str, lies: &[(UserId, String)]) -> Option<(String, Vec<UserId>)> {
     let id = m["metadata"]["match_id"].as_str()?.to_string();
-    let puuids: Vec<&str> = m["players"].as_array()?.iter().filter_map(|p| p["puuid"].as_str()).collect();
+    let puuids: Vec<&str> = m["players"]
+        .as_array()?
+        .iter()
+        .filter_map(|p| p["puuid"].as_str())
+        .collect();
     let autres: Vec<UserId> = lies
         .iter()
         .filter(|(_, puuid)| puuid != moi && puuids.contains(&puuid.as_str()))
@@ -935,11 +1132,21 @@ fn co_membres(m: &Value, moi: &str, lies: &[(UserId, String)]) -> Option<(String
 /// La ligne du membre dans un match — et rien des autres joueurs.
 fn resumer_match(m: &Value, puuid: &str) -> Option<MatchResume> {
     let meta = &m["metadata"];
-    let joueur = m["players"].as_array()?.iter().find(|p| p["puuid"].as_str() == Some(puuid))?;
+    let joueur = m["players"]
+        .as_array()?
+        .iter()
+        .find(|p| p["puuid"].as_str() == Some(puuid))?;
     let equipe = joueur["team_id"].as_str().unwrap_or("");
-    let camp = m["teams"].as_array().and_then(|ts| ts.iter().find(|t| t["team_id"].as_str() == Some(equipe)));
+    let camp = m["teams"]
+        .as_array()
+        .and_then(|ts| ts.iter().find(|t| t["team_id"].as_str() == Some(equipe)));
     let (gagnees, perdues) = camp
-        .map(|t| (t["rounds"]["won"].as_u64().unwrap_or(0) as u8, t["rounds"]["lost"].as_u64().unwrap_or(0) as u8))
+        .map(|t| {
+            (
+                t["rounds"]["won"].as_u64().unwrap_or(0) as u8,
+                t["rounds"]["lost"].as_u64().unwrap_or(0) as u8,
+            )
+        })
         .unwrap_or((0, 0));
     let gagne = match camp.and_then(|t| t["won"].as_bool()) {
         Some(true) => Some(true),
@@ -949,7 +1156,8 @@ fn resumer_match(m: &Value, puuid: &str) -> Option<MatchResume> {
     };
     let stats = &joueur["stats"];
     let tetes = stats["headshots"].as_u64().unwrap_or(0);
-    let tirs = tetes + stats["bodyshots"].as_u64().unwrap_or(0) + stats["legshots"].as_u64().unwrap_or(0);
+    let tirs =
+        tetes + stats["bodyshots"].as_u64().unwrap_or(0) + stats["legshots"].as_u64().unwrap_or(0);
     let mode = meta["queue"]["name"]
         .as_str()
         .or_else(|| meta["queue"]["mode_type"].as_str())
@@ -995,7 +1203,9 @@ fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for octet in s.bytes() {
         match octet {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(octet as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(octet as char)
+            }
             _ => out.push_str(&format!("%{octet:02X}")),
         }
     }
@@ -1014,7 +1224,11 @@ pub fn iso_vers_ms(s: &str) -> u64 {
     let minute = nombre(14, 16).unwrap_or(0);
     let seconde = nombre(17, 19).unwrap_or(0);
     // Jours depuis l'époque, par l'algorithme civil de Howard Hinnant.
-    let (y, m) = if mois <= 2 { (an - 1, mois + 9) } else { (an, mois - 3) };
+    let (y, m) = if mois <= 2 {
+        (an - 1, mois + 9)
+    } else {
+        (an, mois - 3)
+    };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
     let doy = (153 * m + 2) / 5 + jour - 1;
@@ -1090,7 +1304,14 @@ mod tests {
         assert_eq!(seau.passees.len(), BUDGET_PAR_MINUTE);
     }
 
-    fn ligne(user_id: UserId, agent: &str, kda: (u16, u16, u16), score: u32, gagne: Option<bool>, rr: Option<(i32, u8, u16)>) -> LigneAnnonce {
+    fn ligne(
+        user_id: UserId,
+        agent: &str,
+        kda: (u16, u16, u16),
+        score: u32,
+        gagne: Option<bool>,
+        rr: Option<(i32, u8, u16)>,
+    ) -> LigneAnnonce {
         LigneAnnonce {
             user_id,
             resume: MatchResume {
@@ -1102,11 +1323,24 @@ mod tests {
                 deaths: kda.1,
                 assists: kda.2,
                 score,
-                manches: if gagne == Some(true) { (13, 9) } else { (9, 13) },
+                manches: if gagne == Some(true) {
+                    (13, 9)
+                } else {
+                    (9, 13)
+                },
                 gagne,
                 ..Default::default()
             },
-            rr: rr.map(|(d, t, r)| (d, RangValorant { tier: t, rr: r, ..Default::default() })),
+            rr: rr.map(|(d, t, r)| {
+                (
+                    d,
+                    RangValorant {
+                        tier: t,
+                        rr: r,
+                        ..Default::default()
+                    },
+                )
+            }),
         }
     }
 
@@ -1121,7 +1355,13 @@ mod tests {
                 ligne(1, "Jett", (24, 12, 6), 6000, Some(true), Some((18, 14, 57))),
             ],
         };
-        let texte = composer(&a, |id| if id == 1 { "Jerem".into() } else { "Redik".into() });
+        let texte = composer(&a, |id| {
+            if id == 1 {
+                "Jerem".into()
+            } else {
+                "Redik".into()
+            }
+        });
         assert_eq!(
             texte,
             "🏆 Victoire 13-9 sur Ascent · Compétitif\nJerem — Jett 24/12/6 · +18 RR (Or 3, 57 RR)\nRedik — Sage 12/14/9 · +16 RR (Platine 1, 12 RR)"
@@ -1129,7 +1369,10 @@ mod tests {
         // Des deux côtés : chaque ligne dit son issue.
         let b = Annonce {
             match_id: "m1".into(),
-            lignes: vec![ligne(1, "Jett", (24, 12, 6), 6000, Some(true), None), ligne(2, "Sage", (12, 14, 9), 3000, Some(false), None)],
+            lignes: vec![
+                ligne(1, "Jett", (24, 12, 6), 6000, Some(true), None),
+                ligne(2, "Sage", (12, 14, 9), 3000, Some(false), None),
+            ],
         };
         let texte = composer(&b, |id| format!("j{id}"));
         assert!(texte.starts_with("⚔️ Ascent · Compétitif — le groupe des deux côtés"));
@@ -1155,20 +1398,39 @@ mod tests {
             ..Default::default()
         };
         let fiche = FicheValorant {
-            matchs: vec![m("neuf", "Compétitif", recent), m("dm", "Combat à mort", recent), m("vieux", "Compétitif", recent - 7 * 3_600_000)],
-            historique_rr: vec![PointRR { match_id: "neuf".into(), delta: 21, tier: 12, rr: 40, ..Default::default() }],
+            matchs: vec![
+                m("neuf", "Compétitif", recent),
+                m("dm", "Combat à mort", recent),
+                m("vieux", "Compétitif", recent - 7 * 3_600_000),
+            ],
+            historique_rr: vec![PointRR {
+                match_id: "neuf".into(),
+                delta: 21,
+                tier: 12,
+                rr: 40,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let co = vec![("neuf".to_string(), vec![2u64])];
         assert_eq!(fil.nouveaux(1, &fiche, &co, &tx), 3);
         // Le coéquipier 2 a été relu, et l'annonce l'attend.
-        assert!(matches!(rx.try_recv(), Ok(Travail::Rafraichir { user_id: 2, relance: None })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Travail::Rafraichir {
+                user_id: 2,
+                relance: None
+            })
+        ));
         assert!(fil.pretes().is_empty(), "l'annonce attend le coéquipier");
         // Rien de neuf à la seconde lecture.
         assert_eq!(fil.nouveaux(1, &fiche, &co, &tx), 0);
         // Le coéquipier arrive : l'annonce est prête, à deux lignes, avec
         // les RR du premier.
-        let fiche2 = FicheValorant { matchs: vec![m("neuf", "Compétitif", recent)], ..Default::default() };
+        let fiche2 = FicheValorant {
+            matchs: vec![m("neuf", "Compétitif", recent)],
+            ..Default::default()
+        };
         assert_eq!(fil.nouveaux(2, &fiche2, &[], &tx), 1);
         let pretes = fil.pretes();
         assert_eq!(pretes.len(), 1);
@@ -1193,7 +1455,14 @@ mod tests {
         assert_eq!(c[0].equipes, vec!["PRX", "DRX"]);
         assert_eq!(c[0].format, "2 cartes");
         assert_eq!(c[1].equipes, vec!["FNC", "Team Heretics"]);
-        assert_eq!((c[1].format.as_str(), c[1].region.as_str(), c[1].tournoi.as_str()), ("BO3", "EMEA", "Kickoff"));
+        assert_eq!(
+            (
+                c[1].format.as_str(),
+                c[1].region.as_str(),
+                c[1].tournoi.as_str()
+            ),
+            ("BO3", "EMEA", "Kickoff")
+        );
     }
 
     /// Sans clé, le service reste ouvert en lecture et ferme les liaisons.

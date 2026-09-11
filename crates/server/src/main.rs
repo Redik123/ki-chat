@@ -126,8 +126,20 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 for r in state.valorant.resultats() {
                     match r {
-                        valorant::Resultat::Liaison { user_id, ok, message, riot_id } => {
-                            state.send_to(user_id, &ki_protocol::ServerMsg::LiaisonRiot { ok, message, riot_id });
+                        valorant::Resultat::Liaison {
+                            user_id,
+                            ok,
+                            message,
+                            riot_id,
+                        } => {
+                            state.send_to(
+                                user_id,
+                                &ki_protocol::ServerMsg::LiaisonRiot {
+                                    ok,
+                                    message,
+                                    riot_id,
+                                },
+                            );
                             state.broadcast_member(user_id);
                         }
                         valorant::Resultat::Fiche { user_id } => state.broadcast_member(user_id),
@@ -146,7 +158,10 @@ async fn main() -> anyhow::Result<()> {
                             .collect();
                         for annonce in &annonces {
                             let texte = valorant::composer(annonce, |id| {
-                                pseudos.get(&id).cloned().unwrap_or_else(|| format!("membre {id}"))
+                                pseudos
+                                    .get(&id)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("membre {id}"))
                             });
                             state.poster_systeme(channel, valorant::PSEUDO_DU_FIL, &texte);
                         }
@@ -154,8 +169,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 tours = tours.wrapping_add(1);
                 if tours.is_multiple_of(120) {
-                    let en_ligne: Vec<ki_protocol::UserId> = state.users.lock().unwrap().keys().copied().collect();
-                    for id in state.valorant.a_rafraichir(&en_ligne, std::time::Duration::from_secs(30 * 60)) {
+                    let en_ligne: Vec<ki_protocol::UserId> =
+                        state.users.lock().unwrap().keys().copied().collect();
+                    for id in state
+                        .valorant
+                        .a_rafraichir(&en_ligne, std::time::Duration::from_secs(30 * 60))
+                    {
                         state.valorant.rafraichir(id);
                     }
                     // Le calendrier esport, une fois par heure tant que

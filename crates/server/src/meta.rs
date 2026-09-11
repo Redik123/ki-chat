@@ -26,7 +26,10 @@ impl ServerMeta {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ServerInfo::default(),
             Err(e) => return Err(e).context("lecture de server.json"),
         };
-        Ok(Self { path, info: Mutex::new(info) })
+        Ok(Self {
+            path,
+            info: Mutex::new(info),
+        })
     }
 
     pub fn get(&self) -> ServerInfo {

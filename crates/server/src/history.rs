@@ -90,7 +90,10 @@ fn appliquer_reaction(etats: &mut Etats, ev: &EvReaction) -> bool {
             if etat.reactions.len() >= ki_protocol::MAX_REACTIONS {
                 return false;
             }
-            etat.reactions.push(Reaction { emoji: ev.emoji.clone(), users: vec![ev.by] });
+            etat.reactions.push(Reaction {
+                emoji: ev.emoji.clone(),
+                users: vec![ev.by],
+            });
             true
         }
         None => false,
@@ -148,7 +151,9 @@ fn fit_within(messages: Vec<ChatRecord>) -> (Vec<ChatRecord>, bool) {
     let mut total = 0usize;
     let mut start = messages.len();
     for (i, rec) in messages.iter().enumerate().rev() {
-        let size = serde_json::to_string(rec).map(|s| s.len() + 1).unwrap_or(usize::MAX);
+        let size = serde_json::to_string(rec)
+            .map(|s| s.len() + 1)
+            .unwrap_or(usize::MAX);
         if total + size > MAX_HISTORY_BYTES {
             break;
         }
@@ -214,7 +219,9 @@ fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index,
     let mut offset = 0u64;
     let mut etats = Etats::new();
 
-    let Ok(file) = File::open(path) else { return (recent, index, 0, etats) };
+    let Ok(file) = File::open(path) else {
+        return (recent, index, 0, etats);
+    };
     let mut reader = BufReader::new(file);
     // Octets bruts, et non `read_line` : celui-ci échoue sur de l'UTF-8
     // invalide **sans dire combien d'octets il a consommés**, ce qui ne
@@ -237,7 +244,10 @@ fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index,
         offset += read as u64;
         match serde_json::from_slice::<Ligne>(trim_eol(&buf)) {
             Ok(Ligne::Message(rec)) => {
-                index.push(Entry { ts: rec.ts, offset: debut });
+                index.push(Entry {
+                    ts: rec.ts,
+                    offset: debut,
+                });
                 if recent.len() == mem_cap {
                     recent.pop_front();
                 }
@@ -319,7 +329,10 @@ impl History {
     /// Pose l'état après coup sur un message lu : ses réactions, et « garder
     /// ou non » — un message supprimé ne se rend plus.
     fn habiller(etats: &Etats, mut rec: ChatRecord) -> Option<ChatRecord> {
-        match etats.get(&MsgRef { user_id: rec.user_id, ts: rec.ts }) {
+        match etats.get(&MsgRef {
+            user_id: rec.user_id,
+            ts: rec.ts,
+        }) {
             Some(e) if e.supprime => None,
             Some(e) => {
                 rec.reactions = e.reactions.clone();
@@ -334,8 +347,18 @@ impl History {
     pub fn resolve_reply(&self, channel: ChannelId, message: MsgRef) -> Option<(String, String)> {
         let logs = self.logs.lock().unwrap();
         let recent = logs.get(&channel)?;
-        let rec = recent.iter().rev().find(|r| r.user_id == message.user_id && r.ts == message.ts)?;
-        if self.etats.lock().unwrap().get(&channel)?.get(&message).is_some_and(|e| e.supprime) {
+        let rec = recent
+            .iter()
+            .rev()
+            .find(|r| r.user_id == message.user_id && r.ts == message.ts)?;
+        if self
+            .etats
+            .lock()
+            .unwrap()
+            .get(&channel)?
+            .get(&message)
+            .is_some_and(|e| e.supprime)
+        {
             return None;
         }
         Some((rec.username.clone(), ki_protocol::excerpt_of(&rec.text)))
@@ -345,12 +368,18 @@ impl History {
     /// ensuite (par l'horodatage seul : c'est lui que le serveur rend unique).
     fn connu(&self, channel: ChannelId, message: MsgRef) -> bool {
         if let Some(recent) = self.logs.lock().unwrap().get(&channel) {
-            if recent.iter().rev().any(|r| r.ts == message.ts && r.user_id == message.user_id) {
+            if recent
+                .iter()
+                .rev()
+                .any(|r| r.ts == message.ts && r.user_id == message.user_id)
+            {
                 return true;
             }
         }
         let index = self.index.lock().unwrap();
-        let Some(entries) = index.get(&channel) else { return false };
+        let Some(entries) = index.get(&channel) else {
+            return false;
+        };
         let pos = entries.partition_point(|e| e.ts < message.ts);
         entries.get(pos).is_some_and(|e| e.ts == message.ts)
     }
@@ -368,14 +397,22 @@ impl History {
         if !self.connu(channel, message) {
             return None;
         }
-        let ev = EvReaction { message, emoji, by, on };
+        let ev = EvReaction {
+            message,
+            emoji,
+            by,
+            on,
+        };
         let reactions = {
             let mut etats = self.etats.lock().unwrap();
             let etats = etats.entry(channel).or_default();
             if !appliquer_reaction(etats, &ev) {
                 return None;
             }
-            etats.get(&message).map(|e| e.reactions.clone()).unwrap_or_default()
+            etats
+                .get(&message)
+                .map(|e| e.reactions.clone())
+                .unwrap_or_default()
         };
         if let Ok(line) = serde_json::to_string(&Ligne::Reaction { react: ev }) {
             if let Some(writes) = &self.writes {
@@ -393,7 +430,11 @@ impl History {
         }
         {
             let mut etats = self.etats.lock().unwrap();
-            let etat = etats.entry(channel).or_default().entry(message).or_default();
+            let etat = etats
+                .entry(channel)
+                .or_default()
+                .entry(message)
+                .or_default();
             if etat.supprime {
                 return false;
             }
@@ -414,7 +455,9 @@ impl History {
         // le disque, lui, n'a pas encore été touché.
         {
             let mut logs = self.logs.lock().unwrap();
-            let Some(recent) = logs.get_mut(&channel) else { return };
+            let Some(recent) = logs.get_mut(&channel) else {
+                return;
+            };
             if recent.len() == MEM_CAP {
                 recent.pop_front();
             }
@@ -477,8 +520,13 @@ impl History {
                 let etats = etats.get(&channel).unwrap_or(&vide);
                 // Habillés avant de compter : un message supprimé ne doit
                 // pas occuper une place de la page.
-                let mut msgs: Vec<ChatRecord> =
-                    recent.iter().rev().cloned().filter_map(|r| Self::habiller(etats, r)).take(limit).collect();
+                let mut msgs: Vec<ChatRecord> = recent
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .filter_map(|r| Self::habiller(etats, r))
+                    .take(limit)
+                    .collect();
                 msgs.reverse();
                 // Borné à une ligne de contrôle. Le client complète en
                 // remontant le fil (`HistoryBefore`) si tout ne tient pas.
@@ -505,12 +553,20 @@ impl History {
     ) -> (Vec<ChatRecord>, bool) {
         // L'état après coup du salon, pour habiller ce qu'on rend — copié,
         // pour ne pas tenir le verrou pendant une lecture disque.
-        let etats: Etats = self.etats.lock().unwrap().get(&channel).cloned().unwrap_or_default();
+        let etats: Etats = self
+            .etats
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .cloned()
+            .unwrap_or_default();
         // Le cache d'abord : le cas courant est de remonter de quelques
         // pages, ce qui ne touche pas le disque.
         let from_memory = {
             let logs = self.logs.lock().unwrap();
-            let Some(recent) = logs.get(&channel) else { return (Vec::new(), false) };
+            let Some(recent) = logs.get(&channel) else {
+                return (Vec::new(), false);
+            };
             let older: Vec<ChatRecord> = recent
                 .iter()
                 .filter(|r| r.ts < before_ts)
@@ -620,14 +676,21 @@ impl History {
         //
         // Hors de ces deux cas, on désérialise tout : plus lent, mais juste.
         let tamisable = besoin.is_ascii()
-            && !besoin.chars().any(|c| c == '"' || c == '\\' || c.is_control());
+            && !besoin
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control());
         let tamis = tamisable.then(|| besoin.as_bytes().to_vec());
 
         let mut trouves: Vec<(ChannelId, ChatRecord)> = Vec::new();
         let mut deborde = false;
         for &channel in channels {
-            let etats: Etats =
-                self.etats.lock().unwrap().get(&channel).cloned().unwrap_or_default();
+            let etats: Etats = self
+                .etats
+                .lock()
+                .unwrap()
+                .get(&channel)
+                .cloned()
+                .unwrap_or_default();
             // Fenêtre glissante sur les `limit` derniers résultats du salon :
             // c'est ce qui borne la mémoire quel que soit le nombre de
             // correspondances. Chercher « le » dans dix ans d'archives ne doit
@@ -738,7 +801,9 @@ impl History {
         for (i, (_, rec)) in trouves.iter().enumerate().rev() {
             // Une quarantaine d'octets pour l'enveloppe `SearchHit` autour du
             // message : le numéro de salon et les accolades.
-            let taille = serde_json::to_string(rec).map(|s| s.len() + 48).unwrap_or(usize::MAX);
+            let taille = serde_json::to_string(rec)
+                .map(|s| s.len() + 48)
+                .unwrap_or(usize::MAX);
             if total + taille > MAX_HISTORY_BYTES {
                 break;
             }
@@ -755,12 +820,7 @@ impl History {
 
 /// Ajoute un résultat à la fenêtre, en poussant dehors le plus ancien si elle
 /// est pleine — et en notant qu'il a été poussé dehors.
-fn garder(
-    fenetre: &mut VecDeque<ChatRecord>,
-    limit: usize,
-    rec: ChatRecord,
-    deborde: &mut bool,
-) {
+fn garder(fenetre: &mut VecDeque<ChatRecord>, limit: usize, rec: ChatRecord, deborde: &mut bool) {
     if fenetre.len() == limit {
         fenetre.pop_front();
         *deborde = true;
@@ -835,12 +895,12 @@ fn writer_loop(
     while let Ok(cmd) = rx.recv() {
         match cmd {
             WriteCmd::Line(channel, ts, line) => {
-                let Some(log) = files.get_mut(&channel) else { continue };
+                let Some(log) = files.get_mut(&channel) else {
+                    continue;
+                };
                 let debut = log.len;
                 if let Err(e) = writeln!(log.file, "{line}") {
-                    tracing::error!(
-                        "écriture de l'historique du salon {channel} impossible : {e}"
-                    );
+                    tracing::error!("écriture de l'historique du salon {channel} impossible : {e}");
                     // Position inconnue après un échec partiel : on cesse
                     // d'indexer ce salon plutôt que de mentir sur des
                     // positions. L'index reste juste pour ce qui précède.
@@ -873,7 +933,9 @@ fn writer_loop(
             // message, mais sans entrée d'index — l'index ne situe que des
             // messages, et une page ne doit jamais y tomber sur autre chose.
             WriteCmd::Event(channel, line) => {
-                let Some(log) = files.get_mut(&channel) else { continue };
+                let Some(log) = files.get_mut(&channel) else {
+                    continue;
+                };
                 let debut = log.len;
                 if let Err(e) = writeln!(log.file, "{line}") {
                     tracing::error!("écriture d'un événement du salon {channel} impossible : {e}");
@@ -995,13 +1057,25 @@ mod tests {
             assert!(!history.delete(1, cle(20)), "déjà supprimé");
             let page = history.recent(1, 10);
             assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![10, 30]);
-            assert_eq!(page[0].reactions, vec![Reaction { emoji: "👍".into(), users: vec![7] }]);
+            assert_eq!(
+                page[0].reactions,
+                vec![Reaction {
+                    emoji: "👍".into(),
+                    users: vec![7]
+                }]
+            );
             // Le fil d'écriture pose tout sur le disque avant de rendre la main.
         }
         let history = History::open(&dir, &[text_channel(1)]).unwrap();
         let page = history.recent(1, 10);
         assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![10, 30]);
-        assert_eq!(page[0].reactions, vec![Reaction { emoji: "👍".into(), users: vec![7] }]);
+        assert_eq!(
+            page[0].reactions,
+            vec![Reaction {
+                emoji: "👍".into(),
+                users: vec![7]
+            }]
+        );
         // La page relue depuis le disque et la recherche voient la même chose.
         let (avant, _) = history.before(&dir, 1, 31, 10);
         assert_eq!(avant.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![10, 30]);
@@ -1024,7 +1098,10 @@ mod tests {
         history.append(1, &dit(3, 30, "moi je suis sur Deadlock"));
 
         let (hits, more) = history.search(&dir, &[1, 2], "valorant", 10);
-        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![10, 20]);
+        assert_eq!(
+            hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(),
+            vec![10, 20]
+        );
         assert_eq!(hits.iter().map(|(c, _)| *c).collect::<Vec<_>>(), vec![1, 2]);
         assert!(!more, "les deux résultats tiennent dans la limite");
 
@@ -1059,7 +1136,11 @@ mod tests {
             (4, "sur deux\nlignes"),
         ];
         for (ts, texte) in pieges {
-            bytes.extend_from_slice(serde_json::to_string(&dit(1, ts, texte)).unwrap().as_bytes());
+            bytes.extend_from_slice(
+                serde_json::to_string(&dit(1, ts, texte))
+                    .unwrap()
+                    .as_bytes(),
+            );
             bytes.push(b'\n');
         }
         for n in 100..(100 + MEM_CAP as u64) {
@@ -1115,7 +1196,9 @@ mod tests {
         let mut bytes = Vec::new();
         for n in 1..=3u64 {
             bytes.extend_from_slice(
-                serde_json::to_string(&dit(1, n, "encore un test")).unwrap().as_bytes(),
+                serde_json::to_string(&dit(1, n, "encore un test"))
+                    .unwrap()
+                    .as_bytes(),
             );
             bytes.push(b'\n');
         }
@@ -1148,7 +1231,9 @@ mod tests {
         let mut bytes = Vec::new();
         for n in 1..=10u64 {
             bytes.extend_from_slice(
-                serde_json::to_string(&dit(1, n, "encore un test")).unwrap().as_bytes(),
+                serde_json::to_string(&dit(1, n, "encore un test"))
+                    .unwrap()
+                    .as_bytes(),
             );
             bytes.push(b'\n');
         }
@@ -1156,7 +1241,10 @@ mod tests {
         let history = History::open(&dir, &[text_channel(1)]).unwrap();
 
         let (hits, more) = history.search(&dir, &[1], "test", 3);
-        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![8, 9, 10]);
+        assert_eq!(
+            hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(),
+            vec![8, 9, 10]
+        );
         assert!(more, "sept résultats ont été laissés de côté");
 
         // Et un message qui n'a PAS encore atteint le disque compte quand
@@ -1164,7 +1252,10 @@ mod tests {
         // faire écraser par la correction du doublon.
         history.append(1, &dit(1, 11, "encore un test"));
         let (hits, _) = history.search(&dir, &[1], "test", 3);
-        assert_eq!(hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(), vec![9, 10, 11]);
+        assert_eq!(
+            hits.iter().map(|(_, r)| r.ts).collect::<Vec<_>>(),
+            vec![9, 10, 11]
+        );
     }
 
     /// Remonter le fil doit rendre les messages **antérieurs**, du plus
@@ -1215,7 +1306,9 @@ mod tests {
         let mut bytes = Vec::new();
         for n in 1..=total {
             bytes.extend_from_slice(
-                serde_json::to_string(&stamped(n as u64)).unwrap().as_bytes(),
+                serde_json::to_string(&stamped(n as u64))
+                    .unwrap()
+                    .as_bytes(),
             );
             bytes.push(b'\n');
         }
@@ -1226,7 +1319,10 @@ mod tests {
         // Bien au-delà de ce que la mémoire garde : seul l'index peut
         // répondre.
         let (page, more) = history.before(&dir, 1, 100, 5);
-        assert_eq!(page.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![95, 96, 97, 98, 99]);
+        assert_eq!(
+            page.iter().map(|r| r.ts).collect::<Vec<_>>(),
+            vec![95, 96, 97, 98, 99]
+        );
         assert!(more, "il reste 1 à 94 avant");
 
         // Au tout début du salon : on rend ce qui existe, et l'on annonce
@@ -1357,7 +1453,13 @@ mod tests {
         for n in 1..=100 {
             history.append(
                 1,
-                &ChatRecord { user_id: 1, username: "k".into(), text: big.clone(), ts: n, ..Default::default() },
+                &ChatRecord {
+                    user_id: 1,
+                    username: "k".into(),
+                    text: big.clone(),
+                    ts: n,
+                    ..Default::default()
+                },
             );
         }
 
@@ -1373,14 +1475,26 @@ mod tests {
         // Ce sont les plus récents qui sont conservés.
         assert_eq!(page.last().unwrap().ts, 100);
         let sent = ki_protocol::ServerMsg::History { messages: page };
-        assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
+        assert!(
+            line_of(&sent) <= ki_protocol::MAX_LINE,
+            "ligne de {} octets",
+            line_of(&sent)
+        );
 
         // Et en remontant le fil, la page reste elle aussi bornée, en signalant
         // honnêtement qu'il en reste avant.
         let (older, more) = history.before(&dir, 1, 101, 100);
         assert!(more, "il reste des messages plus anciens à charger");
-        let sent = ki_protocol::ServerMsg::HistoryPage { messages: older, more, channel: 1 };
-        assert!(line_of(&sent) <= ki_protocol::MAX_LINE, "ligne de {} octets", line_of(&sent));
+        let sent = ki_protocol::ServerMsg::HistoryPage {
+            messages: older,
+            more,
+            channel: 1,
+        };
+        assert!(
+            line_of(&sent) <= ki_protocol::MAX_LINE,
+            "ligne de {} octets",
+            line_of(&sent)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

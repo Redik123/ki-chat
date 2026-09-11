@@ -122,7 +122,11 @@ mod tests {
 
         // Le fichier publié est l'un des deux, entier — jamais un panaché.
         let written = std::fs::read(&path).unwrap();
-        assert!(written == a || written == b, "contenus mélangés ({} octets)", written.len());
+        assert!(
+            written == a || written == b,
+            "contenus mélangés ({} octets)",
+            written.len()
+        );
         assert_eq!(leftovers(&dir), 0);
 
         std::fs::remove_dir_all(&dir).unwrap();

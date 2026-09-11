@@ -52,7 +52,10 @@ pub fn encode(msg: &ServerMsg) -> Option<Line> {
         }
     };
     if json.len() >= ki_protocol::MAX_LINE {
-        tracing::error!("message de contrôle trop long ({} octets), ignoré", json.len());
+        tracing::error!(
+            "message de contrôle trop long ({} octets), ignoré",
+            json.len()
+        );
         return None;
     }
     let mut bytes = json.into_bytes();
@@ -82,7 +85,11 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn new(tx: tokio::sync::mpsc::Sender<Line>, conn: quinn::Connection) -> Self {
-        Self { tx, conn, closing: Default::default() }
+        Self {
+            tx,
+            conn,
+            closing: Default::default(),
+        }
     }
 
     /// Dépose un message, en le sérialisant pour ce seul destinataire.
@@ -160,7 +167,11 @@ fn router<C>(monde: Vec<Voix<C>>) -> Routes<C> {
             routes.channel_of.insert(v.id, channel);
         }
         if !v.force_deafened {
-            routes.peers.entry(channel).or_default().push((v.id, v.conn));
+            routes
+                .peers
+                .entry(channel)
+                .or_default()
+                .push((v.id, v.conn));
         }
     }
     routes
@@ -230,7 +241,12 @@ pub struct TokenBucket {
 
 impl TokenBucket {
     pub fn new(rate: f32, burst: f32) -> Self {
-        Self { tokens: burst, last: Instant::now(), rate, burst }
+        Self {
+            tokens: burst,
+            last: Instant::now(),
+            rate,
+            burst,
+        }
     }
 
     /// Consomme un jeton. `false` = trop rapide, le message est refusé.
@@ -271,7 +287,10 @@ pub struct VoiceLock {
 /// caractère en mesurant le temps de réponse.
 pub fn secret_eq(a: &str, b: &str) -> bool {
     a.len() == b.len()
-        && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 /// Connexions arrivées mais pas encore authentifiées, comptées par adresse.
@@ -314,12 +333,20 @@ impl Sas {
             return None;
         }
         *place += 1;
-        Some(JetonSas { sas: self.clone(), ip })
+        Some(JetonSas {
+            sas: self.clone(),
+            ip,
+        })
     }
 
     #[cfg(test)]
     fn en_attente(&self, ip: std::net::IpAddr) -> u32 {
-        self.en_attente.lock().unwrap().get(&ip).copied().unwrap_or(0)
+        self.en_attente
+            .lock()
+            .unwrap()
+            .get(&ip)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -365,7 +392,10 @@ pub struct Routes<C> {
 /// or une table vide ne contient aucun `C`.
 impl<C> Default for Routes<C> {
     fn default() -> Self {
-        Self { channel_of: HashMap::new(), peers: HashMap::new() }
+        Self {
+            channel_of: HashMap::new(),
+            peers: HashMap::new(),
+        }
     }
 }
 
@@ -501,7 +531,10 @@ impl AppState {
     /// deviendrait invisible pour tout le monde.
     fn effective_roles(&self, user_id: UserId) -> Vec<ki_protocol::RoleId> {
         let users = self.users.lock().unwrap();
-        let mut roles = users.get(&user_id).map(|u| u.roles.clone()).unwrap_or_default();
+        let mut roles = users
+            .get(&user_id)
+            .map(|u| u.roles.clone())
+            .unwrap_or_default();
         roles.push(ki_protocol::ROLE_EVERYONE);
         roles
     }
@@ -512,7 +545,9 @@ impl AppState {
 
     /// Ce salon est-il visible par cette personne ?
     pub fn can_view(&self, user_id: UserId, channel: ChannelId) -> bool {
-        let Some(info) = self.channels.get(channel) else { return false };
+        let Some(info) = self.channels.get(channel) else {
+            return false;
+        };
         // Qui gère les salons voit tout : c'est la porte de secours contre le
         // salon rendu inaccessible par mégarde, et elle passe avant tout.
         let manages = self.manages_channels(user_id);
@@ -525,7 +560,9 @@ impl AppState {
     /// Cette personne détient-elle cette permission ?
     pub fn holds(&self, user_id: UserId, need: ki_protocol::Perms) -> bool {
         let users = self.users.lock().unwrap();
-        users.get(&user_id).is_some_and(|u| ki_protocol::perm::has(u.perms, need))
+        users
+            .get(&user_id)
+            .is_some_and(|u| ki_protocol::perm::has(u.perms, need))
     }
 
     /// Les salons **tels que cette personne les voit**, verrous compris.
@@ -537,7 +574,9 @@ impl AppState {
         if !manages && !self.holds(user_id, ki_protocol::perm::VIEW_CHANNEL) {
             return Vec::new();
         }
-        let mut list = self.channels.visible_to(&self.effective_roles(user_id), manages);
+        let mut list = self
+            .channels
+            .visible_to(&self.effective_roles(user_id), manages);
         let locks = self.voice_locks.lock().unwrap();
         let now = std::time::Instant::now();
         for channel in &mut list {
@@ -591,7 +630,11 @@ impl AppState {
             // d'apprendre qu'il vient d'être promu ou rétrogradé, `perms` et
             // `rank` ne voyageant autrement que dans `Welcome`.
             if changed {
-                let _ = u.tx.send(ServerMsg::Perms { perms, rank, is_admin });
+                let _ = u.tx.send(ServerMsg::Perms {
+                    perms,
+                    rank,
+                    is_admin,
+                });
             }
         }
     }
@@ -627,9 +670,7 @@ impl AppState {
                 // l'entrée : sans quoi la retirer à quelqu'un déjà installé
                 // dans un salon vocal ne produisait rien du tout, et il y
                 // restait jusqu'à ce qu'il en sorte de lui-même.
-                if !self.can_view(id, c)
-                    || !self.holds(id, ki_protocol::perm::CONNECT_VOICE)
-                {
+                if !self.can_view(id, c) || !self.holds(id, ki_protocol::perm::CONNECT_VOICE) {
                     let mut users = self.users.lock().unwrap();
                     if let Some(u) = users.get_mut(&id) {
                         u.voice = None;
@@ -643,7 +684,9 @@ impl AppState {
             self.rebuild_voice_routes();
         }
         self.push_channels();
-        self.broadcast_all(&ServerMsg::Members { members: self.roster() });
+        self.broadcast_all(&ServerMsg::Members {
+            members: self.roster(),
+        });
     }
 
     /// Vérifie le verrou d'un salon vocal. `Ok(())` = entrée autorisée.
@@ -661,7 +704,9 @@ impl AppState {
             return Ok(());
         }
         let mut locks = self.voice_locks.lock().unwrap();
-        let Some(lock) = locks.get(&channel) else { return Ok(()) };
+        let Some(lock) = locks.get(&channel) else {
+            return Ok(());
+        };
         if lock.expires_at <= std::time::Instant::now() {
             // Expiré : on le retire au passage plutôt que de faire tourner
             // une tâche de fond pour ça.
@@ -843,7 +888,9 @@ impl AppState {
     pub fn broadcast_member(&self, user_id: UserId) {
         match self.member_of(user_id) {
             Some(member) => self.broadcast_all(&ServerMsg::MemberUpdate { member }),
-            None => self.broadcast_all(&ServerMsg::Members { members: self.roster() }),
+            None => self.broadcast_all(&ServerMsg::Members {
+                members: self.roster(),
+            }),
         }
     }
 
@@ -1005,7 +1052,9 @@ impl AppState {
             }
             // Fiche introuvable : on retombe sur la liste entière plutôt que
             // de laisser quelqu'un affiché en ligne alors qu'il est parti.
-            None => self.broadcast_all(&ServerMsg::Members { members: self.roster() }),
+            None => self.broadcast_all(&ServerMsg::Members {
+                members: self.roster(),
+            }),
         }
     }
 }
@@ -1022,7 +1071,13 @@ mod tests {
     use super::*;
 
     fn voix(id: UserId, channel: Option<ChannelId>, muet: bool, sourd: bool) -> Voix<u8> {
-        Voix { id, channel, force_muted: muet, force_deafened: sourd, conn: id as u8 }
+        Voix {
+            id,
+            channel,
+            force_muted: muet,
+            force_deafened: sourd,
+            conn: id as u8,
+        }
     }
 
     /// Les deux sanctions vocales s'appliquent par **absence** dans la table,
@@ -1041,8 +1096,14 @@ mod tests {
         // Micro coupé : aucune destination, donc aucun paquet relayé. C'est
         // l'absence de clé qui fait la sanction, pas un test dans le relais.
         assert!(channel_of.contains_key(&1));
-        assert!(!channel_of.contains_key(&2), "un micro coupé ne route nulle part");
-        assert!(channel_of.contains_key(&3), "être sourd n'empêche pas de parler");
+        assert!(
+            !channel_of.contains_key(&2),
+            "un micro coupé ne route nulle part"
+        );
+        assert!(
+            channel_of.contains_key(&3),
+            "être sourd n'empêche pas de parler"
+        );
         assert!(!channel_of.contains_key(&4));
         assert!(!channel_of.contains_key(&5), "hors du vocal, rien à router");
 
@@ -1052,7 +1113,11 @@ mod tests {
         assert!(salon.contains(&2), "un micro coupé continue d'entendre");
         assert!(!salon.contains(&3), "un sourd ne reçoit rien");
         assert!(!salon.contains(&4));
-        assert_eq!(peers.len(), 1, "aucun salon fantôme pour qui n'est pas en vocal");
+        assert_eq!(
+            peers.len(),
+            1,
+            "aucun salon fantôme pour qui n'est pas en vocal"
+        );
     }
 
     /// Le plafond mord, et la place se rend toute seule.
@@ -1088,14 +1153,20 @@ mod tests {
         let mut budget = TokenBucket::new(100.0, 200.0);
         // La rafale tolérée passe en entier.
         for i in 0..200 {
-            assert!(budget.take(), "le message {i} de la rafale aurait dû passer");
+            assert!(
+                budget.take(),
+                "le message {i} de la rafale aurait dû passer"
+            );
         }
         // Au-delà, tout de suite après, c'est refusé.
         assert!(!budget.take(), "un flot ininterrompu doit être coupé");
 
         // La réserve se reconstitue : après 100 ms à 50 jetons/s, ~5 jetons.
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(budget.take(), "la réserve doit se reconstituer avec le temps");
+        assert!(
+            budget.take(),
+            "la réserve doit se reconstituer avec le temps"
+        );
 
         // Le budget du chat : deux messages d'un coup, pas trois — le
         // troisième attend la cadence d'un toutes les 1,5 s.

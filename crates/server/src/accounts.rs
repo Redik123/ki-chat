@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
@@ -196,7 +198,11 @@ impl Accounts {
         let mut inner: AccountsFile = if path.exists() {
             serde_json::from_str(&std::fs::read_to_string(&path)?)?
         } else {
-            AccountsFile { next_id: 1, users: HashMap::new(), invites: Vec::new() }
+            AccountsFile {
+                next_id: 1,
+                users: HashMap::new(),
+                invites: Vec::new(),
+            }
         };
         // Migration : avant les rôles, `admin: true` tenait lieu de toute la
         // hiérarchie. On la transpose une fois pour toutes, au chargement —
@@ -214,9 +220,15 @@ impl Accounts {
                 user.roles = vec![ROLE_OWNER];
             }
         }
-        let store = Self { path, inner: Mutex::new(inner) };
+        let store = Self {
+            path,
+            inner: Mutex::new(inner),
+        };
         if !migrated.is_empty() {
-            tracing::info!("rôle Propriétaire attribué à {} compte(s) admin", migrated.len());
+            tracing::info!(
+                "rôle Propriétaire attribué à {} compte(s) admin",
+                migrated.len()
+            );
             // Une migration qui ne s'écrit pas se rejouerait à chaque
             // démarrage — sans dommage, mais sans jamais aboutir non plus.
             // Autant s'arrêter et le dire.
@@ -284,7 +296,10 @@ impl Accounts {
         // --- Vérification du mot de passe, verrou relâché ---
         if let Some(stored) = existing {
             let parsed = PasswordHash::new(&stored).map_err(|_| "compte corrompu".to_string())?;
-            if Argon2::default().verify_password(password.as_bytes(), &parsed).is_err() {
+            if Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_err()
+            {
                 return Err("mot de passe incorrect".into());
             }
             // Le compte est **relu** sous verrou plutôt que rendu tel qu'il
@@ -305,7 +320,11 @@ impl Accounts {
                 None if user.banned => return Err("compte bloqué par un admin".into()),
                 _ => {}
             }
-            return Ok(AuthOk { id: user.id, roles: user.roles.clone(), created_with: None });
+            return Ok(AuthOk {
+                id: user.id,
+                roles: user.roles.clone(),
+                created_with: None,
+            });
         }
 
         // Compte inconnu : création uniquement sur invitation valide —
@@ -388,7 +407,11 @@ impl Accounts {
         // que promettre un compte fantôme.
         self.save(&inner)?;
         tracing::info!("nouveau compte : {username} (id {id}, propriétaire: {admin})");
-        Ok(AuthOk { id, roles, created_with: Some(code.to_string()) })
+        Ok(AuthOk {
+            id,
+            roles,
+            created_with: Some(code.to_string()),
+        })
     }
 
     /// Tous les comptes, pour le panneau admin. `online` est complété par
@@ -574,9 +597,7 @@ impl Accounts {
             return Err("compte inconnu".into());
         };
         if user.hash != stored {
-            return Err(
-                "le mot de passe a changé entre-temps — recommence avec le nouveau".into()
-            );
+            return Err("le mot de passe a changé entre-temps — recommence avec le nouveau".into());
         }
         user.hash = hash;
         self.save(&inner)?;
@@ -636,7 +657,11 @@ impl Accounts {
     /// Les rôles d'un compte, hors `@everyone` (toujours implicite).
     pub fn roles_of(&self, username: &str) -> Vec<RoleId> {
         let inner = self.inner.lock().unwrap();
-        inner.users.get(username).map(|u| u.roles.clone()).unwrap_or_default()
+        inner
+            .users
+            .get(username)
+            .map(|u| u.roles.clone())
+            .unwrap_or_default()
     }
 
     /// Remplace la liste des rôles d'un compte.
@@ -688,7 +713,12 @@ impl Accounts {
     /// Photo de profil d'un compte, par identifiant.
     pub fn avatar_of(&self, user_id: UserId) -> Option<String> {
         let inner = self.inner.lock().unwrap();
-        inner.users.values().find(|u| u.id == user_id)?.avatar.clone()
+        inner
+            .users
+            .values()
+            .find(|u| u.id == user_id)?
+            .avatar
+            .clone()
     }
 
     /// Empreintes des photos de tous les comptes, pour garnir la liste des
@@ -698,9 +728,7 @@ impl Accounts {
         inner
             .users
             .values()
-            .filter_map(|u| {
-                ki_protocol::avatar_hash(u.avatar.as_deref()).map(|hash| (u.id, hash))
-            })
+            .filter_map(|u| ki_protocol::avatar_hash(u.avatar.as_deref()).map(|hash| (u.id, hash)))
             .collect()
     }
 
@@ -780,15 +808,21 @@ mod tests {
         let chemin = dir.to_str().unwrap();
 
         let accounts = Accounts::open(chemin).unwrap();
-        accounts.authenticate("kevin", "secret99", Some("inv"), "inv").unwrap();
+        accounts
+            .authenticate("kevin", "secret99", Some("inv"), "inv")
+            .unwrap();
         assert_eq!(accounts.voice_sanctions("kevin"), (false, false));
 
         // Couper le micro ne rend pas sourd au passage : les deux sanctions
         // sont indépendantes, et un modérateur qui fait taire quelqu'''un ne
         // veut pas toujours le priver de la conversation.
-        accounts.set_voice_sanction("kevin", Some(true), None).unwrap();
+        accounts
+            .set_voice_sanction("kevin", Some(true), None)
+            .unwrap();
         assert_eq!(accounts.voice_sanctions("kevin"), (true, false));
-        accounts.set_voice_sanction("kevin", None, Some(true)).unwrap();
+        accounts
+            .set_voice_sanction("kevin", None, Some(true))
+            .unwrap();
         assert_eq!(accounts.voice_sanctions("kevin"), (true, true));
 
         // Relu du disque : c'''est tout l'''enjeu.
@@ -797,10 +831,15 @@ mod tests {
 
         // Et l'''on peut lever l'''une sans lever l'''autre.
         relu.set_voice_sanction("kevin", Some(false), None).unwrap();
-        assert_eq!(Accounts::open(chemin).unwrap().voice_sanctions("kevin"), (false, true));
+        assert_eq!(
+            Accounts::open(chemin).unwrap().voice_sanctions("kevin"),
+            (false, true)
+        );
 
         // Un compte inconnu se refuse plutôt que de créer une fiche vide.
-        assert!(relu.set_voice_sanction("personne", Some(true), None).is_err());
+        assert!(relu
+            .set_voice_sanction("personne", Some(true), None)
+            .is_err());
         assert_eq!(relu.voice_sanctions("personne"), (false, false));
     }
 
@@ -811,23 +850,41 @@ mod tests {
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
         // Inconnu sans invitation : refusé.
-        assert!(accounts.authenticate("alice", "secret99", None, "inv").is_err());
+        assert!(accounts
+            .authenticate("alice", "secret99", None, "inv")
+            .is_err());
         // Mauvaise invitation : refusé.
-        assert!(accounts.authenticate("alice", "secret99", Some("bad"), "inv").is_err());
+        assert!(accounts
+            .authenticate("alice", "secret99", Some("bad"), "inv")
+            .is_err());
         // Bonne invitation : compte créé, premier compte = propriétaire.
-        let alice = accounts.authenticate("alice", "secret99", Some("inv"), "inv").unwrap();
+        let alice = accounts
+            .authenticate("alice", "secret99", Some("inv"), "inv")
+            .unwrap();
         assert_eq!(alice.roles, vec![ROLE_OWNER]);
         // Deuxième compte : aucun rôle, donc @everyone et rien d'autre.
-        let bob = accounts.authenticate("bob", "secret99", Some("inv"), "inv").unwrap();
+        let bob = accounts
+            .authenticate("bob", "secret99", Some("inv"), "inv")
+            .unwrap();
         assert!(bob.roles.is_empty());
         // Reconnexion : mot de passe seul suffit.
-        assert_eq!(accounts.authenticate("alice", "secret99", None, "inv").unwrap().id, alice.id);
+        assert_eq!(
+            accounts
+                .authenticate("alice", "secret99", None, "inv")
+                .unwrap()
+                .id,
+            alice.id
+        );
         // Mauvais mot de passe : refusé même avec invitation.
-        assert!(accounts.authenticate("alice", "wrong1", Some("inv"), "inv").is_err());
+        assert!(accounts
+            .authenticate("alice", "wrong1", Some("inv"), "inv")
+            .is_err());
 
         // Persistance : rechargement depuis le fichier.
         let reloaded = Accounts::open(dir.to_str().unwrap()).unwrap();
-        let again = reloaded.authenticate("alice", "secret99", None, "inv").unwrap();
+        let again = reloaded
+            .authenticate("alice", "secret99", None, "inv")
+            .unwrap();
         assert_eq!(again.id, alice.id);
         assert_eq!(again.roles, vec![ROLE_OWNER]);
 
@@ -841,17 +898,23 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
-        let root = accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
+        let root = accounts
+            .authenticate("root", "rootpass", Some("inv"), "inv")
+            .unwrap();
         assert_eq!(root.roles, vec![ROLE_OWNER]);
 
         // Invitation à usage unique : un compte, pas deux.
         let code = accounts.create_invite("root", Some(1), "", 0).unwrap();
         assert!(code.starts_with("ki-"));
-        let ami = accounts.authenticate("ami", "amipass", Some(&code), "inv").unwrap();
+        let ami = accounts
+            .authenticate("ami", "amipass", Some(&code), "inv")
+            .unwrap();
         // Le code consommé remonte à l'appelant : c'est ce qui permet de
         // consigner « ce compte est né de ce lien ».
         assert_eq!(ami.created_with.as_deref(), Some(code.as_str()));
-        assert!(accounts.authenticate("autre", "autrepass", Some(&code), "inv").is_err());
+        assert!(accounts
+            .authenticate("autre", "autrepass", Some(&code), "inv")
+            .is_err());
         // Épuisée mais **conservée** : le journal d'audit doit pouvoir
         // renvoyer à un code encore listé.
         let listed = accounts.invites();
@@ -861,23 +924,35 @@ mod tests {
         assert_eq!(listed[0].created_by, "root");
 
         // Reset de mot de passe : l'ancien ne marche plus, le nouveau oui.
-        accounts.reset_password("root", "ami", "nouveaupass").unwrap();
-        assert!(accounts.authenticate("ami", "amipass", None, "inv").is_err());
-        assert!(accounts.authenticate("ami", "nouveaupass", None, "inv").is_ok());
+        accounts
+            .reset_password("root", "ami", "nouveaupass")
+            .unwrap();
+        assert!(accounts
+            .authenticate("ami", "amipass", None, "inv")
+            .is_err());
+        assert!(accounts
+            .authenticate("ami", "nouveaupass", None, "inv")
+            .is_ok());
         // La règle « un admin ne touche pas à un autre admin » a déménagé :
         // elle se décide au rang, dans quic.rs. Ici, plus rien ne s'y oppose
         // — le magasin ne fait que stocker ce qu'on lui demande.
         assert!(accounts.reset_password("ami", "root", "rootpass2").is_ok());
-        assert!(accounts.authenticate("root", "rootpass2", None, "inv").is_ok());
+        assert!(accounts
+            .authenticate("root", "rootpass2", None, "inv")
+            .is_ok());
 
         // Bannissement définitif : login refusé, levée le rétablit.
         accounts.ban("root", "ami", "spam", 0).unwrap();
-        let refus = accounts.authenticate("ami", "nouveaupass", None, "inv").unwrap_err();
+        let refus = accounts
+            .authenticate("ami", "nouveaupass", None, "inv")
+            .unwrap_err();
         // Le motif remonte à la personne bannie : sans ça, elle écrit à
         // l'admin et il faut traiter la question à la main.
         assert!(refus.contains("spam"), "message inattendu : {refus}");
         accounts.unban("root", "ami").unwrap();
-        assert!(accounts.authenticate("ami", "nouveaupass", None, "inv").is_ok());
+        assert!(accounts
+            .authenticate("ami", "nouveaupass", None, "inv")
+            .is_ok());
         // Bannir le propriétaire n'est plus refusé ici : c'est le rang qui
         // l'interdira, avant l'appel. Se bannir soi-même n'a en revanche
         // aucun sens, quelle que soit la hiérarchie.
@@ -900,12 +975,18 @@ mod tests {
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
         let roles = Roles::open(dir.to_str().unwrap()).unwrap();
 
-        accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
-        accounts.authenticate("ami", "amipass", Some("inv"), "inv").unwrap();
+        accounts
+            .authenticate("root", "rootpass", Some("inv"), "inv")
+            .unwrap();
+        accounts
+            .authenticate("ami", "amipass", Some("inv"), "inv")
+            .unwrap();
 
         // Une heure : bloquant, et le compte est signalé banni.
         accounts.ban("root", "ami", "pause", 3600).unwrap();
-        assert!(accounts.authenticate("ami", "amipass", None, "inv").is_err());
+        assert!(accounts
+            .authenticate("ami", "amipass", None, "inv")
+            .is_err());
         let listed = accounts.list(&roles);
         let ami = listed.iter().find(|u| u.username == "ami").unwrap();
         assert!(ami.banned);
@@ -925,7 +1006,14 @@ mod tests {
         // signalé banni.
         {
             let mut inner = accounts.inner.lock().unwrap();
-            inner.users.get_mut("ami").unwrap().ban.as_mut().unwrap().until = Some(1);
+            inner
+                .users
+                .get_mut("ami")
+                .unwrap()
+                .ban
+                .as_mut()
+                .unwrap()
+                .until = Some(1);
             accounts.save(&inner).unwrap();
         }
         assert!(accounts.authenticate("ami", "amipass", None, "inv").is_ok());
@@ -943,11 +1031,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
-        accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
+        accounts
+            .authenticate("root", "rootpass", Some("inv"), "inv")
+            .unwrap();
         let code = accounts.create_invite("root", None, "tournoi", 0).unwrap();
 
         for name in ["a", "b", "c"] {
-            assert!(accounts.authenticate(name, "motdepasse", Some(&code), "inv").is_ok());
+            assert!(accounts
+                .authenticate(name, "motdepasse", Some(&code), "inv")
+                .is_ok());
         }
         let listed = accounts.invites();
         assert_eq!(listed[0].uses, 3);
@@ -957,7 +1049,9 @@ mod tests {
 
         // Révoqué : plus aucun compte, mais le code reste listé.
         accounts.revoke_invite(&code).unwrap();
-        assert!(accounts.authenticate("d", "motdepasse", Some(&code), "inv").is_err());
+        assert!(accounts
+            .authenticate("d", "motdepasse", Some(&code), "inv")
+            .is_err());
         assert!(accounts.revoke_invite(&code).is_err());
         assert!(accounts.invites()[0].revoked);
 
@@ -973,27 +1067,34 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ki-test-race-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let accounts =
-            std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
+        let accounts = std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
         // Un premier compte pour que les suivants ne soient pas propriétaires.
-        accounts.authenticate("chef", "motdepasse", Some("inv"), "inv").unwrap();
-        let code = accounts.create_invite("chef", Some(1), "unique", 0).unwrap();
+        accounts
+            .authenticate("chef", "motdepasse", Some("inv"), "inv")
+            .unwrap();
+        let code = accounts
+            .create_invite("chef", Some(1), "unique", 0)
+            .unwrap();
 
         // Deux inscriptions concurrentes avec le même code à usage unique.
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let handles: Vec<_> = ["alice", "bob"]
             .into_iter()
             .map(|name| {
-                let (accounts, code, barrier) =
-                    (accounts.clone(), code.clone(), barrier.clone());
+                let (accounts, code, barrier) = (accounts.clone(), code.clone(), barrier.clone());
                 std::thread::spawn(move || {
                     barrier.wait();
-                    accounts.authenticate(name, "motdepasse", Some(&code), "inv").is_ok()
+                    accounts
+                        .authenticate(name, "motdepasse", Some(&code), "inv")
+                        .is_ok()
                 })
             })
             .collect();
-        let wins =
-            handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
+        let wins = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
 
         assert_eq!(wins, 1, "un code à usage unique ne doit créer qu'un compte");
         let listed = accounts.invites();
@@ -1013,10 +1114,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ki-test-banrace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let accounts =
-            std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
-        accounts.authenticate("chef", "motdepasse", Some("inv"), "inv").unwrap();
-        accounts.authenticate("tricheur", "motdepasse", Some("inv"), "inv").unwrap();
+        let accounts = std::sync::Arc::new(Accounts::open(dir.to_str().unwrap()).unwrap());
+        accounts
+            .authenticate("chef", "motdepasse", Some("inv"), "inv")
+            .unwrap();
+        accounts
+            .authenticate("tricheur", "motdepasse", Some("inv"), "inv")
+            .unwrap();
 
         // Le bannissement tombe pendant que la connexion est en cours de
         // vérification. On le prononce depuis un autre fil, le temps que le
@@ -1034,7 +1138,9 @@ mod tests {
         // Que la course tombe d'un côté ou de l'autre, l'état final est
         // cohérent : si l'entrée a été acceptée, c'est que le ban n'était pas
         // encore posé — et une seconde tentative, elle, doit être refusée.
-        assert!(accounts.authenticate("tricheur", "motdepasse", None, "inv").is_err());
+        assert!(accounts
+            .authenticate("tricheur", "motdepasse", None, "inv")
+            .is_err());
         if outcome.is_ok() {
             eprintln!("course gagnée par la connexion : le ban n'était pas encore posé");
         }
@@ -1050,13 +1156,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
 
-        accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
+        accounts
+            .authenticate("root", "rootpass", Some("inv"), "inv")
+            .unwrap();
         let code = accounts.create_invite("root", None, "", 3600).unwrap();
         {
             let mut inner = accounts.inner.lock().unwrap();
             inner.invites[0].expires_at = Some(1);
         }
-        assert!(accounts.authenticate("tard", "motdepasse", Some(&code), "inv").is_err());
+        assert!(accounts
+            .authenticate("tard", "motdepasse", Some(&code), "inv")
+            .is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1088,7 +1198,10 @@ mod tests {
         // `admin` reste dans le fichier : une version antérieure remise en
         // service doit y retrouver ses administrateurs.
         let written = std::fs::read_to_string(dir.join("users.json")).unwrap();
-        assert!(written.contains("\"admin\": true"), "fichier inattendu : {written}");
+        assert!(
+            written.contains("\"admin\": true"),
+            "fichier inattendu : {written}"
+        );
         let reloaded = Accounts::open(dir.to_str().unwrap()).unwrap();
         assert_eq!(reloaded.roles_of("root"), vec![ROLE_OWNER]);
 
@@ -1105,11 +1218,17 @@ mod tests {
         let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
         let roles = Roles::open(dir.to_str().unwrap()).unwrap();
 
-        accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
-        accounts.authenticate("ami", "amipass", Some("inv"), "inv").unwrap();
+        accounts
+            .authenticate("root", "rootpass", Some("inv"), "inv")
+            .unwrap();
+        accounts
+            .authenticate("ami", "amipass", Some("inv"), "inv")
+            .unwrap();
         let modo = roles.create("Renfort", None, 50, perm::KICK).unwrap();
 
-        accounts.set_roles("ami", roles.sanitize(&[modo.id])).unwrap();
+        accounts
+            .set_roles("ami", roles.sanitize(&[modo.id]))
+            .unwrap();
         let listed = accounts.list(&roles);
         let ami = listed.iter().find(|u| u.username == "ami").unwrap();
         assert_eq!(ami.rank, 50);

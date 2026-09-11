@@ -101,7 +101,10 @@ pub async fn upload(
     // chemin passe par HTTP et non par le flux de contrôle, d'où le contrôle
     // ici plutôt que dans `handle_msg`.
     if !state.holds(user_id, ki_protocol::perm::UPLOAD_FILE) {
-        return (StatusCode::FORBIDDEN, "tu n'as pas le droit de partager des fichiers")
+        return (
+            StatusCode::FORBIDDEN,
+            "tu n'as pas le droit de partager des fichiers",
+        )
             .into_response();
     }
     if body.is_empty() {
@@ -189,7 +192,9 @@ struct Stored {
 /// rapporté : la purge tourne sans surveillance, elle ne doit pas s'arrêter
 /// sur un dossier de plus.
 fn scan(root: &FsPath) -> Vec<Stored> {
-    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
     let mut stored = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
@@ -198,7 +203,9 @@ fn scan(root: &FsPath) -> Vec<Stored> {
         }
         let mut bytes = 0;
         let mut modified = SystemTime::UNIX_EPOCH;
-        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for file in files.flatten() {
             let Ok(meta) = file.metadata() else { continue };
             bytes += meta.len();
@@ -211,7 +218,11 @@ fn scan(root: &FsPath) -> Vec<Stored> {
         if modified == SystemTime::UNIX_EPOCH {
             modified = SystemTime::now();
         }
-        stored.push(Stored { dir, bytes, modified });
+        stored.push(Stored {
+            dir,
+            bytes,
+            modified,
+        });
     }
     stored
 }
@@ -293,7 +304,13 @@ mod tests {
         plant(&root, "0000000000000001", 4096, days(40));
         plant(&root, "0000000000000002", 4096, days(2));
 
-        let (removed, freed) = sweep(&root, Quota { max_bytes: 0, ttl_days: 30 });
+        let (removed, freed) = sweep(
+            &root,
+            Quota {
+                max_bytes: 0,
+                ttl_days: 30,
+            },
+        );
         assert_eq!(removed, 1);
         assert_eq!(freed, 4096);
         // Le dossier entier part, pas seulement le fichier : sinon il
@@ -312,7 +329,13 @@ mod tests {
         plant(&root, "000000000000000c", 1000, days(1));
 
         // 3000 octets pour un plafond de 2500 : le plus ancien seul suffit.
-        let (removed, freed) = sweep(&root, Quota { max_bytes: 2500, ttl_days: 0 });
+        let (removed, freed) = sweep(
+            &root,
+            Quota {
+                max_bytes: 2500,
+                ttl_days: 0,
+            },
+        );
         assert_eq!((removed, freed), (1, 1000));
         assert!(!root.join("000000000000000a").exists());
         assert!(root.join("000000000000000b").exists());
@@ -320,7 +343,16 @@ mod tests {
         assert_eq!(used_bytes(&root), 2000);
 
         // Sous le plafond : une seconde passe ne touche plus à rien.
-        assert_eq!(sweep(&root, Quota { max_bytes: 2500, ttl_days: 0 }), (0, 0));
+        assert_eq!(
+            sweep(
+                &root,
+                Quota {
+                    max_bytes: 2500,
+                    ttl_days: 0
+                }
+            ),
+            (0, 0)
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -331,7 +363,10 @@ mod tests {
         let root = scratch("illimite");
         plant(&root, "000000000000000f", 2048, days(400));
 
-        let quota = Quota { max_bytes: 0, ttl_days: 0 };
+        let quota = Quota {
+            max_bytes: 0,
+            ttl_days: 0,
+        };
         assert!(!quota.enabled());
         assert_eq!(sweep(&root, quota), (0, 0));
         assert_eq!(used_bytes(&root), 2048);

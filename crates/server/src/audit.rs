@@ -193,7 +193,9 @@ fn rotate(path: &Path) -> std::io::Result<()> {
 /// volume rendrait de toute façon fausses.
 fn purger_archives(path: &Path) {
     let Some(dir) = path.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut archives: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -218,7 +220,9 @@ fn purger_archives(path: &Path) {
 /// journal hérité d'une version qui ne pivotait qu'ici peut dépasser la borne
 /// dès l'ouverture.
 fn rotate_if_large(path: &Path) -> anyhow::Result<()> {
-    let Ok(meta) = std::fs::metadata(path) else { return Ok(()) };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(());
+    };
     if meta.len() < ROTATE_BYTES {
         return Ok(());
     }
@@ -234,8 +238,7 @@ mod tests {
     use super::*;
 
     fn scratch(nom: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("ki-audit-{}-{nom}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ki-audit-{}-{nom}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -321,7 +324,10 @@ mod tests {
             .map(|i| format!("audit-17000000000{i:02}.jsonl"))
             .collect();
         assert_eq!(restantes, attendues);
-        assert!(dir.join("users.json").exists(), "seules les archives sont visées");
+        assert!(
+            dir.join("users.json").exists(),
+            "seules les archives sont visées"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -47,6 +47,13 @@ const DELAI_PREMIER_SON: Duration = Duration::from_secs(60);
 /// L'état est republié à cette cadence pendant la lecture, pour la
 /// position.
 const PUBLICATION: Duration = Duration::from_secs(5);
+/// Les clients YouTube que yt-dlp imite, dans l'ordre. Vérifié le
+/// 2026-09-11 : le client par défaut résout la vidéo mais son flux est
+/// refusé au téléchargement (403) sans PO token, même depuis une IP
+/// résidentielle ; `web_embedded` donne l'audio Opus sans rien demander,
+/// `mweb` prend le relais pour les vidéos non intégrables, et le défaut
+/// reste en dernier recours.
+const CLIENTS_YOUTUBE: [&str; 3] = ["web_embedded", "mweb", "default"];
 
 /// Les exécutables, et ce qui s'y ajoute.
 pub struct Outils {
@@ -77,8 +84,13 @@ impl Outils {
 
 /// Ce que le bot peut recevoir.
 pub enum Commande {
-    Rejoindre { salon: ChannelId },
-    Ajouter { piste: Piste, maintenant: bool },
+    Rejoindre {
+        salon: ChannelId,
+    },
+    Ajouter {
+        piste: Piste,
+        maintenant: bool,
+    },
     Retirer(usize),
     Lecture,
     Pause,
@@ -103,8 +115,17 @@ impl Musique {
     pub fn new(data_dir: &str) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let outils = detecter(data_dir).map(Arc::new);
-        let etat = EtatMusique { disponible: outils.is_some(), volume: 60, ..Default::default() };
-        Self { etat: Mutex::new(etat), tx, rx: Mutex::new(Some(rx)), outils }
+        let etat = EtatMusique {
+            disponible: outils.is_some(),
+            volume: 60,
+            ..Default::default()
+        };
+        Self {
+            etat: Mutex::new(etat),
+            tx,
+            rx: Mutex::new(Some(rx)),
+            outils,
+        }
     }
 
     pub fn disponible(&self) -> bool {
@@ -196,7 +217,11 @@ fn executer_borne(cmd: &mut Command, delai: Duration) -> Result<Vec<u8>, String>
 /// La dernière ligne utile de la sortie d'erreur, bornée.
 fn resume_erreur(stderr: &[u8]) -> String {
     let texte = String::from_utf8_lossy(stderr);
-    let ligne = texte.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("échec");
+    let ligne = texte
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("échec");
     let ligne = ligne.trim_start_matches("ERROR: ");
     ligne.chars().take(160).collect()
 }
@@ -205,16 +230,24 @@ fn resume_erreur(stderr: &[u8]) -> String {
 /// rien télécharger. Bloquant : à appeler hors de la boucle asynchrone.
 pub fn resoudre(outils: &Outils, url: &str) -> Result<Piste, String> {
     let mut cmd = Command::new(&outils.yt_dlp);
-    cmd.args(outils.args_yt_dlp()).args(["--dump-single-json", "--skip-download", "--"]).arg(url);
+    cmd.args(outils.args_yt_dlp())
+        .args(["--dump-single-json", "--skip-download", "--"])
+        .arg(url);
     let sortie = executer_borne(&mut cmd, DELAI_RESOLUTION)?;
-    let v: serde_json::Value = serde_json::from_slice(&sortie).map_err(|_| "réponse illisible".to_string())?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&sortie).map_err(|_| "réponse illisible".to_string())?;
     let titre = v["title"].as_str().unwrap_or(url).to_string();
     let artiste = ["artist", "uploader", "channel", "creator"]
         .iter()
         .find_map(|k| v[*k].as_str())
         .unwrap_or("")
         .to_string();
-    let source = match v["extractor_key"].as_str().unwrap_or("").to_ascii_lowercase().as_str() {
+    let source = match v["extractor_key"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         s if s.starts_with("youtube") => "youtube",
         s if s.starts_with("soundcloud") => "soundcloud",
         _ => "autre",
@@ -256,14 +289,49 @@ impl Lecteur {
         std::thread::Builder::new()
             .name("ki-musique".into())
             .spawn(move || {
-                if let Err(err) = pomper(&outils, &url, &tx, &p) {
+                // YouTube : un client après l'autre tant qu'aucun son n'est
+                // sorti ; une piste qui a commencé ne se relance pas.
+                let clients: &[Option<&str>] = if url.contains("youtu") {
+                    &[
+                        Some(CLIENTS_YOUTUBE[0]),
+                        Some(CLIENTS_YOUTUBE[1]),
+                        Some(CLIENTS_YOUTUBE[2]),
+                    ]
+                } else {
+                    &[None]
+                };
+                let mut derniere = None;
+                for client in clients {
+                    match pomper(&outils, &url, *client, &tx, &p) {
+                        Ok(envoyes) if envoyes > 0 => {
+                            derniere = None;
+                            break;
+                        }
+                        Ok(_) => derniere = Some("aucun son".to_string()),
+                        Err(err) => {
+                            tracing::info!("musique : {} — {err}", client.unwrap_or("source"));
+                            derniere = Some(err);
+                        }
+                    }
+                    if tx.send(Vec::new()).is_err() {
+                        break; // le lecteur a été lâché entre deux essais
+                    }
+                }
+                if let Some(err) = derniere {
                     *e.lock().unwrap() = Some(err);
                 }
                 f.store(true, Ordering::Relaxed);
                 p.store(true, Ordering::Relaxed);
             })
             .ok();
-        Self { rx, pret, fini, erreur, position_ms: 0, demarre: Instant::now() }
+        Self {
+            rx,
+            pret,
+            fini,
+            erreur,
+            position_ms: 0,
+            demarre: Instant::now(),
+        }
     }
 }
 
@@ -277,12 +345,23 @@ impl Drop for Enfant {
     }
 }
 
-/// yt-dlp → ffmpeg → blocs de 20 ms dans le canal. Rend quand la piste est
-/// finie, ou quand le récepteur a été lâché, ou sur erreur.
-fn pomper(outils: &Outils, url: &str, tx: &canal::SyncSender<Vec<f32>>, pret: &AtomicBool) -> Result<(), String> {
+/// yt-dlp → ffmpeg → blocs de 20 ms dans le canal. Rend le nombre de blocs
+/// envoyés quand la piste est finie ou que le récepteur a été lâché ; une
+/// erreur avant le premier bloc dit pourquoi. `client` : le client YouTube
+/// à imiter, `None` pour le choix de yt-dlp.
+fn pomper(
+    outils: &Outils,
+    url: &str,
+    client: Option<&str>,
+    tx: &canal::SyncSender<Vec<f32>>,
+    pret: &AtomicBool,
+) -> Result<usize, String> {
     let mut yt = Command::new(&outils.yt_dlp);
-    yt.args(outils.args_yt_dlp())
-        .args(["-f", "bestaudio/best", "-o", "-", "--quiet", "--"])
+    yt.args(outils.args_yt_dlp());
+    if let Some(c) = client.filter(|c| *c != "default") {
+        yt.args(["--extractor-args", &format!("youtube:player_client={c}")]);
+    }
+    yt.args(["-f", "bestaudio/best", "-o", "-", "--quiet", "--"])
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -291,10 +370,23 @@ fn pomper(outils: &Outils, url: &str, tx: &canal::SyncSender<Vec<f32>>, pret: &A
     let flux = yt.0.stdout.take().expect("stdout yt-dlp");
     let mut yt_err = yt.0.stderr.take().expect("stderr yt-dlp");
     let mut ff = Command::new(&outils.ffmpeg);
-    ff.args(["-loglevel", "error", "-i", "pipe:0", "-vn", "-f", "f32le", "-ar", "48000", "-ac", "2", "pipe:1"])
-        .stdin(Stdio::from(flux))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    ff.args([
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-f",
+        "f32le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "pipe:1",
+    ])
+    .stdin(Stdio::from(flux))
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     let mut ff = Enfant(ff.spawn().map_err(|e| format!("ffmpeg : {e}"))?);
     let mut pcm = ff.0.stdout.take().expect("stdout ffmpeg");
 
@@ -315,10 +407,15 @@ fn pomper(outils: &Outils, url: &str, tx: &canal::SyncSender<Vec<f32>>, pret: &A
             break;
         }
         octets[lu..].fill(0);
-        let bloc: Vec<f32> = octets.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        let bloc: Vec<f32> = octets
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect();
         if tx.send(bloc).is_err() {
             // Le cadenceur a lâché le canal : on arrête tout.
-            return Ok(());
+            return Ok(envoyes.max(1));
         }
         envoyes += 1;
         if envoyes == AMORCE_BLOCS {
@@ -330,7 +427,7 @@ fn pomper(outils: &Outils, url: &str, tx: &canal::SyncSender<Vec<f32>>, pret: &A
         let _ = yt_err.read_to_end(&mut err);
         return Err(resume_erreur(&err));
     }
-    Ok(())
+    Ok(envoyes)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,8 +445,12 @@ struct Emetteur {
 
 impl Emetteur {
     fn new(cle: &[u8; 32]) -> Result<Self, String> {
-        let mut opus = ki_opus::Encoder::new(48_000, ki_opus::Channels::Stereo, ki_opus::Application::Audio)
-            .map_err(|e| format!("encodeur Opus : {e:?}"))?;
+        let mut opus = ki_opus::Encoder::new(
+            48_000,
+            ki_opus::Channels::Stereo,
+            ki_opus::Application::Audio,
+        )
+        .map_err(|e| format!("encodeur Opus : {e:?}"))?;
         let _ = opus.set_bitrate(ki_opus::Bitrate::Bits(DEBIT_OPUS));
         let _ = opus.set_complexity(5);
         Ok(Self {
@@ -365,7 +466,10 @@ impl Emetteur {
         let mut nonce = [0u8; 24];
         nonce[..8].copy_from_slice(&MUSIQUE_ID.to_le_bytes());
         nonce[8..16].copy_from_slice(&self.compteur.to_le_bytes());
-        let chiffre = self.cipher.encrypt(&XNonce::from(nonce), &self.sortie[..n]).ok()?;
+        let chiffre = self
+            .cipher
+            .encrypt(&XNonce::from(nonce), &self.sortie[..n])
+            .ok()?;
         let mut paquet = vec![0u8; VOICE_HEADER_LEN + chiffre.len()];
         ki_protocol::write_voice_header(&mut paquet, MUSIQUE_ID, self.compteur);
         paquet[VOICE_HEADER_LEN..].copy_from_slice(&chiffre);
@@ -393,13 +497,20 @@ fn publier(state: &AppState, roster: bool) {
     let etat = state.musique.etat();
     state.broadcast_all(&ServerMsg::MusiqueEtat { etat });
     if roster {
-        state.broadcast_all(&ServerMsg::Members { members: state.roster() });
+        state.broadcast_all(&ServerMsg::Members {
+            members: state.roster(),
+        });
     }
 }
 
 /// Passe à la piste suivante de la file — ou s'arrête d'attendre s'il n'y
 /// en a plus. `erreur` : ce que la piste précédente a laissé.
-fn suivante(state: &AppState, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur>, erreur: Option<String>) {
+fn suivante(
+    state: &AppState,
+    outils: &Arc<Outils>,
+    lecteur: &mut Option<Lecteur>,
+    erreur: Option<String>,
+) {
     *lecteur = None;
     let prochaine = {
         let mut e = state.musique.etat.lock().unwrap();
@@ -421,7 +532,12 @@ fn suivante(state: &AppState, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur
     publier(state, true);
 }
 
-fn appliquer(state: &AppState, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur>, commande: Commande) {
+fn appliquer(
+    state: &AppState,
+    outils: &Arc<Outils>,
+    lecteur: &mut Option<Lecteur>,
+    commande: Commande,
+) {
     match commande {
         Commande::Rejoindre { salon } => {
             let change = {
@@ -508,8 +624,12 @@ fn appliquer(state: &AppState, outils: &Arc<Outils>, lecteur: &mut Option<Lecteu
 
 /// La tâche du bot : commandes d'un côté, cadence de 20 ms de l'autre.
 pub async fn boucle(state: Arc<AppState>) {
-    let Some(outils) = state.musique.outils() else { return };
-    let Some(mut rx) = state.musique.rx.lock().unwrap().take() else { return };
+    let Some(outils) = state.musique.outils() else {
+        return;
+    };
+    let Some(mut rx) = state.musique.rx.lock().unwrap().take() else {
+        return;
+    };
     let mut emetteur = match Emetteur::new(&state.voice_key) {
         Ok(e) => e,
         Err(e) => {
@@ -552,6 +672,7 @@ pub async fn boucle(state: Arc<AppState>) {
                     continue;
                 }
                 match l.rx.try_recv() {
+                    Ok(pcm) if pcm.is_empty() => {}
                     Ok(mut pcm) => {
                         let gain = volume as f32 / 100.0;
                         if gain < 0.999 {
@@ -585,7 +706,10 @@ mod tests {
     /// yt-dlp, bornée.
     #[test]
     fn l_erreur_se_resume() {
-        assert_eq!(resume_erreur(b"WARNING: x\nERROR: [youtube] abc: Video unavailable\n\n"), "[youtube] abc: Video unavailable");
+        assert_eq!(
+            resume_erreur(b"WARNING: x\nERROR: [youtube] abc: Video unavailable\n\n"),
+            "[youtube] abc: Video unavailable"
+        );
         assert_eq!(resume_erreur(b""), "échec");
         assert!(resume_erreur("é".repeat(400).as_bytes()).chars().count() <= 160);
     }
@@ -601,7 +725,10 @@ mod tests {
         assert_eq!(p.id, MUSIQUE_ID);
         assert!(paquet.len() <= ki_protocol::VOICE_MAX_PACKET);
         let second = e.trame(&pcm).expect("trame");
-        assert_eq!(ki_protocol::parse_voice_packet(&second).unwrap().counter, p.counter + 1);
+        assert_eq!(
+            ki_protocol::parse_voice_packet(&second).unwrap().counter,
+            p.counter + 1
+        );
     }
 
     /// Avec yt-dlp sur la machine : une adresse réelle se résout en titre,
@@ -610,11 +737,18 @@ mod tests {
     #[test]
     #[ignore]
     fn resoudre_une_adresse_reelle() {
-        let outils = detecter(&std::env::temp_dir().join("ki-musique-test").to_string_lossy()).expect("yt-dlp et ffmpeg");
-        let piste = resoudre(&outils, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").expect("résolution");
+        let outils = detecter(
+            &std::env::temp_dir()
+                .join("ki-musique-test")
+                .to_string_lossy(),
+        )
+        .expect("yt-dlp et ffmpeg");
+        let piste =
+            resoudre(&outils, "https://www.youtube.com/watch?v=dQw4w9WgXcQ").expect("résolution");
         println!("{piste:?}");
         assert!(!piste.titre.is_empty() && piste.duree_s > 60 && piste.source == "youtube");
-        let sc = resoudre(&outils, "https://soundcloud.com/forss/flickermood").expect("résolution SoundCloud");
+        let sc = resoudre(&outils, "https://soundcloud.com/forss/flickermood")
+            .expect("résolution SoundCloud");
         println!("{sc:?}");
         assert!(sc.source == "soundcloud" && sc.duree_s > 0);
     }
@@ -625,37 +759,61 @@ mod tests {
     #[test]
     #[ignore]
     fn la_chaine_produit_des_trames_depuis_une_adresse_reelle() {
-        let outils = Arc::new(detecter(&std::env::temp_dir().join("ki-musique-test").to_string_lossy()).expect("yt-dlp et ffmpeg"));
-        let debut = Instant::now();
-        let lecteur = Lecteur::demarrer(outils, "https://soundcloud.com/forss/flickermood".into());
-        while !lecteur.pret.load(Ordering::Relaxed) {
-            assert!(debut.elapsed() < DELAI_PREMIER_SON, "pas de son au bout d'une minute");
-            std::thread::sleep(Duration::from_millis(50));
+        let outils = Arc::new(
+            detecter(
+                &std::env::temp_dir()
+                    .join("ki-musique-test")
+                    .to_string_lossy(),
+            )
+            .expect("yt-dlp et ffmpeg"),
+        );
+        for url in [
+            "https://soundcloud.com/forss/flickermood",
+            "https://www.youtube.com/watch?v=GDAGQOAVWa8&list=RDGDAGQOAVWa8",
+        ] {
+            let debut = Instant::now();
+            let lecteur = Lecteur::demarrer(Arc::clone(&outils), url.into());
+            while !lecteur.pret.load(Ordering::Relaxed) {
+                assert!(
+                    debut.elapsed() < DELAI_PREMIER_SON,
+                    "pas de son au bout d'une minute"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            println!("premier son après {:?}", debut.elapsed());
+            assert!(lecteur.erreur.lock().unwrap().is_none());
+            let mut emetteur = Emetteur::new(&[3u8; 32]).unwrap();
+            let mut trames = 0;
+            let mut energie = 0f32;
+            while trames < 100 {
+                let bloc = lecteur
+                    .rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("un bloc de son");
+                assert_eq!(bloc.len(), TRAME);
+                energie += bloc.iter().map(|s| s * s).sum::<f32>();
+                let paquet = emetteur.trame(&bloc).expect("trame");
+                assert!(
+                    paquet.len() > VOICE_HEADER_LEN + 16
+                        && paquet.len() <= ki_protocol::VOICE_MAX_PACKET
+                );
+                trames += 1;
+            }
+            println!("{trames} trames, énergie {energie:.1}");
+            assert!(energie > 0.0, "du son, pas du silence");
+            // Lâcher le lecteur tue les enfants : le fil se termine.
+            drop(lecteur);
+            std::thread::sleep(Duration::from_millis(500));
         }
-        println!("premier son après {:?}", debut.elapsed());
-        assert!(lecteur.erreur.lock().unwrap().is_none());
-        let mut emetteur = Emetteur::new(&[3u8; 32]).unwrap();
-        let mut trames = 0;
-        let mut energie = 0f32;
-        while trames < 100 {
-            let bloc = lecteur.rx.recv_timeout(Duration::from_secs(5)).expect("un bloc de son");
-            assert_eq!(bloc.len(), TRAME);
-            energie += bloc.iter().map(|s| s * s).sum::<f32>();
-            let paquet = emetteur.trame(&bloc).expect("trame");
-            assert!(paquet.len() > VOICE_HEADER_LEN + 16 && paquet.len() <= ki_protocol::VOICE_MAX_PACKET);
-            trames += 1;
-        }
-        println!("{trames} trames, énergie {energie:.1}");
-        assert!(energie > 0.0, "du son, pas du silence");
-        // Lâcher le lecteur tue les enfants : le fil se termine.
-        drop(lecteur);
-        std::thread::sleep(Duration::from_millis(500));
     }
 
     /// Une commande qui n'existe pas se tue au bout du délai.
     #[test]
     fn un_enfant_qui_traine_est_tue() {
-        let r = executer_borne(&mut Command::new("commande-qui-n-existe-pas-ki-chat"), Duration::from_secs(1));
+        let r = executer_borne(
+            &mut Command::new("commande-qui-n-existe-pas-ki-chat"),
+            Duration::from_secs(1),
+        );
         assert!(r.is_err());
     }
 }

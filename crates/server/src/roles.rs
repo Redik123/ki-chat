@@ -128,7 +128,10 @@ impl Roles {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (initial_roles(), true),
             Err(e) => return Err(e).context("lecture de roles.json"),
         };
-        let store = Self { path, inner: Mutex::new(inner) };
+        let store = Self {
+            path,
+            inner: Mutex::new(inner),
+        };
         // Le fichier est écrit dès le premier démarrage : sans ça, un admin
         // qui cherche à comprendre d'où sortent ces trois rôles ne trouve
         // rien dans `data/`.
@@ -194,9 +197,7 @@ impl Roles {
         let inner = self.inner.lock().unwrap();
         let mut kept: Vec<RoleId> = Vec::new();
         for id in roles {
-            if *id != ROLE_EVERYONE
-                && !kept.contains(id)
-                && inner.roles.iter().any(|r| r.id == *id)
+            if *id != ROLE_EVERYONE && !kept.contains(id) && inner.roles.iter().any(|r| r.id == *id)
             {
                 kept.push(*id);
             }
@@ -240,7 +241,12 @@ impl Roles {
         inner.next_id += 1;
         inner.roles.push(role.clone());
         self.save(&inner)?;
-        tracing::info!("rôle créé : {} (id {}, rang {})", role.name, role.id, role.rank);
+        tracing::info!(
+            "rôle créé : {} (id {}, rang {})",
+            role.name,
+            role.id,
+            role.rank
+        );
         Ok(role)
     }
 
@@ -274,16 +280,12 @@ impl Roles {
             }
             if current.id == ROLE_OWNER {
                 if role.perms & known_perms() != current.perms & known_perms() {
-                    return Err(
-                        "les permissions du rôle Propriétaire ne changent pas".into()
-                    );
+                    return Err("les permissions du rôle Propriétaire ne changent pas".into());
                 }
             } else {
                 let wanted = role.perms & known_perms();
                 if wanted & NOT_FOR_EVERYONE != 0 {
-                    return Err(
-                        "ces permissions ne s'accordent pas à tout le monde".into()
-                    );
+                    return Err("ces permissions ne s'accordent pas à tout le monde".into());
                 }
                 current.perms = wanted;
             }
@@ -379,8 +381,12 @@ mod tests {
         // ordinaire ne pourrait ni lire ni écrire.
         assert_eq!(roles.perms_of(&[]), perm::DEFAULT);
 
-        let a = roles.create("Recruteur", None, 10, perm::CREATE_INVITE).unwrap();
-        let b = roles.create("Archiviste", None, 20, perm::VIEW_AUDIT_LOG).unwrap();
+        let a = roles
+            .create("Recruteur", None, 10, perm::CREATE_INVITE)
+            .unwrap();
+        let b = roles
+            .create("Archiviste", None, 20, perm::VIEW_AUDIT_LOG)
+            .unwrap();
         let held = roles.perms_of(&[a.id, b.id]);
         assert!(perm::has(held, perm::CREATE_INVITE));
         assert!(perm::has(held, perm::VIEW_AUDIT_LOG));
@@ -409,7 +415,10 @@ mod tests {
 
         // Un rôle coloré au-dessus reprend la main.
         let chef = roles.create("Chef", Some(0xff_00_00), 90, 0).unwrap();
-        assert_eq!(roles.color_of(&[bas.id, haut.id, chef.id]), Some(0xff_00_00));
+        assert_eq!(
+            roles.color_of(&[bas.id, haut.id, chef.id]),
+            Some(0xff_00_00)
+        );
     }
 
     #[test]
@@ -458,14 +467,21 @@ mod tests {
         assert!(perm::has(roles.perms_of(&[]), perm::CONNECT_VOICE));
 
         // ...puis on le rend par un rôle, à qui doit l'avoir.
-        let parle = roles.create("Membre", None, 10, perm::SEND_MESSAGE).unwrap();
+        let parle = roles
+            .create("Membre", None, 10, perm::SEND_MESSAGE)
+            .unwrap();
         assert!(perm::has(roles.perms_of(&[parle.id]), perm::SEND_MESSAGE));
 
         // En revanche, on n'accorde pas à tout le monde ce qui ne sert qu'à
         // distinguer une autorité d'une autre : le serveur se retrouverait à
         // plat, et personne ne pourrait revenir en arrière — @everyone est au
         // rang zéro, et l'on n'édite qu'un rôle strictement sous son rang.
-        for interdit in [perm::ADMINISTRATOR, perm::BAN, perm::KICK, perm::MANAGE_ROLES] {
+        for interdit in [
+            perm::ADMINISTRATOR,
+            perm::BAN,
+            perm::KICK,
+            perm::MANAGE_ROLES,
+        ] {
             let mut everyone = roles.get(ROLE_EVERYONE).unwrap();
             everyone.perms = perm::DEFAULT | interdit;
             assert!(
@@ -524,12 +540,19 @@ mod tests {
         let roles = Roles::open(&scratch("bits")).unwrap();
         // Un bit sans signification aujourd'hui en aurait peut-être une
         // demain : le stocker reviendrait à accorder une permission à retard.
-        let r = roles.create("Bricolé", None, 10, perm::KICK | 1 << 40).unwrap();
+        let r = roles
+            .create("Bricolé", None, 10, perm::KICK | 1 << 40)
+            .unwrap();
         assert_eq!(r.perms, perm::KICK);
         // Un nom vide ou démesuré n'a pas sa place non plus.
         assert!(roles.create("   ", None, 10, 0).is_err());
-        assert!(roles.create(&"x".repeat(MAX_ROLE_NAME + 1), None, 10, 0).is_err());
+        assert!(roles
+            .create(&"x".repeat(MAX_ROLE_NAME + 1), None, 10, 0)
+            .is_err());
         // Le propriétaire reste seul au sommet.
-        assert_eq!(roles.create("Ambitieux", None, u16::MAX, 0).unwrap().rank, MAX_RANK);
+        assert_eq!(
+            roles.create("Ambitieux", None, u16::MAX, 0).unwrap().rank,
+            MAX_RANK
+        );
     }
 }

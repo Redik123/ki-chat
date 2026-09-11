@@ -99,7 +99,10 @@ impl Throttle {
             records.retain(|_, record| now.duration_since(record.last) < FORGET_AFTER);
         }
         for key in [Key::Address(ip), Key::Account(username.to_string())] {
-            let record = records.entry(key).or_insert(Record { failures: 0, last: now });
+            let record = records.entry(key).or_insert(Record {
+                failures: 0,
+                last: now,
+            });
             // Une ardoise oubliée repart de zéro.
             if now.duration_since(record.last) >= FORGET_AFTER {
                 record.failures = 0;
@@ -174,7 +177,9 @@ mod tests {
         }
         assert!(throttle.check_at(IP, "redik", start).is_err());
         // Juste avant l'échéance, c'est encore non.
-        assert!(throttle.check_at(IP, "redik", start + BASE_DELAY / 2).is_err());
+        assert!(throttle
+            .check_at(IP, "redik", start + BASE_DELAY / 2)
+            .is_err());
         // Après, on peut réessayer.
         assert!(throttle.check_at(IP, "redik", start + BASE_DELAY).is_ok());
     }
@@ -202,7 +207,9 @@ mod tests {
         }
         assert!(throttle.check_at(IP, "encore-une-autre", start).is_err());
         // Une autre machine n'est pas punie pour autant.
-        assert!(throttle.check_at(OTHER_IP, "encore-une-autre", start).is_ok());
+        assert!(throttle
+            .check_at(OTHER_IP, "encore-une-autre", start)
+            .is_ok());
     }
 
     #[test]
