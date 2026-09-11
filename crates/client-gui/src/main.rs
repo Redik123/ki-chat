@@ -1590,8 +1590,8 @@ impl KiApp {
                 ui.label(RichText::new(e).color(DANGER).size(11.0));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let chevron = if self.musique_deroulee { "˄" } else { "˅" };
-                if ui.add(egui::Button::new(RichText::new(chevron).size(15.0)).frame(false)).on_hover_text("détails").clicked() {
+                let chevron = if self.musique_deroulee { Icon::ArrowUp } else { Icon::ArrowDown };
+                if ui::icon_button_ex(ui, chevron, 24.0, "détails", None).clicked() {
                     self.musique_deroulee = !self.musique_deroulee;
                 }
                 // Mon volume : le mien, pas celui du bot.
@@ -1678,13 +1678,13 @@ impl KiApp {
                                 .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.ajoute_par.as_deref().unwrap_or("?")));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add_enabled_ui(peut, |ui| {
-                                    if ui.small_button("✕").on_hover_text("retirer").clicked() {
+                                    if ui::icon_button_ex(ui, Icon::Close, 18.0, "retirer", None).clicked() {
                                         self.commander_musique(C::Retirer { index: i });
                                     }
-                                    if i + 1 < n && ui.small_button("▼").clicked() {
+                                    if i + 1 < n && ui::icon_button_ex(ui, Icon::ArrowDown, 18.0, "descendre", None).clicked() {
                                         self.commander_musique(C::Deplacer { de: i, vers: i + 1 });
                                     }
-                                    if i > 0 && ui.small_button("▲").clicked() {
+                                    if i > 0 && ui::icon_button_ex(ui, Icon::ArrowUp, 18.0, "monter", None).clicked() {
                                         self.commander_musique(C::Deplacer { de: i, vers: i - 1 });
                                     }
                                 });
@@ -1697,22 +1697,34 @@ impl KiApp {
             {
                 let ui = &mut cols[2];
                 ui.add_enabled_ui(peut, |ui| {
+                    let champ = ui.add(
+                        egui::TextEdit::singleline(&mut self.musique_recherche)
+                            .hint_text("chercher un morceau, ou coller une adresse…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    menu_edition(&champ, &mut self.musique_recherche, false);
+                    let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let mut lancer = entree;
                     ui.horizontal(|ui| {
-                        let champ = ui.add(
-                            egui::TextEdit::singleline(&mut self.musique_recherche)
-                                .hint_text("chercher un morceau…")
-                                .desired_width(ui.available_width() - 150.0),
-                        );
-                        menu_edition(&champ, &mut self.musique_recherche, false);
-                        let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.selectable_value(&mut self.musique_soundcloud, false, "YouTube");
                         ui.selectable_value(&mut self.musique_soundcloud, true, "SoundCloud");
-                        let texte = self.musique_recherche.trim().to_string();
-                        if (entree || ui::icon_button_ex(ui, Icon::Loupe, 24.0, "chercher", None).clicked()) && !texte.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui::icon_button_ex(ui, Icon::Loupe, 24.0, "chercher (Entrée)", None).clicked() {
+                                lancer = true;
+                            }
+                        });
+                    });
+                    let texte = self.musique_recherche.trim().to_string();
+                    if lancer && !texte.is_empty() {
+                        // Une adresse collée n'a rien à chercher : elle part en file.
+                        if ki_protocol::url_musique_valide(&texte) {
+                            self.commander_musique(C::Ajouter { url: texte, maintenant: false });
+                            self.musique_recherche.clear();
+                        } else {
                             let source = if self.musique_soundcloud { "soundcloud" } else { "youtube" }.to_string();
                             self.commander_musique(C::Chercher { texte, source });
                         }
-                    });
+                    }
                 });
                 if !peut {
                     ui.label(RichText::new("réservé aux modérateurs").color(TEXT_FAINT).size(11.0));
