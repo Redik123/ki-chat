@@ -3651,12 +3651,32 @@ impl KiApp {
                     if n == 0 {
                         break;
                     }
-                    agent
+                    let envoi = agent
                         .post(&format!("{base}/upload/partiel?upload={upload}&index={index}"))
                         .set("x-ki-token", &token_hex)
                         .timeout(std::time::Duration::from_secs(300))
-                        .send_bytes(&tampon[..n])
-                        .map_err(erreur_http)?;
+                        .send_bytes(&tampon[..n]);
+                    // Un serveur d'avant les morceaux répond 404 : on lui
+                    // envoie le fichier d'un bloc, comme avant, s'il tient
+                    // dans sa limite — le temps qu'il soit mis à jour.
+                    if index == 0 && matches!(&envoi, Err(ureq::Error::Status(404, _))) {
+                        if taille > 25 * 1024 * 1024 {
+                            return Err("le serveur n'accepte pas encore les gros fichiers \
+                                        (25 Mo max avant sa mise à jour)"
+                                .into());
+                        }
+                        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                        let resp = agent
+                            .post(&format!("{base}/upload?name={name}"))
+                            .set("x-ki-token", &token_hex)
+                            .timeout(std::time::Duration::from_secs(300))
+                            .send_bytes(&bytes)
+                            .map_err(erreur_http)?;
+                        let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+                        let file_path = json["url"].as_str().ok_or("réponse invalide")?.to_string();
+                        return Ok(format!("{base}{file_path}"));
+                    }
+                    envoi.map_err(erreur_http)?;
                     index += 1;
                     envoye += n as u64;
                     *status.lock().unwrap() =
