@@ -368,7 +368,7 @@ question posée.
 
 ## Jalons
 
-### C0 — La visionneuse
+### C0 — La visionneuse — livré en test (2026-09-14, commit local)
 `ki-media` (Media Foundation Source Reader, Windows), la file « médias » du
 moteur vocal, la visionneuse (images : zoom, déplacement, suivant/
 précédent, enregistrer sous, copier ; vidéos : lecture, avance, volume),
@@ -379,6 +379,36 @@ glissée dans le chat se lit chez tout le monde, droite, avec le son, sans
 navigateur ; une image de 8000 px s'ouvre sans figer ; on avance à la
 seconde près ; les copains n'entendent pas la vidéo par le micro.
 Estimation : 3 sessions.
+
+**Fait le 2026-09-14** (une session), **vérifié** par les tests :
+- `crates/media` (`ki-media`) : Source Reader en NV12 + float aux cadence
+  et voies natives, rééchantillonnage cubique maison vers 48 kHz (le lecteur
+  ne rééchantillonne pas), ouverture d'affichage lue (les 1088 lignes d'un
+  1080p), DXVA coupé ; tests sur des fichiers fabriqués par le ffmpeg de la
+  machine (images, son, recherche, fichier muet).
+- `ki_voice::medias` : la file « médias » (mono 48 kHz, pause, horloge =
+  échantillons partis vers la carte, consommateur désigné), mixée dans le
+  rappel de sortie du moteur avant le volume général et le limiteur, et la
+  sortie à part hors salon (`SortieSeule`, natif ou cpal).
+- Client : `visionneuse.rs` (voile, image avec zoom/déplacement, vidéo
+  avec un fil de lecture par fichier, curseur, ←/→, volume mémorisé,
+  boucle, enregistrer sous, copier, navigateur), `medias.rs` (cache disque
+  1 Gio LRU, téléchargement suivi, fiche `meta.json`), carte vidéo dans le
+  fil (poster, durée, « en préparation »), GIF et WebP animés (bornés à
+  48 Mpx et 400 images), téléversement par morceaux de 8 Mo (512 Mo max).
+- Serveur : `medias.rs` (`/upload/partiel`, `/upload/fin`, normalisation
+  ffmpeg une à la fois — testée : un HEVC portrait 44,1 kHz mono devient
+  H.264/AAC 48 kHz stéréo avec poster ; un H.264 propre est recopié —,
+  reprise après redémarrage, purge des morceaux abandonnés), types MIME et
+  `inline` au téléchargement, ffprobe dans l'image Docker,
+  `KI_FILES_MAX_FILE_MB`.
+- Non fait, volontairement : le décodage DXVA (logiciel suffit), la
+  rotation d'un fichier local (le serveur la cuit), `Range` HTTP.
+
+Reste à valider par drion (la liste de validation ci-dessus) — et à voir
+à l'usage : le son de la vidéo hors salon sort-il bien par le bon casque
+(la sortie à part suit le périphérique réglé), et l'image tient-elle
+60 images/s sur les portables.
 
 ### C1 — L'enregistreur
 Profil NVENC « clip », le tampon, les robinets audio (jeu, micro, vocal),

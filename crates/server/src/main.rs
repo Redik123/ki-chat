@@ -12,6 +12,10 @@
 //!                       sont supprimés et les nouveaux envois refusés
 //!   KI_FILES_TTL_DAYS   durée de vie d'un fichier partagé (défaut 30 jours,
 //!                       0 = conservation sans limite d'âge)
+//!   KI_FILES_MAX_FILE_MB plafond d'un fichier envoyé par morceaux (défaut
+//!                       512 Mo) — les vidéos ; un bloc simple reste à 25 Mo
+//!   KI_FFMPEG, KI_FFPROBE  les outils vidéo (défaut : dans le PATH) ; sans
+//!                       eux, les vidéos partagées ne sont pas converties
 
 mod accounts;
 mod audit;
@@ -19,6 +23,7 @@ mod channels;
 mod diag;
 mod files;
 mod history;
+mod medias;
 mod meta;
 mod musique;
 mod quic;
@@ -59,7 +64,8 @@ async fn main() -> anyhow::Result<()> {
         ttl_days: env_u64("KI_FILES_TTL_DAYS", files::DEFAULT_TTL_DAYS),
     };
 
-    let state = Arc::new(AppState::new(token, &data_dir, files_quota)?);
+    let fichier_max_mb = env_u64("KI_FILES_MAX_FILE_MB", medias::DEFAULT_FICHIER_MAX_MB);
+    let state = Arc::new(AppState::new(token, &data_dir, files_quota, fichier_max_mb)?);
 
     // Purge du partage de fichiers. Sans elle, data/files/ ne fait que
     // grandir : sur le petit VPS qui héberge le serveur, le disque finit par
@@ -113,6 +119,25 @@ async fn main() -> anyhow::Result<()> {
     // Le bot musique : sa tâche vit tant que le serveur tourne, et ne fait
     // rien tant qu'on ne lui demande rien.
     tokio::spawn(musique::boucle(state.clone()));
+    // Les vidéos partagées : conversion en MP4 lisible partout, une à la
+    // fois ; celles qu'un arrêt a laissées en plan repartent d'abord. Et les
+    // téléversements par morceaux abandonnés sont balayés à leur rythme.
+    medias::reprendre(&state);
+    tokio::spawn(medias::boucle(state.clone()));
+    {
+        let data_dir = data_dir.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+                let d = data_dir.clone();
+                match tokio::task::spawn_blocking(move || medias::purger_partiels(&d)).await {
+                    Ok(n) if n > 0 => tracing::info!("médias : {n} téléversement(s) abandonné(s) jeté(s)"),
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("purge des téléversements : {e}"),
+                }
+            }
+        });
+    }
 
     // Ce que le fil HenrikDev rapporte (liaison faite, fiche refaite) est
     // relayé d'ici : réponse à l'intéressé, roster à tout le monde. Et
@@ -193,6 +218,12 @@ async fn main() -> anyhow::Result<()> {
             "/upload",
             post(files::upload).layer(DefaultBodyLimit::max(files::MAX_FILE_SIZE)),
         )
+        // Par morceaux : chacun sous la limite du routeur, le serveur assemble.
+        .route(
+            "/upload/partiel",
+            post(medias::upload_partiel).layer(DefaultBodyLimit::max(medias::MORCEAU_MAX + 1024)),
+        )
+        .route("/upload/fin", post(medias::upload_fin))
         // Diagnostics partagés : dépôt par les clients volontaires (jeton
         // voix), classement par version, lecture et purge par l'admin
         // (session ADMINISTRATOR ou jeton data/diag.token).

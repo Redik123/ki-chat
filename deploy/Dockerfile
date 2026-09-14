@@ -73,12 +73,12 @@ RUN set -eux; \
     curl -fsSL -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-$ff-gpl.tar.xz"; \
     curl -fsSL -o checksums.sha256 "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/checksums.sha256"; \
     grep " ffmpeg-master-latest-$ff-gpl.tar.xz\$" checksums.sha256 | sed "s| ffmpeg-master-latest-$ff-gpl.tar.xz\$| ffmpeg.tar.xz|" | sha256sum -c -; \
-    tar -xJf ffmpeg.tar.xz --wildcards --strip-components=2 '*/bin/ffmpeg'; \
+    tar -xJf ffmpeg.tar.xz --wildcards --strip-components=2 '*/bin/ffmpeg' '*/bin/ffprobe'; \
     curl -fsSL -o deno.zip "https://github.com/denoland/deno/releases/latest/download/deno-$deno-unknown-linux-gnu.zip"; \
     curl -fsSL -o deno.zip.sha256sum "https://github.com/denoland/deno/releases/latest/download/deno-$deno-unknown-linux-gnu.zip.sha256sum"; \
     sed "s| .*| deno.zip|" deno.zip.sha256sum | sha256sum -c -; \
     unzip -q deno.zip deno; \
-    chmod 0755 yt-dlp ffmpeg deno; \
+    chmod 0755 yt-dlp ffmpeg ffprobe deno; \
     rm -f ffmpeg.tar.xz deno.zip SHA2-256SUMS checksums.sha256 deno.zip.sha256sum
 
 FROM debian:bookworm-slim
@@ -96,7 +96,7 @@ RUN set -eux; \
     chown kichat:kichat /data
 
 COPY --from=build /ki-server /usr/local/bin/ki-server
-COPY --from=outils /outils/yt-dlp /outils/ffmpeg /outils/deno /usr/local/bin/
+COPY --from=outils /outils/yt-dlp /outils/ffmpeg /outils/ffprobe /outils/deno /usr/local/bin/
 
 ENV KI_HTTP_PORT=8080 \
     KI_UDP_PORT=9987 \

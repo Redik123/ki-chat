@@ -61,8 +61,32 @@ fn files_dir(state: &AppState) -> PathBuf {
     PathBuf::from(&state.data_dir).join("files")
 }
 
+/// Un identifiant de fichier neuf : seize caractères hexadécimaux aléatoires.
+pub fn nouvel_id() -> String {
+    format!("{:016x}", rand::rng().random::<u64>())
+}
+
+/// Le type MIME d'un fichier d'après son nom, et s'il se montre dans le
+/// navigateur (`inline`) ou se télécharge (`attachment`). Les images, les
+/// vidéos et les fiches se lisent sur place — c'est ce qu'un téléphone
+/// attend d'un lien vers un clip.
+fn type_mime(name: &str) -> (&'static str, bool) {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "mp4" | "m4v" => ("video/mp4", true),
+        "mov" => ("video/quicktime", true),
+        "webm" => ("video/webm", true),
+        "jpg" | "jpeg" => ("image/jpeg", true),
+        "png" => ("image/png", true),
+        "gif" => ("image/gif", true),
+        "webp" => ("image/webp", true),
+        "json" => ("application/json", true),
+        _ => ("application/octet-stream", false),
+    }
+}
+
 /// Ne garde que des caractères sûrs pour un nom de fichier.
-fn sanitize(name: &str) -> String {
+pub fn sanitize(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| {
@@ -131,7 +155,7 @@ pub async fn upload(
     }
 
     let name = sanitize(&params.name);
-    let file_id = format!("{:016x}", rand::rng().random::<u64>());
+    let file_id = nouvel_id();
     let dir = files_dir(&state).join(&file_id);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         tracing::error!("création dossier fichiers : {e}");
@@ -145,7 +169,10 @@ pub async fn upload(
         "fichier reçu : {name} ({} Ko) de {username} (id {user_id})",
         body.len() / 1024
     );
-    Json(serde_json::json!({ "url": format!("/files/{file_id}/{name}") })).into_response()
+    // Une vidéo est mise de côté et convertie ; l'adresse rendue est celle
+    // du MP4 à venir.
+    let url = crate::medias::finaliser(&state, &file_id, &dir, &name);
+    Json(serde_json::json!({ "url": url })).into_response()
 }
 
 /// GET /files/{id}/{name}
@@ -160,13 +187,15 @@ pub async fn download(
     }
     let name = sanitize(&name);
     let path = files_dir(&state).join(&file_id).join(&name);
+    let (mime, en_ligne) = type_mime(&name);
+    let disposition = if en_ligne { "inline" } else { "attachment" };
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
             [
-                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                (header::CONTENT_TYPE, mime.to_string()),
                 (
                     header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{name}\""),
+                    format!("{disposition}; filename=\"{name}\""),
                 ),
             ],
             bytes,

@@ -19,6 +19,7 @@ pub mod effects;
 // rééchantillonnage reviendrait à parier — c'est précisément ce que les bancs
 // existent pour empêcher.
 pub mod jitter;
+pub mod medias;
 pub mod resample;
 /// Détection de parole neuronale (Silero VAD, par tract).
 pub mod silero;
@@ -187,6 +188,10 @@ pub struct VoiceConfig {
     pub tone: bool,
     /// Mode test : ne lit pas l'audio reçu (compte seulement les paquets).
     pub no_playback: bool,
+    /// La file « médias » (le son d'une vidéo lue dans ki-chat), partagée
+    /// avec l'application : le moteur la joue quand il est là — voir
+    /// `medias.rs`. Absente, il s'en crée une que personne ne remplit.
+    pub medias: Option<std::sync::Arc<medias::File>>,
 }
 
 impl VoiceConfig {
@@ -216,6 +221,7 @@ impl VoiceConfig {
             jitter_frames: 0,
             tone: false,
             no_playback: false,
+            medias: None,
         }
     }
 }
@@ -588,6 +594,9 @@ struct Shared {
     aux_buf: Mutex<std::collections::VecDeque<f32>>,
     /// Son volume (bits f32), réglé par le spectateur.
     aux_gain: AtomicU32,
+    /// Le son d'une vidéo lue dans ki-chat : mixé comme les effets, quand
+    /// l'application nous désigne consommateur (voir `medias.rs`).
+    medias: std::sync::Arc<medias::File>,
     /// Micro affamé : la bascule en catégorie « communications » est
     /// **proposée** à l'utilisateur, jamais imposée — c'est elle qui peut
     /// faire baisser le volume de ses autres sons, à lui de choisir.
@@ -659,6 +668,7 @@ impl VoiceEngine {
             aec_far: Mutex::new(std::collections::VecDeque::new()),
             aux_buf: Mutex::new(std::collections::VecDeque::new()),
             aux_gain: AtomicU32::new(1.0f32.to_bits()),
+            medias: cfg.medias.clone().unwrap_or_default(),
             comms_proposed: AtomicBool::new(false),
             comms_decision: std::sync::atomic::AtomicU8::new(0),
             input_lost: AtomicBool::new(false),
@@ -2608,6 +2618,10 @@ fn output_writer(
                     }
                 }
             }
+            // Le son d'une vidéo de la visionneuse : même place que les
+            // effets et le son du jeu — avant le volume général et le
+            // limiteur, et vu par l'annulateur d'écho.
+            sh_cb.medias.mixer_dans(&mut mix, medias::Consommateur::Moteur);
             // Volume de sortie global + limiteur doux (anti-saturation quand
             // plusieurs voix fortes se superposent).
             let out_gain = load_f32(&sh_cb.output_gain);

@@ -45,6 +45,17 @@ pub enum Icon {
     HeadphonesOff,
     /// Un écran sur son pied, une lecture dedans : « diffuse ».
     Screen,
+    /// Les deux barres de la pause.
+    Pause,
+    /// Une flèche vers un plateau : « enregistrer sous ».
+    Download,
+    /// Chevrons : média précédent / suivant dans la visionneuse.
+    ChevronLeft,
+    ChevronRight,
+    /// Deux flèches en boucle : « lire en boucle ».
+    Repeat,
+    /// Une pellicule : une vidéo.
+    Film,
 }
 
 /// Dessine `icon` centrée dans `rect` (le carré inscrit est utilisé).
@@ -268,6 +279,32 @@ impl Pen<'_> {
                 self.head(tip, (-a.sin(), a.cos()), 3.6, 2.6);
             }
             Icon::Play => self.solid(&[(8.5, 5.0), (19.0, 12.0), (8.5, 19.0)]),
+            Icon::Pause => {
+                self.rrect(6.0, 5.0, 10.0, 19.0, 1.2, true);
+                self.rrect(14.0, 5.0, 18.0, 19.0, 1.2, true);
+            }
+            Icon::Download => {
+                self.seg((12.0, 4.0), (12.0, 15.0));
+                self.head((12.0, 15.0), (0.0, 1.0), 5.2, 4.2);
+                self.path(&[(5.0, 15.5), (5.0, 20.0), (19.0, 20.0), (19.0, 15.5)]);
+            }
+            Icon::ChevronLeft => self.path(&[(15.0, 5.0), (8.0, 12.0), (15.0, 19.0)]),
+            Icon::ChevronRight => self.path(&[(9.0, 5.0), (16.0, 12.0), (9.0, 19.0)]),
+            Icon::Repeat => {
+                self.path(&[(5.0, 10.0), (5.0, 7.0), (17.0, 7.0)]);
+                self.head((17.0, 7.0), (1.0, 0.0), 4.0, 3.0);
+                self.path(&[(19.0, 14.0), (19.0, 17.0), (7.0, 17.0)]);
+                self.head((7.0, 17.0), (-1.0, 0.0), 4.0, 3.0);
+            }
+            Icon::Film => {
+                self.rrect(4.0, 5.0, 20.0, 19.0, 1.6, false);
+                self.seg((8.0, 5.0), (8.0, 19.0));
+                self.seg((16.0, 5.0), (16.0, 19.0));
+                self.seg((4.0, 9.5), (8.0, 9.5));
+                self.seg((4.0, 14.5), (8.0, 14.5));
+                self.seg((16.0, 9.5), (20.0, 9.5));
+                self.seg((16.0, 14.5), (20.0, 14.5));
+            }
             Icon::Target => {
                 self.ring((12.0, 12.0), 8.0);
                 self.ring((12.0, 12.0), 3.4);

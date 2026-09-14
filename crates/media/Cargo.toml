@@ -1,0 +1,30 @@
+[package]
+name = "ki-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Le décodeur de la visionneuse (plan : PLAN-CLIPS.md, jalon C0) : un fichier
+# vidéo entre — le MP4 H.264/AAC que le serveur fabrique, ou un clip enregistré
+# par ki-chat —, des images RGBA et du son mono 48 kHz en sortent, horodatés.
+# Sous Windows, c'est Media Foundation qui démultiplexe et décode : présent
+# dans chaque Windows, rien à livrer ni à télécharger. Ailleurs, l'ouverture
+# refuse en le disant ; le chemin portable est prévu au jalon C4.
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+# La conversion NV12 -> RGBA d'une image 1080p prend quelques millisecondes
+# sur un cœur ; par bandes de lignes, elle tient dans le budget d'une image à
+# 60 par seconde.
+rayon = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    # PROPVARIANT : la position de lecture et la durée du fichier.
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }

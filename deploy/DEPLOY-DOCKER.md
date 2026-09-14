@@ -45,7 +45,7 @@ téléchargement des fichiers partagés.
 
 ## Le bot musique
 
-L'image embarque yt-dlp, ffmpeg et deno : le bot musique existe dès que le
+L'image embarque yt-dlp, ffmpeg, ffprobe et deno : le bot musique existe dès que le
 serveur démarre (journal : « musique : yt-dlp … · ffmpeg … »). Si YouTube
 réclame un compte (« Sign in to confirm you're not a bot »), déposer les
 cookies d'un compte Google **jetable** — jamais le principal — au format

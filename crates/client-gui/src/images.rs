@@ -1,4 +1,5 @@
-//! Aperçu des images partagées dans le fil de discussion.
+//! Aperçu des images partagées dans le fil de discussion — et, depuis la
+//! visionneuse, la fiche des vidéos.
 //!
 //! # Pourquoi on ne télécharge pas n'importe quelle adresse
 //!
@@ -18,9 +19,11 @@
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
+
+use crate::medias::{self, Meta};
 
 /// Poids maximal téléchargé pour un aperçu.
 const MAX_BYTES: usize = 12 * 1024 * 1024;
@@ -30,9 +33,16 @@ const MAX_PX: u32 = 8_000;
 const MAX_CACHED: usize = 40;
 /// Temps accordé à un téléchargement.
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Une animation ne dépasse pas ça, toutes images confondues : au-delà, on
+/// n'en garde que la première — un GIF de 1080p sur trente secondes serait
+/// un gigaoctet de textures.
+const MAX_PIXELS_ANIMATION: u64 = 48_000_000;
+const MAX_IMAGES_ANIMATION: usize = 400;
+/// Une fiche de vidéo qui n'est pas prête se redemande à ce rythme.
+const RELANCE_META: Duration = Duration::from_secs(3);
 
 /// Extensions reconnues comme des images.
-const IMAGE_SUFFIXES: [&str; 5] = [".png", ".jpg", ".jpeg", ".bmp", ".gif"];
+const IMAGE_SUFFIXES: [&str; 6] = [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"];
 
 /// Vrai si l'adresse désigne une image, d'après son extension.
 pub fn looks_like_image(url: &str) -> bool {
@@ -41,13 +51,42 @@ pub fn looks_like_image(url: &str) -> bool {
     IMAGE_SUFFIXES.iter().any(|suffix| path.ends_with(suffix))
 }
 
+/// Une image animée (GIF, WebP) : ses images et leur durée, en secondes.
+pub struct Animation {
+    pub images: Vec<(egui::TextureHandle, f32)>,
+    pub total: f32,
+}
+
+impl Animation {
+    /// L'image à montrer à l'instant `temps` (l'horloge de l'interface).
+    pub fn image_a(&self, temps: f64) -> &egui::TextureHandle {
+        let mut t = (temps % f64::from(self.total.max(0.001))) as f32;
+        for (image, duree) in &self.images {
+            if t < *duree {
+                return image;
+            }
+            t -= duree;
+        }
+        &self.images[self.images.len() - 1].0
+    }
+}
+
 #[derive(Clone)]
 pub enum Preview {
     /// Téléchargement en cours.
     Loading,
     Ready(egui::TextureHandle),
+    /// Animée : plusieurs images, à faire défiler.
+    Anime(Arc<Animation>),
     /// Illisible, trop lourde, ou serveur injoignable.
     Failed,
+}
+
+/// Ce que le décodeur rend.
+pub enum Decodee {
+    Fixe(egui::ColorImage),
+    /// Chaque image et sa durée, en secondes.
+    Animee(Vec<(egui::ColorImage, f32)>),
 }
 
 /// Ce que le fil de téléchargement rend : l'adresse, et l'image **déjà
@@ -57,7 +96,22 @@ pub enum Preview {
 /// borné à 8000 px et 64 Mio d'allocation, il pouvait figer la fenêtre
 /// plusieurs secondes à l'arrivée d'une photo un peu grande. Le fil qui a
 /// téléchargé, lui, n'a plus rien à faire — c'est là que ça se passe.
-type Delivery = (String, Option<egui::ColorImage>);
+type Delivery = (String, Option<Decodee>);
+/// Une fiche de vidéo lue : l'adresse de la fiche, et son contenu (`None`
+/// = pas de fiche, ou serveur injoignable).
+type LivraisonMeta = (String, Option<Meta>);
+
+/// La fiche d'une vidéo, telle qu'on la connaît.
+#[derive(Clone, Debug)]
+pub enum EtatMeta {
+    Chargement,
+    Prete(Meta),
+    /// Le serveur y travaille encore (conversion, poster).
+    EnPreparation,
+    Erreur(String),
+    /// Pas de fiche (un lien d'avant la visionneuse, ou un fichier disparu).
+    Absente,
+}
 
 #[derive(Default)]
 pub struct Previews {
@@ -65,6 +119,9 @@ pub struct Previews {
     /// Ordre d'arrivée, pour évincer les plus anciennes.
     order: Vec<String>,
     incoming: Arc<Mutex<Vec<Delivery>>>,
+    /// Les fiches de vidéos, par adresse de fiche, et l'heure de la lecture.
+    metas: HashMap<String, (EtatMeta, Instant)>,
+    incoming_metas: Arc<Mutex<Vec<LivraisonMeta>>>,
     /// Racine HTTP du serveur courant : seule origine autorisée.
     origin: Option<String>,
     /// Client HTTP épinglé sur l'empreinte du serveur. Par défaut celui de
@@ -88,10 +145,11 @@ impl Previews {
         self.origin = Some(origin);
         self.cache.clear();
         self.order.clear();
+        self.metas.clear();
     }
 
     /// Vrai si cette adresse est servie par notre serveur.
-    fn is_ours(&self, url: &str) -> bool {
+    pub fn is_ours(&self, url: &str) -> bool {
         self.to_pinned(url).is_some()
     }
 
@@ -125,7 +183,8 @@ impl Previews {
             return Some(url.to_string());
         }
         let clear = prefix.replacen("https://", "http://", 1);
-        url.starts_with(&clear).then(|| url.replacen("http://", "https://", 1))
+        url.starts_with(&clear)
+            .then(|| url.replacen("http://", "https://", 1))
     }
 
     /// Monte en textures les images arrivées depuis le dernier rendu.
@@ -143,14 +202,42 @@ impl Previews {
                 continue;
             }
             let state = match image {
-                Some(image) => Preview::Ready(ctx.load_texture(
+                Some(Decodee::Fixe(image)) => Preview::Ready(ctx.load_texture(
                     format!("apercu-{url}"),
                     image,
                     egui::TextureOptions::LINEAR,
                 )),
+                Some(Decodee::Animee(images)) => {
+                    let total: f32 = images.iter().map(|(_, d)| *d).sum();
+                    let images = images
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (image, duree))| {
+                            let texture = ctx.load_texture(
+                                format!("apercu-{url}-{i}"),
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            (texture, duree)
+                        })
+                        .collect();
+                    Preview::Anime(Arc::new(Animation { images, total }))
+                }
                 None => Preview::Failed,
             };
             self.cache.insert(url, state);
+        }
+        let metas = std::mem::take(&mut *self.incoming_metas.lock().unwrap());
+        for (url, meta) in metas {
+            let etat = match meta {
+                Some(m) if m.prete() => EtatMeta::Prete(m),
+                Some(m) if m.en_erreur() => {
+                    EtatMeta::Erreur(m.message.unwrap_or_else(|| "vidéo illisible".into()))
+                }
+                Some(_) => EtatMeta::EnPreparation,
+                None => EtatMeta::Absente,
+            };
+            self.metas.insert(url, (etat, Instant::now()));
         }
     }
 
@@ -165,7 +252,9 @@ impl Previews {
         // Rien n'est mis en cache tant qu'on n'a pas de quoi télécharger :
         // marquer « en chargement » sans lancer la requête figerait l'aperçu
         // dans cet état, l'entrée en cache empêchant tout nouvel essai.
-        let Some(agent) = self.agent.clone() else { return Some(Preview::Loading) };
+        let Some(agent) = self.agent.clone() else {
+            return Some(Preview::Loading);
+        };
         // Téléchargé en TLS, même si le lien du salon est resté en clair.
         let target = self.to_pinned(url)?;
         if self.order.len() >= MAX_CACHED {
@@ -193,8 +282,55 @@ impl Previews {
         }
         self.cache.insert(url.to_string(), Preview::Loading);
         self.order.push(url.to_string());
-        fetch(target, url.to_string(), self.incoming.clone(), ctx.clone(), agent);
+        fetch(
+            target,
+            url.to_string(),
+            self.incoming.clone(),
+            ctx.clone(),
+            agent,
+        );
         Some(Preview::Loading)
+    }
+
+    /// La fiche d'une vidéo de notre serveur, en la demandant si besoin —
+    /// et en la redemandant tant qu'elle n'est pas prête. `None` : la vidéo
+    /// ne vient pas de notre serveur.
+    pub fn meta(&mut self, ctx: &egui::Context, url_video: &str) -> Option<EtatMeta> {
+        let url = medias::url_meta(url_video)?;
+        let target = self.to_pinned(&url)?;
+        if let Some((etat, depuis)) = self.metas.get(&url) {
+            let definitif = matches!(etat, EtatMeta::Prete(_) | EtatMeta::Erreur(_));
+            if definitif || depuis.elapsed() < RELANCE_META {
+                return Some(etat.clone());
+            }
+            if matches!(etat, EtatMeta::Chargement) {
+                return Some(etat.clone());
+            }
+        }
+        let Some(agent) = self.agent.clone() else {
+            return Some(EtatMeta::Chargement);
+        };
+        let ancien = self.metas.get(&url).map(|(e, _)| e.clone());
+        self.metas
+            .insert(url.clone(), (EtatMeta::Chargement, Instant::now()));
+        let slot = self.incoming_metas.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let meta = (|| -> Option<Meta> {
+                let reponse = agent.get(&target).timeout(TIMEOUT).call().ok()?;
+                let mut bytes = Vec::new();
+                reponse
+                    .into_reader()
+                    .take(64 * 1024)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                serde_json::from_slice(&bytes).ok()
+            })();
+            slot.lock().unwrap().push((url, meta));
+            ctx.request_repaint();
+        });
+        // Le temps de la réponse, on montre ce qu'on savait.
+        Some(ancien.unwrap_or(EtatMeta::Chargement))
     }
 }
 
@@ -214,8 +350,11 @@ fn fetch(
         let octets = (|| -> Result<Vec<u8>, String> {
             // Agent épinglé sur l'empreinte du serveur : un aperçu ne doit
             // pas être l'occasion de parler à quelqu'un d'autre.
-            let response =
-                agent.get(&target).timeout(TIMEOUT).call().map_err(|e| e.to_string())?;
+            let response = agent
+                .get(&target)
+                .timeout(TIMEOUT)
+                .call()
+                .map_err(|e| e.to_string())?;
             let mut bytes = Vec::new();
             response
                 .into_reader()
@@ -230,10 +369,18 @@ fn fetch(
         // Le décodage a lieu ICI, et plus dans `mount()` : ce fil a fini son
         // téléchargement et ne fait plus rien, là où le fil de l'interface a
         // une image à peindre dans les seize millisecondes.
-        let image = octets.ok().and_then(|bytes| decode(&bytes));
+        let image = octets.ok().and_then(|bytes| decoder(&bytes));
         slot.lock().unwrap().push((url, image));
         ctx.request_repaint();
     });
+}
+
+fn limites() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_PX);
+    limits.max_image_height = Some(MAX_PX);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits
 }
 
 /// Décode une image téléchargée, décodeur borné.
@@ -246,15 +393,84 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_PX);
-    limits.max_image_height = Some(MAX_PX);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-
+    reader.limits(limites());
     let rgba = reader.decode().ok()?.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        rgba.as_raw(),
+    ))
+}
+
+/// Décode une image, animée si elle l'est (GIF, WebP) et si elle tient dans
+/// les bornes — sinon sa première image seule.
+pub(crate) fn decoder(bytes: &[u8]) -> Option<Decodee> {
+    let format = image::guess_format(bytes).ok();
+    if matches!(
+        format,
+        Some(image::ImageFormat::Gif | image::ImageFormat::WebP)
+    ) {
+        if let Some(images) = decoder_animation(bytes, format?) {
+            if images.len() > 1 {
+                return Some(Decodee::Animee(images));
+            }
+            if let Some((image, _)) = images.into_iter().next() {
+                return Some(Decodee::Fixe(image));
+            }
+        }
+    }
+    decode(bytes).map(Decodee::Fixe)
+}
+
+fn decoder_animation(
+    bytes: &[u8],
+    format: image::ImageFormat,
+) -> Option<Vec<(egui::ColorImage, f32)>> {
+    use image::AnimationDecoder as _;
+    let cursor = std::io::Cursor::new(bytes);
+    let frames = match format {
+        image::ImageFormat::Gif => {
+            let mut d = image::codecs::gif::GifDecoder::new(cursor).ok()?;
+            image::ImageDecoder::set_limits(&mut d, limites()).ok()?;
+            d.into_frames()
+        }
+        image::ImageFormat::WebP => {
+            let mut d = image::codecs::webp::WebPDecoder::new(cursor).ok()?;
+            image::ImageDecoder::set_limits(&mut d, limites()).ok()?;
+            if !d.has_animation() {
+                return None;
+            }
+            d.into_frames()
+        }
+        _ => return None,
+    };
+    let mut images = Vec::new();
+    let mut pixels: u64 = 0;
+    for frame in frames {
+        let frame = frame.ok()?;
+        let (num, den) = frame.delay().numer_denom_ms();
+        // Une image sans délai déclaré défile à dix par seconde, comme dans
+        // les navigateurs.
+        let mut duree = if den == 0 {
+            0.1
+        } else {
+            num as f32 / den as f32 / 1000.0
+        };
+        if duree < 0.02 {
+            duree = 0.1;
+        }
+        let rgba = frame.into_buffer();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        pixels += (size[0] * size[1]) as u64;
+        if pixels > MAX_PIXELS_ANIMATION || images.len() >= MAX_IMAGES_ANIMATION {
+            break;
+        }
+        images.push((
+            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+            duree,
+        ));
+    }
+    (!images.is_empty()).then_some(images)
 }
 
 #[cfg(test)]
@@ -266,6 +482,7 @@ mod tests {
         assert!(looks_like_image("http://s/files/ab/photo.png"));
         assert!(looks_like_image("http://s/files/ab/PHOTO.JPG"));
         assert!(looks_like_image("http://s/files/ab/a.jpeg?v=2"));
+        assert!(looks_like_image("http://s/files/ab/anim.webp"));
         assert!(!looks_like_image("http://s/files/ab/notes.txt"));
         assert!(!looks_like_image("http://s/files/ab/archive.zip"));
         // Une extension glissée dans l'ancre ne fait pas une image.
@@ -292,7 +509,9 @@ mod tests {
     fn changing_server_forgets_the_previous_previews() {
         let mut previews = Previews::default();
         previews.set_origin("http://a:8080".into());
-        previews.cache.insert("http://a:8080/x.png".into(), Preview::Failed);
+        previews
+            .cache
+            .insert("http://a:8080/x.png".into(), Preview::Failed);
         previews.order.push("http://a:8080/x.png".into());
 
         // Même serveur : le cache reste.
@@ -303,5 +522,75 @@ mod tests {
         previews.set_origin("http://b:8080".into());
         assert!(previews.cache.is_empty());
         assert!(previews.order.is_empty());
+    }
+
+    #[test]
+    fn a_video_meta_is_only_asked_for_our_server() {
+        let mut previews = Previews::default();
+        let ctx = egui::Context::default();
+        assert!(previews
+            .meta(&ctx, "https://x:8080/files/ab/clip.mp4")
+            .is_none());
+        previews.set_origin("https://x:8080".into());
+        // Sans agent : « en chargement », sans rien lancer.
+        assert!(matches!(
+            previews.meta(&ctx, "https://x:8080/files/ab/clip.mp4"),
+            Some(EtatMeta::Chargement)
+        ));
+        assert!(previews
+            .meta(&ctx, "https://ailleurs:8080/files/ab/clip.mp4")
+            .is_none());
+    }
+
+    /// Un GIF de deux images (2×2 px), écrit à la main : assez pour prouver
+    /// que l'animation est reconnue et que les durées sont lues.
+    #[test]
+    fn an_animated_gif_yields_its_frames() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif_encoder(&mut gif);
+            for couleur in [[255u8, 0, 0, 255], [0, 0, 255, 255]] {
+                let pixels = couleur.repeat(4);
+                let tampon = image::RgbaImage::from_raw(2, 2, pixels).unwrap();
+                let frame = image::Frame::from_parts(
+                    tampon,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(200, 1),
+                );
+                enc.encode_frame(frame).unwrap();
+            }
+        }
+        match decoder(&gif) {
+            Some(Decodee::Animee(images)) => {
+                assert_eq!(images.len(), 2);
+                assert!((images[0].1 - 0.2).abs() < 1e-3);
+                assert_eq!(images[0].0.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+                assert_eq!(images[1].0.pixels[0], egui::Color32::from_rgb(0, 0, 255));
+            }
+            _ => panic!("animation attendue"),
+        }
+    }
+
+    fn gif_encoder(sortie: &mut Vec<u8>) -> image::codecs::gif::GifEncoder<&mut Vec<u8>> {
+        let mut enc = image::codecs::gif::GifEncoder::new(sortie);
+        enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+            .unwrap();
+        enc
+    }
+
+    #[test]
+    fn the_animation_clock_wraps_around() {
+        let ctx = egui::Context::default();
+        let img = |c: egui::Color32| egui::ColorImage::new([1, 1], vec![c]);
+        let a = ctx.load_texture("a", img(egui::Color32::RED), egui::TextureOptions::LINEAR);
+        let b = ctx.load_texture("b", img(egui::Color32::BLUE), egui::TextureOptions::LINEAR);
+        let anim = Animation {
+            images: vec![(a.clone(), 0.5), (b.clone(), 0.25)],
+            total: 0.75,
+        };
+        assert_eq!(anim.image_a(0.1).id(), a.id());
+        assert_eq!(anim.image_a(0.6).id(), b.id());
+        assert_eq!(anim.image_a(0.8).id(), a.id());
     }
 }

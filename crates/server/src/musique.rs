@@ -361,7 +361,7 @@ fn detecter(data_dir: &str) -> Option<Outils> {
 
 /// Lance la commande, lit sa sortie standard, et la tue si elle dépasse le
 /// délai — un extracteur qui traîne ne bloque jamais le serveur.
-fn executer_borne(cmd: &mut Command, delai: Duration) -> Result<Vec<u8>, String> {
+pub(crate) fn executer_borne(cmd: &mut Command, delai: Duration) -> Result<Vec<u8>, String> {
     let mut enfant = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

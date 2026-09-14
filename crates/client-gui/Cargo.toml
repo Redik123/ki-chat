@@ -32,6 +32,8 @@ ki-client-quic = { path = "../client-quic" }
 # sans jamais être recopiés.
 bytes = "1"
 ki-video = { path = "../video" }
+# Le décodeur de la visionneuse (vidéos du chat) : Media Foundation sous Windows.
+ki-media = { path = "../media" }
 tokio.workspace = true
 chrono = "0.4"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne
@@ -46,7 +48,7 @@ ureq = { version = "2", features = ["json"] }
 arboard = "3"
 # Logos de serveurs : décodage PNG/JPEG puis réencodage en vignette PNG.
 # Les deux formats sont déjà tirés par eframe, aucun téléchargement en plus.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 base64 = "0.22"
 # Vérification de la signature des mises à jour. 100 % Rust, pas de
 # dépendance C : l'application remplace son propre exécutable, c'est le seul

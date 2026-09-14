@@ -62,6 +62,9 @@ pub struct VoicePrefs {
     pub vad_sensitivity: f32,
     /// Débit Opus en bits/s.
     pub bitrate: i32,
+    /// La file « médias » de la visionneuse : le moteur la joue quand il
+    /// est là (voir `ki_voice::medias`).
+    pub medias: std::sync::Arc<ki_voice::medias::File>,
     /// Gain automatique (AGC).
     pub agc: bool,
     /// Annulation d'écho acoustique.
@@ -418,6 +421,7 @@ fn start_engine(
     cfg.agc_target = prefs.agc_target;
     cfg.gate_threshold = prefs.gate_threshold;
     cfg.jitter_frames = prefs.jitter_frames;
+    cfg.medias = Some(prefs.medias.clone());
     // L'émetteur suit l'**emplacement** de connexion, pas une connexion :
     // c'est ce qui laisse ce moteur traverser une reconnexion intact.
     let engine =

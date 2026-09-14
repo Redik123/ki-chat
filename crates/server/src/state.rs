@@ -435,6 +435,8 @@ pub struct AppState {
     pub valorant: crate::valorant::Valorant,
     /// Le bot musique.
     pub musique: crate::musique::Musique,
+    /// Les vidéos partagées : téléversement par morceaux et conversion.
+    pub medias: crate::medias::Fabrique,
 }
 
 impl AppState {
@@ -442,6 +444,7 @@ impl AppState {
         token: String,
         data_dir: &str,
         files_quota: crate::files::Quota,
+        fichier_max_mb: u64,
     ) -> anyhow::Result<Self> {
         // Les salons ne sont plus câblés : ils vivent dans channels.json,
         // qui reprend les six d'origine au premier démarrage.
@@ -476,6 +479,7 @@ impl AppState {
             audit,
             valorant: crate::valorant::Valorant::open(data_dir),
             musique: crate::musique::Musique::new(data_dir),
+            medias: crate::medias::Fabrique::new(fichier_max_mb),
         })
     }
 

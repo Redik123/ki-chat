@@ -24,6 +24,8 @@ services:
       # Clé HenrikDev (fiches VALORANT). Vide : liaisons fermées, rien d'autre ne change.
       KI_HENRIK_KEY: ${KI_HENRIK_KEY:-}
       KI_FILES_TTL_DAYS: ${KI_FILES_TTL_DAYS:-30}
+      # Plafond d'un fichier envoyé par morceaux (vidéos), en Mo.
+      KI_FILES_MAX_FILE_MB: ${KI_FILES_MAX_FILE_MB:-512}
       # Verbosité : info par défaut, `debug` pour enquêter.
       RUST_LOG: ${RUST_LOG:-info}
 

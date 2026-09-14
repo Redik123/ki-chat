@@ -6,6 +6,7 @@ mod appicon;
 mod icons;
 mod images;
 mod markup;
+mod medias;
 mod net;
 mod overlay;
 mod partage;
@@ -23,6 +24,7 @@ mod ui;
 mod update;
 mod valorant;
 mod veille;
+mod visionneuse;
 
 /// Sous `--features mesures`, toutes les allocations du processus passent par
 /// un compteur. C'est ce qui rend vérifiable la cible « ~0 allocation par
@@ -631,6 +633,11 @@ struct KiApp {
     musique_playlist_nom: String,
     /// La fiche d'un bot, ouverte depuis la liste des membres.
     fiche_bot: Option<UserId>,
+    /// La visionneuse : une image ou une vidéo du chat, en grand.
+    visionneuse: visionneuse::Visionneuse,
+    /// La sortie audio à part de la visionneuse, quand il n'y a pas de
+    /// moteur vocal (hors salon) pour jouer sa file.
+    sortie_medias: Option<ki_voice::medias::SortieSeule>,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
@@ -999,6 +1006,10 @@ impl KiApp {
             musique_resultats_pour: String::new(),
             musique_playlist_nom: String::new(),
             fiche_bot: None,
+            visionneuse: visionneuse::Visionneuse::new(
+                get("visionneuse_volume", "0.8").parse().unwrap_or(0.8),
+            ),
+            sortie_medias: None,
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
@@ -1331,6 +1342,7 @@ impl KiApp {
             input_device: self.pref_input.clone(),
             output_device: self.pref_output.clone(),
             native_audio: self.native_audio,
+            medias: self.visionneuse.file.clone(),
             raw_mic: self.raw_mic,
             robust_output: self.robust_output,
             comms_mic: self.comms_mic,
@@ -1907,6 +1919,142 @@ impl KiApp {
         if !open {
             self.fiche_bot = None;
         }
+    }
+
+    /// Ouvre la visionneuse sur `cible`, avec les médias du salon courant
+    /// pour passer de l'un à l'autre.
+    fn ouvrir_visionneuse(&mut self, cible: visionneuse::Cible) {
+        let mut liste = Vec::new();
+        for msg in &self.messages {
+            for (is_link, chunk) in split_links(&msg.text) {
+                if !is_link || !self.previews.is_ours(chunk) {
+                    continue;
+                }
+                if images::looks_like_image(chunk) {
+                    liste.push(visionneuse::Cible::Image(chunk.to_string()));
+                } else if medias::looks_like_video(chunk) {
+                    liste.push(visionneuse::Cible::Video(chunk.to_string()));
+                }
+            }
+        }
+        if !liste.contains(&cible) {
+            liste.push(cible.clone());
+        }
+        self.visionneuse.ouvrir(cible, liste);
+    }
+
+    /// La visionneuse, et ce qui la fait tourner : qui joue son son, le
+    /// téléchargement de la vidéo, ses demandes à l'application.
+    fn visionneuse_window(&mut self, ctx: &egui::Context) {
+        // Le son sort par le moteur vocal quand il est là (même volume
+        // général, même annulateur d'écho), par une sortie à part sinon.
+        let en_video = self.visionneuse.a_une_video();
+        let moteur = self.link.engine.lock().unwrap().is_some();
+        self.visionneuse.file.set_consommateur(if moteur {
+            ki_voice::medias::Consommateur::Moteur
+        } else {
+            ki_voice::medias::Consommateur::Seule
+        });
+        if en_video && !moteur {
+            if self.sortie_medias.is_none() {
+                self.sortie_medias = Some(ki_voice::medias::SortieSeule::demarrer(
+                    self.visionneuse.file.clone(),
+                    self.pref_output.clone(),
+                    self.native_audio,
+                    self.robust_output,
+                ));
+            }
+        } else if self.sortie_medias.is_some() {
+            self.sortie_medias = None;
+        }
+        if !self.visionneuse.est_ouverte() {
+            return;
+        }
+        if let Some(url) = self.visionneuse.video_a_telecharger() {
+            let cible = self.previews.pinned_url(&url).unwrap_or(url);
+            self.visionneuse.lancer_telechargement(self.http_agent(), cible, ctx);
+        }
+        for demande in self.visionneuse.ui(ctx, &mut self.previews) {
+            match demande {
+                visionneuse::Demande::Navigateur(url) => {
+                    let url = self.previews.pinned_url(&url).unwrap_or(url);
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
+                visionneuse::Demande::EnregistrerSous(cible) => self.enregistrer_media(cible),
+                visionneuse::Demande::Copier(url) => self.copier_image(url),
+            }
+        }
+    }
+
+    /// « Enregistrer sous… » depuis la visionneuse : le dialogue natif puis
+    /// la copie, sur un fil — depuis le cache si la vidéo y est déjà.
+    fn enregistrer_media(&mut self, cible: visionneuse::Cible) {
+        let url = cible.url().to_string();
+        let Some(cible_http) = self.previews.pinned_url(&url) else { return };
+        let agent = self.http_agent();
+        let nom = medias::nom_du_fichier(&url);
+        let cache = matches!(cible, visionneuse::Cible::Video(_))
+            .then(|| medias::chemin_cache(&url))
+            .flatten()
+            .filter(|c| c.is_file());
+        let avis = self.visionneuse.avis();
+        std::thread::spawn(move || {
+            let Some(dest) = rfd::FileDialog::new().set_file_name(&nom).save_file() else { return };
+            let resultat = (|| -> Result<(), String> {
+                if let Some(c) = cache {
+                    std::fs::copy(&c, &dest).map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+                let reponse = agent
+                    .get(&cible_http)
+                    .timeout(std::time::Duration::from_secs(600))
+                    .call()
+                    .map_err(|e| e.to_string())?;
+                let mut fichier = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+                std::io::copy(&mut reponse.into_reader(), &mut fichier).map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            *avis.lock().unwrap() = Some(match resultat {
+                Ok(()) => format!("enregistré : {}", dest.display()),
+                Err(e) => format!("enregistrement impossible : {e}"),
+            });
+        });
+    }
+
+    /// « Copier l'image » depuis la visionneuse : retéléchargée et décodée
+    /// sur un fil, puis posée dans le presse-papiers.
+    fn copier_image(&mut self, url: String) {
+        let Some(cible) = self.previews.pinned_url(&url) else { return };
+        let agent = self.http_agent();
+        let avis = self.visionneuse.avis();
+        std::thread::spawn(move || {
+            let resultat = (|| -> Result<(), String> {
+                use std::io::Read as _;
+                let reponse = agent
+                    .get(&cible)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .call()
+                    .map_err(|e| e.to_string())?;
+                let mut octets = Vec::new();
+                reponse
+                    .into_reader()
+                    .take(12 * 1024 * 1024 + 1)
+                    .read_to_end(&mut octets)
+                    .map_err(|e| e.to_string())?;
+                let image = images::decode(&octets).ok_or("image illisible")?;
+                let [largeur, hauteur] = image.size;
+                let octets: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+                let mut presse = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+                presse
+                    .set_image(arboard::ImageData { width: largeur, height: hauteur, bytes: octets.into() })
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            *avis.lock().unwrap() = Some(match resultat {
+                Ok(()) => "image copiée".into(),
+                Err(e) => format!("copie impossible : {e}"),
+            });
+        });
     }
 
     /// Ouvre la page de stats du groupe et demande les fiches au serveur —
@@ -3483,14 +3631,46 @@ impl KiApp {
                 .collect();
             *status.lock().unwrap() = Some(format!("envoi de {name}…"));
             let result = (|| -> Result<String, String> {
-                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                if bytes.len() > 25 * 1024 * 1024 {
-                    return Err("fichier trop gros (25 Mo max)".into());
+                // Par morceaux de 8 Mo : chacun reste sous la limite du
+                // routeur, et la barre avance ; le serveur assemble.
+                const MORCEAU: usize = 8 * 1024 * 1024;
+                const MAX: u64 = 512 * 1024 * 1024;
+                let taille = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+                if taille == 0 {
+                    return Err("fichier vide".into());
                 }
-                let resp = agent.post(&format!("{base}/upload?name={name}"))
+                if taille > MAX {
+                    return Err("fichier trop gros (512 Mo max)".into());
+                }
+                let mut fichier = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+                let upload = format!("{:016x}", empreinte_upload(&path));
+                let mut tampon = vec![0u8; MORCEAU];
+                let (mut index, mut envoye) = (0u32, 0u64);
+                loop {
+                    let n = lire_plein(&mut fichier, &mut tampon).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    agent
+                        .post(&format!("{base}/upload/partiel?upload={upload}&index={index}"))
+                        .set("x-ki-token", &token_hex)
+                        .timeout(std::time::Duration::from_secs(300))
+                        .send_bytes(&tampon[..n])
+                        .map_err(erreur_http)?;
+                    index += 1;
+                    envoye += n as u64;
+                    *status.lock().unwrap() =
+                        Some(format!("envoi de {name}… {} %", envoye * 100 / taille));
+                    if n < MORCEAU {
+                        break;
+                    }
+                }
+                let resp = agent
+                    .post(&format!("{base}/upload/fin?upload={upload}&name={name}&parts={index}"))
                     .set("x-ki-token", &token_hex)
-                    .send_bytes(&bytes)
-                    .map_err(|e| e.to_string())?;
+                    .timeout(std::time::Duration::from_secs(300))
+                    .send_string("")
+                    .map_err(erreur_http)?;
                 let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
                 let file_path = json["url"].as_str().ok_or("réponse invalide")?.to_string();
                 Ok(format!("{base}{file_path}"))
@@ -3997,6 +4177,7 @@ impl KiApp {
         self.fiche_window(ctx);
         self.stats_window(ctx);
         self.fiche_bot_window(ctx);
+        self.visionneuse_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
         if self.show_settings {
@@ -5541,6 +5722,7 @@ impl KiApp {
                                 self.sauter_a(c, ts);
                             }
                         }
+                        MessageAction::Ouvrir(cible) => self.ouvrir_visionneuse(cible),
                         MessageAction::Rien => {}
                     }
                 }
@@ -9158,6 +9340,8 @@ enum MessageAction {
     Reagir(String, bool),
     /// Clic sur le rappel d'une réponse : aller au message d'origine.
     Aller(u64),
+    /// Clic sur une image ou une vidéo : l'ouvrir dans la visionneuse.
+    Ouvrir(visionneuse::Cible),
 }
 
 /// Étiquette courte d'un bannissement : « banni » ou le temps restant.
@@ -10332,8 +10516,16 @@ fn message_block(
                 message_body(ui, &msg.text, membres, moi, (msg.user_id, msg.ts));
                 // Les images partagées s'affichent sous le message.
                 for (is_link, chunk) in split_links(&msg.text) {
-                    if is_link && images::looks_like_image(chunk) {
-                        image_preview(ui, chunk, previews);
+                    if !is_link {
+                        continue;
+                    }
+                    if images::looks_like_image(chunk) {
+                        if image_preview(ui, chunk, previews) {
+                            action =
+                                MessageAction::Ouvrir(visionneuse::Cible::Image(chunk.to_string()));
+                        }
+                    } else if medias::looks_like_video(chunk) && video_card(ui, chunk, previews) {
+                        action = MessageAction::Ouvrir(visionneuse::Cible::Video(chunk.to_string()));
                     }
                 }
                 // Les réactions, en pastilles : la sienne se distingue, et
@@ -10387,12 +10579,13 @@ fn message_block(
 }
 
 /// Corps d'un message : texte simple, ou texte + liens cliquables.
-/// Vignette d'une image partagée, cliquable pour l'ouvrir en grand.
-fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) {
+/// Vignette d'une image partagée, cliquable pour l'ouvrir dans la
+/// visionneuse. Rend vrai au clic.
+fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) -> bool {
     const MAX_W: f32 = 420.0;
     const MAX_H: f32 = 320.0;
 
-    let Some(state) = previews.get(ui.ctx(), url) else { return };
+    let Some(state) = previews.get(ui.ctx(), url) else { return false };
     ui.add_space(6.0);
     match state {
         images::Preview::Loading => {
@@ -10406,41 +10599,128 @@ fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) 
                 egui::FontId::proportional(12.0),
                 TEXT_FAINT,
             );
+            false
         }
         images::Preview::Failed => {
             ui::hint(ui, "image illisible");
+            false
         }
-        images::Preview::Ready(texture) => {
-            // On respecte les proportions, sans jamais dépasser le cadre.
-            let source = texture.size_vec2();
-            let scale = (MAX_W / source.x).min(MAX_H / source.y).min(1.0);
-            let size = source * scale;
-            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-            if ui.is_rect_visible(rect) {
-                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
-                if response.hovered() {
-                    ui.painter().rect_stroke(
-                        rect,
-                        egui::CornerRadius::same(6),
-                        egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-            }
-            let response = response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Ouvrir l'image");
-            if response.clicked() {
-                // Le port du partage n'écoute plus qu'en TLS : ouvrir un
-                // ancien lien en clair donnerait « connexion réinitialisée »
-                // dans le navigateur, sans que rien n'explique pourquoi.
-                ui.ctx().open_url(egui::OpenUrl::new_tab(
-                    previews.pinned_url(url).unwrap_or_else(|| url.to_string()),
-                ));
-            }
+        images::Preview::Ready(texture) => vignette(ui, &texture, MAX_W, MAX_H, "Ouvrir l'image"),
+        images::Preview::Anime(animation) => {
+            // Une image animée : on repeint au rythme de ses images.
+            let texture = animation.image_a(ui.input(|i| i.time)).clone();
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+            vignette(ui, &texture, MAX_W, MAX_H, "Ouvrir l'image")
         }
     }
+}
+
+/// Une texture dans un cadre borné, aux bonnes proportions, cliquable.
+fn vignette(ui: &mut egui::Ui, texture: &egui::TextureHandle, max_w: f32, max_h: f32, bulle: &str) -> bool {
+    // On respecte les proportions, sans jamais dépasser le cadre.
+    let source = texture.size_vec2();
+    let scale = (max_w / source.x).min(max_h / source.y).min(1.0);
+    let size = source * scale;
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+        if response.hovered() {
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(6),
+                egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(bulle).clicked()
+}
+
+/// La carte d'une vidéo partagée : son poster, sa durée, un bouton de
+/// lecture — et « en préparation » tant que le serveur y travaille. Rend
+/// vrai au clic.
+fn video_card(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) -> bool {
+    const MAX_W: f32 = 420.0;
+    const MAX_H: f32 = 240.0;
+
+    let Some(etat) = previews.meta(ui.ctx(), url) else { return false };
+    ui.add_space(6.0);
+    let (poster, duree_s, dims): (Option<String>, f32, (u32, u32)) = match etat {
+        images::EtatMeta::Chargement | images::EtatMeta::EnPreparation => {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(220.0, 24.0), Sense::hover());
+            let center = egui::pos2(rect.left() + 9.0, rect.center().y);
+            ui::spinner(ui.painter(), center, 6.0, ui.input(|i| i.time), TEXT_FAINT);
+            let texte = if matches!(etat, images::EtatMeta::Chargement) {
+                "vidéo…"
+            } else {
+                "vidéo en préparation sur le serveur…"
+            };
+            ui.painter().text(
+                egui::pos2(rect.left() + 24.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                texte,
+                egui::FontId::proportional(12.0),
+                TEXT_FAINT,
+            );
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            return false;
+        }
+        images::EtatMeta::Erreur(message) => {
+            ui::hint(ui, &message);
+            return false;
+        }
+        // Pas de fiche : un partage d'avant la visionneuse. Le fichier se
+        // lit quand même, s'il est dans un format que le décodeur connaît.
+        images::EtatMeta::Absente => (None, 0.0, (16, 9)),
+        images::EtatMeta::Prete(meta) => {
+            let dims = if meta.largeur > 0 && meta.hauteur > 0 { (meta.largeur, meta.hauteur) } else { (16, 9) };
+            (meta.poster, meta.duree_s, dims)
+        }
+    };
+    let source = Vec2::new(dims.0 as f32, dims.1 as f32);
+    let scale = (MAX_W / source.x).min(MAX_H / source.y);
+    let size = source * scale;
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, egui::CornerRadius::same(6), theme::BG_DEEP);
+        let texture = poster.and_then(|p| match previews.chez_nous(ui.ctx(), &p) {
+            Some(images::Preview::Ready(t)) => Some(t),
+            _ => None,
+        });
+        if let Some(t) = texture {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(t.id(), rect, uv, Color32::WHITE);
+        } else {
+            let c = rect.center() - Vec2::new(0.0, 18.0);
+            icons::draw(painter, egui::Rect::from_center_size(c, Vec2::splat(28.0)), Icon::Film, TEXT_FAINT);
+        }
+        // Le bouton de lecture, au centre.
+        let c = rect.center();
+        let r = 22.0;
+        let fond = if response.hovered() { theme::alpha(ACCENT, 230) } else { Color32::from_black_alpha(150) };
+        painter.circle_filled(c, r, fond);
+        painter.circle_stroke(c, r, egui::Stroke::new(1.0_f32, theme::alpha(TEXT, 120)));
+        icons::draw(painter, egui::Rect::from_center_size(c + Vec2::new(2.0, 0.0), Vec2::splat(22.0)), Icon::Play, TEXT);
+        if duree_s > 0.0 {
+            let texte = visionneuse::mmss((duree_s * 1000.0) as u64);
+            let galley = painter.layout_no_wrap(texte, egui::FontId::proportional(11.5), TEXT);
+            let pos = egui::pos2(rect.right() - 8.0 - galley.size().x, rect.bottom() - 8.0 - galley.size().y);
+            let fond = egui::Rect::from_min_size(pos, galley.size()).expand2(Vec2::new(5.0, 2.0));
+            painter.rect_filled(fond, egui::CornerRadius::same(4), Color32::from_black_alpha(170));
+            painter.galley(pos, galley, TEXT);
+        }
+        if response.hovered() {
+            painter.rect_stroke(
+                rect,
+                egui::CornerRadius::same(6),
+                egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Lire la vidéo").clicked()
 }
 
 /// Le sélecteur « réservé à certains rôles » d'un salon.
@@ -10688,6 +10968,54 @@ fn split_links(text: &str) -> Vec<(bool, &str)> {
     parts
 }
 
+/// Remplit `tampon` autant que possible (un `read` peut rendre moins que
+/// demandé sans que le fichier soit fini). Rend le nombre d'octets lus.
+fn lire_plein(fichier: &mut std::fs::File, tampon: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read as _;
+    let mut total = 0;
+    while total < tampon.len() {
+        let n = fichier.read(&mut tampon[total..])?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    Ok(total)
+}
+
+/// Un identifiant de téléversement : le chemin et l'instant, hachés. Il ne
+/// sert qu'à retrouver ses morceaux, dans le dossier du serveur qui est le
+/// nôtre — pas besoin d'aléa cryptographique.
+fn empreinte_upload(path: &std::path::Path) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    for b in path.to_string_lossy().bytes().chain(nanos.to_le_bytes()) {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Le message d'une erreur HTTP : ce que le serveur a répondu, s'il a dit
+/// quelque chose (« fichier trop gros », « espace saturé »), sinon l'erreur.
+fn erreur_http(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, reponse) => {
+            let texte = reponse.into_string().unwrap_or_default();
+            let texte = texte.trim();
+            if texte.is_empty() {
+                format!("le serveur répond {code}")
+            } else {
+                texte.chars().take(200).collect()
+            }
+        }
+        autre => autre.to_string(),
+    }
+}
+
 /// Pseudo affichable : sans caractères dangereux et de longueur bornée.
 fn safe_name(username: &str) -> String {
     ki_protocol::safe_display(username, ki_protocol::MAX_USERNAME)
@@ -10845,7 +11173,9 @@ impl eframe::App for KiApp {
         if self.welcomed {
             // Échap ferme la fenêtre la plus « en avant ».
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                if self.show_settings {
+                if self.visionneuse.est_ouverte() {
+                    self.visionneuse.fermer();
+                } else if self.show_settings {
                     self.close_settings();
                 } else if self.show_admin {
                     self.close_admin();
@@ -10897,6 +11227,7 @@ impl eframe::App for KiApp {
         storage.set_string("window", String::new());
         storage.set_string("sfx_on", if self.sfx_on { "on" } else { "off" }.into());
         storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
+        storage.set_string("visionneuse_volume", format!("{}", self.visionneuse.volume));
         storage.set_string(
             "sfx_muted",
             self.sfx_muted.iter().cloned().collect::<Vec<_>>().join(","),

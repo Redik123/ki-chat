@@ -329,6 +329,32 @@ ni journalisés, ni gardés — et le nom et l'image de chaque skin viennent
 de valorant-api.com, en français. Pour soi seul : rien ne part vers le
 serveur ki-chat. Il faut VALORANT ouvert ; fermé, la section le dit.
 
+## Photos et vidéos dans le chat
+
+Le chantier a son document, [`PLAN-CLIPS.md`](PLAN-CLIPS.md) ; livré
+(jalon C0) : la **visionneuse**. Une image partagée s'ouvre en grand dans
+ki-chat (molette : zoom, glisser : déplacer, ←/→ : le média suivant du
+salon, Échap : fermer), avec « enregistrer sous », « copier » et, si l'on y
+tient, « ouvrir dans le navigateur ». Les GIF et WebP animés bougent, dans
+le fil comme en grand.
+
+Une **vidéo** partagée devient une carte (poster, durée, lecture) : un clic
+l'ouvre dans la visionneuse — lecture, pause, avance au curseur ou par ←/→
+(cinq secondes), volume propre, boucle. Le son passe par le moteur vocal
+quand on est en salon (même volume général, même annulateur d'écho : les
+copains n'entendent pas la vidéo revenir par le micro), par une sortie à
+part sinon. Le décodage vient de **Media Foundation**, présent dans chaque
+Windows : rien à installer.
+
+Côté serveur, toute vidéo reçue est **refaite par ffmpeg** en MP4 H.264 +
+AAC (1080p au plus, rotation de téléphone appliquée), avec un poster et une
+fiche à côté ; la carte dit « en préparation » le temps que ça se fasse.
+Les HEVC d'iPhone, les WebM, les vieux AVI se lisent donc chez tout le
+monde. Les fichiers partent désormais **par morceaux de 8 Mo** (512 Mo au
+plus par fichier), ce qui lève la limite de 25 Mo d'avant. Le client garde
+les vidéos regardées dans un cache disque d'un gigaoctet
+(`%LOCALAPPDATA%\ki-chat\cache\medias`).
+
 ## Bot musique
 
 Le chantier a son document, [`PLAN-MUSIQUE.md`](PLAN-MUSIQUE.md). Livré
@@ -1056,6 +1082,8 @@ Variables d'environnement du serveur :
 | `KI_FILES_MAX_BYTES` | `2 Gio` | plafond global du partage de fichiers ; `0` = illimité |
 | `KI_HENRIK_KEY` | — | clé HenrikDev pour les fiches VALORANT (sinon `data/henrik.key`) ; absente, les liaisons de compte Riot sont fermées |
 | `KI_FILES_TTL_DAYS`  | `30`    | âge au-delà duquel un fichier partagé est effacé ; `0` = jamais |
+| `KI_FILES_MAX_FILE_MB` | `512` | plafond d'un fichier envoyé par morceaux (vidéos) ; un envoi d'un bloc reste à 25 Mo |
+| `KI_FFMPEG`, `KI_FFPROBE` | `ffmpeg`, `ffprobe` | les outils vidéo (dans l'image Docker) ; absents, les vidéos partagées ne sont pas converties |
 
 Les deux dernières bornent le disque : sans elles, `data/files/` grandissait
 indéfiniment jusqu'à saturer la machine. Une purge passe au démarrage puis
