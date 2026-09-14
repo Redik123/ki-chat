@@ -15,6 +15,7 @@ mod perf;
 mod photos;
 mod boutique;
 mod ptt;
+mod raccourci;
 mod rangs;
 mod secours;
 mod secret;
@@ -646,9 +647,8 @@ struct KiApp {
     /// L'enregistreur de clips et ses réglages (PLAN-CLIPS.md, C1).
     clips_reglages: clips::Reglages,
     enregistreur: Option<clips::Enregistreur>,
-    /// Les appuis sur le raccourci déjà traités.
-    clips_appuis_vus: u32,
-    /// Dernier branchement des robinets audio sur le moteur.
+    /// Dernier branchement des robinets audio sur le moteur — et du
+    /// déclencheur du raccourci, refait avec eux.
     clips_branche: Option<std::time::Instant>,
     /// La galerie : ouverte, sa liste, ses vignettes (None = illisible),
     /// celles en cours de décodage, et ce que les fils rapportent.
@@ -1035,7 +1035,6 @@ impl KiApp {
             sortie_medias: None,
             clips_reglages: clips::Reglages::load(get),
             enregistreur: None,
-            clips_appuis_vus: 0,
             clips_branche: None,
             show_clips: false,
             clips_liste: Vec::new(),
@@ -1982,6 +1981,7 @@ impl KiApp {
             Ok(e) => {
                 self.enregistreur = Some(e);
                 self.clips_branche = None;
+                self.brancher_declencheur();
             }
             Err(e) => {
                 ki_voice::journal(format!("clips : démarrage impossible : {e:#}"));
@@ -1992,6 +1992,9 @@ impl KiApp {
 
     fn arreter_clips(&mut self) {
         let Some(e) = self.enregistreur.take() else { return };
+        if let Some(p) = &self.ptt {
+            p.action_raccourci(None);
+        }
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             engine.brancher_micro(None);
             engine.brancher_copains(None);
@@ -1999,9 +2002,37 @@ impl KiApp {
         e.arreter();
     }
 
-    /// L'appui : le clip s'écrit sur un fil ; le résultat arrive par `tick_clips`.
+    /// Le raccourci déclenche le clip lui-même, sur le fil qui a vu
+    /// l'appui, sans passer par l'interface : réduite derrière le jeu, elle
+    /// peut ne pas repeindre avant longtemps, et c'est à l'instant de
+    /// l'appui que le tampon doit être photographié. Le son de confirmation
+    /// part du fil d'écriture, pour la même raison. Rappelé chaque seconde
+    /// par `tick_clips` : les réglages du son changent à chaud.
+    fn brancher_declencheur(&mut self) {
+        let Some(e) = self.enregistreur.as_ref() else { return };
+        if let Some(p) = &self.ptt {
+            let d = e.declencheur();
+            p.action_raccourci(Some(std::sync::Arc::new(move || d.appuyer())));
+        }
+        let son = (self.clips_reglages.son && self.sfx_on && !self.sfx_muted.contains("clip"))
+            .then(|| self.sounds.get("clip").cloned())
+            .flatten();
+        let engine = self.link.engine.clone();
+        let volume = self.sfx_volume;
+        e.quand_fini(Some(std::sync::Arc::new(move |r: &Result<clips::Clip, String>| {
+            if r.is_err() {
+                return;
+            }
+            if let (Some(pcm), Some(engine)) = (&son, engine.lock().unwrap().as_ref()) {
+                engine.play_effect(pcm, volume);
+            }
+        })));
+    }
+
+    /// Le bouton « Clip ! » : le clip s'écrit sur un fil ; le résultat
+    /// arrive par `tick_clips`.
     fn sauver_clip(&mut self) {
-        let resultat = match self.enregistreur.as_mut() {
+        let resultat = match self.enregistreur.as_ref() {
             Some(e) => e.sauver(),
             None => Err("l'enregistreur n'est pas en marche".to_string()),
         };
@@ -2029,6 +2060,7 @@ impl KiApp {
                 engine.brancher_micro(micro);
                 engine.brancher_copains(copains);
             }
+            self.brancher_declencheur();
         }
         let evenement = self.enregistreur.as_mut().and_then(|e| e.tick());
         match evenement {
@@ -2043,9 +2075,7 @@ impl KiApp {
                     clip.duree_s,
                     clips::taille_lisible(clip.taille)
                 ));
-                if self.clips_reglages.son {
-                    self.play_sfx("clip");
-                }
+                // Le son est parti du fil d'écriture (`brancher_declencheur`).
                 self.overlay.annoncer("Clip enregistré");
                 if self.show_clips {
                     self.rafraichir_clips();
@@ -2417,6 +2447,25 @@ impl KiApp {
             self.clips_reglages.raccourci = r;
         }
         ui::hint(ui, "avec Ctrl, Alt ou Maj de préférence, pour ne pas gêner le jeu — Alt+F10 comme NVIDIA");
+        // Ce que Windows en a dit, tant que l'enregistreur tourne : tenue par
+        // lui, la combinaison passe au-dessus du jeu ; refusée, on le dit,
+        // parce qu'en jeu elle ne marchera sans doute pas.
+        match self.ptt.as_ref().map(|p| p.etat_raccourci()) {
+            Some(raccourci::Etat::Enregistre) => {
+                ui::hint(ui, "tenue par Windows : elle marche au-dessus du jeu, même en plein écran")
+            }
+            Some(raccourci::Etat::Refuse) => {
+                ui.label(
+                    RichText::new(
+                        "cette combinaison est déjà prise par un autre programme (NVIDIA ?) : \
+                         ki-chat la lit quand même, mais pas au-dessus d'un jeu — choisis-en une autre",
+                    )
+                    .color(WARN)
+                    .size(11.5),
+                );
+            }
+            _ => {}
+        }
         ui.add_space(10.0);
 
         ui::field_label(ui, "Durée gardée");
@@ -11814,9 +11863,9 @@ impl eframe::App for KiApp {
         // sens et sont simplement consommées.
         ptt.watch_bascule(ptt::Bascule::Micro, self.hotkey_micro);
         ptt.watch_bascule(ptt::Bascule::Sourd, self.hotkey_sourd);
-        // Le raccourci de l'enregistreur de clips, surveillé tant qu'il tourne.
+        // Le raccourci de l'enregistreur de clips, tenu tant qu'il tourne.
+        // L'appui, lui, agit sans passer par ici : voir `brancher_declencheur`.
         ptt.watch_raccourci(self.enregistreur.as_ref().map(|_| self.clips_reglages.raccourci));
-        let appuis_clip = ptt.appuis_raccourci();
         let pressions = (ptt.pressions(ptt::Bascule::Micro), ptt.pressions(ptt::Bascule::Sourd));
         if pressions != self.hotkey_vues {
             let (micro, sourd) = (
@@ -11832,12 +11881,6 @@ impl eframe::App for KiApp {
                     self.basculer_micro();
                 }
             }
-        }
-        // Un appui sur le raccourci : un clip. Le compteur ne se compare
-        // qu'à ce qu'on a traité — deux appuis rapprochés ne s'annulent pas.
-        if appuis_clip != self.clips_appuis_vus {
-            self.clips_appuis_vus = appuis_clip;
-            self.sauver_clip();
         }
         self.tick_clips(ctx);
         // Sortir du vocal rend l'écoute : sourd hors vocal, ce serait des

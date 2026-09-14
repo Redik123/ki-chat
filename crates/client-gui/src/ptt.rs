@@ -212,6 +212,29 @@ impl Touche {
         }
     }
 
+    /// Le code de touche virtuelle Windows, pour `RegisterHotKey`.
+    pub fn vk(self) -> u32 {
+        match self {
+            Touche::F(n) => 0x70 + u32::from(n.clamp(1, 12)) - 1,
+            Touche::Lettre(l) => u32::from(l),
+            Touche::Chiffre(c) => 0x30 + u32::from(c.min(9)),
+            Touche::Insert => 0x2D,
+            Touche::Delete => 0x2E,
+            Touche::Home => 0x24,
+            Touche::End => 0x23,
+            Touche::PageUp => 0x21,
+            Touche::PageDown => 0x22,
+            Touche::Space => 0x20,
+        }
+    }
+
+    /// Une touche qui sert à écrire : lettre, chiffre, espace. Avec
+    /// celles-là, aucun modificateur en plus n'est toléré — Ctrl+Alt+E,
+    /// c'est AltGr+E, le € des claviers français.
+    pub fn de_frappe(self) -> bool {
+        matches!(self, Touche::Lettre(_) | Touche::Chiffre(_) | Touche::Space)
+    }
+
     /// La touche que représente un code, si c'en est une qu'on accepte.
     pub fn depuis_keycode(k: Keycode) -> Option<Touche> {
         let fs = [
@@ -369,13 +392,45 @@ impl Raccourci {
         Some(r)
     }
 
-    /// Vrai si la combinaison est enfoncée (les modificateurs exigés le
-    /// sont, et pas les autres — Alt+F10 n'est pas Ctrl+Alt+F10).
+    /// Vrai si ces modificateurs tenus conviennent : ceux qu'exige la
+    /// combinaison le sont ; et sur une touche de fonction, Ctrl ou Maj en
+    /// plus ne gênent pas — en jeu on les tient pour s'accroupir ou
+    /// marcher, et un clip pris accroupi reste un clip. Jamais Alt en plus,
+    /// ni rien de plus sur une touche qui écrit (voir [`Touche::de_frappe`]).
+    pub fn correspond(&self, ctrl: bool, alt: bool, shift: bool) -> bool {
+        if alt != self.alt {
+            return false;
+        }
+        if self.touche.de_frappe() {
+            return ctrl == self.ctrl && shift == self.shift;
+        }
+        (ctrl || !self.ctrl) && (shift || !self.shift)
+    }
+
+    /// La combinaison et ses variantes acceptées (Ctrl, Maj en plus),
+    /// l'exacte en premier — ce que l'on enregistre auprès de Windows.
+    pub fn variantes(&self) -> Vec<Raccourci> {
+        let mut v = vec![*self];
+        for (ctrl, shift) in [(true, false), (false, true), (true, true)] {
+            let c = Raccourci {
+                ctrl: self.ctrl || ctrl,
+                alt: self.alt,
+                shift: self.shift || shift,
+                touche: self.touche,
+            };
+            if self.correspond(c.ctrl, c.alt, c.shift) && !v.contains(&c) {
+                v.push(c);
+            }
+        }
+        v
+    }
+
+    /// Vrai si la combinaison est enfoncée (voir [`Self::correspond`]).
     pub fn enfonce(&self, touches: &[Keycode]) -> bool {
         let ctrl = touches.contains(&Keycode::LControl) || touches.contains(&Keycode::RControl);
         let alt = touches.contains(&Keycode::LAlt) || touches.contains(&Keycode::RAlt);
         let shift = touches.contains(&Keycode::LShift) || touches.contains(&Keycode::RShift);
-        ctrl == self.ctrl && alt == self.alt && shift == self.shift && touches.contains(&self.touche.keycode())
+        self.correspond(ctrl, alt, shift) && touches.contains(&self.touche.keycode())
     }
 
     /// La combinaison que l'on tient à l'instant, s'il y a une touche
@@ -401,6 +456,13 @@ use std::time::{Duration, Instant};
 
 use device_query::{DeviceQuery, DeviceState};
 use eframe::egui;
+
+use crate::raccourci;
+
+/// Ce que déclenche un appui sur la combinaison de l'enregistreur, sur le
+/// fil qui l'a vu — pas sur celui de l'interface, qui peut dormir derrière
+/// le jeu.
+pub type Action = Arc<dyn Fn() + Send + Sync>;
 
 /// Cadence de sondage du clavier.
 ///
@@ -438,13 +500,19 @@ pub struct Watcher {
     /// qu'un drapeau : deux pressions entre deux images ne s'annulent pas
     /// l'une l'autre par accident, elles se voient.
     bascules: Arc<[(AtomicU8, AtomicU32); 2]>,
-    /// Le raccourci de l'enregistreur de clips (une combinaison), le
-    /// nombre d'appuis vus, et le mode « appuie sur ta combinaison » avec
-    /// ce qu'il a vu.
+    /// Le raccourci de l'enregistreur de clips (une combinaison), ce qu'un
+    /// appui déclenche, et le mode « appuie sur ta combinaison » avec ce
+    /// qu'il a vu.
     raccourci: Arc<Mutex<Option<Raccourci>>>,
-    appuis_raccourci: Arc<AtomicU32>,
+    action: Arc<Mutex<Option<Action>>>,
     capture: Arc<AtomicBool>,
     capturee: Arc<Mutex<Option<Raccourci>>>,
+    /// La combinaison tenue auprès de Windows (voir [`raccourci`]) : ce
+    /// qu'on lui a demandé en dernier, et ce qu'il en a dit. Le sondage ne
+    /// lit la combinaison que s'il ne s'en charge pas.
+    global: Option<raccourci::Global>,
+    regle: Mutex<Option<Raccourci>>,
+    etat_global: Arc<AtomicU8>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -467,9 +535,27 @@ impl Watcher {
         ]);
         let stop = Arc::new(AtomicBool::new(false));
         let raccourci = Arc::new(Mutex::new(None));
-        let appuis_raccourci = Arc::new(AtomicU32::new(0));
+        let action = Arc::new(Mutex::new(None));
         let capture = Arc::new(AtomicBool::new(false));
         let capturee = Arc::new(Mutex::new(None));
+        let etat_global = Arc::new(AtomicU8::new(raccourci::Etat::Aucun as u8));
+        let combo = Combo {
+            raccourci: raccourci.clone(),
+            action: action.clone(),
+            capture: capture.clone(),
+            capturee: capturee.clone(),
+            etat_global: etat_global.clone(),
+        };
+
+        // Le raccourci auprès de Windows : son fil déclenche la même chose
+        // que le sondage, sans passer par l'interface.
+        let global = raccourci::Global::demarrer(
+            {
+                let (combo, ctx) = (combo.clone(), ctx.clone());
+                Arc::new(move || declencher(&combo, &ctx))
+            },
+            etat_global.clone(),
+        );
 
         let handle = std::thread::Builder::new()
             .name("ki-ptt".into())
@@ -481,12 +567,6 @@ impl Watcher {
                     bascules.clone(),
                     stop.clone(),
                 );
-                let combo = Combo {
-                    raccourci: raccourci.clone(),
-                    appuis: appuis_raccourci.clone(),
-                    capture: capture.clone(),
-                    capturee: capturee.clone(),
-                };
                 move || boucle(ctx, key, release_ms, active, bascules, combo, stop)
             })
             .ok();
@@ -497,22 +577,45 @@ impl Watcher {
             active,
             bascules,
             raccourci,
-            appuis_raccourci,
+            action,
             capture,
             capturee,
+            global,
+            regle: Mutex::new(None),
+            etat_global,
             stop,
             handle,
         }
     }
 
     /// Règle la combinaison de l'enregistreur de clips. `None` = aucune.
+    /// À appeler à chaque image : Windows n'est sollicité qu'au changement.
     pub fn watch_raccourci(&self, r: Option<Raccourci>) {
         *self.raccourci.lock().unwrap() = r;
+        // Pendant « appuie sur ta combinaison », rien n'est tenu auprès de
+        // Windows : la combinaison courante doit pouvoir être retapée, et
+        // c'est le sondage qui doit la voir.
+        let a_regler = if self.en_capture() { None } else { r };
+        let mut regle = self.regle.lock().unwrap();
+        if *regle != a_regler {
+            *regle = a_regler;
+            match &self.global {
+                Some(g) => g.regler(a_regler),
+                None => self
+                    .etat_global
+                    .store(raccourci::Etat::Aucun as u8, Ordering::Relaxed),
+            }
+        }
     }
 
-    /// Nombre d'appuis vus sur la combinaison depuis le démarrage.
-    pub fn appuis_raccourci(&self) -> u32 {
-        self.appuis_raccourci.load(Ordering::Relaxed)
+    /// Ce que déclenche un appui sur la combinaison. `None` = rien.
+    pub fn action_raccourci(&self, a: Option<Action>) {
+        *self.action.lock().unwrap() = a;
+    }
+
+    /// Ce que Windows a dit de la combinaison demandée.
+    pub fn etat_raccourci(&self) -> raccourci::Etat {
+        raccourci::lire(&self.etat_global)
     }
 
     /// Mode « appuie sur ta combinaison » : la prochaine combinaison tenue
@@ -624,12 +727,26 @@ fn index_de(key: Option<PttKey>) -> u8 {
         .unwrap_or(AUCUNE)
 }
 
-/// Ce que la boucle tient pour la combinaison de l'enregistreur.
+/// Ce que la boucle tient pour la combinaison de l'enregistreur — partagé
+/// avec le fil du raccourci global, qui déclenche la même chose.
+#[derive(Clone)]
 struct Combo {
     raccourci: Arc<Mutex<Option<Raccourci>>>,
-    appuis: Arc<AtomicU32>,
+    action: Arc<Mutex<Option<Action>>>,
     capture: Arc<AtomicBool>,
     capturee: Arc<Mutex<Option<Raccourci>>>,
+    etat_global: Arc<AtomicU8>,
+}
+
+/// Un appui sur la combinaison, d'où qu'il vienne : agi, et l'interface
+/// réveillée. L'action tourne sur le fil qui a vu l'appui, hors du verrou
+/// — elle peut prendre son temps.
+fn declencher(combo: &Combo, ctx: &egui::Context) {
+    let action = combo.action.lock().unwrap().clone();
+    if let Some(a) = action {
+        a();
+    }
+    ctx.request_repaint();
 }
 
 fn boucle(
@@ -660,7 +777,10 @@ fn boucle(
             bascules[0].0.load(Ordering::Relaxed),
             bascules[1].0.load(Ordering::Relaxed),
         ];
-        let raccourci = *combo.raccourci.lock().unwrap();
+        // La combinaison de l'enregistreur : au sondage seulement si
+        // Windows ne la tient pas déjà (voir `raccourci`).
+        let raccourci = (*combo.raccourci.lock().unwrap())
+            .filter(|_| raccourci::lire(&combo.etat_global) != raccourci::Etat::Enregistre);
         let en_capture = combo.capture.load(Ordering::Relaxed);
         // Rien à surveiller : on ne lit même pas le clavier. Une
         // application qui interroge le clavier en permanence sans en avoir
@@ -719,8 +839,7 @@ fn boucle(
         // La combinaison de l'enregistreur : au front, comme les bascules.
         let combo_enfonce = raccourci.is_some_and(|r| r.enfonce(&touches));
         if combo_enfonce && !combo_avant {
-            combo.appuis.fetch_add(1, Ordering::Relaxed);
-            reveil = true;
+            declencher(&combo, &ctx);
         }
         combo_avant = combo_enfonce;
         // « Appuie sur ta combinaison » : la première tenue est retenue.
@@ -758,16 +877,61 @@ mod tests_raccourci {
     }
 
     #[test]
-    fn la_combinaison_exige_ses_modificateurs_et_pas_les_autres() {
+    fn la_combinaison_exige_ses_modificateurs() {
         let r = Raccourci::DEFAUT;
         assert!(r.enfonce(&[Keycode::LAlt, Keycode::F10]));
         assert!(r.enfonce(&[Keycode::RAlt, Keycode::F10, Keycode::A]));
         assert!(!r.enfonce(&[Keycode::F10]));
-        assert!(!r.enfonce(&[Keycode::LAlt, Keycode::LControl, Keycode::F10]));
+        assert!(!r.enfonce(&[Keycode::LAlt, Keycode::F9]));
+        // Alt en plus, jamais.
+        let f5 = Raccourci { ctrl: true, alt: false, shift: false, touche: Touche::F(5) };
+        assert!(!f5.enfonce(&[Keycode::LControl, Keycode::LAlt, Keycode::F5]));
         assert_eq!(
             Raccourci::depuis_touches(&[Keycode::LShift, Keycode::Key5]),
             Some(Raccourci { ctrl: false, alt: false, shift: true, touche: Touche::Chiffre(5) })
         );
         assert_eq!(Raccourci::depuis_touches(&[Keycode::LShift]), None);
+    }
+
+    #[test]
+    fn en_jeu_ctrl_ou_maj_tenus_en_plus_ne_genent_pas_une_touche_de_fonction() {
+        // Accroupi (Ctrl) ou en marche (Maj), Alt+F10 reste Alt+F10.
+        let r = Raccourci::DEFAUT;
+        assert!(r.enfonce(&[Keycode::LAlt, Keycode::LControl, Keycode::F10]));
+        assert!(r.enfonce(&[Keycode::LAlt, Keycode::LShift, Keycode::F10]));
+        assert!(r.enfonce(&[Keycode::LAlt, Keycode::LShift, Keycode::RControl, Keycode::F10]));
+        let ids: Vec<String> = r.variantes().iter().map(|v| v.id()).collect();
+        assert_eq!(ids, ["alt+f10", "ctrl+alt+f10", "alt+shift+f10", "ctrl+alt+shift+f10"]);
+        // Une combinaison déjà complète n'a pas de variante.
+        let tout = Raccourci { ctrl: true, alt: true, shift: true, touche: Touche::F(1) };
+        assert_eq!(tout.variantes(), vec![tout]);
+        let ctrl_f5 = Raccourci { ctrl: true, alt: false, shift: false, touche: Touche::F(5) };
+        let ids: Vec<String> = ctrl_f5.variantes().iter().map(|v| v.id()).collect();
+        assert_eq!(ids, ["ctrl+f5", "ctrl+shift+f5"]);
+    }
+
+    #[test]
+    fn une_touche_qui_ecrit_ne_tolere_rien_de_plus() {
+        // Ctrl+Alt+E, c'est AltGr+E : le € de tout le monde.
+        let alt_e = Raccourci { ctrl: false, alt: true, shift: false, touche: Touche::Lettre(b'E') };
+        assert!(alt_e.enfonce(&[Keycode::LAlt, Keycode::E]));
+        assert!(!alt_e.enfonce(&[Keycode::LAlt, Keycode::LControl, Keycode::E]));
+        assert!(!alt_e.enfonce(&[Keycode::LAlt, Keycode::LShift, Keycode::E]));
+        assert_eq!(alt_e.variantes(), vec![alt_e]);
+        let espace = Raccourci { ctrl: true, alt: false, shift: false, touche: Touche::Space };
+        assert_eq!(espace.variantes(), vec![espace]);
+    }
+
+    #[test]
+    fn les_codes_de_touche_virtuelle_sont_ceux_de_windows() {
+        assert_eq!(Touche::F(1).vk(), 0x70);
+        assert_eq!(Touche::F(10).vk(), 0x79);
+        assert_eq!(Touche::F(12).vk(), 0x7B);
+        assert_eq!(Touche::Lettre(b'K').vk(), 0x4B);
+        assert_eq!(Touche::Chiffre(0).vk(), 0x30);
+        assert_eq!(Touche::Chiffre(9).vk(), 0x39);
+        assert_eq!(Touche::PageUp.vk(), 0x21);
+        assert_eq!(Touche::PageDown.vk(), 0x22);
+        assert_eq!(Touche::Space.vk(), 0x20);
     }
 }

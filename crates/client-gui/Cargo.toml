@@ -102,4 +102,8 @@ windows = { version = "0.61", features = [
     "Win32_UI_Controls",
     # GetDiskFreeSpaceExW : l'enregistreur de clips vérifie la place avant d'écrire.
     "Win32_Storage_FileSystem",
+    # RegisterHotKey + la file de messages d'un fil : le raccourci des clips
+    # tenu par Windows, qui passe au-dessus du jeu (raccourci.rs).
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
 ] }

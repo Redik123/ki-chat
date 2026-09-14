@@ -443,8 +443,23 @@ pas de fichier cassé. Estimation : 3 sessions.
   (dix titres connus), bascule sur l'écran quand la fenêtre disparaît, et
   reprise de la fenêtre du jeu quand il arrive.
 - Le raccourci : `ptt::Raccourci` (Ctrl/Alt/Maj + F1-F12, lettres,
-  chiffres, Inser…), sondé à 100 Hz par le fil du push-to-talk, au front ;
-  « appuie sur ta combinaison » dans les réglages ; Alt+F10 par défaut.
+  chiffres, Inser…), « appuie sur ta combinaison » dans les réglages ;
+  Alt+F10 par défaut. **Retour de drion (2026-09-14) : en jeu sous VALORANT,
+  le raccourci ne partait pas** — le sondage du clavier (`GetAsyncKeyState`,
+  celui du push-to-talk) ne voit plus rien quand la fenêtre au premier plan
+  est plus privilégiée que nous (un jeu sous anti-triche), la même barrière
+  qui oblige Discord ou OBS à « tourner en administrateur ». Corrigé par
+  `raccourci.rs` : la combinaison est tenue auprès de Windows
+  (`RegisterHotKey`, le mécanisme d'Alt+Tab, résolu par le système avant que
+  la touche n'atteigne le jeu — plein écran exclusif compris, sans
+  élévation), sur un fil à part qui **déclenche le clip lui-même** sans
+  passer par l'interface (réduite derrière le jeu, elle peut ne pas
+  repeindre) ; le son de confirmation part du fil d'écriture. Ctrl ou Maj
+  tenus en plus (accroupi, en marche) ne gênent pas une touche de fonction
+  — les variantes sont enregistrées aussi ; jamais sur une touche qui écrit
+  (Ctrl+Alt+E, c'est AltGr+E). Si Windows refuse la combinaison (déjà prise
+  par un autre programme), le sondage reprend et les réglages le disent en
+  orange. À revalider en jeu.
 - Interface : onglet Réglages → Clips, bouton « Clips » et point « REC »
   à côté de « Valorant », page Clips (galerie en vignettes, lecture dans la
   visionneuse avec ←/→ entre les clips, voir dans le dossier, suppression

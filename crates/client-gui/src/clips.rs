@@ -473,6 +473,93 @@ struct Ecriture {
     fil: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Appelé sur le fil d'écriture quand le clip est là — ou raté.
+pub type Fini = Arc<dyn Fn(&Result<Clip, String>) + Send + Sync>;
+
+/// De quoi déclencher un clip depuis n'importe quel fil. Le raccourci
+/// appuie dessus depuis le sien, sans passer par l'interface : réduite
+/// derrière le jeu, elle peut ne pas repeindre avant longtemps, et le
+/// tampon doit être photographié à l'instant de l'appui, pas au retour.
+#[derive(Clone)]
+pub struct Declencheur {
+    tampon: Arc<Mutex<Tampon>>,
+    ecriture: Arc<Mutex<Option<Ecriture>>>,
+    nom_source: Arc<Mutex<String>>,
+    reglages: Reglages,
+    /// Ce qu'un appui n'a pas pu faire, gardé pour l'interface.
+    avis: Arc<Mutex<VecDeque<String>>>,
+    fini: Arc<Mutex<Option<Fini>>>,
+}
+
+impl Declencheur {
+    /// L'appui : photographie le tampon et écrit le clip sur un fil.
+    pub fn sauver(&self) -> Result<(), String> {
+        let mut ecriture = self.ecriture.lock().unwrap();
+        if ecriture.is_some() {
+            return Err("un clip est déjà en cours d'écriture".into());
+        }
+        let pistes = (self.reglages.jeu, self.reglages.micro, self.reglages.copains);
+        let instantane = self
+            .tampon
+            .lock()
+            .unwrap()
+            .instantane(pistes)
+            .ok_or("rien à enregistrer encore : le tampon se remplit")?;
+        let dossier = self.reglages.dossier_effectif();
+        if let Some(libre) = espace_libre(&dossier) {
+            if libre < 500 * 1024 * 1024 {
+                return Err("moins de 500 Mo libres sur le disque des clips".into());
+            }
+        }
+        let nom = format!(
+            "{} {}.mp4",
+            chrono::Local::now().format("%Y-%m-%d %Hh%Mm%S"),
+            self.nom_source.lock().unwrap()
+        );
+        let chemin = dossier.join(nom);
+        let fps = self.reglages.fps;
+        let debit = self.reglages.qualite.debit_bps();
+        let resultat: Arc<Mutex<Option<Result<Clip, String>>>> = Arc::new(Mutex::new(None));
+        let r = resultat.clone();
+        let fini = self.fini.clone();
+        let fil = std::thread::Builder::new()
+            .name("clips-ecriture".into())
+            .spawn(move || {
+                let sortie = ecrire_clip(instantane, &chemin, fps, debit);
+                if let Ok(c) = &sortie {
+                    let _ = vignette(&c.chemin);
+                }
+                let rappel = fini.lock().unwrap().clone();
+                if let Some(f) = rappel {
+                    f(&sortie);
+                }
+                *r.lock().unwrap() = Some(sortie);
+            })
+            .map_err(|e| e.to_string())?;
+        *ecriture = Some(Ecriture { resultat, fil: Some(fil) });
+        Ok(())
+    }
+
+    /// L'appui venu du raccourci : ce qui rate est gardé pour l'interface,
+    /// qui le dira quand elle repassera (voir [`Enregistreur::tick`]).
+    pub fn appuyer(&self) {
+        if let Err(m) = self.sauver() {
+            ki_video::journal(format!("clips : appui sans clip : {m}"));
+            self.avis.lock().unwrap().push_back(m);
+        }
+    }
+
+    /// Ce qui se passe quand un clip est écrit — le son de confirmation,
+    /// depuis le fil d'écriture, pour qu'il parte même interface endormie.
+    pub fn quand_fini(&self, f: Option<Fini>) {
+        *self.fini.lock().unwrap() = f;
+    }
+
+    fn ecriture_en_cours(&self) -> bool {
+        self.ecriture.lock().unwrap().is_some()
+    }
+}
+
 pub struct Enregistreur {
     tampon: Arc<Mutex<Tampon>>,
     stats: Arc<StageStats>,
@@ -481,11 +568,10 @@ pub struct Enregistreur {
     force_idr: Arc<AtomicBool>,
     reglages: Reglages,
     source: CaptureSource,
-    nom_source: String,
     son_systeme: Option<ki_voice::jeu::SonSysteme>,
     robinet_micro: Option<ki_voice::Robinet>,
     robinet_copains: Option<ki_voice::Robinet>,
-    ecriture: Option<Ecriture>,
+    declencheur: Declencheur,
     /// Dernière vérification de la source automatique.
     verif_source: Instant,
     pub erreur: Option<String>,
@@ -499,6 +585,14 @@ impl Enregistreur {
         let origine = Instant::now();
         let stats = Arc::new(StageStats::default());
         let force_idr = Arc::new(AtomicBool::new(false));
+        let declencheur = Declencheur {
+            tampon: tampon.clone(),
+            ecriture: Arc::new(Mutex::new(None)),
+            nom_source: Arc::new(Mutex::new(nom_source)),
+            reglages: reglages.clone(),
+            avis: Arc::new(Mutex::new(VecDeque::new())),
+            fini: Arc::new(Mutex::new(None)),
+        };
         let mut moi = Self {
             tampon: tampon.clone(),
             stats,
@@ -507,11 +601,10 @@ impl Enregistreur {
             force_idr,
             reglages: reglages.clone(),
             source: source.clone(),
-            nom_source,
             son_systeme: None,
             robinet_micro: None,
             robinet_copains: None,
-            ecriture: None,
+            declencheur,
             verif_source: Instant::now(),
             erreur: None,
         };
@@ -552,7 +645,7 @@ impl Enregistreur {
         crate::secours::marquer_clips();
         ki_video::journal(format!(
             "clips : enregistreur en marche ({}, {} s, {} i/s, {}) — {}",
-            moi.nom_source,
+            moi.nom_source(),
             reglages.duree_s,
             reglages.fps,
             reglages.qualite.label(),
@@ -599,6 +692,20 @@ impl Enregistreur {
         (self.robinet_micro.clone(), self.robinet_copains.clone())
     }
 
+    /// De quoi déclencher un clip depuis un autre fil (le raccourci).
+    pub fn declencheur(&self) -> Declencheur {
+        self.declencheur.clone()
+    }
+
+    /// Voir [`Declencheur::quand_fini`].
+    pub fn quand_fini(&self, f: Option<Fini>) {
+        self.declencheur.quand_fini(f);
+    }
+
+    fn nom_source(&self) -> String {
+        self.declencheur.nom_source.lock().unwrap().clone()
+    }
+
     /// Ce que montre l'interface.
     pub fn etat(&self) -> Etat {
         let t = self.tampon.lock().unwrap();
@@ -610,8 +717,8 @@ impl Enregistreur {
             secondes,
             megaoctets: t.octets as f32 / (1024.0 * 1024.0),
             encodeur: if self.stats.materiel.load(Ordering::Relaxed) { "NVENC".into() } else { "logiciel".into() },
-            source: self.nom_source.clone(),
-            ecriture_en_cours: self.ecriture.is_some(),
+            source: self.nom_source(),
+            ecriture_en_cours: self.declencheur.ecriture_en_cours(),
         }
     }
 
@@ -626,7 +733,7 @@ impl Enregistreur {
                 b.stop();
             }
             let (source, nom) = resoudre_source(&Source::Auto);
-            self.nom_source = nom;
+            *self.declencheur.nom_source.lock().unwrap() = nom;
             if let Err(e) = self.lancer_capture(source) {
                 self.erreur = Some(format!("capture perdue : {e:#}"));
             }
@@ -635,12 +742,12 @@ impl Enregistreur {
         if self.reglages.source == Source::Auto && self.verif_source.elapsed() > Duration::from_secs(10) {
             self.verif_source = Instant::now();
             let (source, nom) = resoudre_source(&Source::Auto);
-            if source != self.source && self.ecriture.is_none() {
+            if source != self.source && !self.declencheur.ecriture_en_cours() {
                 ki_video::journal(format!("clips : on filme maintenant {nom}"));
                 if let Some(b) = self.boucle.take() {
                     b.stop();
                 }
-                self.nom_source = nom;
+                *self.declencheur.nom_source.lock().unwrap() = nom;
                 if let Err(e) = self.lancer_capture(source) {
                     self.erreur = Some(format!("capture : {e:#}"));
                 }
@@ -649,9 +756,16 @@ impl Enregistreur {
         if let Some(a) = self.stats.prendre_avis() {
             self.erreur = Some(a);
         }
-        let fini = self.ecriture.as_ref().is_some_and(|e| e.resultat.lock().unwrap().is_some());
-        if fini {
-            let mut e = self.ecriture.take()?;
+        // Un appui du raccourci qui n'a rien donné : à dire, un par image.
+        if let Some(m) = self.declencheur.avis.lock().unwrap().pop_front() {
+            return Some(Err(m));
+        }
+        let ecriture_finie = {
+            let mut ecriture = self.declencheur.ecriture.lock().unwrap();
+            let finie = ecriture.as_ref().is_some_and(|e| e.resultat.lock().unwrap().is_some());
+            finie.then(|| ecriture.take()).flatten()
+        };
+        if let Some(mut e) = ecriture_finie {
             if let Some(f) = e.fil.take() {
                 let _ = f.join();
             }
@@ -660,46 +774,10 @@ impl Enregistreur {
         None
     }
 
-    /// L'appui : photographie le tampon et écrit le clip sur un fil.
-    pub fn sauver(&mut self) -> Result<(), String> {
-        if self.ecriture.is_some() {
-            return Err("un clip est déjà en cours d'écriture".into());
-        }
-        let pistes = (self.reglages.jeu, self.reglages.micro, self.reglages.copains);
-        let instantane = self
-            .tampon
-            .lock()
-            .unwrap()
-            .instantane(pistes)
-            .ok_or("rien à enregistrer encore : le tampon se remplit")?;
-        let dossier = self.reglages.dossier_effectif();
-        if let Some(libre) = espace_libre(&dossier) {
-            if libre < 500 * 1024 * 1024 {
-                return Err("moins de 500 Mo libres sur le disque des clips".into());
-            }
-        }
-        let nom = format!(
-            "{} {}.mp4",
-            chrono::Local::now().format("%Y-%m-%d %Hh%Mm%S"),
-            self.nom_source
-        );
-        let chemin = dossier.join(nom);
-        let fps = self.reglages.fps;
-        let debit = self.reglages.qualite.debit_bps();
-        let resultat: Arc<Mutex<Option<Result<Clip, String>>>> = Arc::new(Mutex::new(None));
-        let r = resultat.clone();
-        let fil = std::thread::Builder::new()
-            .name("clips-ecriture".into())
-            .spawn(move || {
-                let sortie = ecrire_clip(instantane, &chemin, fps, debit);
-                if let Ok(c) = &sortie {
-                    let _ = vignette(&c.chemin);
-                }
-                *r.lock().unwrap() = Some(sortie);
-            })
-            .map_err(|e| e.to_string())?;
-        self.ecriture = Some(Ecriture { resultat, fil: Some(fil) });
-        Ok(())
+    /// L'appui, depuis l'interface (le bouton « Clip ! ») : voir
+    /// [`Declencheur::sauver`].
+    pub fn sauver(&self) -> Result<(), String> {
+        self.declencheur.sauver()
     }
 
     /// Arrête tout. Les robinets du moteur sont à débrancher par
@@ -709,7 +787,8 @@ impl Enregistreur {
             b.stop();
         }
         self.son_systeme = None;
-        if let Some(mut e) = self.ecriture.take() {
+        let en_cours = self.declencheur.ecriture.lock().unwrap().take();
+        if let Some(mut e) = en_cours {
             if let Some(f) = e.fil.take() {
                 let _ = f.join();
             }
