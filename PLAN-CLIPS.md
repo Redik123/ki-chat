@@ -368,7 +368,7 @@ question posée.
 
 ## Jalons
 
-### C0 — La visionneuse — livré en test (2026-09-14, commit local)
+### C0 — La visionneuse — livré (0.1.35, 2026-09-14)
 `ki-media` (Media Foundation Source Reader, Windows), la file « médias » du
 moteur vocal, la visionneuse (images : zoom, déplacement, suivant/
 précédent, enregistrer sous, copier ; vidéos : lecture, avance, volume),
@@ -410,7 +410,7 @@ Reste à valider par drion (la liste de validation ci-dessus) — et à voir
 (la sortie à part suit le périphérique réglé), et l'image tient-elle
 60 images/s sur les portables.
 
-### C1 — L'enregistreur — livré en test (2026-09-14, commit local)
+### C1 — L'enregistreur — livré (0.1.35, 2026-09-14)
 Profil NVENC « clip », le tampon, les robinets audio (jeu, micro, vocal),
 la touche, le Sink Writer (H.264 tel quel + AAC), le son de confirmation,
 l'overlay, la page « Clips » (galerie locale, vignettes, lire dans la
