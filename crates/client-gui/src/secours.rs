@@ -129,6 +129,35 @@ pub fn diffusion_interrompue() -> Option<String> {
     Some(quoi.trim().to_string())
 }
 
+/// Le marqueur de l'enregistreur de clips, sur le même modèle : posé
+/// quand il démarre, levé quand il s'arrête proprement. Retrouvé au
+/// démarrage suivant, il dit que la session est morte l'enregistreur en
+/// marche — NVENC tournait, comme en diffusion.
+fn chemin_clips() -> Option<PathBuf> {
+    Some(eframe::storage_dir("ki-chat")?.join("clips.en-cours"))
+}
+
+pub fn marquer_clips() {
+    if let Some(chemin) = chemin_clips() {
+        let _ = std::fs::write(chemin, "enregistreur");
+    }
+}
+
+pub fn lever_clips() {
+    if let Some(chemin) = chemin_clips() {
+        let _ = std::fs::remove_file(chemin);
+    }
+}
+
+/// Au démarrage : vrai si la session précédente est morte l'enregistreur en
+/// marche — et on lève le marqueur, pour ne le signaler qu'une fois.
+pub fn clips_interrompus() -> bool {
+    let Some(chemin) = chemin_clips() else { return false };
+    let present = chemin.is_file();
+    let _ = std::fs::remove_file(chemin);
+    present
+}
+
 /// Consigne un plantage dans le rapport dédié, en plus du journal. Appelé
 /// par le panic hook et par `main` quand la boucle graphique meurt : ce sont
 /// les deux seules plumes de ce fichier, il ne contient donc que du

@@ -272,6 +272,20 @@ impl Nvenc {
         fps: u32,
         entree: Entree,
     ) -> anyhow::Result<Self> {
+        Self::avec_entree_gop(width, height, bitrate_bps, fps, 2, entree)
+    }
+
+    /// Comme `avec_entree`, avec la longueur du groupe d'images en secondes :
+    /// deux pour diffuser, une pour un clip — qui se coupe à la trame clé,
+    /// et perd donc au plus une seconde de ce qu'on voulait garder.
+    pub fn avec_entree_gop(
+        width: u32,
+        height: u32,
+        bitrate_bps: u32,
+        fps: u32,
+        gop_s: u32,
+        entree: Entree,
+    ) -> anyhow::Result<Self> {
         let api = api()?;
         let (device, carte) = device_nvidia()?;
         let contexte = unsafe { device.GetImmediateContext() }.context("contexte Direct3D 11")?;
@@ -302,7 +316,7 @@ impl Nvenc {
                 trame: 0,
                 carte,
             };
-            moi.initialiser(bitrate_bps, fps.clamp(1, 120))?;
+            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10))?;
             let mut par_tampon = entree == Entree::Tampon;
             if !par_tampon {
                 if let Err(e) = moi.preparer_texture() {
@@ -429,7 +443,7 @@ impl Nvenc {
     /// quart de résolution), pas de trame B ni de réordonnancement, GOP de
     /// deux secondes avec SPS/PPS répétés à chaque IDR pour qui arrive en
     /// cours de route, profil Main — celui que tous les décodeurs lisent.
-    unsafe fn initialiser(&mut self, bitrate_bps: u32, fps: u32) -> anyhow::Result<()> {
+    unsafe fn initialiser(&mut self, bitrate_bps: u32, fps: u32, gop_s: u32) -> anyhow::Result<()> {
         let fl = &self.api.fl;
         let preregler = fl.nvEncGetEncodePresetConfigEx.context("nvEncGetEncodePresetConfigEx absent")?;
         let mut preset: Box<ffi::NV_ENC_PRESET_CONFIG> = Box::new(std::mem::zeroed());
@@ -449,7 +463,7 @@ impl Nvenc {
         let mut config: Box<ffi::NV_ENC_CONFIG> = Box::new(preset.presetCfg);
         config.version = ffi::NV_ENC_CONFIG_VER;
         config.profileGUID = ffi::NV_ENC_H264_PROFILE_MAIN_GUID;
-        config.gopLength = 2 * fps;
+        config.gopLength = gop_s * fps;
         config.frameIntervalP = 1;
         let rc = &mut config.rcParams;
         rc.rateControlMode = ffi::NV_ENC_PARAMS_RC_CBR;

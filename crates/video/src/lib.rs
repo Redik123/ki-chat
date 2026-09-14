@@ -171,12 +171,14 @@ impl VideoEncoder for Logiciel {
 /// `tentative` compte les échecs NVENC précédents sur ce flux : à zéro on
 /// entre par la texture (le chemin standard), ensuite par le tampon
 /// historique — deux pilotes différents ne refusent pas la même chose.
+#[allow(clippy::too_many_arguments)]
 pub fn creer_encodeur(
     choix: EncoderChoice,
     width: u32,
     height: u32,
     bitrate_bps: u32,
     fps: u32,
+    gop_s: u32,
     stats: &StageStats,
     tentative: u32,
 ) -> anyhow::Result<Box<dyn VideoEncoder>> {
@@ -191,7 +193,7 @@ pub fn creer_encodeur(
     #[cfg(windows)]
     if choix != EncoderChoice::Logiciel {
         let entree = if tentative == 0 { nvenc::Entree::Texture } else { nvenc::Entree::Tampon };
-        match nvenc::Nvenc::avec_entree(width, height, bitrate_bps, fps, entree) {
+        match nvenc::Nvenc::avec_entree_gop(width, height, bitrate_bps, fps, gop_s, entree) {
             Ok(e) => {
                 let (maj, min) = e.version_pilote();
                 let chemin = match e.entree() {
@@ -226,7 +228,7 @@ pub fn creer_encodeur(
         "encodeur : logiciel (openh264), {width}x{height} à {fps} i/s, {} kbit/s",
         bitrate_bps / 1000
     ));
-    Ok(Box::new(Logiciel(screen_encoder(width, height, bitrate_bps, fps)?)))
+    Ok(Box::new(Logiciel(screen_encoder(width, height, bitrate_bps, fps, gop_s)?)))
 }
 
 /// Boucle locale S1a : capture écran -> I420 -> H.264 -> décodage -> sink.
@@ -353,7 +355,7 @@ fn pipeline_loop(
         //    le labo teste ce qui partira réellement.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, &stats, 0) {
+            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, 2, &stats, 0) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -447,6 +449,9 @@ pub struct StreamConfig {
     /// l'on peut rendre au jeu en s'en passant.
     pub preview: bool,
     pub encoder: EncoderChoice,
+    /// Longueur du groupe d'images, en secondes : deux pour diffuser, une
+    /// pour un clip (qui se coupe à la trame clé).
+    pub gop_s: u32,
 }
 
 impl Default for StreamConfig {
@@ -459,6 +464,7 @@ impl Default for StreamConfig {
             cursor: true,
             preview: true,
             encoder: EncoderChoice::Auto,
+            gop_s: 2,
         }
     }
 }
@@ -637,6 +643,7 @@ fn streamer_pipeline(
                 oh,
                 config.bitrate_bps,
                 config.fps,
+                config.gop_s,
                 &stats,
                 echecs_nvenc,
             ) {
@@ -659,6 +666,7 @@ fn streamer_pipeline(
                         oh,
                         config.bitrate_bps,
                         config.fps,
+                        config.gop_s,
                         &stats,
                         0,
                     ) {
@@ -803,13 +811,15 @@ pub fn screen_encoder(
     height: u32,
     bitrate_bps: u32,
     fps: u32,
+    gop_s: u32,
 ) -> anyhow::Result<Encoder> {
     let fps = fps.clamp(1, 120);
+    let gop_s = gop_s.clamp(1, 10);
     let config = EncoderConfig::new()
         .usage_type(UsageType::ScreenContentRealTime)
         .bitrate(BitRate::from_bps(bitrate_bps))
         .max_frame_rate(FrameRate::from_hz(fps as f32))
-        .intra_frame_period(IntraFramePeriod::from_num_frames(2 * fps))
+        .intra_frame_period(IntraFramePeriod::from_num_frames(gop_s * fps))
         .skip_frames(true)
         // Quelques threads d'encodage : le 1080p30 doit tenir même pendant
         // qu'un jeu occupe le reste du CPU.
@@ -829,7 +839,7 @@ mod tests {
     #[test]
     fn h264_roundtrip_smoke() {
         let (w, h) = (320usize, 240usize);
-        let mut encoder = screen_encoder(w as u32, h as u32, 500_000, 30).unwrap();
+        let mut encoder = screen_encoder(w as u32, h as u32, 500_000, 30, 2).unwrap();
 
         // Dégradé synthétique en I420.
         let mut yuv = vec![0u8; w * h + (w * h) / 2];

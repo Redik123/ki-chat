@@ -410,7 +410,7 @@ Reste à valider par drion (la liste de validation ci-dessus) — et à voir
 (la sortie à part suit le périphérique réglé), et l'image tient-elle
 60 images/s sur les portables.
 
-### C1 — L'enregistreur
+### C1 — L'enregistreur — livré en test (2026-09-14, commit local)
 Profil NVENC « clip », le tampon, les robinets audio (jeu, micro, vocal),
 la touche, le Sink Writer (H.264 tel quel + AAC), le son de confirmation,
 l'overlay, la page « Clips » (galerie locale, vignettes, lire dans la
@@ -420,6 +420,48 @@ l'enregistreur en marche — pas de saccade sentie, ~20 % d'un cœur au plus,
 un clip par appui, 29-30 s, son et image synchrones, lisible dans
 l'Explorateur et sur un téléphone ; ki-chat fermé brutalement ne laisse
 pas de fichier cassé. Estimation : 3 sessions.
+
+**Fait le 2026-09-14** (une session), **vérifié** par les tests :
+- `ki-media` écrit des MP4 par le Sink Writer : H.264 tel quel (le type
+  d'entrée est le type de sortie, aucun encodeur inséré — **vérifié**, le
+  fichier se relit), PCM 16 bits → AAC 160 kbit/s par piste, plusieurs
+  pistes ; `annexb` découpe les NAL, retrouve SPS/PPS et les trames clés.
+  Surprise **vérifiée** : la source MPEG-4 de Media Foundation énumère les
+  pistes à l'envers de l'ordre du fichier — le lecteur prend maintenant le
+  dernier flux de chaque type, sinon un clip s'ouvrait sur sa piste muette.
+- `ki-video` : la longueur du GOP se règle (`gop_s`, 2 pour diffuser, 1
+  pour les clips) ; `ki-voice` : les robinets « micro » et « copains » sur
+  le moteur (`Robinet`, trames mono de 20 ms, verrou bref sur le fil temps
+  réel) et `SonSysteme`, la boucle « tout sauf ki-chat » brute.
+- Client `clips.rs` : réglages persistés, tampon de trames encodées coupé
+  à la trame clé (une seconde de marge), trois anneaux de son horodatés
+  sur l'origine de la vidéo (trous comblés de silence), photographie à
+  l'appui, fil d'écriture (mélange écrêté en première piste, puis chaque
+  source ; images et son entrelacés par le temps ; SPS/PPS recollés si la
+  première image ne les porte pas), vignette JPEG dans le cache, espace
+  disque vérifié (500 Mo), source automatique par l'exécutable du jeu
+  (dix titres connus), bascule sur l'écran quand la fenêtre disparaît, et
+  reprise de la fenêtre du jeu quand il arrive.
+- Le raccourci : `ptt::Raccourci` (Ctrl/Alt/Maj + F1-F12, lettres,
+  chiffres, Inser…), sondé à 100 Hz par le fil du push-to-talk, au front ;
+  « appuie sur ta combinaison » dans les réglages ; Alt+F10 par défaut.
+- Interface : onglet Réglages → Clips, bouton « Clips » et point « REC »
+  à côté de « Valorant », page Clips (galerie en vignettes, lecture dans la
+  visionneuse avec ←/→ entre les clips, voir dans le dossier, suppression
+  confirmée, « Clip ! »), son « clip » de confirmation, ligne « Clip
+  enregistré » dans l'overlay, marqueur `clips.en-cours` (mort brutale →
+  l'enregistreur reste éteint au démarrage suivant et le dit).
+- Test de bout en bout sur la machine de développement (`cargo test -p
+  ki-client-gui enregistre -- --ignored`) : l'écran filmé quatre secondes
+  en NVENC, le clip écrit en 720p avec sa piste son, relu image par image.
+- Non fait, volontairement : le profil NVENC « qualité » (c'est celui de la
+  diffusion, CBR, à revoir si l'image déçoit), une seule capture pour
+  diffusion + clips, le retour visuel en plein écran exclusif (rien ne
+  peut s'y afficher, l'overlay non plus).
+
+Reste à valider par drion (la liste ci-dessus) — et surtout une vraie
+soirée : la charge en jeu, la synchronisation image/son sur un clip de
+trente secondes, le micro et les copains dans le fichier.
 
 ### C2 — Le partage
 `ClipPartager`, `data/clips/`, quota et purge, `partage.mp4` + poster,

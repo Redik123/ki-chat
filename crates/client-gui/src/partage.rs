@@ -132,6 +132,7 @@ impl Reglages {
             cursor: self.cursor,
             preview: self.preview,
             encoder: self.encodeur,
+            gop_s: 2,
         }
     }
 

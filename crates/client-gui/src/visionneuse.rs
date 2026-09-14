@@ -28,18 +28,38 @@ use crate::medias::{self, Telechargement};
 use crate::theme::{self, ACCENT, DANGER, TEXT, TEXT_DIM, TEXT_FAINT};
 use crate::ui;
 
-/// Ce que la visionneuse montre : une adresse de notre serveur.
+/// Ce que la visionneuse montre : une adresse de notre serveur, ou un
+/// fichier de cette machine (un clip de la galerie).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cible {
     Image(String),
     Video(String),
+    Fichier(PathBuf),
 }
 
 impl Cible {
+    /// L'adresse, ou le chemin pour un fichier local.
     pub fn url(&self) -> &str {
         match self {
             Cible::Image(u) | Cible::Video(u) => u,
+            Cible::Fichier(p) => p.to_str().unwrap_or(""),
         }
+    }
+
+    /// Le nom à afficher.
+    pub fn nom(&self) -> String {
+        match self {
+            Cible::Image(u) | Cible::Video(u) => medias::nom_du_fichier(u),
+            Cible::Fichier(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        }
+    }
+
+    pub fn est_video(&self) -> bool {
+        matches!(self, Cible::Video(_) | Cible::Fichier(_))
+    }
+
+    pub fn est_locale(&self) -> bool {
+        matches!(self, Cible::Fichier(_))
     }
 }
 
@@ -455,10 +475,15 @@ impl Visionneuse {
         self.pan = Vec2::ZERO;
         self.video = None;
         self.file.vider();
-        if let Cible::Video(url) = &cible {
+        let video = match &cible {
+            Cible::Video(url) => Some((url.clone(), medias::chemin_cache(url))),
+            Cible::Fichier(p) => Some((p.to_string_lossy().into_owned(), Some(p.clone()))),
+            Cible::Image(_) => None,
+        };
+        if let Some((url, chemin)) = video {
             self.video = Some(Video {
-                url: url.clone(),
-                chemin: medias::chemin_cache(url),
+                url,
+                chemin,
                 telechargement: None,
                 lecture: None,
                 texture: None,
@@ -604,7 +629,8 @@ impl Visionneuse {
         }
 
         let ecran = ctx.screen_rect();
-        let est_video = matches!(cible, Cible::Video(_));
+        let est_video = cible.est_video();
+        let locale = cible.est_locale();
         let bas = if est_video { BAS_VIDEO } else { BAS_IMAGE };
         let mut fermer = false;
         let mut aller: isize = 0;
@@ -636,12 +662,7 @@ impl Visionneuse {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let icone = if est_video { Icon::Film } else { Icon::Copy };
                     ui::glyph(ui, icone, 16.0, TEXT_DIM);
-                    ui.label(
-                        RichText::new(medias::nom_du_fichier(cible.url()))
-                            .color(TEXT)
-                            .size(14.0)
-                            .strong(),
-                    );
+                    ui.label(RichText::new(cible.nom()).color(TEXT).size(14.0).strong());
                     if self.liste.len() > 1 {
                         ui.label(
                             RichText::new(format!("{} / {}", self.index + 1, self.liste.len()))
@@ -657,13 +678,19 @@ impl Visionneuse {
                         if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
                             fermer = true;
                         }
-                        if ui::icon_button(ui, Icon::Screen, "Ouvrir dans le navigateur").clicked()
+                        if !locale
+                            && ui::icon_button(ui, Icon::Screen, "Ouvrir dans le navigateur").clicked()
                         {
                             demandes.push(Demande::Navigateur(cible.url().to_string()));
                         }
                         if !est_video && ui::icon_button(ui, Icon::Copy, "Copier l'image").clicked()
                         {
                             demandes.push(Demande::Copier(cible.url().to_string()));
+                        }
+                        if locale && ui::icon_button(ui, Icon::Hash, "Voir dans le dossier").clicked() {
+                            if let Cible::Fichier(p) = &cible {
+                                crate::clips::montrer_dans_le_dossier(p);
+                            }
                         }
                         if ui::icon_button(ui, Icon::Download, "Enregistrer sous…").clicked() {
                             demandes.push(Demande::EnregistrerSous(cible.clone()));
@@ -674,7 +701,7 @@ impl Visionneuse {
                 // --- Le média ---
                 let media_rect = match &cible {
                     Cible::Image(url) => self.peindre_image(ui, contenu, url, previews),
-                    Cible::Video(_) => self.peindre_video(ui, contenu),
+                    Cible::Video(_) | Cible::Fichier(_) => self.peindre_video(ui, contenu),
                 };
 
                 // --- Les chevrons ---

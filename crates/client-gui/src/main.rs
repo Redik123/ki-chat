@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod appicon;
+mod clips;
 mod icons;
 mod images;
 mod markup;
@@ -186,17 +187,19 @@ enum Onglet {
     Diffusion,
     Overlay,
     Jeu,
+    Clips,
     Sons,
     Aide,
 }
 
 impl Onglet {
-    const TOUS: [Onglet; 7] = [
+    const TOUS: [Onglet; 8] = [
         Onglet::Audio,
         Onglet::Reseau,
         Onglet::Diffusion,
         Onglet::Overlay,
         Onglet::Jeu,
+        Onglet::Clips,
         Onglet::Sons,
         Onglet::Aide,
     ];
@@ -208,6 +211,7 @@ impl Onglet {
             Onglet::Diffusion => "Diffusion d'écran",
             Onglet::Overlay => "Overlay en jeu",
             Onglet::Jeu => "Jeu",
+            Onglet::Clips => "Clips",
             Onglet::Sons => "Sons & notifications",
             Onglet::Aide => "Aide & diagnostics",
         }
@@ -222,6 +226,7 @@ impl Onglet {
             Onglet::Diffusion => "diffusion",
             Onglet::Overlay => "overlay",
             Onglet::Jeu => "jeu",
+            Onglet::Clips => "clips",
             Onglet::Sons => "sons",
             Onglet::Aide => "aide",
         }
@@ -638,6 +643,24 @@ struct KiApp {
     /// La sortie audio à part de la visionneuse, quand il n'y a pas de
     /// moteur vocal (hors salon) pour jouer sa file.
     sortie_medias: Option<ki_voice::medias::SortieSeule>,
+    /// L'enregistreur de clips et ses réglages (PLAN-CLIPS.md, C1).
+    clips_reglages: clips::Reglages,
+    enregistreur: Option<clips::Enregistreur>,
+    /// Les appuis sur le raccourci déjà traités.
+    clips_appuis_vus: u32,
+    /// Dernier branchement des robinets audio sur le moteur.
+    clips_branche: Option<std::time::Instant>,
+    /// La galerie : ouverte, sa liste, ses vignettes (None = illisible),
+    /// celles en cours de décodage, et ce que les fils rapportent.
+    show_clips: bool,
+    clips_liste: Vec<clips::ClipInfo>,
+    clips_vignettes: HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
+    clips_vignettes_en_vol: std::collections::HashSet<std::path::PathBuf>,
+    clips_vignettes_recues: VignettesRecues,
+    /// Le clip dont on demande confirmation avant de supprimer.
+    clips_suppression: Option<std::path::PathBuf>,
+    /// Le dossier choisi dans le dialogue natif (sur un fil).
+    clips_dossier_choisi: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
     show_stats: bool,
     stats: Vec<ki_protocol::FicheMembre>,
@@ -1010,6 +1033,17 @@ impl KiApp {
                 get("visionneuse_volume", "0.8").parse().unwrap_or(0.8),
             ),
             sortie_medias: None,
+            clips_reglages: clips::Reglages::load(get),
+            enregistreur: None,
+            clips_appuis_vus: 0,
+            clips_branche: None,
+            show_clips: false,
+            clips_liste: Vec::new(),
+            clips_vignettes: HashMap::new(),
+            clips_vignettes_en_vol: std::collections::HashSet::new(),
+            clips_vignettes_recues: Default::default(),
+            clips_suppression: None,
+            clips_dossier_choisi: Default::default(),
             show_stats: false,
             stats: Vec::new(),
             stats_recu: false,
@@ -1502,6 +1536,21 @@ impl KiApp {
             return;
         }
         self.demarrage_verifie = true;
+        // L'enregistreur de clips : la session précédente est-elle morte
+        // avec lui en marche ? Alors il reste éteint ce coup-ci, et on le dit.
+        if secours::clips_interrompus() {
+            ki_voice::journal(
+                "la session précédente s'est terminée brutalement l'enregistreur de clips en marche"
+                    .to_string(),
+            );
+            self.info = Some(
+                "la dernière session s'est terminée brutalement avec l'enregistreur de clips en \
+                 marche : il reste éteint ce coup-ci — relance-le depuis Clips si tu veux"
+                    .into(),
+            );
+        } else if self.clips_reglages.au_demarrage {
+            self.demarrer_clips();
+        }
         let Some(encodeur) = secours::diffusion_interrompue() else { return };
         ki_voice::journal(format!(
             "la session précédente s'est terminée brutalement pendant une diffusion \
@@ -1921,6 +1970,568 @@ impl KiApp {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Clips (PLAN-CLIPS.md, C1)
+    // -----------------------------------------------------------------
+
+    fn demarrer_clips(&mut self) {
+        if self.enregistreur.is_some() {
+            return;
+        }
+        match clips::Enregistreur::demarrer(&self.clips_reglages) {
+            Ok(e) => {
+                self.enregistreur = Some(e);
+                self.clips_branche = None;
+            }
+            Err(e) => {
+                ki_voice::journal(format!("clips : démarrage impossible : {e:#}"));
+                self.info = Some(format!("enregistreur de clips : {e:#}"));
+            }
+        }
+    }
+
+    fn arreter_clips(&mut self) {
+        let Some(e) = self.enregistreur.take() else { return };
+        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+            engine.brancher_micro(None);
+            engine.brancher_copains(None);
+        }
+        e.arreter();
+    }
+
+    /// L'appui : le clip s'écrit sur un fil ; le résultat arrive par `tick_clips`.
+    fn sauver_clip(&mut self) {
+        let resultat = match self.enregistreur.as_mut() {
+            Some(e) => e.sauver(),
+            None => Err("l'enregistreur n'est pas en marche".to_string()),
+        };
+        if let Err(m) = resultat {
+            self.info = Some(format!("clip : {m}"));
+        }
+    }
+
+    /// À chaque image : les robinets sur le moteur (qui peut avoir
+    /// redémarré), le résultat d'une écriture, les erreurs de l'enregistreur.
+    fn tick_clips(&mut self, ctx: &egui::Context) {
+        if self.enregistreur.is_none() {
+            return;
+        }
+        clips::cadence_ui(ctx);
+        if self
+            .clips_branche
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(1))
+        {
+            self.clips_branche = Some(std::time::Instant::now());
+            let robinets = self.enregistreur.as_ref().map(|e| e.robinets());
+            if let (Some((micro, copains)), Some(engine)) =
+                (robinets, self.link.engine.lock().unwrap().as_ref())
+            {
+                engine.brancher_micro(micro);
+                engine.brancher_copains(copains);
+            }
+        }
+        let evenement = self.enregistreur.as_mut().and_then(|e| e.tick());
+        match evenement {
+            Some(Ok(clip)) => {
+                let nom = clip
+                    .chemin
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.info = Some(format!(
+                    "clip enregistré : {nom} — {:.0} s, {}",
+                    clip.duree_s,
+                    clips::taille_lisible(clip.taille)
+                ));
+                if self.clips_reglages.son {
+                    self.play_sfx("clip");
+                }
+                self.overlay.annoncer("Clip enregistré");
+                if self.show_clips {
+                    self.rafraichir_clips();
+                }
+            }
+            Some(Err(m)) => {
+                ki_voice::journal(format!("clips : {m}"));
+                self.info = Some(format!("clip raté : {m}"));
+            }
+            None => {}
+        }
+        if let Some(err) = self.enregistreur.as_mut().and_then(|e| e.erreur.take()) {
+            self.info = Some(format!("enregistreur de clips : {err}"));
+        }
+    }
+
+    fn rafraichir_clips(&mut self) {
+        self.clips_liste = clips::lister(&self.clips_reglages.dossier_effectif());
+        let vivants: std::collections::HashSet<std::path::PathBuf> =
+            self.clips_liste.iter().map(|c| c.chemin.clone()).collect();
+        self.clips_vignettes.retain(|k, _| vivants.contains(k));
+    }
+
+    fn ouvrir_clips(&mut self) {
+        self.show_clips = true;
+        self.rafraichir_clips();
+    }
+
+    /// Monte les vignettes décodées par les fils de fond, et lance celles
+    /// qui manquent — décodage du JPEG, ou fabrication depuis la première
+    /// image du clip s'il n'en a pas encore.
+    fn preparer_vignettes_clips(&mut self, ctx: &egui::Context) {
+        let arrivees = std::mem::take(&mut *self.clips_vignettes_recues.lock().unwrap());
+        for (chemin, image) in arrivees {
+            self.clips_vignettes_en_vol.remove(&chemin);
+            let texture = image.map(|img| {
+                ctx.load_texture(
+                    format!("clip-{}", chemin.display()),
+                    img,
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            self.clips_vignettes.insert(chemin, texture);
+        }
+        let mut lancees = 0;
+        for c in &self.clips_liste {
+            if lancees >= 4
+                || self.clips_vignettes.contains_key(&c.chemin)
+                || self.clips_vignettes_en_vol.contains(&c.chemin)
+            {
+                continue;
+            }
+            lancees += 1;
+            self.clips_vignettes_en_vol.insert(c.chemin.clone());
+            let chemin = c.chemin.clone();
+            let vignette = c.vignette.clone();
+            let slot = self.clips_vignettes_recues.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let fichier = vignette.or_else(|| clips::vignette(&chemin).ok());
+                let image = fichier
+                    .and_then(|v| std::fs::read(v).ok())
+                    .and_then(|octets| images::decode(&octets));
+                slot.lock().unwrap().push((chemin, image));
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// La galerie des clips : l'enregistreur, ses actions, et les clips du
+    /// dossier en vignettes.
+    fn clips_window(&mut self, ctx: &egui::Context) {
+        if !self.show_clips {
+            return;
+        }
+        self.preparer_vignettes_clips(ctx);
+        let mut open = true;
+        let mut ouvrir: Option<std::path::PathBuf> = None;
+        let mut supprimer: Option<std::path::PathBuf> = None;
+        let mut montrer: Option<std::path::PathBuf> = None;
+        // 1 démarrer, 2 arrêter, 3 clip maintenant, 4 actualiser, 5 dossier.
+        let mut action = 0u8;
+        let etat = self.enregistreur.as_ref().map(|e| e.etat());
+        let total: u64 = self.clips_liste.iter().map(|c| c.taille).sum();
+        let dossier = self.clips_reglages.dossier_effectif();
+        let raccourci = self.clips_reglages.raccourci.label();
+        let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
+        let liste = &self.clips_liste;
+        let vignettes = &self.clips_vignettes;
+        egui::Window::new("Clips")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(880.0)
+            .default_height(roomy)
+            .min_width(520.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    match &etat {
+                        Some(e) => {
+                            ui::status_dot(ui, DANGER, "enregistreur en marche", 10.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.0} s en mémoire · {:.0} Mo · {} · {}",
+                                    e.secondes, e.megaoctets, e.encodeur, e.source
+                                ))
+                                .color(TEXT_DIM)
+                                .size(12.0),
+                            );
+                            if e.ecriture_en_cours {
+                                ui.label(RichText::new("écriture…").color(ACCENT).size(12.0));
+                            }
+                        }
+                        None => {
+                            ui::status_dot(ui, TEXT_FAINT, "enregistreur éteint", 10.0);
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui::icon_button(ui, Icon::Hash, "Ouvrir le dossier").clicked() {
+                            action = 5;
+                        }
+                        if ui::icon_button(ui, Icon::Refresh, "Actualiser").clicked() {
+                            action = 4;
+                        }
+                        if etat.is_some() {
+                            if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                                action = 2;
+                            }
+                            if ui::primary_button(ui, Some(Icon::Film), &format!("Clip ! ({raccourci})"), None)
+                                .clicked()
+                            {
+                                action = 3;
+                            }
+                        } else if ui::primary_button(ui, Some(Icon::Play), "Démarrer l'enregistreur", None)
+                            .clicked()
+                        {
+                            action = 1;
+                        }
+                    });
+                });
+                ui::hint(
+                    ui,
+                    &format!(
+                        "{} clip{} · {} · {}",
+                        liste.len(),
+                        if liste.len() > 1 { "s" } else { "" },
+                        clips::taille_lisible(total),
+                        dossier.display()
+                    ),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if liste.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "aucun clip pour l'instant — lance l'enregistreur, joue, et appuie sur la touche",
+                            )
+                            .color(TEXT_DIM),
+                        );
+                        return;
+                    }
+                    const LARGEUR: f32 = 224.0;
+                    const HAUTEUR_IMAGE: f32 = 126.0;
+                    let colonnes = ((ui.available_width() + 10.0) / (LARGEUR + 10.0)).floor().max(1.0) as usize;
+                    egui::Grid::new("clips-grille").spacing([10.0, 10.0]).show(ui, |ui| {
+                        for (i, c) in liste.iter().enumerate() {
+                            let (rect, r) = ui.allocate_exact_size(
+                                Vec2::new(LARGEUR, HAUTEUR_IMAGE + 40.0),
+                                Sense::click(),
+                            );
+                            if ui.is_rect_visible(rect) {
+                                let painter = ui.painter();
+                                let image = egui::Rect::from_min_size(rect.min, Vec2::new(LARGEUR, HAUTEUR_IMAGE));
+                                painter.rect_filled(image, egui::CornerRadius::same(6), theme::BG_DEEP);
+                                match vignettes.get(&c.chemin) {
+                                    Some(Some(t)) => {
+                                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                        painter.image(t.id(), image, uv, Color32::WHITE);
+                                    }
+                                    Some(None) => {
+                                        icons::draw(
+                                            painter,
+                                            egui::Rect::from_center_size(image.center(), Vec2::splat(28.0)),
+                                            Icon::Film,
+                                            TEXT_FAINT,
+                                        );
+                                    }
+                                    None => {
+                                        ui::spinner(painter, image.center(), 8.0, ui.input(|i| i.time), TEXT_FAINT);
+                                    }
+                                }
+                                let centre = image.center();
+                                let fond = if r.hovered() { theme::alpha(ACCENT, 230) } else { Color32::from_black_alpha(140) };
+                                painter.circle_filled(centre, 18.0, fond);
+                                icons::draw(
+                                    painter,
+                                    egui::Rect::from_center_size(centre + Vec2::new(2.0, 0.0), Vec2::splat(18.0)),
+                                    Icon::Play,
+                                    TEXT,
+                                );
+                                if r.hovered() {
+                                    painter.rect_stroke(
+                                        image,
+                                        egui::CornerRadius::same(6),
+                                        egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                let nom: String = c.nom.chars().take(34).collect();
+                                painter.text(
+                                    egui::pos2(rect.left() + 2.0, image.bottom() + 6.0),
+                                    egui::Align2::LEFT_TOP,
+                                    nom,
+                                    egui::FontId::proportional(12.5),
+                                    TEXT,
+                                );
+                                let date = chrono::DateTime::<chrono::Local>::from(c.modifie).format("%d/%m %H:%M");
+                                painter.text(
+                                    egui::pos2(rect.left() + 2.0, image.bottom() + 24.0),
+                                    egui::Align2::LEFT_TOP,
+                                    format!("{date} · {}", clips::taille_lisible(c.taille)),
+                                    egui::FontId::proportional(11.0),
+                                    TEXT_FAINT,
+                                );
+                            }
+                            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if r.clicked() {
+                                ouvrir = Some(c.chemin.clone());
+                            }
+                            r.context_menu(|ui| {
+                                if ui.button("Lire").clicked() {
+                                    ouvrir = Some(c.chemin.clone());
+                                    ui.close();
+                                }
+                                if ui.button("Voir dans le dossier").clicked() {
+                                    montrer = Some(c.chemin.clone());
+                                    ui.close();
+                                }
+                                if ui.button("Supprimer…").clicked() {
+                                    supprimer = Some(c.chemin.clone());
+                                    ui.close();
+                                }
+                            });
+                            if (i + 1) % colonnes == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                });
+            });
+        match action {
+            1 => self.demarrer_clips(),
+            2 => self.arreter_clips(),
+            3 => self.sauver_clip(),
+            4 => self.rafraichir_clips(),
+            5 => {
+                let d = self.clips_reglages.dossier_effectif();
+                clips::montrer_dans_le_dossier(&d.join(""));
+            }
+            _ => {}
+        }
+        if let Some(p) = montrer {
+            clips::montrer_dans_le_dossier(&p);
+        }
+        if let Some(p) = ouvrir {
+            let liste: Vec<visionneuse::Cible> =
+                self.clips_liste.iter().map(|c| visionneuse::Cible::Fichier(c.chemin.clone())).collect();
+            self.visionneuse.ouvrir(visionneuse::Cible::Fichier(p), liste);
+        }
+        if let Some(p) = supprimer {
+            self.clips_suppression = Some(p);
+        }
+        self.confirmer_suppression_clip(ctx);
+        if !open {
+            self.show_clips = false;
+        }
+    }
+
+    fn confirmer_suppression_clip(&mut self, ctx: &egui::Context) {
+        let Some(chemin) = self.clips_suppression.clone() else { return };
+        let nom = chemin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Supprimer ce clip ?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&nom).color(TEXT).strong());
+                ui::hint(ui, "le fichier sera effacé de ce PC ; il n'y a pas de corbeille");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui::tinted_button(ui, Some(Icon::Trash), "Supprimer", Tone::Danger).clicked() {
+                        decision = Some(true);
+                    }
+                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                if let Err(e) = std::fs::remove_file(&chemin) {
+                    self.info = Some(format!("suppression impossible : {e}"));
+                }
+                if let Some(v) = clips::chemin_vignette(&chemin) {
+                    let _ = std::fs::remove_file(v);
+                }
+                self.clips_vignettes.remove(&chemin);
+                self.clips_suppression = None;
+                self.rafraichir_clips();
+            }
+            Some(false) => self.clips_suppression = None,
+            None => {}
+        }
+    }
+
+    /// L'onglet « Clips » des réglages.
+    fn reglages_clips_ui(&mut self, ui: &mut egui::Ui) {
+        let avant = self.clips_reglages.clone();
+        let en_marche = self.enregistreur.is_some();
+        let mut action = 0u8;
+        ui::group_title(ui, Icon::Film, "L'enregistreur");
+        ui::hint(
+            ui,
+            "tant qu'il tourne, les dernières secondes de jeu sont gardées en mémoire ; un appui \
+             sur la touche les écrit dans un fichier — rien ne quitte ce PC",
+        );
+        ui.horizontal(|ui| {
+            if en_marche {
+                if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                    action = 2;
+                }
+            } else if ui::primary_button(ui, Some(Icon::Play), "Démarrer", None).clicked() {
+                action = 1;
+            }
+            ui.checkbox(&mut self.clips_reglages.au_demarrage, "Démarrer avec ki-chat");
+        });
+        if let Some(e) = self.enregistreur.as_ref().map(|e| e.etat()) {
+            ui::hint(
+                ui,
+                &format!(
+                    "{:.0} s en mémoire · {:.0} Mo · encodeur {} · {}",
+                    e.secondes, e.megaoctets, e.encodeur, e.source
+                ),
+            );
+        }
+        ui.add_space(10.0);
+
+        ui::field_label(ui, "Touche");
+        ui.horizontal(|ui| {
+            let capture = self.ptt.as_ref().is_some_and(|p| p.en_capture());
+            if capture {
+                ui.label(RichText::new("appuie sur ta combinaison…").color(ACCENT));
+                if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    if let Some(p) = &self.ptt {
+                        p.capturer(false);
+                    }
+                }
+            } else {
+                ui.label(RichText::new(self.clips_reglages.raccourci.label()).color(TEXT).strong());
+                if ui::button(ui, Icon::Pencil, "Changer").clicked() {
+                    if let Some(p) = &self.ptt {
+                        p.capturer(true);
+                    }
+                }
+            }
+        });
+        if let Some(r) = self.ptt.as_ref().and_then(|p| p.capturee()) {
+            self.clips_reglages.raccourci = r;
+        }
+        ui::hint(ui, "avec Ctrl, Alt ou Maj de préférence, pour ne pas gêner le jeu — Alt+F10 comme NVIDIA");
+        ui.add_space(10.0);
+
+        ui::field_label(ui, "Durée gardée");
+        ui.horizontal_wrapped(|ui| {
+            for d in clips::DUREES {
+                if ui.selectable_label(self.clips_reglages.duree_s == d, format!("{d} s")).clicked() {
+                    self.clips_reglages.duree_s = d;
+                }
+            }
+        });
+        ui::field_label(ui, "Qualité");
+        egui::ComboBox::from_id_salt("clips_qualite")
+            .width(300.0)
+            .selected_text(RichText::new(self.clips_reglages.qualite.label()).color(TEXT))
+            .show_ui(ui, |ui| {
+                for q in clips::Qualite::TOUTES {
+                    ui.selectable_value(&mut self.clips_reglages.qualite, q, q.label());
+                }
+            });
+        ui::field_label(ui, "Cadence");
+        ui.horizontal(|ui| {
+            for f in [30u32, 60] {
+                if ui.selectable_label(self.clips_reglages.fps == f, format!("{f} images/s")).clicked() {
+                    self.clips_reglages.fps = f;
+                }
+            }
+        });
+        ui::hint(ui, "en mémoire : 45 Mo pour 30 s en qualité équilibrée, 300 Mo pour 120 s en haute");
+        ui.add_space(10.0);
+
+        ui::field_label(ui, "Source");
+        if self.sources.perimees() {
+            self.sources.rafraichir();
+        }
+        let libelle = clips_libelle_source(&self.clips_reglages.source, &self.sources);
+        egui::ComboBox::from_id_salt("clips_source")
+            .width(360.0)
+            .selected_text(RichText::new(libelle).color(TEXT))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.clips_reglages.source,
+                    clips::Source::Auto,
+                    "Automatique — la fenêtre du jeu, sinon l'écran principal",
+                );
+                for e in &self.sources.ecrans {
+                    ui.selectable_value(
+                        &mut self.clips_reglages.source,
+                        clips::Source::Ecran(e.index),
+                        format!("Écran {} — {} {}x{}", e.index, e.name, e.width, e.height),
+                    );
+                }
+                if !self.sources.fenetres.is_empty() {
+                    ui.separator();
+                }
+                for f in &self.sources.fenetres {
+                    let txt = if f.process.is_empty() { f.title.clone() } else { format!("{} ({})", f.title, f.process) };
+                    ui.selectable_value(&mut self.clips_reglages.source, clips::Source::Fenetre(f.title.clone()), txt);
+                }
+            });
+        ui::hint(ui, "en automatique, l'enregistreur reconnaît VALORANT, CS2, Fortnite, Rocket League, Apex, LoL, Overwatch, R6, GTA V et Marvel Rivals");
+        ui.add_space(10.0);
+
+        ui::field_label(ui, "Pistes audio");
+        ui.checkbox(&mut self.clips_reglages.jeu, "Le son du jeu (tout le système, sauf ki-chat)");
+        ui.checkbox(&mut self.clips_reglages.micro, "Mon micro");
+        ui.checkbox(&mut self.clips_reglages.copains, "Les copains du salon vocal");
+        ui::hint(
+            ui,
+            "chaque piste est gardée à part dans le fichier, plus un mélange en première piste \
+             pour les lecteurs ordinaires ; le micro et les copains n'existent qu'en salon vocal",
+        );
+        ui.add_space(10.0);
+
+        ui::field_label(ui, "Dossier");
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(self.clips_reglages.dossier_effectif().display().to_string())
+                    .color(TEXT_DIM)
+                    .size(12.0),
+            );
+            if ui::button(ui, Icon::Pencil, "Changer…").clicked() {
+                let slot = self.clips_dossier_choisi.clone();
+                std::thread::spawn(move || {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        *slot.lock().unwrap() = Some(d);
+                    }
+                });
+            }
+            if self.clips_reglages.dossier.is_some() && ui::button(ui, Icon::Refresh, "Par défaut").clicked() {
+                self.clips_reglages.dossier = None;
+            }
+        });
+        if let Some(d) = self.clips_dossier_choisi.lock().unwrap().take() {
+            self.clips_reglages.dossier = Some(d);
+        }
+        ui::hint(ui, "pointe-le sur un dossier synchronisé par Google Drive pour ordinateur, et les clips y montent tout seuls");
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.clips_reglages.son, "Un son quand le clip est enregistré");
+
+        // Ce qui change la capture relance l'enregistreur, sans rien perdre
+        // d'autre que le tampon en cours.
+        let relancer = en_marche
+            && self.clips_reglages != avant
+            && self.clips_reglages.relance_necessaire(&avant);
+        match action {
+            1 => self.demarrer_clips(),
+            2 => self.arreter_clips(),
+            _ => {}
+        }
+        if relancer {
+            self.arreter_clips();
+            self.demarrer_clips();
+        }
+    }
+
     /// Ouvre la visionneuse sur `cible`, avec les médias du salon courant
     /// pour passer de l'un à l'autre.
     fn ouvrir_visionneuse(&mut self, cible: visionneuse::Cible) {
@@ -1990,13 +2601,21 @@ impl KiApp {
     /// la copie, sur un fil — depuis le cache si la vidéo y est déjà.
     fn enregistrer_media(&mut self, cible: visionneuse::Cible) {
         let url = cible.url().to_string();
-        let Some(cible_http) = self.previews.pinned_url(&url) else { return };
+        let nom = cible.nom();
+        // Un fichier local (un clip) se copie ; un média du serveur vient du
+        // cache s'il y est, du serveur sinon.
+        let (cible_http, cache) = match &cible {
+            visionneuse::Cible::Fichier(p) => (String::new(), Some(p.clone())),
+            visionneuse::Cible::Video(_) => {
+                let Some(h) = self.previews.pinned_url(&url) else { return };
+                (h, medias::chemin_cache(&url).filter(|c| c.is_file()))
+            }
+            visionneuse::Cible::Image(_) => {
+                let Some(h) = self.previews.pinned_url(&url) else { return };
+                (h, None)
+            }
+        };
         let agent = self.http_agent();
-        let nom = medias::nom_du_fichier(&url);
-        let cache = matches!(cible, visionneuse::Cible::Video(_))
-            .then(|| medias::chemin_cache(&url))
-            .flatten()
-            .filter(|c| c.is_file());
         let avis = self.visionneuse.avis();
         std::thread::spawn(move || {
             let Some(dest) = rfd::FileDialog::new().set_file_name(&nom).save_file() else { return };
@@ -4197,6 +4816,7 @@ impl KiApp {
         self.fiche_window(ctx);
         self.stats_window(ctx);
         self.fiche_bot_window(ctx);
+        self.clips_window(ctx);
         self.visionneuse_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
@@ -4527,6 +5147,41 @@ impl KiApp {
                     }
                     if ui::button(ui, Icon::Target, "Valorant").clicked() {
                         self.ouvrir_stats();
+                    }
+                    if ui::button(ui, Icon::Film, "Clips").clicked() {
+                        self.ouvrir_clips();
+                    }
+                    // Le point rouge de l'enregistreur de clips : allumé, il
+                    // tourne et un clic l'arrête ; éteint, un clic le lance.
+                    let rec = self.enregistreur.is_some();
+                    let (rect, r) = ui.allocate_exact_size(Vec2::new(54.0, 28.0), Sense::click());
+                    if ui.is_rect_visible(rect) {
+                        let p = ui.painter();
+                        if r.hovered() {
+                            p.rect_filled(rect, egui::CornerRadius::same(8), theme::BG_HOVER);
+                        }
+                        let couleur = if rec { DANGER } else { TEXT_FAINT };
+                        let pulse = if rec { 0.75 + 0.25 * (ui.input(|i| i.time) * 3.0).sin().abs() as f32 } else { 1.0 };
+                        p.circle_filled(egui::pos2(rect.left() + 13.0, rect.center().y), 5.0 * pulse, couleur);
+                        p.text(
+                            egui::pos2(rect.left() + 23.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "REC",
+                            egui::FontId::proportional(11.5),
+                            couleur,
+                        );
+                    }
+                    let bulle = if rec {
+                        format!("enregistreur de clips en marche ({}) — clic pour l'arrêter", self.clips_reglages.raccourci.label())
+                    } else {
+                        "lancer l'enregistreur de clips".to_string()
+                    };
+                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(bulle).clicked() {
+                        if rec {
+                            self.arreter_clips();
+                        } else {
+                            self.demarrer_clips();
+                        }
                     }
                     if self.any_admin_power() && ui::button(ui, Icon::Crown, "Admin").clicked() {
                         self.show_admin = !self.show_admin;
@@ -7042,6 +7697,9 @@ impl KiApp {
                                  H.264 complet — zéro réseau, c'est le banc d'essai du stream",
                             );
                         }
+                        if onglet == Onglet::Clips {
+                            self.reglages_clips_ui(ui);
+                        }
                         if onglet == Onglet::Jeu {
                             ui::group_title(ui, Icon::Target, "Valorant");
                             ui.checkbox(&mut self.valorant_presence, "Partager mon activité Valorant")
@@ -9352,6 +10010,10 @@ struct MenuMessage {
 /// Ce qu'un clic sur un message demande à l'application. Le message est
 /// peint par une fonction libre, qui n'a pas la main sur l'état : elle rend
 /// la demande, l'appelant l'exécute.
+/// Les vignettes de clips décodées par les fils de fond : (chemin du clip,
+/// image ou `None` si illisible).
+type VignettesRecues = std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<egui::ColorImage>)>>>;
+
 enum MessageAction {
     Rien,
     /// Clic droit : ouvrir le menu à cette position.
@@ -10988,6 +11650,21 @@ fn split_links(text: &str) -> Vec<(bool, &str)> {
     parts
 }
 
+/// Le libellé d'une source de clips, tel que le sélecteur le montre.
+fn clips_libelle_source(source: &clips::Source, sources: &partage::Sources) -> String {
+    match source {
+        clips::Source::Auto => "Automatique — la fenêtre du jeu, sinon l'écran".to_string(),
+        clips::Source::Ecran(0) => "Écran principal".to_string(),
+        clips::Source::Ecran(n) => sources
+            .ecrans
+            .iter()
+            .find(|e| e.index == *n)
+            .map(|e| format!("Écran {n} — {}", e.name))
+            .unwrap_or_else(|| format!("Écran {n}")),
+        clips::Source::Fenetre(t) => format!("Fenêtre : {t}"),
+    }
+}
+
 /// Remplit `tampon` autant que possible (un `read` peut rendre moins que
 /// demandé sans que le fichier soit fini). Rend le nombre d'octets lus.
 fn lire_plein(fichier: &mut std::fs::File, tampon: &mut [u8]) -> std::io::Result<usize> {
@@ -11137,6 +11814,9 @@ impl eframe::App for KiApp {
         // sens et sont simplement consommées.
         ptt.watch_bascule(ptt::Bascule::Micro, self.hotkey_micro);
         ptt.watch_bascule(ptt::Bascule::Sourd, self.hotkey_sourd);
+        // Le raccourci de l'enregistreur de clips, surveillé tant qu'il tourne.
+        ptt.watch_raccourci(self.enregistreur.as_ref().map(|_| self.clips_reglages.raccourci));
+        let appuis_clip = ptt.appuis_raccourci();
         let pressions = (ptt.pressions(ptt::Bascule::Micro), ptt.pressions(ptt::Bascule::Sourd));
         if pressions != self.hotkey_vues {
             let (micro, sourd) = (
@@ -11153,6 +11833,13 @@ impl eframe::App for KiApp {
                 }
             }
         }
+        // Un appui sur le raccourci : un clip. Le compteur ne se compare
+        // qu'à ce qu'on a traité — deux appuis rapprochés ne s'annulent pas.
+        if appuis_clip != self.clips_appuis_vus {
+            self.clips_appuis_vus = appuis_clip;
+            self.sauver_clip();
+        }
+        self.tick_clips(ctx);
         // Sortir du vocal rend l'écoute : sourd hors vocal, ce serait des
         // notifications muettes sans qu'on sache pourquoi.
         if self.sourd && self.voice_channel.is_none() {
@@ -11201,6 +11888,8 @@ impl eframe::App for KiApp {
                     self.close_admin();
                 } else if self.show_account {
                     self.close_account();
+                } else if self.show_clips {
+                    self.show_clips = false;
                 }
             }
             self.main_screen(ctx, &voice);
@@ -11248,6 +11937,7 @@ impl eframe::App for KiApp {
         storage.set_string("sfx_on", if self.sfx_on { "on" } else { "off" }.into());
         storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
         storage.set_string("visionneuse_volume", format!("{}", self.visionneuse.volume));
+        self.clips_reglages.save(storage);
         storage.set_string(
             "sfx_muted",
             self.sfx_muted.iter().cloned().collect::<Vec<_>>().join(","),
@@ -11298,6 +11988,9 @@ impl eframe::App for KiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // L'enregistreur s'arrête proprement : son marqueur de plantage est
+        // levé, sinon le prochain démarrage croirait à une mort brutale.
+        self.arreter_clips();
         if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }

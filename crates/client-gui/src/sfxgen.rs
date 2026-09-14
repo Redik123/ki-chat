@@ -30,6 +30,9 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     sounds.insert("micro-coupe".into(), seq(&[(233.1, 110)], 0.45));
     // Micro réactivé : le même, une octave au-dessus — plus « ouvert ».
     sounds.insert("micro-actif".into(), seq(&[(466.2, 110)], 0.45));
+    // Clip enregistré : trois notes vives qui montent — « c'est dans la
+    // boîte », reconnaissable en pleine partie sans regarder.
+    sounds.insert("clip".into(), seq(&[(1046.5, 55), (1318.5, 55), (1568.0, 150)], 0.4));
     sounds
 }
 
@@ -74,6 +77,7 @@ mod tests {
             "quitte-vocal",
             "micro-coupe",
             "micro-actif",
+            "clip",
         ] {
             let pcm = sounds.get(name).unwrap_or_else(|| panic!("son manquant : {name}"));
             assert!(!pcm.is_empty());

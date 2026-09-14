@@ -17,6 +17,9 @@ use std::path::Path;
 
 #[cfg(windows)]
 mod mf;
+#[cfg(windows)]
+mod mf_ecriture;
+pub mod annexb;
 pub mod pixels;
 pub mod son;
 
@@ -96,6 +99,76 @@ pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
     }
 }
 
+// ---------------------------------------------------------------------
+// L'écriture : le MP4 d'un clip
+// ---------------------------------------------------------------------
+
+/// Le format d'une piste vidéo H.264 à écrire.
+#[derive(Clone, Debug, Default)]
+pub struct FormatVideo {
+    pub largeur: u32,
+    pub hauteur: u32,
+    pub fps: u32,
+    pub debit_bps: u32,
+    /// SPS et PPS en Annex B, si on les a — sinon le conteneur les lit dans
+    /// la première trame clé (NVENC et openh264 les y répètent).
+    pub parametres: Option<Vec<u8>>,
+}
+
+/// Ce qu'un écrivain sait faire, derrière `Ecrivain`.
+pub(crate) trait EcrivainInterne {
+    fn image(&mut self, annexb: &[u8], pts_us: u64, duree_us: u64, idr: bool) -> anyhow::Result<()>;
+    fn son(&mut self, piste: usize, stereo: &[f32], pts_us: u64) -> anyhow::Result<()>;
+    fn terminer(&mut self) -> anyhow::Result<()>;
+}
+
+/// Un MP4 en cours d'écriture : des unités d'accès H.264 telles quelles,
+/// et du son PCM float stéréo 48 kHz par piste, qui sort en AAC. Les
+/// horodatages sont en microsecondes depuis le début du fichier et doivent
+/// monter. Lâcher l'écrivain sans `terminer` termine quand même le fichier.
+pub struct Ecrivain {
+    interne: Box<dyn EcrivainInterne>,
+}
+
+impl Ecrivain {
+    /// Une unité d'accès H.264 Annex B entière (SPS/PPS compris s'il y en a).
+    pub fn image(&mut self, annexb: &[u8], pts_us: u64, duree_us: u64, idr: bool) -> anyhow::Result<()> {
+        self.interne.image(annexb, pts_us, duree_us, idr)
+    }
+
+    /// Du son stéréo entrelacé 48 kHz pour la piste `piste` (0 = la
+    /// première, celle que les lecteurs jouent).
+    pub fn son(&mut self, piste: usize, stereo: &[f32], pts_us: u64) -> anyhow::Result<()> {
+        self.interne.son(piste, stereo, pts_us)
+    }
+
+    pub fn terminer(mut self) -> anyhow::Result<()> {
+        self.interne.terminer()
+    }
+}
+
+impl Drop for Ecrivain {
+    fn drop(&mut self) {
+        let _ = self.interne.terminer();
+    }
+}
+
+/// Ouvre un MP4 à écrire, avec `pistes_audio` pistes AAC.
+pub fn ecrire(chemin: &Path, format: &FormatVideo, pistes_audio: usize) -> anyhow::Result<Ecrivain> {
+    #[cfg(windows)]
+    {
+        Ok(Ecrivain { interne: mf_ecriture::ouvrir(chemin, format, pistes_audio)? })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (chemin, format, pistes_audio);
+        anyhow::bail!(
+            "écriture vidéo indisponible sur {} (Windows seulement pour l'instant)",
+            std::env::consts::OS
+        )
+    }
+}
+
 /// La première image d'un fichier — pour une vignette, un poster.
 pub fn premiere_image(chemin: &Path) -> anyhow::Result<Image> {
     let mut lecteur = ouvrir(chemin)?;
@@ -121,6 +194,10 @@ mod tests {
     /// `None` s'il n'y en a pas — le test est alors sauté, pas cassé : ce
     /// crate ne livre pas ffmpeg, il n'en a besoin que pour se prouver.
     fn fabriquer(nom: &str, args: &[&str]) -> Option<PathBuf> {
+        fabriquer_format(nom, args, "mp4")
+    }
+
+    fn fabriquer_format(nom: &str, args: &[&str], format: &str) -> Option<PathBuf> {
         // Deux tests qui veulent le même fichier au même moment le
         // fabriqueraient deux fois, l'un par-dessus l'autre : un verrou, et
         // une écriture sous un nom provisoire renommée à la fin.
@@ -137,7 +214,7 @@ mod tests {
             .args(["-y", "-loglevel", "error"])
             .args(args)
             .arg("-f")
-            .arg("mp4")
+            .arg(format)
             .arg(&provisoire)
             .status()
             .ok()?;
@@ -321,6 +398,83 @@ mod tests {
             l.suivant(Flux::Audio).expect("flux audio"),
             Paquet::Fin
         ));
+    }
+
+    /// Un flux H.264 brut avec des délimiteurs d'unités d'accès : chaque
+    /// image commence par un NAL de type 9, ce qui permet de la découper.
+    fn flux_h264() -> Option<PathBuf> {
+        fabriquer_format(
+            "essai.h264",
+            &[
+                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-t", "2",
+                "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", "15",
+                "-x264-params", "aud=1:repeat-headers=1", "-pix_fmt", "yuv420p",
+            ],
+            "h264",
+        )
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn un_clip_s_ecrit_puis_se_relit() {
+        let Some(flux) = flux_h264() else {
+            eprintln!("ffmpeg absent : test sauté");
+            return;
+        };
+        let octets = std::fs::read(&flux).expect("lecture du flux");
+        let unites = annexb::unites_d_acces(&octets);
+        assert!(unites.len() >= 55, "{} unités d'accès", unites.len());
+        let parametres = annexb::parametres(unites[0]).expect("SPS et PPS dans la première image");
+        let sortie = std::env::temp_dir().join("ki-media-essais").join(format!("clip-{}.mp4", std::process::id()));
+        let format = FormatVideo {
+            largeur: 320,
+            hauteur: 240,
+            fps: 30,
+            debit_bps: 500_000,
+            parametres: Some(parametres),
+        };
+        let mut e = ecrire(&sortie, &format, 2).expect("ouverture en écriture");
+        for (i, u) in unites.iter().enumerate() {
+            let idr = annexb::est_cle(u);
+            assert!(i > 0 || idr, "la première image doit être une trame clé");
+            e.image(u, i as u64 * 33_333, 33_333, idr).expect("image");
+        }
+        // Deux secondes de son : une sinusoïde sur la première piste, du
+        // silence sur la seconde, par blocs de 20 ms.
+        let bloc_silence = vec![0.0f32; 1920];
+        for b in 0..100u64 {
+            let bloc: Vec<f32> = (0..960)
+                .flat_map(|i| {
+                    let t = (b * 960 + i) as f32 / 48_000.0;
+                    let v = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.3;
+                    [v, v]
+                })
+                .collect();
+            e.son(0, &bloc, b * 20_000).expect("son");
+            e.son(1, &bloc_silence, b * 20_000).expect("silence");
+        }
+        e.terminer().expect("finalisation");
+
+        let mut l = ouvrir(&sortie).expect("relecture");
+        let infos = l.infos().clone();
+        assert!(infos.video && infos.audio, "{infos:?}");
+        assert_eq!((infos.largeur, infos.hauteur), (320, 240));
+        assert!((1_800..=2_200).contains(&infos.duree_ms), "durée {}", infos.duree_ms);
+        let mut images = 0usize;
+        while let Paquet::Image(_) = l.suivant(Flux::Video).expect("image relue") {
+            images += 1;
+        }
+        assert!(images + 2 >= unites.len() && images <= unites.len(), "{images} images relues");
+        let mut echantillons = 0usize;
+        let mut energie = 0.0f32;
+        while let Paquet::Audio { mono, .. } = l.suivant(Flux::Audio).expect("son relu") {
+            echantillons += mono.len();
+            energie += mono.iter().map(|v| v * v).sum::<f32>();
+        }
+        assert!((86_000..=100_000).contains(&echantillons), "{echantillons} échantillons");
+        // La première piste porte bien la sinusoïde, pas du silence.
+        assert!(energie / echantillons as f32 > 0.01, "énergie {energie}");
+        let _ = std::fs::remove_file(&sortie);
     }
 
     #[test]

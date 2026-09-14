@@ -124,6 +124,12 @@ pub fn journal_snapshot() -> Vec<(u64, String)> {
 /// (QUIC aujourd'hui, autre chose demain). L'appel ne doit jamais bloquer.
 pub type DatagramSend = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>;
 
+/// Un robinet sur le son du moteur : reçoit des trames mono 48 kHz de
+/// 20 ms, sur un fil temps réel — il doit se contenter de les ranger.
+/// C'est ainsi que l'enregistreur de clips prend le micro et les voix des
+/// copains (PLAN-CLIPS.md, C1).
+pub type Robinet = std::sync::Arc<dyn Fn(&[f32]) + Send + Sync>;
+
 pub struct VoiceConfig {
     /// Notre identité (en-tête des paquets + nonce de chiffrement).
     pub user_id: u64,
@@ -597,6 +603,10 @@ struct Shared {
     /// Le son d'une vidéo lue dans ki-chat : mixé comme les effets, quand
     /// l'application nous désigne consommateur (voir `medias.rs`).
     medias: std::sync::Arc<medias::File>,
+    /// Les robinets de l'enregistreur de clips : le micro traité (ce qui
+    /// partirait sur le réseau, armé ou non) et le mélange des copains.
+    robinet_micro: Mutex<Option<Robinet>>,
+    robinet_copains: Mutex<Option<Robinet>>,
     /// Micro affamé : la bascule en catégorie « communications » est
     /// **proposée** à l'utilisateur, jamais imposée — c'est elle qui peut
     /// faire baisser le volume de ses autres sons, à lui de choisir.
@@ -669,6 +679,8 @@ impl VoiceEngine {
             aux_buf: Mutex::new(std::collections::VecDeque::new()),
             aux_gain: AtomicU32::new(1.0f32.to_bits()),
             medias: cfg.medias.clone().unwrap_or_default(),
+            robinet_micro: Mutex::new(None),
+            robinet_copains: Mutex::new(None),
             comms_proposed: AtomicBool::new(false),
             comms_decision: std::sync::atomic::AtomicU8::new(0),
             input_lost: AtomicBool::new(false),
@@ -759,6 +771,18 @@ impl VoiceEngine {
     /// Plus de stream à écouter : ce qui restait à jouer est jeté.
     pub fn aux_clear(&self) {
         self.shared.aux_buf.lock().unwrap().clear();
+    }
+
+    /// Branche (ou débranche) le robinet du micro traité : chaque trame de
+    /// 20 ms lui est remise, que l'on émette ou non.
+    pub fn brancher_micro(&self, robinet: Option<Robinet>) {
+        *self.shared.robinet_micro.lock().unwrap() = robinet;
+    }
+
+    /// Branche (ou débranche) le robinet des copains : leur mélange, avant
+    /// les effets, le son du jeu et le volume général.
+    pub fn brancher_copains(&self, robinet: Option<Robinet>) {
+        *self.shared.robinet_copains.lock().unwrap() = robinet;
     }
 
     /// Active/coupe l'émission micro (l'équivalent du push-to-talk).
@@ -1636,6 +1660,11 @@ fn capture_loop(
             // 5. Vumètre : niveau après toute la chaîne (= ce qui part).
             let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
             sh.counters.mic_peak_bits.store(peak.to_bits(), Ordering::Relaxed);
+            // Le robinet de l'enregistreur de clips, s'il est branché : la
+            // voix telle qu'elle partirait, armée ou non. Verrou bref.
+            if let Some(r) = sh.robinet_micro.lock().unwrap().as_ref() {
+                r(&frame);
+            }
 
             // 6. Décision d'émission : armé + activation vocale éventuelle.
             let armed = sh.transmitting.load(Ordering::Relaxed);
@@ -2575,6 +2604,13 @@ fn output_writer(
                     let mut p = playout.lock().unwrap();
                     any |= p.mix_into(&mut mix, gain);
                     trous += p.take_starvations();
+                }
+            }
+            // Le robinet de l'enregistreur de clips : les copains seuls,
+            // avant les effets, le son du jeu, la vidéo et le volume.
+            if any {
+                if let Some(r) = sh_cb.robinet_copains.lock().unwrap().as_ref() {
+                    r(&mix);
                 }
             }
             // Retour local : test micro (« s'écouter ») et son de test.

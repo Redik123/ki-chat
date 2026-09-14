@@ -225,6 +225,9 @@ pub struct Overlay {
     /// La découpe appliquée à la fenêtre, pour ne la refaire qu'au
     /// changement — la refaire à chaque image ferait clignoter.
     decoupe: Option<Vec<Forme>>,
+    /// Une ligne à montrer quelques secondes (« Clip enregistré »), même
+    /// quand personne ne parle.
+    annonce: Option<(String, Instant)>,
 }
 
 /// Windows le sait : `SHQueryUserNotificationState` rend « un programme
@@ -266,6 +269,7 @@ impl Overlay {
             reaffirme: Instant::now(),
             devant: (String::new(), false),
             decoupe: None,
+            annonce: None,
         }
     }
 
@@ -279,8 +283,21 @@ impl Overlay {
     /// Montre (ou non) l'overlay pour cette image. `focus_principal` : la
     /// fenêtre de ki-chat a le clavier — alors on la voit, pas besoin de
     /// doublon. Sans ligne (hors vocal), rien.
+    /// Une ligne à afficher trois secondes, sous les voix — pour dire
+    /// « Clip enregistré » sans quitter le jeu.
+    pub fn annoncer(&mut self, texte: impl Into<String>) {
+        self.annonce = Some((texte.into(), Instant::now()));
+    }
+
     pub fn montrer(&mut self, ctx: &egui::Context, lignes: Vec<Ligne>, focus_principal: bool) {
-        if !self.actif || focus_principal || lignes.is_empty() {
+        let annonce = self
+            .annonce
+            .clone()
+            .filter(|(_, depuis)| depuis.elapsed() < Duration::from_secs(3));
+        if annonce.is_none() {
+            self.annonce = None;
+        }
+        if !self.actif || focus_principal || (lignes.is_empty() && annonce.is_none()) {
             // La fenêtre va disparaître : sa découpe repartira de zéro.
             self.decoupe = None;
             return;
@@ -336,7 +353,7 @@ impl Overlay {
         if !self.toujours {
             affichees.retain(|(_, parle, _)| *parle);
         }
-        if affichees.is_empty() {
+        if affichees.is_empty() && annonce.is_none() {
             self.decoupe = None;
             return;
         }
@@ -365,10 +382,22 @@ impl Overlay {
         } else {
             hauteur_ligne
         };
-        let hauteur = (affichees.len() as f32 * (hauteur_ligne + ECART) - ECART + 2.0).ceil();
+        // L'annonce : une pilule de plus, ajustée à son texte.
+        let largeur_annonce = annonce
+            .as_ref()
+            .map(|(t, _)| {
+                ctx.fonts(|f| f.layout_no_wrap(t.clone(), police.clone(), Color32::WHITE)).size().x
+                    + 2.0 * PAD
+                    + 10.0
+            })
+            .unwrap_or(0.0)
+            .ceil();
+        let largeur = largeur.max(largeur_annonce);
+        let n_lignes = affichees.len() + usize::from(annonce.is_some());
+        let hauteur = (n_lignes as f32 * (hauteur_ligne + ECART) - ECART + 2.0).ceil();
         // La forme de la fenêtre : la même géométrie que le dessin, depuis
         // le coin haut gauche.
-        let formes: Vec<Forme> = (0..affichees.len())
+        let mut formes: Vec<Forme> = (0..affichees.len())
             .map(|i| {
                 let y = 1.0 + i as f32 * (hauteur_ligne + ECART);
                 if avec_pseudo {
@@ -388,6 +417,15 @@ impl Overlay {
                 }
             })
             .collect();
+        if annonce.is_some() {
+            formes.push(Forme::Pilule {
+                x: 0.0,
+                y: 1.0 + affichees.len() as f32 * (hauteur_ligne + ECART),
+                w: largeur_annonce,
+                h: hauteur_ligne,
+                rayon: 14.0,
+            });
+        }
         let ecran = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(Vec2::new(1920.0, 1080.0));
@@ -398,7 +436,8 @@ impl Overlay {
             Coin::BasGauche => Pos2::new(16.0, ecran.y - hauteur - 64.0),
             Coin::BasDroite => Pos2::new(ecran.x - largeur - 16.0, ecran.y - hauteur - 64.0),
         };
-        let anime = affichees.iter().any(|(_, parle, _)| *parle);
+        let anime = affichees.iter().any(|(_, parle, _)| *parle) || annonce.is_some();
+        let annonce_dessin = annonce.clone();
         let id = egui::ViewportId::from_hash_of("overlay-qui-parle");
         // Pas de « transparent » ici : la transparence vient de la clé de
         // couleur (voir `win::remettre_au_dessus`), la seule qui marche avec
@@ -478,6 +517,25 @@ impl Overlay {
                         nom,
                         police.clone(),
                         couleur,
+                    );
+                }
+                if let Some((texte, _)) = &annonce_dessin {
+                    let y = rect.top() + 1.0 + affichees.len() as f32 * (hauteur_ligne + ECART);
+                    let pilule = Rect::from_min_size(
+                        Pos2::new(rect.left(), y),
+                        Vec2::new(largeur_annonce, hauteur_ligne),
+                    );
+                    painter.rect_filled(
+                        pilule,
+                        CornerRadius::same(14),
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+                    );
+                    painter.text(
+                        pilule.center(),
+                        egui::Align2::CENTER_CENTER,
+                        texte,
+                        police.clone(),
+                        Color32::from_rgb(0x00, 0xd2, 0x6a),
                     );
                 }
             });

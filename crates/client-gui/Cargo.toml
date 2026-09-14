@@ -100,4 +100,6 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_UI_Controls",
+    # GetDiskFreeSpaceExW : l'enregistreur de clips vérifie la place avant d'écrire.
+    "Win32_Storage_FileSystem",
 ] }

@@ -7,6 +7,12 @@
 //! décodeur de Microsoft est rapide et n'a pas d'humeur de pilote ; le
 //! matériel viendra si un portable en a besoin.
 //!
+//! Les flux sont choisis par leur numéro, pas par le raccourci « le premier
+//! flux audio » de Media Foundation : sur un MP4 à plusieurs pistes son (un
+//! clip : le mélange, puis le jeu, le micro, les copains), ce raccourci
+//! tombait sur la **dernière** piste du fichier — et un clip s'ouvrait muet.
+//! Voir `flux_disponibles`.
+//!
 //! Tout ce qui parle à COM vit ici, derrière le trait `Lecteur`.
 
 use std::mem::ManuallyDrop;
@@ -27,14 +33,12 @@ use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 use crate::son::{en_mono, Reechantillonneur};
 use crate::{pixels, Flux, Image, Infos, Lecteur, Paquet};
 
-const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-const AUDIO: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 const TOUS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 const SOURCE: u32 = MF_SOURCE_READER_MEDIASOURCE.0 as u32;
 
 /// COM sur ce fil, Media Foundation pour le processus. Une fois chacun ;
 /// on ne referme jamais Media Foundation — il vit autant que ki-chat.
-fn preparer() -> anyhow::Result<()> {
+pub(crate) fn preparer() -> anyhow::Result<()> {
     thread_local! {
         static COM: () = unsafe {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -79,9 +83,13 @@ pub struct LecteurMf {
     infos: Infos,
     video: Option<FormatVideo>,
     audio: Option<FormatAudio>,
+    /// Les numéros de flux retenus (`u32::MAX` : pas de tel flux).
+    flux_video: u32,
+    flux_audio: u32,
 }
 
-pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
+/// Ouvre le fichier avec le lecteur, sans encore choisir de flux.
+fn lecteur_brut(chemin: &Path) -> anyhow::Result<IMFSourceReader> {
     preparer()?;
     if !chemin.is_file() {
         bail!("fichier introuvable : {}", chemin.display());
@@ -102,42 +110,47 @@ pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
     let reader = unsafe { MFCreateSourceReaderFromURL(&url, &attributs) }
         .with_context(|| format!("Media Foundation n'ouvre pas {}", chemin.display()))?;
     unsafe { reader.SetStreamSelection(TOUS, false) }.context("sélection des flux")?;
+    Ok(reader)
+}
 
+pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
+    let reader = lecteur_brut(chemin)?;
+    let (iv, ia) = flux_disponibles(&reader);
     let mut infos = Infos::default();
-    let video = match choisir_video(&reader) {
-        Ok(f) => {
+    let video = match iv.map(|i| choisir_video(&reader, i)) {
+        Some(Ok(f)) => {
             infos.video = true;
             infos.largeur = f.largeur as u32;
             infos.hauteur = f.hauteur as u32;
-            infos.fps = cadence_images(&reader);
+            infos.fps = cadence_images(&reader, iv.unwrap_or(0));
             Some(f)
         }
-        Err(e) => {
-            tracing::info!(
-                "ki-media : pas d'image lisible dans {} ({e:#})",
-                chemin.display()
-            );
-            unsafe {
-                let _ = reader.SetStreamSelection(VIDEO, false);
+        Some(Err(e)) => {
+            tracing::info!("ki-media : pas d'image lisible dans {} ({e:#})", chemin.display());
+            if let Some(i) = iv {
+                unsafe {
+                    let _ = reader.SetStreamSelection(i, false);
+                }
             }
             None
         }
+        None => None,
     };
-    let audio = match choisir_audio(&reader) {
-        Ok(f) => {
+    let audio = match ia.map(|i| choisir_audio(&reader, i)) {
+        Some(Ok(f)) => {
             infos.audio = true;
             Some(f)
         }
-        Err(e) => {
-            tracing::info!(
-                "ki-media : pas de son lisible dans {} ({e:#})",
-                chemin.display()
-            );
-            unsafe {
-                let _ = reader.SetStreamSelection(AUDIO, false);
+        Some(Err(e)) => {
+            tracing::info!("ki-media : pas de son lisible dans {} ({e:#})", chemin.display());
+            if let Some(i) = ia {
+                unsafe {
+                    let _ = reader.SetStreamSelection(i, false);
+                }
             }
             None
         }
+        None => None,
     };
     if video.is_none() && audio.is_none() {
         bail!("ni image ni son lisibles dans ce fichier");
@@ -146,31 +159,57 @@ pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
     Ok(Box::new(LecteurMf {
         reader,
         infos,
+        flux_video: if video.is_some() { iv.unwrap_or(u32::MAX) } else { u32::MAX },
+        flux_audio: if audio.is_some() { ia.unwrap_or(u32::MAX) } else { u32::MAX },
         video,
         audio,
     }))
 }
 
-/// Sélectionne la première piste vidéo et lui demande du NV12.
-fn choisir_video(reader: &IMFSourceReader) -> anyhow::Result<FormatVideo> {
+/// Les flux du fichier, dans l'ordre du lecteur : (numéro, type majeur).
+fn enumerer(reader: &IMFSourceReader) -> Vec<(u32, GUID)> {
+    let mut flux = Vec::new();
+    for index in 0..32u32 {
+        let Ok(t) = (unsafe { reader.GetNativeMediaType(index, 0) }) else { break };
+        if let Ok(majeur) = unsafe { t.GetGUID(&MF_MT_MAJOR_TYPE) } {
+            flux.push((index, majeur));
+        }
+    }
+    flux
+}
+
+/// Le premier flux vidéo et le premier flux audio **du fichier**.
+///
+/// La source MPEG-4 de Media Foundation énumère les pistes à l'envers de
+/// leur ordre dans le fichier (**vérifié** sur un MP4 de ffmpeg comme sur un
+/// clip écrit par le Sink Writer : la première piste du fichier est le
+/// dernier flux du lecteur). Les lecteurs ordinaires jouent la première
+/// piste audio du fichier ; pour jouer la même, on prend le dernier flux de
+/// chaque type.
+fn flux_disponibles(reader: &IMFSourceReader) -> (Option<u32>, Option<u32>) {
+    let flux = enumerer(reader);
+    let dernier = |majeur: GUID| flux.iter().rev().find(|(_, m)| *m == majeur).map(|(i, _)| *i);
+    (dernier(MFMediaType_Video), dernier(MFMediaType_Audio))
+}
+
+/// Sélectionne la piste vidéo `index` et lui demande du NV12.
+fn choisir_video(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatVideo> {
     unsafe {
-        reader
-            .SetStreamSelection(VIDEO, true)
-            .context("pas de piste vidéo")?;
+        reader.SetStreamSelection(index, true).context("pas de piste vidéo")?;
         let t = MFCreateMediaType()?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
         reader
-            .SetCurrentMediaType(VIDEO, None, &t)
+            .SetCurrentMediaType(index, None, &t)
             .context("le décodeur ne sait pas rendre du NV12")?;
     }
-    format_video(reader)
+    format_video(reader, index)
 }
 
 /// Lit le format d'image courant — au départ, et quand le lecteur annonce
 /// qu'il a changé (une résolution qui change en cours de fichier).
-fn format_video(reader: &IMFSourceReader) -> anyhow::Result<FormatVideo> {
-    let t = unsafe { reader.GetCurrentMediaType(VIDEO) }.context("format vidéo")?;
+fn format_video(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatVideo> {
+    let t = unsafe { reader.GetCurrentMediaType(index) }.context("format vidéo")?;
     let taille = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE) }.context("taille d'image")?;
     let codee = ((taille >> 32) as usize, (taille & 0xffff_ffff) as usize);
     if codee.0 == 0 || codee.1 == 0 || codee.0 > 8192 || codee.1 > 8192 {
@@ -204,19 +243,11 @@ fn format_video(reader: &IMFSourceReader) -> anyhow::Result<FormatVideo> {
         .filter(|p| *p > 0)
         .map(|p| p as usize)
         .unwrap_or(0);
-    Ok(FormatVideo {
-        codee,
-        decalage,
-        largeur,
-        hauteur,
-        pas,
-    })
+    Ok(FormatVideo { codee, decalage, largeur, hauteur, pas })
 }
 
-fn cadence_images(reader: &IMFSourceReader) -> f32 {
-    let Ok(t) = (unsafe { reader.GetCurrentMediaType(VIDEO) }) else {
-        return 0.0;
-    };
+fn cadence_images(reader: &IMFSourceReader, index: u32) -> f32 {
+    let Ok(t) = (unsafe { reader.GetCurrentMediaType(index) }) else { return 0.0 };
     match unsafe { t.GetUINT64(&MF_MT_FRAME_RATE) } {
         Ok(fr) => {
             let (num, den) = ((fr >> 32) as u32, (fr & 0xffff_ffff) as u32);
@@ -230,23 +261,14 @@ fn cadence_images(reader: &IMFSourceReader) -> f32 {
     }
 }
 
-/// Sélectionne la première piste audio et lui demande du float, à la
+/// Sélectionne la piste audio `index` et lui demande du float, à la
 /// cadence et aux voies du fichier.
-fn choisir_audio(reader: &IMFSourceReader) -> anyhow::Result<FormatAudio> {
+fn choisir_audio(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatAudio> {
     unsafe {
-        reader
-            .SetStreamSelection(AUDIO, true)
-            .context("pas de piste audio")?;
-        let natif = reader
-            .GetNativeMediaType(AUDIO, 0)
-            .context("format audio natif")?;
-        let cadence = natif
-            .GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)
-            .unwrap_or(48_000);
-        let canaux = natif
-            .GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)
-            .unwrap_or(2)
-            .clamp(1, 8);
+        reader.SetStreamSelection(index, true).context("pas de piste audio")?;
+        let natif = reader.GetNativeMediaType(index, 0).context("format audio natif")?;
+        let cadence = natif.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(48_000);
+        let canaux = natif.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2).clamp(1, 8);
         let t = MFCreateMediaType()?;
         t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
         t.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_Float)?;
@@ -257,14 +279,14 @@ fn choisir_audio(reader: &IMFSourceReader) -> anyhow::Result<FormatAudio> {
         t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 4 * canaux * cadence)?;
         t.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
         reader
-            .SetCurrentMediaType(AUDIO, None, &t)
+            .SetCurrentMediaType(index, None, &t)
             .context("le décodeur ne sait pas rendre du float")?;
     }
-    format_audio(reader)
+    format_audio(reader, index)
 }
 
-fn format_audio(reader: &IMFSourceReader) -> anyhow::Result<FormatAudio> {
-    let t = unsafe { reader.GetCurrentMediaType(AUDIO) }.context("format audio")?;
+fn format_audio(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatAudio> {
+    let t = unsafe { reader.GetCurrentMediaType(index) }.context("format audio")?;
     let cadence = unsafe { t.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND) }.context("cadence")?;
     let canaux = unsafe { t.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS) }.context("voies")? as usize;
     if cadence == 0 || canaux == 0 {
@@ -314,13 +336,13 @@ impl LecteurMf {
                 return Ok(None);
             }
             if a(MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-                if flux == VIDEO {
-                    let f = format_video(&self.reader)?;
+                if flux == self.flux_video {
+                    let f = format_video(&self.reader, flux)?;
                     self.infos.largeur = f.largeur as u32;
                     self.infos.hauteur = f.hauteur as u32;
                     self.video = Some(f);
                 } else {
-                    self.audio = Some(format_audio(&self.reader)?);
+                    self.audio = Some(format_audio(&self.reader, flux)?);
                 }
             }
             if let Some(s) = sample {
@@ -364,8 +386,7 @@ impl LecteurMf {
         } else {
             let mut ptr: *mut u8 = null_mut();
             let mut longueur = 0u32;
-            unsafe { buffer.Lock(&mut ptr, None, Some(&mut longueur)) }
-                .context("verrou du tampon")?;
+            unsafe { buffer.Lock(&mut ptr, None, Some(&mut longueur)) }.context("verrou du tampon")?;
             let resultat = if ptr.is_null() {
                 Err(anyhow::anyhow!("tampon d'image vide"))
             } else {
@@ -396,13 +417,7 @@ impl LecteurMf {
         if !ptr.is_null() {
             let octets = unsafe { std::slice::from_raw_parts(ptr, longueur as usize) };
             // Copie par octets : l'alignement d'un tampon COM n'est pas garanti.
-            a.entrelace.extend(
-                octets
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| f32::from_le_bytes(*c)),
-            );
+            a.entrelace.extend(octets.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
         }
         unsafe {
             let _ = buffer.Unlock();
@@ -410,10 +425,7 @@ impl LecteurMf {
         en_mono(&a.entrelace, a.canaux, &mut a.mono);
         let mut mono = Vec::with_capacity(a.mono.len() * 48_000 / a.cadence as usize + 8);
         a.reech.pousser(&a.mono, &mut mono);
-        Ok(Paquet::Audio {
-            pts_ms: horodatage.max(0) as u64 / 10_000,
-            mono,
-        })
+        Ok(Paquet::Audio { pts_ms: horodatage.max(0) as u64 / 10_000, mono })
     }
 }
 
@@ -447,9 +459,7 @@ impl Lecteur for LecteurMf {
                     wReserved1: 0,
                     wReserved2: 0,
                     wReserved3: 0,
-                    Anonymous: PROPVARIANT_0_0_0 {
-                        hVal: (ms.min(i64::MAX as u64 / 10_000) * 10_000) as i64,
-                    },
+                    Anonymous: PROPVARIANT_0_0_0 { hVal: (ms.min(i64::MAX as u64 / 10_000) * 10_000) as i64 },
                 }),
             },
         };
@@ -471,7 +481,7 @@ impl Lecteur for LecteurMf {
                 if self.video.is_none() {
                     return Ok(Paquet::Fin);
                 }
-                match self.lire(VIDEO)? {
+                match self.lire(self.flux_video)? {
                     Some((s, ts)) => Ok(Paquet::Image(self.image(&s, ts)?)),
                     None => Ok(Paquet::Fin),
                 }
@@ -480,11 +490,64 @@ impl Lecteur for LecteurMf {
                 if self.audio.is_none() {
                     return Ok(Paquet::Fin);
                 }
-                match self.lire(AUDIO)? {
+                match self.lire(self.flux_audio)? {
                     Some((s, ts)) => self.son(&s, ts),
                     None => Ok(Paquet::Fin),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sonde manuelle : `KI_MEDIA_FICHIER=chemin cargo test -p ki-media
+    /// sonde_flux -- --ignored --nocapture` liste les flux et l'énergie de
+    /// chaque piste audio — pour comprendre l'ordre que le lecteur donne.
+    #[test]
+    #[ignore]
+    fn sonde_flux() {
+        let Some(chemin) = std::env::var_os("KI_MEDIA_FICHIER") else { return };
+        let reader = lecteur_brut(Path::new(&chemin)).expect("ouverture");
+        for (index, majeur) in enumerer(&reader) {
+            // Un lecteur neuf par flux : lire un flux fait avancer la source
+            // et jette ce que les autres, non sélectionnés, auraient rendu.
+            let reader = lecteur_brut(Path::new(&chemin)).expect("ouverture");
+            let genre = if majeur == MFMediaType_Video {
+                "vidéo"
+            } else if majeur == MFMediaType_Audio {
+                "audio"
+            } else {
+                "autre"
+            };
+            let mut energie = 0.0f32;
+            let mut n = 0usize;
+            if genre == "audio" {
+                let f = choisir_audio(&reader, index).expect("format audio");
+                let mut l = LecteurMf {
+                    reader: reader.clone(),
+                    infos: Infos::default(),
+                    video: None,
+                    audio: Some(f),
+                    flux_video: u32::MAX,
+                    flux_audio: index,
+                };
+                for _ in 0..50 {
+                    match l.suivant(Flux::Audio) {
+                        Ok(Paquet::Audio { mono, .. }) => {
+                            n += mono.len();
+                            energie += mono.iter().map(|v| v * v).sum::<f32>();
+                        }
+                        _ => break,
+                    }
+                }
+                unsafe {
+                    let _ = reader.SetStreamSelection(index, false);
+                }
+            }
+            eprintln!("flux {index} : {genre} — {n} échantillons, énergie {energie}");
         }
     }
 }

@@ -130,6 +130,61 @@ impl Drop for GameAudio {
     }
 }
 
+/// Le son du système, brut : la même boucle « tout sauf ki-chat », mais
+/// remise telle quelle (float 48 kHz stéréo entrelacé) à `recevoir`, sans
+/// encodage — c'est la piste « jeu » d'un clip (PLAN-CLIPS.md, C1). Vit
+/// tant que la poignée vit.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct SonSysteme {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SonSysteme {
+    #[cfg(not(windows))]
+    pub fn start(_recevoir: crate::Robinet) -> anyhow::Result<Self> {
+        anyhow::bail!("la capture du son du système n'existe que sous Windows (boucle WASAPI par processus)")
+    }
+
+    #[cfg(windows)]
+    pub fn start(recevoir: crate::Robinet) -> anyhow::Result<Self> {
+        let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(64);
+        let alive = Arc::new(AtomicBool::new(true));
+        let flux = wasapi::open_loopback(std::process::id(), tx, alive.clone())
+            .context("capture du son du système")?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("son-systeme".into())
+            .spawn(move || {
+                let _flux = flux;
+                while !stop_thread.load(Ordering::Relaxed) {
+                    match rx.recv_timeout(Duration::from_millis(200)) {
+                        Ok(bloc) => recevoir(&bloc),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if !alive.load(Ordering::Relaxed) {
+                                journal("son du système : la capture s'est arrêtée".into());
+                                return;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            })
+            .context("fil du son du système")?;
+        Ok(Self { stop, thread: Some(thread) })
+    }
+}
+
+impl Drop for SonSysteme {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 /// Le lecteur du spectateur : Opus stéréo → mono → la sortie du moteur.
 pub struct Lecteur {
     dec: Decoder,
