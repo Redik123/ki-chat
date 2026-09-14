@@ -55,7 +55,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ki-cargo-registry-$TA
 # Les outils du bot musique, par architecture. yt-dlp et deno publient des
 # empreintes signées ; ffmpeg (BtbN) un fichier de sommes : on vérifie les
 # trois, un téléchargement corrompu ou détourné fait échouer le build.
-FROM debian:bookworm-slim AS outils
+# `--platform=$BUILDPLATFORM` : les outils (curl, tar, unzip, sha256sum) tournent
+# sur la machine de build native sans émulation QEMU, et téléchargent les binaires
+# correspondant à $TARGETARCH.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS outils
 ARG TARGETARCH
 RUN set -eux; \
     apt-get update; \
@@ -67,15 +70,15 @@ RUN set -eux; \
       arm64) yt=yt-dlp_linux_aarch64; ff=linuxarm64; deno=aarch64 ;; \
       *) echo "architecture non prise en charge : $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$yt"; \
-    curl -fsSL -o SHA2-256SUMS "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$yt"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o SHA2-256SUMS "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"; \
     grep " $yt\$" SHA2-256SUMS | sed "s| $yt\$| yt-dlp|" | sha256sum -c -; \
-    curl -fsSL -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-$ff-gpl.tar.xz"; \
-    curl -fsSL -o checksums.sha256 "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/checksums.sha256"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-$ff-gpl.tar.xz"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o checksums.sha256 "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/checksums.sha256"; \
     grep " ffmpeg-master-latest-$ff-gpl.tar.xz\$" checksums.sha256 | sed "s| ffmpeg-master-latest-$ff-gpl.tar.xz\$| ffmpeg.tar.xz|" | sha256sum -c -; \
     tar -xJf ffmpeg.tar.xz --wildcards --strip-components=2 '*/bin/ffmpeg' '*/bin/ffprobe'; \
-    curl -fsSL -o deno.zip "https://github.com/denoland/deno/releases/latest/download/deno-$deno-unknown-linux-gnu.zip"; \
-    curl -fsSL -o deno.zip.sha256sum "https://github.com/denoland/deno/releases/latest/download/deno-$deno-unknown-linux-gnu.zip.sha256sum"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o deno.zip "https://github.com/denoland/deno/releases/latest/download/deno-$deno-unknown-linux-gnu.zip"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o deno.zip.sha256sum "https://github.com/denoland/deno/releases/latest/download/deno-$deno-unknown-linux-gnu.zip.sha256sum"; \
     sed "s| .*| deno.zip|" deno.zip.sha256sum | sha256sum -c -; \
     unzip -q deno.zip deno; \
     chmod 0755 yt-dlp ffmpeg ffprobe deno; \
