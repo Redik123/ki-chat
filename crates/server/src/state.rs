@@ -423,6 +423,9 @@ pub struct AppState {
     pub sas: Arc<Sas>,
     /// Bornes du partage de fichiers (plafond global, durée de vie).
     pub files_quota: crate::files::Quota,
+    /// Les mêmes pour les clips partagés, à part : un clip pèse dix fois
+    /// une photo, une soirée de clips ne doit pas effacer les partages.
+    pub clips_quota: crate::files::Quota,
     pub data_dir: String,
     pub users: Mutex<HashMap<UserId, ConnectedUser>>,
     pub voice_routes: std::sync::RwLock<RouteTable>,
@@ -444,6 +447,7 @@ impl AppState {
         token: String,
         data_dir: &str,
         files_quota: crate::files::Quota,
+        clips_quota: crate::files::Quota,
         fichier_max_mb: u64,
     ) -> anyhow::Result<Self> {
         // Les salons ne sont plus câblés : ils vivent dans channels.json,
@@ -471,6 +475,7 @@ impl AppState {
             throttle: Throttle::default(),
             sas: Arc::new(Sas::default()),
             files_quota,
+            clips_quota,
             data_dir: data_dir.to_string(),
             users: Mutex::new(HashMap::new()),
             voice_routes: std::sync::RwLock::new(RouteTable::default()),
@@ -854,6 +859,17 @@ impl AppState {
     /// réservé et l'identifiant 0, qu'aucun compte ne porte. Un salon
     /// disparu ou non textuel avale le message sans bruit.
     pub fn poster_systeme(&self, channel: ChannelId, username: &str, text: &str) {
+        self.poster(channel, 0, username, text);
+    }
+
+    /// Poste un message au nom d'un membre — le partage d'un clip, une fois
+    /// le fichier reçu. Le texte est déjà nettoyé (`clean_chat`) ; salon,
+    /// visibilité et permission ont été vérifiés par l'appelant.
+    pub fn poster_membre(&self, channel: ChannelId, user_id: UserId, username: &str, text: &str) {
+        self.poster(channel, user_id, username, text);
+    }
+
+    fn poster(&self, channel: ChannelId, user_id: UserId, username: &str, text: &str) {
         let textuel = self
             .channels
             .list()
@@ -868,7 +884,7 @@ impl AppState {
             .unwrap_or(0);
         let ts = self.history.unique_ts(channel, maintenant);
         let rec = ki_protocol::ChatRecord {
-            user_id: 0,
+            user_id,
             username: username.to_string(),
             text: text.to_string(),
             ts,
@@ -880,7 +896,7 @@ impl AppState {
             channel,
             None,
             &ServerMsg::Chat {
-                user_id: 0,
+                user_id,
                 username: username.to_string(),
                 text: text.to_string(),
                 ts,

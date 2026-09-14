@@ -186,23 +186,27 @@ pub async fn download(
         return StatusCode::NOT_FOUND.into_response();
     }
     let name = sanitize(&name);
-    let path = files_dir(&state).join(&file_id).join(&name);
     let (mime, en_ligne) = type_mime(&name);
     let disposition = if en_ligne { "inline" } else { "attachment" };
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, mime.to_string()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("{disposition}; filename=\"{name}\""),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    // Les fichiers partagés, puis les clips : les deux stocks se servent
+    // par le même chemin, leurs identifiants sont aléatoires dans les deux.
+    for racine in [files_dir(&state), crate::clips::dossier(&state)] {
+        let path = racine.join(&file_id).join(&name);
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            return (
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("{disposition}; filename=\"{name}\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response();
+        }
     }
+    StatusCode::NOT_FOUND.into_response()
 }
 
 /// Un fichier partagé tel qu'il vit sur le disque : la disposition est

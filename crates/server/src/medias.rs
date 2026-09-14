@@ -38,13 +38,15 @@ pub const MORCEAU_MAX: usize = 8 * 1024 * 1024;
 /// Taille maximale d'un fichier assemblé, par défaut (`KI_FILES_MAX_FILE_MB`).
 pub const DEFAULT_FICHIER_MAX_MB: u64 = 512;
 /// Nombre maximal de morceaux : 512 Mo à 8 Mo le morceau.
-const MORCEAUX_MAX: u32 = 64;
+pub(crate) const MORCEAUX_MAX: u32 = 64;
 /// Un téléversement commencé et jamais terminé est jeté après ça.
 pub const PARTIEL_AGE_MAX: Duration = Duration::from_secs(3600);
 /// Temps accordé à ffmpeg pour une conversion.
 const CONVERSION_MAX: Duration = Duration::from_secs(900);
 /// Au-delà, on réencode : un clip déjà propre en dessous passe tel quel.
-const DEBIT_COPIE_MAX: u64 = 12_000_000;
+/// Le débit compté est celui de la piste vidéo quand le fichier le dit —
+/// un clip « équilibré » de l'enregistreur vise 12 Mbit/s et les frôle.
+const DEBIT_COPIE_MAX: u64 = 13_000_000;
 
 /// Extensions traitées comme des vidéos.
 const VIDEO_SUFFIXES: [&str; 6] = [".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi"];
@@ -79,6 +81,29 @@ pub struct Meta {
     /// Le nom du MP4 à produire.
     #[serde(default)]
     pub sortie: Option<String>,
+    /// Un clip partagé (`clips.rs`) plutôt qu'une vidéo ordinaire : la
+    /// version partagée ne porte qu'une piste son.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clip: bool,
+    /// Garder la source après conversion (l'atelier en aura besoin).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub garder_source: bool,
+    /// Qui a partagé, où, avec quelle légende, sous quel nom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auteur: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salon: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legende: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nom: Option<String>,
+    /// Les pistes de la source après le mélange, dans l'ordre du fichier ;
+    /// `None` = inconnues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pistes: Option<Vec<String>>,
+    /// Garder les voix des copains dans la version partagée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voix: Option<bool>,
 }
 
 /// Les outils, trouvés au démarrage.
@@ -122,7 +147,7 @@ impl Fabrique {
         self.outils.is_some()
     }
 
-    fn deposer(&self, dossier: PathBuf) {
+    pub(crate) fn deposer(&self, dossier: PathBuf) {
         self.file.lock().unwrap().push(Travail { dossier });
         self.reveil.notify_one();
     }
@@ -175,11 +200,11 @@ pub struct ParamsFin {
 
 /// Identifiant de téléversement : hexadécimal, 8 à 32 caractères, choisi
 /// par le client. Il ne désigne jamais rien hors de son propre dossier.
-fn upload_valide(id: &str) -> bool {
+pub(crate) fn upload_valide(id: &str) -> bool {
     (8..=32).contains(&id.len()) && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn dossier_partiel(state: &AppState, user_id: u64, upload: &str) -> PathBuf {
+pub(crate) fn dossier_partiel(state: &AppState, user_id: u64, upload: &str) -> PathBuf {
     PathBuf::from(&state.data_dir)
         .join("upload-partiel")
         .join(user_id.to_string())
@@ -187,7 +212,7 @@ fn dossier_partiel(state: &AppState, user_id: u64, upload: &str) -> PathBuf {
 }
 
 /// Qui envoie : le jeton voix de la session, et le droit de partager.
-fn authentifier(
+pub(crate) fn authentifier(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(u64, String), (StatusCode, &'static str)> {
@@ -279,36 +304,8 @@ pub async fn upload_fin(
     let quota = state.files_quota.max_bytes;
     let parts = params.parts;
     let assemble =
-        tokio::task::spawn_blocking(move || -> Result<(String, PathBuf, u64), String> {
-            let mut total: u64 = 0;
-            let mut morceaux = Vec::with_capacity(parts as usize);
-            for i in 0..parts {
-                let m = partiel.join(format!("{i:05}"));
-                let taille = std::fs::metadata(&m)
-                    .map_err(|_| "il manque un morceau".to_string())?
-                    .len();
-                total += taille;
-                morceaux.push(m);
-            }
-            if quota > 0 && files::used_bytes(&racine).saturating_add(total) > quota {
-                let _ = std::fs::remove_dir_all(&partiel);
-                return Err("espace de partage saturé sur le serveur — préviens un admin".into());
-            }
-            let file_id = files::nouvel_id();
-            let dossier = racine.join(&file_id);
-            std::fs::create_dir_all(&dossier).map_err(|e| e.to_string())?;
-            let cible = dossier.join(&nom_ferme);
-            {
-                let mut sortie = std::fs::File::create(&cible).map_err(|e| e.to_string())?;
-                for m in &morceaux {
-                    let mut entree = std::fs::File::open(m).map_err(|e| e.to_string())?;
-                    std::io::copy(&mut entree, &mut sortie).map_err(|e| e.to_string())?;
-                }
-            }
-            let _ = std::fs::remove_dir_all(&partiel);
-            Ok((file_id, dossier, total))
-        })
-        .await;
+        tokio::task::spawn_blocking(move || assembler(&partiel, parts, &racine, quota, &nom_ferme))
+            .await;
     let (file_id, dossier, total) = match assemble {
         Ok(Ok(x)) => x,
         Ok(Err(e)) => {
@@ -330,6 +327,45 @@ pub async fn upload_fin(
     );
     let url = finaliser(&state, &file_id, &dossier, &nom);
     Json(serde_json::json!({ "url": url })).into_response()
+}
+
+/// Assemble les morceaux d'un téléversement dans `racine/<id neuf>/<nom>`,
+/// sous le plafond du stock (0 = sans plafond). Rend l'identifiant, le
+/// dossier et la taille. Le dossier des morceaux est jeté dans tous les cas.
+pub(crate) fn assembler(
+    partiel: &Path,
+    parts: u32,
+    racine: &Path,
+    quota: u64,
+    nom: &str,
+) -> Result<(String, PathBuf, u64), String> {
+    let mut total: u64 = 0;
+    let mut morceaux = Vec::with_capacity(parts as usize);
+    for i in 0..parts {
+        let m = partiel.join(format!("{i:05}"));
+        let taille = std::fs::metadata(&m)
+            .map_err(|_| "il manque un morceau".to_string())?
+            .len();
+        total += taille;
+        morceaux.push(m);
+    }
+    if quota > 0 && files::used_bytes(racine).saturating_add(total) > quota {
+        let _ = std::fs::remove_dir_all(partiel);
+        return Err("espace de partage saturé sur le serveur — préviens un admin".into());
+    }
+    let file_id = files::nouvel_id();
+    let dossier = racine.join(&file_id);
+    std::fs::create_dir_all(&dossier).map_err(|e| e.to_string())?;
+    let cible = dossier.join(nom);
+    {
+        let mut sortie = std::fs::File::create(&cible).map_err(|e| e.to_string())?;
+        for m in &morceaux {
+            let mut entree = std::fs::File::open(m).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entree, &mut sortie).map_err(|e| e.to_string())?;
+        }
+    }
+    let _ = std::fs::remove_dir_all(partiel);
+    Ok((file_id, dossier, total))
 }
 
 /// Un fichier vient d'être rangé dans son dossier : s'il s'agit d'une
@@ -366,7 +402,7 @@ pub fn finaliser(state: &AppState, file_id: &str, dossier: &Path, nom: &str) -> 
     format!("/files/{file_id}/{sortie}")
 }
 
-fn ecrire_meta(dossier: &Path, meta: &Meta) {
+pub(crate) fn ecrire_meta(dossier: &Path, meta: &Meta) {
     if let Ok(json) = serde_json::to_vec_pretty(meta) {
         if let Err(e) = crate::store::write_atomic(&dossier.join("meta.json"), &json) {
             tracing::error!("meta.json non écrit : {e}");
@@ -386,8 +422,12 @@ fn lire_meta(dossier: &Path) -> Option<Meta> {
 /// Au démarrage : les vidéos laissées « en préparation » par un arrêt
 /// repassent en file.
 pub fn reprendre(state: &AppState) {
-    let racine = PathBuf::from(&state.data_dir).join("files");
-    let Ok(entrees) = std::fs::read_dir(&racine) else {
+    reprendre_dans(state, &PathBuf::from(&state.data_dir).join("files"));
+}
+
+/// Idem pour un stock donné (les fichiers, ou les clips).
+pub(crate) fn reprendre_dans(state: &AppState, racine: &Path) {
+    let Ok(entrees) = std::fs::read_dir(racine) else {
         return;
     };
     let mut n = 0;
@@ -403,7 +443,7 @@ pub fn reprendre(state: &AppState) {
         }
     }
     if n > 0 {
-        tracing::info!("médias : {n} vidéo(s) à reprendre");
+        tracing::info!("médias : {n} vidéo(s) à reprendre dans {}", racine.display());
     }
 }
 
@@ -441,9 +481,14 @@ pub async fn boucle(state: Arc<AppState>) {
 struct Sonde {
     duree_s: f32,
     debit: u64,
+    /// Le débit de la piste vidéo seule, si le conteneur le porte (MP4) :
+    /// c'est lui qui décide de la copie, pas le total avec quatre pistes son.
+    debit_video: u64,
     conteneur: String,
     video: Option<(String, u32, u32)>,
     audio: Option<String>,
+    /// Nombre de pistes son.
+    pistes_audio: u32,
 }
 
 fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
@@ -453,7 +498,7 @@ fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
                 "-v",
                 "error",
                 "-show_entries",
-                "format=duration,bit_rate,format_name:stream=codec_type,codec_name,width,height",
+                "format=duration,bit_rate,format_name:stream=codec_type,codec_name,width,height,bit_rate",
                 "-of",
                 "json",
             ])
@@ -480,14 +525,73 @@ fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
             Some("video") if sonde.video.is_none() => {
                 let w = s["width"].as_u64().unwrap_or(0) as u32;
                 let h = s["height"].as_u64().unwrap_or(0) as u32;
+                sonde.debit_video = s["bit_rate"].as_str().and_then(|b| b.parse().ok()).unwrap_or(0);
                 sonde.video = Some((codec, w, h));
             }
-            Some("audio") if sonde.audio.is_none() => sonde.audio = Some(codec),
+            Some("audio") => {
+                sonde.pistes_audio += 1;
+                if sonde.audio.is_none() {
+                    sonde.audio = Some(codec);
+                }
+            }
             _ => {}
         }
     }
     Ok(sonde)
 }
+
+/// Comment le son de la version partagée est composé. Une vidéo ordinaire
+/// garde tout ; un clip ne livre qu'une piste — le mélange, ou un mélange
+/// refait sans les voix des copains — : les pistes séparées ne quittent
+/// pas le dossier du clip.
+#[derive(Debug, PartialEq, Eq)]
+enum Son {
+    /// Vidéo ordinaire : tout ce que la source a.
+    Tout,
+    /// Une piste de la source, copiée (`0:a:N`).
+    Piste(u32),
+    /// Un mélange refait de ces pistes de la source.
+    Melange(Vec<u32>),
+    /// Muet.
+    Aucun,
+}
+
+fn plan_son(meta: &Meta) -> Son {
+    if !meta.clip {
+        return Son::Tout;
+    }
+    // La source d'un clip : le mélange en première piste, puis chaque
+    // source dans l'ordre de `pistes` — quand le client les connaît.
+    let pistes = meta.pistes.clone().unwrap_or_default();
+    let copains = pistes.iter().position(|p| p == "copains");
+    if meta.pistes.as_ref().is_some_and(|p| p.is_empty()) {
+        return Son::Aucun;
+    }
+    if meta.voix.unwrap_or(true) || copains.is_none() {
+        return Son::Piste(0);
+    }
+    let gardees: Vec<u32> = pistes
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| *p != "copains")
+        .map(|(i, _)| i as u32 + 1)
+        .collect();
+    match gardees.len() {
+        0 => Son::Aucun,
+        1 => Son::Piste(gardees[0]),
+        _ => Son::Melange(gardees),
+    }
+}
+
+/// Les arguments vidéo d'un réencodage : x264 rapide, 1080p au plus.
+const VIDEO_X264: [&str; 17] = [
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    "-maxrate", "8M", "-bufsize", "16M", "-profile:v", "high", "-bf", "0",
+    "-pix_fmt", "yuv420p",
+    "-vf",
+];
+const ECHELLE_1080: &str =
+    "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2";
 
 /// Refait la vidéo du dossier en MP4 lisible partout, avec poster et fiche.
 fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
@@ -499,30 +603,56 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
     let resultat = (|| -> Result<(), String> {
         let sonde = sonder(outils, &chemin_source)?;
         let (codec_v, w, h) = sonde.video.clone().ok_or("aucune piste vidéo")?;
+        let debit = if sonde.debit_video > 0 { sonde.debit_video } else { sonde.debit };
         let copie = sonde.conteneur.contains("mp4")
             && codec_v == "h264"
             && sonde.audio.as_deref().is_none_or(|a| a == "aac")
             && w <= 1920
             && h <= 1920
-            && sonde.debit > 0
-            && sonde.debit <= DEBIT_COPIE_MAX;
+            && debit > 0
+            && debit <= DEBIT_COPIE_MAX;
         let mut cmd = Command::new(&outils.ffmpeg);
         cmd.args(["-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
             .arg(&chemin_source);
-        if copie {
-            cmd.args(["-map", "0", "-c", "copy", "-movflags", "+faststart"]);
-        } else {
-            cmd.args([
-                "-map", "0:v:0", "-map", "0:a:0?",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-maxrate", "8M", "-bufsize", "16M", "-profile:v", "high", "-bf", "0",
-                "-pix_fmt", "yuv420p",
-                "-vf", "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-                "-movflags", "+faststart",
-            ]);
+        match plan_son(&meta) {
+            Son::Tout if copie => {
+                cmd.args(["-map", "0", "-c", "copy"]);
+            }
+            Son::Tout => {
+                cmd.args(["-map", "0:v:0", "-map", "0:a:0?"])
+                    .args(VIDEO_X264)
+                    .arg(ECHELLE_1080)
+                    .args(["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]);
+            }
+            son => {
+                // Un clip : la vidéo telle quelle si elle est propre, et
+                // une seule piste son, composée d'après la fiche.
+                if copie {
+                    cmd.args(["-map", "0:v:0", "-c:v", "copy"]);
+                } else {
+                    cmd.args(["-map", "0:v:0"]).args(VIDEO_X264).arg(ECHELLE_1080);
+                }
+                match son {
+                    Son::Aucun => {
+                        cmd.arg("-an");
+                    }
+                    Son::Piste(n) => {
+                        cmd.args(["-map", &format!("0:a:{n}?"), "-c:a", "copy"]);
+                    }
+                    Son::Melange(indices) => {
+                        let entrees: String = indices.iter().map(|i| format!("[0:a:{i}]")).collect();
+                        cmd.args([
+                            "-filter_complex",
+                            &format!("{entrees}amix=inputs={}:normalize=0[son]", indices.len()),
+                            "-map", "[son]",
+                            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+                        ]);
+                    }
+                    Son::Tout => unreachable!("traité au-dessus"),
+                }
+            }
         }
-        cmd.arg(&chemin_sortie);
+        cmd.args(["-movflags", "+faststart"]).arg(&chemin_sortie);
         executer_borne(&mut cmd, CONVERSION_MAX).map_err(|e| format!("ffmpeg : {e}"))?;
         let apres = sonder(outils, &chemin_sortie)?;
         let (_, w2, h2) = apres.video.ok_or("la conversion n'a pas produit d'image")?;
@@ -567,13 +697,20 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // La source d'un clip reste pour l'atelier ; celle d'une vidéo
+    // ordinaire n'a plus d'usage une fois convertie.
+    let lacher_source = |meta: &mut Meta| {
+        if !meta.garder_source {
+            meta.source = None;
+            let _ = std::fs::remove_file(&chemin_source);
+        }
+    };
     match resultat {
         Ok(()) => {
             meta.etat = "pret".into();
             meta.poster = Some(format!("/files/{id}/poster.jpg"));
-            meta.source = None;
             meta.message = None;
-            let _ = std::fs::remove_file(&chemin_source);
+            lacher_source(&mut meta);
             ecrire_meta(dossier, &meta);
             Ok(meta)
         }
@@ -583,8 +720,7 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
                 "vidéo illisible : {}",
                 e.chars().take(160).collect::<String>()
             ));
-            meta.source = None;
-            let _ = std::fs::remove_file(&chemin_source);
+            lacher_source(&mut meta);
             let _ = std::fs::remove_file(&chemin_sortie);
             ecrire_meta(dossier, &meta);
             Err(e)
@@ -632,6 +768,33 @@ mod tests {
         assert!(est_video("IMG_0001.MOV"));
         assert!(!est_video("photo.png"));
         assert!(!est_video("archive.zip"));
+    }
+
+    #[test]
+    fn le_son_d_un_clip_se_compose_d_apres_la_fiche() {
+        let clip = |pistes: Option<&[&str]>, voix: Option<bool>| Meta {
+            clip: true,
+            pistes: pistes.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            voix,
+            ..Default::default()
+        };
+        // Une vidéo ordinaire garde tout.
+        assert_eq!(plan_son(&Meta::default()), Son::Tout);
+        // Le mélange, tel quel : voix gardées, ou pas de piste des copains,
+        // ou pistes inconnues.
+        assert_eq!(plan_son(&clip(Some(&["jeu", "micro", "copains"]), Some(true))), Son::Piste(0));
+        assert_eq!(plan_son(&clip(Some(&["jeu", "micro"]), Some(false))), Son::Piste(0));
+        assert_eq!(plan_son(&clip(None, Some(false))), Son::Piste(0));
+        // Sans les copains : un mélange refait des autres, ou l'autre seule.
+        assert_eq!(
+            plan_son(&clip(Some(&["jeu", "micro", "copains"]), Some(false))),
+            Son::Melange(vec![1, 2])
+        );
+        assert_eq!(plan_son(&clip(Some(&["jeu", "copains"]), Some(false))), Son::Piste(1));
+        assert_eq!(plan_son(&clip(Some(&["micro", "copains"]), Some(false))), Son::Piste(1));
+        // Rien que les copains, retirés : muet. Aucune piste : muet.
+        assert_eq!(plan_son(&clip(Some(&["copains"]), Some(false))), Son::Aucun);
+        assert_eq!(plan_son(&clip(Some(&[]), Some(true))), Son::Aucun);
     }
 
     #[test]
@@ -747,6 +910,64 @@ mod tests {
         let sonde = sonder(&outils, &dossier.join("IMG_0001.mp4")).unwrap();
         assert_eq!(sonde.video.as_ref().map(|v| v.0.as_str()), Some("h264"));
         assert_eq!(sonde.audio.as_deref(), Some("aac"));
+        let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    #[test]
+    fn un_clip_partage_ne_livre_qu_une_piste_son_et_garde_sa_source() {
+        let Some(outils) = detecter() else {
+            eprintln!("ffmpeg absent : test sauté");
+            return;
+        };
+        let dossier = std::env::temp_dir().join(format!("ki-medias-clip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).unwrap();
+        // Ce que l'enregistreur écrit : H.264 propre, et quatre pistes AAC —
+        // le mélange, le jeu, le micro, les copains.
+        let Some(_) = fabriquer(
+            &dossier,
+            "source.mp4",
+            &[
+                "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000",
+                "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000",
+                "-f", "lavfi", "-i", "sine=frequency=1100:sample_rate=48000",
+                "-t", "2",
+                "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a", "-map", "4:a",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-ac", "2",
+            ],
+        ) else {
+            eprintln!("libx264 absent : test sauté");
+            return;
+        };
+        assert_eq!(sonder(&outils, &dossier.join("source.mp4")).unwrap().pistes_audio, 4);
+        let meta = Meta {
+            etat: "en_preparation".into(),
+            source: Some("source.mp4".into()),
+            sortie: Some("clip.mp4".into()),
+            clip: true,
+            garder_source: true,
+            pistes: Some(vec!["jeu".into(), "micro".into(), "copains".into()]),
+            voix: Some(false),
+            ..Default::default()
+        };
+        ecrire_meta(&dossier, &meta);
+        let meta = normaliser(&outils, &dossier).expect("normalisation du clip");
+        assert_eq!(meta.etat, "pret");
+        assert!((1.5..=2.5).contains(&meta.duree_s), "durée {}", meta.duree_s);
+        // Une seule piste : le mélange refait du jeu et du micro, sans les
+        // copains. Les pistes séparées ne sortent pas du dossier.
+        let sonde = sonder(&outils, &dossier.join("clip.mp4")).unwrap();
+        assert_eq!(sonde.pistes_audio, 1);
+        assert_eq!(sonde.video.as_ref().map(|v| v.0.as_str()), Some("h264"));
+        assert!(dossier.join("poster.jpg").is_file());
+        // La source reste, et la fiche s'en souvient.
+        assert!(dossier.join("source.mp4").is_file(), "la source d'un clip est gardée");
+        let relue = lire_meta(&dossier).unwrap();
+        assert_eq!(relue.source.as_deref(), Some("source.mp4"));
+        assert!(relue.clip && relue.garder_source);
         let _ = std::fs::remove_dir_all(&dossier);
     }
 

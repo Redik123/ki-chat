@@ -477,6 +477,16 @@ pub async fn resume(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     // ici, les soirs de pointe.
     texte.push_str("\n\n");
     texte.push_str(&state.valorant.compteurs_texte());
+    // Les deux stocks face à leur plafond : un disque qui se remplit se
+    // voit ici avant de se voir ailleurs.
+    let stockage = {
+        let s = state.clone();
+        tokio::task::spawn_blocking(move || crate::clips::resume_stockage(&s))
+            .await
+            .unwrap_or_default()
+    };
+    texte.push_str("\n\n");
+    texte.push_str(&stockage);
     (StatusCode::OK, texte).into_response()
 }
 

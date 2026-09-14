@@ -14,12 +14,16 @@
 //!                       0 = conservation sans limite d'âge)
 //!   KI_FILES_MAX_FILE_MB plafond d'un fichier envoyé par morceaux (défaut
 //!                       512 Mo) — les vidéos ; un bloc simple reste à 25 Mo
+//!   KI_CLIPS_MAX_BYTES  plafond de data/clips/, les clips partagés (défaut
+//!                       8 Gio, 0 = illimité), purgé comme les fichiers
+//!   KI_CLIPS_TTL_DAYS   durée de vie d'un clip partagé (défaut 60 jours)
 //!   KI_FFMPEG, KI_FFPROBE  les outils vidéo (défaut : dans le PATH) ; sans
 //!                       eux, les vidéos partagées ne sont pas converties
 
 mod accounts;
 mod audit;
 mod channels;
+mod clips;
 mod diag;
 mod files;
 mod history;
@@ -65,28 +69,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let fichier_max_mb = env_u64("KI_FILES_MAX_FILE_MB", medias::DEFAULT_FICHIER_MAX_MB);
-    let state = Arc::new(AppState::new(token, &data_dir, files_quota, fichier_max_mb)?);
+    let clips_quota = files::Quota {
+        max_bytes: env_u64("KI_CLIPS_MAX_BYTES", clips::DEFAULT_MAX_BYTES),
+        ttl_days: env_u64("KI_CLIPS_TTL_DAYS", clips::DEFAULT_TTL_DAYS),
+    };
+    let state = Arc::new(AppState::new(token, &data_dir, files_quota, clips_quota, fichier_max_mb)?);
 
-    // Purge du partage de fichiers. Sans elle, data/files/ ne fait que
-    // grandir : sur le petit VPS qui héberge le serveur, le disque finit par
-    // se remplir, et ce n'est pas seulement le partage qui tombe — plus
-    // d'historique écrit, plus de sauvegarde des comptes.
-    if files_quota.enabled() {
-        let root = std::path::PathBuf::from(&data_dir).join("files");
-        tokio::spawn(async move {
-            loop {
-                // Parcours de dossier et suppressions : sur le pool bloquant,
-                // jamais sur la boucle qui relaie la voix.
-                let dir = root.clone();
-                if let Err(e) =
-                    tokio::task::spawn_blocking(move || files::sweep(&dir, files_quota)).await
-                {
-                    tracing::error!("purge du partage interrompue : {e}");
-                }
-                tokio::time::sleep(files::SWEEP_INTERVAL).await;
-            }
-        });
-    }
+    // Purge du partage de fichiers, et des clips à part. Sans elle,
+    // data/files/ ne fait que grandir : sur le petit VPS qui héberge le
+    // serveur, le disque finit par se remplir, et ce n'est pas seulement le
+    // partage qui tombe — plus d'historique écrit, plus de sauvegarde des
+    // comptes.
+    purger_en_boucle(std::path::PathBuf::from(&data_dir).join("files"), files_quota, "partage");
+    purger_en_boucle(std::path::PathBuf::from(&data_dir).join("clips"), clips_quota, "clips");
 
     // Transport QUIC : contrôle + voix sur une seule connexion chiffrée.
     // Sans lui il ne reste qu'un serveur de fichiers : ni chat, ni voix, ni
@@ -123,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     // fois ; celles qu'un arrêt a laissées en plan repartent d'abord. Et les
     // téléversements par morceaux abandonnés sont balayés à leur rythme.
     medias::reprendre(&state);
+    clips::reprendre(&state);
     tokio::spawn(medias::boucle(state.clone()));
     {
         let data_dir = data_dir.clone();
@@ -224,6 +220,9 @@ async fn main() -> anyhow::Result<()> {
             post(medias::upload_partiel).layer(DefaultBodyLimit::max(medias::MORCEAU_MAX + 1024)),
         )
         .route("/upload/fin", post(medias::upload_fin))
+        // Un clip : les mêmes morceaux, un autre stock, et le message posté
+        // au nom du membre dans le salon choisi.
+        .route("/clips/fin", post(clips::fin))
         // Diagnostics partagés : dépôt par les clients volontaires (jeton
         // voix), classement par version, lecture et purge par l'admin
         // (session ADMINISTRATOR ou jeton data/diag.token).
@@ -256,6 +255,24 @@ async fn main() -> anyhow::Result<()> {
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
+}
+
+/// La purge d'un stock, toutes les heures, tant que le serveur tourne.
+fn purger_en_boucle(root: std::path::PathBuf, quota: files::Quota, quoi: &'static str) {
+    if !quota.enabled() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            // Parcours de dossier et suppressions : sur le pool bloquant,
+            // jamais sur la boucle qui relaie la voix.
+            let dir = root.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || files::sweep(&dir, quota)).await {
+                tracing::error!("purge ({quoi}) interrompue : {e}");
+            }
+            tokio::time::sleep(files::SWEEP_INTERVAL).await;
+        }
+    });
 }
 
 fn env_port(var: &str, default: u16) -> u16 {

@@ -653,6 +653,8 @@ struct KiApp {
     /// La galerie : ouverte, sa liste, ses vignettes (None = illisible),
     /// celles en cours de décodage, et ce que les fils rapportent.
     show_clips: bool,
+    /// La boîte « Partager le clip », quand elle est ouverte.
+    clips_partage: Option<PartageClip>,
     clips_liste: Vec<clips::ClipInfo>,
     clips_vignettes: HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
     clips_vignettes_en_vol: std::collections::HashSet<std::path::PathBuf>,
@@ -1037,6 +1039,7 @@ impl KiApp {
             enregistreur: None,
             clips_branche: None,
             show_clips: false,
+            clips_partage: None,
             clips_liste: Vec::new(),
             clips_vignettes: HashMap::new(),
             clips_vignettes_en_vol: std::collections::HashSet::new(),
@@ -2156,6 +2159,7 @@ impl KiApp {
         let mut ouvrir: Option<std::path::PathBuf> = None;
         let mut supprimer: Option<std::path::PathBuf> = None;
         let mut montrer: Option<std::path::PathBuf> = None;
+        let mut partager: Option<clips::ClipInfo> = None;
         // 1 démarrer, 2 arrêter, 3 clip maintenant, 4 actualiser, 5 dossier.
         let mut action = 0u8;
         let etat = self.enregistreur.as_ref().map(|e| e.etat());
@@ -2310,6 +2314,10 @@ impl KiApp {
                                     ouvrir = Some(c.chemin.clone());
                                     ui.close();
                                 }
+                                if ui.button("Partager dans un salon…").clicked() {
+                                    partager = Some(c.clone());
+                                    ui.close();
+                                }
                                 if ui.button("Voir dans le dossier").clicked() {
                                     montrer = Some(c.chemin.clone());
                                     ui.close();
@@ -2340,6 +2348,9 @@ impl KiApp {
         if let Some(p) = montrer {
             clips::montrer_dans_le_dossier(&p);
         }
+        if let Some(c) = partager {
+            self.ouvrir_partage_clip(c);
+        }
         if let Some(p) = ouvrir {
             let liste: Vec<visionneuse::Cible> =
                 self.clips_liste.iter().map(|c| visionneuse::Cible::Fichier(c.chemin.clone())).collect();
@@ -2352,6 +2363,218 @@ impl KiApp {
         if !open {
             self.show_clips = false;
         }
+    }
+
+    /// « Partager dans un salon… » depuis la galerie : la boîte s'ouvre sur
+    /// le salon courant.
+    fn ouvrir_partage_clip(&mut self, c: clips::ClipInfo) {
+        if self.conn.is_none() {
+            self.info = Some("connecte-toi d'abord pour partager un clip".into());
+            return;
+        }
+        if !self.can(ki_protocol::perm::UPLOAD_FILE) {
+            self.info = Some("tu n'as pas le droit de partager des fichiers".into());
+            return;
+        }
+        let textuels: Vec<&ChannelInfo> =
+            self.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
+        let salon = self
+            .current
+            .filter(|id| textuels.iter().any(|ch| ch.id == *id))
+            .or_else(|| textuels.iter().min_by_key(|ch| ch.position).map(|ch| ch.id));
+        self.clips_partage = Some(PartageClip {
+            chemin: c.chemin,
+            nom: c.nom,
+            taille: c.taille,
+            fiche: c.fiche,
+            salon,
+            legende: String::new(),
+            voix: true,
+            envoi: None,
+        });
+    }
+
+    /// La boîte « Partager le clip » : le salon, une légende, les voix des
+    /// copains ; puis l'envoi, dont on suit la progression ici même.
+    fn partage_clip_window(&mut self, ctx: &egui::Context) {
+        // L'envoi a abouti : on le dit, et la boîte se ferme.
+        let abouti = self
+            .clips_partage
+            .as_ref()
+            .and_then(|p| p.envoi.as_ref())
+            .is_some_and(|e| matches!(e.lock().unwrap().fini, Some(Ok(()))));
+        if abouti {
+            let salon = self
+                .clips_partage
+                .as_ref()
+                .and_then(|p| p.salon)
+                .and_then(|id| self.channels.iter().find(|ch| ch.id == id))
+                .map(|ch| ch.name.clone())
+                .unwrap_or_default();
+            self.info = Some(format!(
+                "clip partagé dans #{salon} — il apparaît dès que le serveur l'a préparé"
+            ));
+            self.clips_partage = None;
+            return;
+        }
+        let salons: Vec<(ChannelId, String)> = {
+            let mut v: Vec<&ChannelInfo> =
+                self.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
+            v.sort_by_key(|ch| ch.position);
+            v.iter().map(|ch| (ch.id, ch.name.clone())).collect()
+        };
+        let Some(p) = self.clips_partage.as_mut() else { return };
+        let etat = p.envoi.as_ref().map(|e| e.lock().unwrap().clone());
+        let en_cours = matches!(&etat, Some(EnvoiClip { fini: None, .. }));
+        if en_cours {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        let mut lancer = false;
+        let mut fermer = false;
+        egui::Window::new("Partager le clip")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                ui.label(RichText::new(&p.nom).color(TEXT).strong());
+                let duree = p
+                    .fiche
+                    .as_ref()
+                    .filter(|f| f.duree_s > 0.0)
+                    .map(|f| format!(" · {:.0} s", f.duree_s))
+                    .unwrap_or_default();
+                ui::hint(ui, &format!("{}{duree}", clips::taille_lisible(p.taille)));
+                ui.add_space(8.0);
+                ui::field_label(ui, "Salon");
+                let nom_salon = salons
+                    .iter()
+                    .find(|(id, _)| Some(*id) == p.salon)
+                    .map(|(_, nom)| format!("#{nom}"))
+                    .unwrap_or_else(|| "choisir…".into());
+                egui::ComboBox::from_id_salt("partage-clip-salon")
+                    .selected_text(nom_salon)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (id, nom) in &salons {
+                            ui.selectable_value(&mut p.salon, Some(*id), format!("#{nom}"));
+                        }
+                    });
+                ui.add_space(6.0);
+                ui::field_label(ui, "Légende");
+                ui.add(
+                    egui::TextEdit::singleline(&mut p.legende)
+                        .hint_text("un mot, si tu veux")
+                        .desired_width(f32::INFINITY),
+                );
+                if p.fiche.as_ref().is_some_and(|f| f.pistes.iter().any(|x| x == "copains")) {
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut p.voix, "avec les voix des copains");
+                    if !p.voix {
+                        ui::hint(ui, "le serveur refait le son sans eux : leurs voix ne quittent pas ce PC");
+                    }
+                }
+                ui.add_space(6.0);
+                ui::hint(
+                    ui,
+                    "l'original reste sur ce PC ; le serveur en prépare une copie pour le fil, avec une \
+                     seule piste son, et poste le message en ton nom",
+                );
+                ui.add_space(8.0);
+                match &etat {
+                    Some(EnvoiClip { fini: None, pour_cent }) => {
+                        ui.add(
+                            egui::ProgressBar::new(f32::from(*pour_cent) / 100.0)
+                                .text(format!("envoi… {pour_cent} %")),
+                        );
+                    }
+                    Some(EnvoiClip { fini: Some(Err(e)), .. }) => {
+                        ui.label(RichText::new(format!("échec : {e}")).color(DANGER).size(12.0));
+                    }
+                    _ => {}
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if en_cours {
+                        ui.label(RichText::new("envoi en cours…").color(TEXT_DIM).size(12.0));
+                        return;
+                    }
+                    ui.add_enabled_ui(p.salon.is_some(), |ui| {
+                        if ui::primary_button(ui, Some(Icon::Film), "Partager", None).clicked() {
+                            lancer = true;
+                        }
+                    });
+                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                        fermer = true;
+                    }
+                });
+            });
+        if fermer {
+            self.clips_partage = None;
+        }
+        if lancer {
+            self.lancer_partage_clip();
+        }
+    }
+
+    /// L'envoi : les morceaux, puis `/clips/fin` avec le salon, la légende
+    /// et les pistes — sur un fil, la boîte suit.
+    fn lancer_partage_clip(&mut self) {
+        let base = self.http_base();
+        let agent = self.http_agent();
+        let token_hex = format!("{:x}", self.voice_token);
+        let Some(p) = self.clips_partage.as_mut() else { return };
+        let Some(salon) = p.salon else { return };
+        let envoi = std::sync::Arc::new(std::sync::Mutex::new(EnvoiClip::default()));
+        p.envoi = Some(envoi.clone());
+        let chemin = p.chemin.clone();
+        let nom = format!("{}.mp4", p.nom);
+        let legende = p.legende.trim().to_string();
+        let voix = p.voix;
+        let pistes = p.fiche.as_ref().map(|f| f.pistes.clone());
+        std::thread::spawn(move || {
+            let resultat = (|| -> Result<(), String> {
+                let taille = std::fs::metadata(&chemin).map_err(|e| e.to_string())?.len();
+                if taille == 0 {
+                    return Err("fichier vide".into());
+                }
+                let progres = {
+                    let envoi = envoi.clone();
+                    move |pc: u64| envoi.lock().unwrap().pour_cent = pc.min(100) as u8
+                };
+                let (upload, parts) =
+                    match envoyer_morceaux(&agent, &base, &token_hex, &chemin, taille, &progres)? {
+                        EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
+                        EnvoiMorceaux::ServeurAncien => {
+                            return Err("le serveur n'a pas encore le partage de clips (mise à jour \
+                                        nécessaire)"
+                                .into())
+                        }
+                    };
+                let corps = serde_json::json!({
+                    "channel": salon,
+                    "legende": legende,
+                    "pistes": pistes,
+                    "voix": voix,
+                    "nom": nom,
+                });
+                agent
+                    .post(&format!("{base}/clips/fin?upload={upload}&parts={parts}"))
+                    .set("x-ki-token", &token_hex)
+                    .set("Content-Type", "application/json")
+                    .timeout(std::time::Duration::from_secs(300))
+                    .send_string(&corps.to_string())
+                    .map_err(|e| match e {
+                        ureq::Error::Status(404, _) => {
+                            "le serveur n'a pas encore le partage de clips (mise à jour nécessaire)"
+                                .to_string()
+                        }
+                        autre => erreur_http(autre),
+                    })?;
+                Ok(())
+            })();
+            envoi.lock().unwrap().fini = Some(resultat);
+        });
     }
 
     fn confirmer_suppression_clip(&mut self, ctx: &egui::Context) {
@@ -2382,6 +2605,9 @@ impl KiApp {
                 }
                 if let Some(v) = clips::chemin_vignette(&chemin) {
                     let _ = std::fs::remove_file(v);
+                }
+                if let Some(f) = clips::chemin_fiche(&chemin) {
+                    let _ = std::fs::remove_file(f);
                 }
                 self.clips_vignettes.remove(&chemin);
                 self.clips_suppression = None;
@@ -4299,9 +4525,6 @@ impl KiApp {
                 .collect();
             *status.lock().unwrap() = Some(format!("envoi de {name}…"));
             let result = (|| -> Result<String, String> {
-                // Par morceaux de 8 Mo : chacun reste sous la limite du
-                // routeur, et la barre avance ; le serveur assemble.
-                const MORCEAU: usize = 8 * 1024 * 1024;
                 const MAX: u64 = 512 * 1024 * 1024;
                 let taille = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
                 if taille == 0 {
@@ -4310,51 +4533,38 @@ impl KiApp {
                 if taille > MAX {
                     return Err("fichier trop gros (512 Mo max)".into());
                 }
-                let mut fichier = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-                let upload = format!("{:016x}", empreinte_upload(&path));
-                let mut tampon = vec![0u8; MORCEAU];
-                let (mut index, mut envoye) = (0u32, 0u64);
-                loop {
-                    let n = lire_plein(&mut fichier, &mut tampon).map_err(|e| e.to_string())?;
-                    if n == 0 {
-                        break;
-                    }
-                    let envoi = agent
-                        .post(&format!("{base}/upload/partiel?upload={upload}&index={index}"))
-                        .set("x-ki-token", &token_hex)
-                        .timeout(std::time::Duration::from_secs(300))
-                        .send_bytes(&tampon[..n]);
-                    // Un serveur d'avant les morceaux répond 404 : on lui
-                    // envoie le fichier d'un bloc, comme avant, s'il tient
-                    // dans sa limite — le temps qu'il soit mis à jour.
-                    if index == 0 && matches!(&envoi, Err(ureq::Error::Status(404, _))) {
-                        if taille > 25 * 1024 * 1024 {
-                            return Err("le serveur n'accepte pas encore les gros fichiers \
-                                        (25 Mo max avant sa mise à jour)"
-                                .into());
+                let progres = {
+                    let (status, name) = (status.clone(), name.clone());
+                    move |pc: u64| *status.lock().unwrap() = Some(format!("envoi de {name}… {pc} %"))
+                };
+                let (upload, parts) =
+                    match envoyer_morceaux(&agent, &base, &token_hex, &path, taille, &progres)? {
+                        EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
+                        // Un serveur d'avant les morceaux : le fichier d'un
+                        // bloc, comme avant, s'il tient dans sa limite — le
+                        // temps qu'il soit mis à jour.
+                        EnvoiMorceaux::ServeurAncien => {
+                            if taille > 25 * 1024 * 1024 {
+                                return Err("le serveur n'accepte pas encore les gros fichiers \
+                                            (25 Mo max avant sa mise à jour)"
+                                    .into());
+                            }
+                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                            let resp = agent
+                                .post(&format!("{base}/upload?name={name}"))
+                                .set("x-ki-token", &token_hex)
+                                .timeout(std::time::Duration::from_secs(300))
+                                .send_bytes(&bytes)
+                                .map_err(erreur_http)?;
+                            let json: serde_json::Value =
+                                resp.into_json().map_err(|e| e.to_string())?;
+                            let file_path =
+                                json["url"].as_str().ok_or("réponse invalide")?.to_string();
+                            return Ok(format!("{base}{file_path}"));
                         }
-                        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                        let resp = agent
-                            .post(&format!("{base}/upload?name={name}"))
-                            .set("x-ki-token", &token_hex)
-                            .timeout(std::time::Duration::from_secs(300))
-                            .send_bytes(&bytes)
-                            .map_err(erreur_http)?;
-                        let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-                        let file_path = json["url"].as_str().ok_or("réponse invalide")?.to_string();
-                        return Ok(format!("{base}{file_path}"));
-                    }
-                    envoi.map_err(erreur_http)?;
-                    index += 1;
-                    envoye += n as u64;
-                    *status.lock().unwrap() =
-                        Some(format!("envoi de {name}… {} %", envoye * 100 / taille));
-                    if n < MORCEAU {
-                        break;
-                    }
-                }
+                    };
                 let resp = agent
-                    .post(&format!("{base}/upload/fin?upload={upload}&name={name}&parts={index}"))
+                    .post(&format!("{base}/upload/fin?upload={upload}&name={name}&parts={parts}"))
                     .set("x-ki-token", &token_hex)
                     .timeout(std::time::Duration::from_secs(300))
                     .send_string("")
@@ -4866,6 +5076,7 @@ impl KiApp {
         self.stats_window(ctx);
         self.fiche_bot_window(ctx);
         self.clips_window(ctx);
+        self.partage_clip_window(ctx);
         self.visionneuse_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
@@ -10063,6 +10274,38 @@ struct MenuMessage {
 /// image ou `None` si illisible).
 type VignettesRecues = std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<egui::ColorImage>)>>>;
 
+/// Le partage d'un clip dans un salon : la boîte de dialogue, puis l'envoi
+/// (PLAN-CLIPS.md, jalon C2). L'original reste sur ce PC ; le serveur en
+/// prépare une copie pour le fil, et poste le message au nom du membre.
+struct PartageClip {
+    chemin: std::path::PathBuf,
+    /// Le nom du clip, sans extension.
+    nom: String,
+    taille: u64,
+    fiche: Option<clips::Fiche>,
+    salon: Option<ChannelId>,
+    legende: String,
+    /// Garder les voix des copains dans la version partagée.
+    voix: bool,
+    /// L'envoi en cours : ce que son fil en dit.
+    envoi: Option<std::sync::Arc<std::sync::Mutex<EnvoiClip>>>,
+}
+
+#[derive(Clone, Default)]
+struct EnvoiClip {
+    pour_cent: u8,
+    fini: Option<Result<(), String>>,
+}
+
+/// Ce que donne l'envoi d'un fichier par morceaux.
+enum EnvoiMorceaux {
+    /// Tous les morceaux sont sur le serveur, à assembler.
+    Envoye { upload: String, parts: u32 },
+    /// Un serveur d'avant les morceaux (404 au premier) : à l'appelant de
+    /// voir — un bloc, ou rien.
+    ServeurAncien,
+}
+
 enum MessageAction {
     Rien,
     /// Clic droit : ouvrir le menu à cette position.
@@ -11716,6 +11959,47 @@ fn clips_libelle_source(source: &clips::Source, sources: &partage::Sources) -> S
 
 /// Remplit `tampon` autant que possible (un `read` peut rendre moins que
 /// demandé sans que le fichier soit fini). Rend le nombre d'octets lus.
+/// Envoie un fichier par morceaux de 8 Mo (`/upload/partiel`) : chacun
+/// reste sous la limite du routeur, et `progres` reçoit le pourcentage ; le
+/// serveur assemblera. Un serveur d'avant les morceaux répond 404 au
+/// premier : c'est [`EnvoiMorceaux::ServeurAncien`].
+fn envoyer_morceaux(
+    agent: &ureq::Agent,
+    base: &str,
+    token_hex: &str,
+    path: &std::path::Path,
+    taille: u64,
+    progres: &dyn Fn(u64),
+) -> Result<EnvoiMorceaux, String> {
+    const MORCEAU: usize = 8 * 1024 * 1024;
+    let mut fichier = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let upload = format!("{:016x}", empreinte_upload(path));
+    let mut tampon = vec![0u8; MORCEAU];
+    let (mut index, mut envoye) = (0u32, 0u64);
+    loop {
+        let n = lire_plein(&mut fichier, &mut tampon).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        let envoi = agent
+            .post(&format!("{base}/upload/partiel?upload={upload}&index={index}"))
+            .set("x-ki-token", token_hex)
+            .timeout(std::time::Duration::from_secs(300))
+            .send_bytes(&tampon[..n]);
+        if index == 0 && matches!(&envoi, Err(ureq::Error::Status(404, _))) {
+            return Ok(EnvoiMorceaux::ServeurAncien);
+        }
+        envoi.map_err(erreur_http)?;
+        index += 1;
+        envoye += n as u64;
+        progres(envoye * 100 / taille.max(1));
+        if n < MORCEAU {
+            break;
+        }
+    }
+    Ok(EnvoiMorceaux::Envoye { upload, parts: index })
+}
+
 fn lire_plein(fichier: &mut std::fs::File, tampon: &mut [u8]) -> std::io::Result<usize> {
     use std::io::Read as _;
     let mut total = 0;
@@ -11925,6 +12209,8 @@ impl eframe::App for KiApp {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 if self.visionneuse.est_ouverte() {
                     self.visionneuse.fermer();
+                } else if self.clips_partage.as_ref().is_some_and(|p| p.envoi.is_none()) {
+                    self.clips_partage = None;
                 } else if self.show_settings {
                     self.close_settings();
                 } else if self.show_admin {

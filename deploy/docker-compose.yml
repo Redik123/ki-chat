@@ -26,6 +26,9 @@ services:
       KI_FILES_TTL_DAYS: ${KI_FILES_TTL_DAYS:-30}
       # Plafond d'un fichier envoyé par morceaux (vidéos), en Mo.
       KI_FILES_MAX_FILE_MB: ${KI_FILES_MAX_FILE_MB:-512}
+      # Les clips partagés ont leur stock à part : plafond et durée de vie.
+      KI_CLIPS_MAX_BYTES: ${KI_CLIPS_MAX_BYTES:-8589934592}
+      KI_CLIPS_TTL_DAYS: ${KI_CLIPS_TTL_DAYS:-60}
       # Verbosité : info par défaut, `debug` pour enquêter.
       RUST_LOG: ${RUST_LOG:-info}
 

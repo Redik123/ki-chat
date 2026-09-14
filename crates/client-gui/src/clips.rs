@@ -456,6 +456,8 @@ pub struct Clip {
     pub chemin: PathBuf,
     pub duree_s: f32,
     pub taille: u64,
+    /// Les pistes son après le mélange, dans l'ordre du fichier.
+    pub pistes: Vec<&'static str>,
 }
 
 /// Ce que l'interface montre de l'enregistreur.
@@ -511,11 +513,8 @@ impl Declencheur {
                 return Err("moins de 500 Mo libres sur le disque des clips".into());
             }
         }
-        let nom = format!(
-            "{} {}.mp4",
-            chrono::Local::now().format("%Y-%m-%d %Hh%Mm%S"),
-            self.nom_source.lock().unwrap()
-        );
+        let source_nom = self.nom_source.lock().unwrap().clone();
+        let nom = format!("{} {}.mp4", chrono::Local::now().format("%Y-%m-%d %Hh%Mm%S"), source_nom);
         let chemin = dossier.join(nom);
         let fps = self.reglages.fps;
         let debit = self.reglages.qualite.debit_bps();
@@ -528,6 +527,7 @@ impl Declencheur {
                 let sortie = ecrire_clip(instantane, &chemin, fps, debit);
                 if let Ok(c) = &sortie {
                     let _ = vignette(&c.chemin);
+                    ecrire_fiche(c, &source_nom);
                 }
                 let rappel = fini.lock().unwrap().clone();
                 if let Some(f) = rappel {
@@ -818,6 +818,7 @@ fn espace_libre(_dossier: &Path) -> Option<u64> {
 /// d'abord quand il y a plusieurs sources, puis chaque source.
 fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Result<Clip, String> {
     let premiere = inst.images.first().ok_or("aucune image")?;
+    let noms: Vec<&'static str> = inst.sources.iter().map(|(n, _)| *n).collect();
     let t0 = premiere.pts_us;
     let (largeur, hauteur) = (u32::from(premiere.width), u32::from(premiere.height));
     let format = ki_media::FormatVideo {
@@ -900,7 +901,7 @@ fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Res
         inst.images.len(),
         taille / (1024 * 1024)
     ));
-    Ok(Clip { chemin: chemin.to_path_buf(), duree_s, taille })
+    Ok(Clip { chemin: chemin.to_path_buf(), duree_s, taille, pistes: noms })
 }
 
 /// Écrêtage doux : plusieurs voix fortes qui se superposent ne saturent
@@ -938,6 +939,41 @@ pub fn chemin_vignette(clip: &Path) -> Option<PathBuf> {
     Some(dossier_vignettes()?.join(format!("{:016x}.jpg", empreinte(clip))))
 }
 
+/// La fiche d'un clip, à côté de sa vignette : ce que le fichier ne dit
+/// pas de lui-même — ses pistes son après le mélange, dans l'ordre, et
+/// d'où il vient. Le partage s'en sert pour proposer de retirer les voix
+/// des copains ; un clip sans fiche (d'avant elle) se partage tel quel.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Fiche {
+    #[serde(default)]
+    pub pistes: Vec<String>,
+    #[serde(default)]
+    pub duree_s: f32,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Où va la fiche d'un clip.
+pub fn chemin_fiche(clip: &Path) -> Option<PathBuf> {
+    Some(dossier_vignettes()?.join(format!("{:016x}.json", empreinte(clip))))
+}
+
+pub fn ecrire_fiche(clip: &Clip, source: &str) {
+    let fiche = Fiche {
+        pistes: clip.pistes.iter().map(|p| p.to_string()).collect(),
+        duree_s: clip.duree_s,
+        source: source.to_string(),
+    };
+    if let (Some(chemin), Ok(json)) = (chemin_fiche(&clip.chemin), serde_json::to_vec_pretty(&fiche)) {
+        let _ = std::fs::write(chemin, json);
+    }
+}
+
+pub fn lire_fiche(clip: &Path) -> Option<Fiche> {
+    let octets = std::fs::read(chemin_fiche(clip)?).ok()?;
+    serde_json::from_slice(&octets).ok()
+}
+
 /// Fabrique la vignette (320 px de large, JPEG) d'un clip, depuis sa
 /// première image. Rend son chemin.
 pub fn vignette(clip: &Path) -> anyhow::Result<PathBuf> {
@@ -964,6 +1000,8 @@ pub struct ClipInfo {
     pub modifie: std::time::SystemTime,
     pub taille: u64,
     pub vignette: Option<PathBuf>,
+    /// Sa fiche, si l'enregistreur l'a écrite.
+    pub fiche: Option<Fiche>,
 }
 
 /// Les clips du dossier, les plus récents d'abord.
@@ -982,11 +1020,13 @@ pub fn lister(dossier: &Path) -> Vec<ClipInfo> {
                 return None;
             }
             let vignette = chemin_vignette(&chemin).filter(|v| v.is_file());
+            let fiche = lire_fiche(&chemin);
             Some(ClipInfo {
                 nom: chemin.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 modifie: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
                 taille: meta.len(),
                 vignette,
+                fiche,
                 chemin,
             })
         })
@@ -1032,6 +1072,22 @@ mod tests {
 
     fn image(pts_us: u64, idr: bool) -> EncodedFrame {
         EncodedFrame { data: vec![0u8; 100], idr, pts_us, width: 16, height: 16 }
+    }
+
+    #[test]
+    fn la_fiche_d_un_clip_fait_l_aller_retour() {
+        let chemin = std::env::temp_dir().join(format!("ki-clip-fiche-{}.mp4", std::process::id()));
+        let clip = Clip { chemin: chemin.clone(), duree_s: 12.5, taille: 42, pistes: vec!["jeu", "copains"] };
+        ecrire_fiche(&clip, "VALORANT");
+        let fiche = lire_fiche(&chemin).expect("la fiche se relit");
+        assert_eq!(fiche.pistes, ["jeu", "copains"]);
+        assert_eq!(fiche.source, "VALORANT");
+        assert!((fiche.duree_s - 12.5).abs() < 0.01);
+        // Un clip d'avant la fiche n'en a pas : il se partage tel quel.
+        assert!(lire_fiche(&chemin.with_extension("autre.mp4")).is_none());
+        if let Some(f) = chemin_fiche(&chemin) {
+            let _ = std::fs::remove_file(f);
+        }
     }
 
     #[test]

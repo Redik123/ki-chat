@@ -459,7 +459,8 @@ pas de fichier cassé. Estimation : 3 sessions.
   — les variantes sont enregistrées aussi ; jamais sur une touche qui écrit
   (Ctrl+Alt+E, c'est AltGr+E). Si Windows refuse la combinaison (déjà prise
   par un autre programme), le sondage reprend et les réglages le disent en
-  orange. À revalider en jeu.
+  orange. **Validé en jeu par drion le 2026-09-14** (Ctrl+Maj+1 : clavier
+  55 %, sans rangée de touches F).
 - Interface : onglet Réglages → Clips, bouton « Clips » et point « REC »
   à côté de « Valorant », page Clips (galerie en vignettes, lecture dans la
   visionneuse avec ←/→ entre les clips, voir dans le dossier, suppression
@@ -478,13 +479,56 @@ Reste à valider par drion (la liste ci-dessus) — et surtout une vraie
 soirée : la charge en jeu, la synchronisation image/son sur un clip de
 trente secondes, le micro et les copains dans le fichier.
 
-### C2 — Le partage
+### C2 — Le partage — livré en test (2026-09-14, commit local)
 `ClipPartager`, `data/clips/`, quota et purge, `partage.mp4` + poster,
 message au nom du membre, carte dans le chat, progression, quotas dans
 `/diag-resume`. **Validation** : un clip partagé depuis la galerie apparaît
 chez tous en moins d'une minute et se lit dans la visionneuse ; le stock
 plein est refusé proprement ; la permission « Partager des fichiers »
 s'applique. Estimation : 1-2 sessions.
+
+**Fait le 2026-09-14** (une session), **vérifié** par les tests :
+- Serveur `clips.rs` : `POST /clips/fin?upload=…&parts=…` avec un corps
+  JSON (salon, légende ≤ 500 caractères, pistes, voix, nom) — les morceaux
+  passent par `/upload/partiel` comme toute vidéo ; l'assemblage (partagé
+  avec `medias.rs`, `assembler`) range la source dans
+  `data/clips/<id>/source.mp4`, sous le plafond **à part**
+  (`KI_CLIPS_MAX_BYTES`, 8 Gio ; `KI_CLIPS_TTL_DAYS`, 60 jours ; purge
+  horaire par `files::sweep`, reprise au démarrage) ; la fiche `meta.json`
+  porte `clip`, `garder_source`, `auteur`, `salon`, `legende`, `nom`,
+  `pistes`, `voix`. La même fabrique convertit ; **la source reste** (pour
+  l'atelier, C3). Le serveur poste **au nom du membre** (`poster_membre`)
+  la légende et le lien, dans le salon demandé — textuel, visible de lui,
+  avec « Écrire » ; sans ffmpeg, refus (503) : la source porte les pistes
+  séparées, elle ne se livre pas telle quelle.
+- Écart avec l'esquisse : pas de `ClientMsg::ClipPartager` — tout passe par
+  HTTP, et les clips se servent par **`/files/<id>/…`** (le téléchargement
+  regarde `data/files/` puis `data/clips/`) : les clients n'ont rien à
+  apprendre, la carte vidéo et la visionneuse de C0 marchent telles quelles,
+  y compris chez qui n'a pas encore mis à jour. Le fichier partagé porte le
+  nom du clip (`2026-09-14_21h03m12_VALORANT.mp4`), pas `partage.mp4`.
+- Le son de la version partagée (**vérifié** par un test ffmpeg avec quatre
+  pistes) : **une seule piste** — le mélange (`0:a:0`, copié), ou, « sans
+  les voix des copains », un mélange refait des autres (`amix` du jeu et du
+  micro, ou l'une seule), ou muet ; les pistes séparées ne quittent jamais
+  le dossier du clip. Une vidéo ordinaire garde tout, comme avant. La copie
+  sans réencodage se décide sur le débit de la **piste vidéo** (13 Mbit/s
+  au plus) : un clip « équilibré » passe tel quel, en quelques secondes.
+- Client : `clips::Fiche` (`%APPDATA%\ki-chat\clips\<fnv>.json`, écrite
+  avec la vignette : pistes, durée, source) ; galerie → clic droit →
+  « Partager dans un salon… » : la boîte (salon textuel, courant par
+  défaut ; légende ; « avec les voix des copains » si le clip en a ;
+  progression ; erreurs) ; l'envoi par morceaux est partagé avec le
+  trombone (`envoyer_morceaux`). Permission « Partager des fichiers »
+  vérifiée des deux côtés. Un serveur d'avant C2 : « mise à jour
+  nécessaire ». Suppression d'un clip = fichier + vignette + fiche.
+- `/diag-resume` : un paragraphe « stockage » — fichiers et clips, poids,
+  plafond, âge.
+
+Reste à valider par drion : un clip partagé depuis la galerie apparaît chez
+tous, se lit dans la visionneuse, avec et sans les voix ; le message au
+nom du membre ; le serveur de prod mis à jour (Watchtower à la prochaine
+release) — avant, « mise à jour nécessaire ».
 
 ### C3 — L'atelier et le téléphone
 L'atelier (coupe, formats, trois mises en page, position de fin, titre,
