@@ -99,8 +99,10 @@ Le décodage et l'écriture de MP4 viennent de Windows, l'encodage de NVENC
 - **L'enregistreur est éteint par défaut et visible quand il tourne**
   (point rouge dans la barre) ; il capture **la fenêtre du jeu** quand il
   la reconnaît, pas l'écran entier avec Discord et le navigateur derrière.
-- **Les voix des copains** n'entrent dans un clip que si l'option est
-  cochée ; le réglage se voit dans la galerie (« avec les voix »).
+- **Les voix des copains** sont une piste à part, que l'on peut retirer
+  de chaque clip avant de le partager ; l'option est visible dans les
+  réglages (cochée par défaut : décision de drion) et la galerie dit
+  « avec les voix ».
 - **Les diagnostics ne contiennent ni image ni son ni clip** — comme
   aujourd'hui pour les messages et l'audio.
 - **Le serveur ne fait tourner que ce qu'il construit lui-même** : le
@@ -146,7 +148,9 @@ Un fil « clips » côté client, calqué sur la boucle streamer :
    Chaque piste porte l'horodatage de son premier échantillon sur
    l'horloge commune (`origine`, la même que la vidéo).
 4. **La touche** : le sondage global existant, déclenchement au front
-   (pas de répétition tant qu'on tient), combinaison possible (Alt+F10).
+   (pas de répétition tant qu'on tient), **combinaison réglable** dans les
+   Paramètres (« appuie sur ta combinaison », comme la touche du
+   push-to-talk), Alt+F10 par défaut.
    À l'appui : copie du tampon (quelques dizaines de Mo, instantané),
    écriture sur un fil à part, **son de confirmation** par le moteur
    d'effets, ligne dans l'overlay « qui parle » (« Clip enregistré ») quand
@@ -313,7 +317,10 @@ question posée.
 
 ## Stockage
 
-- **Client** : `Vidéos\ki-chat\` (clips, jamais supprimés par ki-chat),
+- **Client** : `Vidéos\ki-chat\` (clips, jamais supprimés par ki-chat ;
+  le dossier se change dans les Paramètres — le pointer sur un dossier
+  synchronisé par Google Drive pour ordinateur suffit à envoyer les clips
+  dans le Drive, sans que ki-chat sache parler à Google),
   `%APPDATA%\ki-chat\clips\` (vignettes, `.json`), `%LOCALAPPDATA%\ki-chat\
   cache\medias\` (fichiers du serveur, 1 Gio, LRU).
 - **Serveur** : `data/clips/<id>/{source.mp4, partage.mp4, poster.jpg,
@@ -435,7 +442,28 @@ un récap « clips de la semaine » dans le fil de jeu. Au fil de l'eau.
 - **Un clip de 10 min par erreur** → la durée du tampon est bornée à
   120 s ; la galerie montre la taille.
 
-## Questions ouvertes (posées à drion le 2026-09-14)
+## Décisions (réponses de drion, 2026-09-14)
+
+- **NVIDIA partout, Windows partout** : NVENC seul, pas de chemin AMD/Intel
+  ni de macOS avant qu'un besoin n'arrive.
+- **Pistes audio séparées** dans le fichier : une première piste
+  *mélange* (pour l'Explorateur, VLC et le téléphone, qui ne lisent que la
+  première), puis *jeu*, *micro* et *copains* chacune à part ; l'atelier
+  règle les trois.
+- **La touche se règle** dans les Paramètres ; Alt+F10 par défaut.
+- **Dossier** `Vidéos\ki-chat\`, réglable ; Google Drive par le dossier
+  synchronisé, pas par une connexion à Google.
+- **Le serveur se dimensionne au besoin** : l'export téléphone se fait sur
+  le serveur ; les mesures du C2 diront combien de cœurs.
+- **Certificat** : l'avertissement du téléphone est accepté.
+- **Atelier v1** validé tel quel.
+- **Ordre** : C0 (visionneuse) d'abord, puis C1.
+- La question 3 (source, résolution, tampon) n'était pas claire ; ce que
+  fait l'enregistreur par défaut : il filme **la fenêtre du jeu** quand il
+  la reconnaît (sinon tout l'écran principal), en **1080p à 60 images/s**,
+  et garde **30 secondes** ; les trois se changent dans les Paramètres.
+
+## Questions ouvertes (posées à drion le 2026-09-14, réponses ci-dessus)
 
 1. **Cartes graphiques** : tout le monde est en NVIDIA ? Qui a AMD ou
    Intel ? (Défaut : NVENC seul en C1, les autres en C4.)
