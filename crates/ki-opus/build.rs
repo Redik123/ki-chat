@@ -56,13 +56,7 @@ fn main() {
 }
 
 fn download_verified() -> Vec<u8> {
-    let mut bytes = Vec::new();
-    ureq::get(OPUS_URL)
-        .call()
-        .expect("téléchargement du tarball opus (réseau requis au premier build)")
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .expect("lecture du tarball");
+    let bytes = telecharger(OPUS_URL);
     use sha2::Digest;
     let digest = hex(&sha2::Sha256::digest(&bytes));
     assert_eq!(
@@ -74,4 +68,33 @@ fn download_verified() -> Vec<u8> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Télécharge `url` en entier, en réessayant : un runner de CI perd parfois
+/// sa connexion TLS au premier essai, et un seul échec réseau ne doit pas
+/// coûter une release. Quatre essais, 3 s, 6 s puis 12 s d'attente.
+fn telecharger(url: &str) -> Vec<u8> {
+    let mut derniere = String::new();
+    for essai in 0..4u32 {
+        if essai > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(3 << (essai - 1)));
+        }
+        let tentative = ureq::get(url)
+            .timeout(std::time::Duration::from_secs(180))
+            .call()
+            .map_err(|e| e.to_string())
+            .and_then(|r| {
+                let mut bytes = Vec::new();
+                r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                Ok(bytes)
+            });
+        match tentative {
+            Ok(bytes) => return bytes,
+            Err(e) => {
+                println!("cargo:warning=téléchargement de {url} raté (essai {}) : {e}", essai + 1);
+                derniere = e;
+            }
+        }
+    }
+    panic!("téléchargement de {url} impossible après quatre essais (réseau requis au premier build) : {derniere}");
 }
