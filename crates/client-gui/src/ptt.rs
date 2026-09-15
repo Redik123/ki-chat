@@ -212,7 +212,10 @@ impl Touche {
         }
     }
 
-    /// Le code de touche virtuelle Windows, pour `RegisterHotKey`.
+    /// Le code de touche virtuelle Windows, pour `RegisterHotKey`. Hors
+    /// Windows, seul le sondage lit la combinaison : inutilisé, et gardé
+    /// pour les tests.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn vk(self) -> u32 {
         match self {
             Touche::F(n) => 0x70 + u32::from(n.clamp(1, 12)) - 1,
@@ -409,6 +412,7 @@ impl Raccourci {
 
     /// La combinaison et ses variantes acceptées (Ctrl, Maj en plus),
     /// l'exacte en premier — ce que l'on enregistre auprès de Windows.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn variantes(&self) -> Vec<Raccourci> {
         let mut v = vec![*self];
         for (ctrl, shift) in [(true, false), (false, true), (true, true)] {

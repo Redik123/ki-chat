@@ -264,8 +264,4 @@ impl Global {
     }
 
     pub fn regler(&self, _r: Option<Raccourci>) {}
-
-    pub fn etat(&self) -> Etat {
-        Etat::Aucun
-    }
 }
