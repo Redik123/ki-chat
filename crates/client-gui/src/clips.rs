@@ -219,21 +219,6 @@ pub fn dossier_par_defaut() -> PathBuf {
     base.join("ki-chat")
 }
 
-/// Les jeux que l'on reconnaît à leur exécutable : la fenêtre à filmer, et
-/// le nom qui ira dans celui du clip.
-const JEUX: &[(&str, &str)] = &[
-    ("valorant-win64-shipping.exe", "VALORANT"),
-    ("cs2.exe", "CS2"),
-    ("fortniteclient-win64-shipping.exe", "Fortnite"),
-    ("rocketleague.exe", "Rocket League"),
-    ("r5apex.exe", "Apex"),
-    ("league of legends.exe", "League of Legends"),
-    ("overwatch.exe", "Overwatch"),
-    ("rainbowsix.exe", "Rainbow Six"),
-    ("gta5.exe", "GTA V"),
-    ("marvel-win64-shipping.exe", "Marvel Rivals"),
-];
-
 /// La source réelle et le nom de ce qu'on filme, d'après le réglage.
 pub fn resoudre_source(source: &Source) -> (CaptureSource, String) {
     match source {
@@ -241,9 +226,8 @@ pub fn resoudre_source(source: &Source) -> (CaptureSource, String) {
         Source::Fenetre(t) => (CaptureSource::Window(t.clone()), nom_sur(t)),
         Source::Auto => {
             for f in ki_video::list_windows() {
-                let exe = f.process.to_lowercase();
-                if let Some((_, nom)) = JEUX.iter().find(|(e, _)| *e == exe) {
-                    return (CaptureSource::Window(f.title), (*nom).to_string());
+                if let Some(nom) = crate::jeux::reconnaitre(&f.process) {
+                    return (CaptureSource::Window(f.title), nom.to_string());
                 }
             }
             (CaptureSource::Monitor(0), "Écran".into())

@@ -1215,6 +1215,12 @@ pub struct JeuStatut {
     /// Partie personnalisée (pas de file).
     #[serde(default)]
     pub custom: bool,
+    /// Un autre jeu que VALORANT — « Rocket League », reconnu à sa
+    /// fenêtre : « joue à … », et rien d'autre, on ne lit rien dedans.
+    /// Vide = VALORANT, dont les champs ci-dessus racontent la partie ;
+    /// c'est ce qu'un client d'avant envoie, et ce qu'il lit.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nom: String,
 }
 
 /// La fiche VALORANT d'un membre, telle que le serveur la garde d'après
@@ -1381,7 +1387,20 @@ impl JeuStatut {
             rang: self.rang.min(27),
             niveau: self.niveau.min(9999),
             custom: self.custom,
+            nom: safe_display(&self.nom, MAX_JEU_TEXTE),
         }
+    }
+
+    /// Un autre jeu que VALORANT, reconnu à sa fenêtre : « joue à … »,
+    /// sans rien d'autre — on ne lit rien dans le jeu.
+    pub fn autre_jeu(nom: &str) -> Self {
+        Self { etat: JeuEtat::EnJeu, nom: nom.to_string(), ..Self::default() }
+    }
+
+    /// VALORANT, dont la présence raconte la partie ; sinon c'est un autre
+    /// jeu, dont on ne sait que le nom.
+    pub fn est_valorant(&self) -> bool {
+        self.nom.is_empty()
     }
 
     /// Le nom français de la file. Les files console portent un préfixe
@@ -1415,6 +1434,9 @@ impl JeuStatut {
     /// Une ligne pour la liste des membres : « compétitive · Ascent · 7-5 »,
     /// « sélection des agents », « au menu »…
     pub fn ligne(&self) -> String {
+        if !self.nom.is_empty() {
+            return format!("joue à {}", self.nom);
+        }
         let file = self.libelle_file();
         let party = if self.party_taille > 1 {
             format!(" · party {}/{}", self.party_taille, self.party_max.max(self.party_taille))
@@ -2004,6 +2026,7 @@ mod tests {
             rang: 15,
             niveau: 120,
             custom: false,
+            nom: String::new(),
         };
         assert_eq!(s.ligne(), "compétitive · Ascent · 7-5 · party 3/5");
         let relu: JeuStatut = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -2036,6 +2059,25 @@ mod tests {
     }
 
     /// Le bot n'accepte que YouTube et SoundCloud, en HTTPS, sans espace.
+    #[test]
+    fn un_autre_jeu_se_dit_en_une_ligne() {
+        let j = JeuStatut::autre_jeu("Rocket League");
+        assert_eq!(j.ligne(), "joue à Rocket League");
+        assert!(!j.est_valorant());
+        assert_eq!(j.etat, JeuEtat::EnJeu);
+        // Un client d'avant ne connaît pas le nom : il ne l'envoie pas, et
+        // ce qu'il lit reste VALORANT.
+        let relu: JeuStatut =
+            serde_json::from_str("{\"etat\":\"en_jeu\",\"file\":\"competitive\"}").unwrap();
+        assert!(relu.est_valorant());
+        assert!(!serde_json::to_string(&relu).unwrap().contains("nom"));
+        assert!(serde_json::to_string(&j).unwrap().contains("\"nom\":\"Rocket League\""));
+        // Le nom est assaini et borné comme le reste : il vient d'un client.
+        let sale = JeuStatut { nom: "Jeu\u{0}".repeat(40), ..JeuStatut::default() }.nettoyer();
+        assert!(!sale.nom.contains('\u{0}'));
+        assert!(sale.nom.chars().count() <= MAX_JEU_TEXTE + 1);
+    }
+
     #[test]
     fn les_adresses_du_bot_sont_filtrees() {
         assert!(url_musique_valide("https://www.youtube.com/watch?v=abc"));

@@ -7,6 +7,7 @@ mod atelier;
 mod clips;
 mod icons;
 mod images;
+mod jeux;
 mod markup;
 mod medias;
 mod net;
@@ -683,8 +684,13 @@ struct KiApp {
     demarrage_verifie: bool,
     /// Le fil qui lit le client Riot, tant que l'option est cochée.
     veilleur_valorant: Option<valorant::Veilleur>,
-    /// La version du statut déjà envoyée au serveur, et ce statut.
-    jeu_version_envoyee: u64,
+    /// Dire aux membres à quoi je joue — le jeu reconnu à sa fenêtre,
+    /// sans rien lire dedans. Coché de base : c'est un nom, pas une partie.
+    presence_jeux: bool,
+    /// Le fil qui regarde les fenêtres, tant que l'option est cochée.
+    veilleur_jeux: Option<jeux::Veilleur>,
+    /// Le statut de jeu que le serveur connaît : on ne lui envoie que les
+    /// changements.
     jeu_envoye: Option<ki_protocol::JeuStatut>,
     /// Volume du son du jeu du stream que je regarde (1.0 = 100 %).
     regard_volume: f32,
@@ -1068,7 +1074,8 @@ impl KiApp {
             esports: Vec::new(),
             demarrage_verifie: false,
             veilleur_valorant: None,
-            jeu_version_envoyee: 0,
+            presence_jeux: get("presence_jeux", "on") == "on",
+            veilleur_jeux: None,
             jeu_envoye: None,
             regard_volume: 1.0,
             regard_meme_machine: false,
@@ -3573,6 +3580,8 @@ impl KiApp {
 
         // --- Salons, présence, conversation ---
         self.channels.clear();
+        // Le serveur suivant ne connaît pas notre jeu : il le réapprendra.
+        self.jeu_envoye = None;
         self.current = None;
         self.voice_channel = None;
         self.voice_intent = None;
@@ -3766,29 +3775,41 @@ impl KiApp {
         }
     }
 
-    /// Le statut VALORANT : le fil de lecture vit tant que l'option est
-    /// cochée, et chaque statut différent part au serveur — y compris
-    /// « plus rien » quand le jeu se ferme ou qu'on décoche.
-    fn tick_valorant(&mut self) {
+    /// Ce qu'on raconte de son jeu aux membres : la partie VALORANT lue
+    /// dans son client Riot si l'option est cochée, sinon le jeu reconnu à
+    /// sa fenêtre si l'on veut bien le dire — et rien sinon. Chaque fil de
+    /// lecture vit tant que son option est cochée ; le serveur n'apprend
+    /// que les changements, y compris « plus rien » quand le jeu se ferme
+    /// ou qu'on décoche.
+    fn tick_presence(&mut self) {
         if self.valorant_presence {
             if self.veilleur_valorant.is_none() {
                 self.veilleur_valorant = Some(valorant::Veilleur::demarrer(self.app_ctx.clone()));
             }
         } else {
-            let etait_actif = self.veilleur_valorant.take().is_some();
-            if (etait_actif || self.jeu_envoye.is_some()) && self.welcomed {
-                self.send(ClientMsg::GameStatus { jeu: None });
+            self.veilleur_valorant = None;
+        }
+        if self.presence_jeux {
+            if self.veilleur_jeux.is_none() {
+                self.veilleur_jeux = Some(jeux::Veilleur::demarrer(self.app_ctx.clone()));
             }
-            self.jeu_envoye = None;
-            self.jeu_version_envoyee = 0;
+        } else {
+            self.veilleur_jeux = None;
+        }
+        if !self.welcomed {
             return;
         }
-        let Some(veilleur) = &self.veilleur_valorant else { return };
-        let (version, statut) = veilleur.releve();
-        if version != self.jeu_version_envoyee && self.welcomed {
-            self.jeu_version_envoyee = version;
-            self.jeu_envoye = statut.clone();
-            self.send(ClientMsg::GameStatus { jeu: statut });
+        // VALORANT d'abord : sa présence dit plus qu'un nom de fenêtre.
+        let valorant = self.veilleur_valorant.as_ref().and_then(|v| v.releve().1);
+        let voulu = valorant.or_else(|| {
+            self.veilleur_jeux
+                .as_ref()
+                .and_then(|v| v.releve())
+                .map(ki_protocol::JeuStatut::autre_jeu)
+        });
+        if voulu != self.jeu_envoye {
+            self.send(ClientMsg::GameStatus { jeu: voulu.clone() });
+            self.jeu_envoye = voulu;
         }
     }
 
@@ -4081,7 +4102,7 @@ impl KiApp {
                 self.session_auto = self.selected.filter(|_| self.remember_password);
                 // Une nouvelle connexion ne connaît pas notre statut de jeu :
                 // il repartira au prochain tour.
-                self.jeu_version_envoyee = 0;
+                self.jeu_envoye = None;
                 self.my_id = Some(user_id);
                 // `is_admin` reste la réponse d'un serveur antérieur aux
                 // rôles : sans permissions annoncées, on lui accorde tout
@@ -8164,10 +8185,12 @@ impl KiApp {
                                 "les membres du serveur voient ta partie sous ton pseudo — \
                                  « compétitive · Ascent · 7-5 ». Décoche, et ça s'efface partout.",
                             );
-                            let etat = match (&self.veilleur_valorant, &self.jeu_envoye) {
-                                (None, _) => "désactivé".to_string(),
-                                (Some(_), None) => "actif — client Riot fermé, ou pas en jeu".to_string(),
-                                (Some(_), Some(j)) => j.ligne(),
+                            let etat = match &self.veilleur_valorant {
+                                None => "désactivé".to_string(),
+                                Some(v) => match v.releve().1 {
+                                    None => "actif — client Riot fermé, ou pas en jeu".to_string(),
+                                    Some(j) => j.ligne(),
+                                },
                             };
                             ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
 
@@ -8238,6 +8261,33 @@ impl KiApp {
 
                             ui.add_space(8.0);
                             ui::hint(ui, "ta boutique du jour est dans la page Valorant, à côté de « Chercher »");
+
+                            // Les autres jeux : un nom sous le pseudo, reconnu
+                            // à la fenêtre — le contraire d'une lecture dans
+                            // le jeu, et c'est pour ça qu'il est coché de base.
+                            ui.add_space(12.0);
+                            ui::group_title(ui, Icon::Play, "Les autres jeux");
+                            ui.checkbox(&mut self.presence_jeux, "Dire aux membres à quoi je joue")
+                                .on_hover_text(
+                                    "le jeu est reconnu à sa fenêtre — rien n'est lu dedans. Les \
+                                     membres voient « joue à Rocket League » sous ton pseudo.",
+                                );
+                            let etat = match &self.veilleur_jeux {
+                                None => "désactivé".to_string(),
+                                Some(v) => match v.releve() {
+                                    Some(nom) => format!("en jeu : {nom}"),
+                                    None => "aucun jeu connu en cours".to_string(),
+                                },
+                            };
+                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
+                            ui::hint(
+                                ui,
+                                &format!(
+                                    "{} jeux reconnus, de VALORANT à Dofus en passant par Rocket League — \
+                                     un jeu qui manque s'ajoute d'une ligne dans le code (jeux.rs)",
+                                    jeux::JEUX.len()
+                                ),
+                            );
                         }
 
                         if let Some(info) = self.info.clone() {
@@ -12397,7 +12447,7 @@ impl eframe::App for KiApp {
         // personne ne fait tourner ne sonne jamais.
         self.tick_reprise(ctx);
         self.auto_connexion(ctx);
-        self.tick_valorant();
+        self.tick_presence();
         self.verifier_diffusion_precedente();
         self.update_voice();
         // Un seul instantané par image, pris ici : l'écran principal l'affiche,
@@ -12497,6 +12547,7 @@ impl eframe::App for KiApp {
         storage.set_string("aec", if self.aec_on { "on" } else { "off" }.into());
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
         storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
+        storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));

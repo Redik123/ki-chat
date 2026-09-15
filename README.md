@@ -214,6 +214,7 @@ Ne laissez plus passer un tir incroyable ou un moment mémorable :
 
 Chantier conçu dans le respect strict des préconisations de Riot Games ([`PLAN-VALORANT.md`](PLAN-VALORANT.md)) :
 - **Statut en direct** : Détection locale en lecture seule de la présence de votre propre jeu (sans injection ni scrutation de la mémoire). Affichage du mode, du score et de l'agent joué.
+- **Les autres jeux** : « joue à Rocket League » sous le pseudo, le jeu reconnu à sa fenêtre (plus de deux cents jeux connus, de Dofus à Elden Ring) sans rien lire dedans. Option « Dire aux membres à quoi je joue », cochée de base ; décochée, ça s'efface partout.
 - **Fiches de carrière HenrikDev** : Visualisation du rang compétitif, du pic de saison, du ratio V/D et de l'historique des parties récentes via l'API HenrikDev hébergée sur le serveur.
 - **Fil de match automatique** : Dès qu'une partie classée se termine, le serveur poste un résumé détaillé dans le salon textuel choisi (victoire/défaite, score, KDA individuel et gain/perte de RR). Si plusieurs membres du groupe étaient dans la même partie, leurs statistiques sont regroupées dans une seule annonce.
 - **Le récap de la semaine** : Le dimanche soir, le fil de jeu poste le bilan de la semaine écoulée — une ligne par membre qui a joué, du plus grand gain de RR au plus petit, avec son rang, ses matchs, victoires et défaites et son meilleur match.
@@ -340,6 +341,8 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **C1 (0.1.35)** — Enregistreur de clips rétroactif (30 secondes à la touche Alt+F10), pistes audio séparées en MP4 et galerie de clips locale.
 - [x] **C2 (0.1.37)** — Partage de clips dans les salons textuels : stock à part sur le serveur, une seule piste son (avec ou sans les voix des copains), message au nom du membre, carte vidéo — et la touche des clips tenue par Windows, qui passe au-dessus du jeu.
 - [x] **C3 (0.1.38)** — Atelier de coupe et de recadrage au format téléphone (9:16, quatre mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
+
+- [x] **Présence (0.1.39)** — « joue à … » sous le pseudo pour tous les jeux reconnus à leur fenêtre, VALORANT gardant sa partie détaillée.
 
 ### Perspectives & Prochains jalons
 

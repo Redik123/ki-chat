@@ -295,6 +295,7 @@ pub(crate) fn normaliser(p: &Prive) -> Option<JeuStatut> {
             rang: rang.min(27) as u8,
             niveau: niveau.min(9999),
             custom,
+            nom: String::new(),
         }
         .nettoyer(),
     )

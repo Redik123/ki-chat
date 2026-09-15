@@ -1792,9 +1792,11 @@ fn handle_msg(
             // relayé à tout le monde seulement s'il change — la liste des
             // membres l'affiche sous le pseudo.
             let jeu = jeu.map(|j| j.nettoyer());
+            // Une partie de VALORANT seulement : un autre jeu ne se dit
+            // que par son nom, et n'a pas de fiche à relire.
             let en_jeu = |j: &Option<ki_protocol::JeuStatut>| {
                 j.as_ref()
-                    .is_some_and(|j| j.etat == ki_protocol::JeuEtat::EnJeu)
+                    .is_some_and(|j| j.est_valorant() && j.etat == ki_protocol::JeuEtat::EnJeu)
             };
             let mut partie_finie = false;
             let changed = {
