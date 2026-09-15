@@ -104,6 +104,10 @@ pub struct Meta {
     /// Garder les voix des copains dans la version partagée.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voix: Option<bool>,
+    /// Les messages du fil qui portent ce clip (salon, horodatage) : à
+    /// effacer avec lui.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<(u32, u64)>,
 }
 
 /// Les outils, trouvés au démarrage.

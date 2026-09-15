@@ -1595,6 +1595,87 @@ mod tests {
         assert_eq!(reduire(&mini, 64).size, [32, 18]);
     }
 
+    fn projet_d_essai() -> Projet {
+        Projet {
+            chemin: PathBuf::from("x.mp4"),
+            nom: "x".into(),
+            fiche: Some(Fiche {
+                pistes: Some(vec!["jeu".into(), "micro".into(), "copains".into()]),
+                ..Default::default()
+            }),
+            reseau: None,
+            lecture: None,
+            texture: None,
+            flou: None,
+            largeur: 1920,
+            hauteur: 1080,
+            duree_ms: 30_000,
+            vignettes: Arc::new(Mutex::new(Vec::new())),
+            textures_vignettes: Vec::new(),
+            debut_ms: 1_000,
+            fin_ms: 11_000,
+            a_placer: false,
+            format: Format::Telephone,
+            cadre: Cadre::Recadre,
+            x: 0.5,
+            fin_x: Some(1.0),
+            glisse_fin: false,
+            zoom: 1.5,
+            zx: 0.25,
+            zy: 0.5,
+            titre: " ACE ".into(),
+            titre_bas: true,
+            jeu: 1.0,
+            micro: 0.5,
+            copains: 0.0,
+            cadence: 30,
+            export: Export::Rien,
+            qr: None,
+            demande_qr: None,
+            repartage: None,
+            enregistrement: None,
+        }
+    }
+
+    /// La recette telle que le serveur la lit (`serveur/export.rs`) : les
+    /// mêmes noms, les mêmes formes — c'est le contrat entre les deux.
+    #[test]
+    fn la_recette_parle_la_langue_du_serveur() {
+        let mut p = projet_d_essai();
+        let r = Atelier::recette(&p);
+        assert_eq!(r["debut_ms"], 1000);
+        assert_eq!(r["fin_ms"], 11000);
+        assert_eq!(r["format"]["type"], "telephone");
+        assert_eq!(r["format"]["cadre"]["type"], "recadre");
+        // 1080 de haut → fenêtre de 606 ; 1920 − 606 = 1314 de course :
+        // 657 à mi-chemin, 1314 au bout.
+        assert_eq!(r["format"]["cadre"]["x"], 657);
+        assert_eq!(r["format"]["cadre"]["fin_x"], 1314);
+        assert_eq!(r["titre"]["texte"], "ACE");
+        assert_eq!(r["titre"]["position"], "bas");
+        assert_eq!(r["audio"]["micro"], 0.5);
+        assert_eq!(r["audio"]["copains"], 0.0);
+        assert_eq!(r["cadence"], 30);
+
+        p.cadre = Cadre::Zoom;
+        let r = Atelier::recette(&p);
+        assert_eq!(r["format"]["cadre"]["type"], "zoom");
+        // 606 / 1,5 = 404 et 1080 / 1,5 = 720 : x au quart de 1920 − 404,
+        // y à la moitié de 1080 − 720.
+        assert_eq!(r["format"]["cadre"]["x"], 379);
+        assert_eq!(r["format"]["cadre"]["y"], 180);
+        assert_eq!(r["format"]["cadre"]["facteur"], 1.5);
+
+        p.cadre = Cadre::FondFlou;
+        p.titre.clear();
+        let r = Atelier::recette(&p);
+        assert_eq!(r["format"]["cadre"]["type"], "fond_flou");
+        assert!(r.get("titre").is_none());
+
+        p.format = Format::Original;
+        assert_eq!(Atelier::recette(&p)["format"]["type"], "original");
+    }
+
     #[test]
     fn un_lien_devient_un_qr_code_carre_avec_sa_marge() {
         let image =

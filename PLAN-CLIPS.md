@@ -582,9 +582,13 @@ sessions.
   `pistes` devenu `Option`, `serveur` + `serveur_base` notés au partage
   (C2) comme au dépôt. Galerie → « Modifier dans l'atelier… » ; Échap
   ferme l'atelier d'abord.
-- Non fait : `ClipSupprimer` côté client (la route existe), la suppression
-  du message du fil avec le clip, le lien téléphone pour la version
-  partagée (la route l'accepte : `fichier` = la sortie du partage).
+- Fait ensuite (C4 et finitions du 2026-09-15) : « Retirer du serveur »
+  dans la galerie ; **le message du fil part avec le clip** — la fiche
+  retient les messages postés pour lui (`messages: [(salon, ts)]`, au
+  partage comme au repartage), et `DELETE /clips/{id}` les efface de
+  l'historique et le dit à tout le monde (`MessageDeleted`). Non fait : le
+  lien téléphone pour la version partagée (la route l'accepte : `fichier`
+  = la sortie du partage).
 
 Reste à valider par drion : l'aperçu et les trois mises en page, la coupe,
 un export 9:16 avec titre, le QR code lu par le téléphone (l'avertissement

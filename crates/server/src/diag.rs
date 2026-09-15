@@ -487,6 +487,9 @@ pub async fn resume(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     };
     texte.push_str("\n\n");
     texte.push_str(&stockage);
+    // Et le bot musique : joué, raté, premier son, et le yt-dlp en service.
+    texte.push_str("\n\n");
+    texte.push_str(&state.musique.compteurs_texte());
     (StatusCode::OK, texte).into_response()
 }
 

@@ -868,18 +868,20 @@ impl AppState {
     /// Poste un message au nom d'un membre — le partage d'un clip, une fois
     /// le fichier reçu. Le texte est déjà nettoyé (`clean_chat`) ; salon,
     /// visibilité et permission ont été vérifiés par l'appelant.
-    pub fn poster_membre(&self, channel: ChannelId, user_id: UserId, username: &str, text: &str) {
-        self.poster(channel, user_id, username, text);
+    /// Rend l'horodatage du message — sa clé dans le salon, pour l'effacer
+    /// avec le clip ; 0 si le salon n'est pas textuel.
+    pub fn poster_membre(&self, channel: ChannelId, user_id: UserId, username: &str, text: &str) -> u64 {
+        self.poster(channel, user_id, username, text)
     }
 
-    fn poster(&self, channel: ChannelId, user_id: UserId, username: &str, text: &str) {
+    fn poster(&self, channel: ChannelId, user_id: UserId, username: &str, text: &str) -> u64 {
         let textuel = self
             .channels
             .list()
             .iter()
             .any(|c| c.id == channel && c.kind == ki_protocol::ChannelKind::Text);
         if !textuel {
-            return;
+            return 0;
         }
         let maintenant = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -906,6 +908,7 @@ impl AppState {
                 reply_to: None,
             },
         );
+        ts
     }
 
     pub fn broadcast_member(&self, user_id: UserId) {

@@ -336,6 +336,23 @@ impl Musique {
         self.outils.read().unwrap().clone()
     }
 
+    /// Les compteurs, pour `/diag-resume` : ce que le bot a joué, ce qui a
+    /// raté, le temps avant le premier son — et quel yt-dlp il tient.
+    pub fn compteurs_texte(&self) -> String {
+        let n = self.compteurs.premier_son_n.load(Ordering::Relaxed);
+        let premier = if n > 0 {
+            self.compteurs.premier_son_total_ms.load(Ordering::Relaxed) / u64::from(n)
+        } else {
+            0
+        };
+        format!(
+            "musique : {} piste(s) jouée(s) · {} échec(s) · premier son en {premier} ms en moyenne · yt-dlp : {}",
+            self.compteurs.pistes_jouees.load(Ordering::Relaxed),
+            self.compteurs.echecs.load(Ordering::Relaxed),
+            self.outils().map(|o| o.yt_dlp.clone()).unwrap_or_else(|| "absent".into())
+        )
+    }
+
     /// Un yt-dlp neuf (mise à jour automatique) : vérifié, puis le bot passe
     /// dessus pour les pistes à venir. Vrai s'il a été pris.
     pub fn remplacer_yt_dlp(&self, chemin: &std::path::Path) -> bool {

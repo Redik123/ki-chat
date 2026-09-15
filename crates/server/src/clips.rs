@@ -163,6 +163,25 @@ pub async fn fin(
             return (StatusCode::INTERNAL_SERVER_ERROR, "stockage indisponible").into_response();
         }
     };
+    // Le message, au nom du membre : la légende s'il y en a une, et le
+    // lien. Avant la fiche : la fabrique la relit en commençant et la
+    // réécrit en finissant, ce qu'on y ajouterait entre les deux serait
+    // perdu — et la fiche retient le message, pour l'effacer avec le clip.
+    let url = format!("https://{hote}/files/{id}/{sortie}");
+    let mut messages = Vec::new();
+    if let Some(channel) = demande.channel {
+        match poster_lien(
+            &state,
+            channel,
+            user_id,
+            &username,
+            legende.as_deref(),
+            &url,
+        ) {
+            Ok(ts) => messages.push((channel, ts)),
+            Err(r) => return r.into_response(),
+        }
+    }
     let meta = Meta {
         etat: "en_preparation".into(),
         source: Some("source.mp4".into()),
@@ -175,6 +194,7 @@ pub async fn fin(
         nom: Some(nom.clone()),
         pistes: demande.pistes.clone(),
         voix: Some(demande.voix),
+        messages,
         ..Default::default()
     };
     medias::ecrire_meta(&dossier_clip, &meta);
@@ -188,21 +208,6 @@ pub async fn fin(
             "retirées"
         }
     );
-
-    // Le message, au nom du membre : la légende s'il y en a une, et le lien.
-    let url = format!("https://{hote}/files/{id}/{sortie}");
-    if let Some(channel) = demande.channel {
-        if let Err(r) = poster_lien(
-            &state,
-            channel,
-            user_id,
-            &username,
-            legende.as_deref(),
-            &url,
-        ) {
-            return r.into_response();
-        }
-    }
     Json(serde_json::json!({ "id": id, "url": url })).into_response()
 }
 
@@ -265,14 +270,13 @@ fn poster_lien(
     username: &str,
     legende: Option<&str>,
     url: &str,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<u64, (StatusCode, String)> {
     let texte = match legende {
         Some(l) => format!("{l}\n{url}"),
         None => url.to_string(),
     };
     let texte = ki_protocol::clean_chat(&texte).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    state.poster_membre(channel, user_id, username, &texte);
-    Ok(())
+    Ok(state.poster_membre(channel, user_id, username, &texte))
 }
 
 /// Un membre connecté, par son jeton voix — sans autre droit : disposer de
@@ -562,7 +566,7 @@ pub async fn partager(
         Err(r) => return r.into_response(),
     };
     let url = format!("https://{hote}/files/{id}/{fichier}");
-    if let Err(r) = poster_lien(
+    let ts = match poster_lien(
         &state,
         d.channel,
         user_id,
@@ -570,8 +574,13 @@ pub async fn partager(
         legende.as_deref(),
         &url,
     ) {
-        return r.into_response();
-    }
+        Ok(ts) => ts,
+        Err(r) => return r.into_response(),
+    };
+    // La fiche retient ce message aussi, pour l'effacer avec le clip.
+    let mut meta = meta;
+    meta.messages.push((d.channel, ts));
+    medias::ecrire_meta(&dossier_clip, &meta);
     Json(serde_json::json!({ "url": url })).into_response()
 }
 
@@ -586,13 +595,36 @@ pub async fn supprimer(
         Ok(u) => u,
         Err(r) => return r.into_response(),
     };
-    let (dossier_clip, _) = match clip_du_membre(&state, &id, user_id) {
+    let (dossier_clip, meta) = match clip_du_membre(&state, &id, user_id) {
         Ok(x) => x,
         Err(r) => return r.into_response(),
     };
     match tokio::fs::remove_dir_all(&dossier_clip).await {
         Ok(()) => {
-            tracing::info!("clip {id} supprimé par {username} (id {user_id})");
+            // Les messages du fil qui portaient le clip partent avec lui :
+            // un lien mort n'a rien à faire dans l'historique.
+            let auteur = meta.auteur.unwrap_or(user_id);
+            let mut effaces = 0;
+            for (salon, ts) in &meta.messages {
+                let message = ki_protocol::MsgRef {
+                    user_id: auteur,
+                    ts: *ts,
+                };
+                if state.history.delete(*salon, message) {
+                    state.broadcast(
+                        *salon,
+                        None,
+                        &ki_protocol::ServerMsg::MessageDeleted {
+                            channel: *salon,
+                            message,
+                        },
+                    );
+                    effaces += 1;
+                }
+            }
+            tracing::info!(
+                "clip {id} supprimé par {username} (id {user_id}), {effaces} message(s) effacé(s)"
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
