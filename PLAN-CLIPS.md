@@ -479,7 +479,7 @@ Reste à valider par drion (la liste ci-dessus) — et surtout une vraie
 soirée : la charge en jeu, la synchronisation image/son sur un clip de
 trente secondes, le micro et les copains dans le fichier.
 
-### C2 — Le partage — livré (0.1.36, 2026-09-15), à valider en soirée
+### C2 — Le partage — livré (0.1.37, 2026-09-15), à valider en soirée
 `ClipPartager`, `data/clips/`, quota et purge, `partage.mp4` + poster,
 message au nom du membre, carte dans le chat, progression, quotas dans
 `/diag-resume`. **Validation** : un clip partagé depuis la galerie apparaît
