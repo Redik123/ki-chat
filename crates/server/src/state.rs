@@ -427,6 +427,8 @@ pub struct AppState {
     /// une photo, une soirée de clips ne doit pas effacer les partages.
     pub clips_quota: crate::files::Quota,
     pub data_dir: String,
+    /// L'instant du démarrage : le tableau de bord dit depuis quand.
+    pub demarrage: std::time::Instant,
     pub users: Mutex<HashMap<UserId, ConnectedUser>>,
     pub voice_routes: std::sync::RwLock<RouteTable>,
     /// Les partages d'écran en cours (relais SFU vidéo).
@@ -468,6 +470,7 @@ impl AppState {
         let audit = crate::audit::Audit::open(data_dir)?;
         Ok(Self {
             token,
+            demarrage: std::time::Instant::now(),
             voice_key: rand::rng().random(),
             channels,
             roles,

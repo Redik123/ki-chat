@@ -353,6 +353,38 @@ impl Musique {
         )
     }
 
+    /// Le bot pour le tableau de bord : où il est, ce qu'il joue, ses
+    /// compteurs, et le yt-dlp en service.
+    pub fn tableau(&self) -> ki_protocol::TableauMusique {
+        let (disponible, salon, en_cours, lecture, file) = {
+            let e = self.etat.lock().unwrap();
+            (
+                e.disponible,
+                e.salon,
+                e.en_cours.as_ref().map(|p| p.titre.clone()),
+                e.lecture,
+                e.file.len() as u32,
+            )
+        };
+        let n = self.compteurs.premier_son_n.load(Ordering::Relaxed);
+        let premier_son_ms = if n > 0 {
+            self.compteurs.premier_son_total_ms.load(Ordering::Relaxed) / u64::from(n)
+        } else {
+            0
+        };
+        ki_protocol::TableauMusique {
+            disponible,
+            salon,
+            en_cours,
+            lecture,
+            file,
+            pistes_jouees: self.compteurs.pistes_jouees.load(Ordering::Relaxed),
+            echecs: self.compteurs.echecs.load(Ordering::Relaxed),
+            premier_son_ms,
+            yt_dlp: self.outils().map(|o| o.yt_dlp.clone()).unwrap_or_default(),
+        }
+    }
+
     /// Un yt-dlp neuf (mise à jour automatique) : vérifié, puis le bot passe
     /// dessus pour les pistes à venir. Vrai s'il a été pris.
     pub fn remplacer_yt_dlp(&self, chemin: &std::path::Path) -> bool {

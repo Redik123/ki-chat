@@ -172,6 +172,7 @@ type PickedImage = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>
 /// se lisait plus.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AdminTab {
+    Tableau,
     Server,
     Channels,
     Roles,
@@ -242,7 +243,8 @@ impl Onglet {
 }
 
 impl AdminTab {
-    const ALL: [AdminTab; 7] = [
+    const ALL: [AdminTab; 8] = [
+        AdminTab::Tableau,
         AdminTab::Server,
         AdminTab::Channels,
         AdminTab::Roles,
@@ -254,6 +256,7 @@ impl AdminTab {
 
     fn label(self) -> &'static str {
         match self {
+            AdminTab::Tableau => "Tableau de bord",
             AdminTab::Server => "Serveur",
             AdminTab::Channels => "Salons",
             AdminTab::Roles => "Rôles",
@@ -269,6 +272,9 @@ impl AdminTab {
     fn needs(self) -> ki_protocol::Perms {
         use ki_protocol::perm::*;
         match self {
+            // L'état du serveur entier — stocks, diagnostics — : au
+            // super-admin, comme les diagnostics.
+            AdminTab::Tableau => ADMINISTRATOR,
             AdminTab::Server => MANAGE_SERVER,
             AdminTab::Channels => MANAGE_CHANNELS,
             AdminTab::Roles => MANAGE_ROLES,
@@ -734,6 +740,11 @@ struct KiApp {
     /// Les versions de ki-chat présentes dans les archives, pour proposer la
     /// purge d'un lot ancien.
     diag_versions: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Onglet admin « Tableau de bord » : le dernier état reçu du serveur,
+    /// rempli par un fil ; le moment de la demande ; une demande en vol.
+    tableau_admin: TableauRecu,
+    tableau_demande: Option<std::time::Instant>,
+    tableau_en_vol: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Dernier diagnostic établi. Coûteux — il énumère les processus et
     /// interroge le registre — donc calculé au clic, pas à chaque image.
     docteur: Option<ki_voice::docteur::Diagnostic>,
@@ -1111,6 +1122,9 @@ impl KiApp {
             crash_verifie: false,
             diag_admin: Default::default(),
             diag_versions: Default::default(),
+            tableau_admin: Default::default(),
+            tableau_demande: None,
+            tableau_en_vol: Default::default(),
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
@@ -10023,6 +10037,229 @@ impl KiApp {
         }
     }
 
+    /// Demande le tableau de bord au serveur, sur un fil ; l'ancien reste
+    /// affiché le temps que le nouveau arrive.
+    fn demander_tableau(&mut self) {
+        if self.tableau_en_vol.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        self.tableau_demande = Some(std::time::Instant::now());
+        let base = self.http_base();
+        let agent = self.http_agent();
+        let token_hex = format!("{:x}", self.voice_token);
+        let slot = self.tableau_admin.clone();
+        let en_vol = self.tableau_en_vol.clone();
+        let ctx = self.app_ctx.clone();
+        std::thread::spawn(move || {
+            let resultat = agent
+                .get(&format!("{base}/admin/tableau"))
+                .set("x-ki-token", &token_hex)
+                .timeout(std::time::Duration::from_secs(20))
+                .call()
+                .map_err(erreur_http)
+                .and_then(|r| {
+                    r.into_json::<ki_protocol::TableauAdmin>().map_err(|e| e.to_string())
+                });
+            *slot.lock().unwrap() = Some(resultat);
+            en_vol.store(false, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Onglet « Tableau de bord » : l'état du serveur en un écran, demandé
+    /// à l'ouverture puis toutes les trente secondes tant qu'il est ouvert.
+    fn admin_tableau_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let perime = self
+            .tableau_demande
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(30));
+        if perime {
+            self.demander_tableau();
+        }
+        // Pour l'« il y a … » et le rafraîchissement, même sans souris.
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        let mut rafraichir = false;
+        ui.horizontal(|ui| {
+            ui::group_title(ui, Icon::Server, "Tableau de bord");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui::button(ui, Icon::Refresh, "Rafraîchir").clicked() {
+                    rafraichir = true;
+                }
+                if let Some(t) = self.tableau_demande {
+                    ui.label(
+                        RichText::new(format!("il y a {} s", t.elapsed().as_secs()))
+                            .color(TEXT_FAINT)
+                            .size(11.0),
+                    );
+                }
+            });
+        });
+        if rafraichir {
+            self.tableau_demande = None;
+        }
+        ui.add_space(4.0);
+        let tableau = self.tableau_admin.lock().unwrap().clone();
+        match tableau {
+            None => ui::hint(ui, "récupération de l'état du serveur…"),
+            Some(Err(e)) => {
+                ui::banner(ui, Tone::Warn, &format!("tableau indisponible : {e}"), false);
+            }
+            Some(Ok(t)) => self.peindre_tableau(ui, &t),
+        }
+    }
+
+    /// Le tableau lui-même, carte par carte.
+    fn peindre_tableau(&self, ui: &mut egui::Ui, t: &ki_protocol::TableauAdmin) {
+        let nom_salon = |id: ChannelId| {
+            self.channels
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| format!("salon {id}"))
+        };
+        let dim = |texte: String| RichText::new(texte).color(TEXT_DIM).size(12.0);
+
+        ui::card(ui, |ui| {
+            ui::section_label(ui, "Serveur");
+            let mut ligne = format!(
+                "version {} · en ligne depuis {} · {} comptes, {} connecté(s) · {} salons \
+                 textuels, {} vocaux",
+                t.version,
+                duree_lisible(t.depuis_s),
+                t.comptes,
+                t.en_ligne.len(),
+                t.salons_texte,
+                t.vocal.len()
+            );
+            if let Some(m) = t.memoire_octets {
+                ligne.push_str(&format!(" · mémoire {:.0} Mo", megabytes(m)));
+            }
+            if let Some(d) = t.disque_libre_octets {
+                ligne.push_str(&format!(" · disque libre {:.1} Go", d as f64 / 1e9));
+            }
+            ui.label(RichText::new(ligne).color(TEXT).size(12.5));
+            ui.add_space(4.0);
+            ui::section_label(ui, "Connectés");
+            if t.en_ligne.is_empty() {
+                ui::hint(ui, "personne");
+            }
+            for m in &t.en_ligne {
+                let mut mots = vec![safe_name(&m.pseudo)];
+                if let Some(v) = &m.vocal {
+                    mots.push(format!("vocal : {}", ki_protocol::safe_display(v, 40)));
+                }
+                if m.diffuse {
+                    mots.push("diffuse son écran".into());
+                }
+                if let Some(j) = &m.jeu {
+                    mots.push(ki_protocol::safe_display(j, 80));
+                }
+                ui.label(dim(mots.join(" · ")));
+            }
+        });
+        ui.add_space(8.0);
+
+        ui::card(ui, |ui| {
+            ui::section_label(ui, "Vocal");
+            if t.vocal.is_empty() {
+                ui::hint(ui, "aucun salon vocal");
+            }
+            for s in &t.vocal {
+                let occupants = if s.occupants.is_empty() {
+                    "personne".to_string()
+                } else {
+                    s.occupants.iter().map(|o| safe_name(o)).collect::<Vec<_>>().join(", ")
+                };
+                let verrou = if s.verrouille { " · verrouillé" } else { "" };
+                ui.label(dim(format!("{} : {occupants}{verrou}", ki_protocol::safe_display(&s.nom, 40))));
+            }
+            ui.add_space(4.0);
+            ui::section_label(ui, "Diffusions");
+            if t.diffusions.is_empty() {
+                ui::hint(ui, "aucune diffusion en cours");
+            }
+            for d in &t.diffusions {
+                let palier = d
+                    .palier
+                    .map(|p| format!(" · bridé à {p} kbit/s pour un spectateur"))
+                    .unwrap_or_default();
+                ui.label(dim(format!(
+                    "{} · {} spectateur(s) · {}x{} à {} i/s · {} kbit/s{palier}",
+                    safe_name(&d.streamer),
+                    d.spectateurs,
+                    d.largeur,
+                    d.hauteur,
+                    d.fps,
+                    d.kbps
+                )));
+            }
+        });
+        ui.add_space(8.0);
+
+        ui::card(ui, |ui| {
+            ui::section_label(ui, "Stockage");
+            stock_ligne(ui, "fichiers partagés", &t.fichiers);
+            stock_ligne(ui, "clips", &t.clips);
+            ui::hint(ui, "les plafonds et les âges viennent des variables KI_FILES_* et KI_CLIPS_* du serveur");
+        });
+        ui.add_space(8.0);
+
+        ui::card(ui, |ui| {
+            ui::section_label(ui, "Musique");
+            let m = &t.musique;
+            if !m.disponible {
+                ui::hint(ui, "bot indisponible : yt-dlp ou ffmpeg manquent sur le serveur");
+            } else {
+                let ou = m.salon.map(nom_salon).unwrap_or_else(|| "nulle part".into());
+                let quoi = match &m.en_cours {
+                    Some(titre) => format!(
+                        "{} : {}",
+                        if m.lecture { "joue" } else { "en pause sur" },
+                        ki_protocol::safe_display(titre, 80)
+                    ),
+                    None => "rien en cours".into(),
+                };
+                ui.label(dim(format!("dans {ou} · {quoi} · {} en file", m.file)));
+                let outil = if m.yt_dlp.is_empty() { "absent".to_string() } else { m.yt_dlp.clone() };
+                ui.label(dim(format!(
+                    "{} piste(s) jouée(s) · {} échec(s) · premier son en {} ms en moyenne · yt-dlp : {outil}",
+                    m.pistes_jouees, m.echecs, m.premier_son_ms
+                )));
+            }
+            ui.add_space(4.0);
+            ui::section_label(ui, "VALORANT");
+            ui.label(dim(ki_protocol::safe_display(&t.valorant, 400)));
+        });
+        ui.add_space(8.0);
+
+        ui::card(ui, |ui| {
+            ui::section_label(ui, "Diagnostics des joueurs");
+            if t.diagnostics.is_empty() {
+                ui::hint(
+                    ui,
+                    "aucune archive — personne n'a coché l'option, ou le serveur vient d'être redéployé",
+                );
+                return;
+            }
+            egui::Grid::new("tableau-diag").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
+                for entete in ["version", "joueurs", "sessions", "réouvertures", "famines", "erreurs", "crashs", "taille"] {
+                    ui.label(RichText::new(entete).color(TEXT_FAINT).size(11.0));
+                }
+                ui.end_row();
+                for d in &t.diagnostics {
+                    ui.label(RichText::new(ki_protocol::safe_display(&d.version, 20)).color(TEXT).size(12.0));
+                    for v in [d.joueurs, d.sessions, d.reouvertures, d.famines, d.erreurs] {
+                        ui.label(dim(v.to_string()));
+                    }
+                    let teinte = if d.crashs > 0 { DANGER } else { TEXT_DIM };
+                    ui.label(RichText::new(d.crashs.to_string()).color(teinte).size(12.0));
+                    ui.label(dim(format!("{} Ko", d.taille_ko)));
+                    ui.end_row();
+                }
+            });
+            ui::hint(ui, "le détail des journaux est dans l'onglet Diagnostics");
+        });
+    }
+
     fn admin_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut to_send: Vec<ClientMsg> = Vec::new();
@@ -10070,6 +10307,7 @@ impl KiApp {
                                 .unwrap_or(AdminTab::Server);
                         }
                         match self.admin_tab {
+                            AdminTab::Tableau => self.admin_tableau_tab(ui, ctx),
                             AdminTab::Server => self.server_identity_section(ui, ctx, &mut to_send),
                             AdminTab::Channels => self.admin_channels_tab(ui, &mut to_send),
                             AdminTab::Roles => self.admin_roles_tab(ui, &mut to_send),
@@ -10863,6 +11101,8 @@ impl KiApp {
     }
 
     fn close_admin(&mut self) {
+        // Rouvrir redemande le tableau : l'état d'un serveur bouge.
+        self.tableau_demande = None;
         self.show_admin = false;
         self.info = None;
         self.last_invite = None;
@@ -10985,6 +11225,9 @@ struct MenuMessage {
 type VignettesRecues = std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<egui::ColorImage>)>>>;
 /// Ce que le fil de « Retirer du serveur » rapporte : le nom du clip, ou l'erreur.
 type RetraitClip = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>;
+/// Ce que le fil du tableau de bord rapporte : l'état du serveur, ou l'erreur.
+type TableauRecu =
+    std::sync::Arc<std::sync::Mutex<Option<Result<ki_protocol::TableauAdmin, String>>>>;
 
 /// Le partage d'un clip dans un salon : la boîte de dialogue, puis l'envoi
 /// (PLAN-CLIPS.md, jalon C2). L'original reste sur ce PC ; le serveur en
@@ -12803,6 +13046,42 @@ fn compact(n: u64) -> String {
 }
 
 /// Octets en méga-octets, pour l'affichage.
+/// Une ligne de stock : la barre face au plafond quand il y en a un.
+fn stock_ligne(ui: &mut egui::Ui, nom: &str, s: &ki_protocol::TableauStock) {
+    let age = if s.ttl_jours == 0 {
+        "sans limite d'âge".to_string()
+    } else {
+        format!("{} jours", s.ttl_jours)
+    };
+    if s.plafond_octets > 0 {
+        let part = (s.octets as f64 / s.plafond_octets as f64).clamp(0.0, 1.0) as f32;
+        ui.add(egui::ProgressBar::new(part).text(format!(
+            "{nom} : {} · {:.0} Mo / {:.0} Mo · {age}",
+            s.nombre,
+            megabytes(s.octets),
+            megabytes(s.plafond_octets)
+        )));
+    } else {
+        ui.label(
+            RichText::new(format!("{nom} : {} · {:.0} Mo · sans plafond · {age}", s.nombre, megabytes(s.octets)))
+                .color(TEXT_DIM)
+                .size(12.0),
+        );
+    }
+}
+
+/// Une durée en secondes, dite en jours, heures ou minutes.
+fn duree_lisible(secondes: u64) -> String {
+    let (j, h, m) = (secondes / 86_400, (secondes / 3600) % 24, (secondes / 60) % 60);
+    if j > 0 {
+        format!("{j} j {h} h")
+    } else if h > 0 {
+        format!("{h} h {m:02}")
+    } else {
+        format!("{m} min")
+    }
+}
+
 fn megabytes(bytes: u64) -> f32 {
     bytes as f32 / (1024.0 * 1024.0)
 }
@@ -13050,6 +13329,15 @@ impl eframe::App for KiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn une_duree_se_dit_en_jours_heures_ou_minutes() {
+        assert_eq!(duree_lisible(0), "0 min");
+        assert_eq!(duree_lisible(59), "0 min");
+        assert_eq!(duree_lisible(25 * 60), "25 min");
+        assert_eq!(duree_lisible(3600 + 5 * 60), "1 h 05");
+        assert_eq!(duree_lisible(3 * 86_400 + 4 * 3600), "3 j 4 h");
+    }
 
     #[test]
     fn local_addresses_are_tagged() {

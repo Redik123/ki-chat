@@ -149,6 +149,8 @@ Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 
 ### Diagnostics partagés & Rapports de plantage
 
+- **Tableau de bord** (Administration → Tableau de bord, réservé à l'administrateur) : version et uptime du serveur, connectés et salons vocaux, diffusions en cours, stocks de fichiers et de clips face à leur plafond, disque libre et mémoire, bot musique, service VALORANT et résumé des diagnostics par version — rafraîchi toutes les trente secondes.
+
 En cochant « Partager mes diagnostics » dans les paramètres de l'application, les joueurs transmettent toutes les 10 minutes leur journal technique (modèle GPU, état des pilotes, statistiques réseau et audio — **à l'exclusion stricte de tout message ou donnée vocale**).
 
 Les administrateurs peuvent consulter et analyser les rapports d'erreurs et de plantages directement depuis l'onglet **Diagnostics** du panneau d'administration, ou via l'API protégée par jeton :
@@ -351,6 +353,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **Chat (0.1.39)** — modifier ses messages (clic droit, ou flèche haut dans un champ vide), et glisser-déposer des fichiers sur la fenêtre.
 - [x] **Visionnage détaché (0.1.39)** — le stream d'un copain dans sa propre fenêtre, à poser sur un second écran ou en plein écran (F11, double-clic, Échap).
 - [x] **Encodeur (0.1.39)** — la diffusion descend seule en 30 i/s puis en 720p quand l'encodeur ne suit pas, et remonte prudemment.
+- [x] **Tableau de bord (0.1.39)** — l'état du serveur en un écran dans l'administration : connectés, vocal, diffusions, stocks, musique, VALORANT, diagnostics.
 
 ### Perspectives & Prochains jalons
 

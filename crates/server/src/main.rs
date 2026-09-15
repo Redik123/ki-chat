@@ -43,6 +43,7 @@ mod roles;
 mod state;
 mod store;
 mod stream;
+mod tableau;
 mod throttle;
 mod valorant;
 mod ytdlp;
@@ -262,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         // L'état des lieux compté par le serveur : une ligne par version,
         // joueurs, sessions, réouvertures, famines, erreurs, crashs, taille.
         .route("/diag-resume", get(diag::resume))
+        .route("/admin/tableau", get(tableau::tableau))
         // Les vignettes du bot musique : les clients ne parlent qu'à ki-chat.
         .route("/musique/vignette/{id}", get(musique::vignette))
         .route("/diag/{version}", axum::routing::delete(diag::supprimer))

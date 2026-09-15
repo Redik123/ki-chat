@@ -1489,6 +1489,114 @@ impl JeuStatut {
     }
 }
 
+// --- Le tableau de bord de l'administration (GET /admin/tableau) ---
+
+/// L'état du serveur en un écran, pour l'onglet « Tableau de bord » de
+/// l'administration. Tout est facultatif à la lecture : un serveur d'avant
+/// ne dit pas tout, et un champ de plus ne casse pas un client d'avant.
+/// Rien ici ne contient de message ni de voix.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauAdmin {
+    pub version: String,
+    /// Secondes depuis le démarrage du serveur.
+    pub depuis_s: u64,
+    /// Les comptes non bannis, connectés ou non.
+    pub comptes: u32,
+    pub en_ligne: Vec<TableauMembre>,
+    pub salons_texte: u32,
+    /// Les salons vocaux et qui s'y trouve.
+    pub vocal: Vec<TableauSalonVocal>,
+    pub diffusions: Vec<TableauDiffusion>,
+    pub fichiers: TableauStock,
+    pub clips: TableauStock,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disque_libre_octets: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memoire_octets: Option<u64>,
+    pub musique: TableauMusique,
+    /// Les compteurs du service VALORANT, en une ligne.
+    pub valorant: String,
+    /// Une ligne par version de ki-chat dans les archives de diagnostic.
+    pub diagnostics: Vec<TableauDiag>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauMembre {
+    pub user_id: UserId,
+    pub pseudo: String,
+    /// Le nom de son salon vocal, s'il y est.
+    pub vocal: Option<String>,
+    pub diffuse: bool,
+    /// Sa ligne de jeu, telle que la liste des membres la montre.
+    pub jeu: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauSalonVocal {
+    pub nom: String,
+    pub occupants: Vec<String>,
+    pub verrouille: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauDiffusion {
+    pub streamer: String,
+    pub spectateurs: u32,
+    pub largeur: u16,
+    pub hauteur: u16,
+    pub fps: u8,
+    pub kbps: u32,
+    /// Le palier de débit demandé au streamer, s'il bride le réglage.
+    pub palier: Option<u32>,
+}
+
+/// Un stock de fichiers face à ses bornes (0 = pas de borne).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauStock {
+    pub nombre: u32,
+    pub octets: u64,
+    pub plafond_octets: u64,
+    pub ttl_jours: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauMusique {
+    pub disponible: bool,
+    pub salon: Option<ChannelId>,
+    /// Le titre en cours, s'il y en a un.
+    pub en_cours: Option<String>,
+    pub lecture: bool,
+    /// Pistes en file, celle en cours non comprise.
+    pub file: u32,
+    pub pistes_jouees: u32,
+    pub echecs: u32,
+    /// Délai moyen entre la demande et le premier son, en millisecondes.
+    pub premier_son_ms: u64,
+    /// Le chemin du yt-dlp en service ; vide s'il manque.
+    pub yt_dlp: String,
+}
+
+/// Les compteurs d'une version de ki-chat dans les archives de diagnostic
+/// (voir le serveur, `diag.rs`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauDiag {
+    pub version: String,
+    pub joueurs: u64,
+    pub sessions: u64,
+    pub reouvertures: u64,
+    pub famines: u64,
+    pub erreurs: u64,
+    pub crashs: u64,
+    pub taille_ko: u64,
+}
+
 // --- Le bot musique (voir PLAN-MUSIQUE.md) ---
 
 /// L'identifiant du membre virtuel « Musique », hors de la plage des
@@ -2096,6 +2204,24 @@ mod tests {
         let sale = JeuStatut { nom: "Jeu\u{0}".repeat(40), ..JeuStatut::default() }.nettoyer();
         assert!(!sale.nom.contains('\u{0}'));
         assert!(sale.nom.chars().count() <= MAX_JEU_TEXTE + 1);
+    }
+
+    #[test]
+    fn le_tableau_de_bord_fait_l_aller_retour_et_se_lit_vide() {
+        let t = TableauAdmin {
+            version: "0.1.39".into(),
+            depuis_s: 3600,
+            en_ligne: vec![TableauMembre { pseudo: "kevin".into(), diffuse: true, ..Default::default() }],
+            fichiers: TableauStock { nombre: 3, octets: 10, plafond_octets: 100, ttl_jours: 30 },
+            disque_libre_octets: Some(1 << 30),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<TableauAdmin>(&json).unwrap(), t);
+        // Un serveur qui ne dit rien : tout à zéro, rien ne casse.
+        let vide: TableauAdmin = serde_json::from_str("{}").unwrap();
+        assert_eq!(vide, TableauAdmin::default());
+        assert!(!json.contains("memoire_octets"), "absent : pas écrit");
     }
 
     #[test]

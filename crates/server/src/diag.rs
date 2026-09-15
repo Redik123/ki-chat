@@ -43,7 +43,7 @@ pub const MAX_BATCH: usize = 256 * 1024;
 /// par utilisateur, le stock est donc borné à ~10 Mo.
 const ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 
-fn diag_dir(state: &AppState) -> PathBuf {
+pub(crate) fn diag_dir(state: &AppState) -> PathBuf {
     PathBuf::from(&state.data_dir).join("diag")
 }
 
@@ -205,7 +205,7 @@ pub fn init(state: &AppState) {
 /// hors application, curl depuis une machine de confiance), ou la session
 /// d'un compte ADMINISTRATOR (en-tête x-ki-token — l'onglet « Diagnostics »
 /// du panneau d'administration).
-fn lecteur_autorise(state: &AppState, headers: &HeaderMap) -> bool {
+pub(crate) fn lecteur_autorise(state: &AppState, headers: &HeaderMap) -> bool {
     let admin = headers.get("x-ki-admin").and_then(|v| v.to_str().ok());
     if let (Some(fourni), Ok(attendu)) = (admin, jeton_admin(state)) {
         if fourni == attendu {
@@ -409,10 +409,33 @@ fn fin_de_fichier(chemin: &FsPath, max: u64) -> std::io::Result<String> {
 /// Construit le résumé : une ligne tabulée par version, triée, sous une
 /// ligne d'en-tête. Vide s'il n'y a aucune archive.
 fn resume_versions(dir: &FsPath) -> String {
-    let Ok(versions) = std::fs::read_dir(dir) else {
+    let lignes = lignes_resume(dir);
+    if lignes.is_empty() {
         return String::new();
+    }
+    let corps: Vec<String> = lignes
+        .iter()
+        .map(|l| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{} Ko",
+                l.version, l.joueurs, l.sessions, l.reouvertures, l.famines, l.erreurs, l.crashs, l.taille_ko
+            )
+        })
+        .collect();
+    format!(
+        "version\tjoueurs\tsessions\tréouvertures\tfamines\terreurs\tcrashs\ttaille\n{}",
+        corps.join("\n")
+    )
+}
+
+/// Une ligne par version, triées : l'effectif et les compteurs qui disent
+/// la santé de chaque livraison — la matière du résumé texte et du tableau
+/// de bord.
+pub(crate) fn lignes_resume(dir: &FsPath) -> Vec<ki_protocol::TableauDiag> {
+    let Ok(versions) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let mut lignes: Vec<String> = Vec::new();
+    let mut lignes = Vec::new();
     for vdir in versions.flatten() {
         if !vdir.path().is_dir() {
             continue;
@@ -435,24 +458,19 @@ fn resume_versions(dir: &FsPath) -> String {
                 compter_lignes(&texte, &mut compte);
             }
         }
-        lignes.push(format!(
-            "{version}\t{joueurs}\t{}\t{}\t{}\t{}\t{}\t{} Ko",
-            compte.sessions,
-            compte.reouvertures,
-            compte.famines,
-            compte.erreurs,
-            compte.crashs,
-            taille / 1024
-        ));
+        lignes.push(ki_protocol::TableauDiag {
+            version,
+            joueurs,
+            sessions: compte.sessions,
+            reouvertures: compte.reouvertures,
+            famines: compte.famines,
+            erreurs: compte.erreurs,
+            crashs: compte.crashs,
+            taille_ko: taille / 1024,
+        });
     }
-    if lignes.is_empty() {
-        return String::new();
-    }
-    lignes.sort();
-    format!(
-        "version\tjoueurs\tsessions\tréouvertures\tfamines\terreurs\tcrashs\ttaille\n{}",
-        lignes.join("\n")
-    )
+    lignes.sort_by(|a, b| a.version.cmp(&b.version));
+    lignes
 }
 
 /// GET /diag-resume — l'état des lieux en un écran : une ligne par version,

@@ -241,6 +241,17 @@ impl Streams {
             .map(|(id, _)| *id)
     }
 
+    /// Les diffusions en cours, pour le tableau de bord : le streamer, ses
+    /// spectateurs, ce qu'il annonce, et le palier de débit courant.
+    pub fn resume(&self) -> Vec<(UserId, usize, StreamMeta, u32)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .by_id
+            .values()
+            .map(|l| (l.streamer, l.viewers.len(), l.meta, l.palier.courant))
+            .collect()
+    }
+
     /// Démarre une diffusion. Idempotent : rediffuser renvoie l'existant.
     pub fn start(
         &self,
