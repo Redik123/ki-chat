@@ -344,4 +344,4 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 ### Perspectives & Prochains jalons
 
 - [ ] **C4** — Pipeline de capture vidéo tout-GPU (zéro copie mémoire centrale), encodeur AMD/Intel, une seule capture pour la diffusion et les clips.
-- [ ] **Général** — Son stéréo chez le spectateur du partage d'écran ; résolution et cadence comme crans du débit adaptatif (le débit s'adapte déjà au spectateur qui ne suit pas).
+- [ ] **Général** — Résolution et cadence comme crans du débit adaptatif (le débit s'adapte déjà au spectateur qui ne suit pas, et le son du jeu lui arrive en stéréo).

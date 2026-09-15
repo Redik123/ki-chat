@@ -247,12 +247,15 @@ fn attendre(stop: &AtomicBool, duree: Duration) {
     }
 }
 
-/// Le fournisseur d'échantillons : `n` échantillons mono à la cadence du
-/// périphérique, tirés de la file à 48 kHz et rééchantillonnés.
+/// Le fournisseur d'échantillons : des trames stéréo entrelacées à la
+/// cadence du périphérique, tirées de la file mono à 48 kHz,
+/// rééchantillonnées — le même son des deux côtés.
 fn ecrivain(file: Arc<File>, cadence: u32) -> impl FnMut(&mut [f32]) + Send + 'static {
     let mut reech = CubicResampler::new(SAMPLE_RATE as f64 / cadence.max(1) as f64);
+    let mut mono: Vec<f32> = Vec::new();
     move |out: &mut [f32]| {
-        while !reech.can_pull(out.len()) {
+        let frames = out.len() / 2;
+        while !reech.can_pull(frames) {
             let mut mix = [0f32; FRAME_SAMPLES];
             file.mixer_dans(&mut mix, Consommateur::Seule);
             for o in mix.iter_mut() {
@@ -260,7 +263,15 @@ fn ecrivain(file: Arc<File>, cadence: u32) -> impl FnMut(&mut [f32]) + Send + 's
             }
             reech.push(&mix);
         }
-        reech.pull(out);
+        if mono.len() < frames {
+            mono.resize(frames, 0.0);
+        }
+        reech.pull(&mut mono[..frames]);
+        let (paires, _) = out.as_chunks_mut::<2>();
+        for (paire, &s) in paires.iter_mut().zip(mono.iter()) {
+            paire[0] = s;
+            paire[1] = s;
+        }
     }
 }
 

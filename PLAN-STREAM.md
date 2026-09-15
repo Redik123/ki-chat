@@ -217,10 +217,18 @@ réglage. `Ingest::Ok { ask_idr, palier }` → `ServerMsg::StreamBudget
 réglages effectifs et relance la capture comme pour un changement de
 réglages (`rediffuser`), tableau de bord et journal le disent. Fixé par
 le test `le_palier_descend_sous_le_spectateur_sature_et_remonte_cran_par_cran`.
+**Livré le 2026-09-15 aussi (commit local) : la stéréo chez le spectateur.**
+Le mélangeur de sortie du moteur vocal rend des trames stéréo entrelacées
+(voix, effets, vidéo au milieu ; le son du jeu garde gauche et droite ; un
+rééchantillonneur et un limiteur par canal ; l'AEC reçoit le mélange
+ramené en mono) ; les écrivains natif et cpal et la sortie autonome des
+vidéos répartissent sur les voies du périphérique (`canal`) ; le lecteur
+du son du jeu pousse le stéréo décodé tel quel, `aux_pending` compte en
+trames. À écouter en vrai.
 **Reste** : la validation sur un vrai lien bridé (limiteur de débit chez
 un spectateur : la vidéo doit descendre en quelques secondes et remonter
 cran par cran) ; la résolution et la cadence comme crans suivants (le plan
-: débit d'abord, résolution ensuite) ; stéréo chez le spectateur.
+: débit d'abord, résolution ensuite).
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 

@@ -746,11 +746,18 @@ impl VoiceEngine {
     /// horloges audio des deux machines ne battent pas exactement pareil,
     /// et sans borne le retard grandirait sans fin — les échantillons les
     /// plus vieux sautent, personne ne l'entend.
+    ///
+    /// `pcm` est **stéréo entrelacé** (gauche, droite) : le son du jeu
+    /// arrive en stéréo et ressort en stéréo — la voix, elle, reste au
+    /// milieu.
     pub fn aux_push(&self, pcm: &[f32]) {
-        const AVANCE_MAX: usize = (SAMPLE_RATE as usize) * 3 / 10;
+        // 300 ms de trames stéréo.
+        const AVANCE_MAX: usize = (SAMPLE_RATE as usize) * 3 / 10 * 2;
         let mut aux = self.shared.aux_buf.lock().unwrap();
         aux.extend(pcm.iter().copied());
         let trop = aux.len().saturating_sub(AVANCE_MAX);
+        // Toujours par paires : jamais une gauche orpheline.
+        let trop = trop - trop % 2;
         if trop > 0 {
             aux.drain(..trop);
         }
@@ -761,7 +768,8 @@ impl VoiceEngine {
     /// son sur la sortie, ce dont le spectateur retarde l'image pour que
     /// les deux tombent ensemble.
     pub fn aux_pending(&self) -> usize {
-        self.shared.aux_buf.lock().unwrap().len()
+        // En trames : la file est stéréo entrelacée.
+        self.shared.aux_buf.lock().unwrap().len() / 2
     }
 
     pub fn set_aux_gain(&self, gain: f32) {
@@ -2574,18 +2582,29 @@ fn open_output(
 /// la capture. Ce n'est pas le temps de l'allocation qui coûte — c'est
 /// l'attente possible derrière quelqu'un d'autre, et une attente sur le fil
 /// de sortie s'entend.
+/// Le mélangeur de sortie. Il rend des trames **stéréo entrelacées** (deux
+/// f32 par trame) : la voix, les effets, la vidéo sont mono et vont au
+/// milieu ; le son du jeu d'un stream, lui, arrive en stéréo et garde ses
+/// deux côtés — c'est ce qui manquait au spectateur (PLAN-STREAM.md, S4).
 fn output_writer(
     sh_cb: Arc<Shared>,
     ticks_cb: Arc<std::sync::atomic::AtomicU64>,
     out_rate: u32,
 ) -> impl FnMut(&mut [f32]) + Send + 'static {
-    // Rééchantillonne le mix 48 kHz vers la fréquence du périphérique.
-    let mut resampler = CubicResampler::new(SAMPLE_RATE as f64 / out_rate as f64);
+    // Rééchantillonne le mix 48 kHz vers la fréquence du périphérique : un
+    // rééchantillonneur par canal, nourris à l'identique, ils rendent le
+    // même nombre d'échantillons.
+    let ratio = SAMPLE_RATE as f64 / out_rate as f64;
+    let mut res_gauche = CubicResampler::new(ratio);
+    let mut res_droite = CubicResampler::new(ratio);
+    // Tampons de travail alloués une fois : ce chemin est temps réel.
+    let mut gauche: Vec<f32> = Vec::new();
+    let mut droite: Vec<f32> = Vec::new();
     move |out: &mut [f32]| {
-        let mono_needed = out.len();
+        let frames = out.len() / 2;
         ticks_cb.fetch_add(1, Ordering::Relaxed);
         // Tire du 48 kHz mixé tant que le rééchantillonneur en réclame.
-        while !resampler.can_pull(mono_needed) {
+        while !res_gauche.can_pull(frames) {
             let mut mix = [0f32; FRAME_SAMPLES];
             let mut any = false;
             let mut trous = 0u64;
@@ -2641,16 +2660,20 @@ fn output_writer(
                 }
             }
             // Le son du jeu d'un stream que l'on regarde : même traitement
-            // que les effets, avant le volume général et le limiteur.
+            // que les effets, avant le volume général et le limiteur — mais
+            // en stéréo, chaque côté à sa place.
+            let mut jeu_gauche = [0f32; FRAME_SAMPLES];
+            let mut jeu_droite = [0f32; FRAME_SAMPLES];
             {
                 let mut aux = sh_cb.aux_buf.lock().unwrap();
                 if !aux.is_empty() {
                     let gain = load_f32(&sh_cb.aux_gain);
-                    for o in mix.iter_mut() {
-                        match aux.pop_front() {
-                            Some(s) => *o += s * gain,
-                            None => break,
-                        }
+                    for (g, d) in jeu_gauche.iter_mut().zip(jeu_droite.iter_mut()) {
+                        let (Some(sg), Some(sd)) = (aux.pop_front(), aux.pop_front()) else {
+                            break;
+                        };
+                        *g = sg * gain;
+                        *d = sd * gain;
                     }
                 }
             }
@@ -2659,18 +2682,21 @@ fn output_writer(
             // limiteur, et vu par l'annulateur d'écho.
             sh_cb.medias.mixer_dans(&mut mix, medias::Consommateur::Moteur);
             // Volume de sortie global + limiteur doux (anti-saturation quand
-            // plusieurs voix fortes se superposent).
+            // plusieurs voix fortes se superposent), par canal.
             let out_gain = load_f32(&sh_cb.output_gain);
-            for o in mix.iter_mut() {
-                *o = soft_clip(*o * out_gain);
+            let mut g = [0f32; FRAME_SAMPLES];
+            let mut d = [0f32; FRAME_SAMPLES];
+            for i in 0..FRAME_SAMPLES {
+                g[i] = soft_clip((mix[i] + jeu_gauche[i]) * out_gain);
+                d[i] = soft_clip((mix[i] + jeu_droite[i]) * out_gain);
             }
-            // Copie pour l'annulateur d'écho : ce mix est EXACTEMENT ce qui
-            // part aux haut-parleurs — le « lointain » que la capture va
-            // soustraire. Y compris le silence : le filtre vit de la
-            // continuité du signal, pas seulement de ses pics.
+            // Copie pour l'annulateur d'écho : ce qui part aux haut-parleurs,
+            // ramené en mono — le « lointain » que la capture va soustraire.
+            // Y compris le silence : le filtre vit de la continuité du
+            // signal, pas seulement de ses pics.
             if sh_cb.aec.load(Ordering::Relaxed) {
                 let mut far = sh_cb.aec_far.lock().unwrap();
-                far.extend(mix.iter().copied());
+                far.extend(g.iter().zip(d.iter()).map(|(a, b)| (a + b) * 0.5));
                 while far.len() > AEC_FAR_MAX {
                     far.pop_front();
                 }
@@ -2684,14 +2710,41 @@ fn output_writer(
             if trous > 0 {
                 sh_cb.counters.underruns.fetch_add(trous, Ordering::Relaxed);
             }
-            resampler.push(&mix);
+            res_gauche.push(&g);
+            res_droite.push(&d);
         }
-        resampler.pull(out);
+        if gauche.len() < frames {
+            gauche.resize(frames, 0.0);
+            droite.resize(frames, 0.0);
+        }
+        res_gauche.pull(&mut gauche[..frames]);
+        res_droite.pull(&mut droite[..frames]);
+        let (paires, _) = out.as_chunks_mut::<2>();
+        for (i, paire) in paires.iter_mut().enumerate() {
+            paire[0] = gauche[i];
+            paire[1] = droite[i];
+        }
+    }
+}
+
+/// L'échantillon de la voie `c` d'un périphérique à `channels` voies, pour
+/// la trame `frame` d'un bloc stéréo entrelacé : gauche et droite sur les
+/// deux premières voies, leur moyenne partout ailleurs — et sur une sortie
+/// mono.
+pub(crate) fn canal(stereo: &[f32], frame: usize, c: usize, channels: usize) -> f32 {
+    let (g, d) = (stereo[2 * frame], stereo[2 * frame + 1]);
+    match (channels, c) {
+        (1, _) => (g + d) * 0.5,
+        (_, 0) => g,
+        (_, 1) => d,
+        _ => (g + d) * 0.5,
     }
 }
 
 /// Construit le flux de sortie quel que soit le format d'échantillons du
-/// périphérique. `write_frames(n)` fournit n échantillons mono f32.
+/// périphérique. `write_frames` remplit des trames **stéréo entrelacées**
+/// (deux f32 par trame) ; la répartition sur les voies du périphérique se
+/// fait ici (voir [`canal`]).
 fn build_output_stream(
     device: &cpal::Device,
     supported: &cpal::SupportedStreamConfig,
@@ -2713,20 +2766,19 @@ fn build_output_stream(
         // rappel. cpal ne garantit pas une taille de bloc constante : on ne
         // grandit que si l'on n'a pas assez, ce qui n'arrive qu'aux premiers
         // rappels puis plus jamais.
-        let mut mono: Vec<f32> = Vec::new();
+        let mut stereo: Vec<f32> = Vec::new();
         let stream = device.build_output_stream(
             config,
             move |data: &mut [T], _: &_| {
                 let frames = data.len() / channels;
-                if mono.len() < frames {
-                    mono.resize(frames, 0.0);
+                if stereo.len() < frames * 2 {
+                    stereo.resize(frames * 2, 0.0);
                 }
-                let mono = &mut mono[..frames];
-                wf(mono);
-                for (frame, &s) in data.chunks_exact_mut(channels).zip(mono.iter()) {
-                    let v = T::from_sample_(s.clamp(-1.0, 1.0));
-                    for c in frame.iter_mut() {
-                        *c = v;
+                let stereo = &mut stereo[..frames * 2];
+                wf(stereo);
+                for (i, frame) in data.chunks_exact_mut(channels).enumerate() {
+                    for (c, s) in frame.iter_mut().enumerate() {
+                        *s = T::from_sample_(canal(stereo, i, c, channels).clamp(-1.0, 1.0));
                     }
                 }
             },
@@ -2761,6 +2813,23 @@ fn build_output_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn une_trame_stereo_se_repartit_sur_les_voies() {
+        // Deux trames : (gauche 0,2 · droite −0,6), (gauche 1,0 · droite 0,0).
+        let stereo = [0.2, -0.6, 1.0, 0.0];
+        // Stéréo : chacun sa voie.
+        assert_eq!(canal(&stereo, 0, 0, 2), 0.2);
+        assert_eq!(canal(&stereo, 0, 1, 2), -0.6);
+        assert_eq!(canal(&stereo, 1, 0, 2), 1.0);
+        // Mono : la moyenne.
+        assert!((canal(&stereo, 0, 0, 1) + 0.2).abs() < 1e-6);
+        assert_eq!(canal(&stereo, 1, 0, 1), 0.5);
+        // 5.1 : gauche, droite, puis la moyenne sur le reste.
+        assert_eq!(canal(&stereo, 0, 0, 6), 0.2);
+        assert_eq!(canal(&stereo, 0, 1, 6), -0.6);
+        assert!((canal(&stereo, 0, 4, 6) + 0.2).abs() < 1e-6);
+    }
 
     /// Le compteur sert de nonce, et la clé de chiffrement ne change qu'au
     /// redémarrage du serveur : deux moteurs successifs — un changement de

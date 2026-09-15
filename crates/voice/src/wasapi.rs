@@ -951,10 +951,11 @@ fn render_worker<W: FnMut(&mut [f32])>(
                 // La sonde consomme le mix — les compteurs (watchdog) vivent,
                 // et l'amorce du réveil est justement ce qu'elle a tiré.
                 std::thread::sleep(Duration::from_millis(20));
-                if scratch.len() < PROBE {
-                    scratch.resize(PROBE, 0.0);
+                if scratch.len() < PROBE * 2 {
+                    scratch.resize(PROBE * 2, 0.0);
                 }
-                let probe = &mut scratch[..PROBE];
+                // Des trames stéréo : deux f32 par trame.
+                let probe = &mut scratch[..PROBE * 2];
                 write(probe);
                 if probe.iter().any(|&s| s != 0.0) {
                     // L'amorce ne peut pas dépasser le tampon : un GetBuffer
@@ -963,7 +964,7 @@ fn render_worker<W: FnMut(&mut [f32])>(
                     // boucle. Les trames en trop (quelques ms au pire) sont
                     // sacrifiées à l'instant du réveil — inaudible.
                     let n = PROBE.min(buffer_frames as usize);
-                    let ok = write_block(&open, &render, &probe[..n]).is_ok()
+                    let ok = write_block(&open, &render, &probe[..n * 2]).is_ok()
                         && open.client.Start().is_ok();
                     if !ok {
                         tracing::warn!("flux sortie natif : réveil impossible");
@@ -980,7 +981,7 @@ fn render_worker<W: FnMut(&mut [f32])>(
     }
 }
 
-/// Tire `frames` échantillons mono du mix et les écrit dans le tampon.
+/// Tire `frames` trames stéréo du mix et les écrit dans le tampon.
 /// Rend vrai si tout était à zéro strict — le signal de mise en veille.
 ///
 /// `scratch` est le tampon de travail du fil de rendu, alloué une fois par
@@ -993,37 +994,42 @@ unsafe fn fill_render<W: FnMut(&mut [f32])>(
     scratch: &mut Vec<f32>,
 ) -> anyhow::Result<bool> {
     let frames = frames as usize;
-    if scratch.len() < frames {
-        scratch.resize(frames, 0.0);
+    if scratch.len() < frames * 2 {
+        scratch.resize(frames * 2, 0.0);
     }
-    let mono = &mut scratch[..frames];
-    write(mono);
-    let silent = mono.iter().all(|&s| s == 0.0);
-    unsafe { write_block(open, render, mono)? };
+    let stereo = &mut scratch[..frames * 2];
+    write(stereo);
+    let silent = stereo.iter().all(|&s| s == 0.0);
+    unsafe { write_block(open, render, stereo)? };
     Ok(silent)
 }
 
-/// Écrit un bloc mono dans le tampon de rendu, dupliqué sur tous les canaux —
-/// la sortie voix est mono par nature.
+/// Écrit un bloc stéréo entrelacé dans le tampon de rendu : gauche et
+/// droite sur les deux premières voies, leur moyenne ailleurs (voir
+/// `crate::canal`).
 unsafe fn write_block(
     open: &OpenClient,
     render: &IAudioRenderClient,
-    mono: &[f32],
+    stereo: &[f32],
 ) -> anyhow::Result<()> {
-    let frames = mono.len() as u32;
+    let frames = (stereo.len() / 2) as u32;
     let channels = open.channels as usize;
     let data = render.GetBuffer(frames).context("GetBuffer")?;
     match open.kind {
         SampleKind::F32 => {
-            let out = std::slice::from_raw_parts_mut(data as *mut f32, mono.len() * channels);
-            for (frame, &s) in out.chunks_exact_mut(channels).zip(mono.iter()) {
-                frame.fill(s.clamp(-1.0, 1.0));
+            let out = std::slice::from_raw_parts_mut(data as *mut f32, frames as usize * channels);
+            for (i, frame) in out.chunks_exact_mut(channels).enumerate() {
+                for (c, s) in frame.iter_mut().enumerate() {
+                    *s = crate::canal(stereo, i, c, channels).clamp(-1.0, 1.0);
+                }
             }
         }
         SampleKind::I16 => {
-            let out = std::slice::from_raw_parts_mut(data as *mut i16, mono.len() * channels);
-            for (frame, &s) in out.chunks_exact_mut(channels).zip(mono.iter()) {
-                frame.fill((s.clamp(-1.0, 1.0) * 32767.0) as i16);
+            let out = std::slice::from_raw_parts_mut(data as *mut i16, frames as usize * channels);
+            for (i, frame) in out.chunks_exact_mut(channels).enumerate() {
+                for (c, s) in frame.iter_mut().enumerate() {
+                    *s = (crate::canal(stereo, i, c, channels).clamp(-1.0, 1.0) * 32767.0) as i16;
+                }
             }
         }
     }

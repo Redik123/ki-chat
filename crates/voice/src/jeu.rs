@@ -185,12 +185,12 @@ impl Drop for SonSysteme {
     }
 }
 
-/// Le lecteur du spectateur : Opus stéréo → mono → la sortie du moteur.
+/// Le lecteur du spectateur : Opus stéréo → la sortie du moteur, en
+/// stéréo — le jeu à gauche et à droite comme chez le streamer.
 pub struct Lecteur {
     dec: Decoder,
     dernier: Option<u64>,
     pcm: Vec<f32>,
-    mono: Vec<f32>,
 }
 
 impl Lecteur {
@@ -202,7 +202,6 @@ impl Lecteur {
             dernier: None,
             // Jusqu'à 60 ms d'un coup, au cas où l'émetteur grouperait.
             pcm: vec![0.0; TRAME * 3 * 2],
-            mono: Vec::with_capacity(TRAME * 3),
         })
     }
 
@@ -229,12 +228,10 @@ impl Lecteur {
         }
     }
 
-    /// `n` échantillons par canal décodés : réduits en mono, vers le moteur.
+    /// `n` trames décodées : vers le moteur, stéréo entrelacé tel quel.
     fn pousser(&mut self, n: usize, engine: &VoiceEngine) {
         let n = n.min(self.pcm.len() / 2);
-        self.mono.clear();
-        self.mono.extend((0..n).map(|i| (self.pcm[2 * i] + self.pcm[2 * i + 1]) * 0.5));
-        engine.aux_push(&self.mono);
+        engine.aux_push(&self.pcm[..n * 2]);
     }
 }
 
