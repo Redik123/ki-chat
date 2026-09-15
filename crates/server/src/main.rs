@@ -24,6 +24,8 @@
 //!   KI_YTDLP            le yt-dlp du bot musique (défaut : data/outils/yt-dlp,
 //!                       tenu à jour chaque jour depuis la release yt-dlp,
 //!                       sinon celui du PATH) ; posé, plus de mise à jour
+//!   KI_PUBLIC_URL       l'adresse publique du serveur (https://hote:port), pour
+//!                       les liens que suit un téléphone ; sinon celle du client
 
 mod accounts;
 mod audit;

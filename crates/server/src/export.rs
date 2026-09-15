@@ -70,6 +70,10 @@ pub enum Cadre {
     },
     /// La vidéo entière au milieu, elle-même floutée et agrandie derrière.
     FondFlou,
+    /// Une fenêtre plus large que le 9:16 (de toute la hauteur, `largeur`
+    /// pixels de la source, posée à `x`), serrée dans le cadre : on garde
+    /// presque tout, un peu déformé.
+    Resserre { x: u32, largeur: u32 },
     /// Une fenêtre 9:16 plus petite (facteur 1 à 2), posée à (x, y).
     Zoom { x: u32, y: u32, facteur: f32 },
 }
@@ -246,6 +250,14 @@ pub fn valider(recette: &Recette, source: &Source, police_disponible: bool) -> R
                 }
             }
             Cadre::FondFlou => {}
+            Cadre::Resserre { x, largeur: l } => {
+                if *l < largeur || *l > source.largeur {
+                    return Err("la largeur resserrée sort des bornes".into());
+                }
+                if x + l > source.largeur {
+                    return Err("le cadre sort de l'image".into());
+                }
+            }
             Cadre::Zoom { x, y, facteur } => {
                 if !(1.0..=2.0).contains(facteur) || !facteur.is_finite() {
                     return Err("le zoom va de 1 à 2".into());
@@ -336,6 +348,14 @@ fn chaine_video(
                 Cadre::FondFlou => {
                     chaine.push_str(&format!(
                         "split=2[fond0][devant0];[fond0]scale={TEL_LARGEUR}:{TEL_HAUTEUR}:force_original_aspect_ratio=increase,crop={TEL_LARGEUR}:{TEL_HAUTEUR},boxblur=luma_radius=24:luma_power=2:chroma_radius=12:chroma_power=2[fond];[devant0]scale={TEL_LARGEUR}:-2[devant];[fond][devant]overlay=(W-w)/2:(H-h)/2"
+                    ));
+                }
+                Cadre::Resserre { x, largeur: l } => {
+                    // `scale` sans garder le rapport : c'est le serrage voulu.
+                    chaine.push_str(&format!(
+                        "crop={}:{}:{x}:0,scale={TEL_LARGEUR}:{TEL_HAUTEUR}",
+                        pair(*l),
+                        source.hauteur
                     ));
                 }
                 Cadre::Zoom { x, y, facteur } => {
@@ -808,6 +828,41 @@ mod tests {
         let graphe = &apres[3];
         assert!(graphe.contains("drawtext=fontfile='C\\:/Fonts/a.ttf':textfile='/data/clips/x/titre.txt':expansion=none"), "{graphe}");
         assert!(graphe.contains("y=h-text_h-h*0.07"));
+    }
+
+    #[test]
+    fn le_cadre_resserre_serre_une_fenetre_plus_large() {
+        let s = source();
+        let serre = |x, largeur| {
+            recette(Format::Telephone {
+                cadre: Cadre::Resserre { x, largeur },
+            })
+        };
+        // Entre la fenêtre 9:16 (606) et toute la largeur, sans sortir.
+        assert!(valider(&serre(300, 1200), &s, false).is_ok());
+        assert!(valider(&serre(0, 1920), &s, false).is_ok());
+        assert!(valider(&serre(0, 600), &s, false).is_err());
+        assert!(valider(&serre(800, 1200), &s, false).is_err());
+        assert!(valider(&serre(0, 2000), &s, false).is_err());
+        let (_, apres) = composer(&serre(300, 1201), &s, None).unwrap();
+        assert!(
+            apres[3].contains("crop=1200:1080:300:0,scale=1080:1920"),
+            "{}",
+            apres[3]
+        );
+        let r: Recette = serde_json::from_str(
+            r#"{"debut_ms":0,"fin_ms":5000,"format":{"type":"telephone","cadre":{"type":"resserre","x":300,"largeur":1200}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r.format,
+            Format::Telephone {
+                cadre: Cadre::Resserre {
+                    x: 300,
+                    largeur: 1200
+                }
+            }
+        );
     }
 
     #[test]

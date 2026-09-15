@@ -589,8 +589,15 @@ sessions.
   l'historique et le dit à tout le monde (`MessageDeleted`). Non fait : le
   lien téléphone pour la version partagée (la route l'accepte : `fichier`
   = la sortie du partage).
+- Retours de drion (2026-09-15, après essai) : **« Resserré »**, quatrième
+  mise en page — une fenêtre plus large que le 9:16, serrée dans le cadre
+  (`crop` puis `scale=1080:1920` sans garder le rapport) ; on garde presque
+  tout, un peu déformé, le curseur dit la part de largeur gardée. Et le
+  lien du QR code disait `127.0.0.1` quand le serveur tourne sur ce PC : le
+  client y met l'adresse du PC sur le réseau local (même Wi-Fi), et
+  `KI_PUBLIC_URL` côté serveur fixe l'adresse publique s'il le faut.
 
-Reste à valider par drion : l'aperçu et les trois mises en page, la coupe,
+Reste à valider par drion : l'aperçu et les quatre mises en page, la coupe,
 un export 9:16 avec titre, le QR code lu par le téléphone (l'avertissement
 du certificat, une fois), la publication sur TikTok et Instagram — image
 nette, son présent, rien de refusé —, et la police dans l'image Docker au

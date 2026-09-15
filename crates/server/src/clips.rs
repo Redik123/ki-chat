@@ -482,10 +482,22 @@ pub async fn telephone(
         );
     }
     Json(serde_json::json!({
-        "url": format!("https://{hote}/tel/{jeton}"),
+        "url": format!("{}/tel/{jeton}", base_publique(&hote)),
         "expire_s": JETON_DUREE.as_secs(),
     }))
     .into_response()
+}
+
+/// L'adresse publique du serveur, pour un lien qu'un téléphone suivra :
+/// `KI_PUBLIC_URL` si l'admin l'a posée (derrière un mandataire, l'en-tête
+/// Host peut être une adresse interne), sinon celle par laquelle le client
+/// nous parle.
+fn base_publique(hote: &str) -> String {
+    std::env::var("KI_PUBLIC_URL")
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .unwrap_or_else(|| format!("https://{hote}"))
 }
 
 /// `GET /tel/{jeton}` : le fichier, pour le téléphone qui a scanné le QR

@@ -44,6 +44,7 @@ enum Format {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cadre {
     Recadre,
+    Resserre,
     FondFlou,
     Zoom,
 }
@@ -118,6 +119,9 @@ struct Projet {
     fin_x: Option<f32>,
     /// Ce que l'on déplace en glissant l'aperçu : le début ou la fin.
     glisse_fin: bool,
+    /// Resserré : la part de ce qui dépasse du 9:16 que l'on garde (0 = le
+    /// 9:16 pur, 1 = toute la largeur, serrée).
+    serrage: f32,
     zoom: f32,
     zx: f32,
     zy: f32,
@@ -209,6 +213,7 @@ impl Atelier {
             x: 0.5,
             fin_x: None,
             glisse_fin: false,
+            serrage: 0.5,
             zoom: 1.3,
             zx: 0.5,
             zy: 0.5,
@@ -456,6 +461,7 @@ impl Atelier {
             match reponse {
                 Some(Ok(url)) => {
                     p.demande_qr = None;
+                    let url = adresse_joignable(url);
                     match qr_image(&url) {
                         Some(image) => {
                             let texture = ctx.load_texture(
@@ -532,6 +538,14 @@ impl Atelier {
                             c["fin_x"] = serde_json::json!((f * libre).round() as u32);
                         }
                         c
+                    }
+                    Cadre::Resserre => {
+                        let largeur = largeur_resserree(p);
+                        serde_json::json!({
+                            "type": "resserre",
+                            "x": (p.x * p.largeur.saturating_sub(largeur) as f32).round() as u32,
+                            "largeur": largeur,
+                        })
                     }
                     Cadre::FondFlou => serde_json::json!({ "type": "fond_flou" }),
                     Cadre::Zoom => {
@@ -913,6 +927,14 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
                 Rect::from_min_max(egui::pos2(x0 / l, 0.0), egui::pos2((x0 + fenetre) / l, 1.0));
             painter.image(tex.id(), dest, uv, Color32::WHITE);
         }
+        (Format::Telephone, Cadre::Resserre) => {
+            // Une fenêtre plus large, étirée sur le cadre : c'est le serrage.
+            let largeur = largeur_resserree(p) as f32;
+            let x0 = p.x * (l - largeur).max(0.0);
+            let uv =
+                Rect::from_min_max(egui::pos2(x0 / l, 0.0), egui::pos2((x0 + largeur) / l, 1.0));
+            painter.image(tex.id(), dest, uv, Color32::WHITE);
+        }
         (Format::Telephone, Cadre::FondFlou) => {
             if let Some(flou) = &p.flou {
                 // Couvrir le cadre en gardant le rapport de l'image.
@@ -975,8 +997,8 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     );
 
     // Glisser l'image déplace la fenêtre.
-    let deplacable =
-        p.format == Format::Telephone && matches!(p.cadre, Cadre::Recadre | Cadre::Zoom);
+    let deplacable = p.format == Format::Telephone
+        && matches!(p.cadre, Cadre::Recadre | Cadre::Resserre | Cadre::Zoom);
     if deplacable {
         let r = ui.interact(
             dest,
@@ -993,6 +1015,12 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
                         p.fin_x = p.fin_x.map(|f| (f + dx).clamp(0.0, 1.0));
                     } else {
                         p.x = (p.x + dx).clamp(0.0, 1.0);
+                    }
+                }
+                Cadre::Resserre => {
+                    let largeur = largeur_resserree(p) as f32;
+                    if l > largeur {
+                        p.x = (p.x + d.x * largeur / dest.width() / (l - largeur)).clamp(0.0, 1.0);
                     }
                 }
                 Cadre::Zoom => {
@@ -1211,6 +1239,7 @@ fn panneau_reglages(
         ui::field_label(ui, "Mise en page");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut p.cadre, Cadre::Recadre, "Recadré");
+            ui.selectable_value(&mut p.cadre, Cadre::Resserre, "Resserré");
             ui.selectable_value(&mut p.cadre, Cadre::FondFlou, "Fond flou");
             ui.selectable_value(&mut p.cadre, Cadre::Zoom, "Zoom");
         });
@@ -1248,6 +1277,30 @@ fn panneau_reglages(
                 } else {
                     ui::hint(ui, "glisse l'aperçu pour placer la fenêtre");
                 }
+            }
+            Cadre::Resserre => {
+                let (fenetre, total) =
+                    (((p.hauteur * 9 / 16) & !1) as f32, p.largeur.max(1) as f32);
+                ui.add(
+                    egui::Slider::new(&mut p.serrage, 0.0..=1.0)
+                        .text("largeur gardée")
+                        .custom_formatter(move |v, _| {
+                            format!(
+                                "{:.0} %",
+                                (fenetre + v as f32 * (total - fenetre)) / total * 100.0
+                            )
+                        }),
+                );
+                ui.add(
+                    egui::Slider::new(&mut p.x, 0.0..=1.0)
+                        .show_value(false)
+                        .text("position"),
+                );
+                ui::hint(
+                    ui,
+                    "l'image est serrée dans le cadre : on garde presque tout, un peu déformé ; glisse \
+                     l'aperçu pour placer la fenêtre",
+                );
             }
             Cadre::FondFlou => {
                 ui::hint(
@@ -1470,7 +1523,8 @@ fn panneau_reglages(
                 ui,
                 &format!(
                     "scanne avec l'appareil photo du téléphone, puis partage la vidéo sur TikTok ou Instagram — \
-                     valable {reste} min ; le navigateur avertira une fois du certificat du serveur, continue"
+                     valable {reste} min ; le navigateur avertira une fois du certificat du serveur, continue ; \
+                     serveur sur ce PC : le téléphone doit être sur le même Wi-Fi"
                 ),
             );
             if ui.small_button("copier le lien").clicked() {
@@ -1550,6 +1604,47 @@ fn reduire(image: &egui::ColorImage, largeur: usize) -> egui::ColorImage {
     }
 }
 
+/// La largeur de la fenêtre « resserrée », en pixels de la source : entre
+/// le 9:16 pur et toute la largeur, selon le serrage.
+fn largeur_resserree(p: &Projet) -> u32 {
+    let fenetre = (p.hauteur * 9 / 16) & !1;
+    let l = fenetre as f32 + p.serrage.clamp(0.0, 1.0) * p.largeur.saturating_sub(fenetre) as f32;
+    (l.round() as u32).clamp(fenetre, p.largeur.max(fenetre)) & !1
+}
+
+/// Un lien vers 127.0.0.1 (le serveur lancé sur ce PC pour essayer) ne
+/// mène nulle part depuis un téléphone : on y met l'adresse de ce PC sur
+/// le réseau local — le téléphone doit être sur le même Wi-Fi.
+fn adresse_joignable(url: String) -> String {
+    let Some(reste) = url.strip_prefix("https://") else {
+        return url;
+    };
+    let (hote_port, chemin) = match reste.split_once('/') {
+        Some((h, c)) => (h, format!("/{c}")),
+        None => (reste, String::new()),
+    };
+    let (hote, port) = match hote_port.rsplit_once(':') {
+        Some((h, p)) => (h, format!(":{p}")),
+        None => (hote_port, String::new()),
+    };
+    if !matches!(hote, "127.0.0.1" | "localhost" | "[::1]") {
+        return url;
+    }
+    match ip_locale() {
+        Some(ip) => format!("https://{ip}{port}{chemin}"),
+        None => url,
+    }
+}
+
+/// L'adresse de ce PC sur le réseau local : celle que le système choisirait
+/// pour sortir — on ne fait que la lui demander, rien ne part.
+fn ip_locale() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 /// Le QR code d'un lien, en image : un module = 6 pixels, une marge de
 /// quatre modules — ce que les téléphones lisent sans hésiter.
 fn qr_image(texte: &str) -> Option<egui::ColorImage> {
@@ -1620,6 +1715,7 @@ mod tests {
             x: 0.5,
             fin_x: Some(1.0),
             glisse_fin: false,
+            serrage: 0.5,
             zoom: 1.5,
             zx: 0.25,
             zy: 0.5,
@@ -1666,6 +1762,14 @@ mod tests {
         assert_eq!(r["format"]["cadre"]["y"], 180);
         assert_eq!(r["format"]["cadre"]["facteur"], 1.5);
 
+        p.cadre = Cadre::Resserre;
+        let r = Atelier::recette(&p);
+        assert_eq!(r["format"]["cadre"]["type"], "resserre");
+        // Serrage 0,5 : 606 + 1314 / 2 = 1263 → 1262 (pair) ; x à la moitié
+        // de 1920 − 1262.
+        assert_eq!(r["format"]["cadre"]["largeur"], 1262);
+        assert_eq!(r["format"]["cadre"]["x"], 329);
+
         p.cadre = Cadre::FondFlou;
         p.titre.clear();
         let r = Atelier::recette(&p);
@@ -1674,6 +1778,22 @@ mod tests {
 
         p.format = Format::Original;
         assert_eq!(Atelier::recette(&p)["format"]["type"], "original");
+    }
+
+    #[test]
+    fn un_lien_local_devient_joignable_du_telephone() {
+        // Une vraie adresse ne bouge pas.
+        let distant = "https://ts.baws.fun:8080/tel/abc".to_string();
+        assert_eq!(adresse_joignable(distant.clone()), distant);
+        // La boucle locale devient l'adresse du PC — ou reste telle quelle
+        // sans réseau ; dans les deux cas, port et chemin sont gardés.
+        let local = adresse_joignable("https://127.0.0.1:8080/tel/abc".to_string());
+        assert!(local.starts_with("https://"));
+        assert!(local.ends_with(":8080/tel/abc"), "{local}");
+        assert_eq!(
+            adresse_joignable("http://127.0.0.1/x".into()),
+            "http://127.0.0.1/x"
+        );
     }
 
     #[test]
