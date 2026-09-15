@@ -440,6 +440,8 @@ pub struct AppState {
     pub musique: crate::musique::Musique,
     /// Les vidéos partagées : téléversement par morceaux et conversion.
     pub medias: crate::medias::Fabrique,
+    /// Les liens pour le téléphone : un jeton d'une heure par fichier.
+    pub jetons_telephone: crate::clips::Jetons,
 }
 
 impl AppState {
@@ -485,6 +487,7 @@ impl AppState {
             valorant: crate::valorant::Valorant::open(data_dir),
             musique: crate::musique::Musique::new(data_dir),
             medias: crate::medias::Fabrique::new(fichier_max_mb),
+            jetons_telephone: Default::default(),
         })
     }
 

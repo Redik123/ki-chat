@@ -17,6 +17,8 @@
 //!   KI_CLIPS_MAX_BYTES  plafond de data/clips/, les clips partagés (défaut
 //!                       8 Gio, 0 = illimité), purgé comme les fichiers
 //!   KI_CLIPS_TTL_DAYS   durée de vie d'un clip partagé (défaut 60 jours)
+//!   KI_POLICE           la police (.ttf) du titre des exports de clips
+//!                       (défaut : DejaVu Sans Bold de l'image Docker)
 //!   KI_FFMPEG, KI_FFPROBE  les outils vidéo (défaut : dans le PATH) ; sans
 //!                       eux, les vidéos partagées ne sont pas converties
 
@@ -25,6 +27,7 @@ mod audit;
 mod channels;
 mod clips;
 mod diag;
+mod export;
 mod files;
 mod history;
 mod medias;
@@ -223,6 +226,14 @@ async fn main() -> anyhow::Result<()> {
         // Un clip : les mêmes morceaux, un autre stock, et le message posté
         // au nom du membre dans le salon choisi.
         .route("/clips/fin", post(clips::fin))
+        // L'atelier : exporter d'après une recette, obtenir un lien pour le
+        // téléphone, reposter, supprimer — par celui qui a déposé le clip.
+        .route("/clips/{id}", axum::routing::delete(clips::supprimer))
+        .route("/clips/{id}/exporter", post(clips::exporter))
+        .route("/clips/{id}/telephone", post(clips::telephone))
+        .route("/clips/{id}/partager", post(clips::partager))
+        // Le lien du téléphone : un jeton, une heure, un fichier.
+        .route("/tel/{jeton}", get(clips::tel))
         // Diagnostics partagés : dépôt par les clients volontaires (jeton
         // voix), classement par version, lecture et purge par l'admin
         // (session ADMINISTRATOR ou jeton data/diag.token).

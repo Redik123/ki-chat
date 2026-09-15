@@ -109,13 +109,21 @@ pub struct Meta {
 /// Les outils, trouvés au démarrage.
 #[derive(Clone)]
 pub struct Outils {
-    ffmpeg: String,
-    ffprobe: String,
+    pub(crate) ffmpeg: String,
+    pub(crate) ffprobe: String,
 }
 
-/// Un fichier à convertir : son dossier dans `data/files/`.
+/// Ce qu'il y a à faire dans un dossier : convertir la vidéo reçue, ou
+/// exporter un clip d'après une recette (`export.rs`).
+pub(crate) enum Tache {
+    Normaliser,
+    Exporter(crate::export::Recette),
+}
+
+/// Une tâche en file : son dossier, dans `data/files/` ou `data/clips/`.
 struct Travail {
     dossier: PathBuf,
+    tache: Tache,
 }
 
 /// La fabrique : la file des conversions, et les outils s'ils existent.
@@ -148,12 +156,22 @@ impl Fabrique {
     }
 
     pub(crate) fn deposer(&self, dossier: PathBuf) {
-        self.file.lock().unwrap().push(Travail { dossier });
+        self.file.lock().unwrap().push(Travail { dossier, tache: Tache::Normaliser });
         self.reveil.notify_one();
+    }
+
+    /// Un export de clip, d'après une recette déjà validée.
+    pub(crate) fn deposer_export(&self, dossier: PathBuf, recette: crate::export::Recette) {
+        self.file.lock().unwrap().push(Travail { dossier, tache: Tache::Exporter(recette) });
+        self.reveil.notify_one();
+    }
+
+    pub(crate) fn outils(&self) -> Option<Outils> {
+        self.outils.clone()
     }
 }
 
-fn detecter() -> Option<Outils> {
+pub(crate) fn detecter() -> Option<Outils> {
     let ffmpeg = std::env::var("KI_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
     let ffprobe = std::env::var("KI_FFPROBE").unwrap_or_else(|_| {
         // À côté de ffmpeg quand il est donné par son chemin.
@@ -410,7 +428,7 @@ pub(crate) fn ecrire_meta(dossier: &Path, meta: &Meta) {
     }
 }
 
-fn lire_meta(dossier: &Path) -> Option<Meta> {
+pub(crate) fn lire_meta(dossier: &Path) -> Option<Meta> {
     let bytes = std::fs::read(dossier.join("meta.json")).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -460,45 +478,75 @@ pub async fn boucle(state: Arc<AppState>) {
         };
         let o = outils.clone();
         let dossier = travail.dossier.clone();
-        let resultat = tokio::task::spawn_blocking(move || normaliser(&o, &dossier)).await;
-        match resultat {
-            Ok(Ok(meta)) => tracing::info!(
-                "médias : {} prête ({}x{}, {:.1} s, {} Ko)",
-                travail.dossier.display(),
-                meta.largeur,
-                meta.hauteur,
-                meta.duree_s,
-                meta.taille / 1024
-            ),
-            Ok(Err(e)) => tracing::warn!("médias : {} : {e}", travail.dossier.display()),
-            Err(e) => tracing::error!("médias : tâche interrompue : {e}"),
+        match travail.tache {
+            Tache::Normaliser => {
+                let resultat = tokio::task::spawn_blocking(move || normaliser(&o, &dossier)).await;
+                match resultat {
+                    Ok(Ok(meta)) => tracing::info!(
+                        "médias : {} prête ({}x{}, {:.1} s, {} Ko)",
+                        travail.dossier.display(),
+                        meta.largeur,
+                        meta.hauteur,
+                        meta.duree_s,
+                        meta.taille / 1024
+                    ),
+                    Ok(Err(e)) => tracing::warn!("médias : {} : {e}", travail.dossier.display()),
+                    Err(e) => tracing::error!("médias : tâche interrompue : {e}"),
+                }
+            }
+            Tache::Exporter(recette) => {
+                let resultat =
+                    tokio::task::spawn_blocking(move || crate::export::executer(&o, &dossier, &recette)).await;
+                match resultat {
+                    Ok(Ok(e)) => tracing::info!(
+                        "export : {} prêt ({}x{}, {:.1} s, {} Ko)",
+                        travail.dossier.display(),
+                        e.largeur,
+                        e.hauteur,
+                        e.duree_s,
+                        e.taille / 1024
+                    ),
+                    Ok(Err(e)) => tracing::warn!("export : {} : {e}", travail.dossier.display()),
+                    Err(e) => tracing::error!("export : tâche interrompue : {e}"),
+                }
+            }
         }
     }
 }
 
 /// Ce que ffprobe dit d'un fichier.
 #[derive(Default)]
-struct Sonde {
-    duree_s: f32,
-    debit: u64,
+pub(crate) struct Sonde {
+    pub(crate) duree_s: f32,
+    pub(crate) debit: u64,
     /// Le débit de la piste vidéo seule, si le conteneur le porte (MP4) :
     /// c'est lui qui décide de la copie, pas le total avec quatre pistes son.
-    debit_video: u64,
-    conteneur: String,
-    video: Option<(String, u32, u32)>,
-    audio: Option<String>,
+    pub(crate) debit_video: u64,
+    pub(crate) conteneur: String,
+    /// Codec, largeur, hauteur de la première piste vidéo.
+    pub(crate) video: Option<(String, u32, u32)>,
+    pub(crate) audio: Option<String>,
     /// Nombre de pistes son.
-    pistes_audio: u32,
+    pub(crate) pistes_audio: u32,
+    /// Images par seconde de la piste vidéo (0 si inconnue).
+    pub(crate) cadence: f32,
 }
 
-fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
+/// « 60/1 », « 30000/1001 » : la cadence que ffprobe écrit en fraction.
+fn cadence_de(fraction: &str) -> Option<f32> {
+    let (num, den) = fraction.split_once('/')?;
+    let (num, den): (f32, f32) = (num.parse().ok()?, den.parse().ok()?);
+    (den > 0.0 && num > 0.0).then_some(num / den)
+}
+
+pub(crate) fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
     let sortie = executer_borne(
         Command::new(&outils.ffprobe)
             .args([
                 "-v",
                 "error",
                 "-show_entries",
-                "format=duration,bit_rate,format_name:stream=codec_type,codec_name,width,height,bit_rate",
+                "format=duration,bit_rate,format_name:stream=codec_type,codec_name,width,height,bit_rate,r_frame_rate",
                 "-of",
                 "json",
             ])
@@ -526,6 +574,7 @@ fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
                 let w = s["width"].as_u64().unwrap_or(0) as u32;
                 let h = s["height"].as_u64().unwrap_or(0) as u32;
                 sonde.debit_video = s["bit_rate"].as_str().and_then(|b| b.parse().ok()).unwrap_or(0);
+                sonde.cadence = s["r_frame_rate"].as_str().and_then(cadence_de).unwrap_or(0.0);
                 sonde.video = Some((codec, w, h));
             }
             Some("audio") => {
@@ -795,6 +844,14 @@ mod tests {
         // Rien que les copains, retirés : muet. Aucune piste : muet.
         assert_eq!(plan_son(&clip(Some(&["copains"]), Some(false))), Son::Aucun);
         assert_eq!(plan_son(&clip(Some(&[]), Some(true))), Son::Aucun);
+    }
+
+    #[test]
+    fn la_cadence_se_lit_en_fraction() {
+        assert_eq!(cadence_de("60/1"), Some(60.0));
+        assert!((cadence_de("30000/1001").unwrap() - 29.97).abs() < 0.01);
+        assert_eq!(cadence_de("0/0"), None);
+        assert_eq!(cadence_de("abc"), None);
     }
 
     #[test]

@@ -89,10 +89,11 @@ LABEL org.opencontainers.image.source=https://github.com/Redik123/ki-chat \
       org.opencontainers.image.description="Serveur ki-chat : chat + relais vocal sur QUIC" \
       org.opencontainers.image.licenses=MIT
 
-# curl ne sert qu'au HEALTHCHECK ; useradd, à ne pas tourner en root.
+# curl ne sert qu'au HEALTHCHECK ; useradd, à ne pas tourner en root ;
+# DejaVu Sans Bold, c'est la police du titre des exports de clips (drawtext).
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl; \
+    apt-get install -y --no-install-recommends curl fonts-dejavu-core; \
     rm -rf /var/lib/apt/lists/*; \
     useradd --system --uid 10001 --shell /usr/sbin/nologin kichat; \
     mkdir -p /data; \

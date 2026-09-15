@@ -140,6 +140,7 @@ Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 | `KI_FILES_MAX_FILE_MB` | `512` | Taille maximale pour un média téléversé par morceaux |
 | `KI_CLIPS_MAX_BYTES` | `8589934592` (8 Gio) | Quota des clips partagés (`data/clips/`, purge LRU à part des fichiers) |
 | `KI_CLIPS_TTL_DAYS` | `60` | Durée de rétention des clips partagés (en jours, 0 = illimité) |
+| `KI_POLICE` | *(DejaVu Sans Bold)* | Police `.ttf` du titre des exports de clips |
 | `KI_HENRIK_KEY` | *(vide)* | Clé d'API [HenrikDev](https://docs.henrikdev.xyz) pour l'intégration VALORANT |
 | `KI_FFMPEG` / `KI_FFPROBE` | `ffmpeg` / `ffprobe` | Exécutables vidéo pour la normalisation et l'extraction audio |
 
