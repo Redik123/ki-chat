@@ -530,7 +530,7 @@ tous, se lit dans la visionneuse, avec et sans les voix ; le message au
 nom du membre ; le serveur de prod mis à jour (Watchtower à la prochaine
 release) — avant, « mise à jour nécessaire ».
 
-### C3 — L'atelier et le téléphone
+### C3 — L'atelier et le téléphone — livré en test (2026-09-15, commits locaux)
 L'atelier (coupe, formats, trois mises en page, position de fin, titre,
 curseurs audio), `ClipExporter` + recette validée + ffmpeg, progression,
 `telephone.mp4`, QR code et lien à jeton. **Validation** : un clip coupé
@@ -539,6 +539,58 @@ TikTok et Instagram sans que la plateforme le refuse ni le réencode
 bizarrement (image nette, son présent) ; la police du titre s'affiche ;
 une recette hors bornes est refusée par le serveur. Estimation : 3-4
 sessions.
+
+**Fait le 2026-09-15** (une session), **vérifié** par les tests :
+- Serveur `export.rs` : la `Recette` (JSON : `debut_ms`, `fin_ms`,
+  `format` = `original` | `telephone` + `cadre` = `recadre {x, fin_x?}` |
+  `fond_flou` | `zoom {x, y, facteur}`, `titre {texte, position}`,
+  `audio {jeu, micro, copains}` 0–2, `cadence` 0/24/25/30/50/60) validée
+  contre la sonde de la source (bornes 0,5 s – 3 min, cadre dans l'image,
+  zoom 1–2, titre ≤ 80 sans caractère de contrôle, police présente) ;
+  la ligne ffmpeg composée ici : `-ss`/`-t`, `crop` (glissement par le
+  numéro d'image `n`), `split`+`boxblur`+`overlay`, `crop`+`scale` 1080×1920,
+  `fps`, `drawtext` avec `textfile` sans expansion (le texte ne passe pas
+  par la ligne de commande), `volume` par piste + `amix normalize=0`, x264
+  veryfast crf 21, AAC 160 k, `+faststart`, `-progress pipe:1` suivi sur
+  le tube → `export.json` (`en_attente`/`en_cours`/`pret`/`erreur`,
+  pour cent, fichier, dimensions). **Test ffmpeg de bout en bout** :
+  source 720p à quatre pistes → `telephone.mp4` 1080×1920, une piste,
+  durée, titre avec la police locale ; une recette hors bornes est refusée
+  et l'état le dit.
+- Routes (celui qui a déposé, ou un admin) : `POST /clips/{id}/exporter`
+  (202, un export à la fois par clip), `POST /clips/{id}/telephone`
+  (`{fichier}` → `{url, expire_s}` : jeton 128 bits, une heure, un seul
+  fichier, en mémoire), `GET /tel/{jeton}` (pièce jointe sous un nom
+  parlant `…-tiktok.mp4`), `POST /clips/{id}/partager` (`{channel,
+  legende, fichier}`), `DELETE /clips/{id}`. `POST /clips/fin` sans
+  `channel` = dépôt pour l'atelier, sans message. L'image Docker embarque
+  `fonts-dejavu-core` ; `KI_POLICE` pour une autre police. Un export
+  interrompu par un redémarrage est marqué en erreur au démarrage.
+- Client `atelier.rs` : plein cadre comme la visionneuse ; l'aperçu (le
+  `Lecture` de la visionneuse, désormais `pub(crate)`) dans un cadre 16:9
+  ou 9:16, recadré = rectangle UV glissable (avec « suivre l'action » :
+  la position de fin, et l'aperçu glisse en lisant), fond flou = copie
+  24 px agrandie avec filtrage, zoom = UV plus petit ; le titre peint
+  comme ffmpeg le posera ; bande de temps (12 vignettes par `ki_media`
+  sur un fil, poignées début/fin, tête, sélection en boucle, « début
+  ici »/« fin ici ») ; panneau (format, mise en page, titre, un curseur par
+  piste de la fiche, cadence) ; Exporter (dépôt sans salon si la fiche ne
+  connaît pas ce serveur, puis recette, puis `export.json` chaque seconde),
+  puis « Enregistrer sous… » (`medias::telecharger`), « Partager dans un
+  salon », « Envoyer sur le téléphone » (QR code par `qrcode` 0.14, sans
+  ses features, dessiné module par module, « copier le lien »). Fiche :
+  `pistes` devenu `Option`, `serveur` + `serveur_base` notés au partage
+  (C2) comme au dépôt. Galerie → « Modifier dans l'atelier… » ; Échap
+  ferme l'atelier d'abord.
+- Non fait : `ClipSupprimer` côté client (la route existe), la suppression
+  du message du fil avec le clip, le lien téléphone pour la version
+  partagée (la route l'accepte : `fichier` = la sortie du partage).
+
+Reste à valider par drion : l'aperçu et les trois mises en page, la coupe,
+un export 9:16 avec titre, le QR code lu par le téléphone (l'avertissement
+du certificat, une fois), la publication sur TikTok et Instagram — image
+nette, son présent, rien de refusé —, et la police dans l'image Docker au
+premier export en prod.
 
 ### C4 — Le confort
 Encodeur AMD/Intel par la transformée H.264 de Media Foundation (pour les

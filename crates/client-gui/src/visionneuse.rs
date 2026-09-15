@@ -103,7 +103,7 @@ pub struct Lecture {
 }
 
 impl Lecture {
-    fn demarrer(chemin: PathBuf, file: Arc<File>, ctx: egui::Context) -> Self {
+    pub(crate) fn demarrer(chemin: PathBuf, file: Arc<File>, ctx: egui::Context) -> Self {
         let partage = Arc::new(Partage::default());
         let (tx, rx) = mpsc::channel();
         let p = partage.clone();
@@ -124,11 +124,11 @@ impl Lecture {
         }
     }
 
-    fn jouer(&self, on: bool) {
+    pub(crate) fn jouer(&self, on: bool) {
         self.commander(Commande::Lecture(on));
     }
 
-    fn chercher(&self, ms: u64) {
+    pub(crate) fn chercher(&self, ms: u64) {
         self.commander(Commande::Chercher(ms));
     }
 
@@ -136,27 +136,27 @@ impl Lecture {
         self.commander(Commande::Boucle(on));
     }
 
-    fn prendre_image(&self) -> Option<egui::ColorImage> {
+    pub(crate) fn prendre_image(&self) -> Option<egui::ColorImage> {
         self.partage.image.lock().unwrap().take()
     }
 
-    fn position_ms(&self) -> u64 {
+    pub(crate) fn position_ms(&self) -> u64 {
         self.partage.position_ms.load(Ordering::Relaxed)
     }
 
-    fn duree_ms(&self) -> u64 {
+    pub(crate) fn duree_ms(&self) -> u64 {
         self.partage.duree_ms.load(Ordering::Relaxed)
     }
 
-    fn prete(&self) -> bool {
+    pub(crate) fn prete(&self) -> bool {
         self.partage.prete.load(Ordering::Relaxed)
     }
 
-    fn en_lecture(&self) -> bool {
+    pub(crate) fn en_lecture(&self) -> bool {
         self.partage.lecture.load(Ordering::Relaxed)
     }
 
-    fn erreur(&self) -> Option<String> {
+    pub(crate) fn erreur(&self) -> Option<String> {
         self.partage.erreur.lock().unwrap().clone()
     }
 }

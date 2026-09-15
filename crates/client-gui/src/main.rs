@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod appicon;
+mod atelier;
 mod clips;
 mod icons;
 mod images;
@@ -641,6 +642,8 @@ struct KiApp {
     fiche_bot: Option<UserId>,
     /// La visionneuse : une image ou une vidéo du chat, en grand.
     visionneuse: visionneuse::Visionneuse,
+    /// L'atelier des clips (C3) : coupe, format téléphone, export.
+    atelier: atelier::Atelier,
     /// La sortie audio à part de la visionneuse, quand il n'y a pas de
     /// moteur vocal (hors salon) pour jouer sa file.
     sortie_medias: Option<ki_voice::medias::SortieSeule>,
@@ -1034,6 +1037,9 @@ impl KiApp {
             visionneuse: visionneuse::Visionneuse::new(
                 get("visionneuse_volume", "0.8").parse().unwrap_or(0.8),
             ),
+            // Remplacé juste après : l'atelier partage la file « médias »
+            // de la visionneuse, qui n'existe pas encore ici.
+            atelier: atelier::Atelier::new(ki_voice::medias::File::new(), 0.8),
             sortie_medias: None,
             clips_reglages: clips::Reglages::load(get),
             enregistreur: None,
@@ -1180,6 +1186,9 @@ impl KiApp {
                     .into(),
             });
         }
+        // L'atelier partage la file « médias » de la visionneuse : une seule
+        // sortie son pour les deux.
+        app.atelier = atelier::Atelier::new(app.visionneuse.file.clone(), app.visionneuse.volume);
         app.reload_sounds();
         app
     }
@@ -2160,6 +2169,7 @@ impl KiApp {
         let mut supprimer: Option<std::path::PathBuf> = None;
         let mut montrer: Option<std::path::PathBuf> = None;
         let mut partager: Option<clips::ClipInfo> = None;
+        let mut modifier: Option<clips::ClipInfo> = None;
         // 1 démarrer, 2 arrêter, 3 clip maintenant, 4 actualiser, 5 dossier.
         let mut action = 0u8;
         let etat = self.enregistreur.as_ref().map(|e| e.etat());
@@ -2318,6 +2328,10 @@ impl KiApp {
                                     partager = Some(c.clone());
                                     ui.close();
                                 }
+                                if ui.button("Modifier dans l'atelier…").clicked() {
+                                    modifier = Some(c.clone());
+                                    ui.close();
+                                }
                                 if ui.button("Voir dans le dossier").clicked() {
                                     montrer = Some(c.chemin.clone());
                                     ui.close();
@@ -2350,6 +2364,9 @@ impl KiApp {
         }
         if let Some(c) = partager {
             self.ouvrir_partage_clip(c);
+        }
+        if let Some(c) = modifier {
+            self.ouvrir_atelier(c, ctx);
         }
         if let Some(p) = ouvrir {
             let liste: Vec<visionneuse::Cible> =
@@ -2392,6 +2409,33 @@ impl KiApp {
             voix: true,
             envoi: None,
         });
+    }
+
+    /// « Modifier dans l'atelier… » depuis la galerie. Hors connexion, ou
+    /// sans le droit de partager des fichiers, on regarde et l'on règle,
+    /// sans exporter.
+    fn ouvrir_atelier(&mut self, c: clips::ClipInfo, ctx: &egui::Context) {
+        let reseau = (self.conn.is_some() && self.can(ki_protocol::perm::UPLOAD_FILE)).then(|| {
+            atelier::Reseau {
+                base: self.http_base(),
+                token_hex: format!("{:x}", self.voice_token),
+                agent: self.http_agent(),
+            }
+        });
+        self.visionneuse.fermer();
+        self.atelier.set_volume(self.visionneuse.volume);
+        self.atelier.ouvrir(&c, reseau, ctx);
+    }
+
+    fn atelier_window(&mut self, ctx: &egui::Context) {
+        if !self.atelier.est_ouvert() {
+            return;
+        }
+        let mut textuels: Vec<&ChannelInfo> =
+            self.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
+        textuels.sort_by_key(|ch| ch.position);
+        let salons: Vec<(ChannelId, String)> = textuels.iter().map(|ch| (ch.id, ch.name.clone())).collect();
+        self.atelier.ui(ctx, &salons, self.current);
     }
 
     /// La boîte « Partager le clip » : le salon, une légende, les voix des
@@ -2467,7 +2511,7 @@ impl KiApp {
                         .hint_text("un mot, si tu veux")
                         .desired_width(f32::INFINITY),
                 );
-                if p.fiche.as_ref().is_some_and(|f| f.pistes.iter().any(|x| x == "copains")) {
+                if p.fiche.as_ref().is_some_and(|f| f.pistes.as_ref().is_some_and(|p| p.iter().any(|x| x == "copains"))) {
                     ui.add_space(6.0);
                     ui.checkbox(&mut p.voix, "avec les voix des copains");
                     if !p.voix {
@@ -2531,7 +2575,9 @@ impl KiApp {
         let nom = format!("{}.mp4", p.nom);
         let legende = p.legende.trim().to_string();
         let voix = p.voix;
-        let pistes = p.fiche.as_ref().map(|f| f.pistes.clone());
+        let pistes = p.fiche.as_ref().and_then(|f| f.pistes.clone());
+        let fiche = p.fiche.clone();
+        let base_fiche = base.clone();
         std::thread::spawn(move || {
             let resultat = (|| -> Result<(), String> {
                 let taille = std::fs::metadata(&chemin).map_err(|e| e.to_string())?.len();
@@ -2558,7 +2604,7 @@ impl KiApp {
                     "voix": voix,
                     "nom": nom,
                 });
-                agent
+                let reponse = agent
                     .post(&format!("{base}/clips/fin?upload={upload}&parts={parts}"))
                     .set("x-ki-token", &token_hex)
                     .set("Content-Type", "application/json")
@@ -2571,6 +2617,16 @@ impl KiApp {
                         }
                         autre => erreur_http(autre),
                     })?;
+                // Le clip est sur ce serveur : la fiche s'en souvient, et
+                // l'atelier n'aura pas à le renvoyer.
+                if let Ok(json) = reponse.into_json::<serde_json::Value>() {
+                    if let Some(id) = json["id"].as_str() {
+                        let mut f = fiche.unwrap_or_default();
+                        f.serveur = Some(id.to_string());
+                        f.serveur_base = Some(base_fiche);
+                        clips::sauver_fiche(&chemin, &f);
+                    }
+                }
                 Ok(())
             })();
             envoi.lock().unwrap().fini = Some(resultat);
@@ -2834,7 +2890,7 @@ impl KiApp {
     fn visionneuse_window(&mut self, ctx: &egui::Context) {
         // Le son sort par le moteur vocal quand il est là (même volume
         // général, même annulateur d'écho), par une sortie à part sinon.
-        let en_video = self.visionneuse.a_une_video();
+        let en_video = self.visionneuse.a_une_video() || self.atelier.a_une_video();
         let moteur = self.link.engine.lock().unwrap().is_some();
         self.visionneuse.file.set_consommateur(if moteur {
             ki_voice::medias::Consommateur::Moteur
@@ -5078,6 +5134,7 @@ impl KiApp {
         self.clips_window(ctx);
         self.partage_clip_window(ctx);
         self.visionneuse_window(ctx);
+        self.atelier_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
         if self.show_settings {
@@ -12207,7 +12264,9 @@ impl eframe::App for KiApp {
         if self.welcomed {
             // Échap ferme la fenêtre la plus « en avant ».
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                if self.visionneuse.est_ouverte() {
+                if self.atelier.est_ouvert() {
+                    self.atelier.fermer();
+                } else if self.visionneuse.est_ouverte() {
                     self.visionneuse.fermer();
                 } else if self.clips_partage.as_ref().is_some_and(|p| p.envoi.is_none()) {
                     self.clips_partage = None;

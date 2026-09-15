@@ -49,6 +49,9 @@ arboard = "3"
 # Logos de serveurs : décodage PNG/JPEG puis réencodage en vignette PNG.
 # Les deux formats sont déjà tirés par eframe, aucun téléchargement en plus.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Le QR code du lien téléphone (atelier des clips) : la matrice seule, que
+# l'on dessine nous-mêmes.
+qrcode = { version = "0.14", default-features = false }
 base64 = "0.22"
 # Vérification de la signature des mises à jour. 100 % Rust, pas de
 # dépendance C : l'application remplace son propre exécutable, c'est le seul

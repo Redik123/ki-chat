@@ -945,12 +945,21 @@ pub fn chemin_vignette(clip: &Path) -> Option<PathBuf> {
 /// des copains ; un clip sans fiche (d'avant elle) se partage tel quel.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fiche {
+    /// Les pistes après le mélange, dans l'ordre du fichier ; `None` :
+    /// inconnues (une fiche écrite après coup, pour un clip d'avant elle).
     #[serde(default)]
-    pub pistes: Vec<String>,
+    pub pistes: Option<Vec<String>>,
     #[serde(default)]
     pub duree_s: f32,
     #[serde(default)]
     pub source: String,
+    /// L'identifiant du clip sur le serveur, s'il y a été déposé (partagé,
+    /// ou passé par l'atelier) — et lequel : un autre serveur, c'est un
+    /// autre dépôt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serveur: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serveur_base: Option<String>,
 }
 
 /// Où va la fiche d'un clip.
@@ -960,11 +969,18 @@ pub fn chemin_fiche(clip: &Path) -> Option<PathBuf> {
 
 pub fn ecrire_fiche(clip: &Clip, source: &str) {
     let fiche = Fiche {
-        pistes: clip.pistes.iter().map(|p| p.to_string()).collect(),
+        pistes: Some(clip.pistes.iter().map(|p| p.to_string()).collect()),
         duree_s: clip.duree_s,
         source: source.to_string(),
+        serveur: None,
+        serveur_base: None,
     };
-    if let (Some(chemin), Ok(json)) = (chemin_fiche(&clip.chemin), serde_json::to_vec_pretty(&fiche)) {
+    sauver_fiche(&clip.chemin, &fiche);
+}
+
+/// Écrit (ou réécrit) la fiche d'un clip.
+pub fn sauver_fiche(clip: &Path, fiche: &Fiche) {
+    if let (Some(chemin), Ok(json)) = (chemin_fiche(clip), serde_json::to_vec_pretty(fiche)) {
         let _ = std::fs::write(chemin, json);
     }
 }
@@ -1080,11 +1096,18 @@ mod tests {
         let clip = Clip { chemin: chemin.clone(), duree_s: 12.5, taille: 42, pistes: vec!["jeu", "copains"] };
         ecrire_fiche(&clip, "VALORANT");
         let fiche = lire_fiche(&chemin).expect("la fiche se relit");
-        assert_eq!(fiche.pistes, ["jeu", "copains"]);
+        assert_eq!(fiche.pistes.as_deref(), Some(&["jeu".to_string(), "copains".to_string()][..]));
         assert_eq!(fiche.source, "VALORANT");
         assert!((fiche.duree_s - 12.5).abs() < 0.01);
         // Un clip d'avant la fiche n'en a pas : il se partage tel quel.
         assert!(lire_fiche(&chemin.with_extension("autre.mp4")).is_none());
+        // Le dépôt sur un serveur se note, sans inventer de pistes.
+        let mut apres = Fiche { serveur: Some("0123456789abcdef".into()), ..Default::default() };
+        apres.serveur_base = Some("https://x:8080".into());
+        sauver_fiche(&chemin, &apres);
+        let relue = lire_fiche(&chemin).unwrap();
+        assert_eq!(relue.serveur.as_deref(), Some("0123456789abcdef"));
+        assert!(relue.pistes.is_none());
         if let Some(f) = chemin_fiche(&chemin) {
             let _ = std::fs::remove_file(f);
         }
