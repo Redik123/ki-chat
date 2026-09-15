@@ -172,6 +172,9 @@ jobs:
   macos:
     needs: ci
     runs-on: macos-latest
+    # macOS ne bloque pas la release : voir ci.yml. Sans ses actifs, la
+    # release sort avec ceux de Windows.
+    continue-on-error: true
     env:
       # `.cargo/config.toml` grave les chemins Windows de cmake et de nasm
       # (ceux d'une machine précise, sans `force`) : ici, ceux du PATH.
@@ -254,7 +257,8 @@ jobs:
   # ---------------------------------------------------------------------
   publish:
     needs: [windows, macos]
-    if: startsWith(github.ref, 'refs/tags/')
+    # `always()` : publier même si macOS a lâché — mais jamais sans Windows.
+    if: always() && startsWith(github.ref, 'refs/tags/') && needs.windows.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
