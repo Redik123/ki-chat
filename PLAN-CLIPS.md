@@ -633,7 +633,11 @@ manette, le récap hebdo (à voir si l'envie vient).
   bleu en diffusion ; INVALID_DEVICE chez jildhorn) → l'enregistreur suit
   la même politique que la diffusion (deux refus → arrêt et message,
   marqueur de plantage, jamais de logiciel à 1080p60), et reste éteint par
-  défaut.
+  défaut. **Tenu le 2026-09-15** : si l'encodeur logiciel a pris le relais
+  au-dessus de 720p30, l'enregistreur s'arrête et le dit (`fatal`) ; et
+  une ligne de statistiques part au journal toutes les trente secondes
+  (images capturées/encodées, sautées, débit, conversion, encodage,
+  tampon, encodeur) pour lire la charge en jeu dans les diagnostics.
 - **Pas de NVIDIA** → 720p30 logiciel ou rien en C1 ; l'encodeur Media
   Foundation en C4.
 - **Le Sink Writer refuse le H.264 tel quel** → plan B `mp4` + AAC par la

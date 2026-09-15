@@ -575,6 +575,19 @@ pub struct Enregistreur {
     /// Dernière vérification de la source automatique.
     verif_source: Instant,
     pub erreur: Option<String>,
+    /// L'enregistreur doit s'arrêter : l'encodeur logiciel a pris le relais
+    /// de NVENC à une qualité qu'il ne tient pas en jeu (voir `tick`).
+    pub fatal: bool,
+    /// La ligne de statistiques du journal : quand, et les compteurs d'alors.
+    stats_a: Instant,
+    stats_avant: (u64, u64, u64, u64),
+}
+
+/// L'encodeur logiciel n'a rien à faire à 1080p ou à 60 i/s pendant une
+/// partie : c'est un cœur entier, et le jeu le sent. La qualité « Légère »
+/// (720p) à 30 i/s, elle, reste possible sans NVIDIA.
+pub fn logiciel_trop_lourd(reglages: &Reglages) -> bool {
+    reglages.qualite.hauteur_max() > 720 || reglages.fps > 30
 }
 
 impl Enregistreur {
@@ -607,6 +620,9 @@ impl Enregistreur {
             declencheur,
             verif_source: Instant::now(),
             erreur: None,
+            fatal: false,
+            stats_a: Instant::now(),
+            stats_avant: (0, 0, 0, 0),
         };
         moi.lancer_capture(source)?;
 
@@ -756,6 +772,48 @@ impl Enregistreur {
         }
         if let Some(a) = self.stats.prendre_avis() {
             self.erreur = Some(a);
+        }
+        // Ligne rouge du plan : jamais de logiciel à 1080p60 en jeu. Si NVENC
+        // a refusé et que la qualité demandée dépasse ce que le logiciel
+        // tient, on s'arrête et on le dit, plutôt que de plomber la partie.
+        let encodees = self.stats.encoded.load(Ordering::Relaxed);
+        if encodees > 0
+            && !self.stats.materiel.load(Ordering::Relaxed)
+            && !self.fatal
+            && logiciel_trop_lourd(&self.reglages)
+        {
+            self.fatal = true;
+            self.erreur = Some(
+                "NVENC indisponible : l'enregistreur s'arrête plutôt que d'encoder en logiciel à cette                  qualité — passe en « Légère » à 30 i/s pour réessayer"
+                    .into(),
+            );
+        }
+        // Toutes les trente secondes, une ligne au journal : la charge en
+        // jeu se lit ensuite dans les diagnostics.
+        if self.stats_a.elapsed() >= Duration::from_secs(30) {
+            let maintenant = (
+                self.stats.captured.load(Ordering::Relaxed),
+                encodees,
+                self.stats.skipped.load(Ordering::Relaxed),
+                self.stats.encoded_bytes.load(Ordering::Relaxed),
+            );
+            let dt = self.stats_a.elapsed().as_secs_f32().max(0.1);
+            let avant = self.stats_avant;
+            let etat = self.etat();
+            ki_video::journal(format!(
+                "clips : {:.0} i/s capturées, {:.0} encodées, {} sautées, {} kbit/s, conversion {:.1} ms,                  encodage {:.1} ms, tampon {:.0} s / {:.0} Mo, {}",
+                (maintenant.0 - avant.0) as f32 / dt,
+                (maintenant.1 - avant.1) as f32 / dt,
+                maintenant.2 - avant.2,
+                (maintenant.3 - avant.3) * 8 / 1000 / dt as u64,
+                self.stats.convert_ms.get(),
+                self.stats.encode_ms.get(),
+                etat.secondes,
+                etat.megaoctets,
+                etat.encodeur
+            ));
+            self.stats_a = Instant::now();
+            self.stats_avant = maintenant;
         }
         // Un appui du raccourci qui n'a rien donné : à dire, un par image.
         if let Some(m) = self.declencheur.avis.lock().unwrap().pop_front() {
@@ -1089,6 +1147,17 @@ mod tests {
 
     fn image(pts_us: u64, idr: bool) -> EncodedFrame {
         EncodedFrame { data: vec![0u8; 100], idr, pts_us, width: 16, height: 16 }
+    }
+
+    #[test]
+    fn le_logiciel_ne_tient_que_la_qualite_legere_a_trente() {
+        let mut r = Reglages { qualite: Qualite::Legere, fps: 30, ..Default::default() };
+        assert!(!logiciel_trop_lourd(&r));
+        r.fps = 60;
+        assert!(logiciel_trop_lourd(&r));
+        r.fps = 30;
+        r.qualite = Qualite::Equilibre;
+        assert!(logiciel_trop_lourd(&r));
     }
 
     #[test]

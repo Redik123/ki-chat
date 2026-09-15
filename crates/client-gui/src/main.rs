@@ -2108,6 +2108,11 @@ impl KiApp {
         if let Some(err) = self.enregistreur.as_mut().and_then(|e| e.erreur.take()) {
             self.info = Some(format!("enregistreur de clips : {err}"));
         }
+        // Le logiciel à 1080p60 en jeu : non. L'enregistreur l'a dit, on l'arrête.
+        if self.enregistreur.as_ref().is_some_and(|e| e.fatal) {
+            ki_video::journal("clips : arrêt — encodeur logiciel à une qualité qu'il ne tient pas en jeu");
+            self.arreter_clips();
+        }
     }
 
     fn rafraichir_clips(&mut self) {
