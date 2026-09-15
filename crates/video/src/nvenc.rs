@@ -501,7 +501,11 @@ impl Nvenc {
                 rc.maxBitRate = bitrate_bps.saturating_mul(3) / 2;
                 rc.vbvBufferSize = bitrate_bps;
                 rc.vbvInitialDelay = rc.vbvBufferSize;
-                rc.multiPass = ffi::NV_ENC_TWO_PASS_FULL_RESOLUTION;
+                // Deux passes en quart de résolution, comme la diffusion :
+                // la pleine résolution coûte trop aux cartes d'avant Turing
+                // — un GTX 1080 tient déjà à peine 1080p60 (diagnostics de
+                // Cheekyyyy, 2026-09-15), et le clip tourne pendant la partie.
+                rc.multiPass = ffi::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
                 rc.flags |= ffi::RC_ENABLE_AQ | ffi::RC_ENABLE_TEMPORAL_AQ | ffi::RC_ZERO_REORDER_DELAY;
             }
         }
