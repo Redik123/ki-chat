@@ -82,7 +82,7 @@ Surveillés sur un fil système dédié à 100 Hz (`GetAsyncKeystate` / hooks ba
 
 | Action | Raccourci par défaut | Personnalisable |
 | :--- | :--- | :--- |
-| **Sauver un clip (30 secondes)** | `Alt + F10` | Oui (⚙ → Clips) |
+| **Sauver un clip (30 secondes)** | `Alt + F10` (tenu par Windows : marche au-dessus du jeu) | Oui (⚙ → Clips) |
 | **Push-to-talk (Parler)** | Désactivé par défaut | Oui (⚙ → Audio) |
 | **Couper / Rétablir le micro** | Non assigné | Oui (⚙ → Audio) |
 | **Sourdine casque (Rendre sourd)** | Non assigné | Oui (⚙ → Audio) |
@@ -195,6 +195,9 @@ Ne laissez plus passer un tir incroyable ou un moment mémorable :
    - *Piste 3* : Votre voix filtrée et débruitée.
    - *Piste 4* : Les voix de vos coéquipiers dans le salon.
 3. **Galerie intégrée** : Retrouvez l'ensemble de vos clips dans l'onglet dédié de l'application, avec lecture immédiate, vignettes générées et raccourci pour ouvrir le dossier local dans l'Explorateur Windows.
+4. **Une touche qui passe au-dessus du jeu** : la combinaison est tenue par Windows (`RegisterHotKey`, le mécanisme d'Alt+Tab), pas lue par sondage — elle marche en plein écran, sous VALORANT et son anti-triche, sans lancer ki-chat en administrateur. Ctrl ou Maj tenus en plus (accroupi, en marche) ne la bloquent pas.
+5. **Partager dans un salon (C2, 0.1.37)** : clic droit sur un clip → le salon, une légende, et « avec les voix des copains » ou sans. Le clip monte par morceaux dans un stock à part (`data/clips/`, quota et durée de vie propres), le serveur en fabrique une copie **à une seule piste son** — le mélange, ou un mélange refait sans les copains ; leurs voix ne sortent jamais du dossier du clip — et poste le message en votre nom. Chez chacun, la carte vidéo, puis la visionneuse.
+6. **L'atelier (C3)** : « Modifier dans l'atelier… » — la coupe entre deux poignées sur une bande de vignettes, le format téléphone 9:16 en trois mises en page (recadré, avec une position de fin pour suivre l'action ; fond flou ; zoom), un titre, un curseur par piste, la cadence. Le serveur fabrique la vidéo d'après cette recette (jamais un filtre venu du client), puis : **Enregistrer sous…**, **Partager dans un salon**, ou **Envoyer sur le téléphone** par un QR code — un lien à jeton valable une heure, à scanner avec l'appareil photo, et la vidéo part sur TikTok ou Instagram depuis la feuille de partage du téléphone.
 
 ### Visionneuse média & Téléversement par morceaux
 
@@ -332,10 +335,10 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **M1–M3 (0.1.34)** — Bot musique haute fidélité : streaming direct sans pub, recherche YouTube/SoundCloud, playlists partagées et mémorisation d'état.
 - [x] **C0 (0.1.35)** — Visionneuse photo & vidéo intégrée, décodeur Media Foundation natif, normalisation serveur ffmpeg et téléversement par morceaux de 8 Mo.
 - [x] **C1 (0.1.35)** — Enregistreur de clips rétroactif (30 secondes à la touche Alt+F10), pistes audio séparées en MP4 et galerie de clips locale.
+- [x] **C2 (0.1.37)** — Partage de clips dans les salons textuels : stock à part sur le serveur, une seule piste son (avec ou sans les voix des copains), message au nom du membre, carte vidéo — et la touche des clips tenue par Windows, qui passe au-dessus du jeu.
+- [x] **C3 (à venir)** — Atelier de coupe et de recadrage au format téléphone (9:16, trois mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
 
 ### Perspectives & Prochains jalons
 
-- [ ] **C2** — Partage de clips en un clic dans les salons textuels avec génération automatique de carte vidéo.
-- [ ] **C3** — Atelier de recadrage au format téléphone (9:16) et export direct vers smartphone par QR code.
-- [ ] **C4** — Pipeline de capture vidéo tout-GPU (zéro copie mémoire centrale).
+- [ ] **C4** — Pipeline de capture vidéo tout-GPU (zéro copie mémoire centrale), encodeur AMD/Intel, une seule capture pour la diffusion et les clips.
 - [ ] **Général** — Synchronisation fine image/son sur le partage d'écran et son stéréo chez le spectateur.
