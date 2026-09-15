@@ -338,7 +338,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **C0 (0.1.35)** — Visionneuse photo & vidéo intégrée, décodeur Media Foundation natif, normalisation serveur ffmpeg et téléversement par morceaux de 8 Mo.
 - [x] **C1 (0.1.35)** — Enregistreur de clips rétroactif (30 secondes à la touche Alt+F10), pistes audio séparées en MP4 et galerie de clips locale.
 - [x] **C2 (0.1.37)** — Partage de clips dans les salons textuels : stock à part sur le serveur, une seule piste son (avec ou sans les voix des copains), message au nom du membre, carte vidéo — et la touche des clips tenue par Windows, qui passe au-dessus du jeu.
-- [x] **C3 (à venir)** — Atelier de coupe et de recadrage au format téléphone (9:16, quatre mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
+- [x] **C3 (0.1.38)** — Atelier de coupe et de recadrage au format téléphone (9:16, quatre mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
 
 ### Perspectives & Prochains jalons
 

@@ -530,7 +530,7 @@ tous, se lit dans la visionneuse, avec et sans les voix ; le message au
 nom du membre ; le serveur de prod mis à jour (Watchtower à la prochaine
 release) — avant, « mise à jour nécessaire ».
 
-### C3 — L'atelier et le téléphone — livré en test (2026-09-15, commits locaux)
+### C3 — L'atelier et le téléphone — livré (0.1.38, 2026-09-15)
 L'atelier (coupe, formats, trois mises en page, position de fin, titre,
 curseurs audio), `ClipExporter` + recette validée + ffmpeg, progression,
 `telephone.mp4`, QR code et lien à jeton. **Validation** : un clip coupé
@@ -603,7 +603,7 @@ du certificat, une fois), la publication sur TikTok et Instagram — image
 nette, son présent, rien de refusé —, et la police dans l'image Docker au
 premier export en prod.
 
-### C4 — Le confort — en cours (2026-09-15, commits locaux)
+### C4 — Le confort — en cours (0.1.38 : profil NVENC des clips, retrait du serveur, yt-dlp à jour)
 Encodeur AMD/Intel par la transformée H.264 de Media Foundation (pour les
 copains sans NVIDIA — et la diffusion en profiterait), chemin tout-GPU
 (texture WGC → NVENC), une seule capture pour diffusion + clips, chemin
