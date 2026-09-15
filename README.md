@@ -345,6 +345,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 
 - [x] **Présence (0.1.39)** — « joue à … » sous le pseudo pour tous les jeux reconnus à leur fenêtre, VALORANT gardant sa partie détaillée.
 - [x] **Soundboard (0.1.39)** — des sons à la touche entendus par le salon, mixés à la voix dans le moteur vocal.
+- [x] **Chat (0.1.39)** — modifier ses messages (clic droit, ou flèche haut dans un champ vide), et glisser-déposer des fichiers sur la fenêtre.
 
 ### Perspectives & Prochains jalons
 

@@ -1116,6 +1116,7 @@ fn handle_msg(
                 ts,
                 reply_to: reply_to.clone(),
                 reactions: Vec::new(),
+                edited: false,
             };
             state.history.append(channel, &rec);
             state.broadcast(
@@ -1211,6 +1212,58 @@ fn handle_msg(
                 channel,
                 None,
                 &ServerMsg::MessageDeleted { channel, message },
+            );
+        }
+        ClientMsg::EditMessage { message, text } => {
+            let Some(channel) = current_channel(state, user_id) else {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "rejoins un salon d'abord".into(),
+                });
+                return;
+            };
+            // Les siens seulement : un modérateur supprime, il ne réécrit
+            // pas ce que les autres ont dit.
+            if message.user_id != user_id {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "on ne modifie que ses propres messages".into(),
+                });
+                return;
+            }
+            // Même budget qu'un message : réécrire en rafale remplit le
+            // journal et la bande passante comme écrire.
+            let allowed = {
+                let mut users = state.users.lock().unwrap();
+                users
+                    .get_mut(&user_id)
+                    .is_some_and(|u| u.chat_budget.take())
+            };
+            if !allowed {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "tu écris trop vite".into(),
+                });
+                return;
+            }
+            let text = match ki_protocol::clean_chat(&text) {
+                Ok(text) => text,
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e });
+                    return;
+                }
+            };
+            if !state.history.edit(channel, message, text.clone()) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "ce message n'existe plus".into(),
+                });
+                return;
+            }
+            state.broadcast(
+                channel,
+                None,
+                &ServerMsg::MessageEdited {
+                    channel,
+                    message,
+                    text,
+                },
             );
         }
         ClientMsg::LierRiot { riot_id } => {

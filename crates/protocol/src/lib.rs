@@ -20,6 +20,11 @@ fn default_true() -> bool {
     true
 }
 
+/// Pour ne pas écrire un drapeau à faux dans chaque ligne de journal.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 pub mod perm {
     pub const VIEW_CHANNEL: u64 = 1 << 0;
     pub const SEND_MESSAGE: u64 = 1 << 1;
@@ -151,6 +156,10 @@ pub enum ClientMsg {
     /// Supprimer un message du salon courant : le sien, ou celui d'un autre
     /// avec la permission `DELETE_MESSAGES`.
     DeleteMessage { message: MsgRef },
+    /// Modifier un de ses messages du salon courant : le texte remplace
+    /// l'ancien chez tout le monde, et le message se dit « modifié ». Les
+    /// siens seulement — un modérateur supprime, il ne réécrit pas.
+    EditMessage { message: MsgRef, text: String },
     /// Demander l'historique du salon courant.
     History { limit: u32 },
     /// Chercher un texte dans l'historique.
@@ -454,6 +463,8 @@ pub enum ServerMsg {
     },
     /// Un message du salon a été supprimé : il disparaît chez tout le monde.
     MessageDeleted { channel: ChannelId, message: MsgRef },
+    /// Un message du salon a été modifié par son auteur : voici son texte.
+    MessageEdited { channel: ChannelId, message: MsgRef, text: String },
     /// Réponse à `LierRiot` / `DelierRiot` : réussi ou non, et pourquoi.
     LiaisonRiot {
         ok: bool,
@@ -1118,6 +1129,9 @@ pub struct ChatRecord {
     /// Les réactions, par emoji. Absentes d'un journal antérieur.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
+    /// Modifié par son auteur après coup. Absent d'un journal antérieur.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edited: bool,
 }
 
 /// La clé d'un message : son auteur et son horodatage. Le serveur rend
@@ -1979,6 +1993,7 @@ mod tests {
             ts: 43,
             reply_to: Some(ReplyRef { user_id: 1, ts: 42, username: "kevin".into(), excerpt: "yo".into() }),
             reactions: vec![Reaction { emoji: "👍".into(), users: vec![1, 3] }],
+            edited: false,
         };
         let ligne = serde_json::to_string(&nouveau).unwrap();
         let relu: ChatRecord = serde_json::from_str(&ligne).unwrap();
@@ -1987,6 +2002,11 @@ mod tests {
         // Et rien de tout ça n'alourdit un message ordinaire.
         let simple = serde_json::to_string(&ChatRecord { ts: 1, ..Default::default() }).unwrap();
         assert!(!simple.contains("reply_to") && !simple.contains("reactions"));
+        assert!(!simple.contains("edited"), "un message intact ne dit pas qu'il ne l'est pas");
+        let modifie = ChatRecord { ts: 1, edited: true, ..Default::default() };
+        let json = serde_json::to_string(&modifie).unwrap();
+        assert!(json.contains("\"edited\":true"));
+        assert!(serde_json::from_str::<ChatRecord>(&json).unwrap().edited);
     }
 
     /// Une réaction, c'est un emoji : pas une phrase, pas une lettre, pas

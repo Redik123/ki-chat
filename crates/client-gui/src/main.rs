@@ -524,6 +524,9 @@ struct KiApp {
     /// Le message auquel on est en train de répondre, rappelé au-dessus de
     /// la zone de saisie jusqu'à l'envoi (ou Échap).
     reponse_a: Option<ReplyRef>,
+    /// Le message que l'on est en train de modifier : la zone de saisie
+    /// porte son texte, Entrée l'envoie, Échap y renonce.
+    edition: Option<MsgRef>,
     /// Le menu ouvert d'un clic droit sur un message.
     menu_message: Option<MenuMessage>,
     /// Effets sonores : nom court -> PCM 48 kHz mono. Les défauts synthétisés
@@ -1113,6 +1116,7 @@ impl KiApp {
             admin_tab: AdminTab::Server,
             reglages_onglet: Onglet::depuis(&get("reglages_onglet", "audio")),
             reponse_a: None,
+            edition: None,
             menu_message: None,
             invite_uses: Some(1),
             invite_label: String::new(),
@@ -3616,6 +3620,7 @@ impl KiApp {
         self.voice_intent = None;
         self.members.clear();
         self.messages.clear();
+        self.edition = None;
         self.history_more = false;
         self.history_pending = false;
         self.history_anchor = None;
@@ -4224,6 +4229,7 @@ impl KiApp {
                     ts,
                     reply_to: reply_to.map(clean_reply),
                     reactions: Vec::new(),
+                    edited: false,
                 });
                 if self.messages.len() > 500 {
                     self.messages.remove(0);
@@ -4258,6 +4264,35 @@ impl KiApp {
                 }
                 if self.menu_message.as_ref().is_some_and(|m| m.message == message) {
                     self.menu_message = None;
+                }
+                if self.edition == Some(message) {
+                    self.annuler_edition();
+                }
+            }
+            ServerMsg::MessageEdited { channel, message, text } => {
+                if self.current != Some(channel) {
+                    return;
+                }
+                // Le texte vient d'autrui : les mêmes règles d'affichage
+                // que le reste.
+                let propre = ki_protocol::safe_display(&text, ki_protocol::MAX_CHAT_TEXT);
+                if let Some(m) = self
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.user_id == message.user_id && m.ts == message.ts)
+                {
+                    m.text = propre.clone();
+                    m.edited = true;
+                    // La hauteur change avec le texte : à remesurer.
+                    self.msg_heights.remove(&(message.user_id, message.ts));
+                }
+                // La citation sous une réponse en cours suit le texte.
+                if let Some(r) = self
+                    .reponse_a
+                    .as_mut()
+                    .filter(|r| r.user_id == message.user_id && r.ts == message.ts)
+                {
+                    r.excerpt = ki_protocol::excerpt_of(&propre);
                 }
             }
             ServerMsg::SearchResults { query, hits, more } => {
@@ -4742,6 +4777,13 @@ impl KiApp {
     /// Sélection d'un fichier puis upload, dans un thread (le dialogue
     /// natif et l'envoi ne doivent pas bloquer l'UI).
     fn start_upload(&self) {
+        self.televerser(Vec::new());
+    }
+
+    /// Envoie `fichiers` dans le salon, l'un après l'autre, sur un fil ;
+    /// sans fichier, le dialogue natif en demande un. C'est le même chemin
+    /// pour le trombone et pour un fichier lâché sur la fenêtre.
+    fn televerser(&self, fichiers: Vec<std::path::PathBuf>) {
         let Some(conn) = &self.conn else { return };
         let sender = conn.sender();
         let base = self.http_base();
@@ -4749,76 +4791,97 @@ impl KiApp {
         let token_hex = format!("{:x}", self.voice_token);
         let status = self.upload_status.clone();
         std::thread::spawn(move || {
-            let Some(path) = rfd::FileDialog::new().pick_file() else { return };
-            let name: String = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "fichier".into())
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            *status.lock().unwrap() = Some(format!("envoi de {name}…"));
-            let result = (|| -> Result<String, String> {
-                const MAX: u64 = 512 * 1024 * 1024;
-                let taille = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-                if taille == 0 {
-                    return Err("fichier vide".into());
+            let fichiers: Vec<std::path::PathBuf> = if fichiers.is_empty() {
+                match rfd::FileDialog::new().pick_file() {
+                    Some(p) => vec![p],
+                    None => return,
                 }
-                if taille > MAX {
-                    return Err("fichier trop gros (512 Mo max)".into());
+            } else {
+                // Dix à la fois au plus : au-delà, ce n'est plus un partage.
+                fichiers.into_iter().take(10).collect()
+            };
+            let total = fichiers.len();
+            for (rang, path) in fichiers.into_iter().enumerate() {
+                // Un message toutes les 1,5 s : le serveur tient cette
+                // cadence, et chaque fichier en est un.
+                if rang > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(1600));
                 }
-                let progres = {
-                    let (status, name) = (status.clone(), name.clone());
-                    move |pc: u64| *status.lock().unwrap() = Some(format!("envoi de {name}… {pc} %"))
-                };
-                let (upload, parts) =
-                    match envoyer_morceaux(&agent, &base, &token_hex, &path, taille, &progres)? {
-                        EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
-                        // Un serveur d'avant les morceaux : le fichier d'un
-                        // bloc, comme avant, s'il tient dans sa limite — le
-                        // temps qu'il soit mis à jour.
-                        EnvoiMorceaux::ServeurAncien => {
-                            if taille > 25 * 1024 * 1024 {
-                                return Err("le serveur n'accepte pas encore les gros fichiers \
-                                            (25 Mo max avant sa mise à jour)"
-                                    .into());
-                            }
-                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                            let resp = agent
-                                .post(&format!("{base}/upload?name={name}"))
-                                .set("x-ki-token", &token_hex)
-                                .timeout(std::time::Duration::from_secs(300))
-                                .send_bytes(&bytes)
-                                .map_err(erreur_http)?;
-                            let json: serde_json::Value =
-                                resp.into_json().map_err(|e| e.to_string())?;
-                            let file_path =
-                                json["url"].as_str().ok_or("réponse invalide")?.to_string();
-                            return Ok(format!("{base}{file_path}"));
+                let _ = total;
+                let name: String = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "fichier".into())
+                    .chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                            c
+                        } else {
+                            '_'
                         }
+                    })
+                    .collect();
+                *status.lock().unwrap() = Some(format!("envoi de {name}…"));
+                let result = (|| -> Result<String, String> {
+                    const MAX: u64 = 512 * 1024 * 1024;
+                    let taille = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+                    if taille == 0 {
+                        return Err("fichier vide".into());
+                    }
+                    if taille > MAX {
+                        return Err("fichier trop gros (512 Mo max)".into());
+                    }
+                    let progres = {
+                        let (status, name) = (status.clone(), name.clone());
+                        move |pc: u64| *status.lock().unwrap() = Some(format!("envoi de {name}… {pc} %"))
                     };
-                let resp = agent
-                    .post(&format!("{base}/upload/fin?upload={upload}&name={name}&parts={parts}"))
-                    .set("x-ki-token", &token_hex)
-                    .timeout(std::time::Duration::from_secs(300))
-                    .send_string("")
-                    .map_err(erreur_http)?;
-                let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-                let file_path = json["url"].as_str().ok_or("réponse invalide")?.to_string();
-                Ok(format!("{base}{file_path}"))
-            })();
-            match result {
-                Ok(url) => {
-                    let _ = sender.send(net::Cmd::Send(ClientMsg::Chat { text: url, reply_to: None }));
-                    *status.lock().unwrap() = None;
+                    let (upload, parts) =
+                        match envoyer_morceaux(&agent, &base, &token_hex, &path, taille, &progres)? {
+                            EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
+                            // Un serveur d'avant les morceaux : le fichier d'un
+                            // bloc, comme avant, s'il tient dans sa limite — le
+                            // temps qu'il soit mis à jour.
+                            EnvoiMorceaux::ServeurAncien => {
+                                if taille > 25 * 1024 * 1024 {
+                                    return Err("le serveur n'accepte pas encore les gros fichiers \
+                                                (25 Mo max avant sa mise à jour)"
+                                        .into());
+                                }
+                                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                                let resp = agent
+                                    .post(&format!("{base}/upload?name={name}"))
+                                    .set("x-ki-token", &token_hex)
+                                    .timeout(std::time::Duration::from_secs(300))
+                                    .send_bytes(&bytes)
+                                    .map_err(erreur_http)?;
+                                let json: serde_json::Value =
+                                    resp.into_json().map_err(|e| e.to_string())?;
+                                let file_path =
+                                    json["url"].as_str().ok_or("réponse invalide")?.to_string();
+                                return Ok(format!("{base}{file_path}"));
+                            }
+                        };
+                    let resp = agent
+                        .post(&format!("{base}/upload/fin?upload={upload}&name={name}&parts={parts}"))
+                        .set("x-ki-token", &token_hex)
+                        .timeout(std::time::Duration::from_secs(300))
+                        .send_string("")
+                        .map_err(erreur_http)?;
+                    let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+                    let file_path = json["url"].as_str().ok_or("réponse invalide")?.to_string();
+                    Ok(format!("{base}{file_path}"))
+                })();
+                match result {
+                    Ok(url) => {
+                        let _ = sender.send(net::Cmd::Send(ClientMsg::Chat { text: url, reply_to: None }));
+                        *status.lock().unwrap() = None;
+                    }
+                    Err(e) => {
+                        *status.lock().unwrap() = Some(format!("échec de l'envoi : {e}"));
+                        // Le suivant attend : l'erreur doit se lire.
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
                 }
-                Err(e) => *status.lock().unwrap() = Some(format!("échec de l'envoi : {e}")),
             }
         });
     }
@@ -6378,6 +6441,20 @@ impl KiApp {
             .map(|c| c.name.clone())
             .unwrap_or_default();
 
+        // Un fichier lâché sur la fenêtre part dans le salon, par le même
+        // chemin que le trombone ; en survol, la conversation le dit.
+        let laches: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
+        });
+        if !laches.is_empty() {
+            if self.can(ki_protocol::perm::UPLOAD_FILE) {
+                self.televerser(laches);
+            } else {
+                self.info = Some("tu n'as pas le droit de partager des fichiers".into());
+            }
+        }
+        let survol = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_BASE))
             .show(ctx, |ui| {
@@ -6446,6 +6523,31 @@ impl KiApp {
                     .frame(egui::Frame::NONE.fill(theme::BG_BASE))
                     .show_inside(ui, |ui| self.chat_log(ui, &channel_name));
             });
+
+        if survol {
+            let rect = ctx.screen_rect();
+            egui::Area::new(egui::Id::new("depot-fichier"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(rect.min)
+                .show(ctx, |ui| {
+                    let p = ui.painter();
+                    p.rect_filled(rect, 0.0, theme::alpha(theme::BG_DEEP, 200));
+                    p.rect_stroke(
+                        rect.shrink(18.0),
+                        14.0,
+                        egui::Stroke::new(2.0_f32, ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                    p.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("Lâche pour envoyer dans #{channel_name}"),
+                        egui::FontId::proportional(20.0),
+                        TEXT,
+                    );
+                    ui.allocate_rect(rect, Sense::hover());
+                });
+        }
     }
 
     fn chat_input(&mut self, ui: &mut egui::Ui, channel_name: &str) {
@@ -6469,6 +6571,7 @@ impl KiApp {
             return;
         }
         let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
+        self.edition_bar(ui);
         self.reply_bar(ui);
         egui::Frame::NONE
             .fill(theme::BG_RAISED)
@@ -6496,6 +6599,11 @@ impl KiApp {
                     // repos, jusqu'à six ensuite. Sans plafond, coller cent
                     // lignes mangerait la conversation.
                     let lignes = self.input.lines().count().clamp(1, 6);
+                    let indice = if self.edition.is_some() {
+                        "Modifie ton message — Entrée pour enregistrer, Échap pour annuler".to_string()
+                    } else {
+                        format!("Message dans #{channel_name}")
+                    };
                     let response = ui.add_sized(
                         Vec2::new(ui.available_width() - send_width, 18.0 * lignes as f32 + 8.0),
                         egui::TextEdit::multiline(&mut self.input)
@@ -6503,7 +6611,7 @@ impl KiApp {
                             .desired_rows(lignes)
                             .frame(false)
                             .margin(egui::Margin::symmetric(4, 4))
-                            .hint_text(format!("Message dans #{channel_name}")),
+                            .hint_text(indice),
                     );
                     if menu_edition(&response, &mut self.input, false) {
                         self.focus_input = true;
@@ -6523,6 +6631,21 @@ impl KiApp {
                         }
                         submit = true;
                         self.focus_input = true;
+                    }
+                    // Flèche haut dans un champ vide : reprendre son dernier
+                    // message pour le corriger — le geste de Discord.
+                    if response.has_focus()
+                        && self.input.is_empty()
+                        && self.edition.is_none()
+                        && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
+                    {
+                        let dernier = self
+                            .my_id
+                            .and_then(|me| self.messages.iter().rev().find(|m| m.user_id == me))
+                            .cloned();
+                        if let Some(m) = dernier {
+                            self.commencer_edition(&m);
+                        }
                     }
                     if std::mem::take(&mut self.focus_input) {
                         response.request_focus();
@@ -6556,11 +6679,26 @@ impl KiApp {
             // le champ, Entrée à nouveau l'enverra.
             let trop_tot = self.dernier_envoi.is_some_and(|t| t.elapsed() < CADENCE_CHAT);
             if !text.is_empty() && !trop_tot {
-                let reply_to =
-                    self.reponse_a.take().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
-                self.send(ClientMsg::Chat { text, reply_to });
+                match self.edition.take() {
+                    // Modifier : un texte inchangé ne repart pas, mais
+                    // l'édition se ferme quand même.
+                    Some(message) => {
+                        let inchange = self.messages.iter().any(|m| {
+                            m.user_id == message.user_id && m.ts == message.ts && m.text == text
+                        });
+                        if !inchange {
+                            self.send(ClientMsg::EditMessage { message, text });
+                            self.dernier_envoi = Some(std::time::Instant::now());
+                        }
+                    }
+                    None => {
+                        let reply_to =
+                            self.reponse_a.take().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
+                        self.send(ClientMsg::Chat { text, reply_to });
+                        self.dernier_envoi = Some(std::time::Instant::now());
+                    }
+                }
                 self.input.clear();
-                self.dernier_envoi = Some(std::time::Instant::now());
             }
         }
     }
@@ -6665,6 +6803,12 @@ impl KiApp {
                         self.focus_input = true;
                         fermer = true;
                     }
+                    // Les siens seulement : le serveur refuse le reste, et
+                    // un bouton qui échoue n'apprend rien.
+                    if Some(msg.user_id) == self.my_id && ui.button("✎ Modifier").clicked() {
+                        self.commencer_edition(&msg);
+                        fermer = true;
+                    }
                     if peut_supprimer {
                         let rouge = Color32::from_rgb(232, 84, 84);
                         if menu.confirmer {
@@ -6690,6 +6834,59 @@ impl KiApp {
         if fermer || ailleurs || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.menu_message = None;
         }
+    }
+
+    /// Reprendre un de ses messages dans la zone de saisie pour le
+    /// corriger. Une réponse en cours s'efface : on ne fait pas les deux.
+    fn commencer_edition(&mut self, msg: &ChatRecord) {
+        self.edition = Some(MsgRef { user_id: msg.user_id, ts: msg.ts });
+        self.input = msg.text.clone();
+        self.reponse_a = None;
+        self.focus_input = true;
+    }
+
+    /// Renoncer à modifier : le texte repris s'en va avec.
+    fn annuler_edition(&mut self) {
+        if self.edition.take().is_some() {
+            self.input.clear();
+            self.focus_input = true;
+        }
+    }
+
+    /// Le rappel « tu modifies ton message » au-dessus de la zone de
+    /// saisie, tant qu'une modification est en cours. Échap ou la croix y
+    /// renoncent.
+    fn edition_bar(&mut self, ui: &mut egui::Ui) {
+        if self.edition.is_none() {
+            return;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.annuler_edition();
+            return;
+        }
+        egui::Frame::NONE
+            .fill(theme::BG_RAISED)
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("✎ Tu modifies ton message — Entrée pour enregistrer")
+                            .color(TEXT_DIM)
+                            .size(12.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(RichText::new("✕").color(TEXT_DIM))
+                            .on_hover_text("Annuler (Échap)")
+                            .clicked()
+                        {
+                            self.annuler_edition();
+                        }
+                    });
+                });
+            });
+        ui.add_space(4.0);
     }
 
     /// Le rappel « en réponse à… » au-dessus de la zone de saisie, tant
@@ -11783,6 +11980,9 @@ fn message_block(
                     }
                 }
                 message_body(ui, &msg.text, membres, moi, (msg.user_id, msg.ts));
+                if msg.edited {
+                    ui.label(RichText::new("(modifié)").color(TEXT_FAINT).size(10.5));
+                }
                 // Les images partagées s'affichent sous le message.
                 for (is_link, chunk) in split_links(&msg.text) {
                     if !is_link {

@@ -895,6 +895,7 @@ impl AppState {
             ts,
             reply_to: None,
             reactions: Vec::new(),
+            edited: false,
         };
         self.history.append(channel, &rec);
         self.broadcast(

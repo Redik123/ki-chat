@@ -310,7 +310,8 @@ async fn main() -> anyhow::Result<()> {
                 | ServerMsg::WatchDenied { .. }
                 | ServerMsg::KeyframeNeeded { .. }
                 | ServerMsg::StreamMetaChanged { .. }
-                | ServerMsg::StreamBudget { .. } => {}
+                | ServerMsg::StreamBudget { .. }
+                | ServerMsg::MessageEdited { .. } => {}
             }
         }
         println!("connexion fermée par le serveur");

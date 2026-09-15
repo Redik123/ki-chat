@@ -35,6 +35,9 @@ const MEM_CAP: usize = 1000;
 struct Etat {
     reactions: Vec<Reaction>,
     supprime: bool,
+    /// Le texte modifié par l'auteur, s'il l'a été : la dernière
+    /// modification gagne. Le message brut du journal garde l'original.
+    texte: Option<String>,
 }
 
 type Etats = HashMap<MsgRef, Etat>;
@@ -50,6 +53,7 @@ enum Ligne {
     Message(ChatRecord),
     Reaction { react: EvReaction },
     Suppression { del: MsgRef },
+    Edition { edit: EvEdition },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +62,12 @@ struct EvReaction {
     emoji: String,
     by: UserId,
     on: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EvEdition {
+    message: MsgRef,
+    text: String,
 }
 
 /// Applique un événement à l'état d'un message. Rend vrai si quelque chose
@@ -261,6 +271,9 @@ fn scan(path: &std::path::Path, mem_cap: usize) -> (VecDeque<ChatRecord>, Index,
             Ok(Ligne::Suppression { del }) => {
                 etats.entry(del).or_default().supprime = true;
             }
+            Ok(Ligne::Edition { edit }) => {
+                etats.entry(edit.message).or_default().texte = Some(edit.text);
+            }
             Err(_) => {}
         }
     }
@@ -336,6 +349,10 @@ impl History {
             Some(e) if e.supprime => None,
             Some(e) => {
                 rec.reactions = e.reactions.clone();
+                if let Some(t) = &e.texte {
+                    rec.text = t.clone();
+                    rec.edited = true;
+                }
                 Some(rec)
             }
             None => Some(rec),
@@ -351,17 +368,14 @@ impl History {
             .iter()
             .rev()
             .find(|r| r.user_id == message.user_id && r.ts == message.ts)?;
-        if self
-            .etats
-            .lock()
-            .unwrap()
-            .get(&channel)?
-            .get(&message)
-            .is_some_and(|e| e.supprime)
-        {
+        let etats = self.etats.lock().unwrap();
+        let etat = etats.get(&channel).and_then(|e| e.get(&message));
+        if etat.is_some_and(|e| e.supprime) {
             return None;
         }
-        Some((rec.username.clone(), ki_protocol::excerpt_of(&rec.text)))
+        // Le texte modifié, s'il l'a été : on cite ce qui se lit.
+        let texte = etat.and_then(|e| e.texte.as_deref()).unwrap_or(&rec.text);
+        Some((rec.username.clone(), ki_protocol::excerpt_of(texte)))
     }
 
     /// Ce message existe-t-il dans le salon ? Le cache d'abord, l'index
@@ -442,6 +456,36 @@ impl History {
             etat.reactions.clear();
         }
         if let Ok(line) = serde_json::to_string(&Ligne::Suppression { del: message }) {
+            if let Some(writes) = &self.writes {
+                let _ = writes.send(WriteCmd::Event(channel, line));
+            }
+        }
+        true
+    }
+
+    /// Remplace le texte d'un message. Rend faux s'il n'existe pas, ou
+    /// plus. Le journal reste append-only : une ligne d'événement de plus,
+    /// rejouée au démarrage — la dernière gagne. Le cache mémoire garde le
+    /// texte d'origine, `habiller` applique la modification à la lecture,
+    /// comme pour une page relue du disque.
+    pub fn edit(&self, channel: ChannelId, message: MsgRef, text: String) -> bool {
+        if !self.connu(channel, message) {
+            return false;
+        }
+        {
+            let mut etats = self.etats.lock().unwrap();
+            let etat = etats
+                .entry(channel)
+                .or_default()
+                .entry(message)
+                .or_default();
+            if etat.supprime {
+                return false;
+            }
+            etat.texte = Some(text.clone());
+        }
+        let ev = EvEdition { message, text };
+        if let Ok(line) = serde_json::to_string(&Ligne::Edition { edit: ev }) {
             if let Some(writes) = &self.writes {
                 let _ = writes.send(WriteCmd::Event(channel, line));
             }
@@ -1085,6 +1129,40 @@ mod tests {
         // n'ont pas la même clé.
         assert_eq!(history.unique_ts(1, 30), 31);
         assert_eq!(history.unique_ts(1, 500), 500);
+    }
+
+    /// Une modification remplace le texte à la lecture — page en mémoire,
+    /// page relue du disque, citation d'une réponse — et survit au
+    /// redémarrage comme les réactions.
+    #[test]
+    fn une_modification_survit_au_redemarrage_et_se_cite() {
+        let dir = scratch("edition");
+        let cle = |ts| MsgRef { user_id: 1, ts };
+        {
+            let history = History::open(&dir, &[text_channel(1)]).unwrap();
+            history.append(1, &stamped(10));
+            history.append(1, &stamped(20));
+            assert!(history.edit(1, cle(10), "m10 corrigé".into()));
+            assert!(history.edit(1, cle(10), "m10 encore".into()), "la dernière gagne");
+            assert!(!history.edit(1, cle(99), "fantôme".into()));
+            assert!(history.delete(1, cle(20)));
+            assert!(
+                !history.edit(1, cle(20), "trop tard".into()),
+                "un message supprimé ne se modifie plus"
+            );
+            let page = history.recent(1, 10);
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].text, "m10 encore");
+            assert!(page[0].edited);
+            assert_eq!(history.resolve_reply(1, cle(10)).unwrap().1, "m10 encore");
+        }
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        let page = history.recent(1, 10);
+        assert_eq!(page[0].text, "m10 encore");
+        assert!(page[0].edited);
+        let (avant, _) = history.before(&dir, 1, 31, 10);
+        assert_eq!(avant[0].text, "m10 encore");
+        assert!(avant[0].edited);
     }
 
     /// La recherche ignore la casse, traverse les salons, et rend les
