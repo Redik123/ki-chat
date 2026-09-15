@@ -549,6 +549,11 @@ pub enum ServerMsg {
     KeyframeNeeded { stream_id: u32 },
     /// Les caractéristiques d'un stream ont changé (dimensions, débit).
     StreamMetaChanged { stream_id: u32, meta: StreamMeta },
+    /// Au streamer : le palier de débit que ses spectateurs avalent, à
+    /// appliquer à l'encodeur — il descend dès qu'un lien sature, remonte
+    /// d'un cran toutes les cinq secondes sans saturation, et revient au
+    /// réglage quand tout passe. Un client d'avant l'ignore.
+    StreamBudget { stream_id: u32, kbps: u32 },
     /// Liste complète des membres. Envoyée à la connexion, et chaque fois
     /// qu'un changement touche potentiellement tout le monde (rôles remaniés,
     /// salon supprimé).

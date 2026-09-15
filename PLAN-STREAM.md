@@ -204,9 +204,23 @@ en cours de lecture (trame versée + 20 ms − avance du mixeur, extrapolé
 entre deux relevés), le fil de l'image retient chaque image décodée dans
 une file jusqu'à cet instant (tolérance 15 ms, file bornée à 12, image
 immédiate sans son ou son tari depuis 1,5 s).
-Reste : ladder adaptatif complet (goodput → `StreamBudget` → encodeur,
-hystérésis, `StreamRung`) — c'est lui qui évitera de saturer un lien
-court plutôt que d'en gérer les dégâts ; stéréo chez le spectateur.
+**Livré le 2026-09-15 (commit local, après 0.1.38) : le palier de débit.**
+Le serveur mesure par spectateur et par seconde les octets acceptés par
+sa connexion (fenêtre d'envoi bornée à 1 Mio : accepté ≈ parti) et ses
+saturations (écriture hors délai, trame annulée par la borne en vol, file
+pleine). Un spectateur saturé → palier juste sous 0,9 × ce qu'il avale,
+dans l'échelle {réglage, 8000, 6000, 4000, 2500, 1500, 1000} ; à partir
+de quatre spectateurs, c'est le second plus lent qui compte ; cinq
+secondes sans saturation → un cran de plus ; plus de spectateur → le
+réglage. `Ingest::Ok { ask_idr, palier }` → `ServerMsg::StreamBudget
+{ stream_id, kbps }` au streamer ; le client plafonne `kbps` dans ses
+réglages effectifs et relance la capture comme pour un changement de
+réglages (`rediffuser`), tableau de bord et journal le disent. Fixé par
+le test `le_palier_descend_sous_le_spectateur_sature_et_remonte_cran_par_cran`.
+**Reste** : la validation sur un vrai lien bridé (limiteur de débit chez
+un spectateur : la vidéo doit descendre en quelques secondes et remonter
+cran par cran) ; la résolution et la cadence comme crans suivants (le plan
+: débit d'abord, résolution ensuite) ; stéréo chez le spectateur.
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 

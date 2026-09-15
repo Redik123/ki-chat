@@ -590,6 +590,9 @@ struct KiApp {
     app_ctx: egui::Context,
     /// Ma diffusion d'écran en cours.
     go_live: Option<partage::GoLive>,
+    /// Le palier de débit que le serveur demande (un spectateur ne suit
+    /// pas) ; `None` = le réglage.
+    diffusion_palier: Option<u32>,
     /// Clé générée, en attente du StreamGranted du serveur.
     go_live_attente: Option<[u8; 32]>,
     go_live_tex: Option<egui::TextureHandle>,
@@ -1015,6 +1018,7 @@ impl KiApp {
             go_live_attente: None,
             go_live_tex: None,
             diffusion: partage::Reglages::load(get),
+            diffusion_palier: None,
             sources: Default::default(),
             show_diffusion: false,
             overlay: overlay::Overlay::load(get),
@@ -4317,6 +4321,7 @@ impl KiApp {
                 }
             }
             ServerMsg::StreamGranted { stream_id } => {
+                self.diffusion_palier = None;
                 self.diffusion_accordee(stream_id);
             }
             ServerMsg::StreamStarted { stream_id, user_id, .. } => {
@@ -4369,6 +4374,19 @@ impl KiApp {
                 }
             }
             ServerMsg::StreamMetaChanged { .. } => {}
+            ServerMsg::StreamBudget { stream_id, kbps } => {
+                if self.go_live.as_ref().is_some_and(|g| g.stream_id == stream_id) {
+                    let palier = (kbps < self.diffusion.kbps).then_some(kbps);
+                    if palier != self.diffusion_palier {
+                        ki_voice::journal(match palier {
+                            Some(p) => format!("diffusion : palier {p} kbit/s — un spectateur ne suit pas"),
+                            None => "diffusion : le palier revient au réglage".to_string(),
+                        });
+                        self.diffusion_palier = palier;
+                        self.rediffuser();
+                    }
+                }
+            }
             ServerMsg::LiaisonRiot { ok, message, .. } => {
                 self.riot_message = Some((ok, message));
             }
@@ -8795,16 +8813,27 @@ impl KiApp {
     /// Les réglages ont changé pendant une diffusion : la capture repart
     /// avec les nouveaux, le stream continue — même clé, même séquence, les
     /// spectateurs ne voient qu'une trame clé de plus.
+    /// Les réglages de diffusion en vigueur : les siens, le débit plafonné
+    /// au palier que le serveur demande quand un spectateur ne suit pas.
+    fn reglages_effectifs(&self) -> partage::Reglages {
+        let mut r = self.diffusion.clone();
+        if let Some(p) = self.diffusion_palier {
+            r.kbps = r.kbps.min(p.max(500));
+        }
+        r
+    }
+
     fn rediffuser(&mut self) {
         let Some(g) = self.go_live.take() else { return };
-        if g.reglages == self.diffusion {
+        let effectifs = self.reglages_effectifs();
+        if g.reglages == effectifs {
             self.go_live = Some(g);
             return;
         }
-        match g.reconfigurer(&self.diffusion) {
+        match g.reconfigurer(&effectifs) {
             Ok(mut g) => {
                 // Le son du jeu suit sa case, sans toucher à la vidéo.
-                if !self.diffusion.son {
+                if !effectifs.son {
                     g.audio = None;
                 } else if g.audio.is_none() {
                     g.audio = self.demarrer_son_du_jeu(g.stream_id, g.key, g.origine);
@@ -8812,7 +8841,7 @@ impl KiApp {
                 // Cadence et débit changent tout de suite ; les dimensions,
                 // la couche réseau les annoncera d'elle-même à la première
                 // trame si elles bougent.
-                let mut meta = self.diffusion.meta();
+                let mut meta = effectifs.meta();
                 let (w, h) = g.stats.dims();
                 meta.width = w as u16;
                 meta.height = h as u16;
@@ -8853,6 +8882,7 @@ impl KiApp {
 
     /// Arrête sa propre diffusion, côté capture ET côté serveur.
     fn arreter_diffusion(&mut self) {
+        self.diffusion_palier = None;
         secours::lever_diffusion();
         if let Some(g) = self.go_live.take() {
             ki_voice::journal(format!(
@@ -9071,6 +9101,10 @@ impl KiApp {
                 g.stats.enc_skipped.load(Relaxed),
                 g.stats.net_dropped.load(Relaxed),
             );
+            let etat = match self.diffusion_palier {
+                Some(p) => format!("{etat} · palier {p} kbit/s (un spectateur ne suit pas)"),
+                None => etat,
+            };
             // La même ligne au journal toutes les dix secondes : c'est elle
             // qui dira, à distance, où une diffusion a coincé.
             if self.journal_flux.elapsed() >= std::time::Duration::from_secs(10) {

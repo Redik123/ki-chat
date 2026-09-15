@@ -482,14 +482,23 @@ async fn stream_ingest_task(
         let Some(header) = ki_protocol::parse_media_header(&bytes) else {
             continue;
         };
-        if let crate::stream::Ingest::Ok { ask_idr: true } =
+        if let crate::stream::Ingest::Ok { ask_idr, palier } =
             state.streams.ingest(user_id, &header, bytes)
         {
             // Un spectateur (nouveau, lent, ou sacrifié par le plafond
             // mémoire) attend une trame décodable : prier le streamer.
-            let _ = tx.send(ServerMsg::KeyframeNeeded {
-                stream_id: header.stream_id,
-            });
+            if ask_idr {
+                let _ = tx.send(ServerMsg::KeyframeNeeded {
+                    stream_id: header.stream_id,
+                });
+            }
+            // Le palier de débit vient de changer : le dire au streamer.
+            if let Some(kbps) = palier {
+                let _ = tx.send(ServerMsg::StreamBudget {
+                    stream_id: header.stream_id,
+                    kbps,
+                });
+            }
         }
     }
 }

@@ -20,7 +20,7 @@
 //! (les spectateurs partagent la même allocation).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,12 +54,25 @@ impl Drop for Trame {
     }
 }
 
+/// Ce qu'un spectateur avale vraiment, et ses saturations : la matière du
+/// palier de débit (PLAN-STREAM.md, S3).
+#[derive(Default)]
+struct Mesure {
+    /// Octets acceptés par sa connexion. La fenêtre d'envoi est bornée à
+    /// 1 Mio : ce qui est accepté est parti, ou presque.
+    octets: AtomicU64,
+    /// Écritures hors délai, trames annulées faute de place, file pleine :
+    /// autant de signes que le lien ne suit pas.
+    saturations: AtomicU32,
+}
+
 /// Un spectateur : sa file, son drapeau « il me faut une trame clé », et la
 /// tâche qui écrit vers sa connexion.
 struct Viewer {
     tx: tokio::sync::mpsc::Sender<Arc<Trame>>,
     needs_idr: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
+    mesure: Arc<Mesure>,
     /// Sa connexion, pour le son du jeu : des datagrammes envoyés tels
     /// quels, sans file ni tâche — un paquet de son perdu ne s'attend pas.
     conn: quinn::Connection,
@@ -76,6 +89,114 @@ struct Live {
     seq_start: Option<u64>,
     viewers: HashMap<UserId, Viewer>,
     last_idr_ask: Instant,
+    palier: Palier,
+}
+
+/// Le palier de débit d'une diffusion : ce que le serveur demande au
+/// streamer d'après ce que ses spectateurs avalent.
+struct Palier {
+    courant: u32,
+    derniere_montee: Instant,
+    derniere_mesure: Instant,
+    /// Les compteurs de chaque spectateur à la mesure précédente.
+    avant: HashMap<UserId, (u64, u32)>,
+}
+
+impl Palier {
+    fn neuf(plafond: u32) -> Self {
+        Self {
+            courant: plafond,
+            derniere_montee: Instant::now(),
+            derniere_mesure: Instant::now(),
+            avant: HashMap::new(),
+        }
+    }
+}
+
+/// Un spectateur mesuré sur la dernière seconde.
+#[derive(Clone, Copy, Debug)]
+struct Avale {
+    kbps: u32,
+    sature: bool,
+}
+
+/// Les paliers possibles sous un plafond (le réglage du streamer), du plus
+/// haut au plus bas.
+fn paliers(plafond: u32) -> Vec<u32> {
+    let mut v = vec![plafond];
+    v.extend(
+        [8000u32, 6000, 4000, 2500, 1500, 1000]
+            .into_iter()
+            .filter(|p| *p < plafond),
+    );
+    v
+}
+
+/// Le palier suivant : descente immédiate sous 0,9 fois ce qu'avale le
+/// spectateur saturé le plus lent — le second, à partir de quatre
+/// spectateurs : un seul lien pourri ne dégrade pas tout le monde — ;
+/// remontée d'un cran après cinq secondes sans saturation. `None` : rien ne
+/// change.
+fn prochain_palier(courant: u32, plafond: u32, spectateurs: &[Avale], depuis_montee: Duration) -> Option<u32> {
+    if plafond == 0 || spectateurs.is_empty() {
+        return None;
+    }
+    let echelle = paliers(plafond);
+    let mut satures: Vec<u32> = spectateurs.iter().filter(|s| s.sature).map(|s| s.kbps).collect();
+    satures.sort_unstable();
+    let reference = if spectateurs.len() >= 4 {
+        satures.get(1).copied()
+    } else {
+        satures.first().copied()
+    };
+    if let Some(r) = reference {
+        let vise = (f64::from(r) * 0.9) as u32;
+        let plancher = *echelle.last().unwrap_or(&plafond);
+        let cible = echelle.iter().copied().find(|p| *p <= vise).unwrap_or(plancher);
+        return (cible < courant).then_some(cible);
+    }
+    if depuis_montee >= Duration::from_secs(5) {
+        return echelle.iter().rev().copied().find(|p| *p > courant);
+    }
+    None
+}
+
+/// Une mesure par seconde : ce que chaque spectateur a avalé depuis la
+/// précédente, et le palier qui en découle — rendu s'il change.
+fn mesurer_palier(live: &mut Live) -> Option<u32> {
+    let dt = live.palier.derniere_mesure.elapsed();
+    if dt < Duration::from_secs(1) {
+        return None;
+    }
+    live.palier.derniere_mesure = Instant::now();
+    let plafond = live.meta.kbps;
+    if live.viewers.is_empty() {
+        // Personne ne regarde : le palier revient au réglage.
+        live.palier.avant.clear();
+        live.palier.derniere_montee = Instant::now();
+        if live.palier.courant != plafond {
+            live.palier.courant = plafond;
+            return Some(plafond);
+        }
+        return None;
+    }
+    let secondes = dt.as_secs_f64().max(0.1);
+    let mut avales = Vec::with_capacity(live.viewers.len());
+    let mut avant = HashMap::with_capacity(live.viewers.len());
+    for (user, v) in &live.viewers {
+        let octets = v.mesure.octets.load(Ordering::Relaxed);
+        let sat = v.mesure.saturations.load(Ordering::Relaxed);
+        let (o0, s0) = live.palier.avant.get(user).copied().unwrap_or((octets, sat));
+        avant.insert(*user, (octets, sat));
+        let kbps = ((octets.saturating_sub(o0)) as f64 * 8.0 / 1000.0 / secondes) as u32;
+        avales.push(Avale { kbps, sature: sat > s0 });
+    }
+    live.palier.avant = avant;
+    let depuis = live.palier.derniere_montee.elapsed();
+    let suivant = prochain_palier(live.palier.courant, plafond, &avales, depuis)?;
+    live.palier.courant = suivant;
+    live.palier.derniere_montee = Instant::now();
+    Some(suivant)
 }
 
 #[derive(Default)]
@@ -92,8 +213,9 @@ pub struct Streams {
 
 /// Ce que l'ingestion d'une trame a donné.
 pub enum Ingest {
-    /// Relayée ; `ask_idr` dit s'il faut prier le streamer pour une trame clé.
-    Ok { ask_idr: bool },
+    /// Relayée ; `ask_idr` dit s'il faut prier le streamer pour une trame
+    /// clé, `palier` le débit à lui demander s'il vient de changer.
+    Ok { ask_idr: bool, palier: Option<u32> },
     /// Ce compte ne diffuse pas, ou l'en-tête ment sur le stream_id.
     Refuse,
 }
@@ -141,6 +263,7 @@ impl Streams {
         }
         let id = inner.next_id;
         inner.next_id = inner.next_id.wrapping_add(1).max(1);
+        let palier = Palier::neuf(meta.kbps);
         inner.by_id.insert(
             id,
             Live {
@@ -151,6 +274,7 @@ impl Streams {
                 seq_start: None,
                 viewers: HashMap::new(),
                 last_idr_ask: Instant::now() - IDR_COOLDOWN,
+                palier,
             },
         );
         Ok(id)
@@ -164,6 +288,11 @@ impl Streams {
             .by_id
             .iter_mut()
             .find(|(_, l)| l.streamer == streamer)?;
+        // Le réglage a changé : le palier ne le dépasse jamais, et repart
+        // de là s'il n'y avait pas de contrainte.
+        if live.palier.courant >= live.meta.kbps || live.palier.courant > meta.kbps {
+            live.palier.courant = meta.kbps;
+        }
         live.meta = meta;
         Some(*id)
     }
@@ -234,13 +363,21 @@ impl Streams {
         let (tx, rx) = tokio::sync::mpsc::channel::<Arc<Trame>>(FILE_VIEWER);
         let needs_idr = Arc::new(AtomicBool::new(true));
         let seq_start = live.seq_start.unwrap_or(0);
-        let task = tokio::spawn(diffuser(conn.clone(), rx, seq_start, needs_idr.clone()));
+        let mesure = Arc::new(Mesure::default());
+        let task = tokio::spawn(diffuser(
+            conn.clone(),
+            rx,
+            seq_start,
+            needs_idr.clone(),
+            mesure.clone(),
+        ));
         live.viewers.insert(
             user,
             Viewer {
                 tx,
                 needs_idr,
                 task,
+                mesure,
                 conn,
             },
         );
@@ -295,7 +432,7 @@ impl Streams {
             if ask {
                 live.last_idr_ask = Instant::now();
             }
-            return Ingest::Ok { ask_idr: ask };
+            return Ingest::Ok { ask_idr: ask, palier: None };
         }
         self.mem.fetch_add(taille, Ordering::Relaxed);
         let trame = Arc::new(Trame {
@@ -323,6 +460,7 @@ impl Streams {
                     // Spectateur lent : SA trame est jetée, il repartira
                     // d'une trame clé — les autres n'ont rien vu.
                     v.needs_idr.store(true, Ordering::Relaxed);
+                    v.mesure.saturations.fetch_add(1, Ordering::Relaxed);
                     ask = true;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -339,7 +477,8 @@ impl Streams {
         if ask_idr {
             live.last_idr_ask = Instant::now();
         }
-        Ingest::Ok { ask_idr }
+        let palier = mesurer_palier(live);
+        Ingest::Ok { ask_idr, palier }
     }
 }
 
@@ -376,6 +515,7 @@ async fn diffuser(
     mut rx: tokio::sync::mpsc::Receiver<Arc<Trame>>,
     seq_start: u64,
     needs_idr: Arc<AtomicBool>,
+    mesure: Arc<Mesure>,
 ) {
     let mut en_vol: std::collections::VecDeque<quinn::SendStream> =
         std::collections::VecDeque::new();
@@ -391,11 +531,14 @@ async fn diffuser(
         };
         let _ = flux.set_priority(priorite(trame.seq, seq_start));
         match tokio::time::timeout(ECRITURE_MAX, flux.write_all(&trame.bytes)).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                mesure.octets.fetch_add(trame.bytes.len() as u64, Ordering::Relaxed);
+            }
             Ok(Err(_)) => return,
             Err(_) => {
                 let _ = flux.reset(quinn::VarInt::from_u32(0));
                 needs_idr.store(true, Ordering::Relaxed);
+                mesure.saturations.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
         }
@@ -404,6 +547,7 @@ async fn diffuser(
         while en_vol.len() > EN_VOL_MAX {
             if let Some(mut vieux) = en_vol.pop_front() {
                 let _ = vieux.reset(quinn::VarInt::from_u32(0));
+                mesure.saturations.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -421,6 +565,38 @@ mod tests {
             kbps: 6000,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn le_palier_descend_sous_le_spectateur_sature_et_remonte_cran_par_cran() {
+        let a = |kbps, sature| Avale { kbps, sature };
+        let calme = Duration::from_secs(0);
+        let cinq = Duration::from_secs(5);
+        // Personne ne sature : rien ne bouge avant cinq secondes.
+        assert_eq!(prochain_palier(8000, 8000, &[a(7900, false)], calme), None);
+        // Un spectateur sature en avalant 3000 kbit/s : 0,9 × 3000 = 2700,
+        // le palier juste en dessous est 2500 — tout de suite.
+        assert_eq!(prochain_palier(8000, 8000, &[a(3000, true), a(7900, false)], calme), Some(2500));
+        // Déjà en dessous : on ne descend pas pour rien.
+        assert_eq!(prochain_palier(1500, 8000, &[a(3000, true)], calme), None);
+        // Un lien mort : le plancher.
+        assert_eq!(prochain_palier(8000, 8000, &[a(0, true)], calme), Some(1000));
+        // Après cinq secondes sans saturation : un cran, pas plus.
+        assert_eq!(prochain_palier(2500, 8000, &[a(2400, false)], cinq), Some(4000));
+        assert_eq!(prochain_palier(4000, 8000, &[a(3900, false)], cinq), Some(6000));
+        assert_eq!(prochain_palier(6000, 8000, &[a(5900, false)], cinq), Some(8000));
+        assert_eq!(prochain_palier(8000, 8000, &[a(7900, false)], cinq), None);
+        // À partir de quatre spectateurs, le plus lent seul ne compte pas.
+        let quatre = [a(500, true), a(7900, false), a(7900, false), a(7900, false)];
+        assert_eq!(prochain_palier(8000, 8000, &quatre, calme), None);
+        let deux_lents = [a(500, true), a(3000, true), a(7900, false), a(7900, false)];
+        assert_eq!(prochain_palier(8000, 8000, &deux_lents, calme), Some(2500));
+        // Le plafond du streamer : jamais dépassé, et un plafond bas n'a
+        // que lui et les paliers en dessous.
+        assert_eq!(paliers(3000), vec![3000, 2500, 1500, 1000]);
+        assert_eq!(prochain_palier(2500, 3000, &[a(2400, false)], cinq), Some(3000));
+        // Sans réglage connu (client d'avant), pas de palier.
+        assert_eq!(prochain_palier(0, 0, &[a(0, true)], calme), None);
     }
 
     #[test]
