@@ -225,10 +225,25 @@ ramené en mono) ; les écrivains natif et cpal et la sortie autonome des
 vidéos répartissent sur les voies du périphérique (`canal`) ; le lecteur
 du son du jeu pousse le stéréo décodé tel quel, `aux_pending` compte en
 trames. À écouter en vrai.
+**Livré le 2026-09-15 aussi (commit local) : l'encodeur qui se règle tout
+seul.** Côté streamer cette fois : `partage::Regulateur` relève une fois
+par seconde le temps par trame (conversion + encodage + décodage de
+l'aperçu) face au budget d'une trame, et les trames que la capture jette
+faute d'encodeur libre (`stats.skipped`) ; cinq secondes de saturation →
+un cran plus bas dans `paliers_encodeur(hauteur émise, fps)` — la cadence
+à 30 d'abord, puis 1080p, puis 720p, jamais moins —, quinze secondes de
+repos, deux minutes de calme → une remontée (deux par diffusion au plus,
+une remontée qui sature verrouille le cran). Le cran s'applique dans
+`reglages_effectifs` à côté du palier de débit, `rediffuser` relance la
+capture, le tableau de bord et le journal le disent. Fixé par deux tests
+sans horloge. À valider chez Cheekyyyy (GTX 1080 à 1080p60).
+**Livré aussi : la fenêtre de visionnage détachée** (viewport immédiat,
+plein écran F11/double-clic/Échap, barre de commandes qui s'efface).
 **Reste** : la validation sur un vrai lien bridé (limiteur de débit chez
 un spectateur : la vidéo doit descendre en quelques secondes et remonter
-cran par cran) ; la résolution et la cadence comme crans suivants (le plan
-: débit d'abord, résolution ensuite).
+cran par cran) ; la résolution et la cadence comme crans suivants du
+palier **réseau** (le plan : débit d'abord, résolution ensuite) ; les
+vignettes dans le sélecteur.
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 

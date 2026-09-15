@@ -528,6 +528,186 @@ impl Cadence {
 }
 
 // ---------------------------------------------------------------------
+// L'encodeur qui se règle tout seul
+// ---------------------------------------------------------------------
+
+/// Les crans que la diffusion descend quand l'encodeur ne suit pas :
+/// d'abord la cadence à 30 i/s, puis la hauteur, 1080p puis 720p — jamais
+/// plus bas, un stream à 480p ne se regarde plus. `hauteur` est celle que
+/// l'on émet (la source, ou le plafond réglé), `fps` le réglage. Le premier
+/// cran est le réglage lui-même.
+pub fn paliers_encodeur(hauteur: u32, fps: u32) -> Vec<(u32, u32)> {
+    let mut crans = vec![(hauteur, fps)];
+    let mut f = fps;
+    if f > 30 {
+        f = 30;
+        crans.push((hauteur, f));
+    }
+    let mut h = hauteur;
+    for candidat in [1080, 720] {
+        if candidat < h {
+            h = candidat;
+            crans.push((h, f));
+        }
+    }
+    crans
+}
+
+/// Ce que le régulateur décide à une seconde donnée.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cran {
+    Descente,
+    Remontee,
+}
+
+/// Le régulateur de l'encodeur — le pendant, côté streamer, du palier de
+/// débit que le serveur demande pour un spectateur qui ne suit pas.
+///
+/// Une fois par seconde, il regarde si le pipeline tient la cadence
+/// demandée : le temps par trame (conversion, encodage, et le décodage de
+/// l'aperçu s'il est là) face au budget d'une trame, et les trames que la
+/// capture jette faute d'encodeur libre. Cinq secondes de saturation, et
+/// la diffusion descend d'un cran ; quinze secondes de repos ensuite, le
+/// temps que les moyennes se refassent. Deux minutes de calme, et il tente
+/// de remonter d'un cran — deux fois par diffusion au plus, et une
+/// remontée qui sature à nouveau verrouille le cran pour la session : on
+/// ne fait pas osciller les spectateurs. Un changement de réglages par le
+/// streamer repart de zéro.
+pub struct Regulateur {
+    /// Les crans, du réglage au plus bas — connus à la première trame, la
+    /// hauteur émise venant de la source.
+    crans: Option<Vec<(u32, u32)>>,
+    cran: usize,
+    saturees: u32,
+    calmes: u32,
+    repos: u32,
+    remontees: u32,
+    remontee_en_cours: bool,
+    remontee_depuis: u32,
+    verrou: bool,
+    derniere: Instant,
+    /// Le compteur de trames sautées à la dernière seconde.
+    sautees: u64,
+}
+
+impl Default for Regulateur {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Regulateur {
+    pub fn new() -> Self {
+        Self {
+            crans: None,
+            cran: 0,
+            saturees: 0,
+            calmes: 0,
+            repos: 0,
+            remontees: 0,
+            remontee_en_cours: false,
+            remontee_depuis: 0,
+            verrou: false,
+            derniere: Instant::now(),
+            sautees: 0,
+        }
+    }
+
+    /// Le cran en vigueur s'il n'est pas le réglage : (hauteur, cadence).
+    pub fn cran_actuel(&self) -> Option<(u32, u32)> {
+        let crans = self.crans.as_ref()?;
+        (self.cran > 0).then(|| crans[self.cran])
+    }
+
+    /// À appeler à chaque image pendant une diffusion : relève une fois
+    /// par seconde, et rend un mot pour le streamer quand le cran change.
+    /// `fps` et `preview` sont les réglages en vigueur.
+    pub fn tick(&mut self, stats: &StageStats, fps: u32, preview: bool) -> Option<String> {
+        if self.derniere.elapsed() < Duration::from_secs(1) {
+            return None;
+        }
+        self.derniere = Instant::now();
+        let (_, hauteur) = stats.dims();
+        if hauteur == 0 {
+            return None;
+        }
+        let n = self
+            .crans
+            .get_or_insert_with(|| paliers_encodeur(hauteur, fps))
+            .len();
+        let sautees = stats.skipped.load(Ordering::Relaxed);
+        let delta = sautees.saturating_sub(self.sautees);
+        self.sautees = sautees;
+        if n < 2 {
+            return None;
+        }
+        let charge = stats.convert_ms.get()
+            + stats.encode_ms.get()
+            + if preview { stats.decode_ms.get() } else { 0.0 };
+        let budget = 1000.0 / fps.max(1) as f32;
+        let sature = charge > 0.9 * budget || delta as f32 > 0.15 * fps as f32;
+        let decision = self.decider(sature)?;
+        let (h, f) = self.crans.as_ref()?[self.cran];
+        Some(match decision {
+            Cran::Descente => format!(
+                "l'encodeur ne suivait pas ({charge:.1} ms par trame pour {budget:.1}, \
+                 {delta} trames sautées/s) : la diffusion passe en {h}p{f}"
+            ),
+            Cran::Remontee => format!("l'encodeur a de la marge : la diffusion remonte en {h}p{f}"),
+        })
+    }
+
+    /// La machine à décider, une observation par seconde — sans horloge,
+    /// pour se tester.
+    pub fn decider(&mut self, sature: bool) -> Option<Cran> {
+        let n = self.crans.as_ref().map(Vec::len)?;
+        if sature {
+            self.saturees += 1;
+            self.calmes = 0;
+        } else {
+            self.calmes += 1;
+            self.saturees = 0;
+        }
+        // Une remontée tient si une minute passe sans saturer.
+        if self.remontee_en_cours {
+            self.remontee_depuis += 1;
+            if self.remontee_depuis >= 60 && !sature {
+                self.remontee_en_cours = false;
+            }
+        }
+        // Le repos : le temps que les moyennes se refassent au nouveau
+        // cran, on ne compte rien — ni saturation, ni calme.
+        if self.repos > 0 {
+            self.repos -= 1;
+            self.saturees = 0;
+            self.calmes = 0;
+            return None;
+        }
+        if self.saturees >= 5 && self.cran + 1 < n {
+            self.cran += 1;
+            self.repos = 15;
+            self.saturees = 0;
+            self.calmes = 0;
+            if self.remontee_en_cours {
+                self.remontee_en_cours = false;
+                self.verrou = true;
+            }
+            return Some(Cran::Descente);
+        }
+        if self.calmes >= 120 && self.cran > 0 && !self.verrou && self.remontees < 2 {
+            self.cran -= 1;
+            self.repos = 15;
+            self.calmes = 0;
+            self.remontees += 1;
+            self.remontee_en_cours = true;
+            self.remontee_depuis = 0;
+            return Some(Cran::Remontee);
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------
 // Regarder
 // ---------------------------------------------------------------------
 
@@ -843,6 +1023,88 @@ fn fil_decodeur(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn les_crans_de_l_encodeur_descendent_la_cadence_puis_la_hauteur() {
+        assert_eq!(paliers_encodeur(1080, 60), vec![(1080, 60), (1080, 30), (720, 30)]);
+        assert_eq!(
+            paliers_encodeur(1440, 60),
+            vec![(1440, 60), (1440, 30), (1080, 30), (720, 30)]
+        );
+        assert_eq!(paliers_encodeur(1080, 30), vec![(1080, 30), (720, 30)]);
+        assert_eq!(paliers_encodeur(720, 60), vec![(720, 60), (720, 30)]);
+        // Rien à descendre : 720p30 et moins restent tels quels.
+        assert_eq!(paliers_encodeur(720, 30), vec![(720, 30)]);
+        assert_eq!(paliers_encodeur(480, 30), vec![(480, 30)]);
+    }
+
+    #[test]
+    fn le_regulateur_descend_apres_cinq_secondes_et_verrouille_une_remontee_ratee() {
+        let mut r = Regulateur::new();
+        r.crans = Some(paliers_encodeur(1080, 60));
+        assert_eq!(r.cran_actuel(), None);
+        // Quatre secondes ne suffisent pas, la cinquième descend.
+        for _ in 0..4 {
+            assert_eq!(r.decider(true), None);
+        }
+        assert_eq!(r.decider(true), Some(Cran::Descente));
+        assert_eq!(r.cran_actuel(), Some((1080, 30)));
+        // Quinze secondes de repos, saturées ou non : rien ne bouge.
+        for _ in 0..15 {
+            assert_eq!(r.decider(true), None);
+        }
+        for _ in 0..4 {
+            assert_eq!(r.decider(true), None);
+        }
+        assert_eq!(r.decider(true), Some(Cran::Descente));
+        assert_eq!(r.cran_actuel(), Some((720, 30)));
+        // Tout en bas : saturer encore ne descend plus.
+        for _ in 0..40 {
+            assert_eq!(r.decider(true), None);
+        }
+        // Deux minutes de calme (après le repos), et une remontée.
+        let mut remontee = None;
+        for i in 0..200 {
+            if let Some(c) = r.decider(false) {
+                remontee = Some((i, c));
+                break;
+            }
+        }
+        assert_eq!(remontee.map(|(_, c)| c), Some(Cran::Remontee));
+        // Le repos a été consommé par les quarante secondes du bas : la
+        // cent-vingtième seconde de calme est la bonne.
+        assert_eq!(remontee.map(|(i, _)| i), Some(119));
+        assert_eq!(r.cran_actuel(), Some((1080, 30)));
+        // La remontée sature aussitôt : on redescend, et plus jamais de
+        // remontée — les spectateurs ne font pas le yo-yo.
+        let redescente: Vec<Cran> = (0..30).filter_map(|_| r.decider(true)).collect();
+        assert_eq!(redescente, vec![Cran::Descente]);
+        assert_eq!(r.cran_actuel(), Some((720, 30)));
+        assert!(r.verrou);
+        assert!((0..400).filter_map(|_| r.decider(false)).next().is_none());
+    }
+
+    #[test]
+    fn une_remontee_qui_tient_une_minute_ne_verrouille_pas_la_suivante() {
+        let mut r = Regulateur::new();
+        r.crans = Some(paliers_encodeur(1080, 60));
+        // Deux crans plus bas, vite fait.
+        let descentes: Vec<Cran> = (0..60).filter_map(|_| r.decider(true)).collect();
+        assert_eq!(descentes, vec![Cran::Descente, Cran::Descente]);
+        // Une remontée qui tient : une minute de calme la confirme, la
+        // saturation d'après est une descente ordinaire, sans verrou.
+        let remontee: Vec<Cran> = (0..200).filter_map(|_| r.decider(false)).collect();
+        assert_eq!(remontee, vec![Cran::Remontee]);
+        assert!(!r.remontee_en_cours);
+        let descente: Vec<Cran> = (0..30).filter_map(|_| r.decider(true)).collect();
+        assert_eq!(descente, vec![Cran::Descente]);
+        assert!(!r.verrou);
+        // Une seconde remontée reste permise — la troisième, non.
+        let remontee: Vec<Cran> = (0..200).filter_map(|_| r.decider(false)).collect();
+        assert_eq!(remontee, vec![Cran::Remontee]);
+        let _ = (0..30).filter_map(|_| r.decider(true)).count();
+        assert!((0..400).filter_map(|_| r.decider(false)).next().is_none());
+    }
 
     /// Le chiffrement d'une trame telle que l'émetteur la fabrique doit se
     /// déchiffrer telle que le spectateur la lit — en-tête en AAD compris :

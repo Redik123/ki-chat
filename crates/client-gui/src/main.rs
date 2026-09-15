@@ -598,6 +598,9 @@ struct KiApp {
     /// Le palier de débit que le serveur demande (un spectateur ne suit
     /// pas) ; `None` = le réglage.
     diffusion_palier: Option<u32>,
+    /// L'encodeur qui se règle tout seul : cadence puis hauteur, quand il
+    /// ne suit pas.
+    regulateur: partage::Regulateur,
     /// Clé générée, en attente du StreamGranted du serveur.
     go_live_attente: Option<[u8; 32]>,
     go_live_tex: Option<egui::TextureHandle>,
@@ -1038,6 +1041,7 @@ impl KiApp {
             go_live_tex: None,
             diffusion: partage::Reglages::load(get),
             diffusion_palier: None,
+            regulateur: partage::Regulateur::new(),
             sources: Default::default(),
             show_diffusion: false,
             overlay: overlay::Overlay::load(get),
@@ -8995,6 +8999,7 @@ impl KiApp {
         let mut key = [0u8; 32];
         chacha20poly1305::aead::OsRng.fill_bytes(&mut key);
         self.go_live_attente = Some(key);
+        self.regulateur = partage::Regulateur::new();
         self.show_diffusion = false;
         let r = &self.diffusion;
         ki_voice::journal(format!(
@@ -9113,6 +9118,10 @@ impl KiApp {
         if let Some(p) = self.diffusion_palier {
             r.kbps = r.kbps.min(p.max(500));
         }
+        if let Some((hauteur, fps)) = self.regulateur.cran_actuel() {
+            r.max_height = hauteur;
+            r.fps = fps;
+        }
         r
     }
 
@@ -9176,6 +9185,7 @@ impl KiApp {
     /// Arrête sa propre diffusion, côté capture ET côté serveur.
     fn arreter_diffusion(&mut self) {
         self.diffusion_palier = None;
+        self.regulateur = partage::Regulateur::new();
         secours::lever_diffusion();
         if let Some(g) = self.go_live.take() {
             ki_voice::journal(format!(
@@ -9339,6 +9349,8 @@ impl KiApp {
                 });
             });
         if change {
+            // De nouveaux réglages : le régulateur repart de zéro.
+            self.regulateur = partage::Regulateur::new();
             self.rediffuser();
         }
         if lancer {
@@ -9400,6 +9412,12 @@ impl KiApp {
                 Some(p) => format!("{etat} · palier {p} kbit/s (un spectateur ne suit pas)"),
                 None => etat,
             };
+            // L'encodeur qui ne suit pas : un cran plus bas, et on le dit.
+            let regle = self.regulateur.tick(&g.stats, g.reglages.fps, g.reglages.preview);
+            let etat = match self.regulateur.cran_actuel() {
+                Some((h, f)) => format!("{etat} · encodeur : {h}p{f} (il ne suivait pas au réglage)"),
+                None => etat,
+            };
             // La même ligne au journal toutes les dix secondes : c'est elle
             // qui dira, à distance, où une diffusion a coincé.
             if self.journal_flux.elapsed() >= std::time::Duration::from_secs(10) {
@@ -9457,6 +9475,11 @@ impl KiApp {
             if reglages {
                 self.show_diffusion = true;
                 self.sources.rafraichir();
+            }
+            if let Some(mot) = regle {
+                ki_voice::journal(format!("diffusion : {mot}"));
+                self.info = Some(mot);
+                self.rediffuser();
             }
         }
 

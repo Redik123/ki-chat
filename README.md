@@ -174,6 +174,7 @@ curl -k -H "x-ki-admin: $(cat data/diag.token)" https://ton-serveur:8080/diag
 ### Partage d'écran & Son du jeu
 
 - **Regarder à sa façon** : le stream d'un copain se regarde dans ki-chat, ou détaché dans sa propre fenêtre — sur le second écran, ou en plein écran (F11, double-clic, Échap pour en sortir), avec le volume du son du jeu sous la main.
+- **Un encodeur qui se règle tout seul** : quand la carte ne tient pas la cadence demandée (une GTX 1080 à 1080p60, par exemple), la diffusion passe seule en 30 i/s, puis en 720p, le dit au streamer et au journal — et remonte prudemment quand la marge revient.
 
 - **Windows Graphics Capture (WGC)** : Capture matérielle au niveau de l'OS sans accrochage Direct3D ni injection de DLL dans les processus de jeu.
 - **NVENC sans SDK tiers** : Chargement dynamique direct de `nvEncodeAPI64.dll` présent dans les pilotes NVIDIA modernes (API 12.0+) ; repli transparent sur l'encodeur logiciel openh264 en cas de matériel non supporté.
@@ -349,8 +350,9 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **Soundboard (0.1.39)** — des sons à la touche entendus par le salon, mixés à la voix dans le moteur vocal.
 - [x] **Chat (0.1.39)** — modifier ses messages (clic droit, ou flèche haut dans un champ vide), et glisser-déposer des fichiers sur la fenêtre.
 - [x] **Visionnage détaché (0.1.39)** — le stream d'un copain dans sa propre fenêtre, à poser sur un second écran ou en plein écran (F11, double-clic, Échap).
+- [x] **Encodeur (0.1.39)** — la diffusion descend seule en 30 i/s puis en 720p quand l'encodeur ne suit pas, et remonte prudemment.
 
 ### Perspectives & Prochains jalons
 
 - [ ] **C4** — Pipeline de capture vidéo tout-GPU (zéro copie mémoire centrale), encodeur AMD/Intel, une seule capture pour la diffusion et les clips.
-- [ ] **Général** — Résolution et cadence comme crans du débit adaptatif (le débit s'adapte déjà au spectateur qui ne suit pas, et le son du jeu lui arrive en stéréo).
+- [ ] **Général** — Résolution et cadence comme crans du débit adaptatif côté spectateur (le débit s'adapte déjà au spectateur qui ne suit pas, l'encodeur au streamer qui ne tient pas la cadence, et le son du jeu arrive en stéréo).
