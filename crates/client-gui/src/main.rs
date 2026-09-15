@@ -23,6 +23,7 @@ mod secours;
 mod secret;
 mod servers;
 mod sfxgen;
+mod soundboard;
 mod theme;
 mod ui;
 mod update;
@@ -648,6 +649,8 @@ struct KiApp {
     visionneuse: visionneuse::Visionneuse,
     /// L'atelier des clips (C3) : coupe, format téléphone, export.
     atelier: atelier::Atelier,
+    /// Le soundboard : des sons à la touche, entendus par le salon.
+    soundboard: soundboard::Soundboard,
     /// La sortie audio à part de la visionneuse, quand il n'y a pas de
     /// moteur vocal (hors salon) pour jouer sa file.
     sortie_medias: Option<ki_voice::medias::SortieSeule>,
@@ -1054,6 +1057,7 @@ impl KiApp {
             // Remplacé juste après : l'atelier partage la file « médias »
             // de la visionneuse, qui n'existe pas encore ici.
             atelier: atelier::Atelier::new(ki_voice::medias::File::new(), 0.8),
+            soundboard: soundboard::Soundboard::load(get),
             sortie_medias: None,
             clips_reglages: clips::Reglages::load(get),
             enregistreur: None,
@@ -2987,6 +2991,31 @@ impl KiApp {
         if relancer {
             self.arreter_clips();
             self.demarrer_clips();
+        }
+    }
+
+    /// Le soundboard : la fenêtre, et ce qu'elle demande au moteur vocal.
+    /// Sans moteur (hors connexion), rien ne joue — la fenêtre le dit.
+    fn soundboard_window(&mut self, ctx: &egui::Context) {
+        let en_vocal = self.voice_channel.is_some();
+        let Some(commande) = self.soundboard.fenetre(ctx, en_vocal) else { return };
+        let joue = {
+            let engine = self.link.engine.lock().unwrap();
+            match engine.as_ref() {
+                Some(engine) => {
+                    match commande {
+                        soundboard::Commande::Jouer(pcm) => {
+                            engine.soundboard_push(&pcm, self.soundboard.volume);
+                        }
+                        soundboard::Commande::Arreter => engine.soundboard_clear(),
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        if !joue {
+            self.info = Some("pas de moteur vocal : connecte-toi d'abord".into());
         }
     }
 
@@ -5287,6 +5316,7 @@ impl KiApp {
         self.stats_window(ctx);
         self.fiche_bot_window(ctx);
         self.clips_window(ctx);
+        self.soundboard_window(ctx);
         self.partage_clip_window(ctx);
         self.visionneuse_window(ctx);
         self.atelier_window(ctx);
@@ -5622,6 +5652,12 @@ impl KiApp {
                     }
                     if ui::button(ui, Icon::Film, "Clips").clicked() {
                         self.ouvrir_clips();
+                    }
+                    if ui::button(ui, Icon::Volume, "Soundboard")
+                        .on_hover_text("des sons à la touche, entendus par tout le salon vocal")
+                        .clicked()
+                    {
+                        self.soundboard.basculer();
                     }
                     // Le point rouge de l'enregistreur de clips : allumé, il
                     // tourne et un clic l'arrête ; éteint, un clic le lance.
@@ -12478,6 +12514,8 @@ impl eframe::App for KiApp {
                     self.close_admin();
                 } else if self.show_account {
                     self.close_account();
+                } else if self.soundboard.ouvert {
+                    self.soundboard.ouvert = false;
                 } else if self.show_clips {
                     self.show_clips = false;
                 }
@@ -12548,6 +12586,7 @@ impl eframe::App for KiApp {
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
         storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
         storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
+        self.soundboard.save(storage);
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));

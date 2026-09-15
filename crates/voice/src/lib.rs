@@ -526,6 +526,10 @@ struct Counters {
 
 use std::sync::atomic::{AtomicI32, AtomicU32};
 
+/// Plafond de la file du soundboard, en échantillons (30 s) : un son en
+/// est un, pas un morceau.
+const SOUNDBOARD_CAP: usize = SAMPLE_RATE as usize * 30;
+
 /// Atomic pour un f32 (stocké en bits).
 fn store_f32(a: &AtomicU32, v: f32) {
     a.store(v.to_bits(), Ordering::Relaxed);
@@ -577,6 +581,10 @@ struct Shared {
     effects_buf: Mutex<std::collections::VecDeque<f32>>,
     /// Volume des effets sonores (bits f32), indépendant des voix.
     effects_gain: AtomicU32,
+    /// Les sons du soundboard en attente de **départ** : mixés à la voix
+    /// dans ce qui part sur le réseau — ou envoyés seuls si le micro est
+    /// fermé —, et joués ici par la file des effets. Déjà au bon volume.
+    soundboard_buf: Mutex<std::collections::VecDeque<f32>>,
     /// Le périphérique d'entrée a disparu et l'on tente de le rouvrir.
     /// Débrancher un micro USB, ou un casque sans fil qui s'endort, coupe le
     /// flux cpal sans que rien ne le relance : ces drapeaux permettent de le
@@ -673,6 +681,7 @@ impl VoiceEngine {
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
+            soundboard_buf: Mutex::new(std::collections::VecDeque::new()),
             audio_reset: std::sync::atomic::AtomicU64::new(0),
             aec: AtomicBool::new(cfg.aec),
             aec_far: Mutex::new(std::collections::VecDeque::new()),
@@ -895,6 +904,37 @@ impl VoiceEngine {
     pub fn play_effect(&self, pcm: &[f32], gain: f32) {
         let mut buf = self.shared.effects_buf.lock().unwrap();
         effects::queue(&mut buf, pcm, gain.clamp(0.0, 2.0));
+    }
+
+    /// Un son du soundboard : il part vers le salon — mixé à la voix, ou
+    /// seul si le micro est fermé — et se joue ici comme un effet, au même
+    /// volume. Deux sons rapprochés se superposent. Trente secondes en
+    /// attente au plus : au-delà, tronqué.
+    pub fn soundboard_push(&self, pcm: &[f32], gain: f32) {
+        let gain = gain.clamp(0.0, 2.0);
+        effects::queue_avec_plafond(
+            &mut self.shared.soundboard_buf.lock().unwrap(),
+            pcm,
+            gain,
+            SOUNDBOARD_CAP,
+        );
+        effects::queue_avec_plafond(
+            &mut self.shared.effects_buf.lock().unwrap(),
+            pcm,
+            gain,
+            SOUNDBOARD_CAP,
+        );
+    }
+
+    /// Coupe ce que le soundboard a en attente, ici comme chez les autres.
+    pub fn soundboard_clear(&self) {
+        self.shared.soundboard_buf.lock().unwrap().clear();
+        self.shared.effects_buf.lock().unwrap().clear();
+    }
+
+    /// Ce qu'il reste à envoyer du soundboard, en échantillons.
+    pub fn soundboard_pending(&self) -> usize {
+        self.shared.soundboard_buf.lock().unwrap().len()
     }
 
     /// Volume des effets sonores (1.0 = 100 %), à chaud. S'applique à la
@@ -1719,7 +1759,29 @@ fn capture_loop(
             }
             let hangover =
                 Duration::from_millis(sh.vad_hangover_ms.load(Ordering::Relaxed) as u64);
-            let send = armed && (threshold <= 0.0 || last_voice.elapsed() < hangover);
+            let micro = armed && (threshold <= 0.0 || last_voice.elapsed() < hangover);
+            // Le soundboard : ce qui en attend part vers le salon, mixé à
+            // la voix — ou seul, micro fermé : un micro que l'on n'a pas
+            // ouvert ne part pas avec le son. Écrêté en douceur avec la
+            // voix, comme la sortie.
+            let planche = {
+                let mut b = sh.soundboard_buf.lock().unwrap();
+                if b.is_empty() {
+                    false
+                } else {
+                    if !micro {
+                        frame.fill(0.0);
+                    }
+                    for s in frame.iter_mut() {
+                        match b.pop_front() {
+                            Some(v) => *s = soft_clip(*s + v),
+                            None => break,
+                        }
+                    }
+                    true
+                }
+            };
+            let send = micro || planche;
             sh.sending.store(send, Ordering::Relaxed);
             if send {
                 sender.apply_bitrate(sh.bitrate.load(Ordering::Relaxed));

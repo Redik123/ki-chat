@@ -24,7 +24,13 @@ pub(crate) const QUEUE_CAP: usize = SAMPLE_RATE as usize * 3;
 /// attente : deux notifications rapprochées se superposent au lieu que la
 /// seconde coupe la première. Au-delà du plafond, l'effet est tronqué.
 pub(crate) fn queue(buf: &mut VecDeque<f32>, pcm: &[f32], gain: f32) {
-    let n = pcm.len().min(QUEUE_CAP);
+    queue_avec_plafond(buf, pcm, gain, QUEUE_CAP);
+}
+
+/// La même mise en file, avec son propre plafond : le soundboard envoie
+/// des sons de trente secondes, là où une notification en fait deux.
+pub(crate) fn queue_avec_plafond(buf: &mut VecDeque<f32>, pcm: &[f32], gain: f32, plafond: usize) {
+    let n = pcm.len().min(plafond);
     if buf.len() < n {
         buf.resize(n, 0.0);
     }

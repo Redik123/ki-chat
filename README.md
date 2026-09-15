@@ -45,6 +45,7 @@ Serveur de chat privé façon Discord, 100 % Rust, taillé pour le jeu entre ami
 - **Overlay en jeu « qui parle »** : Connaître les locuteurs sans quitter la partie. Fenêtre découpée à la forme exacte des pastilles, transparente aux clics, invisible pour les anti-triches (Riot Vanguard, Easy Anti-Cheat) car **rien n'est injecté**.
 - **Intégration VALORANT** : Statut en jeu en direct (partie en cours, score, carte, taille d'escouade) lu en lecture seule sur le client Riot local ; fiches de joueurs détaillées avec historique et courbe de RR ; classement du groupe, boutique de skins du jour et **fil de jeu automatique** annonçant les victoires dans le salon textuel.
 - **Bot musique de groupe** : Membre virtuel pilotable par une bannière épurée au-dessus du chat. Recherche YouTube/SoundCloud sans publicité, streaming Opus direct par le serveur (aucun fichier temporaire sur disque ni chez le client), playlists partagées, mise en pause automatique en salon vide et reprise après redémarrage.
+- **Soundboard** : Des sons à la touche (un clic, ou les touches 1 à 9), entendus par tout le salon vocal — mixés à la voix, ou seuls micro fermé, sans rien de plus dans le protocole. Chacun dépose ses .wav ou .mp3 (30 s au plus) dans son dossier `sons\soundboard`.
 - **Souveraineté & Respect de la vie privée** : Chiffrement intégral de bout en bout en transit (QUIC TLS 1.3 + XChaCha20-Poly1305 pour la voix et la vidéo), mots de passe hachés en Argon2id, secrets protégés par le coffre natif du système (DPAPI Windows / Trousseau macOS). Zéro pistage, zéro télémétrie commerciale.
 
 ---
@@ -343,6 +344,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **C3 (0.1.38)** — Atelier de coupe et de recadrage au format téléphone (9:16, quatre mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
 
 - [x] **Présence (0.1.39)** — « joue à … » sous le pseudo pour tous les jeux reconnus à leur fenêtre, VALORANT gardant sa partie détaillée.
+- [x] **Soundboard (0.1.39)** — des sons à la touche entendus par le salon, mixés à la voix dans le moteur vocal.
 
 ### Perspectives & Prochains jalons
 
