@@ -173,6 +173,9 @@ struct Etat {
     comptes: Mutex<BTreeMap<UserId, CompteRiot>>,
     fiches: Mutex<BTreeMap<UserId, FicheValorant>>,
     fil: Fil,
+    /// Le dernier récap hebdo posté, en millisecondes Unix (0 : jamais) ;
+    /// `data/valorant/recap.json`.
+    dernier_recap: Mutex<u64>,
     compteurs: Arc<Compteurs>,
     /// Le calendrier esport : quand il a été lu (0 : jamais), et ce qu'il
     /// contient. `en_cours` évite deux lectures à la fois.
@@ -205,6 +208,10 @@ impl Valorant {
                 .map(|(id, f)| (*id, f.matchs.iter().map(|m| m.id.clone()).collect()))
                 .collect()
         };
+        let dernier_recap = std::fs::read_to_string(dossier.join("recap.json"))
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0);
         let etat = Arc::new(Etat {
             dossier,
             comptes: Mutex::new(comptes),
@@ -213,6 +220,7 @@ impl Valorant {
                 annonces: Mutex::new(annonces),
                 ..Default::default()
             },
+            dernier_recap: Mutex::new(dernier_recap),
             compteurs: Arc::default(),
             esports: Mutex::new((0, Vec::new())),
             esports_en_cours: std::sync::atomic::AtomicBool::new(false),
@@ -411,6 +419,28 @@ impl Valorant {
             });
         }
         self.etat.fil.pretes()
+    }
+
+    /// Le récap de la semaine, s'il est l'heure (dimanche soir) et qu'il
+    /// n'est pas déjà parti cette semaine — marqué comme posté dès qu'il
+    /// est rendu, même vide : une semaine sans match ne se redit pas.
+    pub fn recap_hebdo(&self) -> Option<Recap> {
+        self.travaux.as_ref()?;
+        let maintenant = maintenant_ms();
+        if !heure_du_recap(maintenant) {
+            return None;
+        }
+        let mut dernier = self.etat.dernier_recap.lock().unwrap();
+        if maintenant.saturating_sub(*dernier) < 6 * 86_400_000 {
+            return None;
+        }
+        *dernier = maintenant;
+        let _ = crate::store::write_atomic(
+            &self.etat.dossier.join("recap.json"),
+            maintenant.to_string().as_bytes(),
+        );
+        let fiches = self.etat.fiches.lock().unwrap();
+        recap_de(&fiches, maintenant.saturating_sub(7 * 86_400_000), maintenant)
     }
 
     /// Parmi `en_ligne`, les membres liés dont la fiche a plus de
@@ -633,6 +663,124 @@ pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
         }
     }
     texte
+}
+
+// ---------------------------------------------------------------------
+// Le récap de la semaine
+// ---------------------------------------------------------------------
+
+/// Un membre dans le récap : où il en est, ce qu'il a gagné, ce qu'il a
+/// joué, et son meilleur match.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LigneRecap {
+    pub user_id: UserId,
+    pub rang: RangValorant,
+    pub rr_gagnes: i32,
+    pub matchs: u32,
+    pub victoires: u32,
+    pub defaites: u32,
+    pub meilleur: Option<MatchResume>,
+}
+
+/// Le récap hebdo du fil de jeu : dimanche soir, ce que le groupe a joué
+/// depuis dimanche dernier — du plus grand gain de RR au plus petit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recap {
+    pub depuis_ms: u64,
+    pub jusqu_a_ms: u64,
+    pub lignes: Vec<LigneRecap>,
+    /// Les membres liés qui n'ont pas joué.
+    pub sans_match: Vec<UserId>,
+}
+
+/// Le récap d'après les fiches, sur `[depuis_ms, jusqu_a_ms[`. `None` si
+/// personne n'a joué : rien à dire.
+pub fn recap_de(fiches: &BTreeMap<UserId, FicheValorant>, depuis_ms: u64, jusqu_a_ms: u64) -> Option<Recap> {
+    let dans = |date: u64| date >= depuis_ms && date < jusqu_a_ms;
+    let mut lignes = Vec::new();
+    let mut sans_match = Vec::new();
+    for (id, f) in fiches {
+        let matchs: Vec<&MatchResume> = f.matchs.iter().filter(|m| dans(m.date)).collect();
+        if matchs.is_empty() {
+            sans_match.push(*id);
+            continue;
+        }
+        let rr_gagnes: i32 = f.historique_rr.iter().filter(|p| dans(p.date)).map(|p| p.delta).sum();
+        lignes.push(LigneRecap {
+            user_id: *id,
+            rang: f.rang.clone(),
+            rr_gagnes,
+            matchs: matchs.len() as u32,
+            victoires: matchs.iter().filter(|m| m.gagne == Some(true)).count() as u32,
+            defaites: matchs.iter().filter(|m| m.gagne == Some(false)).count() as u32,
+            meilleur: matchs.iter().max_by_key(|m| (m.kills, m.score)).map(|m| (*m).clone()),
+        });
+    }
+    if lignes.is_empty() {
+        return None;
+    }
+    lignes.sort_by(|a, b| b.rr_gagnes.cmp(&a.rr_gagnes).then(b.matchs.cmp(&a.matchs)));
+    Some(Recap { depuis_ms, jusqu_a_ms, lignes, sans_match })
+}
+
+/// Le texte du récap : un titre daté, une ligne par membre qui a joué, et
+/// ceux qui n'ont pas joué en bas.
+pub fn composer_recap(r: &Recap, pseudo: impl Fn(UserId) -> String) -> String {
+    let mut texte = format!(
+        "📅 La semaine du groupe, du {} au {}",
+        jour(r.depuis_ms),
+        jour(r.jusqu_a_ms.saturating_sub(1))
+    );
+    for (i, l) in r.lignes.iter().enumerate() {
+        let signe = if l.rr_gagnes >= 0 { "+" } else { "" };
+        let pluriel = if l.matchs > 1 { "s" } else { "" };
+        texte.push_str(&format!(
+            "\n{}. {} — {} {} RR · {signe}{} RR · {} match{pluriel} ({} V / {} D)",
+            i + 1,
+            pseudo(l.user_id),
+            ki_protocol::nom_de_rang(l.rang.tier),
+            l.rang.rr,
+            l.rr_gagnes,
+            l.matchs,
+            l.victoires,
+            l.defaites
+        ));
+        if let Some(m) = &l.meilleur {
+            texte.push_str(&format!(
+                " · meilleur : {} {}/{}/{} sur {}",
+                m.agent, m.kills, m.deaths, m.assists, m.carte
+            ));
+        }
+    }
+    if !r.sans_match.is_empty() {
+        let noms: Vec<String> = r.sans_match.iter().map(|id| pseudo(*id)).collect();
+        texte.push_str(&format!("\nPas de match cette semaine : {}", noms.join(", ")));
+    }
+    texte
+}
+
+/// « 8 septembre », depuis des millisecondes Unix. En UTC : à une heure
+/// près, la soirée est la même à Paris.
+fn jour(ms: u64) -> String {
+    use chrono::Datelike;
+    const MOIS: [&str; 12] = [
+        "janvier", "février", "mars", "avril", "mai", "juin",
+        "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+    ];
+    match chrono::DateTime::from_timestamp_millis(ms as i64) {
+        Some(d) => format!("{} {}", d.day(), MOIS[(d.month0() as usize).min(11)]),
+        None => "?".into(),
+    }
+}
+
+/// Dimanche, à partir de 19 h 30 UTC — 21 h 30 à Paris l'été, 20 h 30
+/// l'hiver : le moment où la semaine se raconte.
+pub fn heure_du_recap(ms: u64) -> bool {
+    use chrono::{Datelike, Timelike, Weekday};
+    let Some(d) = chrono::DateTime::from_timestamp_millis(ms as i64) else {
+        return false;
+    };
+    d.weekday() == Weekday::Sun && (d.hour() > 19 || (d.hour() == 19 && d.minute() >= 30))
 }
 
 fn lire<T: serde::de::DeserializeOwned>(chemin: &std::path::Path) -> BTreeMap<UserId, T> {
@@ -1355,6 +1503,99 @@ pub fn iso_vers_ms(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn le_recap_compte_la_semaine_et_classe_par_rr() {
+        let jour = 86_400_000u64;
+        let maintenant = 1_800_000_000_000u64;
+        let (depuis, jusqu_a) = (maintenant - 7 * jour, maintenant);
+        let m = |id: &str, date: u64, kills: u16, gagne: Option<bool>| MatchResume {
+            id: id.into(),
+            date,
+            carte: "Ascent".into(),
+            mode: "Compétitif".into(),
+            agent: "Jett".into(),
+            kills,
+            deaths: 10,
+            assists: 3,
+            score: u32::from(kills) * 200,
+            tete_pct: 20,
+            manches: (13, 9),
+            gagne,
+            tier: 15,
+            duree_s: 2400,
+        };
+        let p = |date: u64, delta: i32| PointRR {
+            match_id: String::new(),
+            carte: "Ascent".into(),
+            date,
+            tier: 15,
+            rr: 40,
+            delta,
+        };
+        let mut fiches = BTreeMap::new();
+        fiches.insert(
+            1,
+            FicheValorant {
+                rang: RangValorant { tier: 15, rr: 40, ..Default::default() },
+                matchs: vec![
+                    m("a", maintenant - jour, 25, Some(true)),
+                    m("b", maintenant - 2 * jour, 12, Some(false)),
+                    // Trop vieux : hors de la semaine.
+                    m("c", maintenant - 9 * jour, 40, Some(true)),
+                ],
+                historique_rr: vec![p(maintenant - jour, 22), p(maintenant - 2 * jour, -15), p(maintenant - 9 * jour, 30)],
+                ..Default::default()
+            },
+        );
+        fiches.insert(
+            2,
+            FicheValorant {
+                rang: RangValorant { tier: 12, rr: 70, ..Default::default() },
+                matchs: vec![m("d", maintenant - 3 * jour, 18, Some(true))],
+                historique_rr: vec![p(maintenant - 3 * jour, 19)],
+                ..Default::default()
+            },
+        );
+        fiches.insert(3, FicheValorant::default());
+        let r = recap_de(&fiches, depuis, jusqu_a).expect("quelqu'un a joué");
+        assert_eq!(r.lignes.len(), 2);
+        // Le membre 2 a gagné 19, le membre 1 seulement 7 : 2 en tête.
+        assert_eq!(r.lignes[0].user_id, 2);
+        assert_eq!(r.lignes[1].user_id, 1);
+        assert_eq!(r.lignes[1].rr_gagnes, 7);
+        assert_eq!((r.lignes[1].matchs, r.lignes[1].victoires, r.lignes[1].defaites), (2, 1, 1));
+        assert_eq!(r.lignes[1].meilleur.as_ref().map(|m| m.kills), Some(25));
+        assert_eq!(r.sans_match, vec![3]);
+        let texte = composer_recap(&r, |id| format!("m{id}"));
+        assert!(texte.starts_with("📅 La semaine du groupe, du "), "{texte}");
+        assert!(texte.contains("1. m2 — "), "{texte}");
+        assert!(texte.contains("+19 RR · 1 match (1 V / 0 D)"), "{texte}");
+        assert!(texte.contains("2. m1 — "), "{texte}");
+        assert!(texte.contains("+7 RR · 2 matchs (1 V / 1 D) · meilleur : Jett 25/10/3 sur Ascent"), "{texte}");
+        assert!(texte.ends_with("Pas de match cette semaine : m3"), "{texte}");
+        // Personne n'a joué : rien à dire.
+        assert!(recap_de(&fiches, maintenant - 20 * jour, maintenant - 15 * jour).is_none());
+    }
+
+    #[test]
+    fn le_recap_part_le_dimanche_soir() {
+        let ms = |y, mo, d, h, mi| {
+            chrono::NaiveDate::from_ymd_opt(y, mo, d)
+                .unwrap()
+                .and_hms_opt(h, mi, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis() as u64
+        };
+        // Le 13 septembre 2026 est un dimanche.
+        assert!(heure_du_recap(ms(2026, 9, 13, 19, 30)));
+        assert!(heure_du_recap(ms(2026, 9, 13, 23, 59)));
+        assert!(!heure_du_recap(ms(2026, 9, 13, 19, 29)));
+        assert!(!heure_du_recap(ms(2026, 9, 14, 20, 0)));
+        assert!(!heure_du_recap(ms(2026, 9, 12, 20, 0)));
+        assert_eq!(jour(ms(2026, 9, 8, 12, 0)), "8 septembre");
+    }
 
     /// Les dates HenrikDev tombent juste, à la seconde.
     #[test]

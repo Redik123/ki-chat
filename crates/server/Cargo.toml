@@ -13,6 +13,8 @@ serde_json.workspace = true
 ureq = { version = "2", features = ["json"] }
 # L'empreinte SHA-256 du yt-dlp téléchargé, contre les sommes publiées.
 sha2 = "0.10"
+# Le dimanche soir du récap hebdo du fil de jeu, et ses dates en clair.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Le bot musique : encodage Opus et chiffrement des trames, comme un membre.
 ki-opus = { path = "../ki-opus" }
 chacha20poly1305 = "0.10"

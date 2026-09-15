@@ -222,7 +222,7 @@ courbe de RR de la fiche sont venues dans la même version.
 **Validation** : une partie finie apparaît en moins de trois minutes,
 sans doublon — à vérifier sur une vraie soirée.
 
-### V4 — Confort — en partie (0.1.33)
+### V4 — Confort — en partie (0.1.33 ; récap hebdo le 2026-09-15, commit local)
 Livré : « cherche des joueurs » lu dans la party ouverte (affichage
 seulement) ; esports par HenrikDev (`/valorant/v1/esports/schedule`, relu
 toutes les heures, vingt matchs à venir ou en cours sur la page Valorant) ;
@@ -232,6 +232,16 @@ HenrikDev dans `/diag-resume` ; et la boutique du jour perso
 → région `-ares-deployment` → `POST pd.<région>.a.pvp.net/store/v3/storefront/<puuid>`
 avec le User-Agent du jeu (sans lui, Cloudflare 1010), noms et images
 par valorant-api.com. Sondé le 2026-09-11 : 200, quatre offres. V4 close.
+
+**Récap hebdo (2026-09-15)** : `valorant::recap_de(&fiches, depuis, jusqu_a)`
+compte, pour chaque membre lié, les matchs de la semaine (`matchs`, datés),
+la somme des `delta` de `historique_rr` dans la semaine, victoires et
+défaites, le meilleur match (kills puis score) ; trié par RR gagnés.
+`composer_recap` fait le texte ; `Valorant::recap_hebdo()` le rend une
+fois par semaine, le dimanche à partir de 19 h 30 UTC (`heure_du_recap`),
+la date du dernier dans `data/valorant/recap.json` ; posté dans le fil de
+jeu par la boucle de main.rs, avec les annonces. Une semaine sans match ne
+se raconte pas.
 
 ## Risques et parades
 

@@ -216,6 +216,7 @@ Chantier conçu dans le respect strict des préconisations de Riot Games ([`PLAN
 - **Statut en direct** : Détection locale en lecture seule de la présence de votre propre jeu (sans injection ni scrutation de la mémoire). Affichage du mode, du score et de l'agent joué.
 - **Fiches de carrière HenrikDev** : Visualisation du rang compétitif, du pic de saison, du ratio V/D et de l'historique des parties récentes via l'API HenrikDev hébergée sur le serveur.
 - **Fil de match automatique** : Dès qu'une partie classée se termine, le serveur poste un résumé détaillé dans le salon textuel choisi (victoire/défaite, score, KDA individuel et gain/perte de RR). Si plusieurs membres du groupe étaient dans la même partie, leurs statistiques sont regroupées dans une seule annonce.
+- **Le récap de la semaine** : Le dimanche soir, le fil de jeu poste le bilan de la semaine écoulée — une ligne par membre qui a joué, du plus grand gain de RR au plus petit, avec son rang, ses matchs, victoires et défaites et son meilleur match.
 - **Boutique du jour** : Consultation sécurisée de vos 4 skins quotidiens en boutique directement depuis l'application ki-chat (lecture locale protégée de vos jetons Riot).
 
 ### Bot musique de groupe

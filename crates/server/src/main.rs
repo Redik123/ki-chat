@@ -178,24 +178,31 @@ async fn main() -> anyhow::Result<()> {
                         valorant::Resultat::Fiche { user_id } => state.broadcast_member(user_id),
                     }
                 }
-                // Le fil de jeu : relances après une fin de partie, et les
-                // annonces prêtes, postées dans le salon choisi par l'admin.
+                // Le fil de jeu : relances après une fin de partie, les
+                // annonces prêtes, et le dimanche soir le récap de la semaine
+                // — postés dans le salon choisi par l'admin.
                 let annonces = state.valorant.tick();
-                if !annonces.is_empty() {
-                    if let Some(channel) = state.meta.get().fil_valorant {
+                if let Some(channel) = state.meta.get().fil_valorant {
+                    let recap = state.valorant.recap_hebdo();
+                    if !annonces.is_empty() || recap.is_some() {
                         let pseudos: std::collections::HashMap<_, _> = state
                             .accounts
                             .list(&state.roles)
                             .into_iter()
                             .map(|a| (a.user_id, a.username))
                             .collect();
+                        let pseudo = |id: ki_protocol::UserId| {
+                            pseudos
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("membre {id}"))
+                        };
                         for annonce in &annonces {
-                            let texte = valorant::composer(annonce, |id| {
-                                pseudos
-                                    .get(&id)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("membre {id}"))
-                            });
+                            let texte = valorant::composer(annonce, pseudo);
+                            state.poster_systeme(channel, valorant::PSEUDO_DU_FIL, &texte);
+                        }
+                        if let Some(r) = &recap {
+                            let texte = valorant::composer_recap(r, pseudo);
                             state.poster_systeme(channel, valorant::PSEUDO_DU_FIL, &texte);
                         }
                     }
