@@ -312,13 +312,27 @@ la file, pause automatique quand le salon se vide, reprise après
 redémarrage. **Validation** : une playlist de vingt pistes enregistrée,
 rechargée après redémarrage du serveur, reprise à la bonne piste.
 
-### M4 — La résilience
+### M4 — La résilience — en cours (2026-09-15 : yt-dlp à jour tout seul)
 Auto-mise à jour de yt-dlp (démarrage + nuit), clients YouTube de repli,
 cookies du compte jetable, fournisseur de PO tokens en conteneur si
 YouTube ferme encore, compteurs dans `/diag-resume` (pistes jouées, échecs
 par source, temps de démarrage d'une piste). **Validation** : une semaine
 sans intervention ; une casse YouTube se répare seule à la mise à jour
 suivante ou bascule sur les cookies.
+
+**Fait le 2026-09-15** (`serveur/ytdlp.rs`) : 20 s après le démarrage puis
+toutes les 24 h, le serveur lit `SHA2-256SUMS` de la dernière release de
+yt-dlp, compare à l'empreinte de `data/outils/yt-dlp` (`yt-dlp_linux`,
+`_aarch64`, `.exe`, `_macos` selon la machine), télécharge le binaire s'il
+diffère (borné à 200 Mo), vérifie l'empreinte, l'installe (`.part` puis
+renommage, 0755), et `Musique::remplacer_yt_dlp` le met en service sans
+redémarrer — la boucle du bot relit ses outils à chaque tour ; s'il
+manquait au démarrage, le bot naît à ce moment-là. `detecter` préfère
+`KI_YTDLP`, puis `data/outils/yt-dlp`, puis le PATH ; `KI_YTDLP` posé =
+pas de mise à jour automatique. Tests : lecture des sommes, nom du
+binaire. Le motif : SoundCloud cassé en septembre 2026 par un yt-dlp
+d'avant le changement de leur API, réparé par la release suivante — sans
+attendre la nôtre, désormais.
 
 ### M5 — La voix
 Piloter le bot à la voix, en pleine partie, sans lâcher la souris :

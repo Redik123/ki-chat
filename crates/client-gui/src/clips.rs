@@ -667,6 +667,7 @@ impl Enregistreur {
             preview: false,
             encoder: EncoderChoice::Auto,
             gop_s: 1,
+            profil: ki_video::Profil::Clip,
         };
         let tampon = self.tampon.clone();
         let emit: ki_video::FrameEmit = Arc::new(move |image: EncodedFrame| {

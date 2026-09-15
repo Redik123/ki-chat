@@ -110,8 +110,11 @@ pub const NV_ENC_INPUT_IMAGE: u32 = 0;
 pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 1;
 pub const NV_ENC_PIC_TYPE_I: u32 = 2;
 pub const NV_ENC_PIC_TYPE_IDR: u32 = 3;
+pub const NV_ENC_PARAMS_RC_VBR: u32 = 1;
 pub const NV_ENC_PARAMS_RC_CBR: u32 = 2;
 pub const NV_ENC_TWO_PASS_QUARTER_RESOLUTION: u32 = 1;
+pub const NV_ENC_TWO_PASS_FULL_RESOLUTION: u32 = 2;
+pub const NV_ENC_TUNING_INFO_HIGH_QUALITY: u32 = 1;
 pub const NV_ENC_TUNING_INFO_LOW_LATENCY: u32 = 2;
 pub const NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY: u32 = 3;
 pub const NV_ENC_PIC_FLAG_FORCEIDR: u32 = 2;
@@ -121,6 +124,7 @@ pub const NV_ENC_LEVEL_AUTOSELECT: u32 = 0;
 // Champs de bits de NV_ENC_RC_PARAMS::flags.
 pub const RC_ENABLE_AQ: u32 = 1 << 3;
 pub const RC_ENABLE_LOOKAHEAD: u32 = 1 << 5;
+pub const RC_ENABLE_TEMPORAL_AQ: u32 = 1 << 8;
 pub const RC_ZERO_REORDER_DELAY: u32 = 1 << 9;
 // Champs de bits de NV_ENC_CONFIG_H264::flags.
 pub const H264_REPEAT_SPSPPS: u32 = 1 << 12;

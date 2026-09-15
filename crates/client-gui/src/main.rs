@@ -664,6 +664,10 @@ struct KiApp {
     clips_vignettes_recues: VignettesRecues,
     /// Le clip dont on demande confirmation avant de supprimer.
     clips_suppression: Option<std::path::PathBuf>,
+    /// « Retirer du serveur » : le clip en attente de confirmation, puis le
+    /// résultat du fil qui s'en charge.
+    clips_retrait: Option<clips::ClipInfo>,
+    clips_retrait_resultat: Option<RetraitClip>,
     /// Le dossier choisi dans le dialogue natif (sur un fil).
     clips_dossier_choisi: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     /// La page de stats du groupe et ce que le serveur en a envoyé.
@@ -1051,6 +1055,8 @@ impl KiApp {
             clips_vignettes_en_vol: std::collections::HashSet::new(),
             clips_vignettes_recues: Default::default(),
             clips_suppression: None,
+            clips_retrait: None,
+            clips_retrait_resultat: None,
             clips_dossier_choisi: Default::default(),
             show_stats: false,
             stats: Vec::new(),
@@ -2164,12 +2170,14 @@ impl KiApp {
             return;
         }
         self.preparer_vignettes_clips(ctx);
+        self.suivre_retrait_clip(ctx);
         let mut open = true;
         let mut ouvrir: Option<std::path::PathBuf> = None;
         let mut supprimer: Option<std::path::PathBuf> = None;
         let mut montrer: Option<std::path::PathBuf> = None;
         let mut partager: Option<clips::ClipInfo> = None;
         let mut modifier: Option<clips::ClipInfo> = None;
+        let mut retirer: Option<clips::ClipInfo> = None;
         // 1 démarrer, 2 arrêter, 3 clip maintenant, 4 actualiser, 5 dossier.
         let mut action = 0u8;
         let etat = self.enregistreur.as_ref().map(|e| e.etat());
@@ -2332,6 +2340,12 @@ impl KiApp {
                                     modifier = Some(c.clone());
                                     ui.close();
                                 }
+                                if c.fiche.as_ref().is_some_and(|f| f.serveur.is_some())
+                                    && ui.button("Retirer du serveur…").clicked()
+                                {
+                                    retirer = Some(c.clone());
+                                    ui.close();
+                                }
                                 if ui.button("Voir dans le dossier").clicked() {
                                     montrer = Some(c.chemin.clone());
                                     ui.close();
@@ -2368,6 +2382,9 @@ impl KiApp {
         if let Some(c) = modifier {
             self.ouvrir_atelier(c, ctx);
         }
+        if let Some(c) = retirer {
+            self.clips_retrait = Some(c);
+        }
         if let Some(p) = ouvrir {
             let liste: Vec<visionneuse::Cible> =
                 self.clips_liste.iter().map(|c| visionneuse::Cible::Fichier(c.chemin.clone())).collect();
@@ -2377,6 +2394,7 @@ impl KiApp {
             self.clips_suppression = Some(p);
         }
         self.confirmer_suppression_clip(ctx);
+        self.confirmer_retrait_clip(ctx);
         if !open {
             self.show_clips = false;
         }
@@ -2630,6 +2648,99 @@ impl KiApp {
                 Ok(())
             })();
             envoi.lock().unwrap().fini = Some(resultat);
+        });
+    }
+
+    /// Le résultat de « Retirer du serveur », quand le fil a fini.
+    fn suivre_retrait_clip(&mut self, ctx: &egui::Context) {
+        let Some(r) = self.clips_retrait_resultat.as_ref() else { return };
+        let fini = r.lock().unwrap().take();
+        match fini {
+            Some(Ok(nom)) => {
+                self.info = Some(format!("{nom} : retiré du serveur — le message du fil garde un lien mort"));
+                self.clips_retrait_resultat = None;
+                self.rafraichir_clips();
+            }
+            Some(Err(e)) => {
+                self.info = Some(format!("retrait impossible : {e}"));
+                self.clips_retrait_resultat = None;
+            }
+            None => ctx.request_repaint_after(std::time::Duration::from_millis(300)),
+        }
+    }
+
+    fn confirmer_retrait_clip(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.clips_retrait.clone() else { return };
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Retirer ce clip du serveur ?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&c.nom).color(TEXT).strong());
+                ui::hint(
+                    ui,
+                    "la copie partagée et ses exports disparaissent du serveur ; le message du fil garde un \
+                     lien mort. Ton clip reste sur ce PC.",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui::tinted_button(ui, Some(Icon::Trash), "Retirer", Tone::Danger).clicked() {
+                        decision = Some(true);
+                    }
+                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                self.clips_retrait = None;
+                self.lancer_retrait_clip(c);
+            }
+            Some(false) => self.clips_retrait = None,
+            None => {}
+        }
+    }
+
+    /// `DELETE /clips/{id}` sur un fil ; la fiche oublie le serveur — un
+    /// nouveau partage redéposera le clip.
+    fn lancer_retrait_clip(&mut self, c: clips::ClipInfo) {
+        let Some(fiche) = c.fiche.clone() else { return };
+        let Some(id) = fiche.serveur.clone() else { return };
+        if self.conn.is_none() {
+            self.info = Some("connecte-toi d'abord".into());
+            return;
+        }
+        let base = self.http_base();
+        if fiche.serveur_base.as_deref() != Some(base.as_str()) {
+            self.info = Some("ce clip a été déposé sur un autre serveur".into());
+            return;
+        }
+        let agent = self.http_agent();
+        let token_hex = format!("{:x}", self.voice_token);
+        let resultat = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.clips_retrait_resultat = Some(resultat.clone());
+        let (chemin, nom) = (c.chemin.clone(), c.nom.clone());
+        std::thread::spawn(move || {
+            let r = (|| -> Result<String, String> {
+                let reponse = agent
+                    .delete(&format!("{base}/clips/{id}"))
+                    .set("x-ki-token", &token_hex)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .call();
+                match reponse {
+                    // Déjà parti du serveur (purgé) : la fiche l'oublie aussi.
+                    Ok(_) | Err(ureq::Error::Status(404, _)) => {}
+                    Err(e) => return Err(erreur_http(e)),
+                }
+                let mut f = fiche;
+                f.serveur = None;
+                f.serveur_base = None;
+                clips::sauver_fiche(&chemin, &f);
+                Ok(nom)
+            })();
+            *resultat.lock().unwrap() = Some(r);
         });
     }
 
@@ -10330,6 +10441,8 @@ struct MenuMessage {
 /// Les vignettes de clips décodées par les fils de fond : (chemin du clip,
 /// image ou `None` si illisible).
 type VignettesRecues = std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<egui::ColorImage>)>>>;
+/// Ce que le fil de « Retirer du serveur » rapporte : le nom du clip, ou l'erreur.
+type RetraitClip = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>;
 
 /// Le partage d'un clip dans un salon : la boîte de dialogue, puis l'envoi
 /// (PLAN-CLIPS.md, jalon C2). L'original reste sur ce PC ; le serveur en

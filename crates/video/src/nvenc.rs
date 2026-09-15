@@ -272,7 +272,7 @@ impl Nvenc {
         fps: u32,
         entree: Entree,
     ) -> anyhow::Result<Self> {
-        Self::avec_entree_gop(width, height, bitrate_bps, fps, 2, entree)
+        Self::avec_entree_gop(width, height, bitrate_bps, fps, 2, entree, crate::Profil::Diffusion)
     }
 
     /// Comme `avec_entree`, avec la longueur du groupe d'images en secondes :
@@ -285,6 +285,7 @@ impl Nvenc {
         fps: u32,
         gop_s: u32,
         entree: Entree,
+        profil: crate::Profil,
     ) -> anyhow::Result<Self> {
         let api = api()?;
         let (device, carte) = device_nvidia()?;
@@ -316,7 +317,7 @@ impl Nvenc {
                 trame: 0,
                 carte,
             };
-            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10))?;
+            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), profil)?;
             let mut par_tampon = entree == Entree::Tampon;
             if !par_tampon {
                 if let Err(e) = moi.preparer_texture() {
@@ -438,13 +439,26 @@ impl Nvenc {
         }
     }
 
-    /// Le préréglage P4 accordé « faible latence », retouché pour un stream :
-    /// débit constant tenu à la trame près (VBV d'une image, deux passes en
-    /// quart de résolution), pas de trame B ni de réordonnancement, GOP de
-    /// deux secondes avec SPS/PPS répétés à chaque IDR pour qui arrive en
-    /// cours de route, profil Main — celui que tous les décodeurs lisent.
-    unsafe fn initialiser(&mut self, bitrate_bps: u32, fps: u32, gop_s: u32) -> anyhow::Result<()> {
+    /// Le préréglage P4, accordé selon ce qu'on encode. Pour un stream :
+    /// « faible latence », débit constant tenu à la trame près (VBV d'une
+    /// image, deux passes en quart de résolution), profil Main — celui que
+    /// tous les décodeurs lisent. Pour un clip : « haute qualité », débit
+    /// variable avec l'image, VBV d'une seconde, deux passes en pleine
+    /// résolution, AQ dans l'espace et le temps, profil High. Dans les deux
+    /// cas : pas de trame B ni de réordonnancement, SPS/PPS répétés à chaque
+    /// IDR — pour qui arrive en cours de route, et pour le MP4 des clips.
+    unsafe fn initialiser(
+        &mut self,
+        bitrate_bps: u32,
+        fps: u32,
+        gop_s: u32,
+        profil: crate::Profil,
+    ) -> anyhow::Result<()> {
         let fl = &self.api.fl;
+        let tuning = match profil {
+            crate::Profil::Diffusion => ffi::NV_ENC_TUNING_INFO_LOW_LATENCY,
+            crate::Profil::Clip => ffi::NV_ENC_TUNING_INFO_HIGH_QUALITY,
+        };
         let preregler = fl.nvEncGetEncodePresetConfigEx.context("nvEncGetEncodePresetConfigEx absent")?;
         let mut preset: Box<ffi::NV_ENC_PRESET_CONFIG> = Box::new(std::mem::zeroed());
         preset.version = ffi::NV_ENC_PRESET_CONFIG_VER;
@@ -454,7 +468,7 @@ impl Nvenc {
                 self.session,
                 ffi::NV_ENC_CODEC_H264_GUID,
                 ffi::NV_ENC_PRESET_P4_GUID,
-                ffi::NV_ENC_TUNING_INFO_LOW_LATENCY,
+                tuning,
                 &mut *preset,
             ),
             "préréglage",
@@ -462,17 +476,35 @@ impl Nvenc {
 
         let mut config: Box<ffi::NV_ENC_CONFIG> = Box::new(preset.presetCfg);
         config.version = ffi::NV_ENC_CONFIG_VER;
-        config.profileGUID = ffi::NV_ENC_H264_PROFILE_MAIN_GUID;
         config.gopLength = gop_s * fps;
         config.frameIntervalP = 1;
         let rc = &mut config.rcParams;
-        rc.rateControlMode = ffi::NV_ENC_PARAMS_RC_CBR;
-        rc.averageBitRate = bitrate_bps;
-        rc.maxBitRate = bitrate_bps;
-        rc.vbvBufferSize = bitrate_bps / fps;
-        rc.vbvInitialDelay = rc.vbvBufferSize;
-        rc.multiPass = ffi::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
-        rc.flags |= ffi::RC_ENABLE_AQ | ffi::RC_ZERO_REORDER_DELAY;
+        match profil {
+            crate::Profil::Diffusion => {
+                config.profileGUID = ffi::NV_ENC_H264_PROFILE_MAIN_GUID;
+                rc.rateControlMode = ffi::NV_ENC_PARAMS_RC_CBR;
+                rc.averageBitRate = bitrate_bps;
+                rc.maxBitRate = bitrate_bps;
+                rc.vbvBufferSize = bitrate_bps / fps;
+                rc.vbvInitialDelay = rc.vbvBufferSize;
+                rc.multiPass = ffi::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
+                rc.flags |= ffi::RC_ENABLE_AQ | ffi::RC_ZERO_REORDER_DELAY;
+            }
+            crate::Profil::Clip => {
+                // Un clip ne part pas sur le réseau : le débit peut suivre
+                // l'image (crête à une fois et demie), le VBV tient une
+                // seconde, les deux passes en pleine résolution, l'AQ dans
+                // le temps aussi, et la transformée 8×8 du profil High.
+                config.profileGUID = ffi::NV_ENC_H264_PROFILE_HIGH_GUID;
+                rc.rateControlMode = ffi::NV_ENC_PARAMS_RC_VBR;
+                rc.averageBitRate = bitrate_bps;
+                rc.maxBitRate = bitrate_bps.saturating_mul(3) / 2;
+                rc.vbvBufferSize = bitrate_bps;
+                rc.vbvInitialDelay = rc.vbvBufferSize;
+                rc.multiPass = ffi::NV_ENC_TWO_PASS_FULL_RESOLUTION;
+                rc.flags |= ffi::RC_ENABLE_AQ | ffi::RC_ENABLE_TEMPORAL_AQ | ffi::RC_ZERO_REORDER_DELAY;
+            }
+        }
         rc.flags &= !ffi::RC_ENABLE_LOOKAHEAD;
         rc.lookaheadDepth = 0;
         let h264 = &mut config.encodeCodecConfig.h264Config;
@@ -498,7 +530,7 @@ impl Nvenc {
         init.enableEncodeAsync = 0;
         init.enablePTD = 1;
         init.encodeConfig = &mut *config;
-        init.tuningInfo = ffi::NV_ENC_TUNING_INFO_LOW_LATENCY;
+        init.tuningInfo = tuning;
         self.verif(initialiser(self.session, &mut *init), "initialisation")?;
 
         let creer_sortie =

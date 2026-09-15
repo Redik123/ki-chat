@@ -21,6 +21,9 @@
 //!                       (défaut : DejaVu Sans Bold de l'image Docker)
 //!   KI_FFMPEG, KI_FFPROBE  les outils vidéo (défaut : dans le PATH) ; sans
 //!                       eux, les vidéos partagées ne sont pas converties
+//!   KI_YTDLP            le yt-dlp du bot musique (défaut : data/outils/yt-dlp,
+//!                       tenu à jour chaque jour depuis la release yt-dlp,
+//!                       sinon celui du PATH) ; posé, plus de mise à jour
 
 mod accounts;
 mod audit;
@@ -40,6 +43,7 @@ mod store;
 mod stream;
 mod throttle;
 mod valorant;
+mod ytdlp;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -117,6 +121,9 @@ async fn main() -> anyhow::Result<()> {
     // Le bot musique : sa tâche vit tant que le serveur tourne, et ne fait
     // rien tant qu'on ne lui demande rien.
     tokio::spawn(musique::boucle(state.clone()));
+    // yt-dlp se tient à jour tout seul : peu après le démarrage, puis chaque
+    // jour — c'est lui qui casse quand YouTube ou SoundCloud changent.
+    tokio::spawn(ytdlp::boucle(state.clone()));
     // Les vidéos partagées : conversion en MP4 lisible partout, une à la
     // fois ; celles qu'un arrêt a laissées en plan repartent d'abord. Et les
     // téléversements par morceaux abandonnés sont balayés à leur rythme.

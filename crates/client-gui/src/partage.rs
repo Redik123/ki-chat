@@ -133,6 +133,7 @@ impl Reglages {
             preview: self.preview,
             encoder: self.encodeur,
             gop_s: 2,
+            profil: ki_video::Profil::Diffusion,
         }
     }
 

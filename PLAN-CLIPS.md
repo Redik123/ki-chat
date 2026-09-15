@@ -592,13 +592,36 @@ du certificat, une fois), la publication sur TikTok et Instagram — image
 nette, son présent, rien de refusé —, et la police dans l'image Docker au
 premier export en prod.
 
-### C4 — Le confort
+### C4 — Le confort — en cours (2026-09-15, commits locaux)
 Encodeur AMD/Intel par la transformée H.264 de Media Foundation (pour les
 copains sans NVIDIA — et la diffusion en profiterait), chemin tout-GPU
 (texture WGC → NVENC), une seule capture pour diffusion + clips, chemin
 portable (macOS) de la visionneuse, décodage DXVA, `Range` HTTP, export
 côté client si le serveur ne suit pas, bouton de manette pour la touche,
 un récap « clips de la semaine » dans le fil de jeu. Au fil de l'eau.
+
+**Fait le 2026-09-15**, **vérifié** par les tests :
+- **Le profil NVENC des clips** (`ki_video::Profil::{Diffusion, Clip}`,
+  dans `StreamConfig` et `creer_encodeur`) : P4 accordé « haute qualité »,
+  VBR (crête 1,5×), VBV d'une seconde, deux passes en pleine résolution,
+  AQ spatiale et temporelle, profil High ; la diffusion ne change pas
+  (P4 faible latence, CBR, Main). Refus de la carte → profil diffusion,
+  puis logiciel. Pas de lookahead : l'enveloppe NVENC est synchrone (une
+  trame entre, une trame sort). Le préréglage reste P4 : les GUID P5-P7 ne
+  sont pas dans nos liaisons et ne se devinent pas. **Vérifié** sur la
+  machine de développement (test qui filme l'écran) : NVENC accepte le
+  profil, le fichier est plus léger.
+- **« Retirer du serveur »** dans la galerie (clip dont la fiche connaît
+  un serveur) : confirmation, `DELETE /clips/{id}`, la fiche oublie le
+  serveur (un 404 vaut un retrait : purgé entre-temps). Le message du fil
+  garde un lien mort — dit dans la confirmation.
+- **yt-dlp se tient à jour** (PLAN-MUSIQUE M4, `serveur/ytdlp.rs`) : voir
+  ce plan-là.
+
+Écartés, par choix : l'encodeur AMD/Intel (tout le monde est en NVIDIA),
+le chemin tout-GPU et la capture unique (« si le profileur le demande »,
+et personne ne sent la charge), macOS (laissé de côté par drion), la
+manette, le récap hebdo (à voir si l'envie vient).
 
 ## Risques et parades
 

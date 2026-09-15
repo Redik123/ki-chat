@@ -143,6 +143,7 @@ Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 | `KI_POLICE` | *(DejaVu Sans Bold)* | Police `.ttf` du titre des exports de clips |
 | `KI_HENRIK_KEY` | *(vide)* | Clé d'API [HenrikDev](https://docs.henrikdev.xyz) pour l'intégration VALORANT |
 | `KI_FFMPEG` / `KI_FFPROBE` | `ffmpeg` / `ffprobe` | Exécutables vidéo pour la normalisation et l'extraction audio |
+| `KI_YTDLP` | `data/outils/yt-dlp` (mis à jour chaque jour depuis la release yt-dlp), sinon `yt-dlp` | yt-dlp du bot musique ; posé par l'admin, plus de mise à jour automatique |
 
 ### Diagnostics partagés & Rapports de plantage
 

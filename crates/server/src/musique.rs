@@ -168,7 +168,9 @@ pub struct Musique {
     etat: Mutex<EtatMusique>,
     tx: tokio::sync::mpsc::UnboundedSender<Commande>,
     rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Commande>>>,
-    outils: Option<Arc<Outils>>,
+    /// Remplaçable à chaud : la mise à jour automatique de yt-dlp
+    /// (`ytdlp.rs`) dépose un binaire neuf sans redémarrer.
+    outils: std::sync::RwLock<Option<Arc<Outils>>>,
     compteurs: Compteurs,
     vignettes: Mutex<Vignettes>,
     /// Les playlists du groupe, par nom.
@@ -207,7 +209,7 @@ impl Musique {
             etat: Mutex::new(etat),
             tx,
             rx: Mutex::new(Some(rx)),
-            outils,
+            outils: std::sync::RwLock::new(outils),
             compteurs: Compteurs::default(),
             vignettes: Mutex::new(Vignettes::default()),
             playlists: Mutex::new(playlists),
@@ -297,7 +299,7 @@ impl Musique {
     }
 
     pub fn disponible(&self) -> bool {
-        self.outils.is_some()
+        self.outils.read().unwrap().is_some()
     }
 
     pub fn etat(&self) -> EtatMusique {
@@ -331,12 +333,66 @@ impl Musique {
     }
 
     pub fn outils(&self) -> Option<Arc<Outils>> {
-        self.outils.clone()
+        self.outils.read().unwrap().clone()
+    }
+
+    /// Un yt-dlp neuf (mise à jour automatique) : vérifié, puis le bot passe
+    /// dessus pour les pistes à venir. Vrai s'il a été pris.
+    pub fn remplacer_yt_dlp(&self, chemin: &std::path::Path) -> bool {
+        let chemin = chemin.to_string_lossy().into_owned();
+        let Ok(sortie) = executer_borne(Command::new(&chemin).arg("--version"), Duration::from_secs(20)) else {
+            return false;
+        };
+        let version: String =
+            String::from_utf8_lossy(&sortie).lines().next().unwrap_or("").chars().take(60).collect();
+        let mut outils = self.outils.write().unwrap();
+        let nouveau = match outils.as_ref() {
+            Some(o) => Outils {
+                yt_dlp: chemin,
+                ffmpeg: o.ffmpeg.clone(),
+                cookies: o.cookies.clone(),
+                cache: o.cache.clone(),
+            },
+            // yt-dlp manquait au démarrage : le bot naît maintenant, si ffmpeg est là.
+            None => {
+                let data_dir = self
+                    .dossier
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "data".into());
+                match detecter_avec(&data_dir, Some(chemin)) {
+                    Some(o) => o,
+                    None => return false,
+                }
+            }
+        };
+        tracing::info!("musique : yt-dlp {version}");
+        *outils = Some(Arc::new(nouveau));
+        drop(outils);
+        self.etat.lock().unwrap().disponible = true;
+        true
     }
 }
 
 fn detecter(data_dir: &str) -> Option<Outils> {
-    let yt_dlp = std::env::var("KI_YTDLP").unwrap_or_else(|_| "yt-dlp".into());
+    detecter_avec(data_dir, None)
+}
+
+/// Cherche les outils ; `yt_dlp_force` : un binaire imposé (celui qu'une
+/// mise à jour vient de déposer).
+fn detecter_avec(data_dir: &str, yt_dlp_force: Option<String>) -> Option<Outils> {
+    // Le binaire choisi par l'admin, sinon celui que la mise à jour
+    // automatique a déposé (`ytdlp.rs`), sinon celui du PATH — ou de l'image.
+    let yt_dlp = yt_dlp_force.unwrap_or_else(|| {
+        std::env::var("KI_YTDLP").unwrap_or_else(|_| {
+            let local = crate::ytdlp::chemin_local(data_dir);
+            if local.is_file() {
+                local.to_string_lossy().into_owned()
+            } else {
+                "yt-dlp".into()
+            }
+        })
+    });
     let ffmpeg = std::env::var("KI_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
     let version = |exe: &str, arg: &str| -> Option<String> {
         let sortie = executer_borne(Command::new(exe).arg(arg), Duration::from_secs(20)).ok()?;
@@ -1064,9 +1120,6 @@ fn appliquer(
 
 /// La tâche du bot : commandes d'un côté, cadence de 20 ms de l'autre.
 pub async fn boucle(state: Arc<AppState>) {
-    let Some(outils) = state.musique.outils() else {
-        return;
-    };
     let Some(mut rx) = state.musique.rx.lock().unwrap().take() else {
         return;
     };
@@ -1102,6 +1155,14 @@ pub async fn boucle(state: Arc<AppState>) {
     let mut seul_depuis: Option<Instant> = None;
     let mut pause_solitude = false;
     loop {
+        // Les outils se relisent à chaque tour : yt-dlp peut avoir été mis
+        // à jour entre deux pistes (`ytdlp.rs`) — ou être arrivé, s'il
+        // manquait au démarrage.
+        let Some(outils) = state.musique.outils() else {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            echeance = tokio::time::Instant::now();
+            continue;
+        };
         tokio::select! {
             commande = rx.recv() => {
                 let Some(commande) = commande else { break };

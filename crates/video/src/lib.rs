@@ -165,6 +165,16 @@ impl VideoEncoder for Logiciel {
     }
 }
 
+/// Ce que l'on encode : une diffusion, où chaque trame part sur le réseau
+/// et où le débit se tient à la trame près ; ou un clip, où seule l'image
+/// compte et où le débit peut varier avec elle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Profil {
+    #[default]
+    Diffusion,
+    Clip,
+}
+
 /// Crée l'encodeur demandé. En « Auto », NVENC si la machine l'offre, le
 /// logiciel sinon — et l'on dit lequel, au journal comme aux stats.
 ///
@@ -179,13 +189,14 @@ pub fn creer_encodeur(
     bitrate_bps: u32,
     fps: u32,
     gop_s: u32,
+    profil: Profil,
     stats: &StageStats,
     tentative: u32,
 ) -> anyhow::Result<Box<dyn VideoEncoder>> {
     // NVENC n'existe que sous Windows ; ailleurs, l'exiger est une erreur
     // franche, et « Auto » veut simplement dire « logiciel ».
     #[cfg(not(windows))]
-    let _ = tentative;
+    let _ = (tentative, profil);
     #[cfg(not(windows))]
     if choix == EncoderChoice::Nvenc {
         anyhow::bail!("NVENC exigé par les réglages, mais indisponible sur {}", std::env::consts::OS);
@@ -193,7 +204,19 @@ pub fn creer_encodeur(
     #[cfg(windows)]
     if choix != EncoderChoice::Logiciel {
         let entree = if tentative == 0 { nvenc::Entree::Texture } else { nvenc::Entree::Tampon };
-        match nvenc::Nvenc::avec_entree_gop(width, height, bitrate_bps, fps, gop_s, entree) {
+        // Le profil « clip » demande plus à la carte (deux passes en pleine
+        // résolution, AQ temporelle) : si elle refuse, celui de la diffusion
+        // vaut toujours mieux que le logiciel.
+        let ouverture = nvenc::Nvenc::avec_entree_gop(width, height, bitrate_bps, fps, gop_s, entree, profil)
+            .or_else(|e| {
+                if profil == Profil::Clip {
+                    journal(format!("NVENC : profil clip refusé ({e:#}) — profil diffusion à la place"));
+                    nvenc::Nvenc::avec_entree_gop(width, height, bitrate_bps, fps, gop_s, entree, Profil::Diffusion)
+                } else {
+                    Err(e)
+                }
+            });
+        match ouverture {
             Ok(e) => {
                 let (maj, min) = e.version_pilote();
                 let chemin = match e.entree() {
@@ -355,7 +378,7 @@ fn pipeline_loop(
         //    le labo teste ce qui partira réellement.
         let enc = match encoder.as_mut() {
             Some(e) => e,
-            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, 2, &stats, 0) {
+            None => match creer_encodeur(EncoderChoice::Auto, w, h, 6_000_000, 30, 2, Profil::Diffusion, &stats, 0) {
                 Ok(e) => encoder.insert(e),
                 Err(e) => {
                     tracing::error!("encodeur H.264 : {e:#}");
@@ -452,6 +475,8 @@ pub struct StreamConfig {
     /// Longueur du groupe d'images, en secondes : deux pour diffuser, une
     /// pour un clip (qui se coupe à la trame clé).
     pub gop_s: u32,
+    /// Diffusion ou clip : le réglage de l'encodeur.
+    pub profil: Profil,
 }
 
 impl Default for StreamConfig {
@@ -465,6 +490,7 @@ impl Default for StreamConfig {
             preview: true,
             encoder: EncoderChoice::Auto,
             gop_s: 2,
+            profil: Profil::Diffusion,
         }
     }
 }
@@ -644,6 +670,7 @@ fn streamer_pipeline(
                 config.bitrate_bps,
                 config.fps,
                 config.gop_s,
+                config.profil,
                 &stats,
                 echecs_nvenc,
             ) {
@@ -667,6 +694,7 @@ fn streamer_pipeline(
                         config.bitrate_bps,
                         config.fps,
                         config.gop_s,
+                        config.profil,
                         &stats,
                         0,
                     ) {
