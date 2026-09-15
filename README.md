@@ -173,6 +173,8 @@ curl -k -H "x-ki-admin: $(cat data/diag.token)" https://ton-serveur:8080/diag
 
 ### Partage d'écran & Son du jeu
 
+- **Regarder à sa façon** : le stream d'un copain se regarde dans ki-chat, ou détaché dans sa propre fenêtre — sur le second écran, ou en plein écran (F11, double-clic, Échap pour en sortir), avec le volume du son du jeu sous la main.
+
 - **Windows Graphics Capture (WGC)** : Capture matérielle au niveau de l'OS sans accrochage Direct3D ni injection de DLL dans les processus de jeu.
 - **NVENC sans SDK tiers** : Chargement dynamique direct de `nvEncodeAPI64.dll` présent dans les pilotes NVIDIA modernes (API 12.0+) ; repli transparent sur l'encodeur logiciel openh264 en cas de matériel non supporté.
 - **Boucle WASAPI « tout sauf ki-chat »** : La capture audio du stream intercepte les sons de tous les processus Windows à l'exception de l'exécutable de ki-chat lui-même. Les spectateurs entendent le jeu et la musique du diffuseur, mais n'entendent jamais leur propre écho en retour.
@@ -346,6 +348,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **Présence (0.1.39)** — « joue à … » sous le pseudo pour tous les jeux reconnus à leur fenêtre, VALORANT gardant sa partie détaillée.
 - [x] **Soundboard (0.1.39)** — des sons à la touche entendus par le salon, mixés à la voix dans le moteur vocal.
 - [x] **Chat (0.1.39)** — modifier ses messages (clic droit, ou flèche haut dans un champ vide), et glisser-déposer des fichiers sur la fenêtre.
+- [x] **Visionnage détaché (0.1.39)** — le stream d'un copain dans sa propre fenêtre, à poser sur un second écran ou en plein écran (F11, double-clic, Échap).
 
 ### Perspectives & Prochains jalons
 

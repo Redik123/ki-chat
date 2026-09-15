@@ -703,6 +703,13 @@ struct KiApp {
     /// Le streamer est sur ce PC (un second ki-chat) : son son du jeu est
     /// coupé chez nous, sinon sa capture nous recapturerait sans fin.
     regard_meme_machine: bool,
+    /// Le stream regardé dans sa propre fenêtre système — à poser sur un
+    /// second écran —, et en plein écran.
+    regard_detache: bool,
+    regard_plein_ecran: bool,
+    /// Le dernier mouvement de souris dans la fenêtre détachée : sa barre
+    /// de commandes s'efface peu après.
+    regard_souris: std::time::Instant,
     /// Docteur audio déplié dans les réglages.
     show_docteur: bool,
     /// Diagnostic partagé : le journal technique part vers le serveur
@@ -1086,6 +1093,9 @@ impl KiApp {
             jeu_envoye: None,
             regard_volume: 1.0,
             regard_meme_machine: false,
+            regard_detache: false,
+            regard_plein_ecran: false,
+            regard_souris: std::time::Instant::now(),
             regard: None,
             regard_tex: None,
             show_docteur: false,
@@ -9244,6 +9254,8 @@ impl KiApp {
             }
         }
         self.regard_tex = None;
+        self.regard_detache = false;
+        self.regard_plein_ecran = false;
     }
 
     /// L'overlay « qui parle » : les occupants de mon salon vocal, avec
@@ -9449,101 +9461,286 @@ impl KiApp {
         }
 
         // --- Ce que je regarde ---
-        if let Some(r) = &self.regard {
-            let frame = r.image.lock().unwrap().take();
-            if let Some(image) = frame {
-                match &mut self.regard_tex {
-                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.regard_tex = Some(ctx.load_texture(
-                            "regard",
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ))
-                    }
+        self.regard_windows(ctx);
+    }
+
+    /// La vue du spectateur : la fenêtre dans ki-chat, ou la fenêtre à part
+    /// quand on l'a détachée. Chaque image décodée devient texture ici, sur
+    /// le fil UI, quelle que soit la fenêtre qui la montre.
+    fn regard_windows(&mut self, ctx: &egui::Context) {
+        let Some(r) = &self.regard else { return };
+        let frame = r.image.lock().unwrap().take();
+        if let Some(image) = frame {
+            match &mut self.regard_tex {
+                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.regard_tex = Some(ctx.load_texture(
+                        "regard",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ))
                 }
             }
-            self.cadence_regard
-                .relever(r.images.load(std::sync::atomic::Ordering::Relaxed), 0);
-            let titre = format!("Écran de {}", r.streamer);
-            let etat = match &self.regard_tex {
-                Some(tex) => {
-                    let [w, h] = tex.size();
-                    format!("{w}x{h} · {:.0} i/s", self.cadence_regard.fps)
+        }
+        self.cadence_regard
+            .relever(r.images.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let titre = format!("Écran de {}", r.streamer);
+        let etat = match &self.regard_tex {
+            Some(tex) => {
+                let [w, h] = tex.size();
+                format!("{w}x{h} · {:.0} i/s", self.cadence_regard.fps)
+            }
+            None => String::new(),
+        };
+        if self.regard_detache {
+            self.regard_fenetre_detachee(ctx, &titre, &etat);
+            return;
+        }
+        let mut quitter = false;
+        let mut ouvert = true;
+        let mut volume_change = false;
+        let mut detacher = false;
+        let mut plein_ecran = false;
+        // La croix de la barre de titre quitte le visionnage, comme le
+        // bouton en bas — que l'on ne voit plus quand la fenêtre est
+        // agrandie au-delà de l'écran.
+        egui::Window::new(titre)
+            .open(&mut ouvert)
+            .default_width(900.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                if let Some(tex) = &self.regard_tex {
+                    let dispo = ui.available_size();
+                    let taille = tex.size_vec2();
+                    // L'image laisse toujours la place de la ligne du
+                    // bas : bouton et cadence restent visibles.
+                    let hauteur = (dispo.y - 44.0).max(60.0);
+                    let echelle = (dispo.x / taille.x).min(hauteur / taille.y).min(2.0);
+                    ui.image((tex.id(), taille * echelle.max(0.05)));
+                } else {
+                    ui.label(
+                        RichText::new("en attente de la première image…").color(TEXT_DIM),
+                    );
                 }
-                None => String::new(),
-            };
-            let mut quitter = false;
-            let mut ouvert = true;
-            let mut volume_change = false;
-            // La croix de la barre de titre quitte le visionnage, comme le
-            // bouton en bas — que l'on ne voit plus quand la fenêtre est
-            // agrandie au-delà de l'écran.
-            egui::Window::new(titre)
-                .open(&mut ouvert)
-                .default_width(900.0)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    if let Some(tex) = &self.regard_tex {
-                        let dispo = ui.available_size();
-                        let taille = tex.size_vec2();
-                        // L'image laisse toujours la place de la ligne du
-                        // bas : bouton et cadence restent visibles.
-                        let hauteur = (dispo.y - 44.0).max(60.0);
-                        let echelle = (dispo.x / taille.x).min(hauteur / taille.y).min(2.0);
-                        ui.image((tex.id(), taille * echelle.max(0.05)));
-                    } else {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui::button(ui, Icon::Close, "Quitter le visionnage").clicked() {
+                        quitter = true;
+                    }
+                    // Sa propre fenêtre : sur le second écran, ou en plein
+                    // écran — là où un stream se regarde vraiment.
+                    if ui::button(ui, Icon::Screen, "Détacher")
+                        .on_hover_text("dans sa propre fenêtre, à poser sur un second écran")
+                        .clicked()
+                    {
+                        detacher = true;
+                    }
+                    if ui::button(ui, Icon::Screen, "Plein écran")
+                        .on_hover_text("Échap pour en sortir, F11 ou double-clic pour y revenir")
+                        .clicked()
+                    {
+                        plein_ecran = true;
+                    }
+                    ui.add_space(8.0);
+                    // Le son du jeu du streamer, à son volume à soi —
+                    // mixé par le moteur vocal, il suit aussi le volume
+                    // général et la mise en sourdine.
+                    if self.regard_meme_machine {
                         ui.label(
-                            RichText::new("en attente de la première image…").color(TEXT_DIM),
+                            RichText::new("son du jeu coupé : le streamer est sur ce PC")
+                                .color(TEXT_FAINT)
+                                .size(11.5),
+                        )
+                        .on_hover_text(
+                            "sa capture exclut son propre ki-chat, pas celui-ci : \
+                             rejouer son son ici le lui renverrait en boucle",
                         );
-                    }
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui::button(ui, Icon::Close, "Quitter le visionnage").clicked() {
-                            quitter = true;
-                        }
-                        ui.add_space(8.0);
-                        // Le son du jeu du streamer, à son volume à soi —
-                        // mixé par le moteur vocal, il suit aussi le volume
-                        // général et la mise en sourdine.
-                        if self.regard_meme_machine {
-                            ui.label(
-                                RichText::new("son du jeu coupé : le streamer est sur ce PC")
-                                    .color(TEXT_FAINT)
-                                    .size(11.5),
+                    } else {
+                        let mut pct = self.regard_volume * 100.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut pct, 0.0..=200.0)
+                                    .text("son du jeu")
+                                    .suffix(" %")
+                                    .integer(),
                             )
-                            .on_hover_text(
-                                "sa capture exclut son propre ki-chat, pas celui-ci : \
-                                 rejouer son son ici le lui renverrait en boucle",
-                            );
-                        } else {
-                            let mut pct = self.regard_volume * 100.0;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut pct, 0.0..=200.0)
-                                        .text("son du jeu")
-                                        .suffix(" %")
-                                        .integer(),
-                                )
-                                .changed()
-                            {
-                                self.regard_volume = pct / 100.0;
-                                volume_change = true;
-                            }
+                            .changed()
+                        {
+                            self.regard_volume = pct / 100.0;
+                            volume_change = true;
                         }
-                        if !etat.is_empty() {
-                            ui.label(RichText::new(&etat).color(TEXT_FAINT).size(11.0).monospace());
-                        }
-                    });
+                    }
+                    if !etat.is_empty() {
+                        ui.label(RichText::new(&etat).color(TEXT_FAINT).size(11.0).monospace());
+                    }
                 });
-            if volume_change {
-                if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                    engine.set_aux_gain(if self.regard_meme_machine { 0.0 } else { self.regard_volume });
+            });
+        if volume_change {
+            self.appliquer_volume_regard();
+        }
+        if detacher || plein_ecran {
+            self.regard_detache = true;
+            self.regard_plein_ecran = plein_ecran;
+            self.regard_souris = std::time::Instant::now();
+        }
+        if quitter || !ouvert {
+            self.fermer_regard(true);
+        }
+    }
+
+    /// Le volume du son du jeu regardé, tel que le moteur le mixe.
+    fn appliquer_volume_regard(&self) {
+        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+            engine.set_aux_gain(if self.regard_meme_machine { 0.0 } else { self.regard_volume });
+        }
+    }
+
+    /// Le stream regardé dans une fenêtre système à part — rendue avec la
+    /// principale (viewport immédiat : même contexte, même texture), à
+    /// poser sur un second écran ou à mettre en plein écran. L'image
+    /// remplit la fenêtre, noir autour ; la barre de commandes se montre
+    /// au mouvement de la souris et s'efface deux secondes après. Échap
+    /// sort du plein écran, puis rattache ; F11 et le double-clic basculent
+    /// le plein écran ; la croix quitte le visionnage, comme dans ki-chat.
+    fn regard_fenetre_detachee(&mut self, ctx: &egui::Context, titre: &str, etat: &str) {
+        let id = egui::ViewportId::from_hash_of("regard-detache");
+        let builder = egui::ViewportBuilder::default()
+            .with_title(format!("{titre} — ki-chat"))
+            .with_inner_size([1280.0, 720.0])
+            .with_min_inner_size([320.0, 180.0])
+            .with_icon(std::sync::Arc::new(theme::app_icon()));
+        let tex = self.regard_tex.clone();
+        let voulu_plein = self.regard_plein_ecran;
+        let barre_visible = self.regard_souris.elapsed() < std::time::Duration::from_millis(2500);
+        let meme_machine = self.regard_meme_machine;
+        let mut volume = self.regard_volume;
+        let (mut quitter, mut rattacher, mut basculer_plein, mut volume_change, mut bouge) =
+            (false, false, false, false, false);
+        ctx.show_viewport_immediate(id, builder, |ctx, _classe| {
+            // Le plein écran suit ce qu'on veut, dès que la fenêtre existe.
+            let plein = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            if plein != voulu_plein {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(voulu_plein));
+            }
+            if ctx.input(|i| i.viewport().close_requested()) {
+                quitter = true;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if plein {
+                    basculer_plein = true;
+                } else {
+                    rattacher = true;
                 }
             }
-            if quitter || !ouvert {
-                self.fermer_regard(true);
+            if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
+                basculer_plein = true;
             }
+            bouge = ctx.input(|i| i.pointer.delta() != Vec2::ZERO || i.pointer.any_down());
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(Color32::BLACK))
+                .show(ctx, |ui| {
+                    let dispo = ui.max_rect();
+                    let toile = ui.interact(dispo, egui::Id::new("regard-toile"), Sense::click());
+                    if toile.double_clicked() {
+                        basculer_plein = true;
+                    }
+                    match &tex {
+                        Some(tex) => {
+                            let taille = tex.size_vec2();
+                            let echelle = (dispo.width() / taille.x).min(dispo.height() / taille.y);
+                            let rect = egui::Rect::from_center_size(dispo.center(), taille * echelle);
+                            ui.painter().image(
+                                tex.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        None => {
+                            ui.painter().text(
+                                dispo.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "en attente de la première image…",
+                                egui::FontId::proportional(16.0),
+                                TEXT_DIM,
+                            );
+                        }
+                    }
+                    if !barre_visible {
+                        return;
+                    }
+                    let barre = egui::Rect::from_min_max(
+                        egui::pos2(dispo.left(), dispo.bottom() - 46.0),
+                        dispo.max,
+                    );
+                    ui.painter().rect_filled(barre, 0.0, theme::alpha(Color32::BLACK, 175));
+                    let mut ligne = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(barre.shrink2(Vec2::new(12.0, 7.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    if ui::button(&mut ligne, Icon::Close, "Quitter").clicked() {
+                        quitter = true;
+                    }
+                    if ui::button(&mut ligne, Icon::ChevronLeft, "Rattacher")
+                        .on_hover_text("revenir dans la fenêtre de ki-chat (Échap)")
+                        .clicked()
+                    {
+                        rattacher = true;
+                    }
+                    let mot = if plein { "Quitter le plein écran" } else { "Plein écran" };
+                    if ui::button(&mut ligne, Icon::Screen, mot)
+                        .on_hover_text("F11, ou double-clic sur l'image")
+                        .clicked()
+                    {
+                        basculer_plein = true;
+                    }
+                    ligne.add_space(8.0);
+                    if meme_machine {
+                        ligne.label(
+                            RichText::new("son du jeu coupé : le streamer est sur ce PC")
+                                .color(TEXT_FAINT)
+                                .size(11.5),
+                        );
+                    } else {
+                        let mut pct = volume * 100.0;
+                        if ligne
+                            .add(
+                                egui::Slider::new(&mut pct, 0.0..=200.0)
+                                    .text("son du jeu")
+                                    .suffix(" %")
+                                    .integer(),
+                            )
+                            .changed()
+                        {
+                            volume = pct / 100.0;
+                            volume_change = true;
+                        }
+                    }
+                    if !etat.is_empty() {
+                        ligne.label(RichText::new(etat).color(TEXT_FAINT).size(11.0).monospace());
+                    }
+                });
+        });
+        if bouge {
+            self.regard_souris = std::time::Instant::now();
+            // Pour effacer la barre à l'heure, même si rien d'autre ne
+            // repeint d'ici là.
+            ctx.request_repaint_after(std::time::Duration::from_millis(2600));
+        }
+        if volume_change {
+            self.regard_volume = volume;
+            self.appliquer_volume_regard();
+        }
+        if basculer_plein {
+            self.regard_plein_ecran = !self.regard_plein_ecran;
+        }
+        if rattacher {
+            self.regard_detache = false;
+            self.regard_plein_ecran = false;
+        }
+        if quitter {
+            self.fermer_regard(true);
         }
     }
 
