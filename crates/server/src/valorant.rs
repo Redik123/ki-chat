@@ -11,12 +11,19 @@
 //! tout le groupe. Un fil unique sert les demandes l'une après l'autre et
 //! s'arrête de lui-même à vingt par minute glissante — les dix restantes
 //! sont la marge. Ouvrir une fiche ne coûte rien : elle vient du cache.
-//! Seules une liaison (quatre requêtes) et un rafraîchissement (trois)
-//! touchent l'API, et les rafraîchissements s'espacent d'une demi-heure
-//! par membre, en ligne seulement.
+//! Seules une liaison (six requêtes : le compte, la fiche, et deux de
+//! rattrapage dans les archives de HenrikDev) et un rafraîchissement
+//! (trois) touchent l'API, et les rafraîchissements s'espacent d'une
+//! demi-heure par membre, en ligne seulement.
 //!
 //! **Ce qu'on garde.** La ligne du membre dans chaque match — jamais celles
-//! des neuf autres, qui ne sont pas du serveur. Deux fichiers sous
+//! des neuf autres, qui ne sont pas du serveur. Depuis 0.1.40 la fiche
+//! **s'accumule** : chaque rafraîchissement ne rapporte que les cinq
+//! derniers matchs, mais [`fusionner`] les range sous les anciens, jusqu'à
+//! soixante matchs et cent points de RR par membre — sans une requête de
+//! plus. Et de chaque match on lit les manches (`rounds[]`, `kills[]`,
+//! déjà téléchargés) pour en tirer la ligne du membre manche par manche :
+//! premiers sangs, KAST, multi-kills, clutchs, poses. Deux fichiers sous
 //! `data/valorant/` : `comptes.json` (qui a lié quoi) et `fiches.json`
 //! (les fiches), écrits par [`crate::store::write_atomic`].
 //!
@@ -41,15 +48,34 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ki_protocol::{FicheValorant, MatchEsport, MatchResume, PointRR, RangValorant, UserId};
+use ki_protocol::{
+    BilanMembre, DetailManches, FicheMembre, FicheValorant, MatchEsport, MatchResume, PointRR,
+    RangValorant, ServerMsg, StatsSaison, UserId, STATS_MAX_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Requêtes tolérées par minute glissante — sous les trente de la clé.
 const BUDGET_PAR_MINUTE: usize = 20;
-/// Points d'historique et matchs gardés par fiche.
-const HISTORIQUE_MAX: usize = 10;
+/// Ce qu'un rafraîchissement rapporte : le `take` sur `v2/mmr-history`
+/// (l'API en rend une vingtaine) et la taille de la requête `v4/matches`
+/// — cinq, parce qu'un match pèse de 300 Ko à 1 Mo sous un timeout de
+/// vingt secondes, et que la fiche accumule de toute façon.
+const HISTORIQUE_MAX: usize = 20;
 const MATCHS_MAX: usize = 5;
+/// Ce que la fiche accumule au fil des rafraîchissements.
+const MATCHS_GARDES: usize = 60;
+const HISTORIQUE_GARDES: usize = 100;
+/// Points du résumé envoyé à la page du groupe (les matchs : `MATCHS_MAX`).
+const POINTS_RESUME: usize = 10;
+/// Le rattrapage à la liaison, une fois par membre : ce que HenrikDev a
+/// archivé de lui (`stored-matches`, `stored-mmr-history`).
+const RATTRAPAGE_MATCHS: usize = 60;
+const RATTRAPAGE_POINTS: usize = 100;
+/// Fenêtre d'échange du KAST : ma mort vengée dans les 5 s compte.
+const ECHANGE_MS: u64 = 5_000;
+/// Un jour, en millisecondes.
+const JOUR_MS: u64 = 86_400_000;
 const BASE: &str = "https://api.henrikdev.xyz";
 /// Par match, les autres membres liés qui y jouaient.
 type CoMembres = Vec<(String, Vec<UserId>)>;
@@ -66,8 +92,9 @@ const ANNONCE_ATTENTE: Duration = Duration::from_secs(120);
 /// match : la fiche est relue après ce délai, jusqu'à `RELANCES_MAX` fois.
 const RELANCE_DELAI: Duration = Duration::from_secs(75);
 const RELANCES_MAX: u32 = 3;
-/// Identifiants de matchs gardés par membre dans `fil.json`.
-const ANNONCES_GARDEES: usize = 30;
+/// Identifiants de matchs gardés par membre dans `fil.json` — plus que
+/// les soixante d'une fiche, puisque `connaitre` y verse la fiche entière.
+const ANNONCES_GARDEES: usize = 80;
 /// Le calendrier esport se relit toutes les heures, et l'on en garde
 /// autant de matchs.
 const ESPORTS_AGE: Duration = Duration::from_secs(3600);
@@ -271,15 +298,26 @@ impl Valorant {
         self.etat.fiches.lock().unwrap().get(&user_id).cloned()
     }
 
-    /// Toutes les fiches, pour la page de stats du groupe.
-    pub fn toutes(&self) -> Vec<(UserId, FicheValorant)> {
+    /// Les fiches allégées et leur bilan, pour la page du groupe :
+    /// `n_matchs` matchs et `n_points` points par membre, et les agrégats
+    /// calculés à l'envoi sous le verrou — [`FicheValorant::resume`] ne
+    /// clone que ce qui part, la fiche entière ne quitte pas la table.
+    pub fn resumes(&self, n_matchs: usize, n_points: usize) -> Vec<(UserId, FicheValorant, BilanMembre)> {
+        let maintenant = maintenant_ms();
         self.etat
             .fiches
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, f)| (*id, f.clone()))
+            .map(|(id, f)| (*id, f.resume(n_matchs, n_points), bilan_membre(f, maintenant)))
             .collect()
+    }
+
+    /// Les 168 cases jour × heure (UTC) des parties commencées sur trente
+    /// jours, tous membres et modes — vide si personne n'a joué.
+    pub fn activite(&self) -> Vec<u16> {
+        let fiches = self.etat.fiches.lock().unwrap();
+        activite_de(fiches.values(), maintenant_ms())
     }
 
     /// Met la liaison en file. Refuse sans clé, ou si ce Riot ID est déjà
@@ -750,6 +788,10 @@ pub fn composer_recap(r: &Recap, pseudo: impl Fn(UserId) -> String) -> String {
                 " · meilleur : {} {}/{}/{} sur {}",
                 m.agent, m.kills, m.deaths, m.assists, m.carte
             ));
+            // Depuis que les manches se lisent, un ace se dit.
+            if m.manches_detail.as_ref().is_some_and(|d| d.aces > 0) {
+                texte.push_str(" (avec un ace)");
+            }
         }
     }
     if !r.sans_match.is_empty() {
@@ -781,6 +823,89 @@ pub fn heure_du_recap(ms: u64) -> bool {
         return false;
     };
     d.weekday() == Weekday::Sun && (d.hour() > 19 || (d.hour() == 19 && d.minute() >= 30))
+}
+
+// ---------------------------------------------------------------------
+// La page du groupe
+// ---------------------------------------------------------------------
+
+/// Ce que la page du groupe reçoit d'un membre sans porter ses soixante
+/// matchs : les bilans à sept et trente jours, la forme, la série, les
+/// agents, cartes et duos du mois — tout par les formules de
+/// `ki-protocol`, classé seulement. Calculé à l'envoi, jamais stocké.
+fn bilan_membre(f: &FicheValorant, maintenant: u64) -> BilanMembre {
+    let sept = maintenant.saturating_sub(7 * JOUR_MS);
+    let trente = maintenant.saturating_sub(30 * JOUR_MS);
+    let compte = |(nom, b): (String, ki_protocol::Bilan)| (nom, b.matchs, b.victoires);
+    BilanMembre {
+        sept_jours: f.bilan(sept, u64::MAX, true),
+        trente_jours: f.bilan(trente, u64::MAX, true),
+        serie: f.serie(),
+        forme: f.forme(10),
+        agents: f.par_agent(trente, u64::MAX, true).into_iter().take(3).map(compte).collect(),
+        cartes: f.par_carte(trente, u64::MAX, true).into_iter().take(5).map(compte).collect(),
+        duos: f.duos(trente, u64::MAX).into_iter().take(5).collect(),
+    }
+}
+
+/// Les 168 cases `[jour UTC 0 = lundi … 6][heure 0..24]` des parties
+/// commencées depuis trente jours, tous membres et modes. Le jour se
+/// calcule sans calendrier : le 1er janvier 1970 était un jeudi, soit le
+/// jour 3 d'une semaine qui commence le lundi. Vide si tout est à zéro.
+fn activite_de<'a>(fiches: impl Iterator<Item = &'a FicheValorant>, maintenant: u64) -> Vec<u16> {
+    let depuis = maintenant.saturating_sub(30 * JOUR_MS);
+    let mut cases = vec![0u16; 7 * 24];
+    for m in fiches.flat_map(|f| f.matchs.iter()) {
+        if m.date < depuis {
+            continue;
+        }
+        let jour = ((m.date / JOUR_MS + 3) % 7) as usize;
+        let heure = ((m.date / 3_600_000) % 24) as usize;
+        if let Some(c) = cases.get_mut(jour * 24 + heure) {
+            *c = c.saturating_add(1);
+        }
+    }
+    if cases.iter().all(|c| *c == 0) {
+        Vec::new()
+    } else {
+        cases
+    }
+}
+
+/// Le message de la page du groupe, sous le budget d'une ligne : cinq
+/// matchs et dix points par membre ; si la ligne dépasse
+/// [`STATS_MAX_BYTES`], on allège tout le monde d'un cran — jamais un
+/// membre de moins. `resumes(n_matchs, n_points)` rend les fiches au
+/// palier demandé. Si même à zéro match ça ne tient pas, le message part
+/// sans esports ni activité : les fiches d'abord.
+pub fn message_stats(
+    resumes: impl Fn(usize, usize) -> Vec<FicheMembre>,
+    esports: Vec<MatchEsport>,
+    activite: Vec<u16>,
+) -> ServerMsg {
+    const PALIERS: [(usize, usize); 4] = [(MATCHS_MAX, POINTS_RESUME), (3, 6), (1, 3), (0, 0)];
+    for (n_m, n_p) in PALIERS {
+        let candidat = ServerMsg::StatsValorant {
+            fiches: resumes(n_m, n_p),
+            esports: esports.clone(),
+            activite: activite.clone(),
+        };
+        if let Ok(octets) = serde_json::to_vec(&candidat) {
+            if octets.len() <= STATS_MAX_BYTES {
+                tracing::debug!(
+                    "VALORANT : page du groupe en {} octets, {n_m} matchs et {n_p} points par membre",
+                    octets.len()
+                );
+                return candidat;
+            }
+        }
+    }
+    tracing::warn!("VALORANT : la page du groupe dépasse le budget même sans match : envoyée sans esports ni activité");
+    ServerMsg::StatsValorant {
+        fiches: resumes(0, 0),
+        esports: Vec::new(),
+        activite: Vec::new(),
+    }
 }
 
 fn lire<T: serde::de::DeserializeOwned>(chemin: &std::path::Path) -> BTreeMap<UserId, T> {
@@ -1026,11 +1151,22 @@ fn fil(
                 let lies = etat.lies();
                 match construire(&mut api, &compte, None, &lies) {
                     Ok((fiche, co)) => {
+                        // `nouveaux` se juge sur la fiche fraîche : avec
+                        // soixante matchs accumulés, d'anciens ids
+                        // redeviendraient « nouveaux » et la relance de fin
+                        // de partie (nouveaux == 0) ne partirait plus.
                         let nouveaux = etat.fil.nouveaux(user_id, &fiche, &co, &travaux);
                         if nouveaux > 0 {
                             etat.sauver_fil();
                         }
-                        etat.fiches.lock().unwrap().insert(user_id, fiche);
+                        {
+                            let mut fiches = etat.fiches.lock().unwrap();
+                            let fiche = match fiches.remove(&user_id) {
+                                Some(ancienne) => fusionner(ancienne, fiche),
+                                None => fiche,
+                            };
+                            fiches.insert(user_id, fiche);
+                        }
                         etat.sauver_fiches();
                         // Rien de neuf après une fin de partie : HenrikDev
                         // n'a pas encore le match, on relira.
@@ -1105,14 +1241,160 @@ fn lier(
     let niveau = d["account_level"].as_u64().unwrap_or(0) as u32;
     let lies = etat.lies();
     let (fiche, _) = construire(api, &compte, Some(niveau), &lies)?;
-    etat.comptes.lock().unwrap().insert(user_id, compte);
+    // Si le membre relie le même compte (ou se renomme : même puuid), sa
+    // fiche accumulée reste ; un autre compte repart de zéro. Ça se lit
+    // avant d'écrire le nouveau compte — et avant le rattrapage, parce
+    // que les trois couches s'empilent dans un ordre précis (voir
+    // `empiler_a_la_liaison`). L'ancienne fiche reste en place le temps
+    // des deux requêtes d'archive : rien ne disparaît pendant qu'on
+    // attend HenrikDev.
+    let ancien_puuid = etat.comptes.lock().unwrap().get(&user_id).map(|c| c.puuid.clone());
+    let ancienne = etat.fiches.lock().unwrap().get(&user_id).map(|f| (ancien_puuid.unwrap_or_default(), f.clone()));
+    let archive = rattraper(api, &compte);
+    let fiche = empiler_a_la_liaison(ancienne, &compte.puuid, fiche, archive);
+    etat.comptes.lock().unwrap().insert(user_id, compte.clone());
     etat.fiches.lock().unwrap().insert(user_id, fiche.clone());
-    // Ses matchs d'avant la liaison ne s'annoncent pas.
+    // Ses matchs d'avant la liaison — rattrapés compris — ne s'annoncent
+    // pas.
     etat.fil.connaitre(user_id, &fiche);
     etat.sauver_comptes();
     etat.sauver_fiches();
     etat.sauver_fil();
     Ok(fiche)
+}
+
+/// À la liaison, l'ancienne fiche n'est gardée que si c'est le même
+/// compte Riot — au puuid, pas au Riot ID, pour qu'un joueur qui se
+/// renomme garde son historique. Sinon la neuve remplace tout.
+fn fusion_a_la_liaison(
+    ancienne: Option<(String, FicheValorant)>,
+    puuid: &str,
+    neuve: FicheValorant,
+) -> FicheValorant {
+    match ancienne {
+        Some((ancien_puuid, ancienne)) if ancien_puuid == puuid => fusionner(ancienne, neuve),
+        _ => neuve,
+    }
+}
+
+/// Les trois couches d'une liaison, de la plus forte à la plus faible :
+/// la fiche fraîche des trois requêtes classiques (elle porte le détail
+/// des manches des cinq derniers matchs), puis la fiche accumulée sur le
+/// disque si c'est le même compte (ses matchs ont été résumés en leur
+/// temps avec leurs manches, leurs co-membres, leur party et leur durée),
+/// et tout en bas l'archive de HenrikDev, qui ne sait rien de tout ça —
+/// elle ne fait que combler les trous. Empilée au-dessus de la fiche
+/// accumulée, l'archive écraserait cinquante matchs détaillés par leur
+/// version muette à chaque re-liaison : c'est l'ordre qui protège.
+fn empiler_a_la_liaison(
+    ancienne: Option<(String, FicheValorant)>,
+    puuid: &str,
+    fraiche: FicheValorant,
+    archive: FicheValorant,
+) -> FicheValorant {
+    let fiche = fusion_a_la_liaison(ancienne, puuid, fraiche);
+    if archive.matchs.is_empty() && archive.historique_rr.is_empty() {
+        return fiche;
+    }
+    fusionner(archive, fiche)
+}
+
+/// Le rattrapage, à la liaison seulement : les archives de HenrikDev —
+/// soixante matchs (`v1/stored-matches`, sans plateforme dans le chemin)
+/// et cent points de RR (`v2/stored-mmr-history`) — rendues comme une
+/// fiche qui n'a que ça, à ranger sous les autres par
+/// [`empiler_a_la_liaison`]. Deux requêtes tolérées : une archive muette
+/// rend une fiche vide, qui ne change rien.
+fn rattraper(api: &mut Api, compte: &CompteRiot) -> FicheValorant {
+    let matchs = api
+        .get(&format!(
+            "/valorant/v1/stored-matches/{}/{}/{}?size={RATTRAPAGE_MATCHS}",
+            compte.region,
+            enc(&compte.nom),
+            enc(&compte.tag)
+        ))
+        .unwrap_or(Value::Null);
+    let points = api
+        .get(&format!(
+            "/valorant/v2/stored-mmr-history/{}/{}/{}/{}?size={RATTRAPAGE_POINTS}",
+            compte.region,
+            compte.plateforme,
+            enc(&compte.nom),
+            enc(&compte.tag)
+        ))
+        .unwrap_or(Value::Null);
+    let archive = fiche_archivee(&matchs, &points);
+    if !archive.matchs.is_empty() || !archive.historique_rr.is_empty() {
+        tracing::info!(
+            "VALORANT : {} rattrapé — {} matchs et {} points archivés",
+            compte.riot_id(),
+            archive.matchs.len(),
+            archive.historique_rr.len()
+        );
+    }
+    archive
+}
+
+/// Les deux réponses d'archive réduites à une fiche qui n'a que des
+/// matchs et des points — tout le reste à zéro, pour passer sous
+/// [`fusionner`] comme une « ancienne » fiche.
+fn fiche_archivee(matchs: &Value, points: &Value) -> FicheValorant {
+    FicheValorant {
+        matchs: matchs["data"]
+            .as_array()
+            .map(|l| l.iter().filter_map(resumer_match_stocke).take(RATTRAPAGE_MATCHS).collect())
+            .unwrap_or_default(),
+        historique_rr: points["data"]
+            .as_array()
+            .map(|l| l.iter().take(RATTRAPAGE_POINTS).map(point_rr).collect())
+            .unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// La fiche fusionne l'ancienne et la neuve : les scalaires de la neuve
+/// (sauf un niveau à zéro ou des saisons vides, qui gardent l'ancien),
+/// l'union des matchs par `id` — la neuve gagne, elle porte les champs
+/// de 0.1.40 — et l'union des points, par `match_id` ou, s'il manque,
+/// par `(date, tier, rr)`. Tout est trié du plus récent au plus ancien et
+/// plafonné à [`MATCHS_GARDES`] et [`HISTORIQUE_GARDES`]. Une neuve sans
+/// match (un `v4/matches` en 429) laisse les anciens en place ; idem pour
+/// l'historique.
+fn fusionner(ancienne: FicheValorant, neuve: FicheValorant) -> FicheValorant {
+    let mut fiche = neuve;
+    if fiche.niveau == 0 {
+        fiche.niveau = ancienne.niveau;
+    }
+    if fiche.saisons.is_empty() {
+        fiche.saisons = ancienne.saisons;
+    }
+    // Un match d'id vide n'est comparable à rien : il reste des deux côtés.
+    let connus: BTreeSet<String> = fiche
+        .matchs
+        .iter()
+        .filter(|m| !m.id.is_empty())
+        .map(|m| m.id.clone())
+        .collect();
+    fiche
+        .matchs
+        .extend(ancienne.matchs.into_iter().filter(|m| m.id.is_empty() || !connus.contains(&m.id)));
+    fiche.matchs.sort_by_key(|m| std::cmp::Reverse(m.date));
+    fiche.matchs.truncate(MATCHS_GARDES);
+
+    let cle = |p: &PointRR| -> (String, u64, u8, u16) {
+        if p.match_id.is_empty() {
+            (String::new(), p.date, p.tier, p.rr)
+        } else {
+            (p.match_id.clone(), 0, 0, 0)
+        }
+    };
+    let mut cles: BTreeSet<(String, u64, u8, u16)> = fiche.historique_rr.iter().map(cle).collect();
+    fiche
+        .historique_rr
+        .extend(ancienne.historique_rr.into_iter().filter(|p| cles.insert(cle(p))));
+    fiche.historique_rr.sort_by_key(|p| std::cmp::Reverse(p.date));
+    fiche.historique_rr.truncate(HISTORIQUE_GARDES);
+    fiche
 }
 
 /// Trois requêtes : rang, historique de RR, derniers matchs. Rend aussi,
@@ -1147,13 +1429,36 @@ fn construire(
         maj: maintenant_ms(),
         ..Default::default()
     };
+    // Les actes joués, dans l'ordre de l'API (du plus ancien au plus
+    // récent) ; une entrée sans `season.short` ne dit pas quel acte, on
+    // la saute. Le dernier donne la saison du rang courant.
+    fiche.saisons = mmr["data"]["seasonal"]
+        .as_array()
+        .map(|l| {
+            l.iter()
+                .filter_map(|s| {
+                    let saison = s["season"]["short"].as_str().filter(|s| !s.is_empty())?;
+                    Some(StatsSaison {
+                        saison: saison.to_string(),
+                        victoires: u16_sature(s["wins"].as_u64().unwrap_or(0)),
+                        parties: u16_sature(s["games"].as_u64().unwrap_or(0)),
+                        tier_fin: u8_sature(s["end_tier"]["id"].as_u64().unwrap_or(0)),
+                        rr_fin: u16_sature(s["end_rr"].as_u64().unwrap_or(0)),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let courant = &mmr["data"]["current"];
     fiche.rang = RangValorant {
         tier: courant["tier"]["id"].as_u64().unwrap_or(0) as u8,
         rr: courant["rr"].as_u64().unwrap_or(0) as u16,
         delta: courant["last_change"].as_i64().unwrap_or(0) as i32,
         elo: courant["elo"].as_u64().unwrap_or(0) as u32,
-        saison: String::new(),
+        saison: fiche.saisons.last().map(|s| s.saison.clone()).unwrap_or_default(),
+        placements_restants: u8_sature(courant["games_needed_for_rating"].as_u64().unwrap_or(0)),
+        boucliers: u8_sature(courant["rank_protection_shields"].as_u64().unwrap_or(0)),
+        classement: u32_sature(courant["leaderboard_placement"]["rank"].as_u64().unwrap_or(0)),
     };
     let pic = &mmr["data"]["peak"];
     if let Some(tier) = pic["tier"]["id"].as_u64() {
@@ -1164,31 +1469,20 @@ fn construire(
                 delta: 0,
                 elo: 0,
                 saison: pic["season"]["short"].as_str().unwrap_or("").to_string(),
+                ..Default::default()
             });
         }
     }
     fiche.historique_rr = historique["data"]["history"]
         .as_array()
-        .map(|h| {
-            h.iter()
-                .take(HISTORIQUE_MAX)
-                .map(|p| PointRR {
-                    match_id: p["match_id"].as_str().unwrap_or("").to_string(),
-                    date: iso_vers_ms(p["date"].as_str().unwrap_or("")),
-                    tier: p["tier"]["id"].as_u64().unwrap_or(0) as u8,
-                    rr: p["rr"].as_u64().unwrap_or(0) as u16,
-                    delta: p["last_change"].as_i64().unwrap_or(0) as i32,
-                    carte: p["map"]["name"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
+        .map(|h| h.iter().take(HISTORIQUE_MAX).map(point_rr).collect())
         .unwrap_or_default();
     fiche.matchs = matchs["data"]
         .as_array()
         .map(|liste| {
             liste
                 .iter()
-                .filter_map(|m| resumer_match(m, &compte.puuid))
+                .filter_map(|m| resumer_match(m, &compte.puuid, lies))
                 .take(MATCHS_MAX)
                 .collect()
         })
@@ -1387,13 +1681,47 @@ fn co_membres(m: &Value, moi: &str, lies: &[(UserId, String)]) -> Option<(String
     (!autres.is_empty()).then_some((id, autres))
 }
 
-/// La ligne du membre dans un match — et rien des autres joueurs.
-fn resumer_match(m: &Value, puuid: &str) -> Option<MatchResume> {
+/// Un point de RR tel que `v2/mmr-history` et `v2/stored-mmr-history` le
+/// donnent — la même forme aux deux endroits.
+fn point_rr(p: &Value) -> PointRR {
+    PointRR {
+        match_id: p["match_id"].as_str().unwrap_or("").to_string(),
+        date: iso_vers_ms(p["date"].as_str().unwrap_or("")),
+        tier: u8_sature(p["tier"]["id"].as_u64().unwrap_or(0)),
+        rr: u16_sature(p["rr"].as_u64().unwrap_or(0)),
+        delta: p["last_change"].as_i64().unwrap_or(0).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        carte: p["map"]["name"].as_str().unwrap_or("").to_string(),
+        saison: p["season"]["short"].as_str().unwrap_or("").to_string(),
+        protege: p["was_derank_protected"].as_bool().unwrap_or(false),
+    }
+}
+
+/// Des nombres qui viennent du réseau : ils entrent dans le type prévu en
+/// butant sur son plafond, jamais en repartant de zéro.
+fn u8_sature(v: u64) -> u8 {
+    v.min(u64::from(u8::MAX)) as u8
+}
+
+fn u16_sature(v: u64) -> u16 {
+    v.min(u64::from(u16::MAX)) as u16
+}
+
+fn u32_sature(v: u64) -> u32 {
+    v.min(u64::from(u32::MAX)) as u32
+}
+
+/// La ligne du membre dans un match — et rien des autres joueurs, sinon
+/// ce qu'on en déduit : l'effectif de sa party, et les autres membres du
+/// groupe (`lies` : membre → puuid) reconnus dans son camp ou en face,
+/// notés par leur `UserId`. Un match pas fini (`is_completed == false`)
+/// n'est pas résumé.
+fn resumer_match(m: &Value, puuid: &str, lies: &[(UserId, String)]) -> Option<MatchResume> {
     let meta = &m["metadata"];
-    let joueur = m["players"]
-        .as_array()?
-        .iter()
-        .find(|p| p["puuid"].as_str() == Some(puuid))?;
+    if meta["is_completed"].as_bool() == Some(false) {
+        return None;
+    }
+    let joueurs = m["players"].as_array()?;
+    let joueur = joueurs.iter().find(|p| p["puuid"].as_str() == Some(puuid))?;
     let equipe = joueur["team_id"].as_str().unwrap_or("");
     let camp = m["teams"]
         .as_array()
@@ -1401,8 +1729,8 @@ fn resumer_match(m: &Value, puuid: &str) -> Option<MatchResume> {
     let (gagnees, perdues) = camp
         .map(|t| {
             (
-                t["rounds"]["won"].as_u64().unwrap_or(0) as u8,
-                t["rounds"]["lost"].as_u64().unwrap_or(0) as u8,
+                u8_sature(t["rounds"]["won"].as_u64().unwrap_or(0)),
+                u8_sature(t["rounds"]["lost"].as_u64().unwrap_or(0)),
             )
         })
         .unwrap_or((0, 0));
@@ -1422,22 +1750,284 @@ fn resumer_match(m: &Value, puuid: &str) -> Option<MatchResume> {
         .or_else(|| meta["queue"]["id"].as_str())
         .unwrap_or("")
         .to_string();
+    // Sa party : combien de joueurs portent le même `party_id`, lui
+    // compris. Un effectif, jamais une identité.
+    let party = joueur["party_id"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(|mien| joueurs.iter().filter(|p| p["party_id"].as_str() == Some(mien)).count())
+        .map(|n| n.min(usize::from(u8::MAX)) as u8)
+        .unwrap_or(0);
+    let mut avec = Vec::new();
+    let mut contre = Vec::new();
+    for (id, autre) in lies.iter().filter(|(_, autre)| autre != puuid) {
+        let Some(p) = joueurs.iter().find(|p| p["puuid"].as_str() == Some(autre.as_str())) else {
+            continue;
+        };
+        if p["team_id"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(equipe)) {
+            avec.push(*id);
+        } else {
+            contre.push(*id);
+        }
+    }
     Some(MatchResume {
         id: meta["match_id"].as_str().unwrap_or("").to_string(),
         date: iso_vers_ms(meta["started_at"].as_str().unwrap_or("")),
         carte: meta["map"]["name"].as_str().unwrap_or("").to_string(),
         mode: mode_en_francais(&mode),
         agent: joueur["agent"]["name"].as_str().unwrap_or("").to_string(),
-        kills: stats["kills"].as_u64().unwrap_or(0) as u16,
-        deaths: stats["deaths"].as_u64().unwrap_or(0) as u16,
-        assists: stats["assists"].as_u64().unwrap_or(0) as u16,
-        score: stats["score"].as_u64().unwrap_or(0) as u32,
-        tete_pct: (tetes * 100).checked_div(tirs).unwrap_or(0) as u8,
+        kills: u16_sature(stats["kills"].as_u64().unwrap_or(0)),
+        deaths: u16_sature(stats["deaths"].as_u64().unwrap_or(0)),
+        assists: u16_sature(stats["assists"].as_u64().unwrap_or(0)),
+        score: u32_sature(stats["score"].as_u64().unwrap_or(0)),
+        tete_pct: (tetes * 100).checked_div(tirs).unwrap_or(0).min(100) as u8,
         manches: (gagnees, perdues),
         gagne,
-        tier: joueur["tier"]["id"].as_u64().unwrap_or(0) as u8,
-        duree_s: (meta["game_length_in_ms"].as_u64().unwrap_or(0) / 1000) as u32,
+        tier: u8_sature(joueur["tier"]["id"].as_u64().unwrap_or(0)),
+        duree_s: u32_sature(meta["game_length_in_ms"].as_u64().unwrap_or(0) / 1000),
+        saison: meta["season"]["short"].as_str().unwrap_or("").to_string(),
+        degats: u32_sature(stats["damage"]["dealt"].as_u64().unwrap_or(0)),
+        degats_recus: u32_sature(stats["damage"]["received"].as_u64().unwrap_or(0)),
+        tetes: u16_sature(tetes),
+        tirs: u16_sature(tirs),
+        party,
+        avec,
+        contre,
+        manches_detail: detailler_manches(m, puuid, equipe),
     })
+}
+
+/// Un match archivé (`v1/stored-matches`) réduit à la ligne du membre :
+/// la même forme, moins ce que l'archive ne dit pas — durée, party,
+/// coéquipiers, manches. Les manches gagnées se lisent de `teams
+/// {blue, red}` selon le camp de `stats.team` ; un camp inconnu donne
+/// (0, 0) et pas de résultat. `None` sans `meta.id` ni `stats`.
+fn resumer_match_stocke(m: &Value) -> Option<MatchResume> {
+    let meta = &m["meta"];
+    let id = meta["id"].as_str().filter(|s| !s.is_empty())?;
+    let stats = &m["stats"];
+    stats.as_object()?;
+    let bleu = u8_sature(m["teams"]["blue"].as_u64().unwrap_or(0));
+    let rouge = u8_sature(m["teams"]["red"].as_u64().unwrap_or(0));
+    let camp = stats["team"].as_str().unwrap_or("");
+    let manches = if camp.eq_ignore_ascii_case("blue") {
+        (bleu, rouge)
+    } else if camp.eq_ignore_ascii_case("red") {
+        (rouge, bleu)
+    } else {
+        (0, 0)
+    };
+    let gagne = match manches {
+        (0, 0) => None,
+        (mien, autre) if mien == autre => None,
+        (mien, autre) => Some(mien > autre),
+    };
+    let tetes = stats["shots"]["head"].as_u64().unwrap_or(0);
+    let tirs = tetes
+        + stats["shots"]["body"].as_u64().unwrap_or(0)
+        + stats["shots"]["leg"].as_u64().unwrap_or(0);
+    Some(MatchResume {
+        id: id.to_string(),
+        date: iso_vers_ms(meta["started_at"].as_str().unwrap_or("")),
+        carte: meta["map"]["name"].as_str().unwrap_or("").to_string(),
+        mode: mode_en_francais(meta["mode"].as_str().unwrap_or("")),
+        agent: stats["character"]["name"].as_str().unwrap_or("").to_string(),
+        kills: u16_sature(stats["kills"].as_u64().unwrap_or(0)),
+        deaths: u16_sature(stats["deaths"].as_u64().unwrap_or(0)),
+        assists: u16_sature(stats["assists"].as_u64().unwrap_or(0)),
+        score: u32_sature(stats["score"].as_u64().unwrap_or(0)),
+        tete_pct: (tetes * 100).checked_div(tirs).unwrap_or(0).min(100) as u8,
+        manches,
+        gagne,
+        tier: u8_sature(stats["tier"].as_u64().unwrap_or(0)),
+        duree_s: 0,
+        saison: meta["season"]["short"].as_str().unwrap_or("").to_string(),
+        degats: u32_sature(stats["damage"]["made"].as_u64().unwrap_or(0)),
+        degats_recus: u32_sature(stats["damage"]["received"].as_u64().unwrap_or(0)),
+        tetes: u16_sature(tetes),
+        tirs: u16_sature(tirs),
+        party: 0,
+        avec: Vec::new(),
+        contre: Vec::new(),
+        manches_detail: None,
+    })
+}
+
+/// Les modes sans manches, tels que `queue.id` les nomme : un combat à
+/// mort n'a ni camp ni premier sang.
+const MODES_SANS_MANCHES: [&str; 3] = ["deathmatch", "team deathmatch", "hurm"];
+
+/// Le puuid d'un objet joueur (`killer`, `victim`, `assistants[]`,
+/// `plant.player`…) — vide s'il n'y en a pas.
+fn puuid_de(v: &Value) -> &str {
+    v["puuid"].as_str().unwrap_or("")
+}
+
+/// Ce que les manches racontent du membre — sa ligne seulement, rien
+/// des neuf autres. Lu dans `rounds[]` et `kills[]`, déjà téléchargés.
+///
+/// `None` si le mode n'a pas de manches, si `rounds[]` manque ou est
+/// vide, si `kills[]` manque (un tableau vide passe : un match sans kill
+/// est théorique mais valide), ou s'il y a moins de deux manches. Les
+/// camps se comparent sans tenir compte de la casse — le format exact de
+/// `winning_team` et `killer.team` reste à voir à l'exécution ; en cas
+/// d'écart, `deroule` reste vide et les clutchs à zéro, sans panique.
+/// Rien ne suppose cinq joueurs par camp : l'effectif se compte.
+fn detailler_manches(m: &Value, moi: &str, mon_camp: &str) -> Option<DetailManches> {
+    if moi.is_empty() {
+        return None;
+    }
+    let queue = &m["metadata"]["queue"];
+    let sans_manches = ["id", "name", "mode_type"].iter().any(|c| {
+        queue[*c]
+            .as_str()
+            .is_some_and(|mode| MODES_SANS_MANCHES.contains(&mode.to_ascii_lowercase().as_str()))
+    });
+    if sans_manches {
+        return None;
+    }
+    let rounds = m["rounds"].as_array().filter(|r| !r.is_empty())?;
+    let kills = m["kills"].as_array()?;
+    let meme_camp = |a: &str, b: &str| !a.is_empty() && a.eq_ignore_ascii_case(b);
+
+    // Qui est de quel camp, et combien ils sont — jetés à la sortie.
+    let mut camp_de: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut effectif: Vec<(&str, u8)> = Vec::new();
+    for p in m["players"].as_array().into_iter().flatten() {
+        let (Some(puuid), Some(camp)) = (p["puuid"].as_str(), p["team_id"].as_str()) else {
+            continue;
+        };
+        camp_de.insert(puuid, camp);
+        match effectif.iter_mut().find(|(c, _)| meme_camp(c, camp)) {
+            Some((_, n)) => *n = n.saturating_add(1),
+            None => effectif.push((camp, 1)),
+        }
+    }
+    // Les kills par manche, dans l'ordre du temps.
+    let mut par_manche: BTreeMap<u64, Vec<&Value>> = BTreeMap::new();
+    for k in kills {
+        if let Some(r) = k["round"].as_u64() {
+            par_manche.entry(r).or_default().push(k);
+        }
+    }
+    for liste in par_manche.values_mut() {
+        liste.sort_by_key(|k| k["time_in_round_in_ms"].as_u64().unwrap_or(0));
+    }
+    let temps = |k: &Value| k["time_in_round_in_ms"].as_u64().unwrap_or(0);
+
+    let mut d = DetailManches {
+        manches: rounds.len().min(usize::from(u8::MAX)) as u8,
+        ..Default::default()
+    };
+    let vide = Vec::new();
+    for (i, r) in rounds.iter().enumerate() {
+        let numero = r["id"].as_u64().unwrap_or(i as u64);
+        let kills = par_manche.get(&numero).unwrap_or(&vide);
+
+        // Gagnée, perdue — ou rien, si `winning_team` ou mon camp ne
+        // nomme aucun camp connu : on n'invente pas une défaite.
+        let vainqueur = r["winning_team"].as_str().unwrap_or("");
+        let camp_connu = |camp: &str| effectif.iter().any(|(c, _)| meme_camp(c, camp));
+        let gagnee = if meme_camp(vainqueur, mon_camp) {
+            Some(true)
+        } else if camp_connu(vainqueur) && camp_connu(mon_camp) {
+            Some(false)
+        } else {
+            None
+        };
+        match gagnee {
+            Some(true) => d.deroule.push('V'),
+            Some(false) => d.deroule.push('D'),
+            None => {}
+        }
+
+        let mes_kills = kills.iter().filter(|k| puuid_de(&k["killer"]) == moi).count();
+        match mes_kills {
+            3 => d.triples = d.triples.saturating_add(1),
+            4 => d.quadruples = d.quadruples.saturating_add(1),
+            n if n >= 5 => d.aces = d.aces.saturating_add(1),
+            _ => {}
+        }
+        if let Some(premier) = kills.first() {
+            if puuid_de(&premier["killer"]) == moi {
+                d.premiers_sangs = d.premiers_sangs.saturating_add(1);
+            }
+            if puuid_de(&premier["victim"]) == moi {
+                d.premieres_morts = d.premieres_morts.saturating_add(1);
+            }
+        }
+
+        // KAST : kill, assist, survie, ou échangé — mon tueur tombe sous
+        // un des miens dans les cinq secondes.
+        let ma_mort = kills.iter().find(|k| puuid_de(&k["victim"]) == moi);
+        let assiste = kills.iter().any(|k| {
+            k["assistants"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| puuid_de(x) == moi))
+        });
+        let echange = ma_mort.is_some_and(|k1| {
+            let t1 = temps(k1);
+            let tueur = puuid_de(&k1["killer"]);
+            // Une chute mortelle (tueur = moi) n'a personne à venger.
+            !tueur.is_empty()
+                && tueur != moi
+                && kills.iter().any(|k2| {
+                    let t2 = temps(k2);
+                    let vengeur = &k2["killer"];
+                    let des_miens = meme_camp(vengeur["team"].as_str().unwrap_or(""), mon_camp)
+                        || camp_de.get(puuid_de(vengeur)).is_some_and(|c| meme_camp(c, mon_camp));
+                    puuid_de(&k2["victim"]) == tueur && des_miens && t2 >= t1 && t2 <= t1 + ECHANGE_MS
+                })
+        });
+        if mes_kills > 0 || assiste || ma_mort.is_none() || echange {
+            d.kast = d.kast.saturating_add(1);
+        }
+
+        // Clutch : on rejoue les kills ; au premier instant où je suis le
+        // dernier des miens face à au moins un adversaire, c'est une
+        // tentative — gagnée si la manche l'est, à X l'effectif d'en face.
+        let mut vivants: Vec<(&str, u8)> = effectif.clone();
+        let mut moi_vivant = true;
+        let mut tente = false;
+        for k in kills {
+            let victime = puuid_de(&k["victim"]);
+            if victime == moi {
+                moi_vivant = false;
+            }
+            if let Some(camp) = camp_de.get(victime) {
+                if let Some((_, n)) = vivants.iter_mut().find(|(c, _)| meme_camp(c, camp)) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            if tente || !moi_vivant {
+                continue;
+            }
+            let miens = vivants.iter().find(|(c, _)| meme_camp(c, mon_camp)).map_or(0, |(_, n)| *n);
+            let adverses: u8 = vivants
+                .iter()
+                .filter(|(c, _)| !meme_camp(c, mon_camp))
+                .fold(0u8, |acc, (_, n)| acc.saturating_add(*n));
+            if miens == 1 && adverses >= 1 {
+                tente = true;
+                d.clutchs_tentes = d.clutchs_tentes.saturating_add(1);
+                if gagnee == Some(true) {
+                    d.clutchs = d.clutchs.saturating_add(1);
+                    d.meilleur_clutch = d.meilleur_clutch.max(adverses);
+                }
+            }
+        }
+
+        if puuid_de(&r["plant"]["player"]) == moi {
+            d.poses = d.poses.saturating_add(1);
+        }
+        if puuid_de(&r["defuse"]["player"]) == moi {
+            d.desamorcages = d.desamorcages.saturating_add(1);
+        }
+    }
+    if d.manches < 2 {
+        return None;
+    }
+    Some(d)
 }
 
 fn mode_en_francais(mode: &str) -> String {
@@ -1524,6 +2114,7 @@ mod tests {
             gagne,
             tier: 15,
             duree_s: 2400,
+            ..Default::default()
         };
         let p = |date: u64, delta: i32| PointRR {
             match_id: String::new(),
@@ -1532,6 +2123,7 @@ mod tests {
             tier: 15,
             rr: 40,
             delta,
+            ..Default::default()
         };
         let mut fiches = BTreeMap::new();
         fiches.insert(
@@ -1606,35 +2198,694 @@ mod tests {
         assert_eq!(iso_vers_ms("n'importe quoi"), 0);
     }
 
-    /// On ne garde que la ligne du membre — pas les neuf autres.
+    /// On ne garde que la ligne du membre — pas les neuf autres. Les
+    /// membres du groupe reconnus dans le match n'y sont que par leur
+    /// `UserId` : ni pseudo, ni puuid.
     #[test]
     fn un_match_se_resume_a_la_ligne_du_membre() {
         let m = serde_json::json!({
             "metadata": {
                 "match_id": "abc", "map": {"name": "Ascent"}, "game_length_in_ms": 2_400_000,
-                "started_at": "2026-09-03T21:12:33.000Z", "queue": {"id": "competitive", "name": "Competitive"}
+                "started_at": "2026-09-03T21:12:33.000Z", "queue": {"id": "competitive", "name": "Competitive"},
+                "season": {"short": "e9a2"}, "is_completed": true
             },
             "players": [
-                {"puuid": "moi", "team_id": "Red", "agent": {"name": "Jett"}, "tier": {"id": 14},
-                 "stats": {"score": 5000, "kills": 20, "deaths": 12, "assists": 4, "headshots": 30, "bodyshots": 60, "legshots": 10}},
-                {"puuid": "autre", "team_id": "Blue", "agent": {"name": "Sage"}, "stats": {"kills": 3}}
+                {"puuid": "moi", "name": "Redik", "team_id": "Red", "party_id": "p1", "agent": {"name": "Jett"}, "tier": {"id": 14},
+                 "stats": {"score": 5000, "kills": 20, "deaths": 12, "assists": 4, "headshots": 30, "bodyshots": 60, "legshots": 10,
+                           "damage": {"dealt": 4212, "received": 3980}}},
+                {"puuid": "copain", "name": "Nono", "team_id": "Red", "party_id": "p1", "agent": {"name": "Omen"}, "stats": {"kills": 9}},
+                {"puuid": "autre", "name": "Inconnu", "team_id": "Blue", "party_id": "p2", "agent": {"name": "Sage"}, "stats": {"kills": 3}}
             ],
             "teams": [
                 {"team_id": "Red", "rounds": {"won": 13, "lost": 9}, "won": true},
                 {"team_id": "Blue", "rounds": {"won": 9, "lost": 13}, "won": false}
             ]
         });
-        let r = resumer_match(&m, "moi").unwrap();
+        let lies = vec![(1u64, "moi".to_string()), (2, "copain".to_string()), (3, "autre".to_string())];
+        let r = resumer_match(&m, "moi", &lies).unwrap();
         assert_eq!((r.kills, r.deaths, r.assists), (20, 12, 4));
         assert_eq!(r.manches, (13, 9));
         assert_eq!(r.gagne, Some(true));
         assert_eq!(r.tete_pct, 30);
+        assert_eq!((r.tetes, r.tirs), (30, 100));
         assert_eq!(r.mode, "Compétitif");
         assert_eq!(r.agent, "Jett");
         assert_eq!(r.duree_s, 2400);
-        assert!(resumer_match(&m, "inconnu").is_none());
+        assert_eq!(r.saison, "e9a2");
+        assert_eq!((r.degats, r.degats_recus), (4212, 3980));
+        assert_eq!(r.party, 2);
+        assert_eq!(r.avec, vec![2]);
+        assert_eq!(r.contre, vec![3]);
+        // Sans `rounds` ni `kills`, pas de détail — et pas de panique.
+        assert!(r.manches_detail.is_none());
+        assert!(resumer_match(&m, "inconnu", &lies).is_none());
         let json = serde_json::to_string(&r).unwrap();
-        assert!(!json.contains("Sage") && !json.contains("autre"));
+        for interdit in ["Sage", "Omen", "autre", "copain", "Nono", "Inconnu", "p1", "p2"] {
+            assert!(!json.contains(interdit), "{interdit} dans {json}");
+        }
+        // Un match pas fini ne se résume pas.
+        let mut en_cours = m.clone();
+        en_cours["metadata"]["is_completed"] = serde_json::json!(false);
+        assert!(resumer_match(&en_cours, "moi", &lies).is_none());
+    }
+
+    /// Un kill de la fixture v4 : qui, qui, quand, avec l'aide de qui.
+    fn kill(round: u64, t: u64, tueur: (&str, &str), victime: (&str, &str), assistants: &[&str]) -> Value {
+        serde_json::json!({
+            "round": round,
+            "time_in_round_in_ms": t,
+            "time_in_match_in_ms": round * 100_000 + t,
+            "killer": {"puuid": tueur.0, "name": tueur.0, "tag": "EUW", "team": tueur.1},
+            "victim": {"puuid": victime.0, "name": victime.0, "tag": "EUW", "team": victime.1},
+            "assistants": assistants.iter().map(|a| serde_json::json!({"puuid": a, "name": a, "tag": "EUW", "team": "Red"})).collect::<Vec<_>>(),
+            "weapon": {"id": null, "name": null, "type": null}
+        })
+    }
+
+    /// Un match v4 à trois manches, cinq contre cinq, moi en Red :
+    /// manche 0, je fais le premier sang puis un triple ; manche 1, je
+    /// meurs le premier et r2 me venge à `vengeance_ms` ; manche 2, je me
+    /// retrouve seul contre deux après avoir posé le spike, et la manche
+    /// est gagnée. Les kills sont donnés dans le désordre : c'est au
+    /// lecteur de les trier.
+    fn match_a_trois_manches(vengeance_ms: u64) -> Value {
+        let joueur = |puuid: &str, camp: &str| {
+            serde_json::json!({
+                "puuid": puuid, "name": puuid, "tag": "EUW", "team_id": camp, "party_id": puuid,
+                "agent": {"name": "Jett"}, "tier": {"id": 14}, "account_level": 100,
+                "stats": {"score": 4000, "kills": 5, "deaths": 1, "assists": 0, "headshots": 5, "bodyshots": 10, "legshots": 0,
+                          "damage": {"dealt": 900, "received": 400}}
+            })
+        };
+        let players: Vec<Value> = ["moi", "r2", "r3", "r4", "r5"]
+            .iter()
+            .map(|p| joueur(p, "Red"))
+            .chain(["b1", "b2", "b3", "b4", "b5"].iter().map(|p| joueur(p, "Blue")))
+            .collect();
+        let kills = vec![
+            // Manche 0 : premier sang et triple.
+            kill(0, 15_000, ("moi", "Red"), ("b3", "Blue"), &[]),
+            kill(0, 5_000, ("moi", "Red"), ("b1", "Blue"), &["r2"]),
+            kill(0, 10_000, ("moi", "Red"), ("b2", "Blue"), &[]),
+            // Manche 1 : je meurs le premier, r2 me venge.
+            kill(1, 3_000, ("b1", "Blue"), ("moi", "Red"), &[]),
+            kill(1, 3_000 + vengeance_ms, ("r2", "Red"), ("b1", "Blue"), &[]),
+            kill(1, 40_000, ("b2", "Blue"), ("r2", "Red"), &[]),
+            // Manche 2 : trois des miens tombent, j'en reprends deux, r5
+            // en prend un puis tombe : je suis seul contre b4 et b5.
+            kill(2, 2_000, ("b1", "Blue"), ("r2", "Red"), &[]),
+            kill(2, 4_000, ("b2", "Blue"), ("r3", "Red"), &[]),
+            kill(2, 6_000, ("b3", "Blue"), ("r4", "Red"), &[]),
+            kill(2, 8_000, ("moi", "Red"), ("b1", "Blue"), &[]),
+            kill(2, 9_000, ("moi", "Red"), ("b2", "Blue"), &[]),
+            kill(2, 10_000, ("r5", "Red"), ("b3", "Blue"), &[]),
+            kill(2, 11_000, ("b4", "Blue"), ("r5", "Red"), &[]),
+        ];
+        serde_json::json!({
+            "metadata": {
+                "match_id": "m3", "map": {"id": "x", "name": "Bind"}, "game_length_in_ms": 900_000,
+                "started_at": "2026-09-03T21:12:33.000Z", "queue": {"id": "competitive", "name": "Competitive", "mode_type": "Standard"},
+                "season": {"id": "s", "short": "e9a2"}, "is_completed": true, "platform": "pc"
+            },
+            "players": players,
+            "teams": [
+                {"team_id": "Red", "rounds": {"won": 2, "lost": 1}, "won": true},
+                {"team_id": "Blue", "rounds": {"won": 1, "lost": 2}, "won": false}
+            ],
+            "rounds": [
+                {"id": 0, "result": "Eliminated", "winning_team": "Red", "plant": null, "defuse": null},
+                {"id": 1, "result": "Eliminated", "winning_team": "Blue", "plant": null, "defuse": null},
+                {"id": 2, "result": "Detonated", "winning_team": "Red",
+                 "plant": {"player": {"puuid": "moi", "name": "moi", "tag": "EUW", "team": "Red"}, "site": "A", "round_time_in_ms": 7_000},
+                 "defuse": null}
+            ],
+            "kills": kills
+        })
+    }
+
+    /// Les manches se lisent : premier sang, première mort, triple, KAST
+    /// par échange, clutch 1v2 gagné, pose.
+    #[test]
+    fn les_manches_donnent_les_premiers_sangs_et_les_clutchs() {
+        let m = match_a_trois_manches(3_000);
+        let d = detailler_manches(&m, "moi", "Red").expect("trois manches");
+        assert_eq!(d.manches, 3);
+        assert_eq!(d.premiers_sangs, 1);
+        assert_eq!(d.premieres_morts, 1);
+        assert_eq!((d.triples, d.quadruples, d.aces), (1, 0, 0));
+        assert_eq!(d.kast, 3);
+        assert_eq!((d.clutchs_tentes, d.clutchs, d.meilleur_clutch), (1, 1, 2));
+        assert_eq!((d.poses, d.desamorcages), (1, 0));
+        assert_eq!(d.deroule, "VDV");
+        // La casse des camps ne compte pas ; un camp inconnu ne dit rien
+        // des manches, mais ne fait pas tomber le reste.
+        let d2 = detailler_manches(&m, "moi", "red").expect("trois manches");
+        assert_eq!(d2, d);
+        let d3 = detailler_manches(&m, "moi", "Team A").expect("trois manches");
+        assert_eq!(d3.deroule, "");
+        assert_eq!((d3.clutchs, d3.premiers_sangs, d3.triples), (0, 1, 1));
+        // Par `resumer_match`, le détail voyage avec le résumé — sans un
+        // seul nom des neuf autres.
+        let r = resumer_match(&m, "moi", &[]).unwrap();
+        assert_eq!(r.manches_detail.as_ref(), Some(&d));
+        assert_eq!(r.party, 1);
+        let json = serde_json::to_string(&r).unwrap();
+        for autre in ["r2", "r3", "b1", "b5"] {
+            assert!(!json.contains(&format!("\"{autre}\"")), "{autre} dans {json}");
+        }
+        // Un JSON sans `rounds`, avec `rounds` vide, ou sans `kills` : rien.
+        let mut sans = m.clone();
+        sans["rounds"] = serde_json::json!([]);
+        assert!(detailler_manches(&sans, "moi", "Red").is_none());
+        let mut sans = m.clone();
+        sans.as_object_mut().unwrap().remove("kills");
+        assert!(detailler_manches(&sans, "moi", "Red").is_none());
+        // Une seule manche ne raconte rien non plus.
+        let mut une = m.clone();
+        une["rounds"].as_array_mut().unwrap().truncate(1);
+        assert!(detailler_manches(&une, "moi", "Red").is_none());
+        // Des kills sans `round`, des joueurs sans camp : toujours pas de
+        // panique.
+        let bizarre = serde_json::json!({
+            "metadata": {"queue": {"id": "competitive"}},
+            "players": [{"puuid": "moi"}, {"team_id": "Blue"}],
+            "rounds": [{"winning_team": 3}, {}],
+            "kills": [{"killer": 1, "victim": null}, {"round": "deux"}]
+        });
+        let d = detailler_manches(&bizarre, "moi", "Red").expect("deux manches");
+        assert_eq!(d.manches, 2);
+        assert_eq!(d.kast, 2, "survivre compte");
+        assert_eq!(d.deroule, "");
+    }
+
+    /// Ma mort vengée six secondes plus tard n'est plus un échange : la
+    /// manche 1 sort du KAST.
+    #[test]
+    fn un_echange_trop_tardif_ne_compte_pas() {
+        let m = match_a_trois_manches(6_000);
+        let d = detailler_manches(&m, "moi", "Red").expect("trois manches");
+        assert_eq!(d.kast, 2);
+        // À cinq secondes pile, ça passe encore.
+        let m = match_a_trois_manches(ECHANGE_MS);
+        assert_eq!(detailler_manches(&m, "moi", "Red").unwrap().kast, 3);
+    }
+
+    /// Un combat à mort n'a pas de manches : pas de détail, mais le match
+    /// se résume quand même.
+    #[test]
+    fn un_combat_a_mort_n_a_pas_de_manches() {
+        let mut m = match_a_trois_manches(3_000);
+        m["metadata"]["queue"] = serde_json::json!({"id": "deathmatch", "name": "Deathmatch", "mode_type": "Deathmatch"});
+        assert!(detailler_manches(&m, "moi", "Red").is_none());
+        let r = resumer_match(&m, "moi", &[]).expect("résumé quand même");
+        assert_eq!(r.mode, "Combat à mort");
+        assert!(r.manches_detail.is_none());
+        // Le TDM aussi, sous ses deux noms.
+        m["metadata"]["queue"] = serde_json::json!({"id": "hurm", "name": "Team Deathmatch"});
+        assert!(detailler_manches(&m, "moi", "Red").is_none());
+    }
+
+    /// Un match de test pour les fusions : `id`, date, et un détail ou non.
+    fn resume(id: &str, date: u64, detail: bool) -> MatchResume {
+        MatchResume {
+            id: id.into(),
+            date,
+            carte: "Ascent".into(),
+            mode: "Compétitif".into(),
+            agent: "Jett".into(),
+            kills: 20,
+            deaths: 10,
+            assists: 4,
+            score: 5000,
+            manches: (13, 9),
+            gagne: Some(true),
+            tier: 15,
+            duree_s: 2400,
+            manches_detail: detail.then(|| DetailManches { manches: 22, kast: 17, ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    fn point(match_id: &str, date: u64, tier: u8, rr: u16, delta: i32) -> PointRR {
+        PointRR {
+            match_id: match_id.into(),
+            date,
+            tier,
+            rr,
+            delta,
+            carte: "Ascent".into(),
+            ..Default::default()
+        }
+    }
+
+    /// La fiche fusionne sans doublon, du plus récent au plus ancien, la
+    /// neuve gagnant sur l'ancienne ; le plafond tient ; une neuve vide
+    /// (HenrikDev en 429) laisse l'ancien en place.
+    #[test]
+    fn la_fiche_accumule_ses_matchs_sans_doublon() {
+        let ancienne = FicheValorant {
+            niveau: 120,
+            saisons: vec![StatsSaison { saison: "e9a1".into(), ..Default::default() }],
+            matchs: ["a", "b", "c", "d", "e"]
+                .iter()
+                .enumerate()
+                .map(|(i, id)| resume(id, 1000 + i as u64, false))
+                .collect(),
+            historique_rr: vec![point("a", 1000, 15, 40, 18), point("", 900, 15, 22, -20), point("z", 800, 14, 90, 15)],
+            ..Default::default()
+        };
+        let neuve = FicheValorant {
+            niveau: 0,
+            maj: 99,
+            matchs: ["c", "d", "e", "f", "g"]
+                .iter()
+                .enumerate()
+                .map(|(i, id)| resume(id, 1002 + i as u64, true))
+                .collect(),
+            historique_rr: vec![point("g", 1006, 15, 58, 18), point("", 900, 15, 22, -20), point("a", 1000, 15, 40, 18)],
+            ..Default::default()
+        };
+        let f = fusionner(ancienne.clone(), neuve.clone());
+        let ids: Vec<&str> = f.matchs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["g", "f", "e", "d", "c", "b", "a"]);
+        assert!(f.matchs.iter().take(5).all(|m| m.manches_detail.is_some()), "la neuve porte le détail");
+        assert!(f.matchs.iter().skip(5).all(|m| m.manches_detail.is_none()));
+        assert_eq!(f.maj, 99);
+        assert_eq!(f.niveau, 120, "un niveau à zéro garde l'ancien");
+        assert_eq!(f.saisons.len(), 1, "des saisons vides gardent les anciennes");
+        // L'historique : « a » et le point sans id sont les mêmes des deux
+        // côtés, « g » et « z » s'ajoutent.
+        let points: Vec<(&str, u64)> = f.historique_rr.iter().map(|p| (p.match_id.as_str(), p.date)).collect();
+        assert_eq!(points, vec![("g", 1006), ("a", 1000), ("", 900), ("z", 800)]);
+        // Sans match ni point dans la neuve, l'ancien reste.
+        let vide = FicheValorant { niveau: 130, ..Default::default() };
+        let f = fusionner(ancienne.clone(), vide);
+        assert_eq!(f.matchs.len(), 5);
+        assert_eq!(f.historique_rr.len(), 3);
+        assert_eq!(f.niveau, 130);
+        // Le plafond : soixante-dix matchs, il en reste soixante, les
+        // plus récents ; les matchs sans id restent des deux côtés.
+        let grosse = FicheValorant {
+            matchs: (0..65).map(|i| resume(&format!("m{i}"), 10_000 + i, false)).chain([resume("", 5, false)]).collect(),
+            historique_rr: (0..90).map(|i| point(&format!("m{i}"), 10_000 + i, 15, 40, 1)).collect(),
+            ..Default::default()
+        };
+        let neuve = FicheValorant {
+            matchs: (63..68).map(|i| resume(&format!("m{i}"), 10_000 + i, true)).chain([resume("", 6, true)]).collect(),
+            historique_rr: (85..105).map(|i| point(&format!("m{i}"), 10_000 + i, 15, 40, 1)).collect(),
+            ..Default::default()
+        };
+        let f = fusionner(grosse, neuve);
+        assert_eq!(f.matchs.len(), MATCHS_GARDES);
+        assert_eq!(f.matchs[0].id, "m67");
+        assert!(f.matchs.iter().all(|m| m.date >= 10_008), "les plus récents restent");
+        assert_eq!(f.historique_rr.len(), HISTORIQUE_GARDES);
+        assert_eq!(f.historique_rr[0].match_id, "m104");
+        let ids: BTreeSet<&str> = f.historique_rr.iter().map(|p| p.match_id.as_str()).collect();
+        assert_eq!(ids.len(), HISTORIQUE_GARDES, "pas de doublon");
+        // Deux matchs sans id ne se confondent pas, même à la fusion.
+        let f = fusionner(
+            FicheValorant { matchs: vec![resume("", 5, false)], ..Default::default() },
+            FicheValorant { matchs: vec![resume("", 6, true)], ..Default::default() },
+        );
+        assert_eq!(f.matchs.len(), 2);
+    }
+
+    /// À la liaison, on garde l'ancienne fiche pour le même compte Riot
+    /// (au puuid) et on repart de zéro pour un autre.
+    #[test]
+    fn la_liaison_ne_fusionne_que_le_meme_compte() {
+        let ancienne = FicheValorant { matchs: vec![resume("a", 1, false)], ..Default::default() };
+        let neuve = FicheValorant { matchs: vec![resume("b", 2, true)], ..Default::default() };
+        let f = fusion_a_la_liaison(Some(("puuid-1".into(), ancienne.clone())), "puuid-1", neuve.clone());
+        assert_eq!(f.matchs.len(), 2);
+        let f = fusion_a_la_liaison(Some(("puuid-1".into(), ancienne.clone())), "puuid-2", neuve.clone());
+        assert_eq!(f.matchs.len(), 1);
+        assert_eq!(f.matchs[0].id, "b");
+        let f = fusion_a_la_liaison(None, "puuid-1", neuve.clone());
+        assert_eq!(f, neuve);
+    }
+
+    /// Nono relie le même compte un mois plus tard : l'archive de
+    /// HenrikDev connaît ses vieux matchs, mais sans manches ni
+    /// co-membres — elle passe dessous, et ce qu'on avait détaillé reste
+    /// détaillé. Un autre compte, lui, ne garde rien de l'ancienne fiche.
+    #[test]
+    fn la_re_liaison_garde_le_detail_des_matchs_accumules() {
+        let mut x = resume("x", 1_000, true);
+        x.avec = vec![2];
+        x.party = 3;
+        x.duree_s = 2_460;
+        let ancienne = FicheValorant {
+            matchs: vec![x.clone()],
+            historique_rr: vec![point("x", 1_000, 15, 40, 18)],
+            ..Default::default()
+        };
+        let fraiche = FicheValorant {
+            riot_id: "NouveauNom#TAG".into(),
+            matchs: vec![resume("y", 2_000, true)],
+            historique_rr: vec![point("y", 2_000, 15, 58, 18)],
+            ..Default::default()
+        };
+        // L'archive : « x » et « z », résumés comme `resumer_match_stocke`
+        // les rend — ni détail, ni co-membre, ni party, ni durée.
+        let archive = FicheValorant {
+            matchs: vec![
+                MatchResume { party: 0, duree_s: 0, manches_detail: None, ..resume("x", 1_000, false) },
+                MatchResume { party: 0, duree_s: 0, ..resume("z", 500, false) },
+            ],
+            historique_rr: vec![point("x", 1_000, 15, 40, 18), point("z", 500, 15, 22, -20)],
+            ..Default::default()
+        };
+        let f = empiler_a_la_liaison(Some(("puuid-1".into(), ancienne.clone())), "puuid-1", fraiche.clone(), archive.clone());
+        let ids: Vec<&str> = f.matchs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["y", "x", "z"], "la fraîche en tête, l'archive comble « z »");
+        assert_eq!(f.matchs[1], x, "« x » garde son détail, ses co-membres, sa party et sa durée");
+        assert!(f.matchs[0].manches_detail.is_some());
+        assert!(f.matchs[2].manches_detail.is_none());
+        assert_eq!(f.riot_id, "NouveauNom#TAG", "le nouveau nom, même puuid");
+        let points: Vec<&str> = f.historique_rr.iter().map(|p| p.match_id.as_str()).collect();
+        assert_eq!(points, vec!["y", "x", "z"]);
+        // Un autre compte : l'ancienne fiche est oubliée, l'archive reste.
+        let f = empiler_a_la_liaison(Some(("puuid-1".into(), ancienne.clone())), "puuid-2", fraiche.clone(), archive.clone());
+        let ids: Vec<&str> = f.matchs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["y", "x", "z"]);
+        assert!(f.matchs[1].avec.is_empty() && f.matchs[1].manches_detail.is_none(), "« x » vient de l'archive");
+        // Une archive muette ne change rien à la fusion classique.
+        let f = empiler_a_la_liaison(Some(("puuid-1".into(), ancienne.clone())), "puuid-1", fraiche.clone(), FicheValorant::default());
+        assert_eq!(f, fusion_a_la_liaison(Some(("puuid-1".into(), ancienne)), "puuid-1", fraiche.clone()));
+        // Et sans rien d'ancien, la fraîche passe sur l'archive.
+        let f = empiler_a_la_liaison(None, "puuid-1", fraiche, archive);
+        assert_eq!(f.matchs.len(), 3);
+        assert!(f.matchs[1].manches_detail.is_none());
+    }
+
+    /// Une fiche écrite par un serveur 0.1.39 se relit avec les défauts,
+    /// et se fusionne sous une fiche neuve.
+    #[test]
+    fn une_fiche_d_avant_se_relit_et_se_fusionne() {
+        let brut = r#"{
+          "7": {
+            "riot_id": "Redik#6162", "region": "eu", "plateforme": "pc", "niveau": 212,
+            "rang": {"tier": 15, "rr": 40, "delta": 18, "elo": 1240, "saison": ""},
+            "pic": {"tier": 16, "rr": 12, "delta": 0, "elo": 0, "saison": "E9A1"},
+            "historique_rr": [
+              {"match_id": "m1", "date": 1788469953000, "tier": 15, "rr": 40, "delta": 18, "carte": "Ascent"}
+            ],
+            "matchs": [
+              {"id": "m1", "date": 1788469953000, "carte": "Ascent", "mode": "Compétitif", "agent": "Jett",
+               "kills": 20, "deaths": 10, "assists": 4, "score": 5000, "tete_pct": 25, "manches": [13, 9],
+               "gagne": true, "tier": 15, "duree_s": 2400}
+            ],
+            "maj": 1788470000000
+          }
+        }"#;
+        let fiches: BTreeMap<UserId, FicheValorant> = serde_json::from_str(brut).expect("une fiche d'avant se relit");
+        let ancienne = fiches.get(&7).expect("le membre 7").clone();
+        assert_eq!(ancienne.matchs[0].manches_detail, None);
+        assert_eq!(ancienne.matchs[0].party, 0);
+        assert!(ancienne.saisons.is_empty());
+        assert_eq!(ancienne.rang.boucliers, 0);
+        let neuve = FicheValorant {
+            riot_id: "Redik#6162".into(),
+            niveau: 213,
+            matchs: vec![resume("m2", 1_788_480_000_000, true), resume("m1", 1_788_469_953_000, true)],
+            historique_rr: vec![point("m2", 1_788_480_000_000, 15, 58, 18), point("m1", 1_788_469_953_000, 15, 40, 18)],
+            ..Default::default()
+        };
+        let f = fusionner(ancienne, neuve);
+        assert_eq!(f.matchs.len(), 2);
+        assert!(f.matchs.iter().all(|m| m.manches_detail.is_some()));
+        assert_eq!(f.historique_rr.len(), 2);
+        assert_eq!(f.niveau, 213);
+        // Et une fiche V5 se réécrit et se relit sans perte.
+        let json = serde_json::to_string(&BTreeMap::from([(7u64, f.clone())])).unwrap();
+        let relue: BTreeMap<UserId, FicheValorant> = serde_json::from_str(&json).unwrap();
+        assert_eq!(relue.get(&7), Some(&f));
+    }
+
+    /// Un match archivé se lit à la ligne du membre, les manches selon
+    /// son camp.
+    #[test]
+    fn un_match_stocke_se_resume() {
+        let stocke = |camp: &str, bleu: u8, rouge: u8| {
+            serde_json::json!({
+                "meta": {
+                    "id": "arch-1", "map": {"id": "x", "name": "Haven"}, "mode": "competitive",
+                    "season": {"id": "s", "short": "e8a3"}, "started_at": "2026-08-01T20:00:00.000Z",
+                    "version": "release-11.00", "region": "eu", "cluster": null
+                },
+                "stats": {
+                    "puuid": "moi", "team": camp, "character": {"id": "c", "name": "Reyna"},
+                    "kills": 22, "deaths": 14, "assists": 3, "score": 5400, "level": 200, "tier": 14,
+                    "damage": {"made": 3800, "received": 3100}, "shots": {"head": 20, "body": 60, "leg": 20},
+                    "name": "Redik", "tag": "6162"
+                },
+                "teams": {"blue": bleu, "red": rouge}
+            })
+        };
+        let r = resumer_match_stocke(&stocke("Blue", 13, 9)).expect("un match");
+        assert_eq!(r.id, "arch-1");
+        assert_eq!(r.manches, (13, 9));
+        assert_eq!(r.gagne, Some(true));
+        assert_eq!(r.mode, "Compétitif");
+        assert_eq!(r.agent, "Reyna");
+        assert_eq!(r.carte, "Haven");
+        assert_eq!(r.saison, "e8a3");
+        assert_eq!((r.kills, r.deaths, r.assists, r.score), (22, 14, 3, 5400));
+        assert_eq!((r.tetes, r.tirs, r.tete_pct), (20, 100, 20));
+        assert_eq!((r.degats, r.degats_recus), (3800, 3100));
+        assert_eq!(r.tier, 14);
+        assert_eq!(r.date, iso_vers_ms("2026-08-01T20:00:00.000Z"));
+        assert_eq!((r.duree_s, r.party), (0, 0));
+        assert!(r.avec.is_empty() && r.contre.is_empty() && r.manches_detail.is_none());
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("Redik") && !json.contains("6162") && !json.contains("moi"));
+        let r = resumer_match_stocke(&stocke("red", 13, 9)).expect("un match");
+        assert_eq!((r.manches, r.gagne), ((9, 13), Some(false)));
+        let r = resumer_match_stocke(&stocke("Blue", 11, 11)).expect("un match");
+        assert_eq!(r.gagne, None);
+        let r = resumer_match_stocke(&stocke("Green", 13, 9)).expect("un match");
+        assert_eq!((r.manches, r.gagne), ((0, 0), None));
+        // Sans `meta.id` ou sans `stats` : rien.
+        let mut sans = stocke("Blue", 13, 9);
+        sans["meta"]["id"] = serde_json::json!("");
+        assert!(resumer_match_stocke(&sans).is_none());
+        let mut sans = stocke("Blue", 13, 9);
+        sans["stats"] = Value::Null;
+        assert!(resumer_match_stocke(&sans).is_none());
+    }
+
+    /// Les deux archives de la liaison donnent une fiche de matchs et de
+    /// points, que la fiche fraîche recouvre.
+    #[test]
+    fn la_liaison_rattrape_l_historique() {
+        let matchs = serde_json::json!({"status": 200, "results": {"total": 2, "returned": 2}, "data": [
+            {"meta": {"id": "m9", "map": {"name": "Bind"}, "mode": "unrated", "season": {"short": "e9a2"}, "started_at": "2026-09-02T20:00:00Z"},
+             "stats": {"puuid": "moi", "team": "Red", "character": {"name": "Sage"}, "kills": 10, "deaths": 10, "assists": 10, "score": 3000,
+                       "tier": 0, "damage": {"made": 2000, "received": 2000}, "shots": {"head": 5, "body": 20, "leg": 0}},
+             "teams": {"blue": 13, "red": 4}},
+            {"meta": {"id": "", "map": {"name": "?"}}, "stats": {}, "teams": {}},
+            {"meta": {"id": "m8", "map": {"name": "Ascent"}, "mode": "competitive", "season": {"short": "e9a2"}, "started_at": "2026-09-01T20:00:00Z"},
+             "stats": {"puuid": "moi", "team": "Blue", "character": {"name": "Jett"}, "kills": 25, "deaths": 12, "assists": 2, "score": 6000,
+                       "tier": 15, "damage": {"made": 4500, "received": 3000}, "shots": {"head": 30, "body": 50, "leg": 20}},
+             "teams": {"blue": 13, "red": 9}}
+        ]});
+        let points = serde_json::json!({"status": 200, "results": {"total": 1, "returned": 1}, "data": [
+            {"match_id": "m8", "date": "2026-09-01T20:40:00Z", "tier": {"id": 15, "name": "Or 3"}, "rr": 40, "last_change": 18,
+             "map": {"name": "Ascent"}, "season": {"short": "e9a2"}, "was_derank_protected": true, "elo": 1240, "refunded_rr": 0}
+        ]});
+        let archive = fiche_archivee(&matchs, &points);
+        assert_eq!(archive.matchs.len(), 2, "l'entrée sans id est ignorée");
+        assert_eq!(archive.matchs[0].id, "m9");
+        assert_eq!((archive.matchs[0].manches, archive.matchs[0].gagne), ((4, 13), Some(false)));
+        assert_eq!(archive.historique_rr.len(), 1);
+        assert!(archive.historique_rr[0].protege);
+        assert_eq!(archive.historique_rr[0].saison, "e9a2");
+        assert_eq!(archive.historique_rr[0].delta, 18);
+        // La fiche fraîche gagne sur « m8 » : elle porte le détail.
+        let fraiche = FicheValorant {
+            riot_id: "Redik#6162".into(),
+            niveau: 200,
+            matchs: vec![resume("m10", iso_vers_ms("2026-09-03T20:00:00Z"), true), resume("m8", iso_vers_ms("2026-09-01T20:00:00Z"), true)],
+            historique_rr: vec![point("m8", iso_vers_ms("2026-09-01T20:40:00Z"), 15, 40, 18)],
+            ..Default::default()
+        };
+        let f = fusionner(archive, fraiche);
+        let ids: Vec<&str> = f.matchs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m10", "m9", "m8"]);
+        assert!(f.matchs[2].manches_detail.is_some());
+        assert_eq!(f.historique_rr.len(), 1);
+        assert_eq!(f.niveau, 200);
+        assert_eq!(f.riot_id, "Redik#6162");
+        // Des archives muettes donnent une fiche vide.
+        let vide = fiche_archivee(&Value::Null, &Value::Null);
+        assert!(vide.matchs.is_empty() && vide.historique_rr.is_empty());
+    }
+
+    /// Le bilan d'un membre se calcule à l'envoi, classé seulement, sur
+    /// sept et trente jours.
+    #[test]
+    fn le_bilan_d_un_membre_se_calcule_a_l_envoi() {
+        let maintenant = 1_800_000_000_000u64;
+        let jour = JOUR_MS;
+        let mut recent = resume("a", maintenant - jour, true);
+        recent.avec = vec![2];
+        let mut perdu = resume("b", maintenant - 10 * jour, true);
+        perdu.gagne = Some(false);
+        perdu.manches = (9, 13);
+        perdu.agent = "Reyna".into();
+        perdu.avec = vec![2, 3];
+        let mut non_classe = resume("c", maintenant - 2 * jour, false);
+        non_classe.mode = "Non classé".into();
+        let vieux = resume("d", maintenant - 40 * jour, false);
+        let f = FicheValorant {
+            matchs: vec![recent, non_classe, perdu, vieux],
+            historique_rr: vec![point("a", maintenant - jour, 15, 58, 18), point("b", maintenant - 10 * jour, 15, 40, -16)],
+            ..Default::default()
+        };
+        let b = bilan_membre(&f, maintenant);
+        assert_eq!((b.sept_jours.matchs, b.sept_jours.victoires, b.sept_jours.rr), (1, 1, 18));
+        assert_eq!((b.trente_jours.matchs, b.trente_jours.defaites, b.trente_jours.rr), (2, 1, 2));
+        // La forme et la série ne connaissent pas de fenêtre : le vieux
+        // classé « d » y est.
+        assert_eq!(b.forme, vec![1, -1, 1]);
+        assert_eq!(b.serie, 1);
+        assert_eq!(b.agents, vec![("Jett".to_string(), 1, 1), ("Reyna".to_string(), 1, 0)]);
+        assert_eq!(b.cartes, vec![("Ascent".to_string(), 2, 1)]);
+        assert_eq!(b.duos, vec![(2, 2, 1), (3, 1, 0)]);
+        assert_eq!(bilan_membre(&FicheValorant::default(), maintenant), BilanMembre::default());
+    }
+
+    /// Deux matchs connus tombent dans les bonnes cases jour × heure ; un
+    /// match trop vieux n'y est pas ; sans match, rien.
+    #[test]
+    fn l_activite_compte_les_heures_utc() {
+        let maintenant = iso_vers_ms("2026-09-15T12:00:00Z");
+        // Le 14 septembre 2026 est un lundi, le 13 un dimanche.
+        let f1 = FicheValorant {
+            matchs: vec![
+                resume("a", iso_vers_ms("2026-09-14T20:30:00Z"), false),
+                resume("b", iso_vers_ms("2026-09-13T01:15:00Z"), false),
+                resume("c", iso_vers_ms("2026-07-01T20:30:00Z"), false),
+            ],
+            ..Default::default()
+        };
+        let f2 = FicheValorant {
+            matchs: vec![resume("d", iso_vers_ms("2026-09-14T20:59:59Z"), false)],
+            ..Default::default()
+        };
+        let cases = activite_de([&f1, &f2].into_iter(), maintenant);
+        assert_eq!(cases.len(), 168);
+        assert_eq!(cases[20], 2, "lundi 20 h");
+        assert_eq!(cases[6 * 24 + 1], 1, "dimanche 1 h");
+        assert_eq!(cases.iter().map(|c| u32::from(*c)).sum::<u32>(), 3);
+        // Le 1er janvier 1970 est un jeudi : la case 3 × 24.
+        let f3 = FicheValorant { matchs: vec![resume("e", 0, false)], ..Default::default() };
+        assert!(activite_de([&f3].into_iter(), maintenant).is_empty(), "trop vieux");
+        assert_eq!(activite_de([&f3].into_iter(), 10 * JOUR_MS)[3 * 24], 1);
+        assert!(activite_de(std::iter::empty(), maintenant).is_empty());
+    }
+
+    /// Quarante fiches pleines — soixante matchs détaillés, cent points —
+    /// tiennent dans une ligne : le serveur descend d'un palier ; trois
+    /// fiches passent au premier.
+    #[test]
+    fn la_page_du_groupe_tient_dans_une_ligne() {
+        let maintenant = 1_800_000_000_000u64;
+        let pleine = |n: u64| FicheValorant {
+            riot_id: format!("JoueurNumeroDouze{n}#EUW{n}"),
+            region: "eu".into(),
+            plateforme: "pc".into(),
+            niveau: 212,
+            rang: RangValorant { tier: 15, rr: 40, delta: 18, elo: 1240, saison: "e9a2".into(), boucliers: 1, ..Default::default() },
+            pic: Some(RangValorant { tier: 16, rr: 12, saison: "e9a1".into(), ..Default::default() }),
+            matchs: (0..60u64)
+                .map(|i| {
+                    let mut m = resume(&format!("0123abcd-4567-89ef-0123-456789abc{n:02}{i:02}"), maintenant - i * 3_600_000, true);
+                    m.saison = "e9a2".into();
+                    m.agent = "Chamber".into();
+                    m.carte = "Fracture".into();
+                    m.degats = 4212;
+                    m.degats_recus = 3980;
+                    m.tetes = 30;
+                    m.tirs = 100;
+                    m.party = 3;
+                    m.avec = vec![(n + 1) % 40, (n + 2) % 40];
+                    m.contre = vec![(n + 3) % 40];
+                    m.manches_detail = Some(DetailManches {
+                        manches: 24, kast: 18, premiers_sangs: 3, premieres_morts: 2, triples: 2, quadruples: 1, aces: 0,
+                        clutchs_tentes: 2, clutchs: 1, meilleur_clutch: 2, poses: 4, desamorcages: 1,
+                        deroule: "VDVVDVDVVVDDVDVVDVDVVDVV".into(),
+                    });
+                    m
+                })
+                .collect(),
+            historique_rr: (0..100u64)
+                .map(|i| {
+                    let mut p = point(&format!("0123abcd-4567-89ef-0123-456789abc{n:02}{i:02}"), maintenant - i * 3_600_000, 15, 40, 18);
+                    p.saison = "e9a2".into();
+                    p.protege = i % 7 == 0;
+                    p
+                })
+                .collect(),
+            maj: maintenant,
+            saisons: (0..12).map(|i| StatsSaison { saison: format!("e{}a{}", i / 3 + 6, i % 3 + 1), victoires: 40, parties: 80, tier_fin: 15, rr_fin: 40 }).collect(),
+        };
+        let fiches: Vec<(UserId, FicheValorant)> = (0..40).map(|n| (n, pleine(n))).collect();
+        let resumes = |n_m: usize, n_p: usize| -> Vec<FicheMembre> {
+            fiches
+                .iter()
+                .map(|(id, f)| FicheMembre {
+                    user_id: *id,
+                    username: format!("membre-numero-{id}"),
+                    fiche: f.resume(n_m, n_p),
+                    bilan: Some(bilan_membre(f, maintenant)),
+                })
+                .collect()
+        };
+        let esports = vec![
+            MatchEsport {
+                date: maintenant,
+                ligue: "VCT EMEA".into(),
+                region: "EMEA".into(),
+                tournoi: "Kickoff".into(),
+                equipes: vec!["FNC".into(), "TH".into()],
+                etat: "unstarted".into(),
+                format: "BO3".into(),
+            };
+            20
+        ];
+        let activite = vec![3u16; 168];
+        let msg = message_stats(resumes, esports, activite);
+        let octets = serde_json::to_vec(&msg).unwrap();
+        assert!(octets.len() <= STATS_MAX_BYTES, "{} octets", octets.len());
+        assert!(octets.len() <= ki_protocol::MAX_LINE);
+        let ServerMsg::StatsValorant { fiches: envoyees, esports, activite } = &msg else {
+            panic!("pas le bon message");
+        };
+        assert_eq!(envoyees.len(), 40, "jamais un membre de moins");
+        assert!(envoyees.iter().all(|f| f.fiche.matchs.len() <= 3 && f.fiche.historique_rr.len() <= 6), "palier (3, 6) au plus");
+        assert!(envoyees.iter().all(|f| f.bilan.is_some() && f.fiche.saisons.is_empty()));
+        assert!(envoyees.iter().all(|f| f.fiche.matchs.iter().all(|m| m.manches_detail.is_none() && !m.id.is_empty())));
+        assert_eq!(esports.len(), 20);
+        assert_eq!(activite.len(), 168);
+        // Trois fiches : le premier palier, cinq matchs et dix points.
+        let trois: Vec<(UserId, FicheValorant)> = fiches.iter().take(3).cloned().collect();
+        let msg = message_stats(
+            |n_m, n_p| {
+                trois
+                    .iter()
+                    .map(|(id, f)| FicheMembre { user_id: *id, username: "x".into(), fiche: f.resume(n_m, n_p), bilan: None })
+                    .collect()
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        let ServerMsg::StatsValorant { fiches: envoyees, .. } = &msg else {
+            panic!("pas le bon message");
+        };
+        assert!(envoyees.iter().all(|f| f.fiche.matchs.len() == MATCHS_MAX && f.fiche.historique_rr.len() == POINTS_RESUME));
     }
 
     /// Les pseudos avec espace ou accent passent dans l'URL.

@@ -5,6 +5,7 @@
 mod appicon;
 mod atelier;
 mod clips;
+mod graphes;
 mod icons;
 mod images;
 mod jeux;
@@ -28,6 +29,7 @@ mod theme;
 mod ui;
 mod update;
 mod valorant;
+mod valo_page;
 mod veille;
 mod visionneuse;
 
@@ -689,11 +691,14 @@ struct KiApp {
     clips_retrait_resultat: Option<RetraitClip>,
     /// Le dossier choisi dans le dialogue natif (sur un fil).
     clips_dossier_choisi: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
-    /// La page de stats du groupe et ce que le serveur en a envoyé.
-    show_stats: bool,
+    /// La page VALORANT du groupe (son état, ses deux fenêtres) et ce que
+    /// le serveur en a envoyé : les fiches, les esports, l'activité.
+    valo: valo_page::PageValo,
     stats: Vec<ki_protocol::FicheMembre>,
     stats_recu: bool,
     esports: Vec<ki_protocol::MatchEsport>,
+    /// Les 168 cases jour × heure (UTC) des parties du groupe sur 30 jours.
+    activite: Vec<u16>,
     /// Le contrôle de démarrage (diffusion précédente interrompue ?) est
     /// fait une fois, à la première image.
     demarrage_verifie: bool,
@@ -1097,10 +1102,11 @@ impl KiApp {
             clips_retrait: None,
             clips_retrait_resultat: None,
             clips_dossier_choisi: Default::default(),
-            show_stats: false,
+            valo: valo_page::PageValo::load(get),
             stats: Vec::new(),
             stats_recu: false,
             esports: Vec::new(),
+            activite: Vec::new(),
             demarrage_verifie: false,
             veilleur_valorant: None,
             presence_jeux: get("presence_jeux", "on") == "on",
@@ -1553,40 +1559,27 @@ impl KiApp {
     }
 
     /// La fiche VALORANT d'un membre, telle que le serveur la garde :
-    /// rang, pic, derniers RR, derniers matchs. Elle vient du cache du
-    /// serveur, l'ouvrir ne coûte rien à personne.
+    /// rang, pic, les mouvements de RR et les matchs accumulés. Elle vient
+    /// du cache du serveur, l'ouvrir ne coûte rien à personne. Les icônes
+    /// de rang se préparent ici (le rang, le pic, le palier suivant, le
+    /// rang de chaque match) ; la page elle-même est dans `valo_page`.
     fn fiche_window(&mut self, ctx: &egui::Context) {
         let Some(f) = &self.fiche else { return };
-        let mut open = true;
-        let titre = format!("VALORANT — {}", f.username);
-        let (recue, fiche) = (f.recue, f.fiche.clone());
-        if let Some(fiche) = &fiche {
-            self.rangs.preparer(ctx, fiche.rang.tier);
-            if let Some(pic) = &fiche.pic {
-                self.rangs.preparer(ctx, pic.tier);
+        if let Some(fiche) = &f.fiche {
+            let mut tiers: Vec<u8> = vec![fiche.rang.tier, fiche.rang.tier.saturating_add(1)];
+            tiers.extend(fiche.pic.iter().map(|p| p.tier));
+            tiers.extend(fiche.matchs.iter().map(|m| m.tier));
+            tiers.sort_unstable();
+            tiers.dedup();
+            for tier in tiers {
+                self.rangs.preparer(ctx, tier);
             }
         }
-        let rangs = &self.rangs;
-        egui::Window::new(titre)
-            .id(egui::Id::new("fiche_valorant"))
-            .collapsible(false)
-            .resizable(false)
-            .default_width(480.0)
-            .open(&mut open)
-            .show(ctx, |ui| match (recue, &fiche) {
-                (false, _) => {
-                    ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
-                }
-                (true, None) => {
-                    ui.label(
-                        RichText::new("pas de compte Riot lié — ou pas encore de fiche.")
-                            .color(TEXT_DIM),
-                    );
-                }
-                (true, Some(fiche)) => fiche_ui(ui, fiche, rangs),
-            });
-        if !open {
-            self.fiche = None;
+        if let Some(f) = &self.fiche {
+            if !self.valo.fiche(ctx, f, &self.stats, &self.members, &self.rangs) {
+                self.fiche = None;
+                self.valo.fermer_fiche();
+            }
         }
     }
 
@@ -3198,108 +3191,53 @@ impl KiApp {
     /// Ouvre la page de stats du groupe et demande les fiches au serveur —
     /// elles viennent de son cache, HenrikDev n'est pas sollicité.
     fn ouvrir_stats(&mut self) {
-        self.show_stats = true;
+        self.valo.ouvert = true;
         self.stats_recu = false;
         self.send(ClientMsg::StatsValorant);
     }
 
-    /// La page de stats : le groupe sur VALORANT d'après les fiches que le
-    /// serveur garde — trois records, le classement, les derniers matchs
-    /// de tout le monde. La ligne de chacun, jamais celles des adversaires.
+    /// La page VALORANT du groupe, tenue par `valo_page` : on prépare les
+    /// icônes de rang, on lui prête la boutique le temps de la fenêtre,
+    /// et on exécute ce qu'elle demande — actualiser, ouvrir une fiche.
     fn stats_window(&mut self, ctx: &egui::Context) {
-        if !self.show_stats {
+        if !self.valo.ouvert {
             return;
         }
-        let mut open = true;
-        let mut actualiser = false;
-        let mut ouvrir: Option<(UserId, String)> = None;
-        let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
-        // Du plus haut rang au plus bas ; à rang égal, les RR départagent.
-        let mut fiches: Vec<&ki_protocol::FicheMembre> = self.stats.iter().collect();
-        fiches.sort_by_key(|f| std::cmp::Reverse((f.fiche.rang.tier, f.fiche.rang.rr)));
-        let recu = self.stats_recu;
         for f in &self.stats {
             self.rangs.preparer(ctx, f.fiche.rang.tier);
+            if let Some(pic) = &f.fiche.pic {
+                self.rangs.preparer(ctx, pic.tier);
+            }
         }
         // La boutique est à soi : elle sort de `self` le temps de la fenêtre,
         // les fiches et les icônes n'y sont lues qu'en lecture.
-        let mut ma_boutique = std::mem::take(&mut self.boutique);
-        let rangs = &self.rangs;
-        let esports = &self.esports;
-        egui::Window::new("VALORANT")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(820.0)
-            .default_height(roomy)
-            .min_width(600.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Le groupe sur VALORANT").strong().size(17.0));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::button(ui, Icon::Refresh, "Actualiser").clicked() {
-                            actualiser = true;
-                        }
-                        let n = fiches.len();
-                        let s = if n > 1 { "s" } else { "" };
-                        ui.label(
-                            RichText::new(format!("{n} joueur{s} lié{s}")).color(TEXT_FAINT).size(11.5),
-                        );
-                    });
-                });
-                ui::hint(
-                    ui,
-                    "d'après les fiches que le serveur tient à jour par HenrikDev — la ligne de \
-                     chacun dans ses matchs, jamais celles des adversaires",
-                );
-                ui.add_space(8.0);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    // Sa boutique du jour d'abord : la seule partie de la page
-                    // qui est à soi — lue dans son propre client Riot.
-                    ui.label(RichText::new("Ma boutique du jour").strong().size(13.5));
-                    ui::hint(
-                        ui,
-                        "lue dans ton client Riot, sur ce PC, pour toi seul — rien ne part vers le \
-                         serveur ; il faut VALORANT ouvert",
-                    );
-                    ma_boutique.ui(ui);
-                    ui.add_space(14.0);
-                    if !recu {
-                        ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
-                        return;
-                    }
-                    if fiches.is_empty() {
-                        ui.label(
-                            RichText::new("personne n'a encore lié son compte Riot — ⚙ → Jeu → Compte Riot")
-                                .color(TEXT_DIM),
-                        );
-                    } else {
-                        stats_records(ui, &fiches);
-                        ui.add_space(14.0);
-                        if let Some(qui) = stats_classement(ui, &fiches, rangs) {
-                            ouvrir = Some(qui);
-                        }
-                        ui.add_space(14.0);
-                        stats_matchs(ui, &fiches);
-                    }
-                    ui.add_space(14.0);
-                    stats_esports(ui, esports);
-                });
-            });
-        self.boutique = ma_boutique;
-        if actualiser {
-            self.ouvrir_stats();
-        }
-        if let Some((user_id, username)) = ouvrir {
-            self.ouvrir_fiche(user_id, username);
-        }
-        if !open {
-            self.show_stats = false;
+        let mut boutique = std::mem::take(&mut self.boutique);
+        let demandes = self.valo.fenetre(
+            ctx,
+            &self.stats,
+            self.stats_recu,
+            &self.esports,
+            &self.activite,
+            self.my_id,
+            &self.members,
+            &self.rangs,
+            &mut boutique,
+        );
+        self.boutique = boutique;
+        for demande in demandes {
+            match demande {
+                valo_page::Demande::Actualiser => self.ouvrir_stats(),
+                valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
+            }
         }
     }
 
-    /// Ouvre la fiche VALORANT d'un membre et la demande au serveur.
+    /// Ouvre la fiche VALORANT d'un membre et la demande au serveur. Une
+    /// fiche déjà ouverte se remplace : ce qu'on y avait déplié ou déroulé
+    /// s'oublie — un match joué ensemble porte le même id chez les deux,
+    /// il s'ouvrirait déjà déplié chez le second.
     fn ouvrir_fiche(&mut self, user_id: UserId, username: String) {
+        self.valo.fermer_fiche();
         self.fiche = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
         self.send(ClientMsg::FicheValorant { user_id });
     }
@@ -4519,9 +4457,10 @@ impl KiApp {
                 self.musique_resultats = pistes;
                 self.musique_resultats_pour = texte;
             }
-            ServerMsg::StatsValorant { fiches, esports } => {
+            ServerMsg::StatsValorant { fiches, esports, activite } => {
                 self.stats = fiches;
                 self.esports = esports;
+                self.activite = activite;
                 self.stats_recu = true;
             }
             ServerMsg::Error { message } => {
@@ -11676,34 +11615,17 @@ fn pastille_bot(ui: &mut egui::Ui) -> egui::Response {
 }
 
 /// « 3:56 » — une durée en minutes et secondes.
-fn mmss(secondes: u64) -> String {
+pub(crate) fn mmss(secondes: u64) -> String {
     format!("{}:{:02}", secondes / 60, secondes % 60)
-}
-
-/// La couleur d'un palier VALORANT, proche de celle du jeu : du gris du
-/// Fer au jaune du Radiant.
-fn couleur_de_rang(tier: u8) -> egui::Color32 {
-    match tier {
-        3..=5 => egui::Color32::from_rgb(0x8f, 0x8f, 0x8f),
-        6..=8 => egui::Color32::from_rgb(0xb5, 0x7f, 0x4a),
-        9..=11 => egui::Color32::from_rgb(0xc8, 0xd0, 0xd8),
-        12..=14 => egui::Color32::from_rgb(0xe8, 0xc0, 0x40),
-        15..=17 => egui::Color32::from_rgb(0x3f, 0xb8, 0xc8),
-        18..=20 => egui::Color32::from_rgb(0xb0, 0x7c, 0xf0),
-        21..=23 => egui::Color32::from_rgb(0x4f, 0xc8, 0x6a),
-        24..=26 => egui::Color32::from_rgb(0xe0, 0x4a, 0x5a),
-        27.. => egui::Color32::from_rgb(0xff, 0xf2, 0x9a),
-        _ => TEXT_FAINT,
-    }
 }
 
 /// La fiche d'un membre, ouverte au clic droit : on l'a demandée au
 /// serveur, et on attend — puis on l'a, ou on sait qu'il n'y en a pas.
-struct FicheOuverte {
-    user_id: UserId,
-    username: String,
-    recue: bool,
-    fiche: Option<ki_protocol::FicheValorant>,
+pub(crate) struct FicheOuverte {
+    pub(crate) user_id: UserId,
+    pub(crate) username: String,
+    pub(crate) recue: bool,
+    pub(crate) fiche: Option<ki_protocol::FicheValorant>,
 }
 
 /// Ce que le presse-papiers contient, s'il contient du texte.
@@ -11774,235 +11696,9 @@ fn menu_edition(reponse: &egui::Response, texte: &mut String, secret: bool) -> b
     modifie
 }
 
-/// Les records du groupe, en trois cartes : le plus haut rang, le plus
-/// gros gain de RR au dernier match, le meilleur ratio récent.
-fn stats_records(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) {
-    let meilleur = fiches.first().filter(|f| f.fiche.rang.tier >= 3);
-    let gain = fiches.iter().filter(|f| f.fiche.rang.delta > 0).max_by_key(|f| f.fiche.rang.delta);
-    let ratio = fiches
-        .iter()
-        .filter_map(|f| {
-            let (k, d) = f
-                .fiche
-                .matchs
-                .iter()
-                .fold((0u32, 0u32), |(k, d), m| (k + m.kills as u32, d + m.deaths as u32));
-            (k + d > 0).then(|| (f, k as f32 / d.max(1) as f32))
-        })
-        .max_by(|a, b| a.1.total_cmp(&b.1));
-    ui.columns(3, |cols| {
-        match meilleur {
-            Some(f) => stats_carte(
-                &mut cols[0],
-                "Plus haut rang",
-                &format!("{} · {} RR", ki_protocol::nom_de_rang(f.fiche.rang.tier), f.fiche.rang.rr),
-                couleur_de_rang(f.fiche.rang.tier),
-                &f.username,
-            ),
-            None => stats_carte(&mut cols[0], "Plus haut rang", "—", TEXT_FAINT, "personne n'est classé"),
-        }
-        match gain {
-            Some(f) => stats_carte(
-                &mut cols[1],
-                "Plus gros gain récent",
-                &format!("+{} RR", f.fiche.rang.delta),
-                SPEAK,
-                &f.username,
-            ),
-            None => stats_carte(&mut cols[1], "Plus gros gain récent", "—", TEXT_FAINT, "pas de gain au dernier match"),
-        }
-        match ratio {
-            Some((f, r)) => stats_carte(&mut cols[2], "Meilleur K/D récent", &format!("{r:.2}"), ACCENT, &f.username),
-            None => stats_carte(&mut cols[2], "Meilleur K/D récent", "—", TEXT_FAINT, "aucun match connu"),
-        }
-    });
-}
-
-fn stats_carte(ui: &mut egui::Ui, titre: &str, valeur: &str, teinte: Color32, qui: &str) {
-    egui::Frame::new()
-        .fill(theme::BG_RAISED)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
-            ui.label(RichText::new(valeur).color(teinte).strong().size(21.0));
-            ui.label(RichText::new(qui).color(TEXT_DIM).size(12.0));
-        });
-}
-
-/// Le classement : une ligne par membre lié. Rend le membre dont on a
-/// demandé la fiche.
-fn stats_classement(
-    ui: &mut egui::Ui,
-    fiches: &[&ki_protocol::FicheMembre],
-    rangs: &rangs::Rangs,
-) -> Option<(UserId, String)> {
-    use ki_protocol::nom_de_rang;
-    let mut ouvrir = None;
-    let maintenant = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let semaine = 7 * 24 * 3600 * 1000;
-    ui.label(RichText::new("Classement").strong().size(13.5));
-    ui.add_space(4.0);
-    egui::Grid::new("stats_classement").striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-        for titre in ["#", "Joueur", "Rang", "Dernier", "7 jours", "Pic", "Bilan récent", "K/D", "Tête", "Niveau", ""] {
-            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
-        }
-        ui.end_row();
-        for (i, f) in fiches.iter().enumerate() {
-            let r = &f.fiche.rang;
-            ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT));
-            let nom = ui
-                .add(egui::Label::new(RichText::new(&f.username).strong()).sense(Sense::click()))
-                .on_hover_text(&f.fiche.riot_id);
-            if nom.clicked() {
-                ouvrir = Some((f.user_id, f.username.clone()));
-            }
-            let rang = if r.tier >= 3 {
-                format!("{} · {} RR", nom_de_rang(r.tier), r.rr)
-            } else {
-                nom_de_rang(0)
-            };
-            ui.horizontal(|ui| {
-                if let Some(icone) = rangs.texture(r.tier) {
-                    ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(18.0)));
-                }
-                ui.label(RichText::new(rang).color(couleur_de_rang(r.tier)).strong());
-            });
-            let (delta, teinte) = if r.delta > 0 {
-                (format!("+{}", r.delta), SPEAK)
-            } else if r.delta < 0 {
-                (r.delta.to_string(), DANGER)
-            } else {
-                ("—".to_string(), TEXT_FAINT)
-            };
-            ui.label(RichText::new(delta).color(teinte));
-            // Les RR gagnés ou perdus sur sept jours, d'après les derniers
-            // classés connus — dix au plus, donc une semaine chargée peut
-            // en montrer moins.
-            let sept_jours: i32 = f
-                .fiche
-                .historique_rr
-                .iter()
-                .filter(|p| maintenant.saturating_sub(p.date) < semaine)
-                .map(|p| p.delta)
-                .sum();
-            let joue = f.fiche.historique_rr.iter().any(|p| maintenant.saturating_sub(p.date) < semaine);
-            let (texte, teinte) = if !joue {
-                ("—".to_string(), TEXT_FAINT)
-            } else if sept_jours > 0 {
-                (format!("+{sept_jours}"), SPEAK)
-            } else if sept_jours < 0 {
-                (sept_jours.to_string(), DANGER)
-            } else {
-                ("±0".to_string(), TEXT_DIM)
-            };
-            ui.label(RichText::new(texte).color(teinte));
-            match &f.fiche.pic {
-                Some(p) if p.tier >= 3 => {
-                    ui.label(RichText::new(nom_de_rang(p.tier)).color(couleur_de_rang(p.tier)));
-                }
-                _ => {
-                    ui.label(RichText::new("—").color(TEXT_FAINT));
-                }
-            }
-            let (v, d) = f.fiche.matchs.iter().fold((0u32, 0u32), |(v, d), m| match m.gagne {
-                Some(true) => (v + 1, d),
-                Some(false) => (v, d + 1),
-                None => (v, d),
-            });
-            ui.label(if v + d > 0 { format!("{v} V · {d} D") } else { "—".to_string() });
-            let (k, morts, tetes, n) = f.fiche.matchs.iter().fold((0u32, 0u32, 0u32, 0u32), |(k, d, t, n), m| {
-                (k + m.kills as u32, d + m.deaths as u32, t + m.tete_pct as u32, n + 1)
-            });
-            ui.label(if n > 0 { format!("{:.2}", k as f32 / morts.max(1) as f32) } else { "—".to_string() });
-            ui.label(tetes.checked_div(n).map(|t| format!("{t} %")).unwrap_or_else(|| "—".to_string()));
-            ui.label(
-                RichText::new(if f.fiche.niveau > 0 { f.fiche.niveau.to_string() } else { "—".to_string() })
-                    .color(TEXT_DIM),
-            );
-            if ui.add(egui::Button::new(RichText::new("fiche").size(11.0)).small()).clicked() {
-                ouvrir = Some((f.user_id, f.username.clone()));
-            }
-            ui.end_row();
-        }
-    });
-    ouvrir
-}
-
-/// Les derniers matchs de tout le groupe, du plus récent au plus ancien.
-fn stats_matchs(ui: &mut egui::Ui, fiches: &[&ki_protocol::FicheMembre]) {
-    let mut tous: Vec<(&str, &ki_protocol::MatchResume)> = fiches
-        .iter()
-        .flat_map(|f| f.fiche.matchs.iter().map(move |m| (f.username.as_str(), m)))
-        .collect();
-    tous.sort_by_key(|(_, m)| std::cmp::Reverse(m.date));
-    tous.truncate(15);
-    if tous.is_empty() {
-        return;
-    }
-    ui.label(RichText::new("Derniers matchs du groupe").strong().size(13.5));
-    ui.add_space(4.0);
-    egui::Grid::new("stats_matchs").striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
-        for titre in ["Quand", "Joueur", "Mode", "Carte", "Agent", "K / D / A", "Tête", "Score"] {
-            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
-        }
-        ui.end_row();
-        for (qui, m) in tous {
-            ui.label(RichText::new(il_y_a(m.date)).color(TEXT_FAINT).size(11.5));
-            ui.label(RichText::new(qui).strong());
-            ui.label(&m.mode);
-            ui.label(&m.carte);
-            ui.label(RichText::new(&m.agent).color(TEXT_DIM));
-            ui.label(format!("{} / {} / {}", m.kills, m.deaths, m.assists));
-            ui.label(RichText::new(format!("{} %", m.tete_pct)).color(TEXT_DIM));
-            let teinte = match m.gagne {
-                Some(true) => SPEAK,
-                Some(false) => DANGER,
-                None => TEXT_DIM,
-            };
-            ui.label(RichText::new(format!("{}-{}", m.manches.0, m.manches.1)).color(teinte).strong());
-            ui.end_row();
-        }
-    });
-}
-
-/// Les prochains matchs d'esport, tels que le serveur les a lus chez
-/// HenrikDev — rien si le serveur n'en a pas.
-fn stats_esports(ui: &mut egui::Ui, matchs: &[ki_protocol::MatchEsport]) {
-    if matchs.is_empty() {
-        return;
-    }
-    ui.label(RichText::new("Esports — prochains matchs").strong().size(13.5));
-    ui.add_space(4.0);
-    egui::Grid::new("stats_esports").striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
-        for titre in ["Quand", "Affiche", "Ligue", "Tournoi", "Format"] {
-            ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
-        }
-        ui.end_row();
-        for m in matchs {
-            let quand = if m.etat == "inProgress" {
-                RichText::new("en cours").color(SPEAK).strong().size(11.5)
-            } else {
-                RichText::new(format!("{} · {}", day_label(m.date), format_time(m.date))).color(TEXT_DIM).size(11.5)
-            };
-            ui.label(quand);
-            ui.label(RichText::new(m.equipes.join("  vs  ")).strong());
-            let ligue = if m.region.is_empty() { m.ligue.clone() } else { format!("{} · {}", m.ligue, m.region) };
-            ui.label(RichText::new(ligue).color(TEXT_DIM));
-            ui.label(RichText::new(&m.tournoi).color(TEXT_FAINT).size(11.5));
-            ui.label(RichText::new(&m.format).color(TEXT_FAINT).size(11.5));
-            ui.end_row();
-        }
-    });
-}
-
 /// « il y a 3 min », « il y a 2 h », « il y a 5 j » — pour dater une
 /// fiche ou un match sans afficher d'horodatage.
-fn il_y_a(ms: u64) -> String {
+pub(crate) fn il_y_a(ms: u64) -> String {
     let maintenant = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -12014,135 +11710,6 @@ fn il_y_a(ms: u64) -> String {
         3600..=86_399 => format!("il y a {} h", s / 3600),
         _ => format!("il y a {} j", s / 86_400),
     }
-}
-
-/// La courbe des RR sur les derniers classés, du plus ancien au plus
-/// récent : une ligne, un point par match, vert quand ça monte, rouge
-/// quand ça descend. L'échelle est celle du palier — cent RR par rang.
-fn courbe_rr(ui: &mut egui::Ui, points: &[ki_protocol::PointRR]) {
-    let mut serie: Vec<&ki_protocol::PointRR> = points.iter().collect();
-    serie.sort_by_key(|p| p.date);
-    if serie.len() < 2 {
-        return;
-    }
-    let valeur = |p: &ki_protocol::PointRR| p.tier as f32 * 100.0 + p.rr as f32;
-    let (min, max) = serie.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(valeur(p)), hi.max(valeur(p))));
-    let (min, max) = if max - min < 20.0 { (min - 10.0, max + 10.0) } else { (min, max) };
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(320.0), 56.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, egui::CornerRadius::same(6), theme::BG_DEEP);
-    let interieur = rect.shrink2(Vec2::new(10.0, 8.0));
-    let pos = |i: usize, p: &ki_protocol::PointRR| {
-        let x = interieur.left() + interieur.width() * i as f32 / (serie.len() - 1) as f32;
-        let y = interieur.bottom() - interieur.height() * (valeur(p) - min) / (max - min);
-        egui::pos2(x, y)
-    };
-    for (i, paire) in serie.windows(2).enumerate() {
-        let teinte = if paire[1].delta >= 0 { SPEAK } else { DANGER };
-        painter.line_segment([pos(i, paire[0]), pos(i + 1, paire[1])], egui::Stroke::new(2.0_f32, teinte));
-    }
-    for (i, p) in serie.iter().enumerate() {
-        painter.circle_filled(pos(i, p), 3.0, if p.delta >= 0 { SPEAK } else { DANGER });
-    }
-    painter.text(
-        egui::pos2(interieur.right(), interieur.top() - 4.0),
-        egui::Align2::RIGHT_TOP,
-        format!("{} → {} RR", serie[0].rr, serie[serie.len() - 1].rr),
-        egui::FontId::proportional(10.0),
-        TEXT_FAINT,
-    );
-}
-
-/// Le corps de la fiche : ce que le serveur sait, et rien de plus.
-fn fiche_ui(ui: &mut egui::Ui, fiche: &ki_protocol::FicheValorant, rangs: &rangs::Rangs) {
-    use ki_protocol::nom_de_rang;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(&fiche.riot_id).strong().size(16.0));
-        let mut detail = format!("{} · {}", fiche.region.to_uppercase(), fiche.plateforme.to_uppercase());
-        if fiche.niveau > 0 {
-            detail.push_str(&format!(" · niveau {}", fiche.niveau));
-        }
-        ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.5));
-    });
-    ui.add_space(6.0);
-
-    // Le rang : l'icône du palier, le nom en gros à sa couleur, le
-    // dernier mouvement.
-    let r = &fiche.rang;
-    ui.horizontal(|ui| {
-        if let Some(icone) = rangs.texture(r.tier) {
-            ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(30.0)));
-        }
-        let nom = nom_de_rang(r.tier);
-        ui.label(RichText::new(&nom).color(couleur_de_rang(r.tier)).strong().size(20.0));
-        if r.tier >= 3 {
-            ui.label(RichText::new(format!("{} RR", r.rr)).color(TEXT_DIM).size(15.0));
-            if r.delta != 0 {
-                let (texte, teinte) =
-                    if r.delta > 0 { (format!("+{}", r.delta), SPEAK) } else { (r.delta.to_string(), DANGER) };
-                ui.label(RichText::new(format!("{texte} au dernier match")).color(teinte).size(11.5));
-            }
-        }
-    });
-    if let Some(pic) = &fiche.pic {
-        let mut texte = format!("pic : {}", nom_de_rang(pic.tier));
-        if pic.tier >= 3 {
-            texte.push_str(&format!(" · {} RR", pic.rr));
-        }
-        if !pic.saison.is_empty() {
-            texte.push_str(&format!(" · {}", pic.saison));
-        }
-        ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.5));
-    }
-
-    // Les derniers mouvements de RR, du plus récent au plus ancien : vert
-    // quand ça monte, rouge quand ça descend, la carte au survol — et la
-    // courbe qui va avec.
-    if !fiche.historique_rr.is_empty() {
-        ui.add_space(10.0);
-        ui.label(RichText::new("Derniers classés").color(TEXT_DIM).size(11.5));
-        courbe_rr(ui, &fiche.historique_rr);
-        ui.horizontal_wrapped(|ui| {
-            for p in &fiche.historique_rr {
-                let (texte, teinte) = if p.delta > 0 {
-                    (format!("+{}", p.delta), SPEAK)
-                } else if p.delta < 0 {
-                    (p.delta.to_string(), DANGER)
-                } else {
-                    ("±0".to_string(), TEXT_FAINT)
-                };
-                let info = format!("{} · {} · {} RR · {}", p.carte, nom_de_rang(p.tier), p.rr, il_y_a(p.date));
-                ui.label(RichText::new(texte).color(teinte).strong()).on_hover_text(info);
-            }
-        });
-    }
-
-    // Les derniers matchs, sa ligne seulement.
-    if !fiche.matchs.is_empty() {
-        ui.add_space(10.0);
-        ui.label(RichText::new("Derniers matchs").color(TEXT_DIM).size(11.5));
-        egui::Grid::new("fiche_matchs").num_columns(7).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
-            for m in &fiche.matchs {
-                let (score, teinte) = match m.gagne {
-                    Some(true) => (format!("{}-{}", m.manches.0, m.manches.1), SPEAK),
-                    Some(false) => (format!("{}-{}", m.manches.0, m.manches.1), DANGER),
-                    None => (format!("{}-{}", m.manches.0, m.manches.1), TEXT_DIM),
-                };
-                ui.label(RichText::new(il_y_a(m.date)).color(TEXT_FAINT).size(11.0));
-                ui.label(RichText::new(&m.mode).size(11.5));
-                ui.label(RichText::new(&m.carte).size(11.5));
-                ui.label(RichText::new(&m.agent).color(TEXT_DIM).size(11.5));
-                ui.label(RichText::new(format!("{}/{}/{}", m.kills, m.deaths, m.assists)).size(11.5))
-                    .on_hover_text(format!("éliminations / morts / assistances — {} % de tirs à la tête, {} points", m.tete_pct, m.score));
-                ui.label(RichText::new(score).color(teinte).strong().size(11.5));
-                let rang = if m.tier >= 3 { nom_de_rang(m.tier) } else { String::new() };
-                ui.label(RichText::new(rang).color(couleur_de_rang(m.tier)).size(11.0));
-                ui.end_row();
-            }
-        });
-    }
-    ui.add_space(8.0);
-    ui.label(RichText::new(format!("mis à jour {} · HenrikDev", il_y_a(fiche.maj))).color(TEXT_FAINT).size(10.5));
 }
 
 fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
@@ -12250,14 +11817,14 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
             f.layout_no_wrap(
                 ki_protocol::nom_de_rang(tier),
                 egui::FontId::proportional(10.0),
-                couleur_de_rang(tier),
+                graphes::couleur_de_rang(tier),
             )
         });
         let largeur = galley.size().x;
         painter.galley(
             egui::pos2(apres_nom + 1.0, name_y - galley.size().y / 2.0 + 1.0),
             galley,
-            couleur_de_rang(tier),
+            graphes::couleur_de_rang(tier),
         );
         apres_nom += largeur + 8.0;
     }
@@ -12830,7 +12397,7 @@ fn empty_state(ui: &mut egui::Ui, channel: &str) {
 // Utilitaires
 // ---------------------------------------------------------------------
 
-fn format_time(ts_millis: u64) -> String {
+pub(crate) fn format_time(ts_millis: u64) -> String {
     chrono::Local
         .timestamp_millis_opt(ts_millis as i64)
         .single()
@@ -12857,7 +12424,7 @@ fn day_key(ts_millis: u64) -> i32 {
 }
 
 /// « Aujourd'hui », « Hier », ou la date — sans dépendre de la locale.
-fn day_label(ts_millis: u64) -> String {
+pub(crate) fn day_label(ts_millis: u64) -> String {
     let stamp = chrono::Local.timestamp_millis_opt(ts_millis as i64).single();
     let Some(dt) = stamp else { return String::new() };
     let today = chrono::Local::now().date_naive();
@@ -13215,6 +12782,11 @@ impl eframe::App for KiApp {
                     self.close_account();
                 } else if self.soundboard.ouvert {
                     self.soundboard.ouvert = false;
+                } else if self.fiche.is_some() {
+                    self.fiche = None;
+                    self.valo.fermer_fiche();
+                } else if self.valo.ouvert {
+                    self.valo.ouvert = false;
                 } else if self.show_clips {
                     self.show_clips = false;
                 }
@@ -13286,6 +12858,7 @@ impl eframe::App for KiApp {
         storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
         storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
         self.soundboard.save(storage);
+        self.valo.save(storage);
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));

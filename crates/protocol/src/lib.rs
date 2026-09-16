@@ -2,6 +2,8 @@
 //! message sur le flux QUIC fiable) et format des paquets voix (datagrammes
 //! QUIC, binaire).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub type UserId = u64;
@@ -484,10 +486,20 @@ pub enum ServerMsg {
     MusiqueResultats { texte: String, pistes: Vec<Piste> },
     /// Toutes les fiches du groupe, pour la page de stats — et les
     /// prochains matchs d'esport, si le serveur les a.
+    ///
+    /// Chaque fiche est un **résumé** (voir [`FicheValorant::resume`]) qui
+    /// porte son [`BilanMembre`] ; la fiche complète ne part que par
+    /// [`ServerMsg::FicheValorant`], à la demande. Le tout tient sous
+    /// [`STATS_MAX_BYTES`].
     StatsValorant {
         fiches: Vec<FicheMembre>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         esports: Vec<MatchEsport>,
+        /// Parties commencées sur trente jours, tous membres et modes,
+        /// par `[jour UTC 0 = lundi … 6][heure 0..24]` : 168 cases, à lire
+        /// `jour * 24 + heure`. Vide si rien — ou si le serveur est d'avant.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        activite: Vec<u16>,
     },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
@@ -704,6 +716,13 @@ pub const MAX_THUMBNAIL_PX: u32 = 256;
 /// face sans avoir à s'authentifier. Dimensionnée sur le plus gros message
 /// légitime : une vignette en base64 dans son enveloppe JSON.
 pub const MAX_LINE: usize = 160 * 1024;
+
+/// Le budget du message de la page du groupe ([`ServerMsg::StatsValorant`]),
+/// sous [`MAX_LINE`] avec la marge que `history.rs` s'accorde déjà : une
+/// ligne qui dépasse ferme la connexion des deux côtés, et trente fiches
+/// pleines la rempliraient sans mal. Le serveur allège tout le monde d'un
+/// cran tant que sa ligne dépasse ce budget.
+pub const STATS_MAX_BYTES: usize = MAX_LINE - 8 * 1024;
 
 /// Longueur maximale d'un message de chat, en caractères.
 pub const MAX_CHAT_TEXT: usize = 4000;
@@ -1240,6 +1259,12 @@ pub struct JeuStatut {
 /// La fiche VALORANT d'un membre, telle que le serveur la garde d'après
 /// HenrikDev : rang courant et pic, derniers mouvements de RR, derniers
 /// matchs résumés — la ligne du membre seulement, jamais les neuf autres.
+///
+/// Depuis 0.1.40 la fiche **s'accumule** : le serveur fusionne l'ancienne
+/// et la neuve à chaque rafraîchissement (soixante matchs, cent points de
+/// RR), et les agrégats — bilan, forme, série, agents, cartes, duos — se
+/// calculent ici, une seule fois pour le serveur et le client. Une fiche
+/// d'avant se relit telle quelle : tout ce qui est nouveau a son défaut.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FicheValorant {
     pub riot_id: String,
@@ -1258,6 +1283,30 @@ pub struct FicheValorant {
     /// Dernière mise à jour, en millisecondes Unix.
     #[serde(default)]
     pub maj: u64,
+    /// Les actes joués d'après v3/mmr, du plus ancien au plus récent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saisons: Vec<StatsSaison>,
+}
+
+/// Un acte tel que v3/mmr le résume (`seasonal[]`) : combien de parties,
+/// combien gagnées, et où il a fini.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatsSaison {
+    /// « e9a2 » (season.short).
+    #[serde(default)]
+    pub saison: String,
+    /// wins
+    #[serde(default)]
+    pub victoires: u16,
+    /// games
+    #[serde(default)]
+    pub parties: u16,
+    /// end_tier.id
+    #[serde(default)]
+    pub tier_fin: u8,
+    /// end_rr
+    #[serde(default)]
+    pub rr_fin: u16,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1273,6 +1322,16 @@ pub struct RangValorant {
     /// La saison (« E9A2 »), pour le pic.
     #[serde(default)]
     pub saison: String,
+    /// Parties de placement encore à jouer (games_needed_for_rating).
+    /// Renseigné pour `rang`, laissé à 0 pour `pic`.
+    #[serde(default)]
+    pub placements_restants: u8,
+    /// Boucliers contre la descente (rank_protection_shields).
+    #[serde(default)]
+    pub boucliers: u8,
+    /// Place au classement régional (Immortel et plus) ; 0 = pas classé.
+    #[serde(default)]
+    pub classement: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1287,6 +1346,12 @@ pub struct PointRR {
     pub delta: i32,
     #[serde(default)]
     pub carte: String,
+    /// L'acte du point (« e9a2 »), pour tracer une frontière sur la courbe.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saison: String,
+    /// Descente évitée grâce à un bouclier (was_derank_protected).
+    #[serde(default)]
+    pub protege: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1312,6 +1377,536 @@ pub struct MatchResume {
     pub tier: u8,
     #[serde(default)]
     pub duree_s: u32,
+    /// L'acte (« e9a2 »), pour couper les séries et les courbes.
+    /// metadata.season.short — vide si absent.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saison: String,
+    /// Dégâts infligés et reçus sur tout le match (stats.damage.dealt /
+    /// received). 0 pour un match résumé avant 0.1.40.
+    #[serde(default)]
+    pub degats: u32,
+    #[serde(default)]
+    pub degats_recus: u32,
+    /// Tirs à la tête et tirs au total (tête + corps + jambes), pour un
+    /// pourcentage agrégé exact ; `tete_pct` reste pour les anciens clients.
+    #[serde(default)]
+    pub tetes: u16,
+    #[serde(default)]
+    pub tirs: u16,
+    /// Combien de joueurs dans sa party, lui compris (1 à 5 ; 0 = inconnu).
+    /// Un effectif, jamais une identité.
+    #[serde(default)]
+    pub party: u8,
+    /// Les autres membres du groupe dans son camp, et en face — des
+    /// `UserId`, jamais un puuid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub avec: Vec<UserId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contre: Vec<UserId>,
+    /// Ce que les manches racontent — `None` quand on ne les a pas eues
+    /// (match d'avant 0.1.40, combat à mort, JSON sans `rounds`/`kills`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manches_detail: Option<DetailManches>,
+}
+
+/// La ligne du membre manche par manche : rien des neuf autres.
+/// Tous les compteurs sont des `u8` : un match compte au plus 30 manches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DetailManches {
+    /// Manches jouées d'après `rounds[]` (recoupe `manches.0 + manches.1`).
+    #[serde(default)]
+    pub manches: u8,
+    /// Manches où il a tué, assisté, survécu, ou été échangé (KAST).
+    #[serde(default)]
+    pub kast: u8,
+    #[serde(default)]
+    pub premiers_sangs: u8,
+    #[serde(default)]
+    pub premieres_morts: u8,
+    /// Manches à 3, 4, 5 kills ou plus.
+    #[serde(default)]
+    pub triples: u8,
+    #[serde(default)]
+    pub quadruples: u8,
+    #[serde(default)]
+    pub aces: u8,
+    /// Situations 1 contre X (X ≥ 1) tentées, gagnées, et le plus gros X
+    /// gagné.
+    #[serde(default)]
+    pub clutchs_tentes: u8,
+    #[serde(default)]
+    pub clutchs: u8,
+    #[serde(default)]
+    pub meilleur_clutch: u8,
+    #[serde(default)]
+    pub poses: u8,
+    #[serde(default)]
+    pub desamorcages: u8,
+    /// Une lettre par manche dans l'ordre : `V` gagnée, `D` perdue.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deroule: String,
+}
+
+/// Des sommes sur un ensemble de matchs : elles s'additionnent, se
+/// filtrent et se relisent sans perte ; les taux se font au dernier
+/// moment, par les méthodes — qui rendent `None` plutôt que de diviser
+/// par zéro, et le client affiche « — ».
+///
+/// Un bilan se construit par [`Bilan::ajouter`], une ligne à la fois ;
+/// [`FicheValorant::bilan`] le fait sur une fenêtre et un mode. Il ne
+/// juge pas ce qu'on lui donne : c'est à l'appelant d'écarter les matchs
+/// sans manches ([`FicheValorant::a_des_manches`]) s'il ne veut pas qu'un
+/// combat à mort pèse sur les moyennes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bilan {
+    #[serde(default)]
+    pub matchs: u16,
+    #[serde(default)]
+    pub victoires: u16,
+    /// Les nuls sont ce qui reste : `matchs − victoires − defaites`.
+    #[serde(default)]
+    pub defaites: u16,
+    /// Σ (manches.0 + manches.1).
+    #[serde(default)]
+    pub manches: u16,
+    #[serde(default)]
+    pub kills: u32,
+    #[serde(default)]
+    pub deaths: u32,
+    #[serde(default)]
+    pub assists: u32,
+    #[serde(default)]
+    pub score: u32,
+    #[serde(default)]
+    pub tetes: u32,
+    #[serde(default)]
+    pub tirs: u32,
+    /// Matchs et manches des seuls matchs qui ont `degats > 0` (ADR).
+    #[serde(default)]
+    pub matchs_degats: u16,
+    #[serde(default)]
+    pub manches_degats: u16,
+    #[serde(default)]
+    pub degats: u32,
+    /// Matchs et manches des seuls matchs qui ont `manches_detail`
+    /// (KAST, premiers sangs, clutchs…).
+    #[serde(default)]
+    pub matchs_detailles: u16,
+    #[serde(default)]
+    pub manches_detaillees: u16,
+    #[serde(default)]
+    pub kast: u16,
+    #[serde(default)]
+    pub premiers_sangs: u16,
+    #[serde(default)]
+    pub premieres_morts: u16,
+    #[serde(default)]
+    pub triples: u16,
+    #[serde(default)]
+    pub quadruples: u16,
+    #[serde(default)]
+    pub aces: u16,
+    #[serde(default)]
+    pub clutchs: u16,
+    #[serde(default)]
+    pub clutchs_tentes: u16,
+    #[serde(default)]
+    pub meilleur_clutch: u8,
+    /// Σ delta des points de RR de la fenêtre.
+    #[serde(default)]
+    pub rr: i32,
+    #[serde(default)]
+    pub duree_s: u32,
+}
+
+impl Bilan {
+    /// Une ligne de plus. Tout se somme en saturant : les nombres viennent
+    /// du réseau et un compteur qui déborde ne doit jamais faire tomber
+    /// qui l'additionne.
+    pub fn ajouter(&mut self, m: &MatchResume) {
+        self.matchs = self.matchs.saturating_add(1);
+        match m.gagne {
+            Some(true) => self.victoires = self.victoires.saturating_add(1),
+            Some(false) => self.defaites = self.defaites.saturating_add(1),
+            None => {}
+        }
+        let manches = u16::from(m.manches.0) + u16::from(m.manches.1);
+        self.manches = self.manches.saturating_add(manches);
+        self.kills = self.kills.saturating_add(u32::from(m.kills));
+        self.deaths = self.deaths.saturating_add(u32::from(m.deaths));
+        self.assists = self.assists.saturating_add(u32::from(m.assists));
+        self.score = self.score.saturating_add(m.score);
+        self.tetes = self.tetes.saturating_add(u32::from(m.tetes));
+        self.tirs = self.tirs.saturating_add(u32::from(m.tirs));
+        if m.degats > 0 {
+            self.matchs_degats = self.matchs_degats.saturating_add(1);
+            self.manches_degats = self.manches_degats.saturating_add(manches);
+            self.degats = self.degats.saturating_add(m.degats);
+        }
+        if let Some(d) = &m.manches_detail {
+            self.matchs_detailles = self.matchs_detailles.saturating_add(1);
+            self.manches_detaillees = self.manches_detaillees.saturating_add(u16::from(d.manches));
+            self.kast = self.kast.saturating_add(u16::from(d.kast));
+            self.premiers_sangs = self.premiers_sangs.saturating_add(u16::from(d.premiers_sangs));
+            self.premieres_morts = self.premieres_morts.saturating_add(u16::from(d.premieres_morts));
+            self.triples = self.triples.saturating_add(u16::from(d.triples));
+            self.quadruples = self.quadruples.saturating_add(u16::from(d.quadruples));
+            self.aces = self.aces.saturating_add(u16::from(d.aces));
+            self.clutchs = self.clutchs.saturating_add(u16::from(d.clutchs));
+            self.clutchs_tentes = self.clutchs_tentes.saturating_add(u16::from(d.clutchs_tentes));
+            self.meilleur_clutch = self.meilleur_clutch.max(d.meilleur_clutch);
+        }
+        self.duree_s = self.duree_s.saturating_add(m.duree_s);
+    }
+
+    /// Un taux `numerateur / denominateur`, ou rien si le dénominateur
+    /// est nul : c'est la seule division de ce bloc.
+    fn taux(numerateur: f32, denominateur: u32) -> Option<f32> {
+        if denominateur == 0 {
+            None
+        } else {
+            Some(numerateur / denominateur as f32)
+        }
+    }
+
+    /// kills / max(deaths, 1) — `None` sans match.
+    pub fn kd(&self) -> Option<f32> {
+        if self.matchs == 0 {
+            None
+        } else {
+            Some(self.kills as f32 / self.deaths.max(1) as f32)
+        }
+    }
+
+    /// (kills + assists) / max(deaths, 1) — `None` sans match.
+    pub fn kda(&self) -> Option<f32> {
+        if self.matchs == 0 {
+            None
+        } else {
+            Some((self.kills as f32 + self.assists as f32) / self.deaths.max(1) as f32)
+        }
+    }
+
+    /// Score moyen par manche — `None` sans manche.
+    pub fn acs(&self) -> Option<f32> {
+        Self::taux(self.score as f32, u32::from(self.manches))
+    }
+
+    /// Dégâts moyens par manche, sur les seuls matchs qui les ont.
+    pub fn adr(&self) -> Option<f32> {
+        Self::taux(self.degats as f32, u32::from(self.manches_degats))
+    }
+
+    /// Part des manches avec kill, assist, survie ou échange, en pour
+    /// cent, sur les seuls matchs détaillés.
+    pub fn kast_pct(&self) -> Option<f32> {
+        Self::taux(f32::from(self.kast) * 100.0, u32::from(self.manches_detaillees))
+    }
+
+    /// Part des tirs à la tête, en pour cent — `None` sans tir.
+    pub fn tete_pct(&self) -> Option<f32> {
+        Self::taux(self.tetes as f32 * 100.0, self.tirs)
+    }
+
+    /// Victoires sur victoires + défaites, en pour cent ; les nuls ne
+    /// comptent pas. `None` sans match décidé.
+    pub fn victoires_pct(&self) -> Option<f32> {
+        let decides = u32::from(self.victoires) + u32::from(self.defaites);
+        Self::taux(f32::from(self.victoires) * 100.0, decides)
+    }
+
+    /// Premiers sangs par match détaillé.
+    pub fn fk_par_match(&self) -> Option<f32> {
+        Self::taux(f32::from(self.premiers_sangs), u32::from(self.matchs_detailles))
+    }
+
+    /// Assez de matchs pour qu'un taux veuille dire quelque chose.
+    pub fn assez(&self, n: u16) -> bool {
+        self.matchs >= n
+    }
+}
+
+/// Où le MMR caché se situe par rapport au rang affiché — deviné, jamais
+/// lu : Riot ne l'expose pas (voir [`FicheValorant::mmr_estime`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PositionMmr {
+    /// Il gagne nettement plus de RR qu'il n'en perd : le jeu le pousse
+    /// à monter.
+    AuDessus,
+    /// Gains et pertes se valent à [`SEUIL_MMR`] près.
+    #[default]
+    AuNiveau,
+    /// Il perd nettement plus qu'il ne gagne : le jeu le retient.
+    EnDessous,
+}
+
+/// L'écart, en RR par match, entre le gain moyen et la perte moyenne à
+/// partir duquel on dit le MMR « au-dessus » (ou « en dessous ») du rang
+/// plutôt qu'« au niveau ». Cinq RR : un match qui rapporte +22 et coûte
+/// −13 est clairement poussé ; +18 / −17 est à l'équilibre.
+pub const SEUIL_MMR: f32 = 5.0;
+/// Combien de points de RR récents entrent dans l'estimation : assez pour
+/// lisser un match, pas assez pour traîner un vieux MMR.
+pub const MMR_POINTS: usize = 20;
+/// Victoires et défaites qu'il faut au minimum, chacune, pour qu'une
+/// moyenne veuille dire quelque chose.
+pub const MMR_MIN_PAR_CAMP: u16 = 3;
+
+/// Le MMR caché tel qu'on le devine aux variations de RR du membre —
+/// comme le font les trackers : aucune requête, aucune donnée d'autrui.
+/// Des `f32`, mais jamais dans un message : ce n'est pas transmis, c'est
+/// recalculé par qui en a besoin (et les moyennes sont finies par
+/// construction).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EstimationMmr {
+    #[serde(default)]
+    pub position: PositionMmr,
+    /// Moyenne des `delta > 0`.
+    #[serde(default)]
+    pub gain_moyen: f32,
+    /// Moyenne des `|delta|` pour `delta < 0` — en valeur absolue.
+    #[serde(default)]
+    pub perte_moyenne: f32,
+    #[serde(default)]
+    pub victoires: u16,
+    #[serde(default)]
+    pub defaites: u16,
+    /// Les classés retenus : `victoires + defaites`.
+    #[serde(default)]
+    pub points: u16,
+}
+
+/// Le nom français du mode classé, tel que le serveur le traduit.
+const MODE_CLASSE: &str = "Compétitif";
+/// Les modes sans manches : un combat à mort n'a ni camp ni score par
+/// manche, il n'entre dans aucune moyenne.
+const MODES_SANS_MANCHES: [&str; 2] = ["Combat à mort", "Combat à mort par équipe"];
+
+impl FicheValorant {
+    /// Les matchs à manches : tout sauf « Combat à mort » et « Combat à
+    /// mort par équipe » — et tout match dont `manches == (0, 0)`, qui
+    /// n'a rien à dire sur une manche non plus.
+    pub fn a_des_manches(m: &MatchResume) -> bool {
+        !MODES_SANS_MANCHES.contains(&m.mode.as_str()) && m.manches != (0, 0)
+    }
+
+    /// Un match classé : le mode « Compétitif », rien d'autre.
+    fn est_classe(m: &MatchResume) -> bool {
+        m.mode == MODE_CLASSE
+    }
+
+    /// Les matchs de la fenêtre `[depuis, jusqu_a[` (ms Unix), dans
+    /// l'ordre de la fiche ; `classe` = « Compétitif » seul. Les combats
+    /// à mort y sont : c'est aux agrégats de les écarter.
+    pub fn matchs_dans(
+        &self,
+        depuis: u64,
+        jusqu_a: u64,
+        classe: bool,
+    ) -> impl Iterator<Item = &MatchResume> {
+        self.matchs
+            .iter()
+            .filter(move |m| m.date >= depuis && m.date < jusqu_a && (!classe || Self::est_classe(m)))
+    }
+
+    /// Les matchs à manches de la fenêtre, ceux qui pèsent sur un bilan.
+    fn matchs_comptes(
+        &self,
+        depuis: u64,
+        jusqu_a: u64,
+        classe: bool,
+    ) -> impl Iterator<Item = &MatchResume> {
+        self.matchs_dans(depuis, jusqu_a, classe).filter(|m| Self::a_des_manches(m))
+    }
+
+    /// Le bilan de la fenêtre : les matchs à manches du mode demandé, et
+    /// `rr` = Σ delta des points de RR de la fenêtre.
+    pub fn bilan(&self, depuis: u64, jusqu_a: u64, classe: bool) -> Bilan {
+        let mut b = Bilan::default();
+        for m in self.matchs_comptes(depuis, jusqu_a, classe) {
+            b.ajouter(m);
+        }
+        b.rr = self
+            .historique_rr
+            .iter()
+            .filter(|p| p.date >= depuis && p.date < jusqu_a)
+            .fold(0i32, |acc, p| acc.saturating_add(p.delta));
+        b
+    }
+
+    /// Les matchs classés du plus récent au plus ancien, quel que soit
+    /// l'ordre de la fiche.
+    fn classes_recents(&self) -> Vec<&MatchResume> {
+        let mut v: Vec<&MatchResume> =
+            self.matchs.iter().filter(|m| Self::est_classe(m) && Self::a_des_manches(m)).collect();
+        v.sort_by_key(|m| std::cmp::Reverse(m.date));
+        v
+    }
+
+    /// Les `n` derniers classés du plus récent au plus ancien : 1 victoire,
+    /// -1 défaite, 0 nul.
+    pub fn forme(&self, n: usize) -> Vec<i8> {
+        self.classes_recents()
+            .into_iter()
+            .take(n)
+            .map(|m| match m.gagne {
+                Some(true) => 1,
+                Some(false) => -1,
+                None => 0,
+            })
+            .collect()
+    }
+
+    /// +3 = trois victoires d'affilée, -2 = deux défaites ; les nuls sont
+    /// ignorés ; 0 sans classé.
+    pub fn serie(&self) -> i8 {
+        let mut serie: i8 = 0;
+        for r in self.forme(usize::MAX) {
+            if r == 0 {
+                continue;
+            }
+            if serie == 0 || (serie > 0) == (r > 0) {
+                serie = serie.saturating_add(r);
+            } else {
+                break;
+            }
+        }
+        serie
+    }
+
+    /// Le MMR caché, deviné : Riot ne le montre pas, mais il se lit dans
+    /// les RR — gagner plus qu'on ne perd, c'est un MMR au-dessus du
+    /// rang, le jeu pousse à monter ; l'inverse, en dessous. Sur les
+    /// [`MMR_POINTS`] classés les plus récents de l'acte en cours (celui
+    /// du point le plus récent ; tout si l'acte est inconnu), sans les
+    /// `delta == 0` ni les descentes protégées par un bouclier, qui
+    /// faussent la perte. `None` sans rang, pendant les placements (leurs
+    /// deltas sont énormes), ou sans [`MMR_MIN_PAR_CAMP`] victoires et
+    /// autant de défaites — les effectifs garantissent qu'on ne divise
+    /// jamais par zéro.
+    pub fn mmr_estime(&self) -> Option<EstimationMmr> {
+        if self.rang.tier < 3 || self.rang.placements_restants > 0 {
+            return None;
+        }
+        let mut points: Vec<&PointRR> = self.historique_rr.iter().collect();
+        points.sort_by_key(|p| std::cmp::Reverse(p.date));
+        let acte = points.first().map(|p| p.saison.as_str()).unwrap_or_default();
+        let (mut gains, mut pertes) = (0f32, 0f32);
+        let (mut victoires, mut defaites) = (0u16, 0u16);
+        let retenus = points
+            .iter()
+            .filter(|p| (acte.is_empty() || p.saison == acte) && p.delta != 0 && !p.protege)
+            .take(MMR_POINTS);
+        for p in retenus {
+            if p.delta > 0 {
+                gains += p.delta as f32;
+                victoires = victoires.saturating_add(1);
+            } else {
+                pertes += p.delta.unsigned_abs() as f32;
+                defaites = defaites.saturating_add(1);
+            }
+        }
+        if victoires < MMR_MIN_PAR_CAMP || defaites < MMR_MIN_PAR_CAMP {
+            return None;
+        }
+        let gain_moyen = gains / f32::from(victoires);
+        let perte_moyenne = pertes / f32::from(defaites);
+        let diff = gain_moyen - perte_moyenne;
+        let position = if diff >= SEUIL_MMR {
+            PositionMmr::AuDessus
+        } else if diff <= -SEUIL_MMR {
+            PositionMmr::EnDessous
+        } else {
+            PositionMmr::AuNiveau
+        };
+        Some(EstimationMmr {
+            position,
+            gain_moyen,
+            perte_moyenne,
+            victoires,
+            defaites,
+            points: victoires.saturating_add(defaites),
+        })
+    }
+
+    /// (nom, bilan) par la clé donnée, sur la fenêtre, trié par matchs
+    /// décroissants — et par nom à égalité, pour que deux appels rendent
+    /// le même ordre.
+    fn ventiler(
+        &self,
+        depuis: u64,
+        jusqu_a: u64,
+        classe: bool,
+        cle: fn(&MatchResume) -> &str,
+    ) -> Vec<(String, Bilan)> {
+        let mut par: BTreeMap<&str, Bilan> = BTreeMap::new();
+        for m in self.matchs_comptes(depuis, jusqu_a, classe) {
+            par.entry(cle(m)).or_default().ajouter(m);
+        }
+        let mut v: Vec<(String, Bilan)> = par.into_iter().map(|(k, b)| (k.to_string(), b)).collect();
+        v.sort_by_key(|(_, b)| std::cmp::Reverse(b.matchs));
+        v
+    }
+
+    /// (agent, bilan) sur la fenêtre, trié par matchs décroissants.
+    pub fn par_agent(&self, depuis: u64, jusqu_a: u64, classe: bool) -> Vec<(String, Bilan)> {
+        self.ventiler(depuis, jusqu_a, classe, |m| m.agent.as_str())
+    }
+
+    /// (carte, bilan) sur la fenêtre, trié par matchs décroissants.
+    pub fn par_carte(&self, depuis: u64, jusqu_a: u64, classe: bool) -> Vec<(String, Bilan)> {
+        self.ventiler(depuis, jusqu_a, classe, |m| m.carte.as_str())
+    }
+
+    /// (membre, parties ensemble, victoires ensemble) d'après `avec`, sur
+    /// la fenêtre et tous les modes à manches, trié par parties puis
+    /// victoires décroissantes.
+    pub fn duos(&self, depuis: u64, jusqu_a: u64) -> Vec<(UserId, u16, u16)> {
+        let mut par: BTreeMap<UserId, (u16, u16)> = BTreeMap::new();
+        for m in self.matchs_comptes(depuis, jusqu_a, false) {
+            let gagne = u16::from(m.gagne == Some(true));
+            // Un même membre deux fois dans `avec` — ça vient du réseau —
+            // n'est qu'une partie ensemble.
+            let mut vus = std::collections::BTreeSet::new();
+            for id in m.avec.iter().filter(|id| vus.insert(**id)) {
+                let e = par.entry(*id).or_default();
+                e.0 = e.0.saturating_add(1);
+                e.1 = e.1.saturating_add(gagne);
+            }
+        }
+        let mut v: Vec<(UserId, u16, u16)> = par.into_iter().map(|(id, (p, g))| (id, p, g)).collect();
+        v.sort_by_key(|&(_, p, g)| std::cmp::Reverse((p, g)));
+        v
+    }
+
+    /// La fiche allégée pour la page du groupe : les `n_matchs` matchs les
+    /// plus récents sans `manches_detail`, les `n_points` points les plus
+    /// récents, `saisons` vidées — le reste tel quel. Les `id` restent :
+    /// ils servent au regroupement « ensemble » et au lien ΔRR.
+    pub fn resume(&self, n_matchs: usize, n_points: usize) -> FicheValorant {
+        let mut matchs: Vec<&MatchResume> = self.matchs.iter().collect();
+        matchs.sort_by_key(|m| std::cmp::Reverse(m.date));
+        let matchs = matchs
+            .into_iter()
+            .take(n_matchs)
+            .map(|m| MatchResume { manches_detail: None, ..m.clone() })
+            .collect();
+        let mut points: Vec<&PointRR> = self.historique_rr.iter().collect();
+        points.sort_by_key(|p| std::cmp::Reverse(p.date));
+        let historique_rr = points.into_iter().take(n_points).cloned().collect();
+        FicheValorant {
+            riot_id: self.riot_id.clone(),
+            region: self.region.clone(),
+            plateforme: self.plateforme.clone(),
+            niveau: self.niveau,
+            rang: self.rang.clone(),
+            pic: self.pic.clone(),
+            historique_rr,
+            matchs,
+            maj: self.maj,
+            saisons: Vec::new(),
+        }
+    }
 }
 
 /// La fiche d'un membre avec son identité, pour la page de stats du
@@ -1321,6 +1916,35 @@ pub struct FicheMembre {
     pub user_id: UserId,
     pub username: String,
     pub fiche: FicheValorant,
+    /// Le bilan que le serveur calcule à l'envoi ; `None` d'un serveur
+    /// d'avant, et le client recalcule sur ce qu'il a.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bilan: Option<BilanMembre>,
+}
+
+/// Ce que la page du groupe reçoit d'un membre sans porter ses soixante
+/// matchs : calculé à l'envoi, jamais stocké. Classé seulement.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BilanMembre {
+    #[serde(default)]
+    pub sept_jours: Bilan,
+    #[serde(default)]
+    pub trente_jours: Bilan,
+    #[serde(default)]
+    pub serie: i8,
+    /// Les dix derniers classés, du plus récent : 1, -1, 0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forme: Vec<i8>,
+    /// (agent, parties, victoires) — les trois plus joués sur 30 j.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<(String, u16, u16)>,
+    /// (carte, parties, victoires) — cinq au plus sur 30 j.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cartes: Vec<(String, u16, u16)>,
+    /// (membre, parties ensemble, victoires ensemble) sur 30 j, cinq au
+    /// plus.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duos: Vec<(UserId, u16, u16)>,
 }
 
 /// Un match d'esport à venir ou en cours, d'après HenrikDev — pour la
@@ -2277,6 +2901,460 @@ mod tests {
         let f = FicheValorant { riot_id: "Redik#6162".into(), ..Default::default() };
         let relu: FicheValorant = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
         assert_eq!(relu, f);
+        // Un acte et un bilan de membre font l'aller-retour aussi.
+        let acte = StatsSaison { saison: "e9a2".into(), victoires: 14, parties: 25, tier_fin: 16, rr_fin: 57 };
+        let relu: StatsSaison = serde_json::from_str(&serde_json::to_string(&acte).unwrap()).unwrap();
+        assert_eq!(relu, acte);
+        let bilan = BilanMembre {
+            sept_jours: Bilan { matchs: 3, victoires: 2, defaites: 1, rr: 41, ..Default::default() },
+            trente_jours: Bilan { matchs: 12, victoires: 7, defaites: 5, ..Default::default() },
+            serie: -2,
+            forme: vec![-1, -1, 1, 0],
+            agents: vec![("Jett".into(), 8, 5), ("Reyna".into(), 4, 2)],
+            cartes: vec![("Ascent".into(), 6, 4)],
+            duos: vec![(7, 5, 4)],
+        };
+        let relu: BilanMembre = serde_json::from_str(&serde_json::to_string(&bilan).unwrap()).unwrap();
+        assert_eq!(relu, bilan);
+    }
+
+    /// Un match classé, gagné, de treize manches à neuf, sans détail :
+    /// le socle des tests d'agrégats.
+    fn match_de_test(id: &str, date: u64, mode: &str, gagne: Option<bool>) -> MatchResume {
+        MatchResume {
+            id: id.into(),
+            date,
+            carte: "Ascent".into(),
+            mode: mode.into(),
+            agent: "Jett".into(),
+            kills: 20,
+            deaths: 10,
+            assists: 4,
+            score: 5_500,
+            tete_pct: 25,
+            manches: if gagne == Some(false) { (9, 13) } else { (13, 9) },
+            gagne,
+            tier: 15,
+            duree_s: 2_400,
+            tetes: 25,
+            tirs: 100,
+            ..Default::default()
+        }
+    }
+
+    /// Une fiche écrite par un serveur 0.1.39 — pas un champ de plus que
+    /// ce qu'il connaissait — se relit avec les défauts ; une fiche où
+    /// tout est rempli fait l'aller-retour à l'identique ; et rien de neuf
+    /// n'alourdit un match ou une fiche de membre qui n'en a pas.
+    #[test]
+    fn une_fiche_d_avant_se_relit_et_une_fiche_enrichie_fait_l_aller_retour() {
+        let ancienne = r#"{"riot_id":"Redik#6162","region":"eu","plateforme":"pc","niveau":212,
+            "rang":{"tier":15,"rr":40,"delta":18,"elo":1240,"saison":""},
+            "historique_rr":[{"match_id":"m1","date":1700000000000,"tier":15,"rr":40,"delta":18,"carte":"Ascent"}],
+            "matchs":[{"id":"m1","date":1700000000000,"carte":"Ascent","mode":"Compétitif","agent":"Jett",
+                "kills":20,"deaths":10,"assists":3,"score":4000,"tete_pct":20,"manches":[13,9],"gagne":true,
+                "tier":15,"duree_s":2400}],
+            "maj":1700000001000}"#;
+        let f: FicheValorant = serde_json::from_str(ancienne).unwrap();
+        assert_eq!(f.riot_id, "Redik#6162");
+        assert_eq!(f.matchs.len(), 1);
+        assert_eq!(f.historique_rr.len(), 1);
+        assert!(f.matchs[0].manches_detail.is_none());
+        assert!(f.matchs[0].avec.is_empty() && f.matchs[0].contre.is_empty());
+        assert_eq!(f.matchs[0].party, 0);
+        assert_eq!(f.matchs[0].degats, 0);
+        assert!(f.matchs[0].saison.is_empty());
+        assert!(f.saisons.is_empty());
+        assert_eq!(f.rang.boucliers, 0);
+        assert_eq!(f.rang.placements_restants, 0);
+        assert_eq!(f.rang.classement, 0);
+        assert!(!f.historique_rr[0].protege);
+        assert!(f.historique_rr[0].saison.is_empty());
+        // Et elle vaut ce qu'elle valait : un match gagné, 18 RR.
+        assert_eq!(f.bilan(0, u64::MAX, true).victoires, 1);
+        assert_eq!(f.bilan(0, u64::MAX, true).rr, 18);
+
+        let detail = DetailManches {
+            manches: 22,
+            kast: 17,
+            premiers_sangs: 3,
+            premieres_morts: 2,
+            triples: 2,
+            quadruples: 1,
+            aces: 0,
+            clutchs_tentes: 2,
+            clutchs: 1,
+            meilleur_clutch: 2,
+            poses: 3,
+            desamorcages: 1,
+            deroule: "VVDVVDDVVVVDVDDVVDVVVD".into(),
+        };
+        let pleine = FicheValorant {
+            riot_id: "Redik#6162".into(),
+            region: "eu".into(),
+            plateforme: "pc".into(),
+            niveau: 212,
+            rang: RangValorant {
+                tier: 16,
+                rr: 57,
+                delta: 18,
+                elo: 1357,
+                saison: "e9a2".into(),
+                placements_restants: 0,
+                boucliers: 2,
+                classement: 0,
+            },
+            pic: Some(RangValorant { tier: 18, rr: 12, saison: "e9a1".into(), ..Default::default() }),
+            historique_rr: vec![PointRR {
+                match_id: "m1".into(),
+                date: 1_700_000_000_000,
+                tier: 16,
+                rr: 57,
+                delta: 18,
+                carte: "Ascent".into(),
+                saison: "e9a2".into(),
+                protege: true,
+            }],
+            matchs: vec![MatchResume {
+                saison: "e9a2".into(),
+                degats: 4_212,
+                degats_recus: 3_980,
+                party: 3,
+                avec: vec![2, 3],
+                contre: vec![4],
+                manches_detail: Some(detail),
+                ..match_de_test("m1", 1_700_000_000_000, "Compétitif", Some(true))
+            }],
+            maj: 1_700_000_001_000,
+            saisons: vec![StatsSaison {
+                saison: "e9a2".into(),
+                victoires: 14,
+                parties: 25,
+                tier_fin: 16,
+                rr_fin: 57,
+            }],
+        };
+        let json = serde_json::to_string(&pleine).unwrap();
+        let relu: FicheValorant = serde_json::from_str(&json).unwrap();
+        assert_eq!(relu, pleine);
+
+        let nu = serde_json::to_string(&MatchResume::default()).unwrap();
+        for champ in ["manches_detail", "avec", "contre", "saison"] {
+            assert!(!nu.contains(champ), "un match sans {champ} ne l'écrit pas : {nu}");
+        }
+        let membre = serde_json::to_string(&FicheMembre::default()).unwrap();
+        assert!(!membre.contains("bilan"), "une fiche de membre sans bilan ne l'écrit pas : {membre}");
+        let stats = serde_json::to_string(&ServerMsg::StatsValorant {
+            fiches: vec![],
+            esports: vec![],
+            activite: vec![],
+        })
+        .unwrap();
+        assert!(!stats.contains("activite"), "pas d'activité, pas de champ : {stats}");
+    }
+
+    /// Le bilan ne prend que la fenêtre et le mode demandés ; les nuls ne
+    /// sont ni victoire ni défaite ; un combat à mort n'entre jamais ; et
+    /// sans dégâts connus, l'ADR est « — », pas 0.
+    #[test]
+    fn le_bilan_ne_compte_que_la_fenetre_et_le_mode() {
+        let jour = 86_400_000u64;
+        let maintenant = 1_800_000_000_000u64;
+        let (depuis, jusqu_a) = (maintenant - 7 * jour, maintenant);
+        let f = FicheValorant {
+            matchs: vec![
+                match_de_test("classe", maintenant - jour, "Compétitif", Some(true)),
+                match_de_test("nul", maintenant - 2 * jour, "Non classé", None),
+                match_de_test("dm", maintenant - 3 * jour, "Combat à mort", Some(true)),
+                match_de_test("vieux", maintenant - 8 * jour, "Compétitif", Some(false)),
+            ],
+            historique_rr: vec![
+                PointRR { match_id: "classe".into(), date: maintenant - jour, delta: 18, ..Default::default() },
+                PointRR { match_id: "vieux".into(), date: maintenant - 8 * jour, delta: -12, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let classe = f.bilan(depuis, jusqu_a, true);
+        assert_eq!((classe.matchs, classe.victoires, classe.defaites), (1, 1, 0));
+        assert_eq!(classe.rr, 18, "seul le point de la fenêtre compte");
+        assert_eq!(classe.manches, 22);
+        assert_eq!(classe.kills, 20);
+        assert_eq!(classe.kd(), Some(2.0));
+        assert_eq!(classe.acs(), Some(250.0));
+        assert_eq!(classe.tete_pct(), Some(25.0));
+        assert_eq!(classe.victoires_pct(), Some(100.0));
+        assert_eq!(classe.adr(), None, "pas de dégâts connus : pas d'ADR");
+        assert_eq!(classe.kast_pct(), None, "pas de détail : pas de KAST");
+        assert_eq!(classe.fk_par_match(), None);
+        assert_eq!(classe.duree_s, 2_400);
+
+        let tous = f.bilan(depuis, jusqu_a, false);
+        assert_eq!(tous.matchs, 2, "le nul entre, le combat à mort jamais");
+        assert_eq!((tous.victoires, tous.defaites), (1, 0));
+        assert_eq!(tous.victoires_pct(), Some(100.0), "un nul ne pèse pas sur le taux");
+        assert_eq!(tous.rr, 18);
+
+        // Toute la fiche : le vieux match aussi, et son -12.
+        let tout = f.bilan(0, u64::MAX, true);
+        assert_eq!((tout.matchs, tout.victoires, tout.defaites), (2, 1, 1));
+        assert_eq!(tout.rr, 6);
+        assert_eq!(tout.victoires_pct(), Some(50.0));
+        assert!(tout.assez(2) && !tout.assez(3));
+
+        // Un match avec dégâts et détail nourrit l'ADR et le KAST, sur ses
+        // seules manches.
+        let mut b = tout.clone();
+        b.ajouter(&MatchResume {
+            degats: 3_300,
+            manches_detail: Some(DetailManches {
+                manches: 22,
+                kast: 11,
+                premiers_sangs: 4,
+                meilleur_clutch: 3,
+                ..Default::default()
+            }),
+            ..match_de_test("riche", maintenant, "Compétitif", Some(true))
+        });
+        assert_eq!(b.matchs, 3);
+        assert_eq!((b.matchs_degats, b.manches_degats), (1, 22));
+        assert_eq!(b.adr(), Some(150.0));
+        assert_eq!(b.kast_pct(), Some(50.0));
+        assert_eq!(b.fk_par_match(), Some(4.0));
+        assert_eq!(b.meilleur_clutch, 3);
+        // `matchs_dans` rend la fenêtre entière, combat à mort compris :
+        // c'est la table, pas la moyenne.
+        let ids: Vec<&str> = f.matchs_dans(depuis, jusqu_a, false).map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["classe", "nul", "dm"]);
+        assert!(!FicheValorant::a_des_manches(&f.matchs[2]));
+        assert!(!FicheValorant::a_des_manches(&MatchResume::default()), "sans manche du tout non plus");
+    }
+
+    /// Un bilan vide n'a pas de taux : toutes les méthodes rendent `None`,
+    /// et aucune ne divise par zéro — même avec des kills sans mort.
+    #[test]
+    fn les_taux_ne_divisent_jamais_par_zero() {
+        let vide = Bilan::default();
+        assert_eq!(vide.kd(), None);
+        assert_eq!(vide.kda(), None);
+        assert_eq!(vide.acs(), None);
+        assert_eq!(vide.adr(), None);
+        assert_eq!(vide.kast_pct(), None);
+        assert_eq!(vide.tete_pct(), None);
+        assert_eq!(vide.victoires_pct(), None);
+        assert_eq!(vide.fk_par_match(), None);
+        assert!(!vide.assez(1) && vide.assez(0));
+        // Un match sans mort : le K/D se calcule sur une mort, pas sur zéro.
+        let mut b = Bilan::default();
+        b.ajouter(&MatchResume { kills: 10, deaths: 0, assists: 2, ..match_de_test("m", 1, "Compétitif", None) });
+        assert_eq!(b.kd(), Some(10.0));
+        assert_eq!(b.kda(), Some(12.0));
+        // Des compteurs déjà au plafond n'explosent pas non plus.
+        let mut plein = Bilan { matchs: u16::MAX, kills: u32::MAX, meilleur_clutch: 5, ..Default::default() };
+        plein.ajouter(&match_de_test("m", 1, "Compétitif", Some(true)));
+        assert_eq!((plein.matchs, plein.kills, plein.meilleur_clutch), (u16::MAX, u32::MAX, 5));
+    }
+
+    /// La forme se lit du plus récent au plus ancien, quel que soit
+    /// l'ordre de la fiche ; la série compte les résultats d'affilée en
+    /// sautant les nuls ; sans classé, rien.
+    #[test]
+    fn la_forme_et_la_serie_se_lisent_du_plus_recent() {
+        // Rangés du plus ancien au plus récent : V, D, V, V — soit, du
+        // plus récent, V V D V.
+        let mut f = FicheValorant {
+            matchs: vec![
+                match_de_test("a", 1_000, "Compétitif", Some(true)),
+                match_de_test("b", 2_000, "Compétitif", Some(false)),
+                match_de_test("c", 3_000, "Compétitif", Some(true)),
+                match_de_test("d", 4_000, "Compétitif", Some(true)),
+                // Une partie rapide gagnée entre-temps ne compte pas.
+                match_de_test("e", 3_500, "Partie rapide", Some(true)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(f.forme(10), [1, 1, -1, 1]);
+        assert_eq!(f.forme(2), [1, 1]);
+        assert_eq!(f.serie(), 2);
+        // Un nul tout frais s'ignore : la série tient.
+        f.matchs.push(match_de_test("nul", 5_000, "Compétitif", None));
+        assert_eq!(f.forme(10), [0, 1, 1, -1, 1]);
+        assert_eq!(f.serie(), 2);
+        // Deux défaites par-dessus : la série s'inverse.
+        f.matchs.push(match_de_test("f", 6_000, "Compétitif", Some(false)));
+        f.matchs.push(match_de_test("g", 7_000, "Compétitif", Some(false)));
+        assert_eq!(f.serie(), -2);
+        // Sans aucun classé : rien à lire.
+        let sans = FicheValorant {
+            matchs: vec![match_de_test("x", 1, "Non classé", Some(true))],
+            ..Default::default()
+        };
+        assert!(sans.forme(10).is_empty());
+        assert_eq!(sans.serie(), 0);
+        assert_eq!(FicheValorant::default().serie(), 0);
+    }
+
+    /// Le MMR caché se devine aux variations de RR : gagner nettement
+    /// plus qu'on ne perd, c'est au-dessus du rang ; l'inverse, en
+    /// dessous ; sinon au niveau. Sans trois victoires et trois défaites,
+    /// sans rang ou en placements, rien ; un point protégé, un delta nul
+    /// ou un acte précédent ne comptent pas ; au-delà de vingt, seuls les
+    /// plus récents pèsent.
+    #[test]
+    fn le_mmr_cache_se_devine_aux_variations_de_rr() {
+        // Le point `i` est d'autant plus ancien que `i` est grand.
+        let point = |i: u64, delta: i32, saison: &str| PointRR {
+            match_id: format!("m{i}"),
+            date: 10_000 - i,
+            delta,
+            saison: saison.into(),
+            ..Default::default()
+        };
+        let fiche = |deltas: &[i32]| FicheValorant {
+            rang: RangValorant { tier: 16, rr: 57, ..Default::default() },
+            historique_rr: deltas.iter().enumerate().map(|(i, d)| point(i as u64, *d, "e9a2")).collect(),
+            ..Default::default()
+        };
+        // (1) Il gagne bien plus qu'il ne perd : le jeu le pousse.
+        let e = fiche(&[22, -12, 24, -14, 21, -13]).mmr_estime().expect("assez de classés");
+        assert_eq!(e.position, PositionMmr::AuDessus);
+        assert!((e.gain_moyen - 22.333).abs() < 0.01, "gain {}", e.gain_moyen);
+        assert!((e.perte_moyenne - 13.0).abs() < 0.01, "perte {}", e.perte_moyenne);
+        assert_eq!((e.victoires, e.defaites, e.points), (3, 3, 6));
+        // (2) L'inverse : le jeu le retient.
+        let e = fiche(&[12, -21, 11, -22, 13, -20]).mmr_estime().unwrap();
+        assert_eq!(e.position, PositionMmr::EnDessous);
+        // (3) +18 / −17 : à l'équilibre.
+        let e = fiche(&[18, -17, 18, -17, 18, -17]).mmr_estime().unwrap();
+        assert_eq!(e.position, PositionMmr::AuNiveau);
+        // (4) Deux victoires seulement : pas assez.
+        assert_eq!(fiche(&[22, -12, -14, 24, -13]).mmr_estime(), None);
+        // (5) Une descente protégée et un delta nul ne pèsent pas.
+        let mut f = fiche(&[22, -12, 24, -14, 21, -13]);
+        f.historique_rr.push(PointRR { protege: true, ..point(50, -60, "e9a2") });
+        f.historique_rr.push(point(51, 0, "e9a2"));
+        let e = f.mmr_estime().unwrap();
+        assert!((e.perte_moyenne - 13.0).abs() < 0.01, "la descente protégée ne pèse pas");
+        assert_eq!(e.points, 6);
+        // (6) Un point de l'acte précédent est écarté quand le plus
+        // récent a une saison — mais tout compte si elle est inconnue.
+        let mut f = fiche(&[22, -12, 24, -14, 21, -13]);
+        f.historique_rr.push(point(60, 80, "e9a1"));
+        let e = f.mmr_estime().unwrap();
+        assert!((e.gain_moyen - 22.333).abs() < 0.01, "l'acte d'avant ne compte pas");
+        for p in &mut f.historique_rr {
+            p.saison.clear();
+        }
+        let e = f.mmr_estime().unwrap();
+        assert_eq!(e.victoires, 4, "sans acte connu, tout compte");
+        // (7) Sans rang, ou en placements : rien à deviner.
+        let mut f = fiche(&[22, -12, 24, -14, 21, -13]);
+        f.rang.tier = 0;
+        assert_eq!(f.mmr_estime(), None);
+        f.rang.tier = 16;
+        f.rang.placements_restants = 2;
+        assert_eq!(f.mmr_estime(), None);
+        // (8) Plus de vingt points : seuls les vingt plus récents comptent.
+        let mut deltas: Vec<i32> = (0..20).map(|i| if i % 2 == 0 { 20 } else { -10 }).collect();
+        deltas.extend(std::iter::repeat_n(-50, 10));
+        let e = fiche(&deltas).mmr_estime().unwrap();
+        assert_eq!((e.victoires, e.defaites, e.points), (10, 10, 20));
+        assert!((e.gain_moyen - 20.0).abs() < 0.01);
+        assert!((e.perte_moyenne - 10.0).abs() < 0.01, "les −50 anciens ne pèsent pas");
+        assert_eq!(e.position, PositionMmr::AuDessus);
+        // Une estimation se sérialise et se relit telle quelle.
+        let relu: EstimationMmr = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(relu, e);
+    }
+
+    /// Agents, cartes et duos se ventilent sur la fenêtre, triés par
+    /// parties ; les victoires ensemble sont celles des matchs où l'on
+    /// était du même côté.
+    #[test]
+    fn les_agents_les_cartes_et_les_duos_se_ventilent() {
+        let f = FicheValorant {
+            matchs: vec![
+                MatchResume { avec: vec![2, 3], ..match_de_test("a", 1_000, "Compétitif", Some(true)) },
+                MatchResume {
+                    agent: "Reyna".into(),
+                    carte: "Bind".into(),
+                    avec: vec![2],
+                    ..match_de_test("b", 2_000, "Compétitif", Some(false))
+                },
+                // Le 2 en double : une seule partie ensemble quand même.
+                MatchResume { avec: vec![2, 2], contre: vec![3], ..match_de_test("c", 3_000, "Compétitif", Some(true)) },
+                // Hors fenêtre : ne pèse nulle part.
+                MatchResume { agent: "Sage".into(), avec: vec![9], ..match_de_test("z", 9_000, "Compétitif", Some(true)) },
+                // Un combat à mort ne ventile rien, même « avec » quelqu'un.
+                MatchResume { avec: vec![5], ..match_de_test("dm", 2_500, "Combat à mort", Some(true)) },
+            ],
+            ..Default::default()
+        };
+        let agents = f.par_agent(0, 5_000, true);
+        let noms: Vec<(&str, u16, u16)> =
+            agents.iter().map(|(n, b)| (n.as_str(), b.matchs, b.victoires)).collect();
+        assert_eq!(noms, [("Jett", 2, 2), ("Reyna", 1, 0)]);
+        let cartes = f.par_carte(0, 5_000, true);
+        let noms: Vec<(&str, u16, u16)> =
+            cartes.iter().map(|(n, b)| (n.as_str(), b.matchs, b.victoires)).collect();
+        assert_eq!(noms, [("Ascent", 2, 2), ("Bind", 1, 0)]);
+        assert_eq!(cartes[1].1.victoires_pct(), Some(0.0));
+        assert_eq!(f.duos(0, 5_000), [(2, 3, 2), (3, 1, 1)]);
+        assert!(f.duos(6_000, 8_000).is_empty());
+        // À égalité de parties, l'ordre est celui des noms : stable d'un
+        // envoi à l'autre.
+        let egaux = FicheValorant {
+            matchs: vec![
+                MatchResume { agent: "Sova".into(), ..match_de_test("a", 1, "Compétitif", Some(true)) },
+                MatchResume { agent: "Brimstone".into(), ..match_de_test("b", 2, "Compétitif", Some(true)) },
+            ],
+            ..Default::default()
+        };
+        let noms: Vec<String> = egaux.par_agent(0, 10, true).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(noms, ["Brimstone", "Sova"]);
+    }
+
+    /// Le résumé garde les matchs et les points les plus récents, sans le
+    /// détail des manches ni les actes — et tout le reste.
+    #[test]
+    fn le_resume_allege_la_fiche() {
+        let detail = DetailManches { manches: 22, kast: 15, deroule: "VD".into(), ..Default::default() };
+        let mut f = FicheValorant {
+            riot_id: "Redik#6162".into(),
+            niveau: 212,
+            rang: RangValorant { tier: 16, rr: 57, boucliers: 1, ..Default::default() },
+            pic: Some(RangValorant { tier: 18, ..Default::default() }),
+            saisons: vec![StatsSaison { saison: "e9a2".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        // Du plus ancien au plus récent, pour vérifier qu'on trie.
+        for i in 0..60u64 {
+            f.matchs.push(MatchResume {
+                manches_detail: Some(detail.clone()),
+                avec: vec![2],
+                ..match_de_test(&format!("m{i}"), 1_000 + i, "Compétitif", Some(true))
+            });
+        }
+        for i in 0..100u64 {
+            f.historique_rr.push(PointRR { match_id: format!("m{i}"), date: 1_000 + i, ..Default::default() });
+        }
+        let r = f.resume(5, 10);
+        assert_eq!(r.matchs.len(), 5);
+        assert_eq!(r.historique_rr.len(), 10);
+        let ids: Vec<&str> = r.matchs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["m59", "m58", "m57", "m56", "m55"]);
+        assert!(r.matchs.iter().all(|m| m.manches_detail.is_none()));
+        assert!(r.matchs.iter().all(|m| m.avec == [2]), "les co-membres restent");
+        assert_eq!(r.historique_rr[0].match_id, "m99");
+        assert_eq!(r.historique_rr[9].match_id, "m90");
+        assert!(r.saisons.is_empty());
+        assert_eq!(r.riot_id, "Redik#6162");
+        assert_eq!(r.rang, f.rang);
+        assert_eq!(r.pic, f.pic);
+        assert_eq!(r.niveau, 212);
+        // Une fiche plus courte que la demande rend ce qu'elle a.
+        let petite = FicheValorant { matchs: f.matchs[..2].to_vec(), ..Default::default() };
+        assert_eq!(petite.resume(5, 10).matchs.len(), 2);
+        assert!(FicheValorant::default().resume(5, 10).matchs.is_empty());
     }
 
     /// Supprimer les messages des autres est une autorité : jamais pour

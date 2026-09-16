@@ -1642,29 +1642,35 @@ fn handle_msg(
             }
         }
         ClientMsg::StatsValorant => {
-            // Les fiches du cache, avec le pseudo de chacun : rien ne part
-            // vers HenrikDev pour ouvrir la page.
+            // Les fiches du cache, résumées et avec leur bilan, le pseudo
+            // de chacun en tête : rien ne part vers HenrikDev pour ouvrir
+            // la page. `message_stats` choisit combien de matchs et de
+            // points par membre pour que la ligne tienne sous le budget.
             let pseudos: std::collections::HashMap<_, _> = state
                 .accounts
                 .list(&state.roles)
                 .into_iter()
                 .map(|a| (a.user_id, a.username))
                 .collect();
-            let fiches = state
-                .valorant
-                .toutes()
-                .into_iter()
-                .filter_map(|(user_id, fiche)| {
-                    let username = pseudos.get(&user_id)?.clone();
-                    Some(ki_protocol::FicheMembre {
-                        user_id,
-                        username,
-                        fiche,
+            let resumes = |n_matchs: usize, n_points: usize| {
+                state
+                    .valorant
+                    .resumes(n_matchs, n_points)
+                    .into_iter()
+                    .filter_map(|(user_id, fiche, bilan)| {
+                        let username = pseudos.get(&user_id)?.clone();
+                        Some(ki_protocol::FicheMembre {
+                            user_id,
+                            username,
+                            fiche,
+                            bilan: Some(bilan),
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
             let esports = state.valorant.esports();
-            let _ = tx.send(ServerMsg::StatsValorant { fiches, esports });
+            let activite = state.valorant.activite();
+            let _ = tx.send(crate::valorant::message_stats(resumes, esports, activite));
         }
         ClientMsg::History { limit } => {
             let Some(channel) = current_channel(state, user_id) else {

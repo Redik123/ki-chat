@@ -70,7 +70,7 @@ personnel, les classements de communauté, avec accord de chacun.
           │                                                    │
   Riot ID lié (opt-in) ───────────────────────────────────────>│ data/valorant/comptes.json
                                                                │
-                              HenrikDev (clé du groupe, 30/min)│ cache data/valorant/<id>.json
+                              HenrikDev (clé du groupe, 30/min)│ cache data/valorant/fiches.json
                                                                ▼
                                    fiche joueur, classement, fin de partie, icônes (valorant-api.com)
 ```
@@ -100,24 +100,31 @@ file d'attente, et des rythmes bornés :
 
 | Quoi | Quand | Coût |
 | :--- | :--- | :--- |
-| Lier un compte | à la demande | 1 (compte) + 1 (MMR) |
-| Rang et RR d'un membre | toutes les 30 min s'il est connecté, sinon jamais | 1 |
-| Fin de partie détectée (présence INGAME → MENUS) | ~2 min après | 1 (historique) + 1 (détails) |
-| Ouverture d'une fiche | jamais : servie par le cache | 0 |
-| Classement du groupe | dérivé du cache | 0 |
+| Lier un compte | à la demande, une fois par membre | 1 (compte) + 3 (la fiche : `v3/mmr`, `v2/mmr-history`, `v4/matches?size=5`) + 2 (rattrapage : `v1/stored-matches?size=60`, `v2/stored-mmr-history?size=100`) = 6 |
+| Rafraîchir la fiche d'un membre | toutes les 30 min s'il est connecté, sinon jamais | 3 (`v3/mmr`, `v2/mmr-history`, `v4/matches?size=5`) |
+| Fin de partie détectée (présence INGAME → MENUS) | 75 s après, jusqu'à trois fois | 3 (le même rafraîchissement) |
+| Ouverture de la page du groupe ou d'une fiche | jamais : servies par le cache | 0 |
+| Calendrier esport | toutes les heures | 1 (jusqu'à 7 si la source officielle tombe et que VLR prend le relais) |
 
-Trente membres tous connectés en même temps : une requête par minute en
-régime établi, quelques-unes par partie finie. Très en dessous.
+Trente membres tous connectés en même temps : trois requêtes par minute en
+régime établi, trois par partie finie. Très en dessous des vingt du seau.
+Le rattrapage à la liaison est le seul appel aux archives de HenrikDev :
+jamais au rafraîchissement, où la fiche accumule d'elle-même.
 
 ### Stockage (`data/valorant/`)
 
-- `comptes.json` — liaisons : id ki-chat, Riot ID, PUUID, région, date,
-  drapeaux d'opt-in. Écriture atomique (renommage), comme `users.json`.
-- `<id>.json` par membre lié — rang et RR courants, historique de RR, les
-  50 derniers matchs résumés (date, carte, mode, agent, K/D/A, score,
-  victoire, variation de RR), horodatages de fraîcheur.
-- Pas de base de données : quelques centaines de kilo-octets à trente ;
-  redb le jour où l'on voudra des années de statistiques.
+- `comptes.json` — liaisons : id ki-chat, Riot ID, PUUID, région,
+  plateforme, date. Écriture atomique (renommage), comme `users.json`.
+- `fiches.json` — toutes les fiches dans un seul fichier : rang et RR
+  courants, pic, actes joués, et depuis 0.1.40 **soixante matchs résumés
+  et cent points de RR par membre**, fusionnés à chaque rafraîchissement
+  (`MATCHS_GARDES`, `HISTORIQUE_GARDES`). Écrit en JSON lisible (`pretty`)
+  ≈ 1,5 Mo à trente membres, réécrit en entier à chaque rafraîchissement —
+  sans conséquence sur le VPS, mais à garder en tête.
+- `fil.json` — les matchs déjà annoncés (80 ids par membre) ; `recap.json`
+  — la date du dernier récap hebdo.
+- Pas de base de données : redb, ou un fichier par membre, le jour où l'on
+  voudra des années de statistiques (question ouverte).
 
 Côté client : cache disque des images valorant-api.com dans
 `%APPDATA%\ki-chat\valorant\`, invalidé quand la version du jeu change.
@@ -243,6 +250,79 @@ la date du dernier dans `data/valorant/recap.json` ; posté dans le fil de
 jeu par la boucle de main.rs, avec les annonces. Une semaine sans match ne
 se raconte pas.
 
+### V5 — Statistiques enrichies — (0.1.40)
+
+**Livré, protocole** (`crates/protocol/src/lib.rs`). `MatchResume` porte
+l'acte, les dégâts infligés et reçus, les tirs à la tête et au total,
+l'effectif de sa party, les autres membres du groupe dans son camp
+(`avec`) et en face (`contre`), et `manches_detail: Option<DetailManches>`
+— la ligne du membre manche par manche : KAST, premiers sangs et
+premières morts, triples, quadruples, aces, clutchs tentés et gagnés (et
+le plus gros), poses, désamorçages, et le déroulé « VDVV… ». `PointRR`
+dit son acte et si la descente a été protégée ; `RangValorant` ses
+placements restants, ses boucliers et sa place au classement ; la fiche
+liste ses actes (`saisons`). Les agrégats vivent une seule fois, dans le
+protocole : `Bilan` (des sommes, les taux en méthodes qui rendent `None`
+plutôt que de diviser par zéro), `FicheValorant::bilan()`, `forme()`,
+`serie()`, `par_agent()`, `par_carte()`, `duos()`, `resume()` — et
+`mmr_estime()`, le MMR caché deviné aux vingt derniers deltas de RR de
+l'acte (gagner plus qu'on ne perd : au-dessus du rang), comme le font les
+trackers, sans une requête ni une donnée d'autrui. La page du
+groupe reçoit par membre un résumé (cinq matchs, dix points) et un
+`BilanMembre` calculé à l'envoi, plus les 168 cases `activite` de la
+semaine type. Tout nouveau champ a son défaut : une fiche d'avant se
+relit, un client d'avant ignore ce qu'il ne connaît pas.
+
+**Livré, serveur** (`crates/server/src/valorant.rs`, `quic.rs`). La fiche
+**s'accumule** : `fusionner(ancienne, neuve)` range les cinq matchs frais
+sous les anciens (union par `id`, la neuve gagne, tri par date, plafond
+`MATCHS_GARDES = 60`) et les points de RR de même (`match_id`, ou
+`(date, tier, rr)` s'il manque ; `HISTORIQUE_GARDES = 100`) — sans une
+requête de plus, et un `v4/matches` en 429 ne vide plus la fiche. À la
+liaison, l'ancienne fiche n'est gardée que pour le même puuid (un joueur
+qui se renomme garde son historique), et un **rattrapage** unique lit les
+archives de HenrikDev (`stored-matches` size=60, `stored-mmr-history`
+size=100 ; `resumer_match_stocke`) sous la fiche fraîche **et** sous la
+fiche accumulée (`empiler_a_la_liaison`) : l'archive ne connaît ni les
+manches, ni les co-membres, ni la party — elle comble les trous, elle
+n'écrase rien de ce qu'on avait détaillé. Les manches se
+lisent dans `rounds[]` et `kills[]` déjà téléchargés
+(`detailler_manches`, fonction pure : camps comparés sans la casse,
+effectifs comptés plutôt que supposés à cinq, kills groupés par manche et
+triés par temps, fenêtre d'échange `ECHANGE_MS = 5 000`). `HISTORIQUE_MAX`
+passe à 20, `MATCHS_MAX` reste à 5, `ANNONCES_GARDEES` à 80. La réponse à
+`StatsValorant` passe par `message_stats` : cinq matchs et dix points par
+membre, puis (3, 6), (1, 3), (0, 0) tant que la ligne dépasse
+`STATS_MAX_BYTES` — jamais un membre de moins ; testé à quarante fiches
+pleines. Le récap hebdo compte enfin la semaine entière, et dit « avec un
+ace » quand le meilleur match en a un.
+
+**Livré, client** (`crates/client-gui/src/graphes.rs`, `valo_page.rs`).
+Les graphiques au painter (courbe temporelle avec bandes de palier,
+sparkline, bande de forme, barres, jauge, heatmap 7 × 24, cases de
+manches), la page du groupe en quatre onglets — Groupe (records,
+classement triable, duos, heures de jeu), Matchs (le fil de tous, les
+parties jouées ensemble regroupées), Esport, Boutique — et une fiche
+déroulante avec deux filtres (période, mode). Lisible avec un serveur
+d'avant (bilan recalculé localement sur cinq matchs) et avec des fiches
+pauvres.
+
+**Ce qu'on ne garde toujours pas.** Rien sur les non-membres : des neuf
+autres joueurs d'un match, il ne reste que ce qu'on déduit sur le membre
+lui-même — `party: u8` est un **effectif** (combien de joueurs dans sa
+party, lui compris), jamais une identité ; `avec` et `contre` sont des
+`UserId` du groupe, jamais un puuid ; les `players[]`, `kills[]`,
+`rounds[]` sont jetés après lecture. Coût HenrikDev inchangé au
+rafraîchissement (3 requêtes) ; la liaison passe de 4 à 6, une fois.
+
+**Validation** : sur deux matchs réels, recouper FK, KAST et clutchs avec
+tracker.gg (écart ≤ 1 manche de KAST selon la fenêtre d'échange) ;
+vérifier à l'exécution le format de `winning_team` et `killer.team`
+(comparés sans la casse ; en cas d'écart, `deroule` vide et clutchs à 0,
+jamais une panique) ; lire la taille des lignes `StatsValorant` et le
+palier retenu dans le journal en debug (`VALORANT : page du groupe en N
+octets`).
+
 ## Risques et parades
 
 - Riot change un endpoint ou le format de présence → la fonctionnalité
@@ -263,3 +343,19 @@ se raconte pas.
 - Faut-il montrer le rang d'un membre qui partage sa présence mais n'a pas
   lié son compte ? La présence porte `competitiveTier` : oui pour l'icône,
   sans fiche.
+- `size=10` sur `v4/matches` : la spec ne le borne pas, mais chaque match
+  pèse 300 Ko à 1 Mo sous un timeout de vingt secondes ; avec
+  l'accumulation, cinq suffisent — à revoir si un membre enchaîne plus de
+  cinq parties entre deux relectures.
+- Le rattrapage par `stored-matches` / `stored-mmr-history` ne se fait
+  qu'à la liaison ; faut-il le rejouer pour les membres liés avant 0.1.40
+  (un bouton admin, une fois) ?
+- Armes (`weapon.name` nullable), économie (seuil à régler),
+  `party_rr_penaltys` (unité inconnue), `session_playtime`, `cluster`,
+  `card`/`title`, `elo`/`refunded_rr` de l'historique, `act_wins`, ultis :
+  écartés en V5, à reprendre si quelqu'un en veut.
+- Pagination de `StatsValorant` au-delà d'une quarantaine de liés : le
+  palier (0, 0) tient jusqu'à une centaine, ensuite il faudra découper.
+- Un fichier par membre, ou redb, quand `fiches.json` (1,5 Mo réécrit à
+  chaque rafraîchissement) deviendra gênant.
+- Courbes multi-membres et comparaison de deux fiches (bonus V5.1).
