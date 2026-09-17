@@ -144,7 +144,16 @@ pub fn install(ctx: &egui::Context) {
     style.interaction.tooltip_delay = 0.35;
     style.interaction.selectable_labels = true;
 
-    ctx.set_style(style);
+    // Le client n'a qu'un thème, celui-ci : ses couleurs sont des
+    // constantes, peintes partout. Or egui suit par défaut le thème du
+    // système, et `set_style` ne règle que le thème courant — chez qui a
+    // Windows en clair, les widgets passaient en clair pendant que les
+    // tuiles, les tableaux et les graphiques gardaient leurs couleurs
+    // sombres : du texte blanc sur du blanc. On impose donc le sombre, et
+    // l'on remplit les deux cases pour ne dépendre d'aucun ordre.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }
 
 /// Ajoute Hack à la famille proportionnelle.
@@ -276,5 +285,27 @@ pub fn app_icon() -> egui::IconData {
         rgba: crate::appicon::render(S),
         width: S,
         height: S,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le thème du système ne commande pas : un contexte qui se croit en
+    /// clair prend quand même nos couleurs, les widgets comme le reste.
+    #[test]
+    fn le_theme_sombre_s_impose_meme_a_un_systeme_en_clair() {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Light);
+        install(&ctx);
+        let entree = egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
+        let _ = ctx.run(entree, |ctx| {
+            assert_eq!(ctx.theme(), egui::Theme::Dark);
+            assert_eq!(ctx.style().visuals.window_fill, BG_RAISED);
+            assert!(ctx.style().visuals.dark_mode);
+        });
+        // Et même la case « clair » porte nos couleurs, au cas où.
+        assert_eq!(ctx.style_of(egui::Theme::Light).visuals.window_fill, BG_RAISED);
     }
 }
