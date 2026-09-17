@@ -702,6 +702,8 @@ struct KiApp {
     /// Le contrôle de démarrage (diffusion précédente interrompue ?) est
     /// fait une fois, à la première image.
     demarrage_verifie: bool,
+    /// La barre de titre de la fenêtre principale a été passée en sombre.
+    barre_sombre: bool,
     /// Le fil qui lit le client Riot, tant que l'option est cochée.
     veilleur_valorant: Option<valorant::Veilleur>,
     /// Dire aux membres à quoi je joue — le jeu reconnu à sa fenêtre,
@@ -720,6 +722,9 @@ struct KiApp {
     /// Le stream regardé dans sa propre fenêtre système — à poser sur un
     /// second écran —, et en plein écran.
     regard_detache: bool,
+    /// La barre de titre de la fenêtre du stream détaché a été passée en
+    /// sombre — à refaire à chaque fois que la fenêtre renaît.
+    regard_barre_sombre: bool,
     regard_plein_ecran: bool,
     /// Le dernier mouvement de souris dans la fenêtre détachée : sa barre
     /// de commandes s'efface peu après.
@@ -1108,6 +1113,7 @@ impl KiApp {
             esports: Vec::new(),
             activite: Vec::new(),
             demarrage_verifie: false,
+            barre_sombre: false,
             veilleur_valorant: None,
             presence_jeux: get("presence_jeux", "on") == "on",
             veilleur_jeux: None,
@@ -1115,6 +1121,7 @@ impl KiApp {
             regard_volume: 1.0,
             regard_meme_machine: false,
             regard_detache: false,
+            regard_barre_sombre: false,
             regard_plein_ecran: false,
             regard_souris: std::time::Instant::now(),
             regard: None,
@@ -9218,6 +9225,7 @@ impl KiApp {
         }
         self.regard_tex = None;
         self.regard_detache = false;
+        self.regard_barre_sombre = false;
         self.regard_plein_ecran = false;
     }
 
@@ -9592,7 +9600,14 @@ impl KiApp {
         let mut volume = self.regard_volume;
         let (mut quitter, mut rattacher, mut basculer_plein, mut volume_change, mut bouge) =
             (false, false, false, false, false);
+        let barre_sombre = &mut self.regard_barre_sombre;
         ctx.show_viewport_immediate(id, builder, |ctx, _classe| {
+            // Sa barre de titre en sombre aussi, une fois par naissance de
+            // la fenêtre (rattacher puis détacher la recrée).
+            if !*barre_sombre {
+                *barre_sombre = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+            }
             // Le plein écran suit ce qu'on veut, dès que la fenêtre existe.
             let plein = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             if plein != voulu_plein {
@@ -9713,6 +9728,7 @@ impl KiApp {
         }
         if rattacher {
             self.regard_detache = false;
+            self.regard_barre_sombre = false;
             self.regard_plein_ecran = false;
         }
         if quitter {
@@ -12676,6 +12692,15 @@ impl eframe::App for KiApp {
         }
         let was_maximized = self.maximized;
         self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(was_maximized));
+
+        // La barre de titre est à Windows (ou macOS), pas à egui : sans
+        // ça, elle suit le thème du système et reste blanche au-dessus
+        // d'une application sombre. Une fois suffit, la fenêtre vit
+        // jusqu'à la fin.
+        if !self.barre_sombre {
+            self.barre_sombre = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+        }
 
         // Focus : conditionne le son des messages et la notification.
         self.window_focused = ctx.input(|i| i.focused);
