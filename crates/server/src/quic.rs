@@ -318,6 +318,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 muted: false,
                 streaming: None,
                 jeu: None,
+                en_jeu_depuis: None,
                 force_muted,
                 force_deafened,
                 roles: auth.roles.clone(),
@@ -1267,6 +1268,24 @@ fn handle_msg(
             );
         }
         ClientMsg::LierRiot { riot_id } => {
+            // Une liaison coûte six requêtes à HenrikDev : même budget
+            // qu'un message, un client modifié ne fait pas cliquer le fil
+            // en rafale. (Et le service refuse de lui-même une seconde
+            // liaison du même membre tant que la première attend.)
+            let allowed = {
+                let mut users = state.users.lock().unwrap();
+                users
+                    .get_mut(&user_id)
+                    .is_some_and(|u| u.chat_budget.take())
+            };
+            if !allowed {
+                let _ = tx.send(ServerMsg::LiaisonRiot {
+                    ok: false,
+                    message: "trop de demandes d'un coup, réessaie dans un instant".into(),
+                    riot_id: None,
+                });
+                return;
+            }
             let Some((nom, tag)) = ki_protocol::parser_riot_id(&riot_id) else {
                 let _ = tx.send(ServerMsg::LiaisonRiot {
                     ok: false,
@@ -1851,13 +1870,12 @@ fn handle_msg(
             // relayé à tout le monde seulement s'il change — la liste des
             // membres l'affiche sous le pseudo.
             let jeu = jeu.map(|j| j.nettoyer());
-            // Une partie de VALORANT seulement : un autre jeu ne se dit
-            // que par son nom, et n'a pas de fiche à relire.
-            let en_jeu = |j: &Option<ki_protocol::JeuStatut>| {
-                j.as_ref()
-                    .is_some_and(|j| j.est_valorant() && j.etat == ki_protocol::JeuEtat::EnJeu)
-            };
-            let mut partie_finie = false;
+            // Ce que la transition dit au fil de jeu — une partie de
+            // VALORANT qui finit (et depuis quand elle durait), ou qui
+            // reprend : voir `valorant::transition_de_jeu`, qui sait
+            // qu'une présence perdue n'est pas un menu ni une session
+            // neuve une entrée en partie.
+            let mut transition = crate::valorant::TransitionJeu::default();
             let changed = {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else {
@@ -1866,9 +1884,13 @@ fn handle_msg(
                 if u.jeu == jeu {
                     false
                 } else {
-                    // Sorti d'une partie : le fil de jeu relira sa fiche
-                    // dans un instant, le temps que HenrikDev voie le match.
-                    partie_finie = en_jeu(&u.jeu) && !en_jeu(&jeu);
+                    transition = crate::valorant::transition_de_jeu(
+                        u.jeu.take(),
+                        &jeu,
+                        u.en_jeu_depuis,
+                        Instant::now(),
+                    );
+                    u.en_jeu_depuis = transition.en_jeu_depuis;
                     u.jeu = jeu;
                     true
                 }
@@ -1876,8 +1898,11 @@ fn handle_msg(
             if changed {
                 state.broadcast_member(user_id);
             }
-            if partie_finie {
-                state.valorant.fin_de_partie(user_id);
+            if let Some((ancien, duree)) = transition.fin {
+                state.valorant.fin_de_partie(user_id, &ancien, duree);
+            }
+            if transition.reprise {
+                state.valorant.reprise_de_partie(user_id);
             }
         }
         ClientMsg::VoiceState { speaking, muted } => {

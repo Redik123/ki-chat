@@ -191,6 +191,11 @@ pub struct ConnectedUser {
     pub streaming: Option<u32>,
     /// Son statut VALORANT, s'il le partage (voir ki_protocol::JeuStatut).
     pub jeu: Option<ki_protocol::JeuStatut>,
+    /// Depuis quand il est en partie de VALORANT — posé à l'entrée en jeu
+    /// depuis le menu, gardé à travers un hoquet de présence, `None` sur
+    /// une session qui reprend en pleine partie ; pour qu'une fin de
+    /// partie se mesure (voir `valorant::transition_de_jeu`).
+    pub en_jeu_depuis: Option<Instant>,
     /// Sanctions vocales posées par un modérateur, relues du compte à la
     /// connexion. Elles ne sont **pas** annoncées par le client et ne peuvent
     /// donc pas être désavouées par lui.

@@ -492,9 +492,12 @@ pub async fn resume(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         texte
     };
     // Et l'état du service VALORANT : le budget HenrikDev se surveille
-    // ici, les soirs de pointe.
+    // ici, les soirs de pointe — et les soixante dernières requêtes, une
+    // par ligne, disent pourquoi on a appelé quand un 429 tombe.
     texte.push_str("\n\n");
     texte.push_str(&state.valorant.compteurs_texte());
+    texte.push('\n');
+    texte.push_str(&state.valorant.journal_texte());
     // Les deux stocks face à leur plafond : un disque qui se remplit se
     // voit ici avant de se voir ailleurs.
     let stockage = {

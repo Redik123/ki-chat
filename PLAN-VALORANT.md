@@ -102,7 +102,7 @@ file d'attente, et des rythmes bornés :
 | :--- | :--- | :--- |
 | Lier un compte | à la demande, une fois par membre | 1 (compte) + 3 (la fiche : `v3/mmr`, `v2/mmr-history`, `v4/matches?size=5`) + 2 (rattrapage : `v1/stored-matches?size=60`, `v2/stored-mmr-history?size=100`) = 6 |
 | Rafraîchir la fiche d'un membre | toutes les 30 min s'il est connecté, sinon jamais | 3 (`v3/mmr`, `v2/mmr-history`, `v4/matches?size=5`) |
-| Fin de partie détectée (présence INGAME → MENUS) | 75 s après, jusqu'à trois fois | 3 (le même rafraîchissement) |
+| Fin de partie détectée (présence INGAME → MENUS, ou présence perdue) | 75 s après ; jusqu'à trois fois pour une file qui s'annonce, une fois sinon, jamais sous trois minutes de jeu ni en personnalisée | 3 (le même rafraîchissement) |
 | Ouverture de la page du groupe ou d'une fiche | jamais : servies par le cache | 0 |
 | Calendrier esport | toutes les heures | 1 (jusqu'à 7 si la source officielle tombe et que VLR prend le relais) |
 
@@ -110,6 +110,47 @@ Trente membres tous connectés en même temps : trois requêtes par minute en
 régime établi, trois par partie finie. Très en dessous des vingt du seau.
 Le rattrapage à la liaison est le seul appel aux archives de HenrikDev :
 jamais au rafraîchissement, où la fiche accumule d'elle-même.
+
+**Sobriété (0.1.43).** Le régime établi tenait, la soirée non : un 5-stack
+classé coûtait 27 requêtes au lieu de 15, un hoquet du client Riot en
+pleine partie en coûtait 9 pour rien, et un redémarrage avec quinze liés
+en ligne re-poussait chaque minute ceux que la file n'avait pas encore
+servis. Quatre garde-fous, sans rien changer au protocole ni aux fichiers :
+
+- **Dédoublonnage.** Une seule porte vers la file (`Fil::pousser`) : un
+  membre déjà en file n'y entre pas deux fois (le motif le plus informatif
+  reste), un membre dont la relance est programmée n'y entre pas non plus —
+  elle viendra. Et une fiche relue il y a moins d'une minute ne se relit
+  pas pour un périodique (un co-membre, lui, passe : une annonce l'attend,
+  et c'est justement quand il vient d'être relu *avant* l'indexation du
+  match qu'il faut le relire). Le 5-stack retombe à 15, le redémarrage à
+  3 par lié.
+- **Fin de partie qualifiée.** Le serveur note depuis quand un membre est
+  en jeu ; à la sortie, il sait ce qu'il jouait et combien de temps. Moins
+  de trois minutes (hoquet, remake, plantage) ou une personnalisée : pas
+  de relance, le périodique verra. Compétitive, non classée, swiftplay ou
+  Premier (console comprise) : trois relances. Le reste (combat à mort,
+  Spike Rush…) : une seule, le match finira dans la fiche, il n'y a rien à
+  annoncer. Et un retour en partie avant que la relance ait tiré l'annule :
+  un hoquet de dix secondes coûte zéro. L'heure d'entrée survit au hoquet
+  (une présence perdue n'est pas un menu) et une session qui reprend en
+  pleine partie n'en a pas (sa fin est réputée assez longue) : un hoquet
+  ou une reconnexion dans les trois dernières minutes d'une classée ne la
+  fait pas passer pour trop courte.
+- **Gel après 429.** Plus de pause locale suivie d'un réessai aveugle : un
+  429 gèle le seau pour tout le fil, le temps que `Retry-After` demande
+  (trente secondes sans en-tête, cinq minutes au plus), et la fiche en
+  cours est un échec franc — un `v4/matches` en 429 ne passe plus pour
+  « rien de neuf » et ne relance plus au moment où HenrikDev sature. Un
+  échec, fiche ou pas, n'est pas retenté avant trente minutes ; une
+  liaison passe par le budget anti-rafale du chat, et une seconde du même
+  membre attend la réponse de la première.
+- **Diag des motifs.** Chaque requête est comptée par motif (périodique,
+  relance n/N, co-membre, liaison, esport) et par point d'API ; les
+  soixante dernières restent en anneau (heure, motif, point, code HTTP,
+  durée) et `/diag-resume` les liste, avec le pic par minute de la dernière
+  heure et l'heure du dernier 429. Le tableau de bord garde sa forme : seule
+  la ligne texte s'enrichit.
 
 ### Stockage (`data/valorant/`)
 

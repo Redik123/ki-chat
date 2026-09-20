@@ -40,6 +40,20 @@
 //! l'annonce les attend, deux minutes au plus, pour ne faire qu'un
 //! message. Ce qui a été annoncé est noté dans `fil.json`, sinon chaque
 //! redémarrage rejouerait la soirée.
+//!
+//! **Sobriété (0.1.43).** Les soirées coûtaient plus que le régime établi :
+//! un 5-stack classé valait 27 requêtes au lieu de 15, un hoquet du
+//! client Riot en pleine partie en valait 9 pour rien. Depuis, tout
+//! rafraîchissement passe par [`Fil::pousser`], qui ne met pas deux fois
+//! le même membre en file ni ne double une relance programmée ; la fin de
+//! partie est **qualifiée** — pas de relance sous trois minutes de jeu ni
+//! en personnalisée, trois relances seulement pour une file qui s'annonce
+//! (compétitive, non classée, swiftplay, Premier), une sinon, et une
+//! reprise de partie annule la relance qui n'a pas encore tiré ; un 429
+//! gèle le seau pour tout le fil le temps que HenrikDev demande
+//! (`Retry-After`) et ne nourrit plus de relance ; et chaque requête est
+//! comptée par motif et par point d'API, les soixante dernières gardées
+//! en anneau, pour que `/diag-resume` dise *pourquoi* on a appelé.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -89,9 +103,34 @@ const ANNONCE_AGE_MAX: Duration = Duration::from_secs(6 * 3600);
 /// Combien de temps une annonce attend les coéquipiers du groupe.
 const ANNONCE_ATTENTE: Duration = Duration::from_secs(120);
 /// Après une fin de partie, HenrikDev met quelques minutes à voir le
-/// match : la fiche est relue après ce délai, jusqu'à `RELANCES_MAX` fois.
+/// match : la fiche est relue après ce délai, jusqu'à `RELANCES_MAX` fois
+/// pour une file qui s'annonce, une seule fois pour les autres (le
+/// combat à mort finit dans la fiche au périodique, rien à annoncer).
 const RELANCE_DELAI: Duration = Duration::from_secs(75);
 const RELANCES_MAX: u32 = 3;
+const RELANCES_SANS_ANNONCE: u32 = 1;
+/// Les files dont un match s'annonce — les mêmes que [`MODES_ANNONCES`],
+/// vues du client Riot (sans le préfixe `console_`).
+const FILES_ANNONCEES: [&str; 4] = ["competitive", "unrated", "swiftplay", "premier"];
+/// Une partie plus courte que ça n'en est pas une : un hoquet du client
+/// Riot, un remake, un plantage. Pas de relance, le périodique verra.
+const PARTIE_MIN: Duration = Duration::from_secs(3 * 60);
+/// Une fiche relue il y a moins d'une minute ne se relit pas pour un
+/// périodique — une relance ou un co-membre passent outre (voir
+/// [`relecture_inutile`]).
+const FRAICHEUR: Duration = Duration::from_secs(60);
+/// Après un échec, pas de nouvel essai périodique avant ce délai —
+/// qu'il y ait une fiche ou non.
+const ECHEC_ATTENTE: Duration = Duration::from_secs(30 * 60);
+/// Un 429 sans `Retry-After` gèle le seau autant ; avec, jamais plus que
+/// le plafond — l'en-tête vient du réseau, il ne commande pas le fil
+/// pour l'après-midi.
+const GEL_DEFAUT: Duration = Duration::from_secs(30);
+const GEL_MAX: Duration = Duration::from_secs(5 * 60);
+/// Les requêtes gardées en anneau pour le diagnostic, et les minutes
+/// d'histoire du pic.
+const JOURNAL_REQUETES: usize = 60;
+const PIC_MINUTES: u64 = 60;
 /// Identifiants de matchs gardés par membre dans `fil.json` — plus que
 /// les soixante d'une fiche, puisque `connaitre` y verse la fiche entière.
 const ANNONCES_GARDEES: usize = 80;
@@ -127,24 +166,203 @@ enum Travail {
         nom: String,
         tag: String,
     },
-    /// `relance` : la énième relecture après une fin de partie, s'il s'agit
-    /// de ça — pour savoir s'il faut relire encore.
+    /// `motif` : pourquoi on relit — la énième relance après une fin de
+    /// partie, le périodique, un co-membre reconnu. Le fil le compte, et
+    /// s'en sert pour savoir s'il faut relire encore.
     Rafraichir {
         user_id: UserId,
-        relance: Option<u32>,
+        motif: Motif,
     },
     /// Le calendrier esport.
     Esports,
 }
 
+/// Pourquoi une requête part : c'est ce que le diagnostic compte, et ce
+/// qui départage deux demandes pour le même membre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Motif {
+    /// La demi-heure est passée.
+    Periodique,
+    /// La énième relecture après une fin de partie (`essai` de 0), sur
+    /// `max` au plus.
+    Relance { essai: u32, max: u32 },
+    /// Reconnu dans le match d'un autre membre.
+    CoMembre,
+    /// Une liaison.
+    Liaison,
+    /// Le calendrier esport.
+    Esports,
+}
+
+impl Motif {
+    /// L'essai en cours s'il s'agit d'une relance.
+    fn relance(self) -> Option<u32> {
+        match self {
+            Motif::Relance { essai, .. } => Some(essai),
+            _ => None,
+        }
+    }
+
+    /// Ce qu'une demande dit de plus qu'une autre : une relance sait
+    /// qu'il y a un match à trouver, un co-membre sait qu'il y a une
+    /// annonce qui attend, le périodique ne sait rien.
+    fn poids(self) -> u8 {
+        match self {
+            Motif::Periodique => 0,
+            Motif::CoMembre => 1,
+            Motif::Relance { .. } => 2,
+            Motif::Liaison | Motif::Esports => 3,
+        }
+    }
+
+    /// Sa case dans les compteurs.
+    fn indice(self) -> usize {
+        match self {
+            Motif::Periodique => 0,
+            Motif::Relance { .. } => 1,
+            Motif::CoMembre => 2,
+            Motif::Liaison => 3,
+            Motif::Esports => 4,
+        }
+    }
+
+    const NOMS: [&'static str; 5] = ["périodique", "relance", "co-membre", "liaison", "esport"];
+
+    fn nom(self) -> String {
+        match self {
+            Motif::Relance { essai, max } => format!("relance {}/{max}", essai + 1),
+            autre => Self::NOMS[autre.indice()].to_string(),
+        }
+    }
+}
+
+/// Le point d'API HenrikDev touché, reconnu au chemin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointApi {
+    Mmr,
+    History,
+    Matches,
+    Account,
+    Stored,
+    Esports,
+    Autre,
+}
+
+impl PointApi {
+    /// Le point d'API est le troisième segment du chemin
+    /// (`/valorant/v3/mmr/…`) — jamais une sous-chaîne : le Riot ID qui
+    /// suit vient d'un membre, et un membre peut s'appeler « mmr ».
+    fn de(chemin: &str) -> Self {
+        let segment = chemin
+            .split('/')
+            .nth(3)
+            .and_then(|s| s.split('?').next())
+            .unwrap_or("");
+        match segment {
+            "mmr" => PointApi::Mmr,
+            "mmr-history" => PointApi::History,
+            "matches" => PointApi::Matches,
+            "account" => PointApi::Account,
+            "stored-matches" | "stored-mmr-history" => PointApi::Stored,
+            "esports" => PointApi::Esports,
+            _ => PointApi::Autre,
+        }
+    }
+
+    fn indice(self) -> usize {
+        match self {
+            PointApi::Mmr => 0,
+            PointApi::History => 1,
+            PointApi::Matches => 2,
+            PointApi::Account => 3,
+            PointApi::Stored => 4,
+            PointApi::Esports => 5,
+            PointApi::Autre => 6,
+        }
+    }
+
+    const NOMS: [&'static str; 7] = ["mmr", "history", "matches", "account", "stored", "esports", "autre"];
+
+    fn nom(self) -> &'static str {
+        Self::NOMS[self.indice()]
+    }
+}
+
+/// Une requête telle que l'anneau du diagnostic la garde.
+#[derive(Debug, Clone, Copy)]
+struct Requete {
+    ms: u64,
+    motif: Motif,
+    point: PointApi,
+    /// 0 : pas de réponse (réseau, délai).
+    code: u16,
+    duree_ms: u32,
+}
+
 /// Ce que HenrikDev a coûté depuis le démarrage — lisible dans le résumé
-/// des diagnostics.
+/// des diagnostics : les totaux, le détail par motif et par point d'API,
+/// les soixante dernières requêtes, et de quoi dire le pic par minute de
+/// la dernière heure.
 #[derive(Default)]
 struct Compteurs {
     requetes: AtomicU64,
     refus_429: AtomicU64,
+    dernier_429_ms: AtomicU64,
     erreurs: AtomicU64,
     derniere_ms: AtomicU64,
+    par_motif: [AtomicU64; 5],
+    par_point: [AtomicU64; 7],
+    journal: Mutex<VecDeque<Requete>>,
+    /// Par minute Unix : combien de requêtes — soixante minutes gardées.
+    par_minute: Mutex<VecDeque<(u64, u32)>>,
+}
+
+impl Compteurs {
+    /// Note une requête partie, où qu'elle aboutisse.
+    fn noter(&self, r: Requete) {
+        self.requetes.fetch_add(1, Ordering::Relaxed);
+        self.derniere_ms.store(r.ms, Ordering::Relaxed);
+        self.par_motif[r.motif.indice()].fetch_add(1, Ordering::Relaxed);
+        self.par_point[r.point.indice()].fetch_add(1, Ordering::Relaxed);
+        // Un 404 n'est pas une erreur de HenrikDev : c'est un Riot ID mal
+        // écrit.
+        if r.code == 429 {
+            self.refus_429.fetch_add(1, Ordering::Relaxed);
+            self.dernier_429_ms.store(r.ms, Ordering::Relaxed);
+        } else if r.code != 200 && r.code != 404 {
+            self.erreurs.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut journal = self.journal.lock().unwrap();
+        journal.push_back(r);
+        while journal.len() > JOURNAL_REQUETES {
+            journal.pop_front();
+        }
+        let minute = r.ms / 60_000;
+        let mut par_minute = self.par_minute.lock().unwrap();
+        match par_minute.back_mut() {
+            Some((m, n)) if *m == minute => *n = n.saturating_add(1),
+            _ => par_minute.push_back((minute, 1)),
+        }
+        while par_minute
+            .front()
+            .is_some_and(|(m, _)| minute.saturating_sub(*m) >= PIC_MINUTES)
+        {
+            par_minute.pop_front();
+        }
+    }
+
+    /// Le pic : la minute la plus chargée de la dernière heure.
+    fn pic(&self, maintenant: u64) -> u32 {
+        let minute = maintenant / 60_000;
+        self.par_minute
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| minute.saturating_sub(*m) < PIC_MINUTES)
+            .map(|(_, n)| *n)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// La ligne d'un membre dans un match annoncé, avec ses RR après coup
@@ -170,16 +388,35 @@ struct Attente {
     attendus: BTreeSet<UserId>,
 }
 
+/// Une relecture programmée après une fin de partie : quand, la énième,
+/// et combien au plus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Relance {
+    quand: Instant,
+    essai: u32,
+    max: u32,
+}
+
 /// Le fil de jeu : ce qui a été annoncé, ce qui attend, ce qui doit être
-/// relu.
+/// relu — et ce qui l'est déjà, pour ne pas le demander deux fois.
+///
+/// Verrous, dans cet ordre quand il en faut plusieurs : `annonces`,
+/// `en_attente`, `en_file`, `relances`.
 #[derive(Default)]
 struct Fil {
     /// Les matchs déjà annoncés (ou connus à la liaison), par membre.
     annonces: Mutex<BTreeMap<UserId, VecDeque<String>>>,
     en_attente: Mutex<BTreeMap<String, Attente>>,
-    /// Relectures programmées après une fin de partie : quand, et le
-    /// nombre de relectures déjà faites.
-    relances: Mutex<BTreeMap<UserId, (Instant, u32)>>,
+    /// Relectures programmées après une fin de partie.
+    relances: Mutex<BTreeMap<UserId, Relance>>,
+    /// Les rafraîchissements en file, par membre, avec le motif le plus
+    /// informatif reçu : c'est ce que le fil lit en commençant.
+    en_file: Mutex<BTreeMap<UserId, Motif>>,
+    /// Les liaisons en file : un double clic n'en fait pas deux.
+    liaisons_en_file: Mutex<BTreeSet<UserId>>,
+    /// Le dernier échec par membre, en millisecondes Unix : pas de nouvel
+    /// essai périodique avant [`ECHEC_ATTENTE`], fiche ou pas.
+    derniere_tentative: Mutex<BTreeMap<UserId, u64>>,
 }
 
 /// Ce qu'il rapporte, à relayer aux clients.
@@ -320,8 +557,9 @@ impl Valorant {
         activite_de(fiches.values(), maintenant_ms())
     }
 
-    /// Met la liaison en file. Refuse sans clé, ou si ce Riot ID est déjà
-    /// celui d'un autre membre.
+    /// Met la liaison en file. Refuse sans clé, si ce Riot ID est déjà
+    /// celui d'un autre membre, ou si une liaison de ce membre attend
+    /// déjà : six requêtes par clic, pas par double clic.
     pub fn lier(&self, user_id: UserId, nom: String, tag: String) -> Result<(), String> {
         let Some(travaux) = &self.travaux else {
             return Err("le serveur n'a pas de clé HenrikDev : demande à l'admin".into());
@@ -337,9 +575,13 @@ impl Valorant {
                 return Err("ce compte Riot est déjà lié à un autre membre".into());
             }
         }
-        travaux
-            .send(Travail::Lier { user_id, nom, tag })
-            .map_err(|_| "le service VALORANT est arrêté".to_string())
+        if !self.etat.fil.liaisons_en_file.lock().unwrap().insert(user_id) {
+            return Err("ta liaison est déjà en cours : attends sa réponse".into());
+        }
+        travaux.send(Travail::Lier { user_id, nom, tag }).map_err(|_| {
+            self.etat.fil.liaisons_en_file.lock().unwrap().remove(&user_id);
+            "le service VALORANT est arrêté".to_string()
+        })
     }
 
     /// Retire compte, fiche et mémoire du fil. `false` s'il n'y avait rien.
@@ -358,6 +600,7 @@ impl Valorant {
             self.etat.sauver_fil();
         }
         self.etat.fil.relances.lock().unwrap().remove(&user_id);
+        self.etat.fil.derniere_tentative.lock().unwrap().remove(&user_id);
         if retire {
             self.etat.sauver_comptes();
         }
@@ -367,14 +610,12 @@ impl Valorant {
         retire
     }
 
-    /// Demande un rafraîchissement — sans clé ou sans compte, rien.
+    /// Demande un rafraîchissement périodique — sans clé ou sans compte,
+    /// rien ; déjà en file ou en relance, rien non plus.
     pub fn rafraichir(&self, user_id: UserId) {
         if let Some(travaux) = &self.travaux {
             if self.etat.comptes.lock().unwrap().contains_key(&user_id) {
-                let _ = travaux.send(Travail::Rafraichir {
-                    user_id,
-                    relance: None,
-                });
+                self.etat.fil.pousser(user_id, Motif::Periodique, travaux);
             }
         }
     }
@@ -395,40 +636,113 @@ impl Valorant {
         }
     }
 
-    /// L'état du service en une ligne, pour le résumé des diagnostics.
+    /// L'état du service en une ligne, pour le résumé des diagnostics et
+    /// le tableau de bord : les totaux, puis le pic par minute de la
+    /// dernière heure, le détail par motif et par point d'API, et le
+    /// dernier 429.
     pub fn compteurs_texte(&self) -> String {
         let c = &self.etat.compteurs;
-        let derniere = match c.derniere_ms.load(Ordering::Relaxed) {
+        let maintenant = maintenant_ms();
+        let il_y_a = |t: u64| match t {
             0 => "jamais".to_string(),
-            t => format!("il y a {} min", maintenant_ms().saturating_sub(t) / 60_000),
+            t => format!("il y a {} min", maintenant.saturating_sub(t) / 60_000),
         };
         let attente = self.etat.fil.en_attente.lock().unwrap().len();
+        let en_file = self.etat.fil.en_file.lock().unwrap().len();
+        let relances = self.etat.fil.relances.lock().unwrap().len();
+        let motifs: Vec<String> = Motif::NOMS
+            .iter()
+            .zip(c.par_motif.iter())
+            .map(|(nom, n)| format!("{nom} {}", n.load(Ordering::Relaxed)))
+            .collect();
+        let points: Vec<String> = PointApi::NOMS
+            .iter()
+            .zip(c.par_point.iter())
+            .map(|(nom, n)| (nom, n.load(Ordering::Relaxed)))
+            .filter(|(_, n)| *n > 0)
+            .map(|(nom, n)| format!("{nom} {n}"))
+            .collect();
         format!(
             "VALORANT : clé HenrikDev {} · {} membres liés, {} fiches · requêtes depuis le démarrage : {} \
-             (refus 429 : {}, erreurs : {}), dernière {} · annonces en attente : {}",
+             (refus 429 : {}, dernier {}, erreurs : {}), dernière {} · pic sur une minute (dernière heure) : {} \
+             · motifs : {} · points d'API : {} · en file : {}, relances programmées : {}, annonces en attente : {}",
             if self.travaux.is_some() { "présente" } else { "absente" },
             self.etat.comptes.lock().unwrap().len(),
             self.etat.fiches.lock().unwrap().len(),
             c.requetes.load(Ordering::Relaxed),
             c.refus_429.load(Ordering::Relaxed),
+            il_y_a(c.dernier_429_ms.load(Ordering::Relaxed)),
             c.erreurs.load(Ordering::Relaxed),
-            derniere,
+            il_y_a(c.derniere_ms.load(Ordering::Relaxed)),
+            c.pic(maintenant),
+            motifs.join(", "),
+            if points.is_empty() { "aucun".to_string() } else { points.join(", ") },
+            en_file,
+            relances,
             attente,
         )
     }
 
-    /// Le membre sort d'une partie : sa fiche sera relue dans 75 s, puis
-    /// encore si le match n'y est pas.
-    pub fn fin_de_partie(&self, user_id: UserId) {
+    /// Les soixante dernières requêtes, une par ligne, de la plus ancienne
+    /// à la plus récente : l'heure, le motif, le point d'API, le code et
+    /// la durée — pour expliquer un 429 après coup.
+    pub fn journal_texte(&self) -> String {
+        let journal = self.etat.compteurs.journal.lock().unwrap();
+        if journal.is_empty() {
+            return "HenrikDev : aucune requête depuis le démarrage".to_string();
+        }
+        let mut texte = format!("HenrikDev : les {} dernières requêtes", journal.len());
+        for r in journal.iter() {
+            let heure = chrono::DateTime::from_timestamp_millis(r.ms as i64)
+                .map(|d| d.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "?".into());
+            let code = if r.code == 0 { "—".to_string() } else { r.code.to_string() };
+            texte.push_str(&format!(
+                "\n  {heure} UTC · {} · {} · {code} · {} ms",
+                r.motif.nom(),
+                r.point.nom(),
+                r.duree_ms
+            ));
+        }
+        texte
+    }
+
+    /// Le membre sort d'une partie — `ancien` : ce qu'il jouait, `duree` :
+    /// depuis quand. Sa fiche sera relue dans 75 s, puis encore si le
+    /// match n'y est pas — jamais pour une partie de moins de trois
+    /// minutes ni une personnalisée, trois fois pour une file qui
+    /// s'annonce, une fois sinon (voir [`relances_pour`]).
+    pub fn fin_de_partie(&self, user_id: UserId, ancien: &ki_protocol::JeuStatut, duree: Duration) {
         if self.travaux.is_none() || !self.etat.comptes.lock().unwrap().contains_key(&user_id) {
             return;
         }
-        self.etat
-            .fil
-            .relances
-            .lock()
-            .unwrap()
-            .insert(user_id, (Instant::now() + RELANCE_DELAI, 0));
+        let max = relances_pour(ancien, duree);
+        if max == 0 {
+            tracing::debug!(
+                "VALORANT : fin de partie de {user_id} sans relance ({} après {} s)",
+                ancien.libelle_file(),
+                duree.as_secs()
+            );
+            return;
+        }
+        self.etat.fil.relances.lock().unwrap().insert(
+            user_id,
+            Relance {
+                quand: Instant::now() + RELANCE_DELAI,
+                essai: 0,
+                max,
+            },
+        );
+    }
+
+    /// Le membre est (de nouveau) en partie : la relance qui n'a pas
+    /// encore tiré n'a plus lieu d'être — c'était un hoquet du client
+    /// Riot, ou le match suivant s'est enchaîné et sa fin la relancera.
+    pub fn reprise_de_partie(&self, user_id: UserId) {
+        let mut relances = self.etat.fil.relances.lock().unwrap();
+        if relances.get(&user_id).is_some_and(|r| r.essai == 0) {
+            relances.remove(&user_id);
+        }
     }
 
     /// À appeler régulièrement : lance les relectures dues et rend les
@@ -438,23 +752,27 @@ impl Valorant {
             return Vec::new();
         };
         let maintenant = Instant::now();
-        let dues: Vec<(UserId, u32)> = {
+        let dues: Vec<(UserId, Relance)> = {
             let mut relances = self.etat.fil.relances.lock().unwrap();
             let dues: Vec<_> = relances
                 .iter()
-                .filter(|(_, (quand, _))| *quand <= maintenant)
-                .map(|(id, (_, n))| (*id, *n))
+                .filter(|(_, r)| r.quand <= maintenant)
+                .map(|(id, r)| (*id, *r))
                 .collect();
             for (id, _) in &dues {
                 relances.remove(id);
             }
             dues
         };
-        for (user_id, essais) in dues {
-            let _ = travaux.send(Travail::Rafraichir {
+        for (user_id, r) in dues {
+            self.etat.fil.pousser(
                 user_id,
-                relance: Some(essais),
-            });
+                Motif::Relance {
+                    essai: r.essai,
+                    max: r.max,
+                },
+                travaux,
+            );
         }
         self.etat.fil.pretes()
     }
@@ -482,7 +800,9 @@ impl Valorant {
     }
 
     /// Parmi `en_ligne`, les membres liés dont la fiche a plus de
-    /// `age_max`.
+    /// `age_max` — ou qui n'en ont pas — et dont le dernier échec, s'il y
+    /// en a un, a plus de [`ECHEC_ATTENTE`] : un membre sans fiche que
+    /// HenrikDev refuse ne se redemande pas chaque minute.
     pub fn a_rafraichir(&self, en_ligne: &[UserId], age_max: Duration) -> Vec<UserId> {
         if self.travaux.is_none() {
             return Vec::new();
@@ -490,6 +810,7 @@ impl Valorant {
         let maintenant = maintenant_ms();
         let comptes = self.etat.comptes.lock().unwrap();
         let fiches = self.etat.fiches.lock().unwrap();
+        let tentatives = self.etat.fil.derniere_tentative.lock().unwrap();
         en_ligne
             .iter()
             .copied()
@@ -498,6 +819,11 @@ impl Valorant {
                 fiches
                     .get(id)
                     .is_none_or(|f| maintenant.saturating_sub(f.maj) > age_max.as_millis() as u64)
+            })
+            .filter(|id| {
+                tentatives.get(id).is_none_or(|t| {
+                    maintenant.saturating_sub(*t) > ECHEC_ATTENTE.as_millis() as u64
+                })
             })
             .collect()
     }
@@ -537,7 +863,133 @@ impl Etat {
     }
 }
 
+/// Combien de relances une fin de partie mérite : aucune sous
+/// [`PARTIE_MIN`] (hoquet du client Riot, remake, plantage) ni en
+/// personnalisée ; [`RELANCES_MAX`] pour une file qui s'annonce (les
+/// variantes console comprises) ; une seule sinon — le match finira dans
+/// la fiche, il n'y a rien à annoncer, pas la peine d'insister.
+fn relances_pour(ancien: &ki_protocol::JeuStatut, duree: Duration) -> u32 {
+    if duree < PARTIE_MIN || ancien.custom {
+        return 0;
+    }
+    let file = ancien.file.strip_prefix("console_").unwrap_or(&ancien.file);
+    if FILES_ANNONCEES.iter().any(|f| f.eq_ignore_ascii_case(file)) {
+        RELANCES_MAX
+    } else {
+        RELANCES_SANS_ANNONCE
+    }
+}
+
+/// Ce qu'un changement de statut de jeu dit au fil : voir
+/// [`transition_de_jeu`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TransitionJeu {
+    /// Il sort d'une partie de VALORANT : ce qu'il jouait, et depuis
+    /// combien de temps ([`Duration::MAX`] quand on ne sait pas).
+    pub fin: Option<(ki_protocol::JeuStatut, Duration)>,
+    /// Il (re)vient en partie : une relance qui n'a pas encore tiré n'a
+    /// plus lieu d'être.
+    pub reprise: bool,
+    /// L'heure d'entrée en partie à garder sur la session.
+    pub en_jeu_depuis: Option<Instant>,
+}
+
+/// Lit une transition de statut (`ancien` → `nouveau`) avec l'heure
+/// d'entrée en partie connue (`depuis`), et dit au fil ce qu'elle vaut.
+///
+/// Toute la finesse est dans l'heure d'entrée. Elle n'est posée que sur
+/// une **vraie** entrée, du menu (ou de la sélection d'agent) à la
+/// partie. Elle n'est **pas** effacée sur une présence perdue (`None`) :
+/// le client Riot hoquette — lockfile, session, présences en erreur —
+/// et revient quelques secondes plus tard ; s'il revient en partie,
+/// c'est la même partie, et sa vraie fin se mesure depuis l'entrée
+/// d'origine, pas depuis le hoquet. Seul un menu observé l'efface. Et la
+/// première présence d'une session (`None` → en jeu sans heure d'entrée :
+/// reconnexion, second client, relance après un plantage) ne compte ni
+/// comme entrée ni comme reprise — on ne sait ni depuis quand ni s'il
+/// s'agit d'un match nouveau ; la fin sera réputée assez longue.
+///
+/// Sans cela, un hoquet ou une reconnexion dans les trois dernières
+/// minutes d'une classée en ferait une partie « trop courte » pour une
+/// relance, et l'annonce attendrait le périodique.
+pub fn transition_de_jeu(
+    ancien: Option<ki_protocol::JeuStatut>,
+    nouveau: &Option<ki_protocol::JeuStatut>,
+    depuis: Option<Instant>,
+    maintenant: Instant,
+) -> TransitionJeu {
+    let en_jeu = |j: Option<&ki_protocol::JeuStatut>| {
+        j.is_some_and(|j| j.est_valorant() && j.etat == ki_protocol::JeuEtat::EnJeu)
+    };
+    let (avant, apres) = (en_jeu(ancien.as_ref()), en_jeu(nouveau.as_ref()));
+    // Un menu observé (ou un autre jeu) clôt la partie ; une présence
+    // perdue peut n'être qu'un hoquet, l'heure d'entrée reste.
+    let garde = if !apres && nouveau.is_some() { None } else { depuis };
+    if avant && !apres {
+        let duree = depuis.map_or(Duration::MAX, |d| maintenant.saturating_duration_since(d));
+        TransitionJeu {
+            fin: ancien.map(|a| (a, duree)),
+            reprise: false,
+            en_jeu_depuis: garde,
+        }
+    } else if !avant && apres {
+        match (ancien.is_some(), depuis) {
+            // Du menu à la partie : une vraie entrée.
+            (true, _) => TransitionJeu {
+                fin: None,
+                reprise: true,
+                en_jeu_depuis: Some(maintenant),
+            },
+            // Présence perdue puis revenue : le hoquet, l'heure d'origine
+            // reste.
+            (false, Some(d)) => TransitionJeu {
+                fin: None,
+                reprise: true,
+                en_jeu_depuis: Some(d),
+            },
+            // Première présence d'une session : on ne sait rien.
+            (false, None) => TransitionJeu::default(),
+        }
+    } else {
+        TransitionJeu {
+            fin: None,
+            reprise: false,
+            en_jeu_depuis: garde,
+        }
+    }
+}
+
 impl Fil {
+    /// La seule porte vers un `Travail::Rafraichir`. Un membre déjà en
+    /// file ne l'est pas deux fois : le motif le plus informatif reste (le
+    /// fil le relit en commençant, voir [`Fil::prendre`]). Un membre dont
+    /// la relance est programmée n'a rien à faire en file non plus : elle
+    /// viendra. Rend `true` si un travail est parti.
+    fn pousser(&self, user_id: UserId, motif: Motif, travaux: &Sender<Travail>) -> bool {
+        let mut en_file = self.en_file.lock().unwrap();
+        if let Some(existant) = en_file.get_mut(&user_id) {
+            if motif.poids() > existant.poids() {
+                *existant = motif;
+            }
+            return false;
+        }
+        if motif.relance().is_none() && self.relances.lock().unwrap().contains_key(&user_id) {
+            return false;
+        }
+        en_file.insert(user_id, motif);
+        if travaux.send(Travail::Rafraichir { user_id, motif }).is_err() {
+            en_file.remove(&user_id);
+            return false;
+        }
+        true
+    }
+
+    /// Le fil commence un rafraîchissement : l'entrée sort de la file, et
+    /// c'est le motif qu'elle porte — fusionné depuis — qui compte.
+    fn prendre(&self, user_id: UserId, motif: Motif) -> Motif {
+        self.en_file.lock().unwrap().remove(&user_id).unwrap_or(motif)
+    }
+
     /// Tout ce que la fiche contient est réputé connu : à la liaison, le
     /// fil commence aux parties à venir.
     fn connaitre(&self, user_id: UserId, fiche: &FicheValorant) {
@@ -547,8 +999,10 @@ impl Fil {
 
     /// Les matchs de la fiche jamais vus : notés, et mis en attente
     /// d'annonce s'ils s'annoncent (mode, âge). Les coéquipiers du groupe
-    /// (`co` : match → membres) sont relus aussitôt et attendus. Rend le
-    /// nombre de matchs nouveaux, annoncés ou non.
+    /// (`co` : match → membres) sont attendus, et relus aussitôt — sauf
+    /// s'ils sont déjà en file ou en relance, auquel cas leur lecture
+    /// vient de toute façon. Rend le nombre de matchs nouveaux, annoncés
+    /// ou non.
     fn nouveaux(
         &self,
         user_id: UserId,
@@ -610,10 +1064,7 @@ impl Fil {
             }
             for autre in autres {
                 if !e.lignes.iter().any(|l| l.user_id == autre) && e.attendus.insert(autre) {
-                    let _ = travaux.send(Travail::Rafraichir {
-                        user_id: autre,
-                        relance: None,
-                    });
+                    self.pousser(autre, Motif::CoMembre, travaux);
                 }
             }
         }
@@ -966,18 +1417,28 @@ pub fn maintenant_ms() -> u64 {
 
 /// Vingt requêtes par minute glissante : on note l'heure de chacune, et
 /// quand la file est pleine on attend que la plus vieille ait une minute.
+/// Et quand HenrikDev a dit 429, le seau est **gelé** jusqu'à l'heure
+/// qu'il a donnée : tout le fil attend, pas seulement la requête refusée.
 struct Seau {
     passees: VecDeque<Instant>,
+    gel_jusqua: Option<Instant>,
 }
 
 impl Seau {
     fn new() -> Self {
         Self {
             passees: VecDeque::with_capacity(BUDGET_PAR_MINUTE),
+            gel_jusqua: None,
         }
     }
 
     fn prendre(&mut self) {
+        if let Some(fin) = self.gel_jusqua.take() {
+            let reste = fin.saturating_duration_since(Instant::now());
+            if !reste.is_zero() {
+                std::thread::sleep(reste);
+            }
+        }
         let fenetre = Duration::from_secs(60);
         while self.passees.front().is_some_and(|t| t.elapsed() >= fenetre) {
             self.passees.pop_front();
@@ -991,11 +1452,39 @@ impl Seau {
         }
         self.passees.push_back(Instant::now());
     }
+
+    /// Gèle le seau pour `duree` — plafonnée, l'en-tête vient du réseau.
+    /// Un gel plus long déjà posé reste.
+    fn geler(&mut self, duree: Duration) {
+        let fin = Instant::now() + duree.min(GEL_MAX);
+        if self.gel_jusqua.is_none_or(|f| f < fin) {
+            self.gel_jusqua = Some(fin);
+        }
+    }
+
+    /// Gelé, et jusqu'à quand.
+    fn gele(&self) -> Option<Duration> {
+        self.gel_jusqua
+            .map(|f| f.saturating_duration_since(Instant::now()))
+            .filter(|d| !d.is_zero())
+    }
+}
+
+/// `Retry-After` d'un 429 : des secondes, ou une date HTTP (RFC 2822).
+/// `None` s'il manque ou ne se lit pas.
+fn lire_retry_after(valeur: Option<&str>) -> Option<Duration> {
+    let v = valeur?.trim();
+    if let Ok(s) = v.parse::<u64>() {
+        return Some(Duration::from_secs(s));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(v).ok()?;
+    let reste = date.timestamp_millis().saturating_sub(chrono::Utc::now().timestamp_millis());
+    Some(Duration::from_millis(reste.max(0) as u64))
 }
 
 enum Erreur {
     Introuvable,
-    /// Trop de requêtes, même après une reprise.
+    /// Trop de requêtes : le seau est gelé, on ne réessaie pas.
     Limite,
     Autre(String),
 }
@@ -1015,51 +1504,62 @@ struct Api {
     cle: String,
     seau: Seau,
     compteurs: Arc<Compteurs>,
+    /// Pourquoi les prochaines requêtes partent — posé par le fil avant
+    /// chaque travail, lu par le journal.
+    motif: Motif,
 }
 
 impl Api {
+    /// Une requête, une seule : un 429 gèle le seau le temps que
+    /// HenrikDev demande (`Retry-After`, sinon [`GEL_DEFAUT`]) et rend
+    /// `Limite` — le travail en cours s'arrête là, le suivant attendra la
+    /// fin du gel avant de partir.
     fn get(&mut self, chemin: &str) -> Result<Value, Erreur> {
         let url = format!("{BASE}{chemin}");
-        let mut essais = 0;
-        loop {
-            self.seau.prendre();
-            essais += 1;
-            self.compteurs.requetes.fetch_add(1, Ordering::Relaxed);
-            self.compteurs
-                .derniere_ms
-                .store(maintenant_ms(), Ordering::Relaxed);
-            match self.agent.get(&url).set("Authorization", &self.cle).call() {
-                Ok(reponse) => {
-                    return reponse
-                        .into_json::<Value>()
-                        .map_err(|e| Erreur::Autre(e.to_string()));
-                }
-                Err(ureq::Error::Status(404, _)) => return Err(Erreur::Introuvable),
-                Err(ureq::Error::Status(429, _)) if essais < 2 => {
-                    self.compteurs.refus_429.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!("VALORANT : HenrikDev renvoie 429, pause de trente secondes");
-                    std::thread::sleep(Duration::from_secs(30));
-                }
-                Err(ureq::Error::Status(429, _)) => {
-                    self.compteurs.refus_429.fetch_add(1, Ordering::Relaxed);
-                    return Err(Erreur::Limite);
-                }
-                Err(ureq::Error::Status(code, reponse)) => {
-                    self.compteurs.erreurs.fetch_add(1, Ordering::Relaxed);
-                    let detail = reponse
-                        .into_json::<Value>()
-                        .ok()
-                        .and_then(|v| v["errors"][0]["message"].as_str().map(str::to_string))
-                        .unwrap_or_default();
-                    return Err(Erreur::Autre(
-                        format!("HTTP {code} {detail}").trim().to_string(),
-                    ));
-                }
-                Err(e) => {
-                    self.compteurs.erreurs.fetch_add(1, Ordering::Relaxed);
-                    return Err(Erreur::Autre(e.to_string()));
-                }
+        self.seau.prendre();
+        let point = PointApi::de(chemin);
+        let depart = Instant::now();
+        let ms = maintenant_ms();
+        let reponse = self.agent.get(&url).set("Authorization", &self.cle).call();
+        let code = match &reponse {
+            Ok(_) => 200,
+            Err(ureq::Error::Status(code, _)) => *code,
+            Err(_) => 0,
+        };
+        self.compteurs.noter(Requete {
+            ms,
+            motif: self.motif,
+            point,
+            code,
+            duree_ms: depart.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+        });
+        match reponse {
+            Ok(reponse) => reponse
+                .into_json::<Value>()
+                .map_err(|e| Erreur::Autre(e.to_string())),
+            Err(ureq::Error::Status(404, _)) => Err(Erreur::Introuvable),
+            Err(ureq::Error::Status(429, reponse)) => {
+                let gel = lire_retry_after(reponse.header("Retry-After")).unwrap_or(GEL_DEFAUT);
+                self.seau.geler(gel);
+                tracing::warn!(
+                    "VALORANT : HenrikDev renvoie 429 ({}, {}) — fil gelé {} s",
+                    self.motif.nom(),
+                    point.nom(),
+                    self.seau.gele().unwrap_or_default().as_secs()
+                );
+                Err(Erreur::Limite)
             }
+            Err(ureq::Error::Status(code, reponse)) => {
+                let detail = reponse
+                    .into_json::<Value>()
+                    .ok()
+                    .and_then(|v| v["errors"][0]["message"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                Err(Erreur::Autre(
+                    format!("HTTP {code} {detail}").trim().to_string(),
+                ))
+            }
+            Err(e) => Err(Erreur::Autre(e.to_string())),
         }
     }
 }
@@ -1080,11 +1580,16 @@ fn fil(
         cle,
         seau: Seau::new(),
         compteurs: Arc::clone(&etat.compteurs),
+        motif: Motif::Periodique,
     };
     for travail in rx {
         match travail {
             Travail::Lier { user_id, nom, tag } => {
+                api.motif = Motif::Liaison;
                 let resultat = lier(&mut api, &etat, user_id, &nom, &tag);
+                // La place en file se rend une fois répondu : pendant les
+                // six requêtes, un second clic est refusé.
+                etat.fil.liaisons_en_file.lock().unwrap().remove(&user_id);
                 let (ok, message, riot_id) = match resultat {
                     Ok(fiche) => {
                         let m = format!(
@@ -1105,18 +1610,27 @@ fn fil(
                 });
             }
             Travail::Esports => {
+                api.motif = Motif::Esports;
                 // Le calendrier complet d'abord ; s'il tombe (HenrikDev a
                 // renvoyé 500 sur l'ensemble un soir de septembre 2026), la
                 // seule région qui nous intéresse, puis l'international.
                 // Même raté, il est daté de maintenant : pas de nouvel essai
                 // avant une heure — et une seule ligne de journal pour les
-                // trois essais.
+                // trois essais. Un 429 arrête tout : chaque variante de
+                // plus attendrait la fin du gel pour se faire refuser à son
+                // tour, et les relances derrière dériveraient d'autant.
                 let mut matchs = None;
                 let mut echecs = Vec::new();
+                let mut sature = false;
                 for filtre in ["", "?region=emea", "?region=international"] {
                     match api.get(&format!("/valorant/v1/esports/schedule{filtre}")) {
                         Ok(v) => {
                             matchs = Some(calendrier_esport(&v, maintenant_ms()));
+                            break;
+                        }
+                        Err(Erreur::Limite) => {
+                            echecs.push(Erreur::Limite.message());
+                            sature = true;
                             break;
                         }
                         Err(e) => echecs.push(e.message()),
@@ -1124,7 +1638,7 @@ fn fil(
                 }
                 // La source officielle en panne, VLR prend le relais : les
                 // événements à venir ou en cours, puis leurs matchs.
-                if matchs.is_none() {
+                if matchs.is_none() && !sature {
                     match calendrier_vlr(&mut api, maintenant_ms()) {
                         Ok(liste) if !liste.is_empty() => {
                             tracing::info!("VALORANT : calendrier esport lu chez VLR ({} matchs)", liste.len());
@@ -1145,56 +1659,111 @@ fn fil(
                 *etat.esports.lock().unwrap() = (maintenant_ms(), matchs);
                 etat.esports_en_cours.store(false, Ordering::Relaxed);
             }
-            Travail::Rafraichir { user_id, relance } => {
+            Travail::Rafraichir { user_id, motif } => {
+                // Le motif qui compte est celui de la file, fusionné depuis
+                // l'envoi : un périodique devenu relance entre-temps relit
+                // en relance.
+                let motif = etat.fil.prendre(user_id, motif);
                 let compte = etat.comptes.lock().unwrap().get(&user_id).cloned();
                 let Some(compte) = compte else { continue };
+                let maj = etat.fiches.lock().unwrap().get(&user_id).map(|f| f.maj);
+                if relecture_inutile(motif, maj, maintenant_ms()) {
+                    tracing::debug!(
+                        "VALORANT : fiche de {} fraîche, relecture {} sautée",
+                        compte.riot_id(),
+                        motif.nom()
+                    );
+                    continue;
+                }
+                api.motif = motif;
                 let lies = etat.lies();
-                match construire(&mut api, &compte, None, &lies) {
-                    Ok((fiche, co)) => {
-                        // `nouveaux` se juge sur la fiche fraîche : avec
-                        // soixante matchs accumulés, d'anciens ids
-                        // redeviendraient « nouveaux » et la relance de fin
-                        // de partie (nouveaux == 0) ne partirait plus.
-                        let nouveaux = etat.fil.nouveaux(user_id, &fiche, &co, &travaux);
-                        if nouveaux > 0 {
-                            etat.sauver_fil();
-                        }
-                        {
-                            let mut fiches = etat.fiches.lock().unwrap();
-                            let fiche = match fiches.remove(&user_id) {
-                                Some(ancienne) => fusionner(ancienne, fiche),
-                                None => fiche,
-                            };
-                            fiches.insert(user_id, fiche);
-                        }
-                        etat.sauver_fiches();
-                        // Rien de neuf après une fin de partie : HenrikDev
-                        // n'a pas encore le match, on relira.
-                        if let Some(essais) = relance {
-                            if nouveaux == 0 && essais + 1 < RELANCES_MAX {
-                                etat.fil
-                                    .relances
-                                    .lock()
-                                    .unwrap()
-                                    .insert(user_id, (Instant::now() + RELANCE_DELAI, essais + 1));
-                            }
-                        }
-                        let _ = tx.send(Resultat::Fiche { user_id });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "VALORANT : fiche de {} non rafraîchie : {}",
-                            compte.riot_id(),
-                            e.message()
-                        );
-                        // Qu'on ne réessaie pas à chaque minute : la fiche
-                        // est datée de maintenant même si elle n'a pas changé.
-                        if let Some(f) = etat.fiches.lock().unwrap().get_mut(&user_id) {
-                            f.maj = maintenant_ms();
-                        }
-                    }
+                let resultat = construire(&mut api, &compte, None, &lies);
+                if let Some(r) = apres_lecture(&etat, user_id, &compte, motif, resultat, &travaux) {
+                    let _ = tx.send(r);
                 }
             }
+        }
+    }
+}
+
+/// Fraîcheur : une fiche relue il y a moins de [`FRAICHEUR`] ne se relit
+/// pas pour un périodique — la lecture qui vient de finir a déjà vu ce
+/// qu'il y avait à voir. Tout autre motif passe : une relance attend un
+/// match précis, un co-membre porte l'information qu'une annonce
+/// l'attend (et s'il venait d'être relu *avant* que le match soit indexé,
+/// c'est justement lui qu'il faut relire — sinon l'annonce sort sans sa
+/// ligne, et son périodique la redit trente minutes plus tard). La
+/// tempête du 5-stack, elle, est retenue en amont par [`Fil::pousser`].
+fn relecture_inutile(motif: Motif, maj: Option<u64>, maintenant: u64) -> bool {
+    motif == Motif::Periodique
+        && maj.is_some_and(|maj| maintenant.saturating_sub(maj) < FRAICHEUR.as_millis() as u64)
+}
+
+/// Ce que le fil fait d'une lecture, réussie ou non. Réussie : l'échec
+/// antérieur s'oublie, les matchs nouveaux partent vers l'annonce, la
+/// fiche se fusionne et s'écrit, et une relance sans rien de neuf se
+/// reprogramme tant que la fin de partie l'a jugé utile. Ratée : l'échec
+/// est noté, fiche ou pas, pour que `a_rafraichir` n'y revienne pas
+/// chaque minute — et **pas** de relance : sur un 429, elle relancerait
+/// précisément quand HenrikDev sature ; le périodique reprendra la fin de
+/// partie. Rend ce qu'il y a à relayer aux clients.
+fn apres_lecture(
+    etat: &Etat,
+    user_id: UserId,
+    compte: &CompteRiot,
+    motif: Motif,
+    resultat: Result<(FicheValorant, CoMembres), Erreur>,
+    travaux: &Sender<Travail>,
+) -> Option<Resultat> {
+    match resultat {
+        Ok((fiche, co)) => {
+            etat.fil.derniere_tentative.lock().unwrap().remove(&user_id);
+            // `nouveaux` se juge sur la fiche fraîche : avec soixante
+            // matchs accumulés, d'anciens ids redeviendraient « nouveaux »
+            // et la relance de fin de partie (nouveaux == 0) ne partirait
+            // plus.
+            let nouveaux = etat.fil.nouveaux(user_id, &fiche, &co, travaux);
+            if nouveaux > 0 {
+                etat.sauver_fil();
+            }
+            {
+                let mut fiches = etat.fiches.lock().unwrap();
+                let fiche = match fiches.remove(&user_id) {
+                    Some(ancienne) => fusionner(ancienne, fiche),
+                    None => fiche,
+                };
+                fiches.insert(user_id, fiche);
+            }
+            etat.sauver_fiches();
+            // Rien de neuf après une fin de partie : HenrikDev n'a pas
+            // encore le match, on relira.
+            if let Motif::Relance { essai, max } = motif {
+                if nouveaux == 0 && essai + 1 < max {
+                    etat.fil.relances.lock().unwrap().insert(
+                        user_id,
+                        Relance {
+                            quand: Instant::now() + RELANCE_DELAI,
+                            essai: essai + 1,
+                            max,
+                        },
+                    );
+                }
+            }
+            Some(Resultat::Fiche { user_id })
+        }
+        Err(e) => {
+            tracing::warn!(
+                "VALORANT : fiche de {} non rafraîchie ({}) : {}",
+                compte.riot_id(),
+                motif.nom(),
+                e.message()
+            );
+            etat.fil
+                .derniere_tentative
+                .lock()
+                .unwrap()
+                .insert(user_id, maintenant_ms());
+            None
         }
     }
 }
@@ -1400,6 +1969,11 @@ fn fusionner(ancienne: FicheValorant, neuve: FicheValorant) -> FicheValorant {
 /// Trois requêtes : rang, historique de RR, derniers matchs. Rend aussi,
 /// par match, les autres membres liés (`lies` : membre → puuid) qui y
 /// jouaient — reconnus à leur puuid, sans rien garder des neuf autres.
+/// Sans le rang, pas de fiche ; sans l'historique ou les matchs, une
+/// fiche qui en manque (la fusion gardera les anciens) — sauf en 429, qui
+/// est une erreur franche : une fiche sans match sous 429 passerait pour
+/// « rien de neuf » et nourrirait la relance au moment où HenrikDev
+/// sature.
 fn construire(
     api: &mut Api,
     compte: &CompteRiot,
@@ -1413,13 +1987,14 @@ fn construire(
         enc(&compte.nom),
         enc(&compte.tag)
     );
+    let tolere = |r: Result<Value, Erreur>| match r {
+        Ok(v) => Ok(v),
+        Err(Erreur::Limite) => Err(Erreur::Limite),
+        Err(_) => Ok(Value::Null),
+    };
     let mmr = api.get(&format!("/valorant/v3/mmr/{suffixe}"))?;
-    let historique = api
-        .get(&format!("/valorant/v2/mmr-history/{suffixe}"))
-        .unwrap_or(Value::Null);
-    let matchs = api
-        .get(&format!("/valorant/v4/matches/{suffixe}?size={MATCHS_MAX}"))
-        .unwrap_or(Value::Null);
+    let historique = tolere(api.get(&format!("/valorant/v2/mmr-history/{suffixe}")))?;
+    let matchs = tolere(api.get(&format!("/valorant/v4/matches/{suffixe}?size={MATCHS_MAX}")))?;
 
     let mut fiche = FicheValorant {
         riot_id: compte.riot_id(),
@@ -3021,10 +3596,21 @@ mod tests {
             rx.try_recv(),
             Ok(Travail::Rafraichir {
                 user_id: 2,
-                relance: None
+                motif: Motif::CoMembre
             })
         ));
+        assert!(rx.try_recv().is_err(), "un seul travail pour le coéquipier");
         assert!(fil.pretes().is_empty(), "l'annonce attend le coéquipier");
+        // Le coéquipier vient d'être relu — juste avant que HenrikDev
+        // indexe le match : sa fiche est fraîche, et pourtant le fil le
+        // relit, sinon l'annonce sortirait sans sa ligne. Seul le
+        // périodique se laisse arrêter par la fraîcheur.
+        let maintenant = maintenant_ms();
+        assert!(!relecture_inutile(Motif::CoMembre, Some(maintenant), maintenant));
+        assert!(!relecture_inutile(Motif::Relance { essai: 0, max: 3 }, Some(maintenant), maintenant));
+        assert!(relecture_inutile(Motif::Periodique, Some(maintenant), maintenant));
+        assert!(!relecture_inutile(Motif::Periodique, Some(maintenant - 61_000), maintenant));
+        assert!(!relecture_inutile(Motif::Periodique, None, maintenant));
         // Rien de neuf à la seconde lecture.
         assert_eq!(fil.nouveaux(1, &fiche, &co, &tx), 0);
         // Le coéquipier arrive : l'annonce est prête, à deux lignes, avec
@@ -3078,11 +3664,426 @@ mod tests {
         assert!(!v.delier(1));
         assert!(v.a_rafraichir(&[1, 2], Duration::from_secs(1)).is_empty());
         assert!(v.resultats().is_empty());
-        v.fin_de_partie(1);
+        v.fin_de_partie(1, &partie("competitive", false), Duration::from_secs(1800));
+        v.reprise_de_partie(1);
+        v.rafraichir(1);
         assert!(v.tick().is_empty());
         v.rafraichir_esports();
         assert!(v.esports().is_empty());
         assert!(v.compteurs_texte().contains("clé HenrikDev absente"));
+        assert!(v.journal_texte().contains("aucune requête"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn partie(file: &str, custom: bool) -> ki_protocol::JeuStatut {
+        ki_protocol::JeuStatut {
+            etat: ki_protocol::JeuEtat::EnJeu,
+            file: file.into(),
+            custom,
+            ..Default::default()
+        }
+    }
+
+    /// Un service avec une clé (bidon) mais dont le fil ne tourne pas :
+    /// les travaux s'entassent dans `rx`, où le test les lit — sans
+    /// jamais toucher HenrikDev.
+    fn service_a_l_arret(nom: &str) -> (Valorant, Receiver<Travail>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ki-valorant-{nom}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (tx, rx) = mpsc::channel();
+        let etat = Arc::new(Etat {
+            dossier: dir.clone(),
+            comptes: Mutex::new(BTreeMap::new()),
+            fiches: Mutex::new(BTreeMap::new()),
+            fil: Fil::default(),
+            dernier_recap: Mutex::new(0),
+            compteurs: Arc::default(),
+            esports: Mutex::new((0, Vec::new())),
+            esports_en_cours: std::sync::atomic::AtomicBool::new(false),
+        });
+        let v = Valorant {
+            etat,
+            travaux: Some(tx),
+            resultats: Mutex::new(mpsc::channel().1),
+        };
+        (v, rx, dir)
+    }
+
+    fn compte(user_id: UserId, v: &Valorant) {
+        v.etat.comptes.lock().unwrap().insert(
+            user_id,
+            CompteRiot {
+                nom: format!("m{user_id}"),
+                tag: "KI".into(),
+                puuid: format!("puuid-{user_id}"),
+                region: "eu".into(),
+                plateforme: "pc".into(),
+                depuis: 0,
+            },
+        );
+    }
+
+    fn travaux_en_file(rx: &Receiver<Travail>) -> Vec<(UserId, Motif)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|t| match t {
+                Travail::Rafraichir { user_id, motif } => Some((user_id, motif)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Le périodique, le co-membre et la relance visent le même membre :
+    /// un seul travail part, et c'est le motif le plus informatif que le
+    /// fil lit en le prenant. Une relance programmée vaut une file : le
+    /// périodique n'y ajoute rien.
+    #[test]
+    fn la_file_ne_double_pas_un_membre_deja_en_attente() {
+        let (v, rx, _dir) = service_a_l_arret("file");
+        compte(1, &v);
+        compte(2, &v);
+        let travaux = v.travaux.as_ref().unwrap();
+        v.rafraichir(1);
+        v.rafraichir(1);
+        assert!(!v.etat.fil.pousser(1, Motif::CoMembre, travaux));
+        assert!(!v.etat.fil.pousser(1, Motif::Relance { essai: 0, max: 3 }, travaux));
+        // Un seul travail, et la file porte la relance.
+        assert_eq!(travaux_en_file(&rx), vec![(1, Motif::Periodique)]);
+        assert_eq!(
+            v.etat.fil.prendre(1, Motif::Periodique),
+            Motif::Relance { essai: 0, max: 3 }
+        );
+        // Sorti de la file, il y revient — le motif d'origine quand rien n'a
+        // été fusionné.
+        v.rafraichir(1);
+        assert_eq!(travaux_en_file(&rx), vec![(1, Motif::Periodique)]);
+        assert_eq!(v.etat.fil.prendre(1, Motif::Periodique), Motif::Periodique);
+        // Une relance programmée : ni le périodique ni un co-membre ne
+        // passent, la relance viendra ; elle-même passe quand elle est due.
+        v.fin_de_partie(2, &partie("competitive", false), Duration::from_secs(1800));
+        v.rafraichir(2);
+        assert!(!v.etat.fil.pousser(2, Motif::CoMembre, travaux));
+        assert!(travaux_en_file(&rx).is_empty());
+        v.etat.fil.relances.lock().unwrap().get_mut(&2).unwrap().quand = Instant::now();
+        assert!(v.tick().is_empty());
+        assert_eq!(travaux_en_file(&rx), vec![(2, Motif::Relance { essai: 0, max: 3 })]);
+        assert!(v.etat.fil.relances.lock().unwrap().is_empty());
+        assert!(v.compteurs_texte().contains("en file : 1, relances programmées : 0"));
+    }
+
+    /// Le membre revient en partie avant que la relance ait tiré : c'était
+    /// un hoquet du client Riot, la relance tombe. Une relance qui a déjà
+    /// tiré reste.
+    #[test]
+    fn une_reprise_de_partie_annule_la_relance() {
+        let (v, rx, _dir) = service_a_l_arret("reprise");
+        compte(1, &v);
+        v.fin_de_partie(1, &partie("competitive", false), Duration::from_secs(1800));
+        assert_eq!(v.etat.fil.relances.lock().unwrap().len(), 1);
+        v.reprise_de_partie(1);
+        assert!(v.etat.fil.relances.lock().unwrap().is_empty());
+        assert!(v.tick().is_empty());
+        assert!(travaux_en_file(&rx).is_empty(), "zéro requête pour un hoquet");
+        // Déjà tirée une fois : la suivante reste programmée.
+        v.etat.fil.relances.lock().unwrap().insert(
+            1,
+            Relance {
+                quand: Instant::now() + RELANCE_DELAI,
+                essai: 1,
+                max: 3,
+            },
+        );
+        v.reprise_de_partie(1);
+        assert_eq!(v.etat.fil.relances.lock().unwrap().len(), 1);
+    }
+
+    fn menu() -> ki_protocol::JeuStatut {
+        ki_protocol::JeuStatut {
+            etat: ki_protocol::JeuEtat::Menus,
+            ..Default::default()
+        }
+    }
+
+    /// Une classée de quarante minutes, un hoquet du client Riot à la
+    /// trente-huitième : la partie se mesure depuis l'entrée d'origine,
+    /// pas depuis le retour du hoquet, et sa vraie fin vaut trois
+    /// relances. Une session qui reprend en pleine partie ne sait pas
+    /// depuis quand : sa fin est réputée assez longue.
+    #[test]
+    fn un_hoquet_ou_une_reconnexion_ne_raccourcit_pas_la_partie() {
+        let t0 = Instant::now();
+        let min = |n: u64| Duration::from_secs(n * 60);
+        let classee = partie("competitive", false);
+        // Du menu à la partie : l'heure d'entrée se pose, la relance du
+        // match d'avant tombe.
+        let t = transition_de_jeu(Some(menu()), &Some(classee.clone()), None, t0);
+        assert_eq!(
+            t,
+            TransitionJeu {
+                fin: None,
+                reprise: true,
+                en_jeu_depuis: Some(t0)
+            }
+        );
+        // Le hoquet : présence perdue à 38 min — une fin, mesurée à 38
+        // min, mais l'heure d'entrée reste.
+        let t = transition_de_jeu(Some(classee.clone()), &None, Some(t0), t0 + min(38));
+        assert_eq!(t.fin, Some((classee.clone(), min(38))));
+        assert!(!t.reprise);
+        assert_eq!(t.en_jeu_depuis, Some(t0));
+        // Retour cinq secondes plus tard : une reprise, l'heure d'origine
+        // toujours.
+        let t = transition_de_jeu(None, &Some(classee.clone()), Some(t0), t0 + min(38) + Duration::from_secs(5));
+        assert_eq!(
+            t,
+            TransitionJeu {
+                fin: None,
+                reprise: true,
+                en_jeu_depuis: Some(t0)
+            }
+        );
+        // La vraie fin, au menu, deux minutes plus tard : quarante minutes,
+        // trois relances ; le menu efface l'heure d'entrée.
+        let t = transition_de_jeu(Some(classee.clone()), &Some(menu()), Some(t0), t0 + min(40));
+        let (ancien, duree) = t.fin.clone().expect("une fin de partie");
+        assert_eq!((duree, t.en_jeu_depuis), (min(40), None));
+        assert_eq!(relances_pour(&ancien, duree), 3);
+        // Et le service enchaîne ces trois transitions comme il faut : une
+        // relance après le hoquet, annulée au retour, puis la vraie.
+        let (v, _rx, _dir) = service_a_l_arret("hoquet");
+        compte(1, &v);
+        v.fin_de_partie(1, &classee, min(38));
+        assert_eq!(v.etat.fil.relances.lock().unwrap().len(), 1);
+        v.reprise_de_partie(1);
+        assert!(v.etat.fil.relances.lock().unwrap().is_empty());
+        v.fin_de_partie(1, &ancien, duree);
+        assert_eq!(v.etat.fil.relances.lock().unwrap().get(&1).map(|r| r.max), Some(3));
+        // Une session neuve qui trouve son membre en partie : ni entrée ni
+        // reprise — la relance du match d'avant, s'il y en a une, reste.
+        let t = transition_de_jeu(None, &Some(classee.clone()), None, t0);
+        assert_eq!(t, TransitionJeu::default());
+        // Sa fin deux minutes plus tard est réputée assez longue.
+        let t = transition_de_jeu(Some(classee.clone()), &Some(menu()), None, t0 + min(2));
+        let (ancien, duree) = t.fin.expect("une fin de partie");
+        assert_eq!(duree, Duration::MAX);
+        assert_eq!(relances_pour(&ancien, duree), 3);
+        // Un menu observé après une présence perdue clôt la partie ; un
+        // score qui bouge en partie ne touche à rien.
+        let t = transition_de_jeu(None, &Some(menu()), Some(t0), t0);
+        assert_eq!(t, TransitionJeu::default());
+        let mut score = classee.clone();
+        score.score_allie = 5;
+        let t = transition_de_jeu(Some(classee.clone()), &Some(score), Some(t0), t0 + min(10));
+        assert_eq!(
+            t,
+            TransitionJeu {
+                fin: None,
+                reprise: false,
+                en_jeu_depuis: Some(t0)
+            }
+        );
+        // Une partie vraiment courte, elle, reste sans relance.
+        let t = transition_de_jeu(Some(classee.clone()), &Some(menu()), Some(t0), t0 + min(2));
+        let (ancien, duree) = t.fin.expect("une fin de partie");
+        assert_eq!(relances_pour(&ancien, duree), 0);
+    }
+
+    /// Trois relances pour une file qui s'annonce (console comprise), une
+    /// pour un combat à mort, aucune en personnalisée ou sous trois
+    /// minutes.
+    #[test]
+    fn la_relance_depend_de_la_file() {
+        let longue = Duration::from_secs(40 * 60);
+        assert_eq!(relances_pour(&partie("competitive", false), longue), 3);
+        assert_eq!(relances_pour(&partie("console_unrated", false), longue), 3);
+        assert_eq!(relances_pour(&partie("swiftplay", false), Duration::from_secs(181)), 3);
+        assert_eq!(relances_pour(&partie("premier", false), longue), 3);
+        assert_eq!(relances_pour(&partie("deathmatch", false), longue), 1);
+        assert_eq!(relances_pour(&partie("hurm", false), longue), 1);
+        assert_eq!(relances_pour(&partie("", false), longue), 1);
+        assert_eq!(relances_pour(&partie("", true), longue), 0);
+        assert_eq!(relances_pour(&partie("competitive", false), Duration::from_secs(179)), 0);
+        assert_eq!(relances_pour(&partie("competitive", false), Duration::ZERO), 0);
+        // Et le service en tient compte : un combat à mort ne se relit
+        // qu'une fois, un hoquet pas du tout.
+        let (v, _rx, _dir) = service_a_l_arret("relance");
+        compte(1, &v);
+        compte(2, &v);
+        v.fin_de_partie(1, &partie("deathmatch", false), longue);
+        v.fin_de_partie(2, &partie("competitive", false), Duration::from_secs(10));
+        let relances = v.etat.fil.relances.lock().unwrap();
+        assert_eq!(relances.get(&1).map(|r| r.max), Some(1));
+        assert!(!relances.contains_key(&2));
+    }
+
+    /// Un 429 gèle le seau — le temps que `Retry-After` demande, sous
+    /// plafond, trente secondes sans en-tête — et se compte avec son
+    /// heure. Et un rafraîchissement qui échoue ne reprogramme rien.
+    #[test]
+    fn un_429_gele_le_seau_et_n_engendre_pas_de_relance() {
+        let mut seau = Seau::new();
+        assert!(seau.gele().is_none());
+        seau.geler(Duration::from_secs(12));
+        let gel = seau.gele().expect("gelé");
+        assert!(gel > Duration::from_secs(10) && gel <= Duration::from_secs(12));
+        // Un gel plus court ne raccourcit pas ; un gel démesuré est plafonné.
+        seau.geler(Duration::from_secs(1));
+        assert!(seau.gele().unwrap() > Duration::from_secs(10));
+        seau.geler(Duration::from_secs(3600));
+        assert!(seau.gele().unwrap() <= GEL_MAX);
+        assert_eq!(lire_retry_after(Some("7")), Some(Duration::from_secs(7)));
+        assert_eq!(lire_retry_after(Some(" 30 ")), Some(Duration::from_secs(30)));
+        assert_eq!(lire_retry_after(None), None);
+        assert_eq!(lire_retry_after(Some("n'importe quoi")), None);
+        // Une date passée : plus rien à attendre, mais l'en-tête se lit.
+        assert_eq!(
+            lire_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            Some(Duration::ZERO)
+        );
+        let dans_une_heure = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc2822();
+        assert!(lire_retry_after(Some(&dans_une_heure)).unwrap() > Duration::from_secs(3500));
+        // Le compteur note le 429 et son heure.
+        let c = Compteurs::default();
+        let ms = maintenant_ms();
+        c.noter(Requete {
+            ms,
+            motif: Motif::Relance { essai: 0, max: 3 },
+            point: PointApi::Matches,
+            code: 429,
+            duree_ms: 40,
+        });
+        assert_eq!(c.refus_429.load(Ordering::Relaxed), 1);
+        assert_eq!(c.dernier_429_ms.load(Ordering::Relaxed), ms);
+        assert_eq!(c.erreurs.load(Ordering::Relaxed), 0);
+        // Le fil, lui, ne reprogramme pas de relance sur un échec : la
+        // première relance revient en 429, rien n'est reprogrammé, l'échec
+        // est noté (le membre sort du périodique), rien à relayer.
+        let (v, rx, dir) = service_a_l_arret("gel");
+        compte(1, &v);
+        let travaux = v.travaux.as_ref().unwrap();
+        let c1 = v.etat.comptes.lock().unwrap()[&1].clone();
+        let relance = Motif::Relance { essai: 0, max: 3 };
+        assert!(apres_lecture(&v.etat, 1, &c1, relance, Err(Erreur::Limite), travaux).is_none());
+        assert!(v.etat.fil.relances.lock().unwrap().is_empty(), "pas de relance sur un 429");
+        assert!(v.etat.fil.derniere_tentative.lock().unwrap().contains_key(&1));
+        assert!(v.a_rafraichir(&[1], Duration::from_secs(0)).is_empty());
+        assert!(v.etat.fiches.lock().unwrap().is_empty(), "pas de fiche datée à vide");
+        // Un succès sans match nouveau, lui, reprogramme la relance
+        // suivante, oublie l'échec, écrit la fiche et la relaie.
+        let fiche = FicheValorant {
+            riot_id: c1.riot_id(),
+            maj: ms,
+            ..Default::default()
+        };
+        let r = apres_lecture(&v.etat, 1, &c1, relance, Ok((fiche, Vec::new())), travaux);
+        assert!(matches!(r, Some(Resultat::Fiche { user_id: 1 })));
+        assert_eq!(
+            v.etat.fil.relances.lock().unwrap().get(&1).map(|r| (r.essai, r.max)),
+            Some((1, 3))
+        );
+        assert!(!v.etat.fil.derniere_tentative.lock().unwrap().contains_key(&1));
+        assert_eq!(v.etat.fiches.lock().unwrap().get(&1).map(|f| f.maj), Some(ms));
+        // La dernière relance sans rien de neuf n'en reprogramme pas.
+        v.etat.fil.relances.lock().unwrap().clear();
+        let fiche = FicheValorant {
+            riot_id: c1.riot_id(),
+            ..Default::default()
+        };
+        let dernier = Motif::Relance { essai: 2, max: 3 };
+        assert!(apres_lecture(&v.etat, 1, &c1, dernier, Ok((fiche, Vec::new())), travaux).is_some());
+        assert!(v.etat.fil.relances.lock().unwrap().is_empty());
+        assert!(travaux_en_file(&rx).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Un membre sans fiche que HenrikDev refuse n'est pas redemandé
+    /// chaque minute : l'échec est noté, trente minutes de silence, puis
+    /// on réessaie ; la déliaison efface tout.
+    #[test]
+    fn un_echec_sans_fiche_n_est_pas_retente_avant_trente_minutes() {
+        let (v, _rx, _dir) = service_a_l_arret("echec");
+        compte(1, &v);
+        compte(2, &v);
+        // Sans fiche ni échec : à relire.
+        assert_eq!(v.a_rafraichir(&[1, 2], Duration::from_secs(1800)), vec![1, 2]);
+        // Le périodique de 1 échoue, sans fiche : l'échec se note quand
+        // même, et 1 sort du périodique.
+        let travaux = v.travaux.as_ref().unwrap();
+        let c1 = v.etat.comptes.lock().unwrap()[&1].clone();
+        let echec = Err(Erreur::Autre("HTTP 500".into()));
+        assert!(apres_lecture(&v.etat, 1, &c1, Motif::Periodique, echec, travaux).is_none());
+        assert!(v.etat.fiches.lock().unwrap().get(&1).is_none(), "toujours sans fiche");
+        assert_eq!(v.a_rafraichir(&[1, 2], Duration::from_secs(1800)), vec![2]);
+        // Dix minutes plus tard, toujours pas ; trente et une, oui.
+        let maintenant = maintenant_ms();
+        {
+            let mut t = v.etat.fil.derniere_tentative.lock().unwrap();
+            t.insert(1, maintenant.saturating_sub(10 * 60_000));
+            t.insert(2, maintenant.saturating_sub(31 * 60_000));
+        }
+        assert_eq!(v.a_rafraichir(&[1, 2], Duration::from_secs(1800)), vec![2]);
+        // Hors ligne : jamais.
+        assert!(v.a_rafraichir(&[], Duration::from_secs(1800)).is_empty());
+        assert!(v.delier(1));
+        assert!(!v.etat.fil.derniere_tentative.lock().unwrap().contains_key(&1));
+        let _ = std::fs::remove_dir_all(_dir);
+    }
+
+    /// Chaque requête se compte par motif et par point d'API, les
+    /// dernières restent en anneau, et le pic par minute se lit.
+    #[test]
+    fn le_motif_se_compte() {
+        assert_eq!(PointApi::de("/valorant/v3/mmr/eu/pc/a/b"), PointApi::Mmr);
+        assert_eq!(PointApi::de("/valorant/v2/mmr-history/eu/pc/a/b"), PointApi::History);
+        assert_eq!(PointApi::de("/valorant/v4/matches/eu/pc/a/b?size=5"), PointApi::Matches);
+        assert_eq!(PointApi::de("/valorant/v2/account/a/b"), PointApi::Account);
+        assert_eq!(PointApi::de("/valorant/v1/stored-matches/eu/a/b"), PointApi::Stored);
+        assert_eq!(PointApi::de("/valorant/v2/stored-mmr-history/eu/pc/a/b"), PointApi::Stored);
+        assert_eq!(PointApi::de("/valorant/v1/esports/schedule"), PointApi::Esports);
+        assert_eq!(PointApi::de("/valorant/v2/esports/vlr/events/1/matches"), PointApi::Esports);
+        assert_eq!(PointApi::de("/valorant/v2/esports/vlr/events?type=upcoming"), PointApi::Esports);
+        // Un membre au nom piégé ne déplace pas le compteur : c'est le
+        // segment qui compte, pas ce qu'on trouve sur le chemin.
+        assert_eq!(PointApi::de("/valorant/v4/matches/eu/pc/mmr/KI?size=5"), PointApi::Matches);
+        assert_eq!(PointApi::de("/valorant/v2/mmr-history/eu/pc/stored-x/KI"), PointApi::History);
+        assert_eq!(PointApi::de("/valorant/v3/mmr/eu/pc/esports/account"), PointApi::Mmr);
+        assert_eq!(PointApi::de("/valorant/v9/inconnu/eu"), PointApi::Autre);
+        assert_eq!(PointApi::de(""), PointApi::Autre);
+        let c = Compteurs::default();
+        let ms = maintenant_ms();
+        let req = |motif, point, code, ms| Requete { ms, motif, point, code, duree_ms: 10 };
+        for _ in 0..3 {
+            c.noter(req(Motif::Periodique, PointApi::Mmr, 200, ms));
+        }
+        c.noter(req(Motif::Relance { essai: 1, max: 3 }, PointApi::Matches, 200, ms + 60_000));
+        c.noter(req(Motif::CoMembre, PointApi::History, 500, ms + 60_000));
+        c.noter(req(Motif::Liaison, PointApi::Account, 404, ms + 60_000));
+        c.noter(req(Motif::Esports, PointApi::Esports, 0, ms + 60_000));
+        assert_eq!(c.requetes.load(Ordering::Relaxed), 7);
+        let motifs: Vec<u64> = c.par_motif.iter().map(|n| n.load(Ordering::Relaxed)).collect();
+        assert_eq!(motifs, vec![3, 1, 1, 1, 1]);
+        let points: Vec<u64> = c.par_point.iter().map(|n| n.load(Ordering::Relaxed)).collect();
+        assert_eq!(points, vec![3, 1, 1, 1, 0, 1, 0]);
+        // Le 404 n'est pas une erreur ; le 500 et le réseau muet le sont.
+        assert_eq!(c.erreurs.load(Ordering::Relaxed), 2);
+        assert_eq!(c.pic(ms + 60_000), 4);
+        // Une heure plus tard, le pic est retombé.
+        assert_eq!(c.pic(ms + 61 * 60_000 + 60_000), 0);
+        // L'anneau garde les soixante dernières.
+        for i in 0..70u64 {
+            c.noter(req(Motif::Periodique, PointApi::Mmr, 200, ms + 120_000 + i));
+        }
+        let journal = c.journal.lock().unwrap();
+        assert_eq!(journal.len(), JOURNAL_REQUETES);
+        assert_eq!(journal.back().map(|r| r.ms), Some(ms + 120_000 + 69));
+        drop(journal);
+        assert_eq!(Motif::Relance { essai: 1, max: 3 }.nom(), "relance 2/3");
+        assert_eq!(Motif::CoMembre.nom(), "co-membre");
+        let (v, _rx, _dir) = service_a_l_arret("motif");
+        v.etat.compteurs.noter(req(Motif::Liaison, PointApi::Account, 200, ms));
+        let texte = v.compteurs_texte();
+        assert!(texte.contains("liaison 1"), "{texte}");
+        assert!(texte.contains("points d'API : account 1"), "{texte}");
+        let journal = v.journal_texte();
+        assert!(journal.contains("liaison · account · 200 · 10 ms"), "{journal}");
     }
 }
