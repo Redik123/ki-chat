@@ -13,6 +13,12 @@
 //! (16:9) dans le dossier du clip, avec `export.json` qui dit où l'on en
 //! est — le client le relit comme la fiche d'une vidéo, et ffmpeg lui donne
 //! sa progression (`-progress pipe:1`).
+//!
+//! Une simple coupe (16:9, sans titre, sans changement de cadence, sur une
+//! source déjà en H.264 1080p) ne réencode pas la vidéo : `-c:v copy`, coupe
+//! à la trame clé qui précède — deux secondes de marge au plus, contre des
+//! minutes de x264 sur un conteneur à un cœur. Tout le reste passe par x264,
+//! sur un nombre de fils borné, avec un délai qui suit la durée de la sortie.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -28,8 +34,6 @@ use crate::medias::{Outils, Sonde};
 pub const DUREE_MAX_MS: u64 = 180_000;
 const DUREE_MIN_MS: u64 = 500;
 const TITRE_MAX: usize = 80;
-/// Temps accordé à ffmpeg pour un export.
-const EXPORT_MAX: Duration = Duration::from_secs(900);
 /// Le téléphone : 1080×1920.
 const TEL_LARGEUR: u32 = 1080;
 const TEL_HAUTEUR: u32 = 1920;
@@ -122,11 +126,14 @@ pub struct Source {
     /// Les pistes après le mélange, dans l'ordre, si le clip les a dites.
     pub pistes: Option<Vec<String>>,
     pub pistes_audio: u32,
+    /// Le codec de la piste vidéo (« h264 ») : décide si une coupe peut se
+    /// faire en copie.
+    pub codec: String,
 }
 
 impl Source {
     pub fn depuis(sonde: &Sonde, pistes: Option<Vec<String>>) -> Option<Self> {
-        let (_, largeur, hauteur) = sonde.video.clone()?;
+        let (codec, largeur, hauteur) = sonde.video.clone()?;
         Some(Self {
             largeur,
             hauteur,
@@ -138,11 +145,14 @@ impl Source {
             },
             pistes,
             pistes_audio: sonde.pistes_audio,
+            codec,
         })
     }
 }
 
-/// Où en est l'export, dans `export.json`.
+/// Où en est l'export, dans `export.json`. Les quatre états et leur sens
+/// sont ceux que les clients 0.1.42 connaissent ; ce qui s'est ajouté
+/// depuis est facultatif et se lit avec un défaut.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Etat {
     /// `en_attente`, `en_cours`, `pret` ou `erreur`.
@@ -162,14 +172,34 @@ pub struct Etat {
     pub hauteur: u32,
     #[serde(default)]
     pub taille: u64,
+    /// En attente : combien de tâches la fabrique traite avant celle-ci.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derriere: Option<u32>,
+    /// Comment la vidéo est faite : « copie » (coupe sans réencodage) ou
+    /// « x264 ».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// L'instant (secondes Unix) de la dernière écriture : le client sait
+    /// si l'état bouge encore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depuis: Option<u64>,
 }
 
-pub fn ecrire_etat(dossier: &Path, etat: &Etat) {
-    if let Ok(json) = serde_json::to_vec_pretty(etat) {
-        if let Err(e) = crate::store::write_atomic(&dossier.join("export.json"), &json) {
-            tracing::error!("export.json non écrit : {e}");
-        }
-    }
+/// Écrit l'état. L'échec remonte, parce qu'un disque plein ou un dossier aux
+/// mauvais droits laisserait le client relire un 404 sans fin : la route qui
+/// accepte l'export doit pouvoir répondre 500 à la place.
+pub fn ecrire_etat(dossier: &Path, etat: &Etat) -> std::io::Result<()> {
+    let mut etat = etat.clone();
+    etat.depuis = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    let json = serde_json::to_vec_pretty(&etat).map_err(std::io::Error::other)?;
+    crate::store::write_atomic(&dossier.join("export.json"), &json).inspect_err(|e| {
+        tracing::error!("export.json non écrit dans {} : {e}", dossier.display());
+    })
 }
 
 pub fn lire_etat(dossier: &Path) -> Option<Etat> {
@@ -199,11 +229,14 @@ pub fn police() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// Les noms que l'atelier sait produire : le 16:9 coupé, et le téléphone.
+pub const EXPORTS: [&str; 2] = ["export.mp4", "telephone.mp4"];
+
 /// Le nom du fichier produit par une recette.
 pub fn nom_sortie(recette: &Recette) -> &'static str {
     match recette.format {
-        Format::Original => "export.mp4",
-        Format::Telephone { .. } => "telephone.mp4",
+        Format::Original => EXPORTS[0],
+        Format::Telephone { .. } => EXPORTS[1],
     }
 }
 
@@ -425,6 +458,18 @@ fn chaine_audio(recette: &Recette, source: &Source) -> Option<String> {
     }
 }
 
+/// Vrai si la recette n'est qu'une coupe d'une source déjà bonne : ni
+/// titre, ni cadence imposée, ni format téléphone, du H.264 qui tient dans
+/// le 1080p. Alors la vidéo se copie au lieu de se réencoder.
+pub fn coupe_en_copie(recette: &Recette, source: &Source) -> bool {
+    recette.format == Format::Original
+        && recette.titre.is_none()
+        && recette.cadence == 0
+        && source.codec == "h264"
+        && source.largeur <= 1920
+        && source.hauteur <= 1080
+}
+
 /// Les arguments de ffmpeg pour une recette validée : ceux d'avant
 /// l'entrée, ceux d'après (jusqu'au nom de sortie exclu).
 pub fn composer(
@@ -435,6 +480,31 @@ pub fn composer(
     let debut_s = recette.debut_ms as f64 / 1000.0;
     let duree_s = (recette.fin_ms - recette.debut_ms) as f64 / 1000.0;
     let avant = vec!["-ss".to_string(), format!("{debut_s:.3}")];
+    if coupe_en_copie(recette, source) {
+        // La coupe seule : `-ss` avant l'entrée saute à la trame clé qui
+        // précède, la vidéo se copie, le son se compose comme d'habitude
+        // (c'est le pas cher). `-avoid_negative_ts` remet la première
+        // image à zéro, sinon un lecteur attend le début manquant.
+        let mut apres: Vec<String> = vec!["-t".into(), format!("{duree_s:.3}")];
+        match chaine_audio(recette, source) {
+            Some(a) => apres.extend(
+                [
+                    "-filter_complex", &a, "-map", "0:v:0", "-map", "[son]", "-c:a", "aac",
+                    "-b:a", "160k", "-ar", "48000", "-ac", "2",
+                ]
+                .map(String::from),
+            ),
+            None => apres.extend(["-map", "0:v:0", "-an"].map(String::from)),
+        }
+        apres.extend(
+            [
+                "-c:v", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
+                "-progress", "pipe:1", "-nostats",
+            ]
+            .map(String::from),
+        );
+        return Ok((avant, apres));
+    }
     let video = chaine_video(recette, source, titre)?;
     let audio = chaine_audio(recette, source);
     let graphe = match &audio {
@@ -458,18 +528,26 @@ pub fn composer(
         ),
         None => apres.push("-an".into()),
     }
+    // x264 `superfast` : un cran plus vite que `veryfast` pour un export
+    // qu'on regarde sur un téléphone, et des fils bornés à ce que le
+    // conteneur a vraiment (voir `medias::fils_ffmpeg`).
+    let fils = crate::medias::fils_ffmpeg().to_string();
     apres.extend(
         [
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "superfast",
             "-crf",
-            "21",
+            "22",
             "-profile:v",
             "high",
             "-pix_fmt",
             "yuv420p",
+            "-threads",
+            &fils,
+            "-filter_threads",
+            &fils,
             "-movflags",
             "+faststart",
             "-progress",
@@ -490,7 +568,7 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
         fichier: Some(sortie.to_string()),
         ..Default::default()
     };
-    ecrire_etat(dossier, &etat);
+    ecrire_etat(dossier, &etat).map_err(|e| format!("export.json : {e}"))?;
     let resultat = (|| -> Result<(), String> {
         let source_chemin = dossier.join("source.mp4");
         let sonde = crate::medias::sonder(outils, &source_chemin)?;
@@ -498,6 +576,8 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
         let source = Source::depuis(&sonde, pistes).ok_or("source sans image")?;
         let police = police();
         valider(recette, &source, police.is_some())?;
+        etat.mode = Some(if coupe_en_copie(recette, &source) { "copie" } else { "x264" }.into());
+        let _ = ecrire_etat(dossier, &etat);
         // Le titre, dans un fichier que drawtext lit tel quel.
         let fichier_titre = dossier.join("titre.txt");
         let titre = match (&recette.titre, &police) {
@@ -510,7 +590,7 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
         let (avant, apres) = composer(recette, &source, titre)?;
         let chemin_sortie = dossier.join(sortie);
         let _ = std::fs::remove_file(&chemin_sortie);
-        let mut cmd = Command::new(&outils.ffmpeg);
+        let mut cmd = crate::medias::commande_ffmpeg(outils);
         cmd.args(["-y", "-nostdin", "-hide_banner", "-loglevel", "error"])
             .args(&avant)
             .arg("-i")
@@ -518,9 +598,10 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
             .args(&apres)
             .arg(&chemin_sortie);
         let duree_us = (recette.fin_ms - recette.debut_ms) * 1000;
-        lancer_avec_progression(&mut cmd, duree_us, |pc| {
+        let delai = crate::medias::delai_pour(duree_us as f32 / 1_000_000.0);
+        lancer_avec_progression(&mut cmd, duree_us, delai, |pc| {
             etat.pour_cent = pc;
-            ecrire_etat(dossier, &etat);
+            let _ = ecrire_etat(dossier, &etat);
         })?;
         let apres = crate::medias::sonder(outils, &chemin_sortie)?;
         let (_, l, h) = apres.video.ok_or("l'export n'a pas produit d'image")?;
@@ -537,13 +618,16 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
             etat.etat = "pret".into();
             etat.pour_cent = 100;
             etat.message = None;
-            ecrire_etat(dossier, &etat);
+            ecrire_etat(dossier, &etat).map_err(|e| format!("export.json : {e}"))?;
             Ok(etat)
         }
         Err(e) => {
+            // Un fichier à moitié écrit (ffmpeg tué au délai) n'est pas
+            // un export : il ne doit pas se servir ni se partager.
+            let _ = std::fs::remove_file(dossier.join(sortie));
             etat.etat = "erreur".into();
             etat.message = Some(e.chars().take(200).collect());
-            ecrire_etat(dossier, &etat);
+            let _ = ecrire_etat(dossier, &etat);
             Err(e)
         }
     }
@@ -551,10 +635,11 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
 
 /// Lance ffmpeg et suit `-progress pipe:1` : `out_time_us=…` à chaque
 /// seconde environ, `progress=end` à la fin. `avancer` reçoit le pourcentage
-/// quand il change.
+/// quand il change ; passé `delai`, ffmpeg est tué.
 fn lancer_avec_progression(
     cmd: &mut Command,
     duree_us: u64,
+    delai: Duration,
     mut avancer: impl FnMut(u8),
 ) -> Result<(), String> {
     let mut enfant = cmd
@@ -597,7 +682,7 @@ fn lancer_avec_progression(
         }
         match enfant.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if debut.elapsed() > EXPORT_MAX => {
+            Ok(None) if debut.elapsed() > delai => {
                 let _ = enfant.kill();
                 let _ = enfant.wait();
                 break None;
@@ -638,6 +723,7 @@ mod tests {
             cadence: 60.0,
             pistes: Some(vec!["jeu".into(), "micro".into(), "copains".into()]),
             pistes_audio: 4,
+            codec: "h264".into(),
         }
     }
 
@@ -738,7 +824,9 @@ mod tests {
 
     #[test]
     fn la_ligne_ffmpeg_se_compose_pour_chaque_cadre() {
-        let s = source();
+        // Une source HEVC : la coupe 16:9 elle-même doit repasser par x264.
+        let mut s = source();
+        s.codec = "hevc".into();
         let (avant, apres) = composer(&recette(Format::Original), &s, None).unwrap();
         assert_eq!(avant, ["-ss", "1.000"]);
         assert_eq!(&apres[..2], ["-t", "10.000"]);
@@ -750,6 +838,8 @@ mod tests {
             "{graphe}"
         );
         assert!(apres.contains(&"[son]".to_string()));
+        assert!(apres.contains(&"libx264".to_string()));
+        assert!(apres.contains(&"-threads".to_string()));
 
         let glisse = recette(Format::Telephone {
             cadre: Cadre::Recadre {
@@ -803,7 +893,7 @@ mod tests {
         assert!(apres.contains(&"-an".to_string()) && !apres[3].contains("[son]"));
 
         // Pistes inconnues : le mélange tel quel.
-        let mut inconnue = source();
+        let mut inconnue = s.clone();
         inconnue.pistes = None;
         let (_, apres) = composer(&recette(Format::Original), &inconnue, None).unwrap();
         assert!(apres[3].ends_with("[0:a:0]volume=1[son]"));
@@ -828,6 +918,89 @@ mod tests {
         let graphe = &apres[3];
         assert!(graphe.contains("drawtext=fontfile='C\\:/Fonts/a.ttf':textfile='/data/clips/x/titre.txt':expansion=none"), "{graphe}");
         assert!(graphe.contains("y=h-text_h-h*0.07"));
+    }
+
+    /// La coupe seule d'un clip H.264 1080p ne réencode pas : la vidéo se
+    /// copie, le son se compose ; un titre, une cadence, un téléphone ou
+    /// une source qui n'est pas du H.264 ramènent x264.
+    #[test]
+    fn une_coupe_seule_se_fait_en_copie() {
+        let s = source();
+        let simple = recette(Format::Original);
+        assert!(coupe_en_copie(&simple, &s));
+        let (avant, apres) = composer(&simple, &s, None).unwrap();
+        assert_eq!(avant, ["-ss", "1.000"]);
+        assert_eq!(&apres[..2], ["-t", "10.000"]);
+        let copie = apres.windows(2).any(|w| w == ["-c:v", "copy"]);
+        assert!(copie, "{apres:?}");
+        assert!(!apres.contains(&"libx264".to_string()));
+        assert!(apres.contains(&"make_zero".to_string()));
+        // Le son passe quand même par le mélange demandé.
+        assert!(apres.iter().any(|a| a.contains("amix=inputs=3")), "{apres:?}");
+        // Muet : ni graphe ni piste.
+        let mut muet = simple.clone();
+        muet.audio = Audio { jeu: 0.0, micro: 0.0, copains: 0.0 };
+        let (_, apres) = composer(&muet, &s, None).unwrap();
+        assert!(apres.contains(&"-an".to_string()) && !apres.contains(&"-filter_complex".to_string()));
+
+        let mut titre = simple.clone();
+        titre.titre = Some(Titre { texte: "ACE".into(), position: Position::Haut });
+        assert!(!coupe_en_copie(&titre, &s));
+        let mut cadence = simple.clone();
+        cadence.cadence = 30;
+        assert!(!coupe_en_copie(&cadence, &s));
+        let tel = recette(Format::Telephone { cadre: Cadre::FondFlou });
+        assert!(!coupe_en_copie(&tel, &s));
+        let mut hevc = s.clone();
+        hevc.codec = "hevc".into();
+        assert!(!coupe_en_copie(&simple, &hevc));
+        let mut grande = s.clone();
+        grande.largeur = 2560;
+        grande.hauteur = 1440;
+        assert!(!coupe_en_copie(&simple, &grande));
+    }
+
+    /// Ce que le client lit dans `export.json` : les états et les champs
+    /// de 0.1.42 gardent leur sens, les nouveaux sont facultatifs.
+    #[test]
+    fn l_etat_d_export_reste_lisible_par_les_clients_d_avant() {
+        // Un état d'avant, sans les champs nouveaux.
+        let ancien: Etat = serde_json::from_str(
+            r#"{"etat":"en_cours","pour_cent":42,"fichier":"telephone.mp4","message":null,"duree_s":0.0,"largeur":0,"hauteur":0,"taille":0}"#,
+        )
+        .unwrap();
+        assert_eq!(ancien.etat, "en_cours");
+        assert_eq!(ancien.pour_cent, 42);
+        assert_eq!(ancien.derriere, None);
+        assert_eq!(ancien.mode, None);
+        // Un état d'aujourd'hui : les nouveaux champs ne s'écrivent que
+        // s'ils sont posés, et ce qu'un client 0.1.42 lit ne change pas.
+        let dossier = std::env::temp_dir().join(format!("ki-export-etat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).unwrap();
+        ecrire_etat(
+            &dossier,
+            &Etat {
+                etat: "en_attente".into(),
+                fichier: Some("export.mp4".into()),
+                derriere: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let texte = std::fs::read_to_string(dossier.join("export.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&texte).unwrap();
+        assert_eq!(v["etat"], "en_attente");
+        assert_eq!(v["fichier"], "export.mp4");
+        assert_eq!(v["pour_cent"], 0);
+        assert_eq!(v["derriere"], 2);
+        assert!(v["depuis"].as_u64().is_some_and(|t| t > 1_700_000_000));
+        assert!(v.get("mode").is_none());
+        let relu = lire_etat(&dossier).unwrap();
+        assert_eq!(relu.derriere, Some(2));
+        // Un dossier qu'on ne peut pas écrire : l'erreur remonte.
+        assert!(ecrire_etat(&dossier.join("absent"), &Etat::default()).is_err());
+        let _ = std::fs::remove_dir_all(&dossier);
     }
 
     #[test]
@@ -934,7 +1107,8 @@ mod tests {
                 pistes: Some(vec!["jeu".into(), "micro".into(), "copains".into()]),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let recette = Recette {
             debut_ms: 500,
             fin_ms: 2_000,

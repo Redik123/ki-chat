@@ -151,12 +151,12 @@ pub async fn fin(
     let (id, dossier_clip, total) = match assemble {
         Ok(Ok(x)) => x,
         Ok(Err(e)) => {
-            let code = if e.contains("saturé") {
-                StatusCode::INSUFFICIENT_STORAGE
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            return (code, e.replace("espace de partage", "espace des clips")).into_response();
+            return medias::refus_assemblage(
+                &e.replace("espace de partage", "espace des clips"),
+                &username,
+                user_id,
+                "clip",
+            )
         }
         Err(e) => {
             tracing::error!("assemblage d'un clip : {e}");
@@ -197,10 +197,22 @@ pub async fn fin(
         messages,
         ..Default::default()
     };
-    medias::ecrire_meta(&dossier_clip, &meta);
-    state.medias.deposer(dossier_clip);
+    // Sans fiche, la carte de chacun dirait « en préparation » sans fin et
+    // l'atelier relirait un 404 : mieux vaut le dire tout de suite. Le
+    // clip reçu est jeté, le message posté reste (rare, et l'admin lit le
+    // journal : c'est un disque plein).
+    if let Err(e) = medias::ecrire_meta(&dossier_clip, &meta) {
+        tracing::error!("clip {id} : fiche non écrite ({e}) — clip jeté");
+        let _ = std::fs::remove_dir_all(&dossier_clip);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stockage indisponible sur le serveur ({e}) — préviens un admin"),
+        )
+            .into_response();
+    }
+    let devant = state.medias.deposer(dossier_clip);
     tracing::info!(
-        "clip reçu : {nom} ({} Mo) de {username} (id {user_id}), voix des copains : {}",
+        "clip reçu : {nom} ({} Mo) de {username} (id {user_id}), voix des copains : {}, {devant} devant en file",
         total / (1024 * 1024),
         if demande.voix {
             "gardées"
@@ -324,13 +336,47 @@ fn clip_du_membre(
     Ok((dossier, meta))
 }
 
-/// Les fichiers d'un clip que l'on peut donner : la version partagée, et
-/// l'export s'il est prêt. Jamais la source, avec ses pistes séparées.
-fn fichier_connu(dossier: &Path, meta: &Meta, fichier: &str) -> bool {
+/// Les fichiers d'un clip que l'on peut donner à voir ou à partager : la
+/// version partagée, et les exports finis. Jamais la source, avec ses
+/// pistes séparées, ni le texte du titre.
+pub(crate) fn fichier_connu(dossier: &Path, meta: &Meta, fichier: &str) -> bool {
     let partage = meta.etat == "pret" && meta.sortie.as_deref() == Some(fichier);
-    let export = export::lire_etat(dossier)
-        .is_some_and(|e| e.etat == "pret" && e.fichier.as_deref() == Some(fichier));
+    // Un export : l'un des deux noms que l'atelier produit. Celui dont
+    // `export.json` parle n'est un fichier que si l'état dit « prêt » — en
+    // cours, il s'écrit encore ; en erreur, ce qui reste est un fichier
+    // tronqué (ffmpeg tué avec le conteneur, tâche morte), que l'on ne
+    // sert ni ne partage. L'autre nom, dont l'état ne parle pas, est un
+    // export précédent, fini : les chemins qui forcent « erreur »
+    // effacent leur sortie, il n'y reste rien de tronqué.
+    let export = export::EXPORTS.contains(&fichier)
+        && export::lire_etat(dossier)
+            .is_none_or(|e| e.fichier.as_deref() != Some(fichier) || e.etat == "pret");
     (partage || export) && dossier.join(fichier).is_file()
+}
+
+/// Un export qui ne finira pas (redémarrage, tâche morte, état périmé) :
+/// son état passe en `erreur`, et ce qu'il a laissé sur le disque part avec
+/// — un MP4 sans index n'est pas un export, et `fichier_connu` ne doit pas
+/// le retrouver sous l'autre nom quand un nouvel export aura réécrit
+/// `export.json`.
+pub(crate) fn abandonner_export(dossier: &Path, etat: &mut export::Etat, pourquoi: &str) {
+    if let Some(f) = etat.fichier.as_deref().filter(|f| export::EXPORTS.contains(f)) {
+        let _ = std::fs::remove_file(dossier.join(f));
+    }
+    etat.etat = "erreur".into();
+    etat.message = Some(pourquoi.into());
+    let _ = export::ecrire_etat(dossier, etat);
+}
+
+/// Ce que `GET /files/<id>/<nom>` peut servir d'un dossier de clip : les
+/// fiches (`meta.json`, `export.json`), le poster, et les fichiers de
+/// [`fichier_connu`]. Le reste — `source.mp4` et ses pistes séparées,
+/// `titre.txt` — n'existe pas pour qui connaît le lien.
+pub(crate) fn fichier_servable(dossier: &Path, nom: &str) -> bool {
+    if matches!(nom, "meta.json" | "export.json" | "poster.jpg") {
+        return dossier.join(nom).is_file();
+    }
+    medias::lire_meta(dossier).is_some_and(|meta| fichier_connu(dossier, &meta, nom))
 }
 
 // ---------------------------------------------------------------------
@@ -360,14 +406,23 @@ pub async fn exporter(
     let Some(outils) = state.medias.outils() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "le serveur n'a pas ffmpeg").into_response();
     };
-    if export::lire_etat(&dossier_clip)
-        .is_some_and(|e| matches!(e.etat.as_str(), "en_attente" | "en_cours"))
+    // Un export vraiment en cours : la fabrique le tient en file ou sous
+    // ffmpeg. Un `export.json` « en cours » qu'elle ne connaît pas est un
+    // reste (tâche morte, ancien démarrage) : il ne bloque pas.
+    if let Some(mut etat) = export::lire_etat(&dossier_clip)
+        .filter(|e| matches!(e.etat.as_str(), "en_attente" | "en_cours"))
     {
-        return (
-            StatusCode::CONFLICT,
-            "un export est déjà en cours sur ce clip",
-        )
-            .into_response();
+        if state.medias.export_vivant(&dossier_clip) {
+            return (
+                StatusCode::CONFLICT,
+                "un export est déjà en cours sur ce clip",
+            )
+                .into_response();
+        }
+        tracing::warn!("export : clip {id} : un état « en cours » périmé, on repart");
+        // Ce que la tâche morte a laissé ne doit pas se servir sous l'autre
+        // nom une fois que l'état ne parlera plus que du nouvel export.
+        abandonner_export(&dossier_clip, &mut etat, "export interrompu sur le serveur");
     }
     // La recette contre la source (ffprobe) : sur le pool bloquant.
     let verdict = {
@@ -388,16 +443,31 @@ pub async fn exporter(
         }
     }
     let fichier = export::nom_sortie(&recette);
-    export::ecrire_etat(
-        &dossier_clip,
-        &export::Etat {
-            etat: "en_attente".into(),
-            fichier: Some(fichier.to_string()),
-            ..Default::default()
-        },
-    );
+    // L'état d'abord, la file ensuite : si l'état ne peut pas s'écrire
+    // (disque plein, droits), le membre le sait tout de suite au lieu de
+    // relire un 404 pendant un quart d'heure. Le nombre de tâches devant
+    // s'écrit avec (« en file derrière 2 ») : c'est celui d'avant le dépôt,
+    // et le dépôt suit aussitôt — la fabrique réécrira « en cours » quand
+    // elle prendra la tâche.
+    let fabrique = state.medias.resume();
+    let derriere = fabrique.en_file as u32 + u32::from(fabrique.en_cours.is_some());
+    let en_attente = export::Etat {
+        etat: "en_attente".into(),
+        fichier: Some(fichier.to_string()),
+        derriere: Some(derriere),
+        ..Default::default()
+    };
+    if let Err(e) = export::ecrire_etat(&dossier_clip, &en_attente) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stockage indisponible sur le serveur ({e}) — préviens un admin"),
+        )
+            .into_response();
+    }
     state.medias.deposer_export(dossier_clip, recette);
-    tracing::info!("export demandé : clip {id} par {username} (id {user_id})");
+    tracing::info!(
+        "export demandé : clip {id} ({fichier}) par {username} (id {user_id}), {derriere} devant en file"
+    );
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "fichier": fichier })),
@@ -505,6 +575,7 @@ fn base_publique(hote: &str) -> String {
 pub async fn tel(
     State(state): State<Arc<AppState>>,
     Param(jeton): Param<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     if jeton.len() != 32 || !jeton.chars().all(|c| c.is_ascii_hexdigit()) {
         return StatusCode::NOT_FOUND.into_response();
@@ -522,20 +593,9 @@ pub async fn tel(
         )
             .into_response();
     };
-    match tokio::fs::read(&e.chemin).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, "video/mp4".to_string()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", e.nom),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
+    // En flux, avec `Range` : le téléphone reprend un téléchargement coupé
+    // et le serveur ne charge jamais le fichier entier en mémoire.
+    files::servir_fichier(&e.chemin, "video/mp4", "attachment", &e.nom, &headers).await
 }
 
 #[derive(Deserialize)]
@@ -592,7 +652,8 @@ pub async fn partager(
     // La fiche retient ce message aussi, pour l'effacer avec le clip.
     let mut meta = meta;
     meta.messages.push((d.channel, ts));
-    medias::ecrire_meta(&dossier_clip, &meta);
+    let _ = medias::ecrire_meta(&dossier_clip, &meta);
+    tracing::info!("clip {id} : {fichier} partagé par {username} (id {user_id}) dans le salon {}", d.channel);
     Json(serde_json::json!({ "url": url })).into_response()
 }
 
@@ -648,20 +709,24 @@ pub async fn supprimer(
 
 /// Au démarrage : les clips laissés « en préparation » repassent en file ;
 /// un export interrompu, lui, ne reprend pas — il faudrait sa recette — et
-/// on le dit, pour qu'un nouveau puisse partir.
+/// on le dit, pour qu'un nouveau puisse partir. Le fichier qu'il écrivait
+/// part avec : Watchtower recrée le conteneur à chaque image, ffmpeg meurt
+/// avec lui, et un `export.mp4` sans index resterait sinon à partager.
 pub fn reprendre(state: &AppState) {
     let racine = dossier(state);
     medias::reprendre_dans(state, &racine);
-    let Ok(entrees) = std::fs::read_dir(&racine) else {
+    abandonner_exports_dans(&racine);
+}
+
+fn abandonner_exports_dans(racine: &Path) {
+    let Ok(entrees) = std::fs::read_dir(racine) else {
         return;
     };
     for e in entrees.flatten() {
         let d = e.path();
         if let Some(mut etat) = export::lire_etat(&d) {
             if matches!(etat.etat.as_str(), "en_attente" | "en_cours") {
-                etat.etat = "erreur".into();
-                etat.message = Some("interrompu par un redémarrage du serveur".into());
-                export::ecrire_etat(&d, &etat);
+                abandonner_export(&d, &mut etat, "interrompu par un redémarrage du serveur");
             }
         }
     }
@@ -686,19 +751,301 @@ pub fn resume_stockage(state: &AppState) -> String {
         format!("{quoi} : {n} · {mo} Mo / {plafond} · {age}")
     };
     format!(
-        "stockage\n{}\n{}",
+        "stockage\n{}\n{}\n{}",
         ligne(
             "fichiers partagés",
             &PathBuf::from(&state.data_dir).join("files"),
             state.files_quota
         ),
-        ligne("clips", &dossier(state), state.clips_quota)
+        ligne("clips", &dossier(state), state.clips_quota),
+        state.medias.ligne()
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dossier_d_essai(nom: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ki-clips-{nom}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Ce qu'un dossier de clip donne à voir : la fiche, le poster,
+    /// l'état d'export, la version partagée, les exports finis — jamais la
+    /// source ni le titre, ni un export que la fabrique écrit encore.
+    #[test]
+    fn un_clip_ne_sert_que_sa_liste_blanche() {
+        let d = dossier_d_essai("blanche");
+        for nom in ["source.mp4", "clip.mp4", "poster.jpg", "titre.txt", "export.mp4", "telephone.mp4"] {
+            std::fs::write(d.join(nom), b"x").unwrap();
+        }
+        // Pas de fiche du tout : rien que les fichiers de fiche existants.
+        assert!(!fichier_servable(&d, "clip.mp4"));
+        assert!(!fichier_servable(&d, "meta.json"));
+        assert!(fichier_servable(&d, "poster.jpg"));
+        assert!(!fichier_servable(&d, "source.mp4"));
+
+        let meta = Meta {
+            etat: "en_preparation".into(),
+            clip: true,
+            garder_source: true,
+            source: Some("source.mp4".into()),
+            sortie: Some("clip.mp4".into()),
+            ..Default::default()
+        };
+        medias::ecrire_meta(&d, &meta).unwrap();
+        assert!(fichier_servable(&d, "meta.json"));
+        assert!(!fichier_servable(&d, "clip.mp4"), "pas prête : pas servie");
+        assert!(!fichier_servable(&d, "source.mp4"));
+        assert!(!fichier_servable(&d, "titre.txt"));
+        // Les exports existent et aucun n'est en cours : servis.
+        assert!(fichier_servable(&d, "export.mp4"));
+        assert!(fichier_servable(&d, "telephone.mp4"));
+        assert!(!fichier_servable(&d, "export.json"), "pas encore d'export.json");
+
+        let prete = Meta { etat: "pret".into(), ..meta };
+        medias::ecrire_meta(&d, &prete).unwrap();
+        assert!(fichier_servable(&d, "clip.mp4"));
+        assert!(!fichier_servable(&d, "source.mp4"), "la source ne sort jamais");
+        assert!(!fichier_servable(&d, "titre.txt"));
+        assert!(!fichier_servable(&d, "autre.mp4"));
+
+        // Un export téléphone en cours : le fichier qu'il écrit n'est pas
+        // servi, l'autre export l'est toujours ; l'état, lui, se lit.
+        export::ecrire_etat(
+            &d,
+            &export::Etat { etat: "en_cours".into(), fichier: Some("telephone.mp4".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert!(fichier_servable(&d, "export.json"));
+        assert!(!fichier_servable(&d, "telephone.mp4"));
+        assert!(!fichier_connu(&d, &prete, "telephone.mp4"));
+        assert!(fichier_servable(&d, "export.mp4"));
+        assert!(fichier_connu(&d, &prete, "export.mp4"));
+        assert!(fichier_connu(&d, &prete, "clip.mp4"));
+        assert!(!fichier_connu(&d, &prete, "source.mp4"));
+        // Fini : les deux.
+        export::ecrire_etat(
+            &d,
+            &export::Etat { etat: "pret".into(), fichier: Some("telephone.mp4".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert!(fichier_servable(&d, "telephone.mp4"));
+        // Un export en erreur qui aurait laissé un fichier (ffmpeg tué avec
+        // le conteneur) : ce qui reste est tronqué, pas servi ; l'autre
+        // export, fini avant, l'est toujours.
+        export::ecrire_etat(
+            &d,
+            &export::Etat { etat: "erreur".into(), fichier: Some("telephone.mp4".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert!(!fichier_servable(&d, "telephone.mp4"));
+        assert!(!fichier_connu(&d, &prete, "telephone.mp4"));
+        assert!(fichier_servable(&d, "export.mp4"));
+        // Un export raté laisse un fichier absent : pas servi non plus.
+        std::fs::remove_file(d.join("telephone.mp4")).unwrap();
+        assert!(!fichier_servable(&d, "telephone.mp4"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Un redémarrage pendant un export (Watchtower recrée le conteneur,
+    /// ffmpeg meurt avec lui) : au démarrage suivant, l'état passe en
+    /// erreur **et** le fichier à moitié écrit disparaît — sans quoi
+    /// `/partager` et `/files/<id>/export.mp4` le donnaient à tout le salon.
+    /// L'export fini d'avant, sous l'autre nom, reste ; un dossier sans
+    /// export en cours n'est pas touché.
+    #[test]
+    fn un_export_interrompu_par_un_redemarrage_perd_son_fichier_tronque() {
+        let racine = dossier_d_essai("reprise");
+        let coupe = racine.join("0123456789abcdef");
+        let fini = racine.join("fedcba9876543210");
+        for d in [&coupe, &fini] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("export.mp4"), b"fini").unwrap();
+            std::fs::write(d.join("telephone.mp4"), b"tronq").unwrap();
+            medias::ecrire_meta(
+                d,
+                &Meta { etat: "pret".into(), clip: true, sortie: Some("clip.mp4".into()), ..Default::default() },
+            )
+            .unwrap();
+        }
+        export::ecrire_etat(
+            &coupe,
+            &export::Etat { etat: "en_cours".into(), fichier: Some("telephone.mp4".into()), pour_cent: 37, ..Default::default() },
+        )
+        .unwrap();
+        export::ecrire_etat(
+            &fini,
+            &export::Etat { etat: "pret".into(), fichier: Some("telephone.mp4".into()), ..Default::default() },
+        )
+        .unwrap();
+
+        abandonner_exports_dans(&racine);
+
+        let etat = export::lire_etat(&coupe).unwrap();
+        assert_eq!(etat.etat, "erreur");
+        assert_eq!(etat.fichier.as_deref(), Some("telephone.mp4"));
+        assert_eq!(etat.message.as_deref(), Some("interrompu par un redémarrage du serveur"));
+        assert!(!coupe.join("telephone.mp4").exists(), "le fichier tronqué est parti");
+        assert!(coupe.join("export.mp4").is_file(), "l'autre export, fini, reste");
+        assert!(fichier_servable(&coupe, "export.mp4"));
+        assert!(!fichier_servable(&coupe, "telephone.mp4"));
+        // Et si un nouvel export sous l'autre nom réécrit l'état, le
+        // tronqué n'est plus là pour être servi « par défaut ».
+        export::ecrire_etat(
+            &coupe,
+            &export::Etat { etat: "pret".into(), fichier: Some("export.mp4".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert!(!fichier_servable(&coupe, "telephone.mp4"));
+
+        let etat = export::lire_etat(&fini).unwrap();
+        assert_eq!(etat.etat, "pret", "un export fini n'est pas touché");
+        assert!(fini.join("telephone.mp4").is_file());
+        assert!(fichier_servable(&fini, "telephone.mp4"));
+        let _ = std::fs::remove_dir_all(&racine);
+    }
+
+    /// Le circuit de l'atelier, fonctions à la suite : les morceaux
+    /// s'assemblent dans le stock des clips, la fiche s'écrit, la fabrique
+    /// normalise, l'export part et `export.json` raconte la suite — jusqu'à
+    /// un fichier que `fichier_connu` accepte de partager. Sauté sans
+    /// ffmpeg.
+    #[test]
+    fn depot_puis_export_d_un_clip_synthetique() {
+        let Some(outils) = medias::detecter() else {
+            eprintln!("ffmpeg absent : test sauté");
+            return;
+        };
+        let racine = dossier_d_essai("circuit");
+        // Le clip tel que l'enregistreur l'écrit : H.264, quatre pistes.
+        let source = racine.join("clip-source.mp4");
+        let statut = std::process::Command::new(&outils.ffmpeg)
+            .args(["-y", "-loglevel", "error"])
+            .args([
+                "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000",
+                "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000",
+                "-f", "lavfi", "-i", "sine=frequency=1100:sample_rate=48000",
+                "-t", "4",
+                "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a", "-map", "4:a",
+                "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-ac", "2",
+            ])
+            .arg(&source)
+            .status();
+        if !statut.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("libx264 absent : test sauté");
+            return;
+        }
+        // Les morceaux, comme `/upload/partiel` les range : 64 Kio chacun.
+        let octets = std::fs::read(&source).unwrap();
+        let partiel = racine.join("upload-partiel").join("7").join("0123456789abcdef");
+        std::fs::create_dir_all(&partiel).unwrap();
+        let morceaux: Vec<&[u8]> = octets.chunks(64 * 1024).collect();
+        for (i, m) in morceaux.iter().enumerate() {
+            std::fs::write(partiel.join(format!("{i:05}")), m).unwrap();
+        }
+        let stock = racine.join("clips");
+        std::fs::create_dir_all(&stock).unwrap();
+        // `/clips/fin` : assemblage sous le plafond, fiche, mise en file.
+        let (id, dossier_clip, total) =
+            medias::assembler(&partiel, morceaux.len() as u32, &stock, 0, "source.mp4").unwrap();
+        assert!(id_valide(&id));
+        assert_eq!(total, octets.len() as u64);
+        assert!(!partiel.exists(), "les morceaux sont jetés");
+        let meta = Meta {
+            etat: "en_preparation".into(),
+            source: Some("source.mp4".into()),
+            sortie: Some("clip.mp4".into()),
+            clip: true,
+            garder_source: true,
+            auteur: Some(7),
+            nom: Some("clip.mp4".into()),
+            pistes: Some(vec!["jeu".into(), "micro".into(), "copains".into()]),
+            voix: Some(true),
+            ..Default::default()
+        };
+        medias::ecrire_meta(&dossier_clip, &meta).unwrap();
+        let fabrique = medias::Fabrique::avec(Some(outils.clone()), 512);
+        assert_eq!(fabrique.deposer(dossier_clip.clone()), 0);
+        // Avant la conversion : l'export est refusé (« pas prêt »), et la
+        // version partagée n'est pas servie.
+        let (d, m) = clip_de_dans(&stock, &id).unwrap();
+        assert_eq!(m.etat, "en_preparation");
+        assert!(!fichier_servable(&d, "clip.mp4"));
+        // La fabrique, à la main : ce que `boucle` fait.
+        let travail = fabrique.prochaine().unwrap();
+        medias::normaliser_pour_test(&outils, &travail.dossier).expect("normalisation");
+        fabrique.terminee();
+        let (_, m) = clip_de_dans(&stock, &id).unwrap();
+        assert_eq!(m.etat, "pret");
+        assert!(fichier_servable(&dossier_clip, "clip.mp4"));
+        assert!(fichier_servable(&dossier_clip, "poster.jpg"));
+        assert!(!fichier_servable(&dossier_clip, "source.mp4"));
+
+        // `/clips/{id}/exporter` : la recette validée, l'état « en attente »
+        // écrit avant la file, puis la fabrique.
+        let recette: Recette = serde_json::from_str(
+            r#"{"debut_ms":1000,"fin_ms":3000,"format":{"type":"original"},"audio":{"jeu":1.0,"micro":1.0,"copains":0.0}}"#,
+        )
+        .unwrap();
+        let sonde = medias::sonder(&outils, &dossier_clip.join("source.mp4")).unwrap();
+        let src = export::Source::depuis(&sonde, m.pistes.clone()).unwrap();
+        export::valider(&recette, &src, false).unwrap();
+        assert!(export::coupe_en_copie(&recette, &src), "une coupe seule : en copie");
+        export::ecrire_etat(
+            &dossier_clip,
+            &export::Etat {
+                etat: "en_attente".into(),
+                fichier: Some(export::nom_sortie(&recette).into()),
+                derriere: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fabrique.deposer_export(dossier_clip.clone(), recette.clone());
+        assert!(fabrique.export_vivant(&dossier_clip), "en file : vivant, un second export serait un 409");
+        let etat = export::lire_etat(&dossier_clip).unwrap();
+        assert_eq!((etat.etat.as_str(), etat.fichier.as_deref(), etat.derriere), ("en_attente", Some("export.mp4"), Some(0)));
+        assert!(!fichier_servable(&dossier_clip, "export.mp4"), "rien à servir encore");
+
+        let travail = fabrique.prochaine().unwrap();
+        let fini = export::executer(&outils, &travail.dossier, &recette).expect("export");
+        fabrique.terminee();
+        assert_eq!(fini.etat, "pret");
+        assert_eq!(fini.mode.as_deref(), Some("copie"));
+        assert!((1.0..=4.5).contains(&fini.duree_s), "coupe à la trame clé : {} s", fini.duree_s);
+        let etat = export::lire_etat(&dossier_clip).unwrap();
+        assert_eq!((etat.etat.as_str(), etat.pour_cent, etat.fichier.as_deref()), ("pret", 100, Some("export.mp4")));
+        assert!(etat.depuis.is_some());
+        assert!(!fabrique.export_vivant(&dossier_clip), "fini : un nouvel export peut partir");
+        // Ce que `/partager` et `/files/<id>/export.mp4` acceptent.
+        let (_, m) = clip_de_dans(&stock, &id).unwrap();
+        assert!(fichier_connu(&dossier_clip, &m, "export.mp4"));
+        assert!(fichier_servable(&dossier_clip, "export.mp4"));
+        assert!(!fichier_servable(&dossier_clip, "titre.txt"));
+        assert!(!fichier_servable(&dossier_clip, "source.mp4"));
+        // Le résultat est bien du H.264 avec une seule piste son.
+        let apres = medias::sonder(&outils, &dossier_clip.join("export.mp4")).unwrap();
+        assert_eq!(apres.video.as_ref().map(|v| v.0.as_str()), Some("h264"));
+        assert_eq!(apres.pistes_audio, 1);
+        let _ = std::fs::remove_dir_all(&racine);
+    }
+
+    /// `clip_de` sans `AppState` : le même contrôle, sur un stock donné.
+    fn clip_de_dans(stock: &Path, id: &str) -> Option<(PathBuf, Meta)> {
+        if !id_valide(id) {
+            return None;
+        }
+        let dossier = stock.join(id);
+        let meta = medias::lire_meta(&dossier)?;
+        meta.clip.then_some((dossier, meta))
+    }
 
     #[test]
     fn la_demande_se_lit_avec_ses_defauts() {

@@ -356,6 +356,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **Encodeur (0.1.39)** — la diffusion descend seule en 30 i/s puis en 720p quand l'encodeur ne suit pas, et remonte prudemment.
 - [x] **Tableau de bord (0.1.39)** — l'état du serveur en un écran dans l'administration : connectés, vocal, diffusions, stocks, musique, VALORANT, diagnostics.
 - [x] **V5 (0.1.40)** — Statistiques enrichies : fiche accumulée, stats de manche, page du groupe en quatre onglets et graphiques au painter.
+- [x] **Clips (0.1.43)** — Partage et atelier robustes sur un serveur lent : fabrique premier arrivé premier servi, coupe sans réencodage, fichiers servis en flux avec `Range`, source jamais servie, et un atelier qui dit toujours où il en est (file, pourcentage, chrono) et pourquoi ça échoue.
 
 ### Perspectives & Prochains jalons
 

@@ -518,6 +518,12 @@ struct KiApp {
     /// Mon rang : on n'agit que sur strictement plus bas que soi.
     my_rank: u16,
     voice_token: u64,
+    /// Le même jeton, en hexadécimal, partagé avec les fils qui durent
+    /// (l'atelier : un export prend des minutes) — relu à chaque requête,
+    /// mis à jour à chaque `Welcome`. Un fil qui aurait copié le jeton à
+    /// son départ parlerait avec celui d'une session finie après une
+    /// reconnexion, et le serveur lui répondrait « jeton invalide ».
+    jeton_http: std::sync::Arc<std::sync::Mutex<String>>,
     channels: Vec<ChannelInfo>,
     /// Tous les rôles du serveur, pour les couleurs et les badges.
     roles: Vec<ki_protocol::RoleInfo>,
@@ -1026,6 +1032,7 @@ impl KiApp {
             my_rank: 0,
             roles: Vec::new(),
             voice_token: 0,
+            jeton_http: Default::default(),
             channels: Vec::new(),
             current: None,
             voice_channel: None,
@@ -2488,7 +2495,7 @@ impl KiApp {
         let reseau = (self.conn.is_some() && self.can(ki_protocol::perm::UPLOAD_FILE)).then(|| {
             atelier::Reseau {
                 base: self.http_base(),
-                token_hex: format!("{:x}", self.voice_token),
+                jeton: self.jeton_http.clone(),
                 agent: self.http_agent(),
             }
         });
@@ -2636,7 +2643,10 @@ impl KiApp {
     fn lancer_partage_clip(&mut self) {
         let base = self.http_base();
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        // Le jeton partagé avec l'application, relu à chaque requête : une
+        // reconnexion pendant les minutes de l'envoi ne fait pas refuser
+        // le morceau suivant avec l'ancien.
+        let jeton = self.jeton_http.clone();
         let Some(p) = self.clips_partage.as_mut() else { return };
         let Some(salon) = p.salon else { return };
         let envoi = std::sync::Arc::new(std::sync::Mutex::new(EnvoiClip::default()));
@@ -2646,17 +2656,23 @@ impl KiApp {
         let legende = p.legende.trim().to_string();
         let voix = p.voix;
         let pistes = p.fiche.as_ref().and_then(|f| f.pistes.clone());
-        let fiche = p.fiche.clone();
         let base_fiche = base.clone();
+        let nom_journal = p.nom.clone();
         std::thread::spawn(move || {
-            let resultat = (|| -> Result<(), String> {
+            let debut = std::time::Instant::now();
+            let token_hex = move || jeton.lock().unwrap().clone();
+            let resultat = (|| -> Result<String, String> {
                 let taille = std::fs::metadata(&chemin).map_err(|e| e.to_string())?.len();
                 if taille == 0 {
                     return Err("fichier vide".into());
                 }
+                ki_voice::journal(format!(
+                    "clips : partage de {nom_journal} ({} Mo) vers le salon {salon} : envoi",
+                    taille / (1024 * 1024)
+                ));
                 let progres = {
                     let envoi = envoi.clone();
-                    move |pc: u64| envoi.lock().unwrap().pour_cent = pc.min(100) as u8
+                    move |pc: u64, _: u32, _: u32| envoi.lock().unwrap().pour_cent = pc.min(100) as u8
                 };
                 let (upload, parts) =
                     match envoyer_morceaux(&agent, &base, &token_hex, &chemin, taille, &progres)? {
@@ -2676,11 +2692,12 @@ impl KiApp {
                 });
                 let reponse = agent
                     .post(&format!("{base}/clips/fin?upload={upload}&parts={parts}"))
-                    .set("x-ki-token", &token_hex)
+                    .set("x-ki-token", &token_hex())
                     .set("Content-Type", "application/json")
                     .timeout(std::time::Duration::from_secs(300))
                     .send_string(&corps.to_string())
                     .map_err(|e| match e {
+                        ureq::Error::Status(401, _) => SESSION_PERDUE.to_string(),
                         ureq::Error::Status(404, _) => {
                             "le serveur n'a pas encore le partage de clips (mise à jour nécessaire)"
                                 .to_string()
@@ -2689,17 +2706,26 @@ impl KiApp {
                     })?;
                 // Le clip est sur ce serveur : la fiche s'en souvient, et
                 // l'atelier n'aura pas à le renvoyer.
+                let mut id_recu = String::from("?");
                 if let Ok(json) = reponse.into_json::<serde_json::Value>() {
                     if let Some(id) = json["id"].as_str() {
-                        let mut f = fiche.unwrap_or_default();
-                        f.serveur = Some(id.to_string());
-                        f.serveur_base = Some(base_fiche);
-                        clips::sauver_fiche(&chemin, &f);
+                        id_recu = id.to_string();
+                        clips::noter_serveur(&chemin, &base_fiche, id);
                     }
                 }
-                Ok(())
+                Ok(id_recu)
             })();
-            envoi.lock().unwrap().fini = Some(resultat);
+            match &resultat {
+                Ok(id) => ki_voice::journal(format!(
+                    "clips : partage de {nom_journal} : reçu par le serveur (clip {id}) en {:.0} s",
+                    debut.elapsed().as_secs_f32()
+                )),
+                Err(e) => ki_voice::journal(format!(
+                    "clips : partage de {nom_journal} : échec après {:.0} s : {e}",
+                    debut.elapsed().as_secs_f32()
+                )),
+            }
+            envoi.lock().unwrap().fini = Some(resultat.map(|_| ()));
         });
     }
 
@@ -2783,13 +2809,17 @@ impl KiApp {
                     .call();
                 match reponse {
                     // Déjà parti du serveur (purgé) : la fiche l'oublie aussi.
-                    Ok(_) | Err(ureq::Error::Status(404, _)) => {}
-                    Err(e) => return Err(erreur_http(e)),
+                    Ok(_) => ki_voice::journal(format!("clips : {nom} retiré du serveur (clip {id})")),
+                    Err(ureq::Error::Status(404, _)) => {
+                        ki_voice::journal(format!("clips : {nom} : le serveur ne connaissait plus le clip {id}"))
+                    }
+                    Err(e) => {
+                        let e = erreur_http(e);
+                        ki_voice::journal(format!("clips : retrait de {nom} (clip {id}) : échec : {e}"));
+                        return Err(e);
+                    }
                 }
-                let mut f = fiche;
-                f.serveur = None;
-                f.serveur_base = None;
-                clips::sauver_fiche(&chemin, &f);
+                clips::oublier_serveur(&chemin);
                 Ok(nom)
             })();
             *resultat.lock().unwrap() = Some(r);
@@ -3582,6 +3612,7 @@ impl KiApp {
         self.my_rank = 0;
         self.roles.clear();
         self.voice_token = 0;
+        self.jeton_http.lock().unwrap().clear();
         self.server_fingerprint.clear();
 
         // --- Salons, présence, conversation ---
@@ -4125,6 +4156,7 @@ impl KiApp {
                 self.my_rank = rank;
                 self.roles = roles;
                 self.voice_token = voice_token;
+                *self.jeton_http.lock().unwrap() = format!("{voice_token:x}");
                 self.channels = channels;
                 // L'identité du serveur arrive **dès** le Welcome. L'ignorer
                 // ici laissait nom et logo invisibles jusqu'à ce qu'un admin
@@ -4762,9 +4794,13 @@ impl KiApp {
         let sender = conn.sender();
         let base = self.http_base();
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        let jeton = self.jeton_http.clone();
         let status = self.upload_status.clone();
         std::thread::spawn(move || {
+            // Relu à chaque requête : un gros fichier part par morceaux
+            // pendant des minutes, et une reconnexion entre-temps change
+            // le jeton.
+            let token_hex = move || jeton.lock().unwrap().clone();
             let fichiers: Vec<std::path::PathBuf> = if fichiers.is_empty() {
                 match rfd::FileDialog::new().pick_file() {
                     Some(p) => vec![p],
@@ -4807,7 +4843,9 @@ impl KiApp {
                     }
                     let progres = {
                         let (status, name) = (status.clone(), name.clone());
-                        move |pc: u64| *status.lock().unwrap() = Some(format!("envoi de {name}… {pc} %"))
+                        move |pc: u64, _: u32, _: u32| {
+                            *status.lock().unwrap() = Some(format!("envoi de {name}… {pc} %"))
+                        }
                     };
                     let (upload, parts) =
                         match envoyer_morceaux(&agent, &base, &token_hex, &path, taille, &progres)? {
@@ -4824,7 +4862,7 @@ impl KiApp {
                                 let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
                                 let resp = agent
                                     .post(&format!("{base}/upload?name={name}"))
-                                    .set("x-ki-token", &token_hex)
+                                    .set("x-ki-token", &token_hex())
                                     .timeout(std::time::Duration::from_secs(300))
                                     .send_bytes(&bytes)
                                     .map_err(erreur_http)?;
@@ -4837,7 +4875,7 @@ impl KiApp {
                         };
                     let resp = agent
                         .post(&format!("{base}/upload/fin?upload={upload}&name={name}&parts={parts}"))
-                        .set("x-ki-token", &token_hex)
+                        .set("x-ki-token", &token_hex())
                         .timeout(std::time::Duration::from_secs(300))
                         .send_string("")
                         .map_err(erreur_http)?;
@@ -10155,6 +10193,18 @@ impl KiApp {
             stock_ligne(ui, "fichiers partagés", &t.fichiers);
             stock_ligne(ui, "clips", &t.clips);
             ui::hint(ui, "les plafonds et les âges viennent des variables KI_FILES_* et KI_CLIPS_* du serveur");
+            // La fabrique des vidéos : un ffmpeg à la fois, et ce qui
+            // attend derrière — c'est là qu'on voit un export qui traîne.
+            let f = &t.fabrique;
+            let quoi = match &f.en_cours {
+                Some(tache) => format!(
+                    "{} depuis {}",
+                    ki_protocol::safe_display(tache, 80),
+                    if f.depuis_s < 60 { format!("{} s", f.depuis_s) } else { duree_lisible(f.depuis_s) }
+                ),
+                None => "rien en cours".into(),
+            };
+            ui.label(dim(format!("fabrique : {} en file · {quoi}", f.en_file)));
         });
         ui.add_space(8.0);
 
@@ -12500,23 +12550,37 @@ fn clips_libelle_source(source: &clips::Source, sources: &partage::Sources) -> S
 
 /// Remplit `tampon` autant que possible (un `read` peut rendre moins que
 /// demandé sans que le fichier soit fini). Rend le nombre d'octets lus.
+/// Ce qu'un 401 veut dire pendant un envoi : le jeton voix de la session
+/// n'est plus celui du serveur — le membre s'est reconnecté (nouveau jeton
+/// au `Welcome`) ou le serveur a redémarré. Le texte brut du serveur,
+/// « jeton invalide », ne dirait pas quoi faire.
+const SESSION_PERDUE: &str =
+    "la session a été perdue pendant l'envoi — reconnecte-toi, puis réessaie";
+
 /// Envoie un fichier par morceaux de 8 Mo (`/upload/partiel`) : chacun
-/// reste sous la limite du routeur, et `progres` reçoit le pourcentage ; le
-/// serveur assemblera. Un serveur d'avant les morceaux répond 404 au
-/// premier : c'est [`EnvoiMorceaux::ServeurAncien`].
+/// reste sous la limite du routeur, et `progres` reçoit le pourcentage, le
+/// nombre de morceaux envoyés et le total ; le serveur assemblera. Le jeton
+/// est **relu à chaque morceau** (`jeton`) : un envoi de 300 Mo dure des
+/// minutes sur une montée domestique, et une reconnexion pendant ce temps
+/// en tire un nouveau — les morceaux suivants partent avec. Un serveur
+/// d'avant les morceaux répond 404 au premier : c'est
+/// [`EnvoiMorceaux::ServeurAncien`]. Un refus (401, 413, 507) remonte avec le
+/// texte du serveur — ou, pour le 401, [`SESSION_PERDUE`] — et se note au
+/// journal.
 fn envoyer_morceaux(
     agent: &ureq::Agent,
     base: &str,
-    token_hex: &str,
+    jeton: &dyn Fn() -> String,
     path: &std::path::Path,
     taille: u64,
-    progres: &dyn Fn(u64),
+    progres: &dyn Fn(u64, u32, u32),
 ) -> Result<EnvoiMorceaux, String> {
     const MORCEAU: usize = 8 * 1024 * 1024;
     let mut fichier = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let upload = format!("{:016x}", empreinte_upload(path));
     let mut tampon = vec![0u8; MORCEAU];
     let (mut index, mut envoye) = (0u32, 0u64);
+    let total = taille.div_ceil(MORCEAU as u64).max(1) as u32;
     loop {
         let n = lire_plein(&mut fichier, &mut tampon).map_err(|e| e.to_string())?;
         if n == 0 {
@@ -12524,16 +12588,30 @@ fn envoyer_morceaux(
         }
         let envoi = agent
             .post(&format!("{base}/upload/partiel?upload={upload}&index={index}"))
-            .set("x-ki-token", token_hex)
+            .set("x-ki-token", &jeton())
             .timeout(std::time::Duration::from_secs(300))
             .send_bytes(&tampon[..n]);
         if index == 0 && matches!(&envoi, Err(ureq::Error::Status(404, _))) {
             return Ok(EnvoiMorceaux::ServeurAncien);
         }
-        envoi.map_err(erreur_http)?;
+        if let Err(e) = envoi {
+            let code = match &e {
+                ureq::Error::Status(code, _) => code.to_string(),
+                _ => "réseau".into(),
+            };
+            let texte = match e {
+                ureq::Error::Status(401, _) => SESSION_PERDUE.to_string(),
+                autre => erreur_http(autre),
+            };
+            ki_voice::journal(format!(
+                "envoi par morceaux : morceau {}/{total} refusé ({code}) : {texte}",
+                index + 1
+            ));
+            return Err(texte);
+        }
         index += 1;
         envoye += n as u64;
-        progres(envoye * 100 / taille.max(1));
+        progres(envoye * 100 / taille.max(1), index, total);
         if n < MORCEAU {
             break;
         }

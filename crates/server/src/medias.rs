@@ -16,10 +16,11 @@
 //! La fiche est ce que le client lit pour la carte dans le fil : tant qu'elle
 //! dit « en préparation », il patiente et redemande.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -41,8 +42,14 @@ pub const DEFAULT_FICHIER_MAX_MB: u64 = 512;
 pub(crate) const MORCEAUX_MAX: u32 = 64;
 /// Un téléversement commencé et jamais terminé est jeté après ça.
 pub const PARTIEL_AGE_MAX: Duration = Duration::from_secs(3600);
-/// Temps accordé à ffmpeg pour une conversion.
-const CONVERSION_MAX: Duration = Duration::from_secs(900);
+/// Temps accordé à ffmpeg pour une conversion : un socle, plus dix fois la
+/// durée de la vidéo — un conteneur à un cœur réencode un clip « Haute »
+/// à peine plus vite que le temps réel, et un clip de trois minutes ne
+/// doit pas mourir à un délai fixe taillé pour trente secondes.
+const CONVERSION_SOCLE: Duration = Duration::from_secs(120);
+/// Le plafond, quoi que dise la durée (une vidéo de deux heures n'a rien à
+/// faire ici).
+const CONVERSION_MAX: Duration = Duration::from_secs(3600);
 /// Au-delà, on réencode : un clip déjà propre en dessous passe tel quel.
 /// Le débit compté est celui de la piste vidéo quand le fichier le dit —
 /// un clip « équilibré » de l'enregistreur vise 12 Mbit/s et les frôle.
@@ -125,15 +132,46 @@ pub(crate) enum Tache {
 }
 
 /// Une tâche en file : son dossier, dans `data/files/` ou `data/clips/`.
-struct Travail {
-    dossier: PathBuf,
+pub(crate) struct Travail {
+    pub(crate) dossier: PathBuf,
     tache: Tache,
 }
 
+impl Travail {
+    /// Ce que la tâche est, en un mot, pour les journaux et le tableau.
+    fn genre(&self) -> &'static str {
+        match self.tache {
+            Tache::Normaliser => "conversion",
+            Tache::Exporter(_) => "export",
+        }
+    }
+}
+
+/// Ce que la fabrique est en train de faire — pour le tableau de bord et
+/// pour savoir si un `export.json` « en cours » l'est vraiment.
+struct EnCours {
+    dossier: PathBuf,
+    genre: &'static str,
+    depuis: Instant,
+}
+
+/// Ce que le tableau de bord et `/diag-resume` disent de la fabrique.
+pub struct ResumeFabrique {
+    pub en_file: usize,
+    /// Le dossier en cours, ce qu'on y fait, et depuis combien de temps.
+    pub en_cours: Option<(String, &'static str, Duration)>,
+}
+
 /// La fabrique : la file des conversions, et les outils s'ils existent.
+///
+/// La file est **premier arrivé, premier servi** : une soirée où trois clips
+/// et un export partent en cinq minutes se traite dans l'ordre où chacun a
+/// cliqué — pas dans l'ordre inverse, comme le faisait un `Vec::pop` qui
+/// laissait le premier partage attendre tous les suivants.
 pub struct Fabrique {
     outils: Option<Outils>,
-    file: Mutex<Vec<Travail>>,
+    file: Mutex<VecDeque<Travail>>,
+    en_cours: Mutex<Option<EnCours>>,
     reveil: tokio::sync::Notify,
     /// Plafond d'un fichier assemblé, en octets.
     pub fichier_max: u64,
@@ -147,9 +185,14 @@ impl Fabrique {
                 "médias : ffmpeg ou ffprobe introuvable — les vidéos partagées ne seront pas converties"
             );
         }
+        Self::avec(outils, fichier_max_mb)
+    }
+
+    pub(crate) fn avec(outils: Option<Outils>, fichier_max_mb: u64) -> Self {
         Self {
             outils,
-            file: Mutex::new(Vec::new()),
+            file: Mutex::new(VecDeque::new()),
+            en_cours: Mutex::new(None),
             reveil: tokio::sync::Notify::new(),
             fichier_max: fichier_max_mb.saturating_mul(1024 * 1024),
         }
@@ -159,20 +202,127 @@ impl Fabrique {
         self.outils.is_some()
     }
 
-    pub(crate) fn deposer(&self, dossier: PathBuf) {
-        self.file.lock().unwrap().push(Travail { dossier, tache: Tache::Normaliser });
+    /// Met une tâche en file et rend combien la précèdent.
+    fn mettre_en_file(&self, travail: Travail) -> usize {
+        let mut file = self.file.lock().unwrap();
+        file.push_back(travail);
+        let devant = file.len() - 1 + usize::from(self.en_cours.lock().unwrap().is_some());
+        drop(file);
         self.reveil.notify_one();
+        devant
     }
 
-    /// Un export de clip, d'après une recette déjà validée.
-    pub(crate) fn deposer_export(&self, dossier: PathBuf, recette: crate::export::Recette) {
-        self.file.lock().unwrap().push(Travail { dossier, tache: Tache::Exporter(recette) });
-        self.reveil.notify_one();
+    /// Une vidéo à convertir. Rend le nombre de tâches devant elle.
+    pub(crate) fn deposer(&self, dossier: PathBuf) -> usize {
+        self.mettre_en_file(Travail { dossier, tache: Tache::Normaliser })
+    }
+
+    /// Un export de clip, d'après une recette déjà validée. Rend le nombre
+    /// de tâches devant lui.
+    pub(crate) fn deposer_export(&self, dossier: PathBuf, recette: crate::export::Recette) -> usize {
+        self.mettre_en_file(Travail { dossier, tache: Tache::Exporter(recette) })
+    }
+
+    /// La tâche suivante, dans l'ordre d'arrivée — et la fabrique la note
+    /// comme en cours. Le verrou de la file est gardé jusque-là : entre
+    /// « sortie de la file » et « notée en cours », `export_vivant` et
+    /// `resume` ne verraient la tâche nulle part, et `/exporter` tenant
+    /// dans cette fenêtre jugerait « périmé » un état bien vivant — deux
+    /// ffmpeg à la suite sur le même dossier. Même ordre de prise que
+    /// [`Self::mettre_en_file`] (la file, puis l'en-cours) : pas
+    /// d'interblocage.
+    pub(crate) fn prochaine(&self) -> Option<Travail> {
+        let mut file = self.file.lock().unwrap();
+        let travail = file.pop_front()?;
+        *self.en_cours.lock().unwrap() = Some(EnCours {
+            dossier: travail.dossier.clone(),
+            genre: travail.genre(),
+            depuis: Instant::now(),
+        });
+        drop(file);
+        Some(travail)
+    }
+
+    pub(crate) fn terminee(&self) {
+        *self.en_cours.lock().unwrap() = None;
+    }
+
+    /// Vrai si un export de ce dossier est en file ou en cours : c'est ce
+    /// qui distingue un `export.json` « en cours » vivant d'un état laissé
+    /// par une tâche morte.
+    pub(crate) fn export_vivant(&self, dossier: &Path) -> bool {
+        let en_file = self
+            .file
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|t| t.dossier == dossier && matches!(t.tache, Tache::Exporter(_)));
+        en_file
+            || self
+                .en_cours
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|c| c.dossier == dossier && c.genre == "export")
+    }
+
+    pub fn resume(&self) -> ResumeFabrique {
+        ResumeFabrique {
+            en_file: self.file.lock().unwrap().len(),
+            en_cours: self.en_cours.lock().unwrap().as_ref().map(|c| {
+                let nom = c
+                    .dossier
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (nom, c.genre, c.depuis.elapsed())
+            }),
+        }
+    }
+
+    /// La fabrique, en une ligne, pour `/diag-resume`.
+    pub fn ligne(&self) -> String {
+        let r = self.resume();
+        match r.en_cours {
+            Some((nom, genre, depuis)) => format!(
+                "fabrique : {} en file · {genre} de {nom} depuis {} s",
+                r.en_file,
+                depuis.as_secs()
+            ),
+            None => format!("fabrique : {} en file · rien en cours", r.en_file),
+        }
     }
 
     pub(crate) fn outils(&self) -> Option<Outils> {
         self.outils.clone()
     }
+}
+
+/// Combien de fils ffmpeg peut prendre : ceux que le conteneur nous donne
+/// (`available_parallelism` lit le quota cgroup sous Linux), huit au plus.
+/// Sans borne, x264 lance un fil et demi par cœur de **l'hôte** — sur un
+/// nœud à 64 cœurs bridé à un, c'est une centaine de fils qui se marchent
+/// dessus et deux gigaoctets de tampons, jusqu'à ce que le conteneur soit
+/// tué pour sa mémoire.
+pub(crate) fn fils_ffmpeg() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 8)
+}
+
+/// La commande ffmpeg, sous `nice -n 19` là où il existe : la conversion
+/// d'un clip ne doit pas hacher la voix que le même conteneur relaie.
+pub(crate) fn commande_ffmpeg(outils: &Outils) -> Command {
+    #[cfg(unix)]
+    {
+        if Path::new("/usr/bin/nice").is_file() {
+            let mut cmd = Command::new("/usr/bin/nice");
+            cmd.args(["-n", "19"]).arg(&outils.ffmpeg);
+            return cmd;
+        }
+    }
+    Command::new(&outils.ffmpeg)
 }
 
 pub(crate) fn detecter() -> Option<Outils> {
@@ -243,9 +393,14 @@ pub(crate) fn authentifier(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| u64::from_str_radix(s, 16).ok());
     let Some((user_id, username)) = token.and_then(|t| state.user_by_voice_token(t)) else {
+        // Un jeton d'une session finie : le membre s'est reconnecté (ou le
+        // serveur a redémarré) pendant un envoi. Sans cette ligne, l'échec
+        // n'existe que chez lui.
+        tracing::warn!("envoi refusé : jeton invalide (session finie ou serveur redémarré)");
         return Err((StatusCode::UNAUTHORIZED, "jeton invalide"));
     };
     if !state.holds(user_id, ki_protocol::perm::UPLOAD_FILE) {
+        tracing::warn!("envoi refusé : {username} (id {user_id}) n'a pas le droit de partager");
         return Err((
             StatusCode::FORBIDDEN,
             "tu n'as pas le droit de partager des fichiers",
@@ -289,11 +444,17 @@ pub async fn upload_partiel(
     .await;
     match ecrit {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(e)) if e.to_string().contains("trop gros") => (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("fichier trop gros ({} Mo max)", max / (1024 * 1024)),
-        )
-            .into_response(),
+        Ok(Err(e)) if e.to_string().contains("trop gros") => {
+            tracing::warn!(
+                "morceaux refusés : plus de {} Mo (membre {user_id})",
+                max / (1024 * 1024)
+            );
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("fichier trop gros ({} Mo max)", max / (1024 * 1024)),
+            )
+                .into_response()
+        }
         Ok(Err(e)) => {
             tracing::error!("morceau non écrit : {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "stockage indisponible").into_response()
@@ -330,14 +491,7 @@ pub async fn upload_fin(
             .await;
     let (file_id, dossier, total) = match assemble {
         Ok(Ok(x)) => x,
-        Ok(Err(e)) => {
-            let code = if e.contains("saturé") {
-                StatusCode::INSUFFICIENT_STORAGE
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            return (code, e).into_response();
-        }
+        Ok(Err(e)) => return refus_assemblage(&e, &username, user_id, "fichier"),
         Err(e) => {
             tracing::error!("assemblage : {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "stockage indisponible").into_response();
@@ -349,6 +503,25 @@ pub async fn upload_fin(
     );
     let url = finaliser(&state, &file_id, &dossier, &nom);
     Json(serde_json::json!({ "url": url })).into_response()
+}
+
+/// Un assemblage refusé : 507 si le stock est plein, 400 sinon — et une
+/// ligne de journal dans les deux cas, parce qu'un stock saturé ne se voit
+/// autrement que chez le membre qui vient d'échouer.
+pub(crate) fn refus_assemblage(
+    erreur: &str,
+    username: &str,
+    user_id: u64,
+    quoi: &str,
+) -> axum::response::Response {
+    let code = if erreur.contains("saturé") {
+        tracing::warn!("{quoi} refusé : stock plein ({username}, id {user_id})");
+        StatusCode::INSUFFICIENT_STORAGE
+    } else {
+        tracing::warn!("{quoi} refusé : {erreur} ({username}, id {user_id})");
+        StatusCode::BAD_REQUEST
+    };
+    (code, erreur.to_string()).into_response()
 }
 
 /// Assemble les morceaux d'un téléversement dans `racine/<id neuf>/<nom>`,
@@ -419,17 +592,26 @@ pub fn finaliser(state: &AppState, file_id: &str, dossier: &Path, nom: &str) -> 
         sortie: Some(sortie.clone()),
         ..Default::default()
     };
-    ecrire_meta(dossier, &meta);
-    state.medias.deposer(dossier.to_path_buf());
+    if let Err(e) = ecrire_meta(dossier, &meta) {
+        // Sans fiche, pas de conversion : on rend la source telle quelle,
+        // le lecteur fera ce qu'il peut.
+        tracing::error!("vidéo {file_id} : meta.json non écrit ({e}), servie sans conversion");
+        let _ = std::fs::rename(dossier.join(meta.source.unwrap_or_default()), dossier.join(nom));
+        return format!("/files/{file_id}/{nom}");
+    }
+    let devant = state.medias.deposer(dossier.to_path_buf());
+    tracing::info!("médias : {file_id} en file ({devant} devant)");
     format!("/files/{file_id}/{sortie}")
 }
 
-pub(crate) fn ecrire_meta(dossier: &Path, meta: &Meta) {
-    if let Ok(json) = serde_json::to_vec_pretty(meta) {
-        if let Err(e) = crate::store::write_atomic(&dossier.join("meta.json"), &json) {
-            tracing::error!("meta.json non écrit : {e}");
-        }
-    }
+/// Écrit la fiche. L'échec remonte : un disque plein ou un dossier aux
+/// mauvais droits doit se dire au membre, pas seulement au journal — sans
+/// fiche, sa carte tournerait sans fin.
+pub(crate) fn ecrire_meta(dossier: &Path, meta: &Meta) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
+    crate::store::write_atomic(&dossier.join("meta.json"), &json).inspect_err(|e| {
+        tracing::error!("meta.json non écrit dans {} : {e}", dossier.display());
+    })
 }
 
 pub(crate) fn lire_meta(dossier: &Path) -> Option<Meta> {
@@ -469,52 +651,93 @@ pub(crate) fn reprendre_dans(state: &AppState, racine: &Path) {
     }
 }
 
-/// La tâche de fond : une conversion à la fois.
+/// La tâche de fond : une conversion à la fois, dans l'ordre d'arrivée.
+/// Chaque ligne de journal dit combien de temps ça a pris : c'est ainsi
+/// qu'on lit la vraie vitesse du conteneur dans `docker logs`.
 pub async fn boucle(state: Arc<AppState>) {
     let Some(outils) = state.medias.outils.clone() else {
         return;
     };
     loop {
-        let travail = state.medias.file.lock().unwrap().pop();
-        let Some(travail) = travail else {
+        let Some(travail) = state.medias.prochaine() else {
             state.medias.reveil.notified().await;
             continue;
         };
         let o = outils.clone();
         let dossier = travail.dossier.clone();
+        let restent = state.medias.file.lock().unwrap().len();
+        let debut = Instant::now();
         match travail.tache {
             Tache::Normaliser => {
                 let resultat = tokio::task::spawn_blocking(move || normaliser(&o, &dossier)).await;
                 match resultat {
                     Ok(Ok(meta)) => tracing::info!(
-                        "médias : {} prête ({}x{}, {:.1} s, {} Ko)",
+                        "médias : {} prête ({}x{}, {:.1} s, {} Ko) en {:.1} s, {restent} en file",
                         travail.dossier.display(),
                         meta.largeur,
                         meta.hauteur,
                         meta.duree_s,
-                        meta.taille / 1024
+                        meta.taille / 1024,
+                        debut.elapsed().as_secs_f32()
                     ),
-                    Ok(Err(e)) => tracing::warn!("médias : {} : {e}", travail.dossier.display()),
-                    Err(e) => tracing::error!("médias : tâche interrompue : {e}"),
+                    Ok(Err(e)) => tracing::warn!(
+                        "médias : {} : {e} (après {:.1} s)",
+                        travail.dossier.display(),
+                        debut.elapsed().as_secs_f32()
+                    ),
+                    Err(e) => {
+                        // La tâche a paniqué : la fiche resterait « en
+                        // préparation » pour toujours, et la carte de
+                        // chacun avec elle.
+                        tracing::error!("médias : tâche interrompue : {e}");
+                        if let Some(mut meta) = lire_meta(&travail.dossier) {
+                            meta.etat = "erreur".into();
+                            meta.message = Some("conversion interrompue sur le serveur".into());
+                            let _ = ecrire_meta(&travail.dossier, &meta);
+                        }
+                    }
                 }
             }
             Tache::Exporter(recette) => {
+                let sortie = crate::export::nom_sortie(&recette);
                 let resultat =
                     tokio::task::spawn_blocking(move || crate::export::executer(&o, &dossier, &recette)).await;
                 match resultat {
                     Ok(Ok(e)) => tracing::info!(
-                        "export : {} prêt ({}x{}, {:.1} s, {} Ko)",
+                        "export : {} prêt ({}x{}, {:.1} s, {} Ko, {}) en {:.1} s, {restent} en file",
                         travail.dossier.display(),
                         e.largeur,
                         e.hauteur,
                         e.duree_s,
-                        e.taille / 1024
+                        e.taille / 1024,
+                        e.mode.as_deref().unwrap_or("?"),
+                        debut.elapsed().as_secs_f32()
                     ),
-                    Ok(Err(e)) => tracing::warn!("export : {} : {e}", travail.dossier.display()),
-                    Err(e) => tracing::error!("export : tâche interrompue : {e}"),
+                    Ok(Err(e)) => tracing::warn!(
+                        "export : {} : {e} (après {:.1} s)",
+                        travail.dossier.display(),
+                        debut.elapsed().as_secs_f32()
+                    ),
+                    Err(e) => {
+                        // Idem : sans ça, `export.json` dit « en cours »
+                        // jusqu'au prochain redémarrage, et toute relance
+                        // répond « un export est déjà en cours ». Le
+                        // fichier à moitié écrit part avec l'état.
+                        tracing::error!("export : tâche interrompue : {e}");
+                        let mut etat = crate::export::Etat {
+                            fichier: Some(sortie.to_string()),
+                            ..Default::default()
+                        };
+                        crate::clips::abandonner_export(
+                            &travail.dossier,
+                            &mut etat,
+                            "export interrompu sur le serveur",
+                        );
+                    }
                 }
             }
         }
+        state.medias.terminee();
     }
 }
 
@@ -636,15 +859,52 @@ fn plan_son(meta: &Meta) -> Son {
     }
 }
 
-/// Les arguments vidéo d'un réencodage : x264 rapide, 1080p au plus.
-const VIDEO_X264: [&str; 17] = [
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-    "-maxrate", "8M", "-bufsize", "16M", "-profile:v", "high", "-bf", "0",
-    "-pix_fmt", "yuv420p",
-    "-vf",
-];
+/// Les arguments vidéo d'un réencodage : x264 rapide, 1080p au plus, sur
+/// un nombre de fils borné (voir [`fils_ffmpeg`]).
+fn video_x264(fils: usize) -> Vec<String> {
+    let fils = fils.to_string();
+    [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-maxrate", "8M", "-bufsize", "16M", "-profile:v", "high", "-bf", "0",
+        "-pix_fmt", "yuv420p", "-threads", &fils, "-filter_threads", &fils,
+        "-vf",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
 const ECHELLE_1080: &str =
     "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2";
+
+/// Le temps accordé à une conversion ou un export, d'après la durée de ce
+/// qu'il faut produire : un socle, plus dix fois cette durée, plafonné.
+pub(crate) fn delai_pour(duree_s: f32) -> Duration {
+    let variable = Duration::from_secs_f32(duree_s.clamp(0.0, 7200.0) * 10.0);
+    (CONVERSION_SOCLE + variable).min(CONVERSION_MAX)
+}
+
+/// Ce qu'on accordait à toute conversion avant que le délai suive la
+/// durée : le plancher quand la durée manque.
+const CONVERSION_SANS_DUREE: Duration = Duration::from_secs(900);
+/// Le débit qu'on suppose à une vidéo dont l'en-tête ne dit pas la durée,
+/// pour l'estimer d'après sa taille — bas exprès : un délai trop court tue
+/// une vidéo lisible, un délai trop long ne coûte qu'un peu d'attente.
+const DEBIT_SUPPOSE: f32 = 4_000_000.0;
+
+/// Le délai d'une conversion : celui de [`delai_pour`] quand ffprobe donne
+/// la durée ; sinon — un WebM de MediaRecorder, un MKV ou un AVI d'OBS non
+/// finalisé, tous acceptés par [`est_video`] et sans durée dans l'en-tête —
+/// une estimation d'après la taille, jamais sous l'ancien délai fixe. Sans
+/// ça, `delai_pour(0.0)` donnait le socle de 120 s, et une vidéo de dix
+/// minutes à réencoder mourait en « délai dépassé » là où 0.1.42 lui
+/// laissait 900 s.
+pub(crate) fn delai_conversion(duree_s: f32, taille_octets: u64) -> Duration {
+    if duree_s > 0.0 {
+        return delai_pour(duree_s);
+    }
+    let estimee_s = taille_octets as f32 * 8.0 / DEBIT_SUPPOSE;
+    delai_pour(estimee_s).max(CONVERSION_SANS_DUREE)
+}
 
 /// Refait la vidéo du dossier en MP4 lisible partout, avec poster et fiche.
 fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
@@ -664,7 +924,8 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
             && h <= 1920
             && debit > 0
             && debit <= DEBIT_COPIE_MAX;
-        let mut cmd = Command::new(&outils.ffmpeg);
+        let fils = fils_ffmpeg();
+        let mut cmd = commande_ffmpeg(outils);
         cmd.args(["-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
             .arg(&chemin_source);
         match plan_son(&meta) {
@@ -673,7 +934,7 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
             }
             Son::Tout => {
                 cmd.args(["-map", "0:v:0", "-map", "0:a:0?"])
-                    .args(VIDEO_X264)
+                    .args(video_x264(fils))
                     .arg(ECHELLE_1080)
                     .args(["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]);
             }
@@ -683,7 +944,7 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
                 if copie {
                     cmd.args(["-map", "0:v:0", "-c:v", "copy"]);
                 } else {
-                    cmd.args(["-map", "0:v:0"]).args(VIDEO_X264).arg(ECHELLE_1080);
+                    cmd.args(["-map", "0:v:0"]).args(video_x264(fils)).arg(ECHELLE_1080);
                 }
                 match son {
                     Son::Aucun => {
@@ -706,7 +967,9 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
             }
         }
         cmd.args(["-movflags", "+faststart"]).arg(&chemin_sortie);
-        executer_borne(&mut cmd, CONVERSION_MAX).map_err(|e| format!("ffmpeg : {e}"))?;
+        let taille_source = std::fs::metadata(&chemin_source).map(|m| m.len()).unwrap_or(0);
+        executer_borne(&mut cmd, delai_conversion(sonde.duree_s, taille_source))
+            .map_err(|e| format!("ffmpeg : {e}"))?;
         let apres = sonder(outils, &chemin_sortie)?;
         let (_, w2, h2) = apres.video.ok_or("la conversion n'a pas produit d'image")?;
         // Le poster, pris dans le résultat : même orientation que ce que le
@@ -714,7 +977,7 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
         let poster = dossier.join("poster.jpg");
         let a = if apres.duree_s > 1.0 { "0.5" } else { "0" };
         executer_borne(
-            Command::new(&outils.ffmpeg)
+            commande_ffmpeg(outils)
                 .args([
                     "-y",
                     "-nostdin",
@@ -764,7 +1027,7 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
             meta.poster = Some(format!("/files/{id}/poster.jpg"));
             meta.message = None;
             lacher_source(&mut meta);
-            ecrire_meta(dossier, &meta);
+            ecrire_meta(dossier, &meta).map_err(|e| format!("fiche non écrite : {e}"))?;
             Ok(meta)
         }
         Err(e) => {
@@ -775,10 +1038,16 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
             ));
             lacher_source(&mut meta);
             let _ = std::fs::remove_file(&chemin_sortie);
-            ecrire_meta(dossier, &meta);
+            let _ = ecrire_meta(dossier, &meta);
             Err(e)
         }
     }
+}
+
+/// La conversion, pour le test du circuit complet dans `clips.rs`.
+#[cfg(test)]
+pub(crate) fn normaliser_pour_test(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
+    normaliser(outils, dossier)
 }
 
 /// Jette les téléversements par morceaux abandonnés depuis plus d'une heure.
@@ -856,6 +1125,75 @@ mod tests {
         assert!((cadence_de("30000/1001").unwrap() - 29.97).abs() < 0.01);
         assert_eq!(cadence_de("0/0"), None);
         assert_eq!(cadence_de("abc"), None);
+    }
+
+    /// La file est premier arrivé, premier servi — et la fabrique sait ce
+    /// qu'elle a en main.
+    #[test]
+    fn la_fabrique_sert_dans_l_ordre_d_arrivee() {
+        let f = Fabrique::avec(None, 1);
+        let recette: crate::export::Recette = serde_json::from_str(
+            r#"{"debut_ms":0,"fin_ms":5000,"format":{"type":"original"}}"#,
+        )
+        .unwrap();
+        assert_eq!(f.deposer(PathBuf::from("a")), 0);
+        assert_eq!(f.deposer(PathBuf::from("b")), 1);
+        assert_eq!(f.deposer_export(PathBuf::from("c"), recette), 2);
+        assert_eq!(f.resume().en_file, 3);
+        assert!(f.resume().en_cours.is_none());
+        assert!(f.export_vivant(Path::new("c")));
+        assert!(!f.export_vivant(Path::new("a")), "a est une conversion, pas un export");
+
+        let premiere = f.prochaine().unwrap();
+        assert_eq!(premiere.dossier, PathBuf::from("a"));
+        assert_eq!(premiere.genre(), "conversion");
+        let r = f.resume();
+        assert_eq!(r.en_file, 2);
+        assert_eq!(r.en_cours.as_ref().map(|(n, g, _)| (n.as_str(), *g)), Some(("a", "conversion")));
+        assert!(f.ligne().starts_with("fabrique : 2 en file · conversion de a depuis"));
+        // Pendant que « a » tourne, une nouvelle tâche compte celle-là.
+        assert_eq!(f.deposer(PathBuf::from("d")), 3);
+        f.terminee();
+        assert_eq!(f.prochaine().unwrap().dossier, PathBuf::from("b"));
+        f.terminee();
+        let export = f.prochaine().unwrap();
+        assert_eq!(export.dossier, PathBuf::from("c"));
+        assert_eq!(export.genre(), "export");
+        assert!(f.export_vivant(Path::new("c")), "en cours : vivant");
+        f.terminee();
+        assert!(!f.export_vivant(Path::new("c")), "fini : plus rien");
+        assert_eq!(f.prochaine().unwrap().dossier, PathBuf::from("d"));
+        f.terminee();
+        assert!(f.prochaine().is_none());
+        assert_eq!(f.ligne(), "fabrique : 0 en file · rien en cours");
+    }
+
+    #[test]
+    fn le_delai_suit_la_duree() {
+        assert_eq!(delai_pour(0.0), Duration::from_secs(120));
+        assert_eq!(delai_pour(30.0), Duration::from_secs(420));
+        assert_eq!(delai_pour(180.0), Duration::from_secs(1920));
+        assert_eq!(delai_pour(10_000.0), CONVERSION_MAX);
+        assert!((1..=8).contains(&fils_ffmpeg()));
+    }
+
+    /// Sans durée dans l'en-tête (WebM de navigateur, MKV non finalisé),
+    /// la conversion ne retombe pas sur le socle de deux minutes : jamais
+    /// moins que l'ancien délai fixe, et davantage pour un gros fichier.
+    #[test]
+    fn sans_duree_le_delai_s_estime_d_apres_la_taille_sans_descendre_sous_l_ancien() {
+        // Avec la durée : le même délai qu'avant.
+        assert_eq!(delai_conversion(30.0, 500 * 1024 * 1024), delai_pour(30.0));
+        // Sans durée ni taille : l'ancien délai fixe.
+        assert_eq!(delai_conversion(0.0, 0), Duration::from_secs(900));
+        // Un petit WebM : encore le plancher.
+        assert_eq!(delai_conversion(0.0, 10 * 1024 * 1024), Duration::from_secs(900));
+        // 300 Mo à 4 Mbit/s ≈ 10 min de vidéo : 120 + 6000 s, plafonné à
+        // l'heure — pas 120 s.
+        assert_eq!(delai_conversion(0.0, 300 * 1024 * 1024), CONVERSION_MAX);
+        // 60 Mo ≈ 2 min : 120 + 1260 s.
+        let d = delai_conversion(0.0, 60 * 1024 * 1024);
+        assert!(d > Duration::from_secs(900) && d < CONVERSION_MAX, "{d:?}");
     }
 
     #[test]
@@ -947,7 +1285,7 @@ mod tests {
             sortie: Some("IMG_0001.mp4".into()),
             ..Default::default()
         };
-        ecrire_meta(&dossier, &meta);
+        ecrire_meta(&dossier, &meta).unwrap();
         let meta = normaliser(&outils, &dossier).expect("normalisation");
         assert_eq!(meta.etat, "pret");
         assert!(meta.largeur > 0 && meta.hauteur > 0);
@@ -1014,7 +1352,7 @@ mod tests {
             voix: Some(false),
             ..Default::default()
         };
-        ecrire_meta(&dossier, &meta);
+        ecrire_meta(&dossier, &meta).unwrap();
         let meta = normaliser(&outils, &dossier).expect("normalisation du clip");
         assert_eq!(meta.etat, "pret");
         assert!((1.5..=2.5).contains(&meta.duree_s), "durée {}", meta.duree_s);
@@ -1078,7 +1416,8 @@ mod tests {
                 sortie: Some("clip.mp4".into()),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let meta = normaliser(&outils, &dossier).expect("normalisation");
         assert_eq!(meta.etat, "pret");
         // Copié tel quel : même taille à quelques kilo-octets près (l'index

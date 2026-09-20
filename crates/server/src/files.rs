@@ -5,18 +5,24 @@
 //! périodiquement : un serveur privé tourne sur un petit VPS, et un disque
 //! plein n'emporte pas que le partage de fichiers — le chat n'écrit plus son
 //! historique, les comptes ne se sauvegardent plus.
+//!
+//! Les fichiers se servent **en flux**, avec `Content-Length` et `Range` :
+//! vingt personnes qui ouvrent le même clip de 60 Mo ne font pas monter le
+//! serveur de 1,2 Go, et un lecteur (ou un téléphone) peut reprendre où il
+//! en était.
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rand::Rng;
 use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::state::AppState;
 
@@ -179,6 +185,7 @@ pub async fn upload(
 pub async fn download(
     State(state): State<Arc<AppState>>,
     Path((file_id, name)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     // L'identifiant est un hex aléatoire de 16 caractères : on refuse tout
     // autre motif (pas de traversée de chemin possible).
@@ -188,25 +195,118 @@ pub async fn download(
     let name = sanitize(&name);
     let (mime, en_ligne) = type_mime(&name);
     let disposition = if en_ligne { "inline" } else { "attachment" };
-    // Les fichiers partagés, puis les clips : les deux stocks se servent
-    // par le même chemin, leurs identifiants sont aléatoires dans les deux.
-    for racine in [files_dir(&state), crate::clips::dossier(&state)] {
-        let path = racine.join(&file_id).join(&name);
-        if let Ok(bytes) = tokio::fs::read(&path).await {
+    // Les fichiers partagés d'abord : tout ce qui est dans le dossier.
+    let path = files_dir(&state).join(&file_id).join(&name);
+    if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+        return servir_fichier(&path, mime, disposition, &name, &headers).await;
+    }
+    // Puis les clips, par le même chemin — mais pas tout : la source avec
+    // ses pistes séparées et le texte du titre restent dans le dossier
+    // (`clips::fichier_servable`). L'identifiant est dans l'URL du message,
+    // visible de tout le salon : « sans les voix des copains » doit tenir.
+    let dossier = crate::clips::dossier(&state).join(&file_id);
+    let (d, n) = (dossier.clone(), name.clone());
+    let servable = tokio::task::spawn_blocking(move || crate::clips::fichier_servable(&d, &n))
+        .await
+        .unwrap_or(false);
+    if servable {
+        return servir_fichier(&dossier.join(&name), mime, disposition, &name, &headers).await;
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+/// Une demande `Range: bytes=a-b` (ou `a-`, ou `-n`) contre un fichier de
+/// `total` octets : la tranche `[debut, fin]` à servir. `None` si l'en-tête
+/// est absent ou n'est pas une plage d'octets simple (on sert alors tout),
+/// `Some(Err(()))` si la plage sort du fichier (416).
+pub(crate) fn tranche(range: Option<&str>, total: u64) -> Option<Result<(u64, u64), ()>> {
+    let spec = range?.trim().strip_prefix("bytes=")?;
+    // Plusieurs plages : on n'en sert qu'une, la première ; c'est permis.
+    let premiere = spec.split(',').next()?.trim();
+    let (a, b) = premiere.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    if total == 0 {
+        return Some(Err(()));
+    }
+    let plage = match (a.is_empty(), b.is_empty()) {
+        // `-n` : les n derniers octets.
+        (true, false) => {
+            let n: u64 = b.parse().ok()?;
+            if n == 0 {
+                return Some(Err(()));
+            }
+            (total.saturating_sub(n), total - 1)
+        }
+        // `a-` : de a à la fin.
+        (false, true) => {
+            let debut: u64 = a.parse().ok()?;
+            if debut >= total {
+                return Some(Err(()));
+            }
+            (debut, total - 1)
+        }
+        (false, false) => {
+            let (debut, fin): (u64, u64) = (a.parse().ok()?, b.parse().ok()?);
+            if debut > fin || debut >= total {
+                return Some(Err(()));
+            }
+            (debut, fin.min(total - 1))
+        }
+        (true, true) => return None,
+    };
+    Some(Ok(plage))
+}
+
+/// Sert un fichier en flux : `Content-Length`, `Accept-Ranges`, et une
+/// tranche (206) si l'on en demande une. Le fichier n'est jamais lu entier
+/// en mémoire — un clip de 60 Mo ouvert par vingt spectateurs coûte vingt
+/// tampons de 64 Ko, pas 1,2 Go.
+pub(crate) async fn servir_fichier(
+    path: &FsPath,
+    mime: &str,
+    disposition: &str,
+    nom: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let Ok(mut fichier) = tokio::fs::File::open(path).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let total = match fichier.metadata().await {
+        Ok(m) if m.is_file() => m.len(),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let (statut, debut, fin) = match tranche(range, total) {
+        None => (StatusCode::OK, 0, total.saturating_sub(1)),
+        Some(Ok((a, b))) => (StatusCode::PARTIAL_CONTENT, a, b),
+        Some(Err(())) => {
             return (
-                [
-                    (header::CONTENT_TYPE, mime.to_string()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        format!("{disposition}; filename=\"{name}\""),
-                    ),
-                ],
-                bytes,
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{total}"))],
             )
                 .into_response();
         }
+    };
+    let longueur = if total == 0 { 0 } else { fin - debut + 1 };
+    if debut > 0 && fichier.seek(std::io::SeekFrom::Start(debut)).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    StatusCode::NOT_FOUND.into_response()
+    let flux = tokio_util::io::ReaderStream::with_capacity(fichier.take(longueur), 64 * 1024);
+    let mut reponse = Response::builder()
+        .status(statut)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_LENGTH, longueur)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("{disposition}; filename=\"{nom}\""),
+        );
+    if statut == StatusCode::PARTIAL_CONTENT {
+        reponse = reponse.header(header::CONTENT_RANGE, format!("bytes {debut}-{fin}/{total}"));
+    }
+    reponse
+        .body(Body::from_stream(flux))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Un fichier partagé tel qu'il vit sur le disque : la disposition est
@@ -387,6 +487,73 @@ mod tests {
             (0, 0)
         );
 
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn une_plage_d_octets_se_lit_et_se_borne() {
+        assert_eq!(tranche(None, 100), None);
+        assert_eq!(tranche(Some("bytes=0-9"), 100), Some(Ok((0, 9))));
+        assert_eq!(tranche(Some("bytes=10-"), 100), Some(Ok((10, 99))));
+        assert_eq!(tranche(Some("bytes=-10"), 100), Some(Ok((90, 99))));
+        // Une fin au-delà du fichier se ramène au dernier octet.
+        assert_eq!(tranche(Some("bytes=90-500"), 100), Some(Ok((90, 99))));
+        // Hors du fichier, ou à l'envers : 416.
+        assert_eq!(tranche(Some("bytes=100-"), 100), Some(Err(())));
+        assert_eq!(tranche(Some("bytes=20-10"), 100), Some(Err(())));
+        assert_eq!(tranche(Some("bytes=0-"), 0), Some(Err(())));
+        // Pas une plage d'octets : on sert tout.
+        assert_eq!(tranche(Some("items=0-9"), 100), None);
+        assert_eq!(tranche(Some("bytes=abc"), 100), None);
+    }
+
+    /// Le fichier part en flux, avec sa longueur ; une tranche donne un
+    /// 206 avec `Content-Range` et juste ces octets-là.
+    #[tokio::test]
+    async fn un_fichier_se_sert_entier_ou_par_tranche() {
+        let root = scratch("flux");
+        let chemin = root.join("clip.mp4");
+        let contenu: Vec<u8> = (0..=255u8).collect();
+        std::fs::write(&chemin, &contenu).unwrap();
+        let corps = |r: Response| async move {
+            let (parts, body) = r.into_parts();
+            let octets = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+            (parts.status, parts.headers, octets.to_vec())
+        };
+
+        let entier = servir_fichier(&chemin, "video/mp4", "inline", "clip.mp4", &HeaderMap::new()).await;
+        let (statut, en_tetes, octets) = corps(entier).await;
+        assert_eq!(statut, StatusCode::OK);
+        assert_eq!(en_tetes[header::CONTENT_LENGTH], "256");
+        assert_eq!(en_tetes[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(en_tetes[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(octets, contenu);
+
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=10-19".parse().unwrap());
+        let tranche = servir_fichier(&chemin, "video/mp4", "attachment", "x.mp4", &h).await;
+        let (statut, en_tetes, octets) = corps(tranche).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(en_tetes[header::CONTENT_LENGTH], "10");
+        assert_eq!(en_tetes[header::CONTENT_RANGE], "bytes 10-19/256");
+        assert_eq!(octets, &contenu[10..20]);
+
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=-16".parse().unwrap());
+        let fin = servir_fichier(&chemin, "video/mp4", "inline", "x.mp4", &h).await;
+        let (statut, _, octets) = corps(fin).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(octets, &contenu[240..]);
+
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=300-".parse().unwrap());
+        let hors = servir_fichier(&chemin, "video/mp4", "inline", "x.mp4", &h).await;
+        let (statut, en_tetes, _) = corps(hors).await;
+        assert_eq!(statut, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(en_tetes[header::CONTENT_RANGE], "bytes */256");
+
+        let absent = servir_fichier(&root.join("rien.mp4"), "video/mp4", "inline", "x", &HeaderMap::new()).await;
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

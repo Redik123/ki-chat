@@ -12,8 +12,8 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use ki_protocol::{
-    ChannelId, ChannelKind, TableauAdmin, TableauDiffusion, TableauMembre, TableauSalonVocal,
-    TableauStock, UserId,
+    ChannelId, ChannelKind, TableauAdmin, TableauDiffusion, TableauFabrique, TableauMembre,
+    TableauSalonVocal, TableauStock, UserId,
 };
 
 use crate::files;
@@ -106,6 +106,17 @@ pub fn composer(state: &AppState) -> TableauAdmin {
         musique: state.musique.tableau(),
         valorant: state.valorant.compteurs_texte(),
         diagnostics: crate::diag::lignes_resume(&crate::diag::diag_dir(state)),
+        fabrique: fabrique(state),
+    }
+}
+
+/// La fabrique des vidéos : ce qu'elle fait et ce qui attend.
+fn fabrique(state: &AppState) -> TableauFabrique {
+    let r = state.medias.resume();
+    TableauFabrique {
+        en_file: r.en_file as u32,
+        en_cours: r.en_cours.as_ref().map(|(nom, genre, _)| format!("{genre} de {nom}")),
+        depuis_s: r.en_cours.as_ref().map(|(_, _, d)| d.as_secs()).unwrap_or(0),
     }
 }
 

@@ -33,6 +33,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Certificat TLS auto-signé, généré et persisté au premier démarrage.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 bytes = "1"
+# Les fichiers partagés servis en flux (`ReaderStream`) : jamais un clip
+# entier en mémoire par spectateur.
+tokio-util = { version = "0.7", features = ["io"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 
 # Le grain du minuteur Windows (15,6 ms) est trop grossier pour cadencer le

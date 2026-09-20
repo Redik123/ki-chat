@@ -2143,6 +2143,21 @@ pub struct TableauAdmin {
     pub valorant: String,
     /// Une ligne par version de ki-chat dans les archives de diagnostic.
     pub diagnostics: Vec<TableauDiag>,
+    /// La fabrique des vidéos (conversions et exports de clips) : depuis
+    /// 0.1.43, absent d'un serveur d'avant.
+    pub fabrique: TableauFabrique,
+}
+
+/// La fabrique des vidéos : un ffmpeg à la fois, une file devant.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauFabrique {
+    /// Les tâches qui attendent, celle en cours non comprise.
+    pub en_file: u32,
+    /// Ce qui se fait : « conversion » ou « export », et de quel dossier.
+    pub en_cours: Option<String>,
+    /// Depuis combien de secondes.
+    pub depuis_s: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2846,6 +2861,15 @@ mod tests {
         let vide: TableauAdmin = serde_json::from_str("{}").unwrap();
         assert_eq!(vide, TableauAdmin::default());
         assert!(!json.contains("memoire_octets"), "absent : pas écrit");
+        // La fabrique (0.1.43) : lue si elle est là, à zéro sinon.
+        assert_eq!(vide.fabrique, TableauFabrique::default());
+        let t = TableauAdmin {
+            fabrique: TableauFabrique { en_file: 2, en_cours: Some("export de abcd".into()), depuis_s: 41 },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"fabrique\""));
+        assert_eq!(serde_json::from_str::<TableauAdmin>(&json).unwrap(), t);
     }
 
     #[test]

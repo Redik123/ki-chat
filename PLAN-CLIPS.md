@@ -607,8 +607,9 @@ premier export en prod.
 Encodeur AMD/Intel par la transformée H.264 de Media Foundation (pour les
 copains sans NVIDIA — et la diffusion en profiterait), chemin tout-GPU
 (texture WGC → NVENC), une seule capture pour diffusion + clips, chemin
-portable (macOS) de la visionneuse, décodage DXVA, `Range` HTTP, export
-côté client si le serveur ne suit pas, bouton de manette pour la touche,
+portable (macOS) de la visionneuse, décodage DXVA, `Range` HTTP (fait en
+0.1.43, voir plus bas), export côté client si le serveur ne suit pas,
+bouton de manette pour la touche,
 un récap « clips de la semaine » dans le fil de jeu. Au fil de l'eau.
 
 **Fait le 2026-09-15**, **vérifié** par les tests :
@@ -633,6 +634,106 @@ un récap « clips de la semaine » dans le fil de jeu. Au fil de l'eau.
 le chemin tout-GPU et la capture unique (« si le profileur le demande »,
 et personne ne sent la charge), macOS (laissé de côté par drion), la
 manette, le récap hebdo (à voir si l'envie vient).
+
+### Robustesse du partage (0.1.43)
+
+Le rapport « quand on modifie un clip, on ne peut pas le partager dans un
+salon : ça charge à l'infini » venait du serveur du groupe passé sur un
+conteneur Jelastic à CPU limité, où un export qui prenait cinq secondes
+sur le PC de dev en prend des minutes — et de plusieurs façons, pour
+l'atelier, de rester sans réponse pendant ce temps. Corrigé des deux
+côtés, tout compatible avec les clients 0.1.42 :
+
+- **La fabrique est premier arrivé, premier servi** (`VecDeque`, plus le
+  `Vec::pop` qui servait le dernier déposé d'abord) ; elle sait ce qu'elle
+  a en main (`export_vivant`), le tableau de bord et `/diag-resume` le
+  montrent (« fabrique : N en file · export de <id> depuis 3 min »,
+  `TableauAdmin.fabrique`, `#[serde(default)]`).
+- **L'export ne réencode plus une simple coupe** (16:9, sans titre ni
+  cadence, source H.264 ≤ 1080p) : `-ss` avant l'entrée et `-c:v copy`,
+  coupe à la trame clé qui précède (deux secondes de marge au plus, le GOP
+  de l'enregistreur). Le reste passe par x264 `superfast`, sur des fils
+  bornés à ce que le conteneur a (`available_parallelism`, huit au plus —
+  sans quoi x264 lance cent fils sur un nœud à 64 cœurs et le conteneur
+  meurt pour sa mémoire), sous `nice -n 19` pour que la voix passe avant.
+  Le délai suit la durée : 120 s + 10 × la durée de la sortie (plafonné à
+  une heure), pour la normalisation comme pour l'export, au lieu de 900 s
+  fixes.
+- **`export.json` est fiable** : `ecrire_etat` et `ecrire_meta` rendent
+  l'erreur, `/clips/fin` et `/clips/{id}/exporter` répondent 500
+  « stockage indisponible » au lieu de 202 sur un disque plein (le client
+  relisait un 404 pendant un quart d'heure) ; une tâche qui meurt écrit
+  `erreur` ; un « en cours » que la fabrique ne connaît pas ne bloque plus
+  la relance (409) ; chaque état porte `derriere` (tâches devant), `mode`
+  (« copie »/« x264 ») et `depuis` (horodatage), facultatifs ; un export
+  raté ne laisse pas de fichier à moitié écrit.
+- **Les fichiers se servent en flux**, avec `Content-Length`,
+  `Accept-Ranges` et `Range` (206, 416) — `/files/<id>/<nom>` comme
+  `/tel/<jeton>` — au lieu de lire le fichier entier en mémoire par
+  spectateur. Et un dossier de clip ne sert que sa **liste blanche** :
+  `meta.json`, `export.json`, `poster.jpg`, la version partagée quand
+  elle est prête, les exports qui ne sont pas en train de s'écrire —
+  jamais `source.mp4` (les pistes séparées, « sans les voix des
+  copains » tenait à un lien) ni `titre.txt`.
+- **Le serveur dit ses refus** : `warn!` sur les 401/403 des envois, les
+  413 des morceaux, les 507 d'assemblage ; durée de chaque conversion et
+  export dans le journal (« prête en 26,6 s, 2 en file ») ; longueur de
+  file au dépôt.
+- **Côté client, l'atelier ne reste jamais sans réponse** : le jeton est
+  relu à chaque requête (`Reseau.jeton`, partagé avec l'application et mis
+  à jour au `Welcome` — une reconnexion pendant l'export ne donne plus
+  « jeton invalide » au partage) ; l'identifiant du clip est noté dès la
+  réponse de `/clips/fin` (un dépôt dont l'attente échoue n'est pas
+  renvoyé au prochain essai) ; la barre dit la phase (« dépôt du clip ·
+  morceau 3/12 », « en file sur le serveur, 2 devant », « export
+  (coupe sans réencodage)… 42 % »), le chrono, et se repeint sans la
+  souris ; chaque attente a une borne qui suit la durée (600 s + 15 × la
+  durée, une heure au plus), un état figé plus de 15 min ou une fiche
+  introuvable plus de 20 s deviennent des erreurs en clair ; `pret`
+  n'est accepté que pour le fichier demandé (le `pret` d'un export
+  précédent donnait « ce fichier n'existe pas (encore) ») ; un 404
+  « clip inconnu » à l'export fait oublier le serveur à la fiche et
+  redépose, seul un 404 sans corps vaut « mise à jour nécessaire ».
+  Dépôt, export, partage et retrait s'écrivent au journal (lignes
+  `clips : atelier …`, `clips : partage …`), avec code et texte serveur
+  à chaque échec — lisibles dans `ki-chat.log` et les diagnostics.
+
+Relecture du circuit après coup, sept défauts corrigés (tests à l'appui) :
+
+- **Un export interrompu ne laisse plus de fichier tronqué à partager.**
+  `fichier_connu` n'accepte l'export que `export.json` nomme que s'il dit
+  `pret` (en cours : il s'écrit ; en erreur : ce qui reste n'a pas d'index)
+  ; et partout où l'état est forcé à `erreur` hors `executer` — reprise au
+  démarrage (Watchtower recrée le conteneur, ffmpeg meurt avec), tâche
+  paniquée, état périmé relancé — `clips::abandonner_export` efface la
+  sortie avec, pour que l'autre nom ne la retrouve pas.
+- **Sans durée ffprobe** (WebM de MediaRecorder, MKV non finalisé), le
+  délai de conversion ne tombe plus à 120 s : `delai_conversion` l'estime
+  d'après la taille à 4 Mbit/s, jamais sous les 900 s d'avant.
+- **`prochaine()` garde le verrou de la file** en notant la tâche en cours :
+  plus de fenêtre où `export_vivant` ne la voit nulle part et où
+  `/exporter` repartirait sur un état bien vivant.
+- **En file, l'export n'est jamais « figé »** : le serveur n'écrit
+  `en_attente` qu'une fois, seul le délai global borne l'attente ; et un
+  409 « déjà en cours » se suit (`export.json` dit le fichier) au lieu
+  d'échouer puis de tout refaire.
+- **La fiche apprend le serveur depuis le fil**, dès la réponse de
+  `/clips/fin` (`clips::noter_serveur`), et l'oublie dès un « clip
+  inconnu » (`clips::oublier_serveur`) : un atelier fermé pendant le dépôt
+  ne redépose plus le clip en double à la réouverture.
+- **Clip déjà sur le serveur mais pas prêt** : le chemin rapide relit
+  `meta.json` d'abord — `pret` → export, `en_preparation` → on attend en
+  phase « préparation sur le serveur », `erreur` ou 404 → la fiche
+  l'oublie et on redépose. Fini le « le clip n'est pas prêt » sans issue.
+- **Le jeton est relu à chaque morceau** (`envoyer_morceaux` prend une
+  closure) — partage, atelier et trombone — et un 401 pendant l'envoi dit
+  « la session a été perdue pendant l'envoi — reconnecte-toi, puis
+  réessaie » au lieu de « jeton invalide ».
+
+Pas fait, à décider : nommer chaque export avec un horodatage (le cache
+client est indexé par l'adresse, un second `telephone.mp4` est servi
+depuis l'ancien chez qui a vu le premier) ; un vrai `docker run --cpus=1`
+pour rejouer les temps du conteneur.
 
 ## Risques et parades
 

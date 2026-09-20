@@ -10,6 +10,14 @@
 //! `export.json` dit où il en est. Puis trois gestes : enregistrer sous,
 //! partager dans un salon, envoyer sur le téléphone par un QR code — un lien
 //! à jeton, valable une heure.
+//!
+//! Le fil qui dépose et exporte ne laisse jamais l'atelier sans réponse :
+//! chaque attente a une borne (qui suit la durée du clip), un état visible
+//! (« dépôt · morceau 3/12 », « en file sur le serveur, 2 devant », « export
+//! 42 % »), et une fin en clair — succès, ou l'erreur avec le texte du
+//! serveur. Chaque étape et chaque échec s'écrivent au journal
+//! (`ki_voice::journal`, lignes « clips : atelier … »), pour que le prochain
+//! rapport dise autre chose que « ça charge à l'infini ».
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,12 +33,22 @@ use crate::theme::{self, ACCENT, DANGER, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
 use crate::ui;
 use crate::visionneuse::{mmss, Lecture};
 
-/// De quoi parler au serveur depuis un fil.
+/// De quoi parler au serveur depuis un fil. Le jeton est **partagé** avec
+/// l'application et relu à chaque requête : une reconnexion pendant les
+/// minutes d'un export en tire un nouveau, et l'ancien vaudrait « jeton
+/// invalide » au moment de partager.
 #[derive(Clone)]
 pub struct Reseau {
     pub base: String,
-    pub token_hex: String,
+    pub jeton: Arc<Mutex<String>>,
     pub agent: ureq::Agent,
+}
+
+impl Reseau {
+    /// Le jeton du moment, en hexadécimal.
+    pub fn token_hex(&self) -> String {
+        self.jeton.lock().unwrap().clone()
+    }
 }
 
 /// Le format de sortie.
@@ -63,10 +81,210 @@ const PANNEAU: f32 = 330.0;
 struct Suivi {
     phase: String,
     pour_cent: u8,
-    /// L'identifiant du clip sur le serveur, dès qu'il est connu.
+    /// Le pourcentage a un sens dans cette phase (dépôt, export) ; en
+    /// file, non.
+    avec_pour_cent: bool,
+    /// Depuis quand le fil travaille.
+    debut: Option<Instant>,
+    /// L'identifiant du clip sur le serveur, dès qu'il est connu — dès la
+    /// réponse de `/clips/fin`, avant même que le serveur l'ait préparé :
+    /// si l'attente échoue ensuite, le prochain export ne renvoie pas tout.
     id: Option<String>,
+    /// Le serveur a répondu « clip inconnu » pour l'identifiant de la fiche
+    /// (purgé, effacé) : la fiche doit l'oublier.
+    serveur_perdu: bool,
     /// Le nom du fichier produit, ou l'erreur.
     fini: Option<Result<String, String>>,
+}
+
+impl Suivi {
+    fn phase(&mut self, phase: impl Into<String>, avec_pour_cent: bool) {
+        self.phase = phase.into();
+        self.pour_cent = 0;
+        self.avec_pour_cent = avec_pour_cent;
+    }
+
+    /// Le texte de la barre : la phase, le pourcentage s'il veut dire
+    /// quelque chose, et depuis combien de temps — une barre qui ne bouge
+    /// pas pendant une minute reste ainsi lisible.
+    fn texte(&self) -> String {
+        let mut t = self.phase.clone();
+        if self.avec_pour_cent {
+            t.push_str(&format!("… {} %", self.pour_cent));
+        } else {
+            t.push('…');
+        }
+        if let Some(d) = self.debut {
+            let s = d.elapsed().as_secs();
+            if s >= 5 {
+                t.push_str(&format!("  ({})", mmss(s * 1000)));
+            }
+        }
+        t
+    }
+}
+
+/// Un 404 de `/clips/{id}/exporter`, trié : le serveur ne connaît plus ce
+/// clip (purgé par âge ou par plafond, retiré par un admin), ou il n'a pas
+/// la route (serveur d'avant l'atelier). Le premier se répare en
+/// redéposant ; le second, en mettant le serveur à jour.
+#[derive(Debug, PartialEq, Eq)]
+enum Absence {
+    ClipInconnu,
+    RouteAbsente,
+}
+
+fn trier_404(corps: &str) -> Absence {
+    if corps.contains("clip inconnu") {
+        Absence::ClipInconnu
+    } else {
+        Absence::RouteAbsente
+    }
+}
+
+/// Ce que `export.json` dit, tel que le serveur l'écrit
+/// (`serveur/export.rs`) : les champs d'avant sont là, les nouveaux sont
+/// facultatifs.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+struct EtatExport {
+    #[serde(default)]
+    etat: String,
+    #[serde(default)]
+    pour_cent: u8,
+    #[serde(default)]
+    fichier: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    /// Combien de tâches la fabrique traite avant celle-ci (0.1.43).
+    #[serde(default)]
+    derriere: Option<u32>,
+    /// « copie » ou « x264 » (0.1.43).
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// Ce qu'on en fait.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// On attend encore : la phase à montrer, et le pourcentage s'il compte.
+    Attendre { phase: String, pour_cent: Option<u8> },
+    Pret,
+    Erreur(String),
+}
+
+/// L'état lu contre le fichier qu'on a demandé. Un `pret` qui parle d'un
+/// autre fichier est celui d'un export précédent, pas le nôtre : on ne le
+/// prend pas pour argent comptant — c'est ainsi que « Partager » répondait
+/// « ce fichier n'existe pas (encore) ».
+fn interpreter(etat: &EtatExport, fichier: &str) -> Verdict {
+    let le_notre = etat.fichier.as_deref().is_none_or(|f| f == fichier);
+    match etat.etat.as_str() {
+        "pret" if le_notre => Verdict::Pret,
+        "erreur" if le_notre => Verdict::Erreur(
+            etat.message
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or_else(|| "échec de l'export".into()),
+        ),
+        "en_attente" => Verdict::Attendre {
+            phase: match etat.derriere {
+                Some(n) if n > 0 => format!("en file sur le serveur, {n} devant"),
+                _ => "en file sur le serveur".into(),
+            },
+            pour_cent: None,
+        },
+        "en_cours" => Verdict::Attendre {
+            phase: match etat.mode.as_deref() {
+                Some("copie") => "export (coupe sans réencodage)".into(),
+                _ => "export".into(),
+            },
+            pour_cent: Some(etat.pour_cent.min(100)),
+        },
+        // Un état d'un autre export, ou inconnu : le serveur n'a pas encore
+        // écrit le nôtre.
+        _ => Verdict::Attendre {
+            phase: "en attente du serveur".into(),
+            pour_cent: None,
+        },
+    }
+}
+
+/// Une fiche relue en boucle (`meta.json`, `export.json`) : `Ok(None)` tant
+/// qu'elle manque ou que le serveur ne répond pas, `Err` quand ça dure.
+struct Relecture {
+    /// Depuis quand on ne reçoit que des 404.
+    absente_depuis: Option<Instant>,
+    /// Depuis quand le serveur ne répond pas (réseau, 5xx).
+    muet_depuis: Option<Instant>,
+}
+
+/// Une fiche introuvable au-delà de ça, c'est un serveur qui ne l'a pas
+/// écrite (disque plein, droits) — pas un délai.
+const FICHE_ABSENTE_MAX: Duration = Duration::from_secs(20);
+/// Un serveur muet au-delà de ça, c'est une panne, pas un hoquet.
+const SERVEUR_MUET_MAX: Duration = Duration::from_secs(120);
+
+impl Relecture {
+    fn new() -> Self {
+        Self { absente_depuis: None, muet_depuis: None }
+    }
+
+    /// Relit `url` ; rend le JSON s'il est là.
+    fn lire(&mut self, reseau: &Reseau, url: &str, quoi: &str) -> Result<Option<serde_json::Value>, String> {
+        match reseau.agent.get(url).timeout(Duration::from_secs(20)).call() {
+            Ok(r) => {
+                self.absente_depuis = None;
+                self.muet_depuis = None;
+                r.into_json().map(Some).map_err(|e| format!("{quoi} illisible : {e}"))
+            }
+            Err(ureq::Error::Status(404, _)) => {
+                let depuis = *self.absente_depuis.get_or_insert_with(Instant::now);
+                if depuis.elapsed() > FICHE_ABSENTE_MAX {
+                    return Err(format!(
+                        "le serveur n'a pas enregistré {quoi} (introuvable depuis {} s) — disque plein ou dossier illisible sur le serveur, préviens un admin",
+                        depuis.elapsed().as_secs()
+                    ));
+                }
+                Ok(None)
+            }
+            Err(e) => {
+                let depuis = *self.muet_depuis.get_or_insert_with(Instant::now);
+                if depuis.elapsed() > SERVEUR_MUET_MAX {
+                    return Err(format!("le serveur ne répond plus : {}", crate::erreur_http(e)));
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Le temps qu'on accorde au serveur pour préparer ou exporter : un socle,
+/// plus quinze fois la durée de ce qu'il a à faire (un conteneur à un cœur
+/// réencode à peine plus vite que le temps réel, et il y a parfois une file
+/// devant), plafonné à une heure. Le serveur, lui, s'arrête à dix fois.
+fn delai_pour(duree_ms: u64) -> Duration {
+    let variable = Duration::from_secs((duree_ms / 1000).saturating_mul(15));
+    (Duration::from_secs(600) + variable).min(Duration::from_secs(3600))
+}
+
+/// Un export dont l'état ne bouge plus pendant ça — ni le pourcentage, ni
+/// l'état — est tenu pour bloqué. Sauf en file : voir [`avance`].
+const EXPORT_FIGE_MAX: Duration = Duration::from_secs(900);
+
+/// L'état relu compte-t-il comme « ça bouge » ? Tout changement, oui. Et
+/// toute place en file, même identique : le serveur n'écrit `en_attente`
+/// (avec `derriere`) **qu'une fois**, au dépôt, et ne réécrit l'état qu'à
+/// la prise en charge — un export « fond flou » de trois minutes devant,
+/// sur le conteneur, c'est un quart d'heure sans que rien ne change. Là,
+/// seule la borne globale (`delai_pour`) compte ; déclarer « l'export
+/// n'avance plus » faisait abandonner le fil pendant que le serveur allait
+/// bel et bien faire l'export.
+fn avance(dernier: Option<&EtatExport>, etat: &EtatExport) -> bool {
+    etat.etat == "en_attente" || dernier != Some(etat)
+}
+
+fn journal(texte: String) {
+    ki_voice::journal(format!("clips : atelier : {texte}"));
 }
 
 enum Export {
@@ -435,22 +653,19 @@ impl Atelier {
             }
         }
         p.textures_vignettes.sort_by_key(|(t, _)| *t);
-        // L'export en cours.
+        // L'export en cours. Tant qu'il tourne, on repeint sans attendre la
+        // souris : la barre et son chrono avancent seuls.
         if let Export::EnCours(s) = &p.export {
             let s = s.lock().unwrap().clone();
-            match s.fini {
+            match &s.fini {
                 Some(Ok(fichier)) => {
-                    if let Some(id) = &s.id {
-                        noter_serveur(p, id);
-                    }
-                    p.export = Export::Pret { fichier };
+                    relire_fiche(p, &s);
+                    p.export = Export::Pret { fichier: fichier.clone() };
                     self.info = Some(("export prêt".into(), Instant::now()));
                 }
                 Some(Err(e)) => {
-                    if let Some(id) = &s.id {
-                        noter_serveur(p, id);
-                    }
-                    p.export = Export::Erreur(e);
+                    relire_fiche(p, &s);
+                    p.export = Export::Erreur(e.clone());
                 }
                 None => ctx.request_repaint_after(Duration::from_millis(300)),
             }
@@ -590,6 +805,7 @@ impl Atelier {
         }
         let suivi = Arc::new(Mutex::new(Suivi {
             phase: "préparation".into(),
+            debut: Some(Instant::now()),
             ..Default::default()
         }));
         p.export = Export::EnCours(suivi.clone());
@@ -597,7 +813,10 @@ impl Atelier {
         let recette = Self::recette(p);
         let chemin = p.chemin.clone();
         let nom = format!("{}.mp4", p.nom);
+        let nom_court = p.nom.clone();
         let pistes = p.fiche.as_ref().and_then(|f| f.pistes.clone());
+        let duree_clip_ms = p.duree_ms;
+        let duree_coupe_ms = p.fin_ms - p.debut_ms;
         let deja = p
             .fiche
             .as_ref()
@@ -606,73 +825,75 @@ impl Atelier {
         std::thread::Builder::new()
             .name("atelier-export".into())
             .spawn(move || {
+                let debut = Instant::now();
+                journal(format!(
+                    "export de {nom_court} : {} ms → {} ms, {}",
+                    recette["debut_ms"],
+                    recette["fin_ms"],
+                    match deja.as_deref() {
+                        Some(id) => format!("déjà sur le serveur (clip {id})"),
+                        None => "à déposer d'abord".into(),
+                    }
+                ));
+                let depot = Depot { reseau: &reseau, chemin: &chemin, nom: &nom, pistes, duree_ms: duree_clip_ms };
+                // Le serveur ne connaît plus ce clip, ou n'a pas su le
+                // préparer : la fiche l'oublie tout de suite (sur le disque,
+                // l'atelier peut être fermé), et on le redépose une fois.
+                let perdu = |pourquoi: &str| {
+                    journal(format!("export de {nom_court} : {pourquoi}, redépôt"));
+                    suivi.lock().unwrap().serveur_perdu = true;
+                    clips::oublier_serveur(&chemin);
+                };
                 let resultat = (|| -> Result<String, String> {
                     let id = match deja {
-                        Some(id) => id,
-                        None => {
-                            suivi.lock().unwrap().phase = "dépôt du clip".into();
-                            let id = deposer(&reseau, &chemin, &nom, pistes, &suivi)?;
-                            suivi.lock().unwrap().id = Some(id.clone());
-                            id
-                        }
+                        // Déjà sur le serveur d'après la fiche — mais prêt ?
+                        // Un partage récent le prépare encore ; un partage
+                        // d'hier a pu rater ou être purgé.
+                        Some(id) => match depot.attendre_pret(&id, &suivi, true) {
+                            Ok(()) => id,
+                            Err(Attente::Perdu(pourquoi)) => {
+                                perdu(&pourquoi);
+                                depot.deposer(&suivi)?
+                            }
+                            Err(Attente::Echec(e)) => return Err(e),
+                        },
+                        None => depot.deposer(&suivi)?,
                     };
-                    suivi.lock().unwrap().phase = "export".into();
-                    let reponse = reseau
-                        .agent
-                        .post(&format!("{}/clips/{id}/exporter", reseau.base))
-                        .set("x-ki-token", &reseau.token_hex)
-                        .set("Content-Type", "application/json")
-                        .timeout(Duration::from_secs(120))
-                        .send_string(&recette.to_string())
-                        .map_err(|e| match e {
-                            ureq::Error::Status(404, _) => {
-                                "le serveur n'a pas encore l'atelier (mise à jour nécessaire)"
-                                    .to_string()
-                            }
-                            autre => crate::erreur_http(autre),
-                        })?;
-                    let json: serde_json::Value = reponse.into_json().map_err(|e| e.to_string())?;
-                    let fichier = json["fichier"]
-                        .as_str()
-                        .ok_or("réponse invalide")?
-                        .to_string();
-                    // Puis l'état, jusqu'à la fin.
-                    let debut = Instant::now();
-                    loop {
-                        std::thread::sleep(Duration::from_millis(900));
-                        if debut.elapsed() > Duration::from_secs(900) {
-                            return Err("l'export n'en finit pas".into());
+                    let (id, fichier) = match demander_export(&reseau, &id, &recette, &suivi) {
+                        Ok(fichier) => (id, fichier),
+                        Err(Echec::ClipInconnu) => {
+                            perdu(&format!("le serveur ne connaît plus le clip {id}"));
+                            let id = depot.deposer(&suivi)?;
+                            let fichier = demander_export(&reseau, &id, &recette, &suivi)
+                                .map_err(|e| e.texte())?;
+                            (id, fichier)
                         }
-                        let etat: serde_json::Value = match reseau
-                            .agent
-                            .get(&format!("{}/files/{id}/export.json", reseau.base))
-                            .timeout(Duration::from_secs(20))
-                            .call()
-                        {
-                            Ok(r) => r.into_json().map_err(|e| e.to_string())?,
-                            Err(_) => continue,
-                        };
-                        let pc = etat["pour_cent"].as_u64().unwrap_or(0).min(100) as u8;
-                        {
-                            let mut s = suivi.lock().unwrap();
-                            s.pour_cent = pc;
-                            s.phase = match etat["etat"].as_str() {
-                                Some("en_attente") => "en file sur le serveur".into(),
-                                _ => "export".into(),
-                            };
+                        // Un export tourne déjà sur ce clip (le nôtre, lancé
+                        // d'un atelier fermé depuis) : on le suit au lieu
+                        // d'échouer — et de tout refaire à la relance.
+                        Err(Echec::DejaEnCours) => {
+                            let fichier = fichier_en_cours(&reseau, &id)
+                                .unwrap_or_else(|| nom_sortie(&recette).to_string());
+                            journal(format!(
+                                "export de {nom_court} : un export ({fichier}) est déjà en cours sur le clip {id}, on le suit"
+                            ));
+                            (id, fichier)
                         }
-                        match etat["etat"].as_str() {
-                            Some("pret") => return Ok(fichier),
-                            Some("erreur") => {
-                                return Err(etat["message"]
-                                    .as_str()
-                                    .unwrap_or("échec de l'export")
-                                    .to_string())
-                            }
-                            _ => {}
-                        }
-                    }
+                        Err(e) => return Err(e.texte()),
+                    };
+                    suivre_export(&reseau, &id, &fichier, duree_coupe_ms, &suivi)?;
+                    Ok(fichier)
                 })();
+                match &resultat {
+                    Ok(f) => journal(format!(
+                        "export de {nom_court} : {f} prêt en {}",
+                        mmss(debut.elapsed().as_millis() as u64)
+                    )),
+                    Err(e) => journal(format!(
+                        "export de {nom_court} : échec après {} : {e}",
+                        mmss(debut.elapsed().as_millis() as u64)
+                    )),
+                }
                 suivi.lock().unwrap().fini = Some(resultat);
             })
             .ok();
@@ -702,7 +923,7 @@ impl Atelier {
                 let rep = reseau
                     .agent
                     .post(&format!("{}/clips/{id}/telephone", reseau.base))
-                    .set("x-ki-token", &reseau.token_hex)
+                    .set("x-ki-token", &reseau.token_hex())
                     .set("Content-Type", "application/json")
                     .timeout(Duration::from_secs(30))
                     .send_string(&corps.to_string())
@@ -760,101 +981,385 @@ impl Atelier {
                 reseau
                     .agent
                     .post(&format!("{}/clips/{id}/partager", reseau.base))
-                    .set("x-ki-token", &reseau.token_hex)
+                    .set("x-ki-token", &reseau.token_hex())
                     .set("Content-Type", "application/json")
                     .timeout(Duration::from_secs(60))
                     .send_string(&corps.to_string())
-                    .map_err(crate::erreur_http)?;
+                    .map_err(|e| match e {
+                        // Le jeton est relu à chaque requête : un 401 ici,
+                        // c'est qu'on n'est plus connecté du tout.
+                        ureq::Error::Status(401, _) => {
+                            "la session a été perdue entre-temps — reconnecte-toi, puis ferme et rouvre l'atelier"
+                                .to_string()
+                        }
+                        autre => crate::erreur_http(autre),
+                    })?;
                 Ok(())
             })();
+            match &resultat {
+                Ok(()) => journal(format!("{fichier} du clip {id} partagé dans le salon {salon}")),
+                Err(e) => journal(format!("partage de {fichier} (clip {id}) dans le salon {salon} : échec : {e}")),
+            }
             *envoi.lock().unwrap() = Some(resultat);
         });
     }
 }
 
-/// Le clip vient d'être déposé sur ce serveur : la fiche s'en souvient,
-/// pour ne pas le renvoyer au prochain export.
-fn noter_serveur(p: &mut Projet, id: &str) {
-    let Some(reseau) = &p.reseau else { return };
-    let mut fiche = p.fiche.clone().unwrap_or_default();
-    if fiche.serveur.as_deref() == Some(id) {
+/// Un export refusé par le serveur.
+enum Echec {
+    /// 404 « clip inconnu » : à redéposer.
+    ClipInconnu,
+    /// 409 « un export est déjà en cours sur ce clip » : à suivre.
+    DejaEnCours,
+    Autre(String),
+}
+
+impl Echec {
+    fn texte(self) -> String {
+        match self {
+            Echec::ClipInconnu => "le serveur ne connaît plus ce clip".into(),
+            Echec::DejaEnCours => "un export est déjà en cours sur ce clip".into(),
+            Echec::Autre(t) => t,
+        }
+    }
+}
+
+/// Le fichier que produira une recette — ce que le serveur répond à
+/// `/exporter` (`serveur/export.rs::nom_sortie`), quand on n'a pas pu le lui
+/// demander.
+fn nom_sortie(recette: &serde_json::Value) -> &'static str {
+    match recette["format"]["type"].as_str() {
+        Some("telephone") => "telephone.mp4",
+        _ => "export.mp4",
+    }
+}
+
+/// Le fichier de l'export que le serveur dit « déjà en cours » : celui que
+/// nomme son `export.json`, s'il se lit.
+fn fichier_en_cours(reseau: &Reseau, id: &str) -> Option<String> {
+    let url = format!("{}/files/{id}/export.json", reseau.base);
+    let json: serde_json::Value = reseau.agent.get(&url).timeout(Duration::from_secs(20)).call().ok()?.into_json().ok()?;
+    let etat: EtatExport = serde_json::from_value(json).ok()?;
+    matches!(etat.etat.as_str(), "en_attente" | "en_cours")
+        .then_some(etat.fichier)
+        .flatten()
+}
+
+/// `POST /clips/{id}/exporter` : rend le nom du fichier que le serveur
+/// produira.
+fn demander_export(
+    reseau: &Reseau,
+    id: &str,
+    recette: &serde_json::Value,
+    suivi: &Arc<Mutex<Suivi>>,
+) -> Result<String, Echec> {
+    suivi.lock().unwrap().phase("demande d'export", false);
+    let reponse = reseau
+        .agent
+        .post(&format!("{}/clips/{id}/exporter", reseau.base))
+        .set("x-ki-token", &reseau.token_hex())
+        .set("Content-Type", "application/json")
+        .timeout(Duration::from_secs(120))
+        .send_string(&recette.to_string())
+        .map_err(|e| match e {
+            ureq::Error::Status(404, r) => {
+                let corps = r.into_string().unwrap_or_default();
+                match trier_404(&corps) {
+                    Absence::ClipInconnu => Echec::ClipInconnu,
+                    Absence::RouteAbsente => Echec::Autre(
+                        "le serveur n'a pas encore l'atelier (mise à jour nécessaire)".into(),
+                    ),
+                }
+            }
+            ureq::Error::Status(409, r) => {
+                let corps = r.into_string().unwrap_or_default();
+                let corps = corps.trim();
+                if corps.contains("déjà en cours") {
+                    Echec::DejaEnCours
+                } else if corps.contains("pas prêt") {
+                    // On a pourtant relu `pret` juste avant : la
+                    // préparation a été refaite entre-temps (reprise après
+                    // un redémarrage du serveur).
+                    Echec::Autre(format!("{corps} — le serveur le prépare de nouveau ; réessaie dans quelques minutes"))
+                } else if corps.is_empty() {
+                    Echec::Autre("le serveur répond 409".into())
+                } else {
+                    Echec::Autre(corps.chars().take(200).collect())
+                }
+            }
+            ureq::Error::Status(401, _) => Echec::Autre(
+                "la session a été perdue entre-temps — reconnecte-toi, puis ferme et rouvre l'atelier"
+                    .into(),
+            ),
+            autre => Echec::Autre(crate::erreur_http(autre)),
+        })?;
+    let json: serde_json::Value = reponse
+        .into_json()
+        .map_err(|e| Echec::Autre(format!("réponse illisible : {e}")))?;
+    let fichier = json["fichier"]
+        .as_str()
+        .ok_or_else(|| Echec::Autre("réponse invalide".into()))?
+        .to_string();
+    journal(format!("clip {id} : export accepté ({fichier})"));
+    Ok(fichier)
+}
+
+/// Relit `export.json` jusqu'à `pret` ou `erreur`. Borné trois fois : par
+/// le délai qui suit la durée de la coupe, par un état qui ne bouge plus,
+/// et par une fiche introuvable ou un serveur muet ([`Relecture`]).
+fn suivre_export(
+    reseau: &Reseau,
+    id: &str,
+    fichier: &str,
+    duree_coupe_ms: u64,
+    suivi: &Arc<Mutex<Suivi>>,
+) -> Result<(), String> {
+    suivi.lock().unwrap().phase("en attente du serveur", false);
+    let url = format!("{}/files/{id}/export.json", reseau.base);
+    let debut = Instant::now();
+    let delai = delai_pour(duree_coupe_ms);
+    let mut relecture = Relecture::new();
+    let mut dernier: Option<EtatExport> = None;
+    let mut fige_depuis = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(900));
+        if debut.elapsed() > delai {
+            return Err(format!(
+                "l'export n'a pas fini en {} — le serveur est trop lent ou saturé ; il continue de son côté, ferme et rouvre l'atelier plus tard",
+                mmss(delai.as_millis() as u64)
+            ));
+        }
+        let Some(json) = relecture.lire(reseau, &url, "l'état de l'export")? else {
+            continue;
+        };
+        let etat: EtatExport = serde_json::from_value(json).unwrap_or_default();
+        if avance(dernier.as_ref(), &etat) {
+            fige_depuis = Instant::now();
+            dernier = Some(etat.clone());
+        } else if fige_depuis.elapsed() > EXPORT_FIGE_MAX {
+            return Err(format!(
+                "l'export n'avance plus depuis {} ({}) — le serveur est peut-être saturé ; ferme et rouvre l'atelier plus tard",
+                mmss(fige_depuis.elapsed().as_millis() as u64),
+                suivi.lock().unwrap().phase
+            ));
+        }
+        match interpreter(&etat, fichier) {
+            Verdict::Attendre { phase, pour_cent } => {
+                let mut s = suivi.lock().unwrap();
+                if s.phase != phase {
+                    s.phase(phase, pour_cent.is_some());
+                }
+                if let Some(pc) = pour_cent {
+                    s.pour_cent = pc;
+                }
+            }
+            Verdict::Pret => return Ok(()),
+            Verdict::Erreur(m) => return Err(m),
+        }
+    }
+}
+
+/// Le fil a fini : la fiche sur le disque est la bonne — c'est lui qui l'a
+/// écrite, au moment où il a su l'identifiant (`clips::noter_serveur`) ou
+/// que le serveur ne le connaissait plus (`clips::oublier_serveur`), que
+/// l'atelier soit resté ouvert ou non. On la relit ; sans dossier de
+/// fiches (rien d'écrit), on applique en mémoire ce que le fil a appris,
+/// pour que « Téléphone » et « Partager » trouvent l'identifiant.
+fn relire_fiche(p: &mut Projet, s: &Suivi) {
+    if let Some(fiche) = clips::lire_fiche(&p.chemin) {
+        p.fiche = Some(fiche);
         return;
     }
-    fiche.serveur = Some(id.to_string());
-    fiche.serveur_base = Some(reseau.base.clone());
-    clips::sauver_fiche(&p.chemin, &fiche);
+    let mut fiche = p.fiche.clone().unwrap_or_default();
+    if s.serveur_perdu {
+        fiche.serveur = None;
+        fiche.serveur_base = None;
+    }
+    if let (Some(id), Some(reseau)) = (&s.id, &p.reseau) {
+        fiche.serveur = Some(id.clone());
+        fiche.serveur_base = Some(reseau.base.clone());
+    }
     p.fiche = Some(fiche);
 }
 
-/// Dépose le clip sur le serveur sans le partager (pas de salon), et rend
-/// son identifiant.
-fn deposer(
-    reseau: &Reseau,
-    chemin: &std::path::Path,
-    nom: &str,
+/// Le dépôt d'un clip sur le serveur, sans le partager (pas de salon).
+struct Depot<'a> {
+    reseau: &'a Reseau,
+    chemin: &'a std::path::Path,
+    nom: &'a str,
     pistes: Option<Vec<String>>,
-    suivi: &Arc<Mutex<Suivi>>,
-) -> Result<String, String> {
-    let taille = std::fs::metadata(chemin).map_err(|e| e.to_string())?.len();
-    let progres = {
-        let suivi = suivi.clone();
-        move |pc: u64| suivi.lock().unwrap().pour_cent = pc.min(100) as u8
-    };
-    let (upload, parts) = match crate::envoyer_morceaux(
-        &reseau.agent,
-        &reseau.base,
-        &reseau.token_hex,
-        chemin,
-        taille,
-        &progres,
-    )? {
-        crate::EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
-        crate::EnvoiMorceaux::ServeurAncien => {
-            return Err("le serveur n'a pas encore l'atelier (mise à jour nécessaire)".into())
+    /// La durée du clip : le temps de préparation en dépend.
+    duree_ms: u64,
+}
+
+/// Pourquoi un clip que l'on croyait sur le serveur n'y est pas prêt.
+enum Attente {
+    /// Le serveur ne l'a plus (purgé, retiré), ou n'a pas su le préparer :
+    /// la fiche doit l'oublier, et un nouveau dépôt lui redonne sa chance.
+    Perdu(String),
+    /// Tout le reste : le texte à montrer.
+    Echec(String),
+}
+
+impl Attente {
+    fn texte(self) -> String {
+        match self {
+            Attente::Perdu(t) | Attente::Echec(t) => t,
         }
-    };
-    let corps = serde_json::json!({ "nom": nom, "pistes": pistes, "voix": true });
-    let reponse = reseau
-        .agent
-        .post(&format!(
-            "{}/clips/fin?upload={upload}&parts={parts}",
-            reseau.base
-        ))
-        .set("x-ki-token", &reseau.token_hex)
-        .set("Content-Type", "application/json")
-        .timeout(Duration::from_secs(300))
-        .send_string(&corps.to_string())
-        .map_err(crate::erreur_http)?;
-    let json: serde_json::Value = reponse.into_json().map_err(|e| e.to_string())?;
-    let id = json["id"].as_str().ok_or("réponse invalide")?.to_string();
-    // Le serveur prépare la version partagée avant d'accepter un export :
-    // on attend qu'il ait fini, c'est l'affaire de quelques secondes.
-    suivi.lock().unwrap().phase = "préparation sur le serveur".into();
-    let debut = Instant::now();
-    loop {
-        std::thread::sleep(Duration::from_millis(800));
-        if debut.elapsed() > Duration::from_secs(600) {
-            return Err("le serveur n'a pas fini de préparer le clip".into());
-        }
-        let meta: serde_json::Value = match reseau
-            .agent
-            .get(&format!("{}/files/{id}/meta.json", reseau.base))
-            .timeout(Duration::from_secs(20))
-            .call()
-        {
-            Ok(r) => r.into_json().map_err(|e| e.to_string())?,
-            Err(_) => continue,
-        };
-        match meta["etat"].as_str() {
-            Some("pret") => return Ok(id),
-            Some("erreur") => {
-                return Err(meta["message"]
-                    .as_str()
-                    .unwrap_or("clip illisible par le serveur")
-                    .into())
+    }
+}
+
+impl Depot<'_> {
+    /// Envoie les morceaux, demande l'assemblage, puis attend que le
+    /// serveur ait préparé la version partagée (l'export l'exige). Rend
+    /// l'identifiant — noté dans le suivi **et dans la fiche sur le disque**
+    /// dès la réponse de `/clips/fin`, avant l'attente : si celle-ci échoue,
+    /// ou si l'atelier a été fermé entre-temps, le clip est quand même là et
+    /// le prochain export ne le renverra pas.
+    fn deposer(&self, suivi: &Arc<Mutex<Suivi>>) -> Result<String, String> {
+        let reseau = self.reseau;
+        let taille = std::fs::metadata(self.chemin).map_err(|e| e.to_string())?.len();
+        suivi.lock().unwrap().phase("dépôt du clip", true);
+        journal(format!("dépôt de {} ({} Mo)", self.nom, taille / (1024 * 1024)));
+        let progres = {
+            let suivi = suivi.clone();
+            move |pc: u64, morceau: u32, total: u32| {
+                let mut s = suivi.lock().unwrap();
+                s.pour_cent = pc.min(100) as u8;
+                s.phase = format!("dépôt du clip · morceau {morceau}/{total}");
             }
-            _ => {}
+        };
+        let (upload, parts) = match crate::envoyer_morceaux(
+            &reseau.agent,
+            &reseau.base,
+            &|| reseau.token_hex(),
+            self.chemin,
+            taille,
+            &progres,
+        )? {
+            crate::EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
+            crate::EnvoiMorceaux::ServeurAncien => {
+                return Err("le serveur n'a pas encore l'atelier (mise à jour nécessaire)".into())
+            }
+        };
+        suivi.lock().unwrap().phase("assemblage sur le serveur", false);
+        let corps = serde_json::json!({ "nom": self.nom, "pistes": self.pistes, "voix": true });
+        let reponse = reseau
+            .agent
+            .post(&format!(
+                "{}/clips/fin?upload={upload}&parts={parts}",
+                reseau.base
+            ))
+            .set("x-ki-token", &reseau.token_hex())
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(300))
+            .send_string(&corps.to_string())
+            .map_err(|e| {
+                let code = match &e {
+                    ureq::Error::Status(c, _) => c.to_string(),
+                    _ => "réseau".into(),
+                };
+                let texte = match e {
+                    ureq::Error::Status(401, _) => crate::SESSION_PERDUE.to_string(),
+                    ureq::Error::Status(404, _) => {
+                        "le serveur n'a pas encore l'atelier (mise à jour nécessaire)".to_string()
+                    }
+                    autre => crate::erreur_http(autre),
+                };
+                journal(format!("dépôt de {} : /clips/fin refusé ({code}) : {texte}", self.nom));
+                texte
+            })?;
+        let json: serde_json::Value = reponse.into_json().map_err(|e| e.to_string())?;
+        let id = json["id"].as_str().ok_or("réponse invalide")?.to_string();
+        suivi.lock().unwrap().id = Some(id.clone());
+        clips::noter_serveur(self.chemin, &reseau.base, &id);
+        journal(format!("dépôt de {} : reçu (clip {id}), préparation sur le serveur", self.nom));
+        self.attendre_pret(&id, suivi, false).map_err(Attente::texte)?;
+        Ok(id)
+    }
+
+    /// Attend que le serveur ait préparé la version partagée du clip `id`
+    /// (`meta.json` à `pret`) : quelques secondes sur un PC, des minutes sur
+    /// un conteneur à un cœur pour un clip « Haute ». `deja` : le clip
+    /// n'est pas de ce fil mais d'un partage ou d'un export précédent — la
+    /// fiche le croit sur le serveur ; alors une fiche introuvable, ou
+    /// laissée en erreur par une préparation ratée (« ffmpeg : délai
+    /// dépassé »), n'est pas un échec mais un clip [`Attente::Perdu`], à
+    /// redéposer. Sans cette relecture, le chemin rapide envoyait
+    /// `/exporter` tout de suite et recevait « le clip n'est pas prêt »,
+    /// sans dire d'attendre, et sans issue si la préparation avait échoué.
+    fn attendre_pret(&self, id: &str, suivi: &Arc<Mutex<Suivi>>, deja: bool) -> Result<(), Attente> {
+        let reseau = self.reseau;
+        suivi.lock().unwrap().phase("préparation sur le serveur", false);
+        let url = format!("{}/files/{id}/meta.json", reseau.base);
+        let mut relecture = Relecture::new();
+        if deja {
+            // Un premier regard, sans patience : ce qu'un clip d'hier a à
+            // dire, il le dit tout de suite.
+            match reseau.agent.get(&url).timeout(Duration::from_secs(20)).call() {
+                Ok(r) => {
+                    let meta: serde_json::Value = r
+                        .into_json()
+                        .map_err(|e| Attente::Echec(format!("la fiche du clip est illisible : {e}")))?;
+                    match juger_meta(&meta) {
+                        Presence::Pret => return Ok(()),
+                        Presence::Erreur(m) => {
+                            return Err(Attente::Perdu(format!(
+                                "le serveur n'avait pas su préparer le clip {id} ({m})"
+                            )))
+                        }
+                        Presence::EnPreparation => {}
+                    }
+                }
+                Err(ureq::Error::Status(404, _)) => {
+                    return Err(Attente::Perdu(format!("le serveur ne connaît plus le clip {id}")))
+                }
+                // Réseau, 5xx : la boucle en dessous saura patienter.
+                Err(_) => {}
+            }
         }
+        let debut = Instant::now();
+        let delai = delai_pour(self.duree_ms);
+        loop {
+            std::thread::sleep(Duration::from_millis(800));
+            if debut.elapsed() > delai {
+                return Err(Attente::Echec(format!(
+                    "le serveur n'a pas fini de préparer le clip en {} — il est trop lent ou saturé ; le clip y est, réessaie plus tard sans le renvoyer",
+                    mmss(delai.as_millis() as u64)
+                )));
+            }
+            let Some(meta) = relecture.lire(reseau, &url, "la fiche du clip").map_err(Attente::Echec)? else {
+                continue;
+            };
+            match juger_meta(&meta) {
+                Presence::Pret => return Ok(()),
+                Presence::Erreur(m) => return Err(Attente::Echec(m)),
+                Presence::EnPreparation => {}
+            }
+        }
+    }
+}
+
+/// Ce que `meta.json` dit du clip.
+#[derive(Debug, PartialEq, Eq)]
+enum Presence {
+    Pret,
+    EnPreparation,
+    /// Le message du serveur, ou un texte à nous.
+    Erreur(String),
+}
+
+fn juger_meta(meta: &serde_json::Value) -> Presence {
+    match meta["etat"].as_str() {
+        Some("pret") => Presence::Pret,
+        Some("erreur") => Presence::Erreur(
+            meta["message"]
+                .as_str()
+                .filter(|m| !m.trim().is_empty())
+                .unwrap_or("clip illisible par le serveur")
+                .into(),
+        ),
+        _ => Presence::EnPreparation,
     }
 }
 
@@ -1376,10 +1881,8 @@ fn panneau_reglages(
     match &p.export {
         Export::EnCours(s) => {
             let s = s.lock().unwrap().clone();
-            ui.add(
-                egui::ProgressBar::new(f32::from(s.pour_cent) / 100.0)
-                    .text(format!("{}… {} %", s.phase, s.pour_cent)),
-            );
+            let barre = egui::ProgressBar::new(f32::from(s.pour_cent) / 100.0).text(s.texte());
+            ui.add(if s.avec_pour_cent { barre } else { barre.animate(true) });
             ui::hint(ui, "le serveur travaille ; tu peux continuer à régler, l'export en cours ne change plus");
         }
         Export::Erreur(e) => {
@@ -1778,6 +2281,147 @@ mod tests {
 
         p.format = Format::Original;
         assert_eq!(Atelier::recette(&p)["format"]["type"], "original");
+    }
+
+    /// Un 404 de `/exporter` n'est pas toujours « mets le serveur à jour » :
+    /// « clip inconnu », c'est un clip purgé, à redéposer.
+    #[test]
+    fn un_404_se_trie_entre_clip_purge_et_serveur_d_avant() {
+        assert_eq!(trier_404("clip inconnu"), Absence::ClipInconnu);
+        assert_eq!(trier_404(""), Absence::RouteAbsente);
+        assert_eq!(trier_404("<html>404 Not Found</html>"), Absence::RouteAbsente);
+    }
+
+    /// `export.json` tel que le serveur l'écrit, d'hier et d'aujourd'hui,
+    /// et ce qu'on en montre.
+    #[test]
+    fn l_etat_d_export_se_lit_et_se_juge_contre_le_fichier_demande() {
+        // Un serveur 0.1.42 : pas de `derriere` ni de `mode`.
+        let ancien: EtatExport = serde_json::from_str(
+            r#"{"etat":"en_cours","pour_cent":42,"fichier":"telephone.mp4","message":null,"duree_s":0.0,"largeur":0,"hauteur":0,"taille":0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            interpreter(&ancien, "telephone.mp4"),
+            Verdict::Attendre { phase: "export".into(), pour_cent: Some(42) }
+        );
+        // Un serveur 0.1.43 : la place en file, le mode, l'horodatage.
+        let en_file: EtatExport = serde_json::from_str(
+            r#"{"etat":"en_attente","pour_cent":0,"fichier":"export.mp4","derriere":2,"depuis":1758400000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            interpreter(&en_file, "export.mp4"),
+            Verdict::Attendre { phase: "en file sur le serveur, 2 devant".into(), pour_cent: None }
+        );
+        let copie: EtatExport =
+            serde_json::from_str(r#"{"etat":"en_cours","pour_cent":7,"fichier":"export.mp4","mode":"copie"}"#).unwrap();
+        assert!(matches!(interpreter(&copie, "export.mp4"), Verdict::Attendre { pour_cent: Some(7), .. }));
+        // Prêt — mais seulement pour le fichier demandé : le `pret` d'un
+        // export précédent (l'autre nom) n'est pas le nôtre.
+        let pret: EtatExport =
+            serde_json::from_str(r#"{"etat":"pret","pour_cent":100,"fichier":"telephone.mp4"}"#).unwrap();
+        assert_eq!(interpreter(&pret, "telephone.mp4"), Verdict::Pret);
+        assert!(matches!(interpreter(&pret, "export.mp4"), Verdict::Attendre { .. }));
+        // L'erreur porte le texte du serveur, ou un texte à nous.
+        let erreur: EtatExport =
+            serde_json::from_str(r#"{"etat":"erreur","fichier":"export.mp4","message":"ffmpeg : délai dépassé"}"#).unwrap();
+        assert_eq!(interpreter(&erreur, "export.mp4"), Verdict::Erreur("ffmpeg : délai dépassé".into()));
+        let muette: EtatExport = serde_json::from_str(r#"{"etat":"erreur"}"#).unwrap();
+        assert_eq!(interpreter(&muette, "export.mp4"), Verdict::Erreur("échec de l'export".into()));
+        // N'importe quoi : on attend, pas de plantage.
+        let vide: EtatExport = serde_json::from_str("{}").unwrap();
+        assert!(matches!(interpreter(&vide, "export.mp4"), Verdict::Attendre { .. }));
+    }
+
+    /// En file, un état relu identique n'est pas un export figé : le
+    /// serveur n'écrit `en_attente` qu'une fois. Sous ffmpeg, si.
+    #[test]
+    fn en_file_un_etat_identique_n_est_pas_fige() {
+        let en_file: EtatExport =
+            serde_json::from_str(r#"{"etat":"en_attente","fichier":"export.mp4","derriere":1}"#).unwrap();
+        assert!(avance(None, &en_file));
+        assert!(avance(Some(&en_file), &en_file), "toujours 1 devant : on attend, sans compter le figé");
+        let en_cours: EtatExport =
+            serde_json::from_str(r#"{"etat":"en_cours","fichier":"export.mp4","pour_cent":12}"#).unwrap();
+        assert!(avance(Some(&en_file), &en_cours), "pris en charge : ça bouge");
+        assert!(!avance(Some(&en_cours), &en_cours), "même pourcentage : figé");
+        let plus_loin: EtatExport =
+            serde_json::from_str(r#"{"etat":"en_cours","fichier":"export.mp4","pour_cent":13}"#).unwrap();
+        assert!(avance(Some(&en_cours), &plus_loin));
+    }
+
+    /// Ce que `meta.json` dit d'un clip déjà sur le serveur, et le fichier
+    /// qu'une recette produit quand on n'a pas pu le demander au serveur.
+    #[test]
+    fn la_fiche_du_clip_se_juge_et_la_recette_nomme_sa_sortie() {
+        assert_eq!(juger_meta(&serde_json::json!({"etat":"pret"})), Presence::Pret);
+        assert_eq!(juger_meta(&serde_json::json!({"etat":"en_preparation"})), Presence::EnPreparation);
+        assert_eq!(juger_meta(&serde_json::json!({})), Presence::EnPreparation);
+        assert_eq!(
+            juger_meta(&serde_json::json!({"etat":"erreur","message":"vidéo illisible : ffmpeg : délai dépassé"})),
+            Presence::Erreur("vidéo illisible : ffmpeg : délai dépassé".into())
+        );
+        assert_eq!(
+            juger_meta(&serde_json::json!({"etat":"erreur","message":"  "})),
+            Presence::Erreur("clip illisible par le serveur".into())
+        );
+        let mut p = projet_d_essai();
+        assert_eq!(nom_sortie(&Atelier::recette(&p)), "telephone.mp4");
+        p.format = Format::Original;
+        assert_eq!(nom_sortie(&Atelier::recette(&p)), "export.mp4");
+        assert_eq!(nom_sortie(&serde_json::json!({})), "export.mp4");
+    }
+
+    /// Le fil a fini : la fiche du projet suit ce qu'il a appris — depuis
+    /// le disque quand il y a écrit, sinon en mémoire.
+    #[test]
+    fn la_fiche_du_projet_suit_le_fil() {
+        let mut p = projet_d_essai();
+        p.reseau = Some(Reseau {
+            base: "https://ts:8080".into(),
+            jeton: Arc::new(Mutex::new("ab".into())),
+            agent: ureq::Agent::new(),
+        });
+        // Un chemin sans fiche sur le disque : ce que le fil a noté.
+        let suivi = Suivi { id: Some("0123456789abcdef".into()), ..Default::default() };
+        relire_fiche(&mut p, &suivi);
+        let f = p.fiche.clone().unwrap();
+        assert_eq!(f.serveur.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(f.serveur_base.as_deref(), Some("https://ts:8080"));
+        assert!(f.pistes.is_some(), "le reste de la fiche est gardé");
+        // Perdu puis redéposé : le nouvel identifiant.
+        let suivi = Suivi { id: Some("fedcba9876543210".into()), serveur_perdu: true, ..Default::default() };
+        relire_fiche(&mut p, &suivi);
+        assert_eq!(p.fiche.as_ref().unwrap().serveur.as_deref(), Some("fedcba9876543210"));
+        // Perdu sans redépôt (le dépôt a échoué) : plus de serveur.
+        let suivi = Suivi { serveur_perdu: true, ..Default::default() };
+        relire_fiche(&mut p, &suivi);
+        assert!(p.fiche.as_ref().unwrap().serveur.is_none());
+    }
+
+    #[test]
+    fn le_delai_suit_la_duree_de_la_coupe() {
+        assert_eq!(delai_pour(0), Duration::from_secs(600));
+        assert_eq!(delai_pour(30_000), Duration::from_secs(1050));
+        assert_eq!(delai_pour(180_000), Duration::from_secs(3300));
+        assert_eq!(delai_pour(3_600_000), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn la_barre_dit_la_phase_et_le_temps_qui_passe() {
+        let mut s = Suivi::default();
+        s.phase("en file sur le serveur, 2 devant", false);
+        assert_eq!(s.texte(), "en file sur le serveur, 2 devant…");
+        s.phase("export", true);
+        s.pour_cent = 42;
+        assert_eq!(s.texte(), "export… 42 %");
+        s.debut = Some(Instant::now() - Duration::from_secs(75));
+        assert_eq!(s.texte(), "export… 42 %  (1:15)");
+        // Un changement de phase remet le pourcentage à zéro : la barre
+        // pleine du dépôt ne reste pas affichée pendant la préparation.
+        s.phase("préparation sur le serveur", false);
+        assert_eq!(s.pour_cent, 0);
     }
 
     #[test]

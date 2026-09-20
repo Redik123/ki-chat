@@ -1033,6 +1033,35 @@ pub fn lire_fiche(clip: &Path) -> Option<Fiche> {
     serde_json::from_slice(&octets).ok()
 }
 
+/// Le clip est sur ce serveur, sous cet identifiant : la fiche l'apprend,
+/// telle qu'elle est **sur le disque** au moment où on le sait — depuis le
+/// fil qui vient de recevoir la réponse de `/clips/fin`, pas depuis une
+/// fenêtre qui a pu être fermée entre-temps. Sans ça, un atelier fermé
+/// pendant la préparation redéposait le clip en entier au prochain export.
+/// Rend la fiche écrite.
+pub fn noter_serveur(clip: &Path, base: &str, id: &str) -> Fiche {
+    let mut fiche = lire_fiche(clip).unwrap_or_default();
+    if fiche.serveur.as_deref() != Some(id) || fiche.serveur_base.as_deref() != Some(base) {
+        fiche.serveur = Some(id.to_string());
+        fiche.serveur_base = Some(base.to_string());
+        sauver_fiche(clip, &fiche);
+    }
+    fiche
+}
+
+/// Le serveur ne connaît plus ce clip (purgé, retiré, ou illisible chez
+/// lui) : la fiche l'oublie, un prochain envoi le redéposera. Rend la fiche
+/// écrite, s'il y en avait une.
+pub fn oublier_serveur(clip: &Path) -> Option<Fiche> {
+    let mut fiche = lire_fiche(clip)?;
+    if fiche.serveur.is_some() || fiche.serveur_base.is_some() {
+        fiche.serveur = None;
+        fiche.serveur_base = None;
+        sauver_fiche(clip, &fiche);
+    }
+    Some(fiche)
+}
+
 /// Fabrique la vignette (320 px de large, JPEG) d'un clip, depuis sa
 /// première image. Rend son chemin.
 pub fn vignette(clip: &Path) -> anyhow::Result<PathBuf> {
@@ -1162,6 +1191,41 @@ mod tests {
         let relue = lire_fiche(&chemin).unwrap();
         assert_eq!(relue.serveur.as_deref(), Some("0123456789abcdef"));
         assert!(relue.pistes.is_none());
+        if let Some(f) = chemin_fiche(&chemin) {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    /// Le serveur se note et s'oublie **sur le disque**, en gardant le reste
+    /// de la fiche : c'est ce qu'un fil fait pendant que l'atelier est
+    /// peut-être fermé.
+    #[test]
+    fn la_fiche_note_et_oublie_le_serveur_sans_perdre_le_reste() {
+        let chemin = std::env::temp_dir().join(format!("ki-clip-serveur-{}.mp4", std::process::id()));
+        if chemin_fiche(&chemin).is_none() {
+            eprintln!("pas de dossier de vignettes : test sauté");
+            return;
+        }
+        let clip = Clip { chemin: chemin.clone(), duree_s: 8.0, taille: 42, pistes: vec!["jeu", "micro"] };
+        ecrire_fiche(&clip, "VALORANT");
+        let notee = noter_serveur(&chemin, "https://ts:8080", "0123456789abcdef");
+        assert_eq!(notee.serveur.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(notee.serveur_base.as_deref(), Some("https://ts:8080"));
+        let relue = lire_fiche(&chemin).unwrap();
+        assert_eq!(relue, notee, "écrite telle quelle");
+        assert_eq!(relue.source, "VALORANT", "le reste de la fiche est gardé");
+        assert_eq!(relue.pistes.as_deref().map(|p| p.len()), Some(2));
+        // Un autre serveur : un autre dépôt.
+        let ailleurs = noter_serveur(&chemin, "https://autre:8080", "fedcba9876543210");
+        assert_eq!(lire_fiche(&chemin).unwrap(), ailleurs);
+        // Oublié : plus de serveur, le reste intact.
+        let oubliee = oublier_serveur(&chemin).unwrap();
+        assert!(oubliee.serveur.is_none() && oubliee.serveur_base.is_none());
+        let relue = lire_fiche(&chemin).unwrap();
+        assert_eq!(relue, oubliee);
+        assert_eq!(relue.source, "VALORANT");
+        // Sans fiche du tout : rien à oublier, rien d'inventé.
+        assert!(oublier_serveur(&chemin.with_extension("inconnu.mp4")).is_none());
         if let Some(f) = chemin_fiche(&chemin) {
             let _ = std::fs::remove_file(f);
         }
