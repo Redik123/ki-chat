@@ -8,6 +8,7 @@ mod clips;
 mod graphes;
 mod icons;
 mod images;
+mod instance;
 mod jeux;
 mod markup;
 mod medias;
@@ -114,6 +115,20 @@ fn main() -> eframe::Result {
     if relances > 0 {
         tracing::info!("instance relancée automatiquement (tentative {relances})");
     }
+    // Un seul ki-chat par session : lancé une seconde fois — depuis
+    // l'icône du Bureau, alors qu'il est réduit à côté de l'horloge —, on
+    // ramène le premier au premier plan et l'on se retire.
+    let verrou = match instance::prendre() {
+        instance::Demarrage::Premiere(verrou) => verrou,
+        instance::Demarrage::DejaLancee => {
+            if instance::reveiller_l_autre() {
+                tracing::info!("ki-chat tourne déjà dans cette session : il revient au premier plan, celui-ci se retire");
+            } else {
+                tracing::warn!("ki-chat tourne déjà dans cette session mais ne répond pas au réveil ; celui-ci se retire quand même");
+            }
+            return Ok(());
+        }
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -141,6 +156,10 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(KiApp::new(cc)))),
     );
+    // Le verrou est rendu avant de relancer quoi que ce soit : le
+    // successeur d'une mise à jour ou d'une relance automatique doit
+    // pouvoir le prendre sans attendre notre mort.
+    verrou.lacher();
     match &outcome {
         // Une mise à jour installée ne prend effet qu'au prochain lancement :
         // on le déclenche ici, la fenêtre fermée — donc après que les
@@ -13819,6 +13838,9 @@ impl eframe::App for KiApp {
             zone::Constat::ReductionAbandonnee => {
                 self.info = Some("la fenêtre n'a pas pu être réduite dans la zone de notification".into());
             }
+            // Un second ki-chat lancé depuis l'icône du Bureau : il s'est
+            // retiré, à nous de revenir — rouverte si réduite, devant sinon.
+            zone::Constat::Revelee => self.rouvrir_depuis_zone(ctx),
         }
         for ev in self.zone.evenements() {
             match ev {

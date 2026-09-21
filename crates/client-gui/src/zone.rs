@@ -109,6 +109,10 @@ pub enum Constat {
     /// La fenêtre ne s'est pas minimisée dans le délai : la réduction est
     /// abandonnée, la fenêtre reste ouverte.
     ReductionAbandonnee,
+    /// Un second ki-chat a été lancé et s'est retiré en nous sonnant
+    /// (`instance`) : la fenêtre doit revenir au premier plan, rouverte
+    /// si elle était réduite.
+    Revelee,
 }
 
 /// Le témoin « réduit » lu par `secours::relancer` et
@@ -190,6 +194,8 @@ struct Veille {
     reduite: AtomicBool,
     /// Le garde-fou a rouvert la fenêtre lui-même ; `tick` le relève.
     forcee: AtomicBool,
+    /// Un second lancement nous a sonnés ; `tick` le relève.
+    revele: AtomicBool,
     hwnd: AtomicIsize,
     arret: AtomicBool,
 }
@@ -209,8 +215,16 @@ impl Veille {
 /// Le fil du garde-fou : tourne toute la vie de l'application, ne regarde
 /// que quand la fenêtre est réduite.
 fn veiller(veille: Arc<Veille>, ctx: egui::Context) {
+    // L'oreille des seconds lancements : elle vit avec ce fil, toute la
+    // vie de l'application, réduite ou non.
+    let reveil = crate::instance::Reveil::creer();
     while !veille.arret.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(500));
+        if reveil.sonne() {
+            ki_voice::journal("zone : un second ki-chat nous a sonnés — retour au premier plan".to_string());
+            veille.revele.store(true, Ordering::Relaxed);
+            ctx.request_repaint();
+        }
         // Une consigne attend déjà que `tick` la relève : inutile de
         // sommer encore, `update()` ne répondra pas mieux la deuxième fois.
         if veille.forcee.load(Ordering::Relaxed) {
@@ -311,6 +325,7 @@ impl Zone {
             depart: Instant::now(),
             reduite: AtomicBool::new(false),
             forcee: AtomicBool::new(false),
+            revele: AtomicBool::new(false),
             hwnd: AtomicIsize::new(hwnd),
             arret: AtomicBool::new(false),
         });
@@ -421,6 +436,11 @@ impl Zone {
             self.rouvrir_quoi_qu_il_en_soit(ctx);
             ki_voice::journal("zone : réouverture forcée relevée, fenêtre rouverte".to_string());
             return Constat::ReouvertureForcee;
+        }
+        if self.veille.revele.swap(false, Ordering::Relaxed) {
+            // Rouvrir ou ramener devant : c'est l'application qui sait
+            // (elle a le contexte des deux), on ne fait que le dire.
+            return Constat::Revelee;
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -932,6 +952,21 @@ mod tests {
 
     /// Le garde-fou a laissé sa consigne : `tick` rejoue la réouverture,
     /// quel que soit l'état où l'on en était.
+    /// Un second lancement nous sonne : `tick` le dit une fois, puis se
+    /// tait — c'est l'application qui rouvre ou ramène devant.
+    #[test]
+    fn un_reveil_se_releve_une_fois() {
+        let ctx = egui::Context::default();
+        let mut zone = Zone::factice();
+        zone.veille.revele.store(true, Ordering::Relaxed);
+        let mut premier = Constat::Rien;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| premier = zone.tick(ctx));
+        assert_eq!(premier, Constat::Revelee);
+        let mut second = Constat::Rien;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| second = zone.tick(ctx));
+        assert_eq!(second, Constat::Rien);
+    }
+
     #[test]
     fn la_reouverture_forcee_est_rejouee() {
         let ctx = egui::Context::default();
@@ -955,6 +990,7 @@ mod tests {
             depart: Instant::now() - Duration::from_secs(10),
             reduite: AtomicBool::new(true),
             forcee: AtomicBool::new(false),
+            revele: AtomicBool::new(false),
             hwnd: AtomicIsize::new(0),
             arret: AtomicBool::new(false),
         };
