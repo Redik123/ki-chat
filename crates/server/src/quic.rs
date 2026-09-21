@@ -331,6 +331,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 conn: conn.clone(),
                 chat_budget: Default::default(),
                 voice_budget: crate::state::TokenBucket::new(3.0, 8.0),
+                pokes_ok: None,
             },
         );
     }
@@ -366,6 +367,12 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     // ligne que porte le roster.
     let _ = tx.send(ServerMsg::Members {
         members: state.roster(),
+    });
+    // Où il en est dans chaque salon : les pastilles de ce qu'il a manqué.
+    // Un client antérieur jette ce message ; un client neuf y lit aussi
+    // « ce serveur tient les lus », et se met à envoyer les siens.
+    let _ = tx.send(ServerMsg::NonLus {
+        salons: non_lus_de(&state, user_id, &username),
     });
     if let Some(member) = state.member_of(user_id) {
         state.broadcast_all_except(user_id, &ServerMsg::MemberUpdate { member });
@@ -443,7 +450,23 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     voice.abort();
     stream_in.abort();
     writer.abort();
+    // Ses repères de lecture partent sur le disque sans attendre la passe
+    // suivante : un redémarrage du serveur dans l'intervalle lui aurait
+    // rendu ses pastilles. Sur le pool bloquant — c'est une écriture.
+    let lus_state = state.clone();
+    tokio::task::spawn_blocking(move || lus_state.lus.ecrire_si_sale());
     Ok(())
+}
+
+/// Ce que `user_id` n'a pas lu, salon textuel visible par salon textuel
+/// visible — la règle du repère absent est dans [`crate::lus::non_lus`].
+fn non_lus_de(state: &Arc<AppState>, user_id: UserId, username: &str) -> Vec<ki_protocol::NonLuSalon> {
+    let salons = state
+        .visible_channels(user_id)
+        .into_iter()
+        .filter(|c| c.kind == ki_protocol::ChannelKind::Text)
+        .map(|c| c.id);
+    crate::lus::non_lus(&state.lus, &state.history, salons, user_id, username)
 }
 
 /// Ingestion des trames vidéo d'UN streamer : chaque flux unidirectionnel
@@ -1113,24 +1136,33 @@ fn handle_msg(
             let rec = ChatRecord {
                 user_id,
                 username: username.to_string(),
-                text: text.clone(),
+                text,
                 ts,
-                reply_to: reply_to.clone(),
+                reply_to,
                 reactions: Vec::new(),
                 edited: false,
             };
             state.history.append(channel, &rec);
-            state.broadcast(
-                channel,
-                None,
-                &ServerMsg::Chat {
-                    user_id,
-                    username: username.to_string(),
-                    text,
-                    ts,
-                    reply_to,
-                },
-            );
+            // Aux lecteurs le message, aux autres voyants un `Nouveau` :
+            // c'est ce qui fait vivre les pastilles des autres salons.
+            state.diffuser_message(channel, &rec);
+        }
+        ClientMsg::Lu { channel, ts } => {
+            // Même silence qu'un `Join` refusé : un salon qu'on ne voit pas
+            // n'existe pas, et l'on ne pose pas de repère dedans.
+            if !state.channel_is(channel, ki_protocol::ChannelKind::Text)
+                || !state.can_view(user_id, channel)
+            {
+                return;
+            }
+            // Borné au dernier message du salon : « j'ai tout lu » se dit
+            // avec n'importe quel horodatage d'avance, et le repère ne peut
+            // pas dépasser ce qui existe — sans quoi le prochain message
+            // arriverait déjà lu.
+            let Some(dernier) = state.history.dernier_ts(channel) else {
+                return;
+            };
+            state.lus.marquer(user_id, channel, ts.min(dernier));
         }
         ClientMsg::React { message, emoji, on } => {
             let Some(channel) = current_channel(state, user_id) else {
@@ -1904,6 +1936,92 @@ fn handle_msg(
             if transition.reprise {
                 state.valorant.reprise_de_partie(user_id);
             }
+        }
+        ClientMsg::AccepterPokes { accepter } => {
+            // Son réglage, pour lui seul : rien à diffuser, les autres
+            // l'apprendront au refus.
+            let mut users = state.users.lock().unwrap();
+            if let Some(u) = users.get_mut(&user_id) {
+                u.pokes_ok = Some(accepter);
+            }
+        }
+        ClientMsg::Poke { user_id: cible } => {
+            let refus = |message: String| {
+                let _ = tx.send(ServerMsg::PokeRefuse { user_id: cible, message });
+            };
+            if cible == user_id {
+                refus("on ne se poke pas soi-même".into());
+                return;
+            }
+            // Le serveur et le bot n'ont ni oreilles ni barre des tâches.
+            if cible == 0 || cible == ki_protocol::MUSIQUE_ID {
+                refus("utilisateur introuvable".into());
+                return;
+            }
+            // Tout ce qu'il faut savoir de la cible, en une prise du verrou
+            // des connectés — relâché avant les règles, les limites et
+            // l'envoi : jamais d'envoi réseau ni d'autre verrou sous `users`.
+            let lu = {
+                let users = state.users.lock().unwrap();
+                users.get(&cible).map(|u| {
+                    (
+                        u.username.clone(),
+                        crate::pokes::Cible {
+                            en_ligne: true,
+                            en_vocal: u.voice.is_some(),
+                            en_partie: u.jeu.as_ref().is_some_and(|j| {
+                                matches!(j.etat, ki_protocol::JeuEtat::PreGame | ki_protocol::JeuEtat::EnJeu)
+                            }),
+                            client_recent: u.pokes_ok.is_some(),
+                            accepte: u.pokes_ok.unwrap_or(true),
+                        },
+                        Some(u.tx.clone()),
+                    )
+                })
+            };
+            let (nom, etat, tx_cible) = match lu {
+                Some(lu) => lu,
+                None => {
+                    // Pas connecté : on le nomme quand même, s'il existe.
+                    let Some(nom) = state.accounts.username_of(cible) else {
+                        refus("utilisateur introuvable".into());
+                        return;
+                    };
+                    let absent = crate::pokes::Cible {
+                        en_ligne: false,
+                        en_vocal: false,
+                        en_partie: false,
+                        client_recent: true,
+                        accepte: true,
+                    };
+                    (nom, absent, None)
+                }
+            };
+            // Les règles d'abord : un refus de règle ne coûte rien.
+            if let Err(motif) = crate::pokes::verdict(&etat) {
+                refus(format!("{nom} {motif}"));
+                return;
+            }
+            // Puis seulement les limites.
+            match state.pokes.consommer(user_id, cible) {
+                Ok(()) => {}
+                Err(crate::pokes::Limite::DejaPoke { depuis }) => {
+                    refus(format!("tu as déjà poké {nom} il y a {} min", crate::pokes::minutes(depuis)));
+                    return;
+                }
+                Err(crate::pokes::Limite::TropDePokes) => {
+                    refus("trop de pokes — attends un peu".into());
+                    return;
+                }
+            }
+            let Some(t) = tx_cible else { return };
+            tracing::info!("poke : {username} -> {nom}");
+            // Un geste entre membres, pas une action d'administration : pas
+            // d'audit, une trace suffit.
+            let _ = t.send(ServerMsg::Poke {
+                user_id,
+                username: username.to_string(),
+            });
         }
         ClientMsg::VoiceState { speaking, muted } => {
             let changed = {

@@ -164,6 +164,16 @@ pub enum ClientMsg {
     EditMessage { message: MsgRef, text: String },
     /// Demander l'historique du salon courant.
     History { limit: u32 },
+    /// « J'ai lu ce salon jusqu'à `ts` inclus. » Le serveur tient ce repère
+    /// par membre et par salon (voir [`ServerMsg::NonLus`]) : il suit d'un
+    /// ordinateur à l'autre, et c'est lui qui sait ce qui a été écrit entre
+    /// deux sessions.
+    ///
+    /// `ts` est borné côté serveur au dernier message du salon : un client
+    /// ne peut pas « lire l'avenir ». Un client neuf ne l'envoie qu'après
+    /// avoir reçu un `NonLus` — preuve que le serveur en face connaît ce
+    /// message. Un serveur antérieur répondrait « message invalide ».
+    Lu { channel: ChannelId, ts: u64 },
     /// Chercher un texte dans l'historique.
     ///
     /// La casse est ignorée. Le serveur ne cherche que dans les salons que
@@ -202,6 +212,20 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         jeu: Option<JeuStatut>,
     },
+    /// « Poke » un membre : un son et un clignotement chez lui, rien
+    /// d'autre — pour appeler quelqu'un qui traîne dans les menus sans lui
+    /// écrire. Le serveur refuse ([`ServerMsg::PokeRefuse`]) s'il est hors
+    /// ligne, en vocal, en partie, s'il n'en veut pas, ou si l'on insiste
+    /// trop ; il ne relaie que ce qui peut être reçu.
+    ///
+    /// Un client neuf ne l'envoie qu'après une preuve que le serveur en
+    /// face est récent (un `NonLus` reçu) : un serveur antérieur répondrait
+    /// « message invalide », en bannière.
+    Poke { user_id: UserId },
+    /// Ce que je fais des pokes qu'on m'adresse. État de session, comme
+    /// `GameStatus` : envoyé après `Welcome` et à chaque changement. Sans
+    /// rien reçu, le serveur tient chacun pour joignable.
+    AccepterPokes { accepter: bool },
     /// Lier son compte Riot (« Pseudo#TAG ») : le serveur le résout et
     /// tient à jour sa fiche (rang, matchs) par HenrikDev. La réponse vient
     /// à part, `LiaisonRiot`, une fois le compte trouvé.
@@ -445,7 +469,8 @@ pub enum ServerMsg {
     UserJoined { user_id: UserId, username: String },
     /// Un utilisateur a quitté le salon.
     UserLeft { user_id: UserId },
-    /// Message texte relayé.
+    /// Message texte relayé — aux **lecteurs** du salon, ceux qui l'ont
+    /// ouvert. Les autres reçoivent un [`ServerMsg::Nouveau`].
     Chat {
         user_id: UserId,
         username: String,
@@ -454,7 +479,42 @@ pub enum ServerMsg {
         ts: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<ReplyRef>,
+        /// Le salon d'où il vient. `0` = serveur antérieur, qui ne le
+        /// disait pas : le client s'en remet alors au salon qu'il lit. Un
+        /// client antérieur ignore le champ.
+        #[serde(default)]
+        channel: ChannelId,
     },
+    /// Un message vient d'être écrit dans un salon que le destinataire
+    /// **peut voir mais ne lit pas** : de quoi poser une pastille, sonner
+    /// s'il est nommé, sans lui envoyer une conversation qu'il n'affiche
+    /// pas. Un client antérieur jette ce message sans bruit — c'est ce qui
+    /// interdit d'envoyer un `Chat` aux non-lecteurs : il l'afficherait
+    /// dans le mauvais fil.
+    ///
+    /// Le texte voyage entier (borné comme un `Chat`) : c'est le client qui
+    /// reconnaît une mention, avec la même règle qu'à l'affichage.
+    Nouveau {
+        channel: ChannelId,
+        user_id: UserId,
+        username: String,
+        text: String,
+        ts: u64,
+    },
+    /// Où en est le destinataire dans chaque salon visible, à la connexion :
+    /// envoyé après `Members`. Un salon sans rien de neuf y figure aussi,
+    /// avec `non_lus` à 0 — la liste dit du même coup « ce serveur tient
+    /// les lus », ce qui autorise le client à envoyer des [`ClientMsg::Lu`].
+    NonLus { salons: Vec<NonLuSalon> },
+    /// Quelqu'un te poke : `username` te veut. Même forme que `UserJoined`.
+    /// Un client antérieur jette ce message sans bruit.
+    Poke { user_id: UserId, username: String },
+    /// Ton poke n'est pas parti : `user_id` est la cible visée — de quoi
+    /// griser son bouton un moment —, `message` dit pourquoi, en toutes
+    /// lettres et en français (« Nono est en vocal », « trop de pokes —
+    /// attends un peu »). Un `Error` aurait fait l'affaire pour l'affichage,
+    /// pas pour rattacher le refus à la cible.
+    PokeRefuse { user_id: UserId, message: String },
     /// Quelqu'un a posé ou retiré une réaction sur un message du salon.
     Reaction {
         channel: ChannelId,
@@ -1151,6 +1211,27 @@ pub struct ChatRecord {
     /// Modifié par son auteur après coup. Absent d'un journal antérieur.
     #[serde(default, skip_serializing_if = "is_false")]
     pub edited: bool,
+}
+
+/// Ce qu'un membre n'a pas encore lu dans un salon, tel que le serveur le
+/// compte à la connexion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonLuSalon {
+    pub channel: ChannelId,
+    /// Horodatage du dernier message **lu** (0 : jamais rien lu). Tout
+    /// message d'horodatage supérieur est non lu — c'est là que le client
+    /// pose son « nouveaux messages ».
+    #[serde(default)]
+    pub dernier_ts: u64,
+    /// Messages non lus, comptés sur ce que le serveur garde en mémoire
+    /// (mille par salon) : au-delà, le compte s'arrête là.
+    #[serde(default)]
+    pub non_lus: u32,
+    /// L'un d'eux nomme le destinataire (`@pseudo`). Approximation du
+    /// serveur, qui ne partage pas le découpeur du client : frontière de
+    /// mot, casse ASCII ignorée, blocs et portions de code exclus.
+    #[serde(default)]
+    pub mention: bool,
 }
 
 /// La clé d'un message : son auteur et son horodatage. Le serveur rend
@@ -3606,6 +3687,100 @@ mod tests {
         };
         assert_eq!(channel, 0);
         assert_eq!(limit, 50);
+    }
+
+    /// Les non-lus : un `Chat` d'avant se relit sans salon, un `Chat`
+    /// d'aujourd'hui le porte, et les trois messages nouveaux font
+    /// l'aller-retour — y compris un `NonLus` réduit à l'essentiel.
+    #[test]
+    fn les_non_lus_font_l_aller_retour_et_un_chat_d_avant_se_relit() {
+        // Un serveur antérieur ne dit pas le salon : 0, « fais confiance ».
+        let ancien = r#"{"type":"chat","user_id":1,"username":"kevin","text":"yo","ts":42}"#;
+        let ServerMsg::Chat { channel, ts, .. } = serde_json::from_str(ancien).unwrap() else {
+            panic!("pas un Chat")
+        };
+        assert_eq!((channel, ts), (0, 42));
+
+        let chat = ServerMsg::Chat {
+            user_id: 1,
+            username: "kevin".into(),
+            text: "yo".into(),
+            ts: 42,
+            reply_to: None,
+            channel: 7,
+        };
+        let json = serde_json::to_string(&chat).unwrap();
+        assert!(json.contains("\"channel\":7"));
+
+        let nouveau = ServerMsg::Nouveau {
+            channel: 7,
+            user_id: 1,
+            username: "kevin".into(),
+            text: "@léa tu viens ?".into(),
+            ts: 43,
+        };
+        let json = serde_json::to_string(&nouveau).unwrap();
+        assert!(json.contains("\"type\":\"nouveau\""));
+        let ServerMsg::Nouveau { channel, text, .. } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un Nouveau")
+        };
+        assert_eq!(channel, 7);
+        assert_eq!(text, "@léa tu viens ?");
+
+        let salons = vec![
+            NonLuSalon { channel: 7, dernier_ts: 40, non_lus: 3, mention: true },
+            NonLuSalon { channel: 8, dernier_ts: 0, non_lus: 0, mention: false },
+        ];
+        let json = serde_json::to_string(&ServerMsg::NonLus { salons: salons.clone() }).unwrap();
+        let ServerMsg::NonLus { salons: relus } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un NonLus")
+        };
+        assert_eq!(relus, salons);
+        // Les champs d'un salon ont tous une valeur par défaut : un serveur
+        // qui en ajoutera d'autres restera lisible, et l'inverse aussi.
+        let minimal: NonLuSalon = serde_json::from_str(r#"{"channel":9}"#).unwrap();
+        assert_eq!(minimal, NonLuSalon { channel: 9, ..Default::default() });
+
+        let json = serde_json::to_string(&ClientMsg::Lu { channel: 7, ts: 43 }).unwrap();
+        assert!(json.contains("\"type\":\"lu\""));
+        let ClientMsg::Lu { channel, ts } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un Lu")
+        };
+        assert_eq!((channel, ts), (7, 43));
+    }
+
+    /// Le poke : les deux demandes et les deux réponses font l'aller-retour
+    /// sous les noms `snake_case` attendus, et un refus garde sa cible.
+    #[test]
+    fn le_poke_fait_l_aller_retour_avec_sa_cible() {
+        let json = serde_json::to_string(&ClientMsg::Poke { user_id: 12 }).unwrap();
+        assert_eq!(json, r#"{"type":"poke","user_id":12}"#);
+        let ClientMsg::Poke { user_id } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un Poke")
+        };
+        assert_eq!(user_id, 12);
+
+        let json = serde_json::to_string(&ClientMsg::AccepterPokes { accepter: false }).unwrap();
+        assert_eq!(json, r#"{"type":"accepter_pokes","accepter":false}"#);
+        let ClientMsg::AccepterPokes { accepter } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un AccepterPokes")
+        };
+        assert!(!accepter);
+
+        let json = serde_json::to_string(&ServerMsg::Poke { user_id: 3, username: "nono".into() }).unwrap();
+        assert!(json.contains("\"type\":\"poke\""));
+        let ServerMsg::Poke { user_id, username } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un Poke")
+        };
+        assert_eq!((user_id, username.as_str()), (3, "nono"));
+
+        let refus = ServerMsg::PokeRefuse { user_id: 12, message: "Nono est en vocal".into() };
+        let json = serde_json::to_string(&refus).unwrap();
+        assert!(json.contains("\"type\":\"poke_refuse\""));
+        let ServerMsg::PokeRefuse { user_id, message } = serde_json::from_str(&json).unwrap() else {
+            panic!("pas un PokeRefuse")
+        };
+        assert_eq!((user_id, message.as_str()), (12, "Nono est en vocal"));
     }
 
     /// Et dans l'autre sens : un serveur antérieur ne connaît ni le motif

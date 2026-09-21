@@ -546,6 +546,18 @@ impl History {
         Ok(())
     }
 
+    /// Attend que tout ce qui a été accepté jusqu'ici soit sur le disque —
+    /// borné à `au_plus`, un fil d'écriture coincé ne doit pas retenir un
+    /// arrêt. Pour l'arrêt sur signal : le `Drop`, qui vide la file, ne
+    /// court jamais quand le processus quitte par `exit`.
+    pub fn attendre_ecritures(&self, au_plus: std::time::Duration) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Some(writes) = &self.writes {
+            let _ = writes.send(WriteCmd::Barriere(tx));
+        }
+        let _ = rx.recv_timeout(au_plus);
+    }
+
     /// Referme le journal d'un salon supprimé. Le fichier reste sur le
     /// disque — c'est l'archivage, assuré par le magasin de salons.
     pub fn close_channel(&self, channel: ChannelId) {
@@ -578,6 +590,39 @@ impl History {
             }
             None => Vec::new(),
         }
+    }
+
+    /// L'horodatage du dernier message du salon, `None` s'il est vide (ou
+    /// inconnu). C'est la borne d'un « lu jusqu'à » : on ne lit pas l'avenir.
+    pub fn dernier_ts(&self, channel: ChannelId) -> Option<u64> {
+        let logs = self.logs.lock().unwrap();
+        logs.get(&channel).and_then(|r| r.back()).map(|r| r.ts)
+    }
+
+    /// Les messages **postérieurs** à `lu`, du plus ancien au plus récent,
+    /// habillés — un message supprimé ne compte pas comme non lu.
+    ///
+    /// Sur le cache mémoire seulement : mille messages par salon. Au-delà,
+    /// le compte s'arrête là, et c'est bien assez pour une pastille. Le coût
+    /// est celui des non-lus, pas celui du salon : on remonte depuis la fin
+    /// et l'on s'arrête au premier message déjà lu.
+    pub fn depuis(&self, channel: ChannelId, lu: u64) -> Vec<ChatRecord> {
+        let logs = self.logs.lock().unwrap();
+        let etats = self.etats.lock().unwrap();
+        let Some(recent) = logs.get(&channel) else {
+            return Vec::new();
+        };
+        let vide = Etats::new();
+        let etats = etats.get(&channel).unwrap_or(&vide);
+        let mut msgs: Vec<ChatRecord> = recent
+            .iter()
+            .rev()
+            .take_while(|r| r.ts > lu)
+            .cloned()
+            .filter_map(|r| Self::habiller(etats, r))
+            .collect();
+        msgs.reverse();
+        msgs
     }
 
     /// Les `limit` messages qui précèdent `before_ts`, du plus ancien au plus
@@ -1001,6 +1046,10 @@ fn writer_loop(
                 files.remove(&channel);
                 index.lock().unwrap().remove(&channel);
             }
+            // Tout ce qui précédait dans la file est écrit : le dire.
+            WriteCmd::Barriere(fini) => {
+                let _ = fini.send(());
+            }
         }
     }
 }
@@ -1014,6 +1063,8 @@ enum WriteCmd {
     Event(ChannelId, String),
     Open(ChannelId, File),
     Close(ChannelId),
+    /// Répondre quand tout ce qui précède est écrit.
+    Barriere(Sender<()>),
 }
 
 /// Un journal ouvert en écriture, et sa taille courante.
@@ -1129,6 +1180,45 @@ mod tests {
         // n'ont pas la même clé.
         assert_eq!(history.unique_ts(1, 30), 31);
         assert_eq!(history.unique_ts(1, 500), 500);
+    }
+
+    /// La barrière rend la main une fois la file écrite : ce qu'on vient
+    /// d'accepter est sur le disque, sans passer par le `Drop`.
+    #[test]
+    fn la_barriere_attend_que_la_file_soit_sur_le_disque() {
+        let dir = scratch("barriere");
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        for n in 1..=50 {
+            history.append(1, &stamped(n));
+        }
+        history.attendre_ecritures(std::time::Duration::from_secs(5));
+        let journal =
+            std::fs::read_to_string(PathBuf::from(&dir).join("channel-1.jsonl")).unwrap();
+        assert_eq!(journal.lines().count(), 50, "tout est écrit avant que la barrière rende la main");
+        drop(history);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Les non-lus d'un salon : ce qui suit le repère, sans les messages
+    /// supprimés, et la borne du « lu jusqu'à » est le dernier message.
+    #[test]
+    fn les_messages_depuis_un_repere_se_comptent_sans_les_supprimes() {
+        let dir = scratch("depuis");
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        assert_eq!(history.dernier_ts(1), None, "salon vide");
+        assert!(history.depuis(1, 0).is_empty());
+        assert!(history.depuis(2, 0).is_empty(), "salon inconnu");
+        for ts in [10, 20, 30, 40] {
+            history.append(1, &stamped(ts));
+        }
+        assert!(history.delete(1, MsgRef { user_id: 1, ts: 30 }));
+        assert_eq!(history.dernier_ts(1), Some(40));
+        let ts = |v: Vec<ChatRecord>| v.iter().map(|r| r.ts).collect::<Vec<_>>();
+        assert_eq!(ts(history.depuis(1, 0)), vec![10, 20, 40]);
+        assert_eq!(ts(history.depuis(1, 10)), vec![20, 40], "le repère lui-même est lu");
+        assert_eq!(ts(history.depuis(1, 25)), vec![40]);
+        assert!(history.depuis(1, 40).is_empty());
+        assert!(history.depuis(1, 999).is_empty(), "un repère d'avance ne compte rien");
     }
 
     /// Une modification remplace le texte à la lecture — page en mémoire,

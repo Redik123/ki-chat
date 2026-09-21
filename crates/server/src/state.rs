@@ -226,6 +226,12 @@ pub struct ConnectedUser {
     /// seconde suffisaient à étrangler le relais de tout le monde. Un humain
     /// en fait deux ou trois d'affilée, jamais cinquante.
     pub voice_budget: TokenBucket,
+    /// Accepte-t-il qu'on le poke ? Annoncé par son client
+    /// (`ClientMsg::AccepterPokes`). `None` : rien reçu — un client
+    /// antérieur n'en dit rien, et jette aussi le `Poke` qu'on lui
+    /// enverrait ; l'émetteur est prévenu plutôt que de croire avoir
+    /// appelé. Un client récent l'annonce dès l'image qui suit `NonLus`.
+    pub pokes_ok: Option<bool>,
 }
 
 /// Seau à jetons : autorise une rafale courte, puis un débit soutenu.
@@ -449,6 +455,10 @@ pub struct AppState {
     pub medias: crate::medias::Fabrique,
     /// Les liens pour le téléphone : un jeton d'une heure par fichier.
     pub jetons_telephone: crate::clips::Jetons,
+    /// Le « dernier lu » de chacun dans chaque salon, pour les pastilles.
+    pub lus: crate::lus::Lus,
+    /// Les limites des pokes, tenues ici pour survivre aux reconnexions.
+    pub pokes: crate::pokes::Pokes,
 }
 
 impl AppState {
@@ -496,6 +506,8 @@ impl AppState {
             musique: crate::musique::Musique::new(data_dir),
             medias: crate::medias::Fabrique::new(fichier_max_mb),
             jetons_telephone: Default::default(),
+            lus: crate::lus::Lus::open(data_dir),
+            pokes: Default::default(),
         })
     }
 
@@ -769,6 +781,70 @@ impl AppState {
         }
     }
 
+    /// Le complément de `broadcast` : à tous ceux qui **peuvent voir** le
+    /// salon mais ne l'ont pas ouvert — de quoi leur poser une pastille,
+    /// jamais un message dans le mauvais fil. L'auteur, s'il lit ailleurs,
+    /// est écarté aussi : on ne se signale pas à soi-même.
+    ///
+    /// Même règle de visibilité que `broadcast`, évaluée par destinataire,
+    /// verrou relâché : `can_view` reprend la table des connectés.
+    pub fn broadcast_visible_sauf_lecteurs(
+        &self,
+        channel: ChannelId,
+        except: Option<UserId>,
+        msg: &ServerMsg,
+    ) {
+        let Some(line) = encode(msg) else { return };
+        let targets: Vec<UserId> = {
+            let users = self.users.lock().unwrap();
+            users
+                .iter()
+                .filter(|(id, u)| u.channel != Some(channel) && Some(**id) != except)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in targets {
+            if !self.can_view(id, channel) {
+                continue;
+            }
+            let users = self.users.lock().unwrap();
+            if let Some(u) = users.get(&id) {
+                let _ = u.tx.send_line(&line);
+            }
+        }
+    }
+
+    /// Un message vient d'être écrit dans un salon : aux lecteurs le `Chat`,
+    /// aux autres voyants le `Nouveau` — les deux moitiés du même événement.
+    pub fn diffuser_message(&self, channel: ChannelId, rec: &ki_protocol::ChatRecord) {
+        self.broadcast(
+            channel,
+            None,
+            &ServerMsg::Chat {
+                user_id: rec.user_id,
+                username: rec.username.clone(),
+                text: rec.text.clone(),
+                ts: rec.ts,
+                reply_to: rec.reply_to.clone(),
+                channel,
+            },
+        );
+        // L'auteur d'un message est par construction dans le salon (il y
+        // écrit) ; le serveur (identifiant 0) n'est nulle part, et 0 n'est
+        // le compte de personne : l'exception ne coûte rien dans les deux cas.
+        self.broadcast_visible_sauf_lecteurs(
+            channel,
+            Some(rec.user_id),
+            &ServerMsg::Nouveau {
+                channel,
+                user_id: rec.user_id,
+                username: rec.username.clone(),
+                text: rec.text.clone(),
+                ts: rec.ts,
+            },
+        );
+    }
+
     /// Envoie un message à tous les clients connectés, salon ou pas.
     ///
     /// Une sérialisation, N dépôts. C'est la diffusion la plus chère du
@@ -906,17 +982,7 @@ impl AppState {
             edited: false,
         };
         self.history.append(channel, &rec);
-        self.broadcast(
-            channel,
-            None,
-            &ServerMsg::Chat {
-                user_id,
-                username: username.to_string(),
-                text: text.to_string(),
-                ts,
-                reply_to: None,
-            },
-        );
+        self.diffuser_message(channel, &rec);
         ts
     }
 

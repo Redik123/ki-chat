@@ -121,6 +121,25 @@ async fn main() -> anyhow::Result<()> {
                     Some(r) => println!("<{username}> (↩ {} : {}) {text}", r.username, r.excerpt),
                     None => println!("<{username}> {text}"),
                 },
+                // Du nouveau dans un salon qu'on ne lit pas : on le dit, sans
+                // le texte — ce n'est pas notre fil.
+                ServerMsg::Nouveau { channel, username, .. } => {
+                    println!("* {username} a écrit dans le salon {channel}")
+                }
+                ServerMsg::NonLus { salons } => {
+                    for s in salons.iter().filter(|s| s.non_lus > 0) {
+                        println!(
+                            "* salon {} : {} non lu(s){}",
+                            s.channel,
+                            s.non_lus,
+                            if s.mention { ", on te nomme" } else { "" }
+                        );
+                    }
+                }
+                // Un poke, sans son ni clignotement ici : une ligne, et le
+                // caractère d'alerte du terminal.
+                ServerMsg::Poke { username, .. } => println!("* {username} te poke \x07"),
+                ServerMsg::PokeRefuse { message, .. } => println!("* poke refusé : {message}"),
                 ServerMsg::Reaction { emoji, by, on, message, .. } => println!(
                     "* {by} {} {emoji} sur le message {} de {}",
                     if on { "réagit" } else { "retire" },

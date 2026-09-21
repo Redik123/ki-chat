@@ -244,6 +244,88 @@ impl Onglet {
     }
 }
 
+/// Ce qu'on n'a pas lu dans un salon — de quoi peindre sa pastille.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NonLu {
+    /// Messages non lus. Le serveur compte sur mille au plus, le client
+    /// affiche « 99+ » au-delà de la centaine.
+    nb: u32,
+    /// L'un d'eux me nomme : la pastille passe à l'accent.
+    mention: bool,
+    /// Tout message d'horodatage **supérieur** est non lu — c'est là que se
+    /// pose le séparateur « nouveaux messages » à l'entrée du salon.
+    depuis: u64,
+}
+
+impl NonLu {
+    /// Un message de plus. `ts` ne fait reculer le repère que s'il n'y en
+    /// avait pas encore : le premier non-lu fixe l'endroit du séparateur.
+    fn ajouter(&mut self, ts: u64, mention: bool) {
+        if self.nb == 0 {
+            self.depuis = ts.saturating_sub(1);
+        }
+        self.nb = self.nb.saturating_add(1);
+        self.mention |= mention;
+    }
+}
+
+/// De quoi le client prévient — son et clignotement de la barre des tâches.
+/// Les pastilles, elles, restent dans tous les cas : ne pas être dérangé
+/// n'est pas ne pas savoir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Notif {
+    /// Tout message d'un autre salon, et ceux du salon lu quand la fenêtre
+    /// est à l'arrière-plan.
+    Tout,
+    /// Seulement quand on est nommé.
+    Mentions,
+    /// Jamais.
+    Rien,
+}
+
+impl Notif {
+    const TOUS: [Notif; 3] = [Notif::Tout, Notif::Mentions, Notif::Rien];
+
+    fn label(self) -> &'static str {
+        match self {
+            Notif::Tout => "tout",
+            Notif::Mentions => "mentions seulement",
+            Notif::Rien => "rien",
+        }
+    }
+
+    fn cle(self) -> &'static str {
+        match self {
+            Notif::Tout => "tout",
+            Notif::Mentions => "mentions",
+            Notif::Rien => "rien",
+        }
+    }
+
+    fn depuis(cle: &str) -> Self {
+        Self::TOUS.into_iter().find(|n| n.cle() == cle).unwrap_or(Notif::Tout)
+    }
+
+    /// Faut-il prévenir de ce message-là ?
+    fn previent(self, pour_moi: bool) -> bool {
+        match self {
+            Notif::Tout => true,
+            Notif::Mentions => pour_moi,
+            Notif::Rien => false,
+        }
+    }
+}
+
+/// Le délai entre « j'ai vu » et le `Lu` envoyé au serveur : un par
+/// conversation, pas un par message.
+const DELAI_LU: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Combien de temps « X te poke » reste affiché dans l'en-tête du salon.
+const DUREE_POKE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Après un refus du serveur, le bouton « Poke » de cette cible reste
+/// grisé le temps de lire le motif — et de ne pas insister.
+const DELAI_REFUS_POKE: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl AdminTab {
     const ALL: [AdminTab; 8] = [
         AdminTab::Tableau,
@@ -556,6 +638,41 @@ struct KiApp {
     window_focused: bool,
     /// Demande de clignotement de la barre des tâches à honorer.
     wants_attention: bool,
+    /// … et avec insistance : une mention clignote jusqu'au retour du
+    /// focus, là où un simple message ne fait qu'un signe.
+    attention_critique: bool,
+    /// Ce qui n'a pas été lu, par salon. Le salon courant y figure aussi
+    /// quand on ne le regarde pas — fenêtre à l'arrière-plan, ou fil
+    /// remonté dans le passé.
+    non_lus: HashMap<ChannelId, NonLu>,
+    /// Le serveur tient les repères de lecture : vrai dès le premier
+    /// `NonLus` reçu. Avant ça — ou face à un serveur antérieur — on
+    /// n'envoie jamais de `Lu`, qu'il prendrait pour un message invalide.
+    serveur_gere_lus: bool,
+    /// Le `Lu` en attente : le salon, et l'instant où l'envoyer.
+    lu_a_envoyer: Option<(ChannelId, std::time::Instant)>,
+    /// Le fil est-il collé en bas ? Un message qui arrive alors est vu ;
+    /// un message qui arrive pendant qu'on relit le passé ne l'est pas.
+    fil_en_bas: bool,
+    /// Où poser « nouveaux messages » dans le fil du salon courant : avant
+    /// le premier message d'horodatage supérieur. `None` : rien de neuf.
+    separateur_nouveaux: Option<u64>,
+    /// De quoi prévenir : tout, les mentions, rien.
+    notif: Notif,
+    /// Le titre envoyé à la fenêtre, pour ne le renvoyer que s'il change.
+    titre_fenetre: String,
+    /// « X te poke » : qui, et depuis quand — le bandeau s'efface tout
+    /// seul après [`DUREE_POKE`]. À part de `error`, qu'une erreur sans
+    /// rapport écraserait.
+    poke_recu: Option<(String, std::time::Instant)>,
+    /// Est-ce que j'accepte les pokes ? Réglage ⚙, persisté.
+    pokes_accepter: bool,
+    /// Ce que le serveur sait de ce réglage : on ne lui envoie que les
+    /// changements, comme `jeu_envoye`. `None` = rien envoyé encore.
+    pokes_envoye: Option<bool>,
+    /// Les cibles dont le poke vient d'être refusé, et quand : leur bouton
+    /// reste grisé [`DELAI_REFUS_POKE`], le temps de lire le motif.
+    pokes_refuses: HashMap<UserId, std::time::Instant>,
     /// Occupants du salon vocal à l'image précédente : c'est leur écart qui
     /// révèle une arrivée ou un départ. Les messages `UserJoined`/`UserLeft`
     /// portent sur le serveur entier, pas sur le salon vocal.
@@ -1049,6 +1166,18 @@ impl KiApp {
             sfx_volume: get("sfx_volume", "0.6").parse().unwrap_or(0.6),
             window_focused: true,
             wants_attention: false,
+            attention_critique: false,
+            non_lus: HashMap::new(),
+            serveur_gere_lus: false,
+            lu_a_envoyer: None,
+            fil_en_bas: true,
+            separateur_nouveaux: None,
+            notif: Notif::depuis(&get("notif", "tout")),
+            titre_fenetre: String::new(),
+            poke_recu: None,
+            pokes_accepter: get("pokes", "on") == "on",
+            pokes_envoye: None,
+            pokes_refuses: HashMap::new(),
             prev_voice_peers: std::collections::HashSet::new(),
             prev_voice_channel: None,
             history_more: false,
@@ -3287,6 +3416,7 @@ impl KiApp {
 
     /// Ouvre un salon textuel : on change ce qu'on lit, rien d'autre.
     fn join(&mut self, channel: ChannelId) {
+        let meme_salon = self.current == Some(channel);
         self.current = Some(channel);
         self.messages.clear();
         // On repart du principe qu'il y a un passé à remonter : le serveur
@@ -3300,8 +3430,100 @@ impl KiApp {
         // quitte : la garder ferait sauter la vue du nouveau.
         self.history_anchor = None;
         self.focus_input = true;
+        // Entrer, c'est lire : la pastille tombe, et « nouveaux messages »
+        // se posera là où l'on en était. Le serveur l'apprend dans une
+        // seconde — s'il tient les lus.
+        let repere = self
+            .non_lus
+            .remove(&channel)
+            .filter(|n| n.nb > 0)
+            .map(|n| n.depuis);
+        // Rouvrir le salon où l'on est déjà — « revenir au présent » après
+        // un saut de recherche — n'est pas en changer : le repère posé à
+        // l'entrée reste, on veut le retrouver en bas du fil.
+        self.separateur_nouveaux = if meme_salon { repere.or(self.separateur_nouveaux) } else { repere };
+        // Les hauteurs mesurées comprenaient, ou non, ce séparateur : à
+        // remesurer.
+        self.msg_heights.clear();
+        self.programmer_lu(channel);
         self.send(ClientMsg::Join { channel });
         self.send(ClientMsg::History { limit: 100 });
+    }
+
+    /// Prévoit de tenir le salon pour lu dans [`DELAI_LU`] : la pastille
+    /// tombe, et le serveur l'apprend s'il tient les lus. Un seul `Lu` en
+    /// attente : le dernier programmé l'emporte.
+    fn programmer_lu(&mut self, channel: ChannelId) {
+        self.lu_a_envoyer = Some((channel, std::time::Instant::now() + DELAI_LU));
+        // Une image à l'échéance : rien ne garantit qu'une autre viendra
+        // d'elle-même — fenêtre immobile, personne en vocal.
+        self.app_ctx.request_repaint_after(DELAI_LU);
+    }
+
+    /// Tient le salon pour lu quand l'heure du `Lu` en attente est venue —
+    /// et seulement si on le regarde vraiment : ce salon-là, fenêtre au
+    /// premier plan, fil collé en bas, la même règle que celle qui décide
+    /// qu'un message reçu est « vu ». Le salon ouvert d'office à la
+    /// connexion, fenêtre réduite, reste donc non lu : c'est le retour du
+    /// focus qui le lira ; et un fil remonté dans le passé attend qu'on
+    /// redescende, sinon les messages arrivés hors écran passeraient pour
+    /// lus.
+    ///
+    /// La pastille tombe dans tous les cas ; le `Lu` ne part que vers un
+    /// serveur qui a dit tenir les lus — un autre répondrait « message
+    /// invalide », en bannière. Sans ça, face à un serveur antérieur, la
+    /// pastille du salon courant et le « (N) » du titre ne s'effaçaient
+    /// jamais.
+    fn tick_lus(&mut self, ctx: &egui::Context) {
+        let Some((channel, quand)) = self.lu_a_envoyer else { return };
+        let now = std::time::Instant::now();
+        if now < quand {
+            ctx.request_repaint_after(quand - now);
+            return;
+        }
+        self.lu_a_envoyer = None;
+        if !lecture_effective(self.window_focused, self.fil_en_bas, self.current, channel) {
+            return;
+        }
+        self.non_lus.remove(&channel);
+        if !self.serveur_gere_lus {
+            return;
+        }
+        // Jusqu'au dernier message affiché ; fil vide, jusqu'au dernier que
+        // le serveur connaît — il borne de toute façon.
+        let ts = self.messages.iter().map(|m| m.ts).max().unwrap_or(u64::MAX);
+        self.send(ClientMsg::Lu { channel, ts });
+    }
+
+    /// Un message non lu de plus dans `channel`.
+    fn compter_non_lu(&mut self, channel: ChannelId, ts: u64, mention: bool) {
+        self.non_lus.entry(channel).or_default().ajouter(ts, mention);
+    }
+
+    /// Son et clignotement pour un message reçu, selon le réglage : une
+    /// mention a son propre son et insiste jusqu'au retour du focus.
+    fn notifier(&mut self, pour_moi: bool) {
+        if !self.notif.previent(pour_moi) {
+            return;
+        }
+        self.play_sfx(if pour_moi { sfx::MENTION } else { sfx::MESSAGE });
+        self.wants_attention = true;
+        self.attention_critique |= pour_moi;
+    }
+
+    /// Ce message me nomme-t-il ? Même règle que le surlignage du fil.
+    fn me_nomme(&self, user_id: UserId, text: &str) -> bool {
+        Some(user_id) != self.my_id
+            && !est_bot(user_id)
+            && self.my_pseudo().is_some_and(|moi| {
+                let membres: Vec<&str> = self.members.iter().map(|m| m.username.as_str()).collect();
+                markup::me_mentionne(text, &membres, moi)
+            })
+    }
+
+    /// Le total des non-lus, pour le titre de la fenêtre.
+    fn total_non_lus(&self) -> u32 {
+        self.non_lus.values().fold(0u32, |n, v| n.saturating_add(v.nb))
     }
 
     /// Ai-je cette permission ?
@@ -3628,6 +3850,17 @@ impl KiApp {
         self.history_more = false;
         self.history_pending = false;
         self.history_anchor = None;
+        // Les non-lus sont ceux d'un serveur : le prochain redira les siens,
+        // et redira s'il tient les lus.
+        self.non_lus.clear();
+        self.serveur_gere_lus = false;
+        self.lu_a_envoyer = None;
+        self.separateur_nouveaux = None;
+        // Les pokes sont ceux d'un serveur, et le suivant ne connaît pas
+        // notre réglage : il le réapprendra.
+        self.poke_recu = None;
+        self.pokes_envoye = None;
+        self.pokes_refuses.clear();
 
         // --- Vignettes : indexées par user_id, donc par serveur ---
         self.avatars.clear();
@@ -3744,6 +3977,10 @@ impl KiApp {
         if voice.device_trouble.0 || voice.device_trouble.1 {
             return Some(Duration::from_millis(500));
         }
+        // « X te poke » s'efface tout seul : il faut une image pour ça.
+        if self.poke_recu.is_some() {
+            return Some(Duration::from_secs(1));
+        }
         None
     }
 
@@ -3849,6 +4086,52 @@ impl KiApp {
             self.send(ClientMsg::GameStatus { jeu: voulu.clone() });
             self.jeu_envoye = voulu;
         }
+        // Le réglage des pokes, sur le même modèle — mais seulement vers un
+        // serveur qui a prouvé qu'il est récent (il tient les lus) : un
+        // serveur antérieur répondrait « message invalide », en bannière,
+        // à chaque connexion.
+        if self.serveur_gere_lus && self.pokes_envoye != Some(self.pokes_accepter) {
+            self.send(ClientMsg::AccepterPokes { accepter: self.pokes_accepter });
+            self.pokes_envoye = Some(self.pokes_accepter);
+        }
+    }
+
+    /// Le bandeau « X te poke » encore à afficher, s'il n'a pas expiré.
+    fn poke_en_cours(&mut self) -> Option<String> {
+        let (nom, quand) = self.poke_recu.as_ref()?;
+        if quand.elapsed() >= DUREE_POKE {
+            self.poke_recu = None;
+            return None;
+        }
+        Some(nom.clone())
+    }
+
+    /// Pourquoi le poke vers `m` ne partirait pas, tel que le client le
+    /// sait déjà — pour griser le bouton avec le motif au survol. Le
+    /// serveur reste l'autorité : ce qu'il refuse en plus arrive en
+    /// `PokeRefuse`.
+    fn poke_impossible(&self, m: &Member) -> Option<&'static str> {
+        if !m.online {
+            return Some("hors ligne");
+        }
+        if m.voice.is_some() {
+            return Some("en vocal — il t'entend déjà");
+        }
+        if m
+            .jeu
+            .as_ref()
+            .is_some_and(|j| matches!(j.etat, ki_protocol::JeuEtat::PreGame | ki_protocol::JeuEtat::EnJeu))
+        {
+            return Some("en partie — on ne le dérange pas");
+        }
+        if self
+            .pokes_refuses
+            .get(&m.user_id)
+            .is_some_and(|quand| quand.elapsed() < DELAI_REFUS_POKE)
+        {
+            return Some("refusé à l'instant — attends un peu");
+        }
+        None
     }
 
     /// Reprendre la session d'avant sans rien cliquer : au lancement, si
@@ -4138,9 +4421,11 @@ impl KiApp {
                 // Connecté : on y reviendra tout seul au prochain lancement,
                 // si le mot de passe est mémorisé — sans lui, impossible.
                 self.session_auto = self.selected.filter(|_| self.remember_password);
-                // Une nouvelle connexion ne connaît pas notre statut de jeu :
-                // il repartira au prochain tour.
+                // Une nouvelle connexion ne connaît pas notre statut de jeu,
+                // ni si l'on accepte les pokes : ils repartiront au prochain
+                // tour.
                 self.jeu_envoye = None;
+                self.pokes_envoye = None;
                 self.my_id = Some(user_id);
                 // `is_admin` reste la réponse d'un serveur antérieur aux
                 // rôles : sans permissions annoncées, on lui accorde tout
@@ -4208,24 +4493,53 @@ impl KiApp {
                 text,
                 ts,
                 reply_to,
+                channel,
             } => {
+                // Le serveur ne l'envoie qu'aux lecteurs du salon, mais un
+                // changement de salon peut le croiser en route : écrit dans
+                // A juste avant que le serveur traite notre `Join` vers B, il
+                // arrive en `Chat` et non en `Nouveau`. Il n'entre pas dans
+                // ce fil, mais il compte comme un `Nouveau` — le jeter, c'était
+                // perdre sa pastille et son son, et le serveur nous tient
+                // pour lecteur de A jusqu'avant lui. `0` = serveur antérieur,
+                // qui ne le dit pas — on lui fait confiance.
+                if channel != 0 && self.current != Some(channel) {
+                    if Some(user_id) != self.my_id {
+                        let pour_moi = self.me_nomme(user_id, &text);
+                        self.compter_non_lu(channel, ts, pour_moi);
+                        if !est_bot(user_id) {
+                            self.notifier(pour_moi);
+                        }
+                    }
+                    return;
+                }
                 // Être **nommé** n'est pas un message de plus : ça appelle une
                 // réponse. On prévient donc même fenêtre au premier plan, là où
                 // un message ordinaire ne le fait pas.
-                let pour_moi = Some(user_id) != self.my_id
-                    && self.my_pseudo().is_some_and(|moi| {
-                        let membres: Vec<&str> =
-                            self.members.iter().map(|m| m.username.as_str()).collect();
-                        markup::me_mentionne(&text, &membres, moi)
-                    });
-                // Jamais de son pour ses propres messages ; et pour ceux des
-                // autres, seulement quand la fenêtre n'a pas le focus — en
-                // pleine conversation, un bip par message serait insupportable.
+                let pour_moi = self.me_nomme(user_id, &text);
+                let de_moi = Some(user_id) == self.my_id;
+                // Vu, ou pas : fenêtre au premier plan et fil collé en bas.
+                // Sinon le salon qu'on « lit » sans le regarder prend sa
+                // pastille lui aussi, jusqu'au retour du focus.
+                let vu = self.window_focused && self.fil_en_bas;
+                if !de_moi && !vu {
+                    if let Some(c) = self.current {
+                        self.compter_non_lu(c, ts, pour_moi);
+                    }
+                }
+                // Jamais de son pour ses propres messages, ni pour ceux du
+                // serveur (fil de jeu, bot) ; et pour ceux des autres,
+                // seulement quand la fenêtre n'a pas le focus — en pleine
+                // conversation, un bip par message serait insupportable.
                 // La barre des tâches clignote en prime : le « quoi de neuf »
                 // se voit même en jeu.
-                if Some(user_id) != self.my_id && (pour_moi || !self.window_focused) {
-                    self.play_sfx(sfx::MESSAGE);
-                    self.wants_attention = true;
+                if !de_moi && !est_bot(user_id) && (pour_moi || !self.window_focused) {
+                    self.notifier(pour_moi);
+                }
+                if vu {
+                    if let Some(c) = self.current {
+                        self.programmer_lu(c);
+                    }
                 }
                 self.messages.push(ChatRecord {
                     user_id,
@@ -4238,6 +4552,47 @@ impl KiApp {
                 });
                 if self.messages.len() > 500 {
                     self.messages.remove(0);
+                }
+            }
+            ServerMsg::Nouveau { channel, user_id, username: _, text, ts } => {
+                // Un message dans un salon qu'on ne lit pas. Le sien n'est
+                // pas du nouveau ; et s'il concerne le salon qu'on vient
+                // d'ouvrir, c'est qu'il a croisé notre `Join` : l'historique
+                // demandé dans la foulée le contiendra.
+                if Some(user_id) == self.my_id || self.current == Some(channel) {
+                    return;
+                }
+                let pour_moi = self.me_nomme(user_id, &text);
+                self.compter_non_lu(channel, ts, pour_moi);
+                // Le serveur (fil de jeu, bot) pose des pastilles, jamais
+                // de son : il poste souvent, et personne ne lui répond.
+                if !est_bot(user_id) {
+                    self.notifier(pour_moi);
+                }
+            }
+            ServerMsg::NonLus { salons } => {
+                // Le serveur tient les lus : à partir d'ici, on lui dit ce
+                // qu'on lit. Ce qu'il compte remplace ce qu'on croyait — il
+                // sait, lui, ce qui s'est écrit pendant qu'on n'était pas là.
+                self.serveur_gere_lus = true;
+                for salon in salons {
+                    if salon.non_lus == 0 {
+                        self.non_lus.remove(&salon.channel);
+                        continue;
+                    }
+                    self.non_lus.insert(
+                        salon.channel,
+                        NonLu { nb: salon.non_lus, mention: salon.mention, depuis: salon.dernier_ts },
+                    );
+                }
+                // Le salon déjà ouvert (celui de la connexion, ou de la
+                // reprise) : « nouveaux messages » se pose, et il se lira
+                // dès qu'on le regarde — pas avant.
+                if let Some(c) = self.current {
+                    if let Some(n) = self.non_lus.get(&c) {
+                        self.separateur_nouveaux = Some(n.depuis);
+                    }
+                    self.programmer_lu(c);
                 }
             }
             ServerMsg::History { messages } => {
@@ -4501,6 +4856,25 @@ impl KiApp {
                 self.esports = esports;
                 self.activite = activite;
                 self.stats_recu = true;
+            }
+            ServerMsg::Poke { user_id: _, username } => {
+                // Quelqu'un me veut : son, clignotement insistant (jusqu'au
+                // retour du focus), bandeau dans le salon, et une ligne
+                // par-dessus le jeu pour qui est alt-tabbé. Ça ne dépend
+                // pas du réglage « Notifications » : un poke est un appel
+                // personnel, et c'est « Accepter les pokes » qui le coupe.
+                let username = ki_protocol::safe_display(&username, 64);
+                self.play_sfx(sfx::POKE);
+                self.wants_attention = true;
+                self.attention_critique = true;
+                self.overlay.annoncer(format!("{username} te poke"));
+                self.poke_recu = Some((username, std::time::Instant::now()));
+            }
+            ServerMsg::PokeRefuse { user_id, message } => {
+                // Le motif vient du serveur, en toutes lettres ; la cible
+                // reste grisée un moment, le temps de le lire.
+                self.error = Some(ki_protocol::safe_display(&message, 300));
+                self.pokes_refuses.insert(user_id, std::time::Instant::now());
             }
             ServerMsg::Error { message } => {
                 let message = ki_protocol::safe_display(&message, 300);
@@ -6001,7 +6375,8 @@ impl KiApp {
                                 for ch in channels.iter().filter(|c| c.kind == ChannelKind::Text) {
                                     let selected = self.current == Some(ch.id);
                                     let kind = ChannelKind::Text;
-                                    let row = channel_row(ui, &ch.name, selected, kind);
+                                    let pastille = self.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
+                                    let row = channel_row(ui, &ch.name, selected, kind, pastille);
                                     if row.clicked() && !selected {
                                         self.join(ch.id);
                                     }
@@ -6012,7 +6387,7 @@ impl KiApp {
                                 ui::section_label(ui, "Salons vocaux");
                                 for ch in channels.iter().filter(|c| c.kind == ChannelKind::Voice) {
                                     let here = self.voice_channel == Some(ch.id);
-                                    let row = channel_row(ui, &ch.name, here, ChannelKind::Voice);
+                                    let row = channel_row(ui, &ch.name, here, ChannelKind::Voice, None);
                                     if row.clicked() {
                                         if here {
                                             self.leave_voice();
@@ -6170,6 +6545,25 @@ impl KiApp {
                 if ui::button(ui, Icon::Refresh, "Remettre à 100 %").clicked() {
                     self.set_volume(m.user_id, 1.0);
                 }
+            }
+            // Le poke : un son chez lui, pour l'appeler sans lui écrire.
+            // Seulement face à un serveur qui a prouvé qu'il est récent —
+            // un serveur antérieur répondrait « message invalide ». Grisé
+            // avec le motif quand on sait d'avance que ça ne partira pas.
+            if self.serveur_gere_lus {
+                ui.add_space(4.0);
+                let motif = self.poke_impossible(m);
+                ui.add_enabled_ui(motif.is_none(), |ui| {
+                    let bouton = ui::button(ui, Icon::Send, "Poke");
+                    let bouton = match motif {
+                        Some(motif) => bouton.on_disabled_hover_text(motif),
+                        None => bouton.on_hover_text("un son et un clignotement chez lui, rien d'autre"),
+                    };
+                    if bouton.clicked() {
+                        self.send(ClientMsg::Poke { user_id: m.user_id });
+                        ui.close();
+                    }
+                });
             }
 
             // Attribution de rôles : cocher/décocher, borné par son propre
@@ -6495,6 +6889,12 @@ impl KiApp {
                             ui.add_space(8.0);
                             if ui::banner(ui, Tone::Warn, &err, true) {
                                 self.error = None;
+                            }
+                        }
+                        if let Some(nom) = self.poke_en_cours() {
+                            ui.add_space(8.0);
+                            if ui::banner(ui, Tone::Accent, &format!("{nom} te poke"), true) {
+                                self.poke_recu = None;
                             }
                         }
                     });
@@ -7017,12 +7417,21 @@ impl KiApp {
 
                 let mut last_day = i32::MIN;
                 let mut previous: Option<(UserId, u64)> = None;
+                // « Nouveaux messages » : avant le premier message postérieur
+                // au repère, une fois. Posé à l'entrée du salon, il reste
+                // jusqu'au prochain changement de salon — on veut le retrouver
+                // en remontant.
+                let mut separateur = self.separateur_nouveaux;
                 let messages = std::mem::take(&mut self.messages);
                 for msg in &messages {
                     let day = day_key(msg.ts);
                     let jour_change = day != last_day;
                     if jour_change {
                         last_day = day;
+                    }
+                    let nouveaux = separateur.is_some_and(|depuis| msg.ts > depuis);
+                    if nouveaux {
+                        separateur = None;
                     }
                     let grouped = !jour_change
                         && previous.is_some_and(|(user, ts)| {
@@ -7076,6 +7485,9 @@ impl KiApp {
                     let bloc = ui.scope(|ui| {
                         if jour_change {
                             day_separator(ui, &day_label(msg.ts));
+                        }
+                        if nouveaux {
+                            separateur_nouveaux(ui);
                         }
                         message_block(
                             ui,
@@ -7158,6 +7570,22 @@ impl KiApp {
         // chargements jusqu'à épuiser le salon.
         self.chat_height = out.content_size.y;
         let mut offset_y = out.state.offset.y;
+        // Collé en bas, à quelques points près : c'est ce qui décide si un
+        // message qui arrive est vu, ou s'il pose une pastille.
+        let fond = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        let etait_en_bas = self.fil_en_bas;
+        self.fil_en_bas = offset_y >= fond - 8.0;
+        // Redescendu en bas, fenêtre au premier plan : ce qui est arrivé
+        // pendant qu'on relisait le passé est sous les yeux maintenant. Sans
+        // ça, la pastille posée sur le salon courant restait jusqu'au message
+        // suivant.
+        if self.fil_en_bas && !etait_en_bas && self.window_focused {
+            if let Some(c) = self.current {
+                if self.non_lus.contains_key(&c) {
+                    self.programmer_lu(c);
+                }
+            }
+        }
         if let Some(before) = self.history_anchor.take() {
             let grown = out.content_size.y - before;
             if grown > 0.0 {
@@ -7243,6 +7671,17 @@ impl KiApp {
         self.history_pending = true;
         self.history_anchor = None;
         self.retour_present = Some(channel);
+        // C'est bien entrer dans le salon, comme `join` : la pastille tombe
+        // (le serveur nous tient pour lecteur dès le `Join`, elle ne
+        // bougerait plus), et « nouveaux messages » se pose à **son** repère
+        // — pas à celui du salon qu'on quitte, qui se dessinerait ici au
+        // mauvais endroit. Il reste posé pour le retour au présent.
+        self.separateur_nouveaux = self
+            .non_lus
+            .remove(&channel)
+            .filter(|n| n.nb > 0)
+            .map(|n| n.depuis);
+        self.programmer_lu(channel);
         self.send(ClientMsg::Join { channel });
         // `before_ts` est exclusif : +1 pour que le message cherché soit dans
         // la page, et en dernier.
@@ -8188,6 +8627,8 @@ impl KiApp {
                                 // et l'étiquette dit si le son est personnalisé.
                                 for (name, label) in [
                                     (sfx::MESSAGE, "Message reçu (fenêtre à l'arrière-plan)"),
+                                    (sfx::MENTION, "On me nomme (@moi)"),
+                                    (sfx::POKE, "Quelqu'un me poke"),
                                     (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
                                     (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
                                     (sfx::SELF_JOIN, "Je rejoins un vocal"),
@@ -8247,10 +8688,53 @@ impl KiApp {
                             ui::hint(
                                 ui,
                                 "les sons par défaut sont intégrés ; dépose des .wav (48 kHz \
-                                 conseillé) nommés message, arrivee, depart, rejoint-vocal, \
-                                 quitte-vocal, micro-coupe, micro-actif pour les remplacer",
+                                 conseillé) nommés message, mention, poke, arrivee, depart, \
+                                 rejoint-vocal, quitte-vocal, micro-coupe, micro-actif pour \
+                                 les remplacer",
                             );
 
+                            // --- Notifications ---
+                            // Indépendant des sons : « rien » coupe aussi le
+                            // clignotement, et « tout » ne rallume pas un son
+                            // coupé plus haut. Les pastilles restent toujours.
+                            ui.add_space(12.0);
+                            ui::group_title(ui, Icon::Info, "Notifications");
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Notifications :").color(TEXT_DIM).size(12.5));
+                                for n in Notif::TOUS {
+                                    ui.selectable_value(&mut self.notif, n, n.label());
+                                }
+                            });
+                            ui::hint(
+                                ui,
+                                match self.notif {
+                                    Notif::Tout => {
+                                        "son et clignotement pour tout message reçu dans un \
+                                         autre salon, ou fenêtre à l'arrière-plan"
+                                    }
+                                    Notif::Mentions => {
+                                        "son et clignotement seulement quand on te nomme \
+                                         (@toi) ; les autres messages ne font que poser une \
+                                         pastille"
+                                    }
+                                    Notif::Rien => {
+                                        "ni son ni clignotement ; les pastilles de non-lus \
+                                         restent"
+                                    }
+                                },
+                            );
+                            // Le poke a son propre interrupteur : c'est un
+                            // appel personnel, pas un message, et il passe
+                            // outre « rien » ci-dessus. Le serveur refuse
+                            // pour nous quand on le décoche.
+                            ui.add_space(6.0);
+                            ui.checkbox(&mut self.pokes_accepter, "Accepter les pokes");
+                            ui::hint(
+                                ui,
+                                "un membre peut te « poker » depuis la liste : un son et un \
+                                 clignotement chez toi, jamais en vocal ni en partie ; \
+                                 décoché, le serveur lui répond que tu n'en veux pas",
+                            );
                         }
                         if onglet == Onglet::Reseau {
                             // --- Réseau & qualité ---
@@ -11124,6 +11608,11 @@ mod sfx {
     pub const PEER_JOIN: &str = "arrivee";
     pub const PEER_LEAVE: &str = "depart";
     pub const MESSAGE: &str = "message";
+    /// On me nomme : distinct du message ordinaire, pour tendre l'oreille
+    /// sans regarder.
+    pub const MENTION: &str = "mention";
+    /// Quelqu'un me poke : le seul son qui vise quelqu'un en particulier.
+    pub const POKE: &str = "poke";
     pub const MUTE: &str = "micro-coupe";
     pub const UNMUTE: &str = "micro-actif";
 }
@@ -11550,11 +12039,17 @@ fn address_tag(address: &str) -> Option<&'static str> {
 }
 
 /// Ligne de salon : pastille pleine largeur, filet d'accent si sélectionnée.
+///
+/// `non_lu` : le nom passe en clair (la « graisse » de l'application, voir
+/// `strong()`), et une pastille à droite dit combien — à l'accent quand on
+/// y est nommé, discrète sinon. Le style est celui de `pastille_bot`, pour
+/// que les deux se ressemblent.
 fn channel_row(
     ui: &mut egui::Ui,
     name: &str,
     selected: bool,
     kind: ChannelKind,
+    non_lu: Option<NonLu>,
 ) -> egui::Response {
     let height = 34.0;
     let (rect, response) =
@@ -11580,7 +12075,7 @@ fn channel_row(
         }
         let fg = if selected {
             ACCENT
-        } else if response.hovered() {
+        } else if response.hovered() || non_lu.is_some() {
             TEXT
         } else {
             TEXT_DIM
@@ -11596,13 +12091,38 @@ fn channel_row(
             ChannelKind::Voice => Icon::Volume,
         };
         icons::draw(painter, icon, symbol, fg);
-        painter.text(
-            egui::pos2(rect.left() + 34.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            egui::FontId::proportional(14.0),
-            fg,
-        );
+        // La pastille d'abord : le nom se tronque à sa gauche, jamais
+        // par-dessus.
+        let mut droite = rect.right() - 10.0;
+        if let Some(n) = non_lu {
+            let texte = if n.nb > 99 { "99+".to_string() } else { n.nb.to_string() };
+            let galley = ui.fonts(|f| {
+                f.layout_no_wrap(texte, egui::FontId::proportional(10.5), theme::BG_DEEP)
+            });
+            let taille = Vec2::new(galley.size().x + 10.0, 16.0);
+            let pastille = egui::Rect::from_min_size(
+                egui::pos2(droite - taille.x, rect.center().y - taille.y / 2.0),
+                taille,
+            );
+            let fond = if n.mention { ACCENT } else { TEXT_DIM };
+            painter.rect_filled(pastille, egui::CornerRadius::same(8), fond);
+            painter.galley(
+                egui::pos2(pastille.center().x - galley.size().x / 2.0, pastille.center().y - galley.size().y / 2.0),
+                galley,
+                theme::BG_DEEP,
+            );
+            droite = pastille.left() - 6.0;
+        }
+        // « En gras » au sens de l'application : `strong()` n'a pas de
+        // graisse, c'est la couleur pleine — `TEXT` au lieu de `TEXT_DIM`.
+        let galley =
+            ui.fonts(|f| f.layout_no_wrap(name.to_owned(), egui::FontId::proportional(14.0), fg));
+        let gauche = rect.left() + 34.0;
+        painter.with_clip_rect(egui::Rect::from_min_max(
+            egui::pos2(gauche, rect.top()),
+            egui::pos2(droite.max(gauche), rect.bottom()),
+        ))
+        .galley(egui::pos2(gauche, rect.center().y - galley.size().y / 2.0), galley, fg);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -11985,6 +12505,46 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
         TEXT_FAINT,
     );
     ui.add_space(6.0);
+}
+
+/// « — nouveaux messages — » : le même dessin qu'un changement de jour, à
+/// l'accent — c'est le seul filet du fil qu'on cherche des yeux.
+/// Regarde-t-on vraiment `channel` ? C'est ce qui tient un salon pour lu :
+/// le salon ouvert, fenêtre au premier plan, fil collé en bas — la règle
+/// même qui décide qu'un message reçu est « vu ». Fenêtre à l'arrière-plan
+/// ou fil remonté dans le passé, rien n'est lu, quoi qu'on ait programmé.
+fn lecture_effective(
+    window_focused: bool,
+    fil_en_bas: bool,
+    current: Option<ChannelId>,
+    channel: ChannelId,
+) -> bool {
+    window_focused && fil_en_bas && current == Some(channel)
+}
+
+fn separateur_nouveaux(ui: &mut egui::Ui) {
+    ui.add_space(10.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let galley = ui.fonts(|f| {
+        f.layout_no_wrap("nouveaux messages".to_owned(), egui::FontId::proportional(11.0), ACCENT)
+    });
+    let painter = ui.painter();
+    let half = galley.size().x / 2.0;
+    let y = rect.center().y;
+    let stroke = egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 140));
+    painter.line_segment(
+        [egui::pos2(rect.left() + 16.0, y), egui::pos2(rect.center().x - half - 10.0, y)],
+        stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(rect.center().x + half + 10.0, y), egui::pos2(rect.right() - 16.0, y)],
+        stroke,
+    );
+    painter.galley(egui::pos2(rect.center().x - half, y - galley.size().y / 2.0), galley, ACCENT);
+    ui.add_space(4.0);
 }
 
 /// Un message : en-tête (avatar + pseudo + heure) si c'est le premier du
@@ -12781,7 +13341,15 @@ impl eframe::App for KiApp {
         }
 
         // Focus : conditionne le son des messages et la notification.
-        self.window_focused = ctx.input(|i| i.focused);
+        let focused = ctx.input(|i| i.focused);
+        // Le focus revient : ce qu'on avait sous les yeux sans le regarder
+        // — le salon ouvert, fenêtre à l'arrière-plan — est lu maintenant.
+        if focused && !self.window_focused {
+            if let Some(c) = self.current {
+                self.programmer_lu(c);
+            }
+        }
+        self.window_focused = focused;
 
         // Diagnostic partagé : si l'option est cochée, le journal technique
         // part vers le serveur à son rythme (une minute, et que du neuf).
@@ -12844,6 +13412,8 @@ impl eframe::App for KiApp {
         self.veille.actualiser(self.voice_channel.is_some());
 
         self.poll_events();
+        // Après les messages reçus : c'est eux qui programment les `Lu`.
+        self.tick_lus(ctx);
         self.check_connect_timeout();
         // La reprise se déclenche depuis le rendu, comme la sonde des
         // serveurs : c'est sans risque ici, l'écran de connexion se repeint
@@ -12863,9 +13433,26 @@ impl eframe::App for KiApp {
         // la barre des tâches clignote (l'équivalent sobre d'une notification).
         if self.wants_attention {
             self.wants_attention = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                egui::UserAttentionType::Informational,
-            ));
+            // Une mention insiste jusqu'au retour du focus ; un simple
+            // message ne fait qu'un signe.
+            let genre = if self.attention_critique {
+                egui::UserAttentionType::Critical
+            } else {
+                egui::UserAttentionType::Informational
+            };
+            self.attention_critique = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(genre));
+        }
+
+        // Le titre compte les non-lus : « (3) ki-chat » se lit dans la barre
+        // des tâches sans ouvrir la fenêtre. Renvoyé seulement s'il change.
+        let titre = match self.total_non_lus() {
+            0 => "ki-chat".to_string(),
+            n => format!("({n}) ki-chat"),
+        };
+        if titre != self.titre_fenetre {
+            self.titre_fenetre = titre.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(titre));
         }
 
         if self.welcomed {
@@ -12944,6 +13531,8 @@ impl eframe::App for KiApp {
             "sfx_muted",
             self.sfx_muted.iter().cloned().collect::<Vec<_>>().join(","),
         );
+        storage.set_string("notif", self.notif.cle().into());
+        storage.set_string("pokes", if self.pokes_accepter { "on" } else { "off" }.into());
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());
@@ -13005,6 +13594,50 @@ impl eframe::App for KiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une pastille compte, retient si l'on y est nommé, et fixe le repère
+    /// du séparateur au **premier** non-lu — pas au dernier.
+    #[test]
+    fn une_pastille_compte_et_retient_le_premier_non_lu() {
+        let mut n = NonLu::default();
+        n.ajouter(100, false);
+        assert_eq!(n, NonLu { nb: 1, mention: false, depuis: 99 });
+        n.ajouter(200, true);
+        n.ajouter(300, false);
+        assert_eq!(n, NonLu { nb: 3, mention: true, depuis: 99 });
+        // Le repère lui-même est lu, le message qui le suit ne l'est pas.
+        assert!(n.depuis < 100 && n.depuis >= 99);
+        // Le premier message d'un salon (horodatage 0) ne fait pas déborder.
+        let mut z = NonLu::default();
+        z.ajouter(0, false);
+        assert_eq!(z.depuis, 0);
+    }
+
+    /// Un salon n'est lu que sous les yeux : le bon salon, fenêtre au premier
+    /// plan, fil en bas. Un fil remonté dans le passé au retour du focus ne
+    /// marque rien lu — c'est ce qui aurait tenu pour lus des messages
+    /// jamais affichés.
+    #[test]
+    fn un_salon_n_est_lu_que_sous_les_yeux() {
+        assert!(lecture_effective(true, true, Some(3), 3));
+        assert!(!lecture_effective(false, true, Some(3), 3), "fenêtre à l'arrière-plan");
+        assert!(!lecture_effective(true, false, Some(3), 3), "fil remonté dans le passé");
+        assert!(!lecture_effective(true, true, Some(4), 3), "on a changé de salon entre-temps");
+        assert!(!lecture_effective(true, true, None, 3));
+    }
+
+    /// Le réglage se mémorise par une clé stable, et une clé inconnue
+    /// retombe sur « tout » — le comportement d'avant le réglage.
+    #[test]
+    fn le_reglage_de_notification_se_relit_et_decide() {
+        for n in Notif::TOUS {
+            assert_eq!(Notif::depuis(n.cle()), n);
+        }
+        assert_eq!(Notif::depuis("n'importe quoi"), Notif::Tout);
+        assert!(Notif::Tout.previent(false) && Notif::Tout.previent(true));
+        assert!(!Notif::Mentions.previent(false) && Notif::Mentions.previent(true));
+        assert!(!Notif::Rien.previent(false) && !Notif::Rien.previent(true));
+    }
 
     #[test]
     fn une_duree_se_dit_en_jours_heures_ou_minutes() {

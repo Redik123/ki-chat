@@ -35,6 +35,8 @@ mod diag;
 mod export;
 mod files;
 mod history;
+mod lus;
+mod pokes;
 mod medias;
 mod meta;
 mod musique;
@@ -103,13 +105,27 @@ async fn main() -> anyhow::Result<()> {
     let (cert, key) = quic::load_or_create_cert(&data_dir)?;
     let quic_state = state.clone();
     let (quic_cert, quic_key) = (cert.clone(), key.clone_key());
+    let arret_state = state.clone();
     tokio::spawn(async move {
         match quic::run(quic_state, udp_port, quic_cert, quic_key).await {
             Ok(()) => tracing::error!("transport QUIC terminé sans erreur — arrêt"),
             Err(e) => tracing::error!("transport QUIC arrêté : {e:#}"),
         }
-        std::process::exit(1);
+        quitter(&arret_state, 1).await;
     });
+
+    // `docker stop` (SIGTERM) et Ctrl-C : le processus meurt sur-le-champ
+    // si personne n'écoute, et les clients ne se déconnectent pas — c'est le
+    // serveur qui disparaît. Ce qui attendait la passe de fond (jusqu'à cinq
+    // secondes de repères de lecture) serait perdu : on l'écrit d'abord.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            attendre_signal_d_arret().await;
+            tracing::info!("arrêt demandé");
+            quitter(&state, 0).await;
+        });
+    }
 
     // HTTPS : uniquement le partage de fichiers. Chiffré avec le **même**
     // certificat que le QUIC, donc reconnu par la même empreinte : le client
@@ -133,6 +149,23 @@ async fn main() -> anyhow::Result<()> {
     medias::reprendre(&state);
     clips::reprendre(&state);
     tokio::spawn(medias::boucle(state.clone()));
+    // Les repères de lecture : écrits à retardement, une fois toutes les
+    // cinq secondes au plus, quand il y a du neuf. Une écriture disque, donc
+    // sur le pool bloquant — jamais sur la boucle qui relaie la voix.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if state.lus.a_ecrire(std::time::Instant::now()) {
+                    let s = state.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || s.lus.ecrire_si_sale()).await {
+                        tracing::error!("écriture des repères de lecture : {e}");
+                    }
+                }
+            }
+        });
+    }
     {
         let data_dir = data_dir.clone();
         tokio::spawn(async move {
@@ -284,6 +317,46 @@ async fn main() -> anyhow::Result<()> {
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
+}
+
+/// SIGTERM (Docker, systemd) ou Ctrl-C, le premier arrivé.
+async fn attendre_signal_d_arret() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("SIGTERM non écouté ({e}) : seul Ctrl-C arrête proprement");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Quitte le processus après avoir mis sur le disque ce qui n'y était pas
+/// encore : les repères de lecture, et la file de l'historique. Des
+/// écritures, donc sur le pool bloquant — et bornées, un disque qui ne
+/// répond plus ne doit pas empêcher l'arrêt.
+async fn quitter(state: &Arc<AppState>, code: i32) -> ! {
+    let s = state.clone();
+    let ecrit = tokio::task::spawn_blocking(move || {
+        s.history.attendre_ecritures(std::time::Duration::from_secs(3));
+        s.lus.ecrire_si_sale();
+    });
+    if tokio::time::timeout(std::time::Duration::from_secs(5), ecrit).await.is_err() {
+        tracing::error!("arrêt : les écritures en attente n'ont pas fini à temps");
+    }
+    std::process::exit(code);
 }
 
 /// La purge d'un stock, toutes les heures, tant que le serveur tourne.

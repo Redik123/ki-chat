@@ -710,6 +710,13 @@ impl Accounts {
         Ok(touched)
     }
 
+    /// Le pseudo d'un compte, par identifiant — pour nommer quelqu'un qui
+    /// n'est pas connecté (« Nono est hors ligne »).
+    pub fn username_of(&self, user_id: UserId) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.users.iter().find(|(_, u)| u.id == user_id).map(|(nom, _)| nom.clone())
+    }
+
     /// Photo de profil d'un compte, par identifiant.
     pub fn avatar_of(&self, user_id: UserId) -> Option<String> {
         let inner = self.inner.lock().unwrap();

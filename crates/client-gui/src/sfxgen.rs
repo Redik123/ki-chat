@@ -15,6 +15,9 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     let mut sounds = HashMap::new();
     // Message reçu : une goutte d'eau, brève et douce.
     sounds.insert("message".into(), seq(&[(880.0, 70), (1174.7, 110)], 0.32));
+    // On me nomme : deux notes montantes, plus franches que la goutte du
+    // message (une quinte, et plus longues) — ça appelle une réponse.
+    sounds.insert("mention".into(), seq(&[(783.99, 90), (1174.7, 170)], 0.38));
     // Quelqu'un arrive dans mon vocal : deux notes montantes (do -> sol).
     sounds.insert("arrivee".into(), seq(&[(523.3, 90), (784.0, 130)], 0.4));
     // Quelqu'un part : les mêmes, descendantes.
@@ -33,6 +36,9 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     // Clip enregistré : trois notes vives qui montent — « c'est dans la
     // boîte », reconnaissable en pleine partie sans regarder.
     sounds.insert("clip".into(), seq(&[(1046.5, 55), (1318.5, 55), (1568.0, 150)], 0.4));
+    // Quelqu'un me poke : deux notes brèves, répétées — un « toc toc » qui
+    // ne ressemble à aucun message, et qu'on entend fenêtre réduite.
+    sounds.insert("poke".into(), seq(&[(659.3, 60), (880.0, 60), (659.3, 60), (880.0, 120)], 0.42));
     sounds
 }
 
@@ -71,6 +77,7 @@ mod tests {
         let sounds = defaults();
         for name in [
             "message",
+            "mention",
             "arrivee",
             "depart",
             "rejoint-vocal",
@@ -78,6 +85,7 @@ mod tests {
             "micro-coupe",
             "micro-actif",
             "clip",
+            "poke",
         ] {
             let pcm = sounds.get(name).unwrap_or_else(|| panic!("son manquant : {name}"));
             assert!(!pcm.is_empty());
