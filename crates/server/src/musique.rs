@@ -903,12 +903,18 @@ impl Emetteur {
 }
 
 fn envoyer(state: &AppState, salon: ChannelId, paquet: bytes::Bytes) {
-    let routes = state.voice_routes.read().unwrap();
-    if let Some(pairs) = routes.peers.get(&salon) {
-        for (_, conn) in pairs {
-            let _ = conn.send_datagram(paquet.clone());
+    {
+        let routes = state.voice_routes.read().unwrap();
+        if let Some(pairs) = routes.peers.get(&salon) {
+            for (_, conn) in pairs {
+                let _ = conn.send_datagram(paquet.clone());
+            }
         }
     }
+    // Les invités web en vocal dans ce salon entendent le bot aussi : le
+    // serveur déchiffre pour eux ce qu'il vient de chiffrer pour les
+    // membres — rien s'il n'y a personne à l'écoute.
+    state.portes.relayer(salon, &state.voice_key, &paquet);
 }
 
 // ---------------------------------------------------------------------------
@@ -924,6 +930,9 @@ fn publier(state: &AppState, roster: bool) {
         state.broadcast_all(&ServerMsg::Members {
             members: state.roster(),
         });
+        // Les invités web à l'écoute de son salon le comptent parmi les
+        // occupants : c'est ainsi que leur page le nomme quand il joue.
+        crate::porte::annoncer_occupants(state);
     }
 }
 

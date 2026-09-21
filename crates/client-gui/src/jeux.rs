@@ -17,6 +17,7 @@ use eframe::egui;
 pub const JEUX: &[(&str, &str)] = &[
     // Les tireurs et les arènes du soir.
     ("valorant-win64-shipping.exe", "VALORANT"),
+    ("valorant.exe", "VALORANT"),
     ("cs2.exe", "CS2"),
     ("fortniteclient-win64-shipping.exe", "Fortnite"),
     ("rocketleague.exe", "Rocket League"),

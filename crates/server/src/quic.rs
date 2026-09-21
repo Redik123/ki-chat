@@ -184,9 +184,13 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     // Bornes sur les champs d'authentification : ils arrivent avant tout
     // contrôle d'identité, donc de n'importe qui.
     let username = username.trim().to_string();
+    // « (web) » à la fin est la marque des invités des portes web : un
+    // compte ne peut pas la porter, sinon un membre se ferait passer pour
+    // un inconnu — ou l'inverse.
     if username.is_empty()
         || username.chars().count() > ki_protocol::MAX_USERNAME
         || username.chars().any(|c| c.is_control())
+        || username.to_lowercase().ends_with("(web)")
     {
         send_direct(
             &mut send,
@@ -354,6 +358,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         // inaccessible, il ne doit pas même se deviner.
         channels: state.visible_channels(user_id),
         server: state.meta.get(),
+        // La preuve que le client attend avant de parler de portes.
+        portes: true,
     });
     tracing::info!("connexion : {username} (id {user_id})");
     // La liste du serveur vient de changer, pour tout le monde.
@@ -599,18 +605,25 @@ async fn voice_task(
         last_counter = pkt.counter;
 
         // Relais : une lecture partagée de la table précalculée.
-        {
+        let channel = {
             let routes = state.voice_routes.read().unwrap();
-            if let Some(channel) = routes.channel_of.get(&user_id) {
-                if let Some(peers) = routes.peers.get(channel) {
-                    for (peer_id, peer_conn) in peers {
-                        if *peer_id != user_id {
-                            // Clonage de Bytes : compteur de références, pas de copie.
-                            let _ = peer_conn.send_datagram(dat.clone());
-                        }
+            let channel = routes.channel_of.get(&user_id).copied();
+            if let Some(peers) = channel.and_then(|c| routes.peers.get(&c)) {
+                for (peer_id, peer_conn) in peers {
+                    if *peer_id != user_id {
+                        // Clonage de Bytes : compteur de références, pas de copie.
+                        let _ = peer_conn.send_datagram(dat.clone());
                     }
                 }
             }
+            channel
+        };
+        // Les invités web en vocal dans ce salon, s'il y en a : eux n'ont
+        // pas la clé, le serveur déchiffre pour eux. Sans invité à
+        // l'écoute, c'est une lecture partagée d'une table vide — le chemin
+        // chaud ne paie rien de plus.
+        if let Some(channel) = channel {
+            state.portes.relayer(channel, &state.voice_key, &dat);
         }
 
         if last_report.elapsed() >= Duration::from_secs(5) {
@@ -2647,16 +2660,10 @@ fn handle_msg(
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
                 return;
             }
-            match state.channels.create(&name, kind, allowed_roles) {
+            // Journal ouvert avant l'annonce, comme pour le salon d'une
+            // porte web : c'est `creer_salon` qui tient la séquence.
+            match state.creer_salon(&name, kind, allowed_roles, None) {
                 Ok(channel) => {
-                    // Le journal du salon s'ouvre **avant** l'annonce :
-                    // `History::append` échoue en silence sur un salon
-                    // inconnu, et le premier message partirait dans le vide.
-                    if channel.kind == ki_protocol::ChannelKind::Text {
-                        if let Err(e) = state.history.open_channel(&state.data_dir, channel.id) {
-                            tracing::error!("journal du salon {} : {e:#}", channel.id);
-                        }
-                    }
                     state
                         .audit
                         .record("channel.create", username, &channel.name, "");
@@ -2684,6 +2691,20 @@ fn handle_msg(
         }
         ClientMsg::AdminDeleteChannel { channel } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            // Le salon d'une porte web : c'est la porte qu'on ferme — ses
+            // invités congédiés, son journal effacé et non archivé, le lien
+            // mort. Un client antérieur montre ce salon comme un autre, sans
+            // garde ; c'est ici que le serveur sait ce qu'il est.
+            if state.portes.slug_du_salon(channel).is_some() {
+                let (state, tx) = (state.clone(), tx.clone());
+                let acteur = username.to_string();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(Err(message)) = crate::porte::fermer_salon(&state, &acteur, channel) {
+                        let _ = tx.send(ServerMsg::Error { message });
+                    }
+                });
                 return;
             }
             match state.channels.delete(&state.data_dir, channel) {
@@ -2775,6 +2796,84 @@ fn handle_msg(
         }
         ClientMsg::Ping => {
             let _ = tx.send(ServerMsg::Pong);
+        }
+        // Les portes web : ouvrir, c'est déjà inviter — la permission des
+        // invitations. Le reste (répondre, expulser, fermer) revient à
+        // l'hôte de la porte ou à qui peut expulser, ce que `porte` vérifie.
+        ClientMsg::PorteOuvrir {
+            slug,
+            nom_salon,
+            ttl_secs,
+        } => {
+            if !require(state, user_id, tx, ki_protocol::perm::CREATE_INVITE) {
+                return;
+            }
+            match crate::porte::ouvrir(state, user_id, username, &slug, &nom_salon, ttl_secs) {
+                Ok(ouverte) => {
+                    let _ = tx.send(ouverte);
+                }
+                Err(message) => {
+                    let _ = tx.send(ServerMsg::Error { message });
+                }
+            }
+        }
+        ClientMsg::PorteRepondre {
+            demande_id,
+            accepter,
+            motif,
+        } => {
+            let motif = ki_protocol::safe_display(&motif, ki_protocol::MAX_PORTE_MOTIF);
+            if let Err(message) =
+                crate::porte::repondre(state, user_id, username, demande_id, accepter, &motif)
+            {
+                let _ = tx.send(ServerMsg::Error { message });
+            }
+        }
+        ClientMsg::PorteExpulser { invite_id } => {
+            if let Err(message) = crate::porte::expulser(state, user_id, username, invite_id) {
+                let _ = tx.send(ServerMsg::Error { message });
+            }
+        }
+        ClientMsg::PorteFermer { slug } => {
+            // La fermeture efface un journal du disque : pool bloquant.
+            let (state, tx) = (state.clone(), tx.clone());
+            let acteur = username.to_string();
+            tokio::task::spawn_blocking(move || {
+                let motif = format!("fermée par {acteur}");
+                if let Err(message) = crate::porte::fermer(&state, Some((user_id, &acteur)), &slug, &motif) {
+                    let _ = tx.send(ServerMsg::Error { message });
+                }
+            });
+        }
+        ClientMsg::PorteOffrir { invite_id } => {
+            if !require(state, user_id, tx, ki_protocol::perm::CREATE_INVITE) {
+                return;
+            }
+            // L'invitation s'écrit dans users.json : pool bloquant, comme
+            // `AdminCreateInvite`.
+            let (state, tx) = (state.clone(), tx.clone());
+            let acteur = username.to_string();
+            tokio::task::spawn_blocking(move || match crate::porte::offrir(&state, &acteur, invite_id) {
+                // Le code revient à qui l'offre, et à lui seul : le salon,
+                // lu par des inconnus, n'en voit que le lien.
+                Ok(code) => {
+                    let _ = tx.send(ServerMsg::Info {
+                        message: format!("invitation offerte : le lien est dans le salon, le code {code} sur sa page"),
+                    });
+                }
+                Err(message) => {
+                    let _ = tx.send(ServerMsg::Error { message });
+                }
+            });
+        }
+        // Un invité web en vocal : l'hôte de la porte, ou qui peut expulser,
+        // l'amène dans le salon vocal où il se trouve lui-même, ou l'en sort
+        // (`channel: None`). La voix passe alors par sa WebSocket, le
+        // serveur chiffrant et déchiffrant à sa place.
+        ClientMsg::PorteVocal { invite_id, channel } => {
+            if let Err(message) = crate::porte::vocal(state, user_id, username, invite_id, channel) {
+                let _ = tx.send(ServerMsg::Error { message });
+            }
         }
     }
 }

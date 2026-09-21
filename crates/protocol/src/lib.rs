@@ -415,6 +415,65 @@ pub enum ClientMsg {
     /// Les vignettes ne voyagent pas dans la liste des membres : celle-ci ne
     /// porte qu'une empreinte, et le client ne demande que ce qui lui manque.
     RequestAvatars { user_ids: Vec<UserId> },
+    /// Ouvrir une **porte web** : un salon textuel temporaire, joignable
+    /// depuis un navigateur par `https://<serveur>/s/<slug>` sans compte ni
+    /// installation — pour faire entrer des inconnus le temps d'une soirée.
+    /// Permission « Créer des invitations » : ouvrir une porte, c'est déjà
+    /// inviter. Réponse : [`ServerMsg::PorteOuverte`], ou `Error`.
+    ///
+    /// Un client neuf ne l'envoie qu'après la preuve que le serveur en face
+    /// sert les portes (`portes: true` dans son [`ServerMsg::Welcome`]) :
+    /// un serveur antérieur répondrait « message invalide ».
+    PorteOuvrir {
+        /// Le nom de la porte dans le lien : 3 à 24 caractères parmi
+        /// `[a-z0-9-]` (voir [`slug_valide`]), choisi par l'hôte pour être
+        /// criable en vocal (« salon1 »). Unique parmi les portes ouvertes.
+        slug: String,
+        /// Le nom du salon temporaire, nettoyé comme un nom de salon.
+        /// Vide : le serveur reprend le slug.
+        #[serde(default)]
+        nom_salon: String,
+        /// Durée de vie demandée en secondes, bornée par le serveur à
+        /// [`PORTE_TTL_MAX_SECS`]. 0 = la borne. La porte ferme de toute
+        /// façon [`PORTE_VIDE_SECS`] après le départ du dernier invité.
+        #[serde(default)]
+        ttl_secs: u64,
+    },
+    /// Accepter ou refuser quelqu'un qui frappe à une porte
+    /// ([`ServerMsg::PorteDemande`]). Répondent l'hôte de la porte et tout
+    /// connecté qui détient « Expulser » — la première réponse l'emporte,
+    /// les autres reçoivent un `Info`.
+    PorteRepondre {
+        demande_id: u64,
+        accepter: bool,
+        /// Dit à l'invité s'il est refusé (« pas ce soir »). Libre, borné.
+        #[serde(default)]
+        motif: String,
+    },
+    /// Mettre un invité web à la porte. Hôte ou « Expulser ». Il peut
+    /// frapper à nouveau ; c'est au serveur de tenir son adresse à l'écart
+    /// s'il insiste.
+    PorteExpulser { invite_id: UserId },
+    /// Fermer une porte : les invités sont congédiés
+    /// ([`ServerMsg::PorteFermee`]) et le salon temporaire **effacé**, pas
+    /// archivé — ce que des inconnus ont écrit n'a pas à rester. Hôte ou
+    /// « Expulser ».
+    PorteFermer { slug: String },
+    /// Faire entrer un invité web dans un salon vocal, ou l'en sortir
+    /// (`channel: None`). L'invité n'a pas de compte, donc pas de
+    /// « Rejoindre le vocal » : c'est l'hôte qui décide pour lui, comme
+    /// `AdminVoiceMove`. Hôte ou « Déplacer en vocal ».
+    PorteVocal {
+        invite_id: UserId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<ChannelId>,
+    },
+    /// « Lui offrir ki-chat » : le serveur crée une invitation à usage
+    /// unique, valable sept jours, au nom de l'auteur, la pousse à l'invité
+    /// par sa porte ([`ServerMsg::PorteInvitation`]) et la poste en message
+    /// système dans le salon, lien de téléchargement compris. Permission
+    /// « Créer des invitations » — la même que pour un code ordinaire.
+    PorteOffrir { invite_id: UserId },
     /// Keepalive.
     Ping,
 }
@@ -452,6 +511,13 @@ pub enum ServerMsg {
         /// Identité du serveur (nom, logo), telle que ses admins l'ont réglée.
         #[serde(default)]
         server: ServerInfo,
+        /// Ce serveur sert les **portes web** (depuis 0.1.44). C'est la seule
+        /// preuve sur laquelle le client s'appuie avant d'envoyer un
+        /// `Porte*` : un serveur antérieur ne pose pas le champ — il reste
+        /// faux — et répondrait « message invalide ». Un `NonLus` reçu ne
+        /// prouve rien ici : la 0.1.43 l'envoie déjà.
+        #[serde(default)]
+        portes: bool,
     },
     /// L'identité du serveur vient de changer : poussée à tout le monde.
     ServerInfo { server: ServerInfo },
@@ -707,8 +773,374 @@ pub enum ServerMsg {
     /// Rapport qualité réseau : pertes mesurées par le serveur sur le flux
     /// montant du destinataire (en %). Sert au débit adaptatif.
     NetQuality { loss_pct: f32 },
+    /// Réponse à `PorteOuvrir`, à l'hôte seul : la porte est ouverte, voici
+    /// le lien à partager. Le salon temporaire arrive à part, par
+    /// `ChannelsUpdated`, avec son `expire_le`.
+    PorteOuverte {
+        slug: String,
+        /// Le lien complet (`https://ts.baws.fun/s/salon1`), construit par
+        /// le serveur depuis son adresse publique — jamais depuis l'en-tête
+        /// `Host` d'une requête, qu'un visiteur choisit.
+        url: String,
+        /// Le salon temporaire créé pour cette porte.
+        salon: ChannelId,
+        /// Fermeture au plus tard (ms Unix).
+        expire_le: u64,
+    },
+    /// Quelqu'un frappe à une porte : de quoi afficher « Kevin veut
+    /// rejoindre par le web » avec Accepter / Refuser. Envoyé à l'hôte et
+    /// à tout connecté détenant « Expulser ». Se répond par
+    /// [`ClientMsg::PorteRepondre`]. Un client antérieur jette ce message
+    /// sans bruit — il ne peut pas répondre, c'est la seule conséquence.
+    PorteDemande {
+        slug: String,
+        demande_id: u64,
+        /// Le nom qu'il s'est donné, déjà nettoyé comme un pseudo par le
+        /// serveur — le client passe quand même par `safe_display`.
+        nom: String,
+        /// Son adresse, tronquée (« 82.65.x.x ») : assez pour reconnaître
+        /// un insistant, pas assez pour le pister.
+        #[serde(default)]
+        ip_masquee: String,
+    },
+    /// L'état complet d'une porte, poussé à l'hôte et aux détenteurs
+    /// d'« Expulser » à chaque changement — une entrée, un départ, une
+    /// demande qui arrive ou qui expire. Un état et non des événements :
+    /// trente demandes en rafale font une seule liste, pas trente
+    /// bannières.
+    PorteEtat {
+        slug: String,
+        salon: ChannelId,
+        #[serde(default)]
+        invites: Vec<InviteWeb>,
+        #[serde(default)]
+        demandes: Vec<DemandeWeb>,
+        /// Fermeture au plus tard (ms Unix).
+        #[serde(default)]
+        expire_le: u64,
+    },
+    /// À l'invité web, par sa porte : « Voilà ki-chat ». Une invitation à
+    /// usage unique, valable sept jours, créée par le serveur au nom de
+    /// l'hôte quand il clique « L'inviter dans ki-chat » — et postée en
+    /// message système dans le salon, pour que tout le monde la voie.
+    /// Un client ki-chat ne le reçoit jamais.
+    PorteInvitation {
+        code: String,
+        /// L'adresse à saisir (« ts.baws.fun:9988 »).
+        serveur: String,
+        /// Le lien de téléchargement ([`PORTE_TELECHARGEMENT`]).
+        telechargement: String,
+    },
+    /// La porte est fermée : par l'hôte, par expiration, ou faute
+    /// d'invité. À l'hôte, aux détenteurs d'« Expulser » et aux invités
+    /// (pour qui c'est la fin de la page). Le salon disparaît par
+    /// `ChannelsUpdated`, comme d'habitude.
+    PorteFermee {
+        slug: String,
+        /// En toutes lettres et en français (« fermée par redik »,
+        /// « expirée », « plus personne depuis dix minutes »).
+        #[serde(default)]
+        motif: String,
+    },
     /// Réponse au Ping.
     Pong,
+}
+
+// ---------------------------------------------------------------------
+// Les portes web
+// ---------------------------------------------------------------------
+//
+// Une porte, c'est un lien `https://<serveur>/s/<slug>` qui mène à un salon
+// textuel temporaire. Qui frappe donne un nom, un membre l'accepte, et il
+// écrit dans le salon depuis son navigateur, sans compte. À la fermeture, le
+// salon est effacé. Les invités ne sont pas des comptes : ils vivent dans
+// une plage d'identifiants réservée, portent « (web) » dans leur nom, et ne
+// reçoivent jamais rien d'un autre salon.
+
+/// Premier identifiant de la plage réservée aux invités web : `1 << 62`.
+///
+/// Les comptes partent de 1 et s'incrémentent ; 0 est le serveur lui-même,
+/// [`MUSIQUE_ID`] le bot. Rien ne s'approche de 4,6 × 10¹⁸ comptes : aucune
+/// collision possible. Un invité reçoit un identifiant unique dans cette
+/// plage pour la durée de sa session ; le même nom qui revient plus tard
+/// en reçoit un autre.
+pub const INVITE_ID_BASE: UserId = 1 << 62;
+/// Dernier identifiant de la plage des invités, exclus : `1 << 63`. Le bot
+/// musique, tout en haut, reste en dehors.
+pub const INVITE_ID_FIN: UserId = 1 << 63;
+/// Le pas entre deux identifiants d'invités : `1 << 10`. La page web lit
+/// ces identifiants en JavaScript — dans le JSON des messages, et dans les
+/// trames voix — où un nombre est un double à 53 bits de mantisse : entre
+/// 2⁶² et 2⁶³, seuls les multiples de 2¹⁰ s'écrivent exactement, les
+/// autres s'arrondissent au plus proche et deux invités se confondraient.
+/// Le serveur n'attribue donc que `INVITE_ID_BASE + k × INVITE_ID_PAS` ;
+/// un client ki-chat, en `u64`, n'en a que faire.
+pub const INVITE_ID_PAS: UserId = 1 << 10;
+
+/// Un identifiant de la plage des invités web ?
+pub fn est_invite(id: UserId) -> bool {
+    (INVITE_ID_BASE..INVITE_ID_FIN).contains(&id)
+}
+
+/// Un compte, au sens d'une personne membre : ni le serveur (0), ni le bot
+/// musique, ni un invité web. C'est le filtre des mentions et des sons —
+/// ce qui vient d'ailleurs que d'un membre ne nomme personne.
+pub fn est_compte(id: UserId) -> bool {
+    id != 0 && id != MUSIQUE_ID && !est_invite(id)
+}
+
+/// Ce que le serveur colle au nom d'un invité (« Kevin (web) ») pour que
+/// les membres voient d'un coup d'œil que ce n'est pas un compte. La
+/// contrepartie : aucun pseudo de compte ne peut finir ainsi.
+pub const INVITE_SUFFIXE: &str = " (web)";
+
+/// Longueur d'un slug de porte, en caractères.
+pub const PORTE_SLUG_MIN: usize = 3;
+pub const PORTE_SLUG_MAX: usize = 24;
+
+/// Un slug de porte acceptable : de [`PORTE_SLUG_MIN`] à [`PORTE_SLUG_MAX`]
+/// caractères parmi `a-z`, `0-9` et `-`. Minuscules seulement — un lien se
+/// dicte à voix haute, et « Salon1 » et « salon1 » ne doivent pas être deux
+/// portes. La même règle chez le client (pour ne pas envoyer ce qui sera
+/// refusé) et chez le serveur (qui ne croit pas le client).
+pub fn slug_valide(slug: &str) -> bool {
+    (PORTE_SLUG_MIN..=PORTE_SLUG_MAX).contains(&slug.len())
+        && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Durée de vie maximale d'une porte : deux heures. Une porte n'est pas un
+/// salon permanent ouvert sur Internet.
+pub const PORTE_TTL_MAX_SECS: u64 = 2 * 60 * 60;
+/// Une porte sans invité ferme au bout de dix minutes.
+pub const PORTE_VIDE_SECS: u64 = 10 * 60;
+/// Portes ouvertes en même temps, au plus.
+pub const PORTES_MAX: usize = 5;
+/// Invités par porte, au plus.
+pub const PORTE_INVITES_MAX: usize = 20;
+/// Demandes en attente par porte, au plus — et une seule par adresse.
+pub const PORTE_DEMANDES_MAX: usize = 5;
+/// Longueur maximale du motif d'un refus, en caractères.
+pub const MAX_PORTE_MOTIF: usize = 200;
+/// Où télécharger ki-chat, tel que la page web et l'invitation le donnent.
+pub const PORTE_TELECHARGEMENT: &str = "https://github.com/Redik123/ki-chat/releases/latest";
+
+/// Un invité web présent dans un salon temporaire, vu de l'hôte.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteWeb {
+    /// Son identifiant de session, dans la plage [`INVITE_ID_BASE`].
+    pub invite_id: UserId,
+    /// Son nom **avec** le suffixe « (web) », tel qu'il signe ses messages.
+    pub nom: String,
+    /// Entré à (ms Unix).
+    #[serde(default)]
+    pub depuis: u64,
+    /// Le salon vocal où l'hôte l'a mis, s'il y est ([`ClientMsg::PorteVocal`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocal: Option<ChannelId>,
+}
+
+/// Quelqu'un qui attend derrière une porte.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DemandeWeb {
+    pub demande_id: u64,
+    pub nom: String,
+    /// A frappé à (ms Unix).
+    #[serde(default)]
+    pub depuis: u64,
+}
+
+#[cfg(test)]
+mod portes_tests {
+    use super::*;
+
+    /// La plage des invités ne touche ni les comptes, ni le serveur, ni le
+    /// bot ; et `est_compte` est le filtre exact des mentions.
+    #[test]
+    fn la_plage_des_invites_est_a_part() {
+        assert!(!est_invite(0));
+        assert!(!est_invite(1));
+        assert!(!est_invite(INVITE_ID_BASE - 1));
+        assert!(est_invite(INVITE_ID_BASE));
+        assert!(est_invite(INVITE_ID_BASE + 12_345));
+        assert!(est_invite(INVITE_ID_FIN - 1));
+        assert!(!est_invite(INVITE_ID_FIN));
+        assert!(!est_invite(MUSIQUE_ID));
+        assert!(!est_invite(u64::MAX));
+
+        assert!(est_compte(1));
+        assert!(est_compte(INVITE_ID_BASE - 1));
+        assert!(!est_compte(0));
+        assert!(!est_compte(MUSIQUE_ID));
+        assert!(!est_compte(INVITE_ID_BASE));
+    }
+
+    /// Un identifiant d'invité survit au passage par un double JavaScript :
+    /// c'est ce que garantit le pas, et ce qu'un pas de 1 ne garantit pas.
+    #[test]
+    fn un_identifiant_d_invite_tient_dans_un_double() {
+        for k in [0u64, 1, 2, 3, 19, 20_000] {
+            let id = INVITE_ID_BASE + k * INVITE_ID_PAS;
+            assert!(est_invite(id));
+            assert_eq!(id as f64 as u64, id, "k = {k}");
+        }
+        assert_ne!((INVITE_ID_BASE + 1) as f64 as u64, INVITE_ID_BASE + 1, "sans le pas, l'arrondi mange l'unité");
+    }
+
+    /// Un slug se dicte à voix haute : minuscules, chiffres, tirets, ni
+    /// trop court ni trop long.
+    #[test]
+    fn un_slug_de_porte_se_dicte_a_voix_haute() {
+        assert!(slug_valide("salon1"));
+        assert!(slug_valide("abc"));
+        assert!(slug_valide("soiree-du-samedi-2026"));
+        assert!(slug_valide(&"a".repeat(PORTE_SLUG_MAX)));
+        assert!(!slug_valide("ab"));
+        assert!(!slug_valide(&"a".repeat(PORTE_SLUG_MAX + 1)));
+        assert!(!slug_valide("Salon1"));
+        assert!(!slug_valide("salon 1"));
+        assert!(!slug_valide("salon_1"));
+        assert!(!slug_valide("salon/1"));
+        assert!(!slug_valide("été"));
+        assert!(!slug_valide(""));
+    }
+
+    /// Chaque message de porte fait l'aller-retour tel quel, sous le nom
+    /// `snake_case` que la page web lit aussi.
+    #[test]
+    fn les_messages_de_porte_font_l_aller_retour() {
+        let allers: Vec<ClientMsg> = vec![
+            ClientMsg::PorteOuvrir { slug: "salon1".into(), nom_salon: "Soirée".into(), ttl_secs: 3600 },
+            ClientMsg::PorteRepondre { demande_id: 7, accepter: false, motif: "pas ce soir".into() },
+            ClientMsg::PorteExpulser { invite_id: INVITE_ID_BASE + 1 },
+            ClientMsg::PorteFermer { slug: "salon1".into() },
+            ClientMsg::PorteVocal { invite_id: INVITE_ID_BASE + 1, channel: Some(4) },
+            ClientMsg::PorteVocal { invite_id: INVITE_ID_BASE + 1, channel: None },
+            ClientMsg::PorteOffrir { invite_id: INVITE_ID_BASE + 1 },
+        ];
+        let types = [
+            "porte_ouvrir",
+            "porte_repondre",
+            "porte_expulser",
+            "porte_fermer",
+            "porte_vocal",
+            "porte_vocal",
+            "porte_offrir",
+        ];
+        for (msg, attendu) in allers.iter().zip(types) {
+            let json = serde_json::to_string(msg).unwrap();
+            assert!(json.contains(&format!("\"type\":\"{attendu}\"")), "{json}");
+            let relu: ClientMsg = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&relu).unwrap(), json);
+        }
+        // `PorteVocal` sans salon : le champ ne voyage pas.
+        let sortie = serde_json::to_string(&allers[5]).unwrap();
+        assert!(!sortie.contains("channel"), "{sortie}");
+
+        let retours: Vec<ServerMsg> = vec![
+            ServerMsg::PorteOuverte {
+                slug: "salon1".into(),
+                url: "https://ts.baws.fun/s/salon1".into(),
+                salon: 9,
+                expire_le: 1_800_000_000_000,
+            },
+            ServerMsg::PorteDemande {
+                slug: "salon1".into(),
+                demande_id: 7,
+                nom: "Kevin".into(),
+                ip_masquee: "82.65.x.x".into(),
+            },
+            ServerMsg::PorteEtat {
+                slug: "salon1".into(),
+                salon: 9,
+                invites: vec![InviteWeb {
+                    invite_id: INVITE_ID_BASE + 1,
+                    nom: "Kevin (web)".into(),
+                    depuis: 1_700_000_000_000,
+                    vocal: Some(4),
+                }],
+                demandes: vec![DemandeWeb { demande_id: 8, nom: "Léa".into(), depuis: 1_700_000_001_000 }],
+                expire_le: 1_800_000_000_000,
+            },
+            ServerMsg::PorteInvitation {
+                code: "ki-abcdefghij".into(),
+                serveur: "ts.baws.fun:9988".into(),
+                telechargement: PORTE_TELECHARGEMENT.into(),
+            },
+            ServerMsg::PorteFermee { slug: "salon1".into(), motif: "expirée".into() },
+        ];
+        let types = ["porte_ouverte", "porte_demande", "porte_etat", "porte_invitation", "porte_fermee"];
+        for (msg, attendu) in retours.iter().zip(types) {
+            let json = serde_json::to_string(msg).unwrap();
+            assert!(json.contains(&format!("\"type\":\"{attendu}\"")), "{json}");
+            let relu: ServerMsg = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&relu).unwrap(), json);
+        }
+
+        // L'état d'une porte se relit champ à champ.
+        let json = serde_json::to_string(&retours[2]).unwrap();
+        let ServerMsg::PorteEtat { invites, demandes, expire_le, .. } = serde_json::from_str(&json).unwrap() else {
+            panic!("ce n'est pas un PorteEtat");
+        };
+        assert_eq!(invites[0].vocal, Some(4));
+        assert_eq!(invites[0].nom, "Kevin (web)");
+        assert_eq!(demandes[0].demande_id, 8);
+        assert_eq!(expire_le, 1_800_000_000_000);
+    }
+
+    /// Les champs optionnels ont leur défaut : un client d'avant les portes
+    /// envoie `porte_ouvrir` avec le seul slug, un serveur d'avant n'envoie
+    /// ni `expire_le` sur un salon ni `invite` sur un membre — et un salon
+    /// ordinaire d'aujourd'hui ne dit pas qu'il n'expire pas.
+    #[test]
+    fn les_anciennes_formes_se_relisent() {
+        let msg: ClientMsg = serde_json::from_str(r#"{"type":"porte_ouvrir","slug":"salon1"}"#).unwrap();
+        let ClientMsg::PorteOuvrir { slug, nom_salon, ttl_secs } = msg else { panic!("ce n'est pas un PorteOuvrir") };
+        assert_eq!(slug, "salon1");
+        assert!(nom_salon.is_empty());
+        assert_eq!(ttl_secs, 0);
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"porte_repondre","demande_id":3,"accepter":true}"#).unwrap();
+        let ClientMsg::PorteRepondre { motif, accepter, .. } = msg else { panic!("ce n'est pas un PorteRepondre") };
+        assert!(accepter && motif.is_empty());
+        let msg: ClientMsg =
+            serde_json::from_str(r#"{"type":"porte_vocal","invite_id":4611686018427387905}"#).unwrap();
+        let ClientMsg::PorteVocal { invite_id, channel } = msg else { panic!("ce n'est pas un PorteVocal") };
+        assert!(est_invite(invite_id) && channel.is_none());
+
+        let msg: ServerMsg = serde_json::from_str(
+            r#"{"type":"porte_etat","slug":"salon1","salon":9}"#,
+        )
+        .unwrap();
+        let ServerMsg::PorteEtat { invites, demandes, expire_le, .. } = msg else { panic!("ce n'est pas un PorteEtat") };
+        assert!(invites.is_empty() && demandes.is_empty() && expire_le == 0);
+        let msg: ServerMsg = serde_json::from_str(r#"{"type":"porte_fermee","slug":"salon1"}"#).unwrap();
+        let ServerMsg::PorteFermee { motif, .. } = msg else { panic!("ce n'est pas un PorteFermee") };
+        assert!(motif.is_empty());
+
+        // Un salon d'un serveur antérieur, sans `expire_le`.
+        let ancien = r#"{"id":3,"name":"général","kind":"text","position":0,"locked":false}"#;
+        let salon: ChannelInfo = serde_json::from_str(ancien).unwrap();
+        assert_eq!(salon.expire_le, None);
+        let json = serde_json::to_string(&salon).unwrap();
+        assert!(!json.contains("expire_le"), "{json}");
+        let temporaire = ChannelInfo { expire_le: Some(1_800_000_000_000), ..salon };
+        let json = serde_json::to_string(&temporaire).unwrap();
+        assert!(json.contains("\"expire_le\":1800000000000"), "{json}");
+        assert_eq!(serde_json::from_str::<ChannelInfo>(&json).unwrap().expire_le, Some(1_800_000_000_000));
+
+        // Un membre d'un serveur antérieur, sans `invite`.
+        let ancien = r#"{"user_id":1,"username":"alice","speaking":false}"#;
+        let m: Member = serde_json::from_str(ancien).unwrap();
+        assert!(!m.invite);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("invite"), "un membre ordinaire ne dit pas qu'il n'est pas invité : {json}");
+        let invite = Member { user_id: INVITE_ID_BASE, username: "Kevin (web)".into(), invite: true, ..m };
+        let json = serde_json::to_string(&invite).unwrap();
+        assert!(json.contains("\"invite\":true"), "{json}");
+        let relu: Member = serde_json::from_str(&json).unwrap();
+        assert!(relu.invite && est_invite(relu.user_id));
+        assert!(relu.username.ends_with(INVITE_SUFFIXE));
+    }
 }
 
 /// Identité publique d'un serveur, définie par ses admins et distribuée
@@ -1105,6 +1537,12 @@ pub struct ChannelInfo {
     /// pas à connaître la composition des restrictions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_roles: Option<Vec<RoleId>>,
+    /// Salon **temporaire** — celui d'une porte web : effacé à cette date
+    /// (ms Unix) au plus tard, ou avant si la porte ferme. `None` = salon
+    /// ordinaire, et c'est ce que lit un client antérieur, qui voit alors
+    /// un salon textuel comme les autres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_le: Option<u64>,
 }
 
 /// Un rôle : une couleur de pseudo, un rang, un jeu de permissions.
@@ -1183,6 +1621,13 @@ pub struct Member {
     /// modération qui seraient refusées de toute façon.
     #[serde(default)]
     pub rank: u16,
+    /// Un invité web : pas un compte, pas de rôle, pas de photo, présent le
+    /// temps d'une porte. Un client antérieur ignore le champ et le liste
+    /// en ligne comme un membre — son nom finit par « (web) », ça suffit.
+    /// Redondant avec [`est_invite`] sur `user_id`, à dessein : le drapeau
+    /// se lit sans connaître la plage.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invite: bool,
 }
 
 /// Un résultat de recherche : le message, et le salon d'où il vient.
@@ -2227,6 +2672,23 @@ pub struct TableauAdmin {
     /// La fabrique des vidéos (conversions et exports de clips) : depuis
     /// 0.1.43, absent d'un serveur d'avant.
     pub fabrique: TableauFabrique,
+    /// Les portes web ouvertes : depuis 0.1.44, absent d'un serveur d'avant.
+    pub portes: Vec<TableauPorte>,
+}
+
+/// Une porte web ouverte, vue du tableau de bord.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauPorte {
+    pub slug: String,
+    /// Le nom du salon temporaire.
+    pub salon: String,
+    /// Le pseudo de l'hôte.
+    pub hote: String,
+    pub invites: u32,
+    pub demandes: u32,
+    /// Fermeture au plus tard (ms Unix).
+    pub expire_le: u64,
 }
 
 /// La fabrique des vidéos : un ffmpeg à la fois, une file devant.
@@ -3497,11 +3959,12 @@ mod tests {
         let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,
                        "voice_key":"ab","is_admin":true,"channels":[]}"#;
         let msg: ServerMsg = serde_json::from_str(json).unwrap();
-        let ServerMsg::Welcome { server, is_admin, .. } = msg else {
+        let ServerMsg::Welcome { server, is_admin, portes, .. } = msg else {
             panic!("ce n'est pas un Welcome");
         };
         assert!(is_admin);
         assert_eq!(server, ServerInfo::default());
+        assert!(!portes, "un serveur d'avant les portes ne les sert pas");
     }
 
     /// Ce protocole n'a pas de champ de version : la compatibilité repose

@@ -29,6 +29,20 @@ services:
       # Les clips partagés ont leur stock à part : plafond et durée de vie.
       KI_CLIPS_MAX_BYTES: ${KI_CLIPS_MAX_BYTES:-8589934592}
       KI_CLIPS_TTL_DAYS: ${KI_CLIPS_TTL_DAYS:-60}
+      # Les portes web (un lien vers un salon temporaire, pour des invités
+      # sans compte) : l'adresse publique dont le lien est fait, et celle à
+      # saisir dans ki-chat quand on offre une invitation. Sans elles, le
+      # lien est relatif et l'invitation donne l'hôte de la première.
+      KI_PUBLIC_URL: ${KI_PUBLIC_URL:-}
+      KI_PUBLIC_QUIC: ${KI_PUBLIC_QUIC:-}
+      # Certificat public (PEM) pour les navigateurs — voir « Porte web et
+      # certificat public » dans le guide. Posés, le serveur ouvre une
+      # seconde écoute HTTPS sur KI_TLS_PORT, relit les fichiers chaque
+      # heure, et l'écoute 8080 (épinglée par les clients) ne bouge pas.
+      # Vides : rien de plus.
+      KI_TLS_CERT: ${KI_TLS_CERT:-}
+      KI_TLS_KEY: ${KI_TLS_KEY:-}
+      KI_TLS_PORT: ${KI_TLS_PORT:-8443}
       # Verbosité : info par défaut, `debug` pour enquêter.
       RUST_LOG: ${RUST_LOG:-info}
 
@@ -36,8 +50,15 @@ services:
       # QUIC : authentification, chat ET voix. C'est le port qui compte —
       # sans UDP ouvert de bout en bout, personne ne se connecte.
       - "${KI_UDP_PORT:-9987}:9987/udp"
-      # HTTPS : téléchargement des fichiers partagés, rien d'autre.
+      # HTTPS : téléchargement des fichiers partagés, et les portes web
+      # (avec l'avertissement du navigateur : certificat auto-signé).
       - "${KI_HTTP_PORT:-8080}:8080/tcp"
+      # Les portes web sans avertissement : l'écoute publique, derrière un
+      # vrai certificat (KI_TLS_CERT / KI_TLS_KEY), publiée sur 443 pour que
+      # le lien soit https://ton-domaine/salon1, sans port. À décommenter
+      # une fois le certificat en place — le conteneur écoute 8443 en
+      # interne (utilisateur 10001, pas de port privilégié), Docker fait 443.
+      # - "443:${KI_TLS_PORT:-8443}/tcp"
 
     volumes:
       # Comptes (hachages Argon2id), historique, fichiers partagés, identité
@@ -45,6 +66,10 @@ services:
       # dossier de l'hôte : le conteneur tourne en utilisateur 10001, et un
       # dossier hôte appartenant à root le ferait échouer à l'écriture.
       - ki-chat-data:/data
+      # Le certificat public écrit par un sidecar certbot (guide, « Porte
+      # web et certificat public ») : en lecture seule, ki-chat ne fait que
+      # le lire. À décommenter avec le service certbot ci-dessous.
+      # - ki-chat-tls:/data/tls:ro
 
     labels:
       # Seuls les conteneurs portant ce label sont mis à jour par Watchtower.
@@ -67,5 +92,35 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # Le certificat public des portes web, obtenu et renouvelé par certbot
+  # (Let's Encrypt, défi HTTP-01 : le port 80 doit arriver à ce conteneur).
+  # Il copie fullchain.pem et privkey.pem dans le volume partagé à chaque
+  # délivrance ; ki-chat les relit chaque heure. À décommenter avec le
+  # montage `ki-chat-tls` et le port 443 du service ki-chat, et poser
+  # KI_TLS_CERT=/data/tls/fullchain.pem, KI_TLS_KEY=/data/tls/privkey.pem,
+  # KI_DOMAINE et KI_ACME_MAIL dans les variables de la stack. Le guide
+  # explique aussi la route « add-on Let's Encrypt » de Jelastic, sans
+  # sidecar.
+  # certbot:
+  #   image: certbot/certbot:latest
+  #   container_name: ki-chat-certbot
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80/tcp"
+  #   volumes:
+  #     - ki-chat-letsencrypt:/etc/letsencrypt
+  #     - ki-chat-tls:/tls
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command:
+  #     - >
+  #       while true; do
+  #         certbot certonly --standalone --non-interactive --agree-tos
+  #           --keep-until-expiring -m "${KI_ACME_MAIL:?}" -d "${KI_DOMAINE:?}"
+  #           --deploy-hook 'cp "$$RENEWED_LINEAGE/fullchain.pem" "$$RENEWED_LINEAGE/privkey.pem" /tls/ && chmod 644 /tls/fullchain.pem /tls/privkey.pem';
+  #         sleep 12h;
+  #       done
+
 volumes:
   ki-chat-data:
+  # ki-chat-tls:
+  # ki-chat-letsencrypt:

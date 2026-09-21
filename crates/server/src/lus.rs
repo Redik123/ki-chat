@@ -100,12 +100,36 @@ impl Lus {
             }
         };
         if change {
-            let mut sale = self.sale_depuis.lock().unwrap();
-            if sale.is_none() {
-                *sale = Some(Instant::now());
-            }
+            self.salir();
         }
         change
+    }
+
+    /// Oublie un salon : le repère que chacun y avait posé est retiré. Le
+    /// salon d'une porte web est effacé à sa fermeture ; ses repères ne
+    /// veulent plus rien dire, et ne doivent pas s'empiler dans lus.json,
+    /// un par membre et par porte.
+    pub fn oublier(&self, channel: ChannelId) {
+        let change = {
+            let mut table = self.table.lock().unwrap();
+            let mut change = false;
+            for salons in table.values_mut() {
+                change |= salons.remove(&channel).is_some();
+            }
+            table.retain(|_, salons| !salons.is_empty());
+            change
+        };
+        if change {
+            self.salir();
+        }
+    }
+
+    /// Du neuf à écrire — depuis maintenant, si ce n'était pas déjà le cas.
+    fn salir(&self) {
+        let mut sale = self.sale_depuis.lock().unwrap();
+        if sale.is_none() {
+            *sale = Some(Instant::now());
+        }
     }
 
     /// Le disque est-il en retard depuis assez longtemps pour l'écrire ?
@@ -187,11 +211,11 @@ pub fn non_lus(
                 channel,
                 dernier_ts,
                 non_lus: autres.len().min(u32::MAX as usize) as u32,
-                // Comme chez le client : le serveur et le bot ne nomment
-                // personne, seul un membre le fait.
+                // Comme chez le client : le serveur, le bot et un invité
+                // web ne nomment personne, seul un membre le fait.
                 mention: autres
                     .iter()
-                    .filter(|r| r.user_id != 0 && r.user_id != ki_protocol::MUSIQUE_ID)
+                    .filter(|r| ki_protocol::est_compte(r.user_id))
                     .any(|r| mentionne(&r.text, username)),
             }
         })
@@ -304,6 +328,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Un salon oublié ne laisse de repère chez personne, ni en mémoire ni
+    /// sur le disque ; les autres salons n'y perdent rien.
+    #[test]
+    fn oublier_un_salon_retire_son_repere_chez_chacun() {
+        let dir = dossier("oublier");
+        let lus = Lus::open(&dir);
+        lus.marquer(1, 10, 500);
+        lus.marquer(1, 11, 7);
+        lus.marquer(2, 10, 1);
+        lus.ecrire_si_sale();
+        assert!(!lus.a_ecrire(Instant::now() + DELAI_ECRITURE * 2), "à jour");
+        lus.oublier(10);
+        assert_eq!(lus.de(1), HashMap::from([(11, 7)]));
+        assert!(lus.de(2).is_empty(), "le membre 2 n'avait que ce salon : plus de ligne du tout");
+        assert!(lus.a_ecrire(Instant::now() + DELAI_ECRITURE * 2), "un oubli s'écrit");
+        lus.ecrire_si_sale();
+        let relu = Lus::open(&dir);
+        assert_eq!(relu.de(1), HashMap::from([(11, 7)]));
+        assert!(relu.lu(2, 10).is_none());
+        // Oublier un salon que personne n'a lu ne salit rien.
+        lus.oublier(99);
+        assert!(!lus.a_ecrire(Instant::now() + DELAI_ECRITURE * 2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Le disque n'est touché qu'à retardement, et seulement s'il y a du
     /// neuf : trente changements de salon, une écriture.
     #[test]
@@ -334,6 +383,7 @@ mod tests {
             position: 0,
             locked: false,
             allowed_roles: None,
+            expire_le: None,
         }
     }
 

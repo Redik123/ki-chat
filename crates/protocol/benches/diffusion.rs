@@ -42,6 +42,7 @@ fn roster(n: usize) -> Vec<Member> {
             // groupes de quatre chiffres — d'où l'absence de séparateur.
             color: Some(0x5865f2),
             rank: (i % 4) as u16 * 10,
+            invite: false,
         })
         .collect()
 }

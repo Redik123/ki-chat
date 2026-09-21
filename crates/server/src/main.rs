@@ -25,7 +25,17 @@
 //!                       tenu à jour chaque jour depuis la release yt-dlp,
 //!                       sinon celui du PATH) ; posé, plus de mise à jour
 //!   KI_PUBLIC_URL       l'adresse publique du serveur (https://hote:port), pour
-//!                       les liens que suit un téléphone ; sinon celle du client
+//!                       les liens que suit un téléphone ; sinon celle du client.
+//!                       Les portes web en font leur lien (https://hote/salon1)
+//!   KI_PUBLIC_QUIC      l'adresse à saisir dans ki-chat (« hote:9988 »), telle
+//!                       qu'une invitation offerte par une porte web la donne ;
+//!                       sinon l'hôte de KI_PUBLIC_URL et KI_UDP_PORT
+//!   KI_TLS_CERT, KI_TLS_KEY  un certificat public et sa clé (PEM, Let's
+//!                       Encrypt en pratique) : le serveur ouvre alors une
+//!                       seconde écoute HTTPS, pour les navigateurs, sur
+//!                       KI_TLS_PORT (défaut 8443), et relit les fichiers
+//!                       chaque heure. L'écoute KI_HTTP_PORT, épinglée par
+//!                       les clients, ne change pas. Absentes : rien de plus
 
 mod accounts;
 mod audit;
@@ -40,6 +50,7 @@ mod pokes;
 mod medias;
 mod meta;
 mod musique;
+mod porte;
 mod quic;
 mod roles;
 mod state;
@@ -149,6 +160,10 @@ async fn main() -> anyhow::Result<()> {
     medias::reprendre(&state);
     clips::reprendre(&state);
     tokio::spawn(medias::boucle(state.clone()));
+    // Les portes web : chaque minute, celles qui ont expiré ou que plus
+    // personne n'occupe ferment, et les demandes sans réponse sont
+    // congédiées.
+    tokio::spawn(porte::boucle(state.clone()));
     // Les repères de lecture : écrits à retardement, une fois toutes les
     // cinq secondes au plus, quand il y a du neuf. Une écriture disque, donc
     // sur le pool bloquant — jamais sur la boucle qui relaie la voix.
@@ -302,6 +317,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/diag/{version}", axum::routing::delete(diag::supprimer))
         .route("/diag/{version}/{fichier}", get(diag::lire))
         .route("/files/{file_id}/{name}", get(files::download))
+        // Les portes web : la page d'un salon temporaire, sous `/s/{slug}`
+        // et sous sa forme courte `/{slug}` — après toutes les routes
+        // statiques, qui gardent la priorité.
+        .merge(porte::routes())
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
@@ -313,10 +332,108 @@ async fn main() -> anyhow::Result<()> {
         key.secret_der().to_vec(),
     )
     .await?;
+    // La seconde écoute, publique : le même routeur derrière un certificat
+    // qu'un navigateur reconnaît, pour les portes web. Elle ne remplace pas
+    // celle-ci — les clients ki-chat en épinglent le certificat.
+    ecouter_publique(app.clone(), env_port("KI_TLS_PORT", 8443));
     axum_server::bind_rustls(addr, tls)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
+}
+
+/// Relecture du certificat public : toutes les heures. Let's Encrypt
+/// renouvelle à trente jours de l'échéance, une heure de retard ne se voit
+/// pas.
+const TLS_RELECTURE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// Certificat public annoncé mais illisible (pas encore délivré, le plus
+/// souvent) : on réessaie à ce rythme, pour qu'un certificat qui arrive après
+/// le démarrage — un sidecar certbot met une minute à l'obtenir — soit
+/// servi sans redémarrer le conteneur.
+const TLS_REESSAI: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// La seconde écoute HTTPS, publique, pour les navigateurs.
+///
+/// Les clients ki-chat épinglent l'empreinte du certificat auto-signé : la
+/// remplacer sur l'écoute principale casserait les téléchargements de tout
+/// le monde jusqu'à mise à jour. On n'y touche donc pas, et l'on sert le
+/// **même** routeur une seconde fois, sur `KI_TLS_PORT`, derrière le
+/// certificat de `KI_TLS_CERT` / `KI_TLS_KEY` (PEM, Let's Encrypt en
+/// pratique) — c'est ce qui fait de `https://ts.baws.fun/salon1` un lien
+/// qu'un inconnu peut ouvrir sans avertissement. Les fichiers sont relus
+/// chaque heure ([`TLS_RELECTURE`]) : un renouvellement passe sans
+/// redémarrage, et un fichier momentanément illisible laisse l'ancien
+/// certificat en service.
+///
+/// Rien n'est fatal ici : sans les variables, rien ne change ; fichiers
+/// illisibles ou port pris, le journal le dit et le serveur continue sur
+/// son écoute principale — les portes y restent joignables, avec
+/// l'avertissement du navigateur.
+fn ecouter_publique(app: Router, port: u16) {
+    let variable = |nom: &str| std::env::var(nom).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let (cert, key) = match (variable("KI_TLS_CERT"), variable("KI_TLS_KEY")) {
+        (Some(cert), Some(key)) => (cert, key),
+        (None, None) => return,
+        _ => {
+            tracing::warn!(
+                "KI_TLS_CERT et KI_TLS_KEY vont ensemble : l'un manque, pas d'écoute HTTPS publique"
+            );
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        use axum_server::tls_rustls::RustlsConfig;
+        let mut essais: u32 = 0;
+        let tls = loop {
+            match RustlsConfig::from_pem_file(&cert, &key).await {
+                Ok(tls) => break tls,
+                Err(e) => {
+                    // Une fois en clair au démarrage ; ensuite en debug, un
+                    // certificat qui n'arrive jamais ne doit pas noyer le
+                    // journal.
+                    let message = format!(
+                        "certificat public illisible ({cert}, {key}) : {e} — pas d'écoute HTTPS publique pour l'instant, nouvel essai dans {} min",
+                        TLS_REESSAI.as_secs() / 60
+                    );
+                    if essais == 0 {
+                        tracing::warn!("{message}");
+                    } else {
+                        tracing::debug!("{message}");
+                    }
+                    essais = essais.saturating_add(1);
+                    tokio::time::sleep(TLS_REESSAI).await;
+                }
+            }
+        };
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        tracing::info!(
+            "écoute HTTPS publique {addr} avec le certificat {cert} (relu toutes les {} min)",
+            TLS_RELECTURE.as_secs() / 60
+        );
+        {
+            let tls = tls.clone();
+            let (cert, key) = (cert.clone(), key.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(TLS_RELECTURE).await;
+                    match tls.reload_from_pem_file(&cert, &key).await {
+                        Ok(()) => tracing::debug!("certificat public relu ({cert})"),
+                        Err(e) => tracing::warn!(
+                            "certificat public non relu ({cert}) : {e} — l'ancien reste en service"
+                        ),
+                    }
+                }
+            });
+        }
+        if let Err(e) = axum_server::bind_rustls(addr, tls)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+        {
+            tracing::error!(
+                "écoute HTTPS publique {addr} arrêtée : {e} — les portes web restent joignables sur l'écoute principale, avec l'avertissement du navigateur"
+            );
+        }
+    });
 }
 
 /// SIGTERM (Docker, systemd) ou Ctrl-C, le premier arrivé.

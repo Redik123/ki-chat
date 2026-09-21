@@ -2787,6 +2787,7 @@ mod tests {
                 online: true,
                 color: None,
                 rank: 0,
+                invite: false,
             })
             .collect()
     }

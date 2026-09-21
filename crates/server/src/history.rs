@@ -559,9 +559,13 @@ impl History {
     }
 
     /// Referme le journal d'un salon supprimé. Le fichier reste sur le
-    /// disque — c'est l'archivage, assuré par le magasin de salons.
+    /// disque — c'est l'archivage, assuré par le magasin de salons. Les
+    /// états de ses messages (réactions, corrections, suppressions) partent
+    /// avec : un salon temporaire ouvert puis fermé ne laisse rien en
+    /// mémoire.
     pub fn close_channel(&self, channel: ChannelId) {
         self.logs.lock().unwrap().remove(&channel);
+        self.etats.lock().unwrap().remove(&channel);
         if let Some(writes) = &self.writes {
             let _ = writes.send(WriteCmd::Close(channel));
         }
@@ -1096,6 +1100,7 @@ mod tests {
             position: 0,
             locked: false,
             allowed_roles: None,
+            expire_le: None,
         }
     }
 
@@ -1180,6 +1185,24 @@ mod tests {
         // n'ont pas la même clé.
         assert_eq!(history.unique_ts(1, 30), 31);
         assert_eq!(history.unique_ts(1, 500), 500);
+    }
+
+    /// Un salon refermé ne laisse rien en mémoire : ni ses messages, ni
+    /// les états qu'on leur avait posés ; les autres salons n'y perdent rien.
+    #[test]
+    fn refermer_un_salon_oublie_ses_etats() {
+        let dir = scratch("refermer");
+        let history = History::open(&dir, &[text_channel(1), text_channel(2)]).unwrap();
+        history.append(1, &stamped(10));
+        history.append(2, &stamped(10));
+        assert!(history.react(1, MsgRef { user_id: 1, ts: 10 }, "👍".into(), 7, true).is_some());
+        assert!(history.react(2, MsgRef { user_id: 1, ts: 10 }, "👍".into(), 7, true).is_some());
+        history.close_channel(1);
+        assert!(!history.logs.lock().unwrap().contains_key(&1));
+        assert!(!history.etats.lock().unwrap().contains_key(&1), "l'état du salon 1 est resté");
+        assert!(history.etats.lock().unwrap().contains_key(&2), "le salon 2 n'a rien perdu");
+        assert!(history.recent(1, 10).is_empty());
+        assert_eq!(history.recent(2, 10)[0].reactions.len(), 1);
     }
 
     /// La barrière rend la main une fois la file écrite : ce qu'on vient

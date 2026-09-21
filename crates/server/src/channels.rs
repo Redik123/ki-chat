@@ -53,6 +53,11 @@ struct StoredChannel {
     /// `None` = visible par tous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     allowed_roles: Option<Vec<RoleId>>,
+    /// Salon **temporaire** — celui d'une porte web — effacé à cette date
+    /// (ms Unix) au plus tard. `None` = salon ordinaire. Un salon temporaire
+    /// ne survit pas à un redémarrage : sa porte, elle, vit en mémoire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expire_le: Option<u64>,
 }
 
 impl StoredChannel {
@@ -66,6 +71,7 @@ impl StoredChannel {
             position: self.position,
             locked: false,
             allowed_roles: self.allowed_roles.clone(),
+            expire_le: self.expire_le,
         }
     }
 }
@@ -103,6 +109,23 @@ impl Channels {
             .max(from_channels.saturating_add(1))
             .max(from_disk.saturating_add(1))
             .max(FIRST_FREE_ID);
+        // Les salons temporaires n'ont pas survécu : leur porte vivait en
+        // mémoire, personne ne peut plus y entrer, et ce que des inconnus y
+        // ont écrit n'a pas à rester. Tous, pas seulement les expirés — un
+        // salon de porte sans porte est un orphelin.
+        let orphelins: Vec<ChannelId> = file
+            .channels
+            .iter()
+            .filter(|c| c.expire_le.is_some())
+            .map(|c| c.id)
+            .collect();
+        if !orphelins.is_empty() {
+            tracing::info!("{} salon(s) temporaire(s) effacé(s) au démarrage", orphelins.len());
+            file.channels.retain(|c| c.expire_le.is_none());
+            for id in &orphelins {
+                forget_log(&dir, *id);
+            }
+        }
         compact_positions(&mut file.channels);
 
         let channels = Self {
@@ -112,7 +135,7 @@ impl Channels {
         // La migration est écrite tout de suite : sans ça, `next_id` ne serait
         // fixé sur disque qu'à la première modification, et un redémarrage
         // entre-temps repartirait d'un fichier absent.
-        if fresh {
+        if fresh || !orphelins.is_empty() {
             // Même raison que pour les rôles : un premier démarrage qui
             // n'arrive pas à écrire ses salons ne doit pas se poursuivre.
             channels
@@ -164,12 +187,15 @@ impl Channels {
             .collect()
     }
 
-    /// Crée un salon et rend sa description complète.
-    pub fn create(
+    /// Crée un salon et rend sa description complète. `expire_le` ne se pose
+    /// que sur le salon temporaire d'une porte web, effacé à cette date (ms
+    /// Unix) au plus tard.
+    pub fn create_with(
         &self,
         name: &str,
         kind: ChannelKind,
         allowed_roles: Option<Vec<RoleId>>,
+        expire_le: Option<u64>,
     ) -> Result<ChannelInfo, String> {
         let name = clean_name(name)?;
         let mut inner = self.inner.lock().unwrap();
@@ -184,6 +210,7 @@ impl Channels {
             kind,
             position,
             allowed_roles: normalize_roles(allowed_roles),
+            expire_le,
         });
         compact_positions(&mut inner.channels);
         let created = inner
@@ -249,6 +276,29 @@ impl Channels {
             removed
         };
         archive_log(Path::new(data_dir), id);
+        Ok(removed)
+    }
+
+    /// Retire le salon et **efface** son journal — le contraire de `delete`.
+    ///
+    /// Pour le salon temporaire d'une porte web : ce que des inconnus y ont
+    /// écrit n'a pas vocation à rester sur le disque, et il n'y a rien à
+    /// « récupérer à la main ». Le numéro reste brûlé par `next_id` dans
+    /// `channels.json` ; seule la perte de ce fichier le rouvrirait, et un
+    /// salon d'invités n'a pas d'historique qu'un successeur pourrait
+    /// hériter.
+    pub fn delete_and_forget(&self, data_dir: &str, id: ChannelId) -> Result<ChannelInfo, String> {
+        let removed = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(at) = inner.channels.iter().position(|c| c.id == id) else {
+                return Err("salon inconnu".into());
+            };
+            let removed = inner.channels.remove(at).info();
+            compact_positions(&mut inner.channels);
+            self.save(&inner)?;
+            removed
+        };
+        forget_log(Path::new(data_dir), id);
         Ok(removed)
     }
 
@@ -361,6 +411,7 @@ fn default_channels() -> ChannelsFile {
                 kind: *kind,
                 position: position as u32,
                 allowed_roles: None,
+                expire_le: None,
             })
             .collect(),
     }
@@ -416,6 +467,17 @@ fn archive_log(dir: &Path, id: ChannelId) {
     // réservé. On le signale, c'est tout.
     if let Err(e) = std::fs::rename(&live, &archived) {
         tracing::error!("archivage du journal du salon {id} impossible : {e}");
+    }
+}
+
+/// Efface le journal d'un salon temporaire. Un journal absent n'est pas une
+/// erreur : le salon n'a peut-être jamais reçu de message.
+fn forget_log(dir: &Path, id: ChannelId) {
+    let live = dir.join(format!("channel-{id}.jsonl"));
+    match std::fs::remove_file(&live) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::error!("effacement du journal du salon temporaire {id} impossible : {e}"),
     }
 }
 
@@ -522,7 +584,7 @@ mod tests {
         assert!(log_path(&dir, "channels.json").exists());
         let after_restart = Channels::open(&dir).unwrap();
         let neuf = after_restart
-            .create("neuf", ChannelKind::Text, None)
+            .create_with("neuf", ChannelKind::Text, None, None)
             .unwrap();
         assert_eq!(neuf.id, 104);
     }
@@ -552,7 +614,7 @@ mod tests {
         std::fs::write(log_path(&dir, "channel-800.txt"), "").unwrap();
 
         let channels = Channels::open(&dir).unwrap();
-        let created = channels.create("suite", ChannelKind::Text, None).unwrap();
+        let created = channels.create_with("suite", ChannelKind::Text, None, None).unwrap();
         assert_eq!(
             created.id, 208,
             "l'archive du 207 réserve encore son numéro"
@@ -562,7 +624,7 @@ mod tests {
         // trou : le dossier suffit à retenir les numéros.
         std::fs::remove_file(log_path(&dir, "channels.json")).unwrap();
         let repartie = Channels::open(&dir).unwrap();
-        let created = repartie.create("suite", ChannelKind::Text, None).unwrap();
+        let created = repartie.create_with("suite", ChannelKind::Text, None, None).unwrap();
         assert_eq!(created.id, 208);
     }
 
@@ -573,7 +635,7 @@ mod tests {
         let dir = scratch("archive");
         let channels = Channels::open(&dir).unwrap();
         let salon = channels
-            .create("éphémère", ChannelKind::Text, None)
+            .create_with("éphémère", ChannelKind::Text, None, None)
             .unwrap();
         std::fs::write(
             log_path(&dir, &format!("channel-{}.jsonl", salon.id)),
@@ -608,15 +670,74 @@ mod tests {
         );
 
         // Le salon suivant ne récupère pas le numéro libéré.
-        let suivant = channels.create("suivant", ChannelKind::Text, None).unwrap();
+        let suivant = channels.create_with("suivant", ChannelKind::Text, None, None).unwrap();
         assert!(suivant.id > salon.id);
         // Y compris après redémarrage, fichier effacé compris.
         std::fs::remove_file(log_path(&dir, "channels.json")).unwrap();
         let apres = Channels::open(&dir).unwrap();
-        assert!(apres.create("encore", ChannelKind::Text, None).unwrap().id > salon.id);
+        assert!(apres.create_with("encore", ChannelKind::Text, None, None).unwrap().id > salon.id);
 
         // Supprimer deux fois, ou un salon inconnu, se refuse proprement.
         assert!(channels.delete(&dir, salon.id).is_err());
+    }
+
+    /// Le salon d'une porte web : daté, effacé sans archive à la fermeture,
+    /// et balayé au redémarrage — sa porte ne survit pas au processus, lui
+    /// non plus. Un salon ordinaire, lui, ne bouge pas.
+    #[test]
+    fn un_salon_temporaire_s_efface_et_ne_survit_pas_au_redemarrage() {
+        let dir = scratch("temporaire");
+        let channels = Channels::open(&dir).unwrap();
+        let porte = channels
+            .create_with("porte salon1", ChannelKind::Text, None, Some(1_800_000_000_000))
+            .unwrap();
+        assert_eq!(porte.expire_le, Some(1_800_000_000_000));
+        assert_eq!(channels.get(porte.id).unwrap().expire_le, Some(1_800_000_000_000));
+        // Un salon ordinaire ne dit pas de date.
+        assert_eq!(channels.get(1).unwrap().expire_le, None);
+
+        // Fermeture : le journal disparaît, rien n'est archivé, et le numéro
+        // reste brûlé.
+        let journal = log_path(&dir, &format!("channel-{}.jsonl", porte.id));
+        std::fs::write(&journal, "{}\n").unwrap();
+        let removed = channels.delete_and_forget(&dir, porte.id).unwrap();
+        assert_eq!(removed.id, porte.id);
+        assert!(channels.get(porte.id).is_none());
+        assert!(!journal.exists(), "le journal d'une porte s'efface");
+        let archives = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("channel-{}.deleted-", porte.id)))
+            .count();
+        assert_eq!(archives, 0, "rien à récupérer à la main : pas d'archive");
+        assert!(channels.create_with("suivant", ChannelKind::Text, None, None).unwrap().id > porte.id);
+        // Un journal absent n'est pas une erreur.
+        let sans_journal = channels
+            .create_with("porte salon2", ChannelKind::Text, None, Some(1_800_000_000_000))
+            .unwrap();
+        channels.delete_and_forget(&dir, sans_journal.id).unwrap();
+        assert!(channels.delete_and_forget(&dir, sans_journal.id).is_err());
+
+        // Redémarrage avec un salon temporaire encore listé, même pas
+        // expiré : c'est un orphelin, il part avec son journal, et les
+        // salons ordinaires restent.
+        let orphelin = channels
+            .create_with("porte salon3", ChannelKind::Text, None, Some(u64::MAX))
+            .unwrap();
+        let journal = log_path(&dir, &format!("channel-{}.jsonl", orphelin.id));
+        std::fs::write(&journal, "{}\n").unwrap();
+        let avant = channels.list().len();
+        drop(channels);
+        let apres = Channels::open(&dir).unwrap();
+        assert!(apres.get(orphelin.id).is_none());
+        assert!(!journal.exists());
+        assert_eq!(apres.list().len(), avant - 1);
+        assert!(apres.get(1).is_some());
+        // Et c'est écrit : une seconde ouverture n'a plus rien à balayer.
+        let json = std::fs::read_to_string(log_path(&dir, "channels.json")).unwrap();
+        assert!(!json.contains("expire_le"), "{json}");
+        assert!(apres.create_with("encore", ChannelKind::Text, None, None).unwrap().id > orphelin.id);
     }
 
     /// Une liste tronquée ferait disparaître les salons qu'elle ne cite pas.
@@ -674,7 +795,7 @@ mod tests {
         let dir = scratch("visibilite");
         let channels = Channels::open(&dir).unwrap();
         let prive = channels
-            .create("staff", ChannelKind::Text, Some(vec![7]))
+            .create_with("staff", ChannelKind::Text, Some(vec![7]), None)
             .unwrap();
 
         // Sans le rôle : le salon n'existe pas.
@@ -730,14 +851,14 @@ mod tests {
         let dir = scratch("noms");
         let channels = Channels::open(&dir).unwrap();
 
-        assert!(channels.create("   ", ChannelKind::Text, None).is_err());
+        assert!(channels.create_with("   ", ChannelKind::Text, None, None).is_err());
         assert!(channels
-            .create(&"x".repeat(MAX_NAME + 1), ChannelKind::Text, None)
+            .create_with(&"x".repeat(MAX_NAME + 1), ChannelKind::Text, None, None)
             .is_err());
         // Les commandes bidirectionnelles disparaissent : elles font lire à
         // l'écran autre chose que ce qui est écrit.
         let propre = channels
-            .create("  sa\u{202e}lon\n2  ", ChannelKind::Text, None)
+            .create_with("  sa\u{202e}lon\n2  ", ChannelKind::Text, None, None)
             .unwrap();
         assert_eq!(propre.name, "salon 2");
 

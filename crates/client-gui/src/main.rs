@@ -16,6 +16,7 @@ mod overlay;
 mod partage;
 mod perf;
 mod photos;
+mod porte_ui;
 mod boutique;
 mod ptt;
 mod raccourci;
@@ -685,6 +686,8 @@ struct KiApp {
     /// seul après [`DUREE_POKE`]. À part de `error`, qu'une erreur sans
     /// rapport écraserait.
     poke_recu: Option<(String, std::time::Instant)>,
+    /// Les portes web : bannières de demande, panneau, portes connues.
+    portes: porte_ui::Portes,
     /// Est-ce que j'accepte les pokes ? Réglage ⚙, persisté.
     pokes_accepter: bool,
     /// Ce que le serveur sait de ce réglage : on ne lui envoie que les
@@ -1202,6 +1205,7 @@ impl KiApp {
             notif: Notif::depuis(&get("notif", "tout")),
             titre_fenetre: String::new(),
             poke_recu: None,
+            portes: porte_ui::Portes::new(),
             pokes_accepter: get("pokes", "on") == "on",
             pokes_envoye: None,
             pokes_refuses: HashMap::new(),
@@ -3277,6 +3281,52 @@ impl KiApp {
         }
     }
 
+    /// Ce que le rendu des portes doit savoir de moi : mes permissions,
+    /// mon vocal, les salons. Le serveur tranche de toute façon ; ici on
+    /// ne fait que cacher ce qu'il refuserait.
+    fn contexte_portes(&self) -> porte_ui::Contexte<'_> {
+        use ki_protocol::perm::*;
+        porte_ui::Contexte {
+            peut_ouvrir: self.can(CREATE_INVITE),
+            peut_expulser: self.can(KICK),
+            mon_vocal: self.voice_channel,
+            salons: &self.channels,
+        }
+    }
+
+    /// Le panneau « Portes web », s'il est ouvert, et ce qu'on y a demandé.
+    fn portes_window(&mut self, ctx: &egui::Context) {
+        if !self.portes.ouvert {
+            return;
+        }
+        // Le contexte emprunte `self`, le panneau modifie `self.portes` :
+        // on sort les portes le temps du rendu, comme le roster.
+        let mut portes = std::mem::take(&mut self.portes);
+        let actions = portes.fenetre(ctx, &self.contexte_portes());
+        self.portes = portes;
+        self.appliquer_portes(actions);
+    }
+
+    /// Ce que le panneau, la bannière ou le menu d'un invité ont demandé.
+    fn appliquer_portes(&mut self, actions: Vec<porte_ui::Action>) {
+        for action in actions {
+            match action {
+                porte_ui::Action::Envoyer(msg) => self.send(msg),
+                porte_ui::Action::Copier(texte) => self.app_ctx.copy_text(texte),
+                porte_ui::Action::Lire(salon) => {
+                    if self.current != Some(salon) {
+                        self.join(salon);
+                    }
+                }
+                // « Lui offrir ki-chat » : c'est le serveur qui crée le
+                // code, poste le lien dans le salon et pousse le code à la
+                // page de l'invité — jamais dans le salon, lu par des
+                // inconnus. Il nous répond par un `Info` qui porte le code.
+                porte_ui::Action::Offrir { invite_id } => self.send(ClientMsg::PorteOffrir { invite_id }),
+            }
+        }
+    }
+
     /// Le soundboard : la fenêtre, et ce qu'elle demande au moteur vocal.
     /// Sans moteur (hors connexion), rien ne joue — la fenêtre le dit.
     fn soundboard_window(&mut self, ctx: &egui::Context) {
@@ -3652,7 +3702,7 @@ impl KiApp {
 
     /// Couleur d'un membre : celle de son rôle, sinon son pseudo.
     fn color_of(&self, member: &Member) -> egui::Color32 {
-        theme::member_color(member.color, &member.username)
+        couleur_de_membre(member)
     }
 
     /// Nom du rôle le mieux classé d'un membre, pour l'afficher en badge.
@@ -3953,6 +4003,8 @@ impl KiApp {
         self.poke_recu = None;
         self.pokes_envoye = None;
         self.pokes_refuses.clear();
+        // Les portes aussi : le serveur suivant devra prouver qu'il les sert.
+        self.portes.reinitialiser();
 
         // --- Vignettes : indexées par user_id, donc par serveur ---
         self.avatars.clear();
@@ -4071,6 +4123,10 @@ impl KiApp {
         }
         // « X te poke » s'efface tout seul : il faut une image pour ça.
         if self.poke_recu.is_some() {
+            return Some(Duration::from_secs(1));
+        }
+        // « Kevin veut rejoindre… expire dans 4 min » : même horloge.
+        if self.portes.a_des_demandes() {
             return Some(Duration::from_secs(1));
         }
         None
@@ -4503,9 +4559,14 @@ impl KiApp {
                 roles,
                 channels,
                 server,
+                portes,
                 ..
             } => {
                 self.welcomed = true;
+                // Le serveur dit lui-même s'il sert les portes web : un
+                // serveur antérieur ne pose pas le champ, et le panneau
+                // reste caché — rien de nouveau ne lui part.
+                self.portes.disponible = portes;
                 self.connecting = false;
                 self.connect_started = None;
                 self.error = None;
@@ -4809,7 +4870,7 @@ impl KiApp {
                 self.author_colors = self
                     .members
                     .iter()
-                    .map(|m| (m.user_id, theme::member_color(m.color, &m.username)))
+                    .map(|m| (m.user_id, couleur_de_membre(m)))
                     .collect();
                 self.after_roster_change();
             }
@@ -4821,10 +4882,7 @@ impl KiApp {
                 let mut member = member;
                 member.username = safe_name(&member.username);
                 self.fetch_missing_avatars(std::slice::from_ref(&member));
-                self.author_colors.insert(
-                    member.user_id,
-                    theme::member_color(member.color, &member.username),
-                );
+                self.author_colors.insert(member.user_id, couleur_de_membre(&member));
                 match self.members.iter_mut().find(|m| m.user_id == member.user_id) {
                     Some(place) => *place = member,
                     None => {
@@ -5030,10 +5088,13 @@ impl KiApp {
                 let still_there =
                     self.current.is_some_and(|c| self.channels.iter().any(|ch| ch.id == c));
                 if !still_there {
+                    // Un salon ordinaire d'abord : un salon temporaire
+                    // disparaîtra à son tour, et l'on retomberait dedans.
                     let first = self
                         .channels
                         .iter()
-                        .find(|c| c.kind == ChannelKind::Text)
+                        .find(|c| c.kind == ChannelKind::Text && c.expire_le.is_none())
+                        .or_else(|| self.channels.iter().find(|c| c.kind == ChannelKind::Text))
                         .map(|c| c.id);
                     match first {
                         Some(id) => self.join(id),
@@ -5104,6 +5165,59 @@ impl KiApp {
                 self.on_net_quality(loss_pct);
             }
             ServerMsg::Pong => {}
+            // --- Les portes web ---
+            ServerMsg::PorteOuverte { slug, url, salon, expire_le } => {
+                // Ma porte : le lien et son QR dans le panneau, et le
+                // salon temporaire sous les yeux — il arrive par
+                // `ChannelsUpdated`, avant ou après, peu importe : lire
+                // un salon ne demande que son identifiant.
+                self.portes.ouverte(&slug, url, salon, expire_le);
+                self.join(salon);
+            }
+            ServerMsg::PorteDemande { slug, demande_id, nom, ip_masquee } => {
+                // Quelqu'un frappe : bannière en tête du salon, son à
+                // part, clignotement insistant, une ligne par-dessus le
+                // jeu. Comme un poke : c'est un appel, pas un message.
+                let nom = ki_protocol::safe_display(&nom, 64);
+                let slug = ki_protocol::safe_display(&slug, ki_protocol::PORTE_SLUG_MAX);
+                if self.portes.demande(&slug, demande_id, &nom, &ip_masquee) {
+                    self.play_sfx(sfx::PORTE);
+                    self.wants_attention = true;
+                    self.attention_critique = true;
+                    self.overlay.annoncer(format!("{nom} frappe à la porte {slug}"));
+                }
+            }
+            ServerMsg::PorteEtat { slug, salon, invites, demandes, expire_le } => {
+                let invites = invites
+                    .into_iter()
+                    .map(|mut i| {
+                        i.nom = ki_protocol::safe_display(&i.nom, 64);
+                        i
+                    })
+                    .collect();
+                let demandes = demandes
+                    .into_iter()
+                    .map(|mut d| {
+                        d.nom = ki_protocol::safe_display(&d.nom, 64);
+                        d
+                    })
+                    .collect();
+                self.portes.etat(&slug, salon, invites, demandes, expire_le);
+            }
+            ServerMsg::PorteFermee { slug, motif } => {
+                let motif = ki_protocol::safe_display(&motif, ki_protocol::MAX_PORTE_MOTIF);
+                self.portes.fermee(&slug, &motif);
+                // Le salon disparaît par `ChannelsUpdated` ; ici on dit
+                // seulement pourquoi.
+                self.info = Some(if motif.is_empty() {
+                    format!("porte « {slug} » fermée")
+                } else {
+                    format!("porte « {slug} » fermée : {motif}")
+                });
+            }
+            // À l'invité web seulement, par sa porte : un client ki-chat
+            // ne le reçoit jamais.
+            ServerMsg::PorteInvitation { .. } => {}
         }
     }
 
@@ -5861,6 +5975,7 @@ impl KiApp {
         self.fiche_bot_window(ctx);
         self.clips_window(ctx);
         self.soundboard_window(ctx);
+        self.portes_window(ctx);
         self.partage_clip_window(ctx);
         self.visionneuse_window(ctx);
         self.atelier_window(ctx);
@@ -6203,6 +6318,19 @@ impl KiApp {
                     {
                         self.soundboard.basculer();
                     }
+                    // Les portes web : ouvrir la sienne (« Créer des
+                    // invitations »), ou voir celles des autres quand le
+                    // serveur nous en parle. Jamais face à un serveur
+                    // antérieur, qui n'en sait rien.
+                    let portes_visibles = self.portes.disponible
+                        && (self.can(ki_protocol::perm::CREATE_INVITE) || !self.portes.est_vide());
+                    if portes_visibles
+                        && ui::button(ui, Icon::Key, "Portes")
+                            .on_hover_text("un lien pour faire entrer quelqu'un par le web, sans compte, le temps d'une soirée")
+                            .clicked()
+                    {
+                        self.portes.ouvert = !self.portes.ouvert;
+                    }
                     // Le point rouge de l'enregistreur de clips : allumé, il
                     // tourne et un clic l'arrête ; éteint, un clic le lance.
                     let rec = self.enregistreur.is_some();
@@ -6467,14 +6595,66 @@ impl KiApp {
 
                                 // --- Salons textuels : on les ouvre ---
                                 ui::section_label(ui, "Salons textuels");
-                                for ch in channels.iter().filter(|c| c.kind == ChannelKind::Text) {
+                                for ch in channels
+                                    .iter()
+                                    .filter(|c| c.kind == ChannelKind::Text && c.expire_le.is_none())
+                                {
                                     let selected = self.current == Some(ch.id);
                                     let kind = ChannelKind::Text;
                                     let pastille = self.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
-                                    let row = channel_row(ui, &ch.name, selected, kind, pastille);
+                                    let row = channel_row(ui, &ch.name, selected, kind, pastille, false);
                                     if row.clicked() && !selected {
                                         self.join(ch.id);
                                     }
+                                }
+
+                                // --- Salons temporaires des portes web : à part,
+                                // avec ce qu'il leur reste à vivre. Un client
+                                // antérieur les voit parmi les textuels, c'est
+                                // voulu : `expire_le` lui est inconnu.
+                                let temporaires: Vec<&ChannelInfo> =
+                                    channels.iter().filter(|c| c.expire_le.is_some()).collect();
+                                if !temporaires.is_empty() {
+                                    ui.add_space(10.0);
+                                    ui::section_label(ui, "Invités");
+                                    let maintenant = porte_ui::maintenant_ms();
+                                    let contexte = self.contexte_portes();
+                                    let mut actions = Vec::new();
+                                    let mut lire = None;
+                                    for ch in temporaires {
+                                        let selected = self.current == Some(ch.id);
+                                        let pastille = self.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
+                                        let reste = porte_ui::reste_texte(ch.expire_le.unwrap_or(0), maintenant);
+                                        let slug = self.portes.slug_du_salon(ch.id);
+                                        let bulle = match slug {
+                                            Some(slug) => format!("salon temporaire de la porte « {slug} » · {reste}"),
+                                            None => format!("salon temporaire d'une porte web · {reste}"),
+                                        };
+                                        let row = channel_row(ui, &ch.name, selected, ChannelKind::Text, pastille, true)
+                                            .on_hover_text(bulle);
+                                        if row.clicked() && !selected {
+                                            lire = Some(ch.id);
+                                        }
+                                        // Fermer la porte depuis son salon : la mienne,
+                                        // ou n'importe laquelle avec « Expulser ».
+                                        if let Some(slug) = slug.filter(|s| self.portes.peut_fermer(s, &contexte)) {
+                                            let slug = slug.to_string();
+                                            row.context_menu(|ui| {
+                                                ui.set_width(200.0);
+                                                if ui::tinted_button(ui, Some(Icon::Ban), "Fermer la porte", Tone::Danger)
+                                                    .on_hover_text("les invités sont congédiés et le salon effacé")
+                                                    .clicked()
+                                                {
+                                                    actions.push(porte_ui::Action::Envoyer(ClientMsg::PorteFermer { slug }));
+                                                    ui.close();
+                                                }
+                                            });
+                                        }
+                                    }
+                                    if let Some(id) = lire {
+                                        self.join(id);
+                                    }
+                                    self.appliquer_portes(actions);
                                 }
 
                                 // --- Salons vocaux : on y entre ---
@@ -6482,7 +6662,7 @@ impl KiApp {
                                 ui::section_label(ui, "Salons vocaux");
                                 for ch in channels.iter().filter(|c| c.kind == ChannelKind::Voice) {
                                     let here = self.voice_channel == Some(ch.id);
-                                    let row = channel_row(ui, &ch.name, here, ChannelKind::Voice, None);
+                                    let row = channel_row(ui, &ch.name, here, ChannelKind::Voice, None, false);
                                     if row.clicked() {
                                         if here {
                                             self.leave_voice();
@@ -6569,6 +6749,42 @@ impl KiApp {
             (false, true) => response.on_hover_text("rendu sourd par un modérateur"),
             (false, false) => response,
         };
+        // Un invité web n'a pas non plus le menu d'un membre : ni rôles, ni
+        // bannissement de compte (il n'en a pas), ni poke. Son volume — il
+        // peut parler en vocal —, et ce que sa porte permet : le vocal,
+        // l'expulsion, l'offre. Jamais sans preuve que le serveur sert les
+        // portes : le seul fait qu'il soit là en est une.
+        if est_invite_membre(m) {
+            let mut actions = Vec::new();
+            response.context_menu(|ui| {
+                ui.set_width(228.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&m.username).color(theme::INVITE).strong());
+                    porte_ui::pastille_invite(ui);
+                });
+                let porte = self.portes.porte_de_l_invite(m.user_id).map(|p| p.slug.clone());
+                let quoi = match porte {
+                    Some(slug) => format!("entré par la porte « {slug} », sans compte"),
+                    None => "entré par une porte web, sans compte".to_string(),
+                };
+                ui.label(RichText::new(quoi).color(TEXT_FAINT).size(11.0));
+                ui.add_space(4.0);
+                let mut pct = self.volume_of(m.user_id) * 100.0;
+                if ui
+                    .add(egui::Slider::new(&mut pct, 0.0..=200.0).suffix(" %").integer().text("volume"))
+                    .changed()
+                {
+                    self.set_volume(m.user_id, pct / 100.0);
+                }
+                ui.add_space(4.0);
+                ui::hairline(ui);
+                ui.add_space(4.0);
+                let contexte = self.contexte_portes();
+                actions = self.portes.menu_invite(ui, m.user_id, m.voice, &contexte);
+            });
+            self.appliquer_portes(actions);
+            return;
+        }
         // Un bot n'a pas le menu d'un membre : son volume, sa fiche, c'est
         // tout — ni rôles, ni expulsion, ni compte Riot.
         if est_bot(m.user_id) {
@@ -6847,8 +7063,12 @@ impl KiApp {
                 // C'est la technique déjà employée par le fil de discussion ;
                 // la remise a lieu plus bas, avant de sortir de la fermeture.
                 let members = std::mem::take(&mut self.members);
+                // Trois listes : les membres en ligne, les invités web (à
+                // part — pas des comptes), les hors-ligne.
+                let (invites, comptes): (Vec<&Member>, Vec<&Member>) =
+                    members.iter().partition(|m| est_invite_membre(m));
                 let (online, offline): (Vec<&Member>, Vec<&Member>) =
-                    members.iter().partition(|m| m.online);
+                    comptes.into_iter().partition(|m| m.online);
 
                 ui.horizontal(|ui| {
                     ui::section_label(ui, "En ligne");
@@ -6902,6 +7122,44 @@ impl KiApp {
                         self.member_menu(response, m, is_me);
                     }
 
+                    // Les invités web : en ligne, forcément, mais pas des
+                    // nôtres — ni rôle, ni rang, ni photo. Le vumètre, oui :
+                    // l'hôte peut les mettre en vocal.
+                    if !invites.is_empty() {
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui::section_label(ui, "Invités");
+                            ui.label(
+                                RichText::new(invites.len().to_string())
+                                    .color(theme::BORDER_STRONG)
+                                    .size(11.0)
+                                    .strong(),
+                            );
+                        });
+                        ui.add_space(2.0);
+                        for m in &invites {
+                            let audible = m.voice.is_some() && m.voice == self.voice_channel;
+                            let level = if audible {
+                                voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                            let speaking = m.speaking || level > SPEAK_LEVEL;
+                            let (response, _) = member_row(
+                                ui,
+                                MemberRow {
+                                    member: m,
+                                    speaking: speaking && audible,
+                                    muted: m.voice.is_some() && m.muted,
+                                    is_me: false,
+                                    photo: None,
+                                    rang_icone: None,
+                                },
+                            );
+                            self.member_menu(response, m, false);
+                        }
+                    }
+
                     // Toute la communauté, pas seulement les présents : les
                     // hors-ligne en dessous, éteints mais bien là — et le
                     // clic droit (rôles, bannir…) marche aussi sur eux.
@@ -6929,7 +7187,7 @@ impl KiApp {
                         }
                     }
                 });
-                drop((online, offline));
+                drop((online, offline, invites));
                 self.members = members;
             });
     }
@@ -6955,6 +7213,9 @@ impl KiApp {
             }
         }
         let survol = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        // Ce que les bannières de porte demandent : appliqué une fois
+        // l'en-tête rendu, hors de sa fermeture.
+        let mut actions_porte: Vec<porte_ui::Action> = Vec::new();
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_BASE))
@@ -6992,7 +7253,11 @@ impl KiApp {
                                 self.poke_recu = None;
                             }
                         }
+                        // « Kevin veut rejoindre par le web » — une par
+                        // demande, empilées, avec Accepter / Refuser.
+                        actions_porte.extend(self.portes.bannieres(ui));
                     });
+                self.appliquer_portes(std::mem::take(&mut actions_porte));
 
                 // --- Musique : la bannière, quand le bot est quelque part — ou
                 // quand on peut le faire venir : en vocal, avec la permission.
@@ -7562,6 +7827,10 @@ impl KiApp {
                     // parle en couleur d'accent : ce n'est pas un membre.
                     let color = if msg.user_id == 0 {
                         ACCENT
+                    } else if ki_protocol::est_invite(msg.user_id) {
+                        // Un invité web, même parti depuis : sa couleur
+                        // ne dépend pas du roster.
+                        theme::INVITE
                     } else {
                         self.author_colors
                             .get(&msg.user_id)
@@ -8724,6 +8993,7 @@ impl KiApp {
                                     (sfx::MESSAGE, "Message reçu (fenêtre à l'arrière-plan)"),
                                     (sfx::MENTION, "On me nomme (@moi)"),
                                     (sfx::POKE, "Quelqu'un me poke"),
+                                    (sfx::PORTE, "Quelqu'un frappe à une porte web"),
                                     (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
                                     (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
                                     (sfx::SELF_JOIN, "Je rejoins un vocal"),
@@ -11102,6 +11372,9 @@ impl KiApp {
                                 .draft
                                 .restricted
                                 .then(|| edit.draft.allowed_roles.clone()),
+                            // Un salon temporaire ne s'édite pas d'ici ;
+                            // le serveur garde sa propre date.
+                            expire_le: None,
                         },
                     });
                 } else if annuler {
@@ -11732,6 +12005,8 @@ mod sfx {
     pub const MENTION: &str = "mention";
     /// Quelqu'un me poke : le seul son qui vise quelqu'un en particulier.
     pub const POKE: &str = "poke";
+    /// Quelqu'un frappe à une porte web : il attend qu'on lui ouvre.
+    pub const PORTE: &str = "porte";
     pub const MUTE: &str = "micro-coupe";
     pub const UNMUTE: &str = "micro-actif";
 }
@@ -12163,12 +12438,15 @@ fn address_tag(address: &str) -> Option<&'static str> {
 /// `strong()`), et une pastille à droite dit combien — à l'accent quand on
 /// y est nommé, discrète sinon. Le style est celui de `pastille_bot`, pour
 /// que les deux se ressemblent.
+/// `temporaire` : le salon d'une porte web — icône d'invité, badge
+/// « temporaire » — plutôt qu'un « # » comme les autres.
 fn channel_row(
     ui: &mut egui::Ui,
     name: &str,
     selected: bool,
     kind: ChannelKind,
     non_lu: Option<NonLu>,
+    temporaire: bool,
 ) -> egui::Response {
     let height = 34.0;
     let (rect, response) =
@@ -12206,13 +12484,38 @@ fn channel_row(
         // Le pictogramme dit la nature du salon : on lit un « # », on parle
         // dans un haut-parleur.
         let symbol = match kind {
+            _ if temporaire => Icon::User,
             ChannelKind::Text => Icon::Hash,
             ChannelKind::Voice => Icon::Volume,
         };
-        icons::draw(painter, icon, symbol, fg);
+        icons::draw(painter, icon, symbol, if temporaire { theme::INVITE } else { fg });
         // La pastille d'abord : le nom se tronque à sa gauche, jamais
         // par-dessus.
         let mut droite = rect.right() - 10.0;
+        if temporaire {
+            // Le badge « temporaire », à la couleur des invités : ce salon
+            // s'effacera, et ce qui s'y dit avec.
+            let galley = ui.fonts(|f| {
+                f.layout_no_wrap("temporaire".into(), egui::FontId::proportional(9.5), theme::INVITE)
+            });
+            let taille = Vec2::new(galley.size().x + 8.0, 14.0);
+            let badge = egui::Rect::from_min_size(
+                egui::pos2(droite - taille.x, rect.center().y - taille.y / 2.0),
+                taille,
+            );
+            painter.rect_stroke(
+                badge,
+                egui::CornerRadius::same(4),
+                egui::Stroke::new(1.0_f32, theme::alpha(theme::INVITE, 140)),
+                egui::StrokeKind::Inside,
+            );
+            painter.galley(
+                egui::pos2(badge.left() + 4.0, badge.center().y - galley.size().y / 2.0),
+                galley,
+                theme::INVITE,
+            );
+            droite = badge.left() - 6.0;
+        }
         if let Some(n) = non_lu {
             let texte = if n.nb > 99 { "99+".to_string() } else { n.nb.to_string() };
             let galley = ui.fonts(|f| {
@@ -12305,6 +12608,22 @@ const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_millis(1500)
 /// bot musique. Jamais un compte, jamais un membre.
 fn est_bot(user_id: UserId) -> bool {
     user_id == 0 || user_id == ki_protocol::MUSIQUE_ID
+}
+
+/// Un invité web : le drapeau du serveur, ou sa plage d'identifiants —
+/// l'un ou l'autre suffit, un roster en retard n'y change rien.
+fn est_invite_membre(m: &Member) -> bool {
+    m.invite || ki_protocol::est_invite(m.user_id)
+}
+
+/// La couleur d'un membre : celle de son rôle, sinon son pseudo — et
+/// celle des invités pour un invité, qui n'a ni rôle ni couleur à lui.
+fn couleur_de_membre(m: &Member) -> Color32 {
+    if est_invite_membre(m) {
+        theme::INVITE
+    } else {
+        theme::member_color(m.color, &m.username)
+    }
 }
 
 /// La pastille « BOT », à la couleur d'accent, à côté d'un nom.
@@ -12456,9 +12775,9 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     // c'est le hachage du pseudo, comme avant les rôles. Hors ligne, la
     // couleur s'éteint : présent dans la liste, absent de la pièce.
     let color = if member.online {
-        theme::member_color(member.color, &member.username)
+        couleur_de_membre(member)
     } else {
-        theme::member_color(member.color, &member.username).gamma_multiply(0.45)
+        couleur_de_membre(member).gamma_multiply(0.45)
     };
     let font = egui::FontId::proportional(13.5);
     let galley = ui.fonts(|f| f.layout_no_wrap(member.username.clone(), font, color));
@@ -12493,6 +12812,22 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
             Vec2::new(galley.size().x + 8.0, 14.0),
         );
         painter.rect_filled(pastille, egui::CornerRadius::same(4), ACCENT);
+        painter.galley(
+            egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
+            galley,
+            theme::BG_DEEP,
+        );
+        apres_nom += pastille.width() + 6.0;
+    }
+    if est_invite_membre(member) {
+        // La pastille INVITÉ, même dessin que BOT, à la couleur des
+        // invités : pas un compte, présent le temps d'une porte.
+        let galley = ui.fonts(|f| f.layout_no_wrap("INVITÉ".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
+        let pastille = egui::Rect::from_min_size(
+            egui::pos2(apres_nom + 1.0, name_y - 7.0),
+            Vec2::new(galley.size().x + 8.0, 14.0),
+        );
+        painter.rect_filled(pastille, egui::CornerRadius::same(4), theme::INVITE);
         painter.galley(
             egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
             galley,
@@ -12725,6 +13060,8 @@ fn message_block(
                             pastille_bot(ui).on_hover_text(
                                 "le serveur lui-même : il poste le fil de jeu, il n'a pas de compte",
                             );
+                        } else if ki_protocol::est_invite(msg.user_id) {
+                            porte_ui::pastille_invite(ui);
                         }
                         ui.label(
                             RichText::new(format_time(msg.ts))
@@ -13677,6 +14014,8 @@ impl eframe::App for KiApp {
                     self.close_account();
                 } else if self.soundboard.ouvert {
                     self.soundboard.ouvert = false;
+                } else if self.portes.ouvert {
+                    self.portes.ouvert = false;
                 } else if self.fiche.is_some() {
                     self.fiche = None;
                     self.valo.fermer_fiche();

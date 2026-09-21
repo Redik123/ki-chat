@@ -25,6 +25,7 @@ Serveur de chat privé façon Discord, 100 % Rust, taillé pour le jeu entre ami
    - [Visionneuse média & Téléversement par morceaux](#visionneuse-média--téléversement-par-morceaux)
    - [Intégration VALORANT](#intégration-valorant)
    - [Bot musique de groupe](#bot-musique-de-groupe)
+   - [Porte web : inviter sans compte](#porte-web--inviter-sans-compte)
    - [Sécurité, Rôles & Modération](#sécurité-rôles--modération)
 5. [Architecture & Développement](#architecture--développement)
    - [Organisation des crates](#organisation-des-crates)
@@ -121,7 +122,8 @@ Pour les utilisateurs de **Portainer**, copiez simplement le fichier [`deploy/do
 
 Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 - **Port 9987/udp (INDISPENSABLE)** : Tout le trafic applicatif (authentification, chat, présence, salons vocaux SFU, diffusion d'écran en direct) transite sur ce port unique. Si ce port UDP n'est pas redirigé ou ouvert dans votre pare-feu, les clients ne pourront pas se connecter.
-- **Port 8080/tcp (HTTPS)** : Utilisé exclusivement pour le téléchargement direct des fichiers/médias partagés et la consultation sécurisée des diagnostics par l'administrateur.
+- **Port 8080/tcp (HTTPS)** : Utilisé pour le téléchargement direct des fichiers/médias partagés, la consultation sécurisée des diagnostics par l'administrateur, et les pages des portes web (avec l'avertissement du navigateur : certificat auto-signé).
+- **Port 443/tcp (facultatif, 0.1.44)** : Une seconde écoute HTTPS du même serveur derrière un certificat public (`KI_TLS_CERT` / `KI_TLS_KEY`, relu chaque heure), pour que le lien d'une porte web s'ouvre sans avertissement — `https://ton-domaine/salon1`. Le 8080, épinglé par les clients, ne change pas. Guide : [`deploy/DEPLOY-DOCKER.md`](deploy/DEPLOY-DOCKER.md), « Porte web et certificat public ».
 
 ### Mises à jour automatiques
 
@@ -145,7 +147,10 @@ Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 | `KI_HENRIK_KEY` | *(vide)* | Clé d'API [HenrikDev](https://docs.henrikdev.xyz) pour l'intégration VALORANT |
 | `KI_FFMPEG` / `KI_FFPROBE` | `ffmpeg` / `ffprobe` | Exécutables vidéo pour la normalisation et l'extraction audio |
 | `KI_YTDLP` | `data/outils/yt-dlp` (mis à jour chaque jour depuis la release yt-dlp), sinon `yt-dlp` | yt-dlp du bot musique ; posé par l'admin, plus de mise à jour automatique |
-| `KI_PUBLIC_URL` | *(l'adresse par laquelle le client parle au serveur)* | Adresse publique (`https://hote:port`) pour les liens que suit un téléphone (QR code de l'atelier) |
+| `KI_PUBLIC_URL` | *(l'adresse par laquelle le client parle au serveur)* | Adresse publique (`https://hote:port`) pour les liens que suit un téléphone (QR code de l'atelier) et le lien des portes web |
+| `KI_PUBLIC_QUIC` | *(l'hôte de `KI_PUBLIC_URL` et `KI_UDP_PORT`)* | Adresse à saisir dans ki-chat (`hote:9987`), telle qu'une invitation offerte par une porte web la donne |
+| `KI_TLS_CERT` / `KI_TLS_KEY` | *(vides)* | Certificat public et sa clé (PEM, Let's Encrypt) : ouvre une seconde écoute HTTPS pour les navigateurs, relue chaque heure ; l'écoute 8080 ne change pas |
+| `KI_TLS_PORT` | `8443` | Port de cette seconde écoute dans le conteneur (publié sur 443 par Docker) |
 
 ### Diagnostics partagés & Rapports de plantage
 
@@ -234,6 +239,10 @@ Membre virtuel autonome pour animer vos sessions de jeu ([`PLAN-MUSIQUE.md`](PLA
 - **Recherche intégrée** : Saisissez un titre ou collez un lien YouTube / SoundCloud pour garnir la file de lecture partagée.
 - **Playlists du groupe** : Sauvegardez vos files d'écoute préférées et marquez vos morceaux d'une étoile pour les ajouter aux « Favoris ».
 - **Zéro fardeau client** : L'extraction et le réencodage Opus sont gérés à 100 % sur le serveur. Les clients reçoivent un flux audio chiffré similaire à la voix d'un utilisateur ordinaire, réglable individuellement en volume.
+
+### Porte web : inviter sans compte
+
+- **Porte web (0.1.44)** : Un membre qui peut créer des invitations ouvre une porte (`salon1`, 30 min à 2 h) depuis le bouton « Portes » de la barre latérale, et donne le lien — `https://ton-domaine/s/salon1`, avec son QR code — à quelqu'un qui n'a ni compte ni l'application. La page (servie par le serveur, sans dépendance, mobile d'abord) demande un nom ; les membres qui peuvent expulser voient « Kevin veut rejoindre par le web », acceptent ou refusent en un clic ; et l'invité lit et écrit, marqué « (web) », dans un salon textuel temporaire — rien d'autre : ni la liste des salons, ni celle des membres. Un membre peut aussi l'amener dans **son** salon vocal : la voix passe par la même WebSocket (Opus via WebCodecs), le serveur chiffre et déchiffre à sa place. Le salon est effacé à la fermeture, dix minutes sans invité ou deux heures au plus. Tout est borné (cinq portes, vingt invités, une demande par adresse, limiteur, sas, budget d'écriture) et journalisé dans l'audit. « Lui offrir ki-chat » poste le lien de téléchargement dans le salon et pousse à la page de l'invité — à lui seul, jamais dans le salon lu par les autres invités — un code d'invitation à usage unique de sept jours. Voir [`PLAN-PORTE.md`](PLAN-PORTE.md).
 
 ### Sécurité, Rôles & Modération
 
@@ -360,6 +369,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **Non-lus et mentions (0.1.43)** — Le serveur tient le « dernier lu » de chacun par salon (`lus.json`, écrit à retardement) et prévient les non-lecteurs d'un salon qu'il s'y écrit quelque chose (`Nouveau`) : pastille avec le nombre sur chaque salon textuel, à l'accent quand on y est nommé, compteur dans le titre de la fenêtre, séparateur « nouveaux messages » à l'entrée du salon, son de mention distinct et clignotement insistant de la barre des tâches. Réglage ⚙ → Sons & notifications : tout / mentions seulement / rien (les pastilles restent). Un client d'avant ne voit rien de neuf ; un client neuf face à un serveur d'avant ne compte que le salon ouvert.
 - [x] **Poke (0.1.43)** — Clic droit sur un membre → « Poke » : un son et un clignotement chez lui, rien d'autre — pour appeler qui traîne dans les menus sans lui écrire. Le serveur refuse, motif en bannière, s'il est hors ligne, en vocal (il entend déjà), en partie (on ne le dérange pas) ou s'il a décoché ⚙ « Accepter les pokes » ; puis borne : un poke par paire toutes les cinq minutes, trois d'affilée par émetteur puis un toutes les 200 s, limites qui survivent aux reconnexions. Le bouton est grisé d'avance avec le motif, et masqué face à un serveur d'avant.
 - [x] **Zone de notification (0.1.43)** — La croix ne quitte plus ki-chat : la fenêtre se réduit à côté de l'horloge (icône avec menu Ouvrir / Quitter, clic ou double-clic pour rouvrir) et tout continue — messages, sons, pokes, vocal, push-to-talk, reprise réseau — parce que la fenêtre reste une fenêtre que Windows repeint (cloakée par le compositeur et minimisée, bouton de la barre des tâches retiré ; jamais cachée, ce qui gèle `update()`). Réduit, l'icône porte une pastille et compte les non-lus dans son tooltip. Un garde-fou rouvre la fenêtre de force si elle ne peint plus pendant trois secondes, et une relance ou une mise à jour survenue réduit repart réduit (`--reduit`). Réglage ⚙ → Sons & notifications, coché par défaut, expliqué à la première fermeture.
+- [x] **Porte web (0.1.44)** — Un lien vers un salon textuel temporaire pour des invités sans compte : page servie par le serveur (`/s/salon1`, WebSocket parlant le JSON du protocole, CSP sans `unsafe-inline`), demande d'accès approuvée en bannière par l'hôte ou qui peut expulser, invité marqué « (web) » dans une plage d'identifiants réservée, vocal par la même WebSocket avec chiffrement par le serveur, plafonds et audit, salon effacé à la fermeture, code d'invitation offert en un clic. Côté déploiement, une seconde écoute HTTPS (`KI_TLS_CERT` / `KI_TLS_KEY`, 443) sert le même routeur derrière un certificat public relu chaque heure, sans toucher au 8080 épinglé. Un client d'avant ne voit qu'un salon textuel de plus.
 
 ### Perspectives & Prochains jalons
 

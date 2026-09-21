@@ -41,6 +41,10 @@ const FORGET_AFTER: Duration = Duration::from_secs(15 * 60);
 /// limiteur deviendrait lui-même un moyen d'épuiser la mémoire : il suffit
 /// d'essayer des pseudos tous différents.
 const MAX_ENTRIES: usize = 4096;
+/// Autant d'échecs d'un coup qu'il en faut pour que le prochain essai
+/// attende le délai maximal : les gratuits, puis les doublements de 2 s
+/// jusqu'à 60 s (2 × 2⁵ = 64 s, plafonné).
+const ECART_ECHECS: u32 = FREE_ATTEMPTS + 6;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Key {
@@ -68,6 +72,18 @@ impl Throttle {
     /// Enregistre un échec : le prochain essai sera plus lent.
     pub fn record_failure(&self, ip: IpAddr, username: &str) {
         self.record_failure_at(ip, username, Instant::now());
+    }
+
+    /// Tient à l'écart : autant d'échecs d'un coup qu'il en faut pour que
+    /// le prochain essai attende le délai maximal, puis la pente ordinaire
+    /// — l'ardoise s'efface toujours après un quart d'heure de calme. C'est
+    /// ce que fait une porte web d'une adresse qu'on vient de refuser ou
+    /// d'expulser : elle peut revenir, pas dans la seconde.
+    pub fn ecarter(&self, ip: IpAddr, username: &str) {
+        let now = Instant::now();
+        for _ in 0..ECART_ECHECS {
+            self.record_failure_at(ip, username, now);
+        }
     }
 
     /// Efface l'ardoise après une authentification réussie.
@@ -166,6 +182,24 @@ mod tests {
         // Plafonné, et sans débordement même pour un compteur absurde.
         assert_eq!(required_gap(FREE_ATTEMPTS + 40), MAX_DELAY);
         assert_eq!(required_gap(u32::MAX), MAX_DELAY);
+    }
+
+    /// Tenu à l'écart, on attend tout de suite le délai maximal — et pas
+    /// davantage : la table n'a rien d'infini à retenir.
+    #[test]
+    fn ecarter_impose_le_delai_maximal_d_un_coup() {
+        // La porte web n'a pas de compte : l'adresse sert deux fois de clé.
+        let throttle = Throttle::default();
+        let start = Instant::now();
+        assert!(throttle.check_at(IP, &IP.to_string(), start).is_ok());
+        throttle.ecarter(IP, &IP.to_string());
+        let attente = throttle.check_at(IP, &IP.to_string(), Instant::now()).unwrap_err();
+        assert!(attente > MAX_DELAY - Duration::from_secs(1), "{attente:?}");
+        assert!(attente <= MAX_DELAY);
+        assert_eq!(required_gap(ECART_ECHECS), MAX_DELAY);
+        assert!(required_gap(ECART_ECHECS - 1) < MAX_DELAY, "pas un échec de trop");
+        // Une autre adresse n'en sait rien.
+        assert!(throttle.check_at(OTHER_IP, &OTHER_IP.to_string(), Instant::now()).is_ok());
     }
 
     #[test]

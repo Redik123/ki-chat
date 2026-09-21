@@ -39,6 +39,9 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     // Quelqu'un me poke : deux notes brèves, répétées — un « toc toc » qui
     // ne ressemble à aucun message, et qu'on entend fenêtre réduite.
     sounds.insert("poke".into(), seq(&[(659.3, 60), (880.0, 60), (659.3, 60), (880.0, 120)], 0.42));
+    // Quelqu'un frappe à une porte web : un carillon de porte, deux notes
+    // descendantes et tenues — « ding, dong » — que rien d'autre ne fait.
+    sounds.insert("porte".into(), seq(&[(659.3, 160), (523.3, 260)], 0.4));
     sounds
 }
 
@@ -86,6 +89,7 @@ mod tests {
             "micro-actif",
             "clip",
             "poke",
+            "porte",
         ] {
             let pcm = sounds.get(name).unwrap_or_else(|| panic!("son manquant : {name}"));
             assert!(!pcm.is_empty());

@@ -29,10 +29,10 @@ use windows::Win32::Media::Audio::{
     ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
     IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Vtbl,
     IAudioCaptureClient, IAudioClient, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
-    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::BLOB;
@@ -115,11 +115,21 @@ unsafe extern "system" fn rappel_qi(
 }
 
 unsafe extern "system" fn rappel_add_ref(this: *mut c_void) -> u32 {
-    unsafe { (*(this as *mut Rappel)).count.fetch_add(1, Ordering::AcqRel) + 1 }
+    unsafe {
+        (*(this as *mut Rappel))
+            .count
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
 }
 
 unsafe extern "system" fn rappel_release(this: *mut c_void) -> u32 {
-    let n = unsafe { (*(this as *mut Rappel)).count.fetch_sub(1, Ordering::AcqRel) - 1 };
+    let n = unsafe {
+        (*(this as *mut Rappel))
+            .count
+            .fetch_sub(1, Ordering::AcqRel)
+            - 1
+    };
     if n == 0 {
         drop(unsafe { Box::from_raw(this as *mut Rappel) });
     }
@@ -138,8 +148,10 @@ unsafe extern "system" fn rappel_activate_completed(
         unsafe { op.GetActivateResult(&mut hr, &mut iface) }
             .context("résultat d'activation de la boucle")?;
         hr.ok().context("la boucle audio est refusée")?;
-        let client: IAudioClient =
-            iface.context("client audio absent")?.cast().context("IAudioClient")?;
+        let client: IAudioClient = iface
+            .context("client audio absent")?
+            .cast()
+            .context("IAudioClient")?;
         let fmt = engine_format(2);
         unsafe {
             client.Initialize(
@@ -172,7 +184,11 @@ unsafe extern "system" fn rappel_activate_completed(
 
 /// Un rappel neuf, une référence (la nôtre) ; l'interface la porte.
 fn rappel_neuf(tx: mpsc::Sender<Pret>) -> IActivateAudioInterfaceCompletionHandler {
-    let obj = Box::into_raw(Box::new(Rappel { vtable: &VTABLE, count: AtomicU32::new(1), tx }));
+    let obj = Box::into_raw(Box::new(Rappel {
+        vtable: &VTABLE,
+        count: AtomicU32::new(1),
+        tx,
+    }));
     unsafe { IActivateAudioInterfaceCompletionHandler::from_raw(obj as *mut c_void) }
 }
 
@@ -246,7 +262,10 @@ pub fn open_loopback(
         })
         .context("création du fil de boucle audio")?;
     match ready_rx.recv() {
-        Ok(Ok(())) => Ok(NativeStream { stop, thread: Some(thread) }),
+        Ok(Ok(())) => Ok(NativeStream {
+            stop,
+            thread: Some(thread),
+        }),
         Ok(Err(e)) => {
             let _ = thread.join();
             Err(e)
@@ -254,7 +273,9 @@ pub fn open_loopback(
         Err(_) => {
             stop.store(true, Ordering::Relaxed);
             let _ = thread.join();
-            Err(anyhow!("le fil de boucle audio s'est arrêté avant d'ouvrir"))
+            Err(anyhow!(
+                "le fil de boucle audio s'est arrêté avant d'ouvrir"
+            ))
         }
     }
 }

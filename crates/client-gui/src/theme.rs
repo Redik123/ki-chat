@@ -44,6 +44,9 @@ pub const SPEAK: Color32 = Color32::from_rgb(0x00, 0xe6, 0x76);
 pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
 pub const WARN: Color32 = Color32::from_rgb(0xff, 0xa1, 0x57);
 pub const INFO: Color32 = Color32::from_rgb(0x58, 0xa6, 0xff);
+/// Les invités web : un ambre à part, ni l'accent (le bot, le serveur)
+/// ni une couleur de rôle — « pas des nôtres, le temps d'une porte ».
+pub const INVITE: Color32 = Color32::from_rgb(0xf0, 0xb8, 0x6c);
 
 /// Couleurs de pseudos, stables par hachage du nom.
 const PALETTE: [Color32; 8] = [

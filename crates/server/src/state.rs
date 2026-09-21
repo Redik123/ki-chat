@@ -330,7 +330,7 @@ pub struct Sas {
 ///
 /// Il ne borne que la traversée du sas, qui dure au plus le délai
 /// d'authentification : une fois entré, on ne compte plus.
-const SAS_MAX_PAR_IP: u32 = 32;
+pub(crate) const SAS_MAX_PAR_IP: u32 = 32;
 
 impl Sas {
     /// Fait entrer une connexion, ou refuse si l'adresse en fait déjà trop
@@ -459,6 +459,10 @@ pub struct AppState {
     pub lus: crate::lus::Lus,
     /// Les limites des pokes, tenues ici pour survivre aux reconnexions.
     pub pokes: crate::pokes::Pokes,
+    /// Les portes web : les salons temporaires ouverts aux invités sans
+    /// compte, qui attend derrière et qui est entré. **En mémoire
+    /// seulement** — une porte ne survit pas au redémarrage.
+    pub portes: crate::porte::Portes,
 }
 
 impl AppState {
@@ -508,7 +512,53 @@ impl AppState {
             jetons_telephone: Default::default(),
             lus: crate::lus::Lus::open(data_dir),
             pokes: Default::default(),
+            portes: Default::default(),
         })
+    }
+
+    /// Crée un salon et, s'il est textuel, ouvre son journal **avant** de
+    /// le rendre : `History::append` ignore en silence un salon qu'il ne
+    /// connaît pas, et le premier message partirait dans le vide. La même
+    /// séquence sert au salon d'administration et au salon temporaire d'une
+    /// porte web — `expire_le` ne se pose que sur ce dernier.
+    ///
+    /// L'annonce (`push_channels`) reste à l'appelant : il a parfois autre
+    /// chose à poser avant qu'on le voie.
+    pub fn creer_salon(
+        &self,
+        name: &str,
+        kind: ki_protocol::ChannelKind,
+        allowed_roles: Option<Vec<ki_protocol::RoleId>>,
+        expire_le: Option<u64>,
+    ) -> Result<ChannelInfo, String> {
+        let channel = self.channels.create_with(name, kind, allowed_roles, expire_le)?;
+        if channel.kind == ki_protocol::ChannelKind::Text {
+            if let Err(e) = self.history.open_channel(&self.data_dir, channel.id) {
+                tracing::error!("journal du salon {} : {e:#}", channel.id);
+            }
+        }
+        Ok(channel)
+    }
+
+    /// Efface un salon temporaire : journal fermé puis **supprimé**, verrou
+    /// vocal oublié. Le retour à la cohérence de tout le monde
+    /// (`reconcile_memberships`) reste à l'appelant, qui a souvent d'autres
+    /// choses à dire avant.
+    ///
+    /// La fermeture du journal passe par la file du fil d'écriture ; on
+    /// attend qu'il l'ait traitée avant d'effacer le fichier — sous Windows,
+    /// un fichier encore ouvert ne s'efface pas. L'attente est bornée, et
+    /// courte en pratique : c'est une commande de plus dans une file qui se
+    /// vide en continu.
+    pub fn effacer_salon(&self, channel: ChannelId) -> Result<ChannelInfo, String> {
+        self.history.close_channel(channel);
+        self.history
+            .attendre_ecritures(std::time::Duration::from_secs(2));
+        self.voice_locks.lock().unwrap().remove(&channel);
+        // Les repères de lecture qu'on y avait posés : effacés avec lui,
+        // sans quoi lus.json grossirait d'une ligne par membre et par porte.
+        self.lus.oublier(channel);
+        self.channels.delete_and_forget(&self.data_dir, channel)
     }
 
     /// Reconstruit la table de routage voix depuis l'état des connexions.
@@ -547,6 +597,9 @@ impl AppState {
                 .collect()
         };
         *self.voice_routes.write().unwrap() = router(monde);
+        // Les invités web à l'écoute d'un salon vocal : qui y est a peut-être
+        // changé, et c'est tout ce qu'ils savent du salon.
+        crate::porte::annoncer_occupants(self);
     }
 
     /// Vrai si le salon existe **et** est de la nature attendue : on ne
@@ -715,6 +768,9 @@ impl AppState {
         if voice_changed {
             self.rebuild_voice_routes();
         }
+        // Les invités web aussi : un salon vocal supprimé sous leurs pieds
+        // les en sort, comme les membres.
+        crate::porte::verifier_vocaux(self);
         self.push_channels();
         self.broadcast_all(&ServerMsg::Members {
             members: self.roster(),
@@ -779,6 +835,12 @@ impl AppState {
                 let _ = u.tx.send_line(&line);
             }
         }
+        // La même ligne aux invités web attachés à ce salon, s'il en a. Tout
+        // ce qui passe ici — messages, réactions, corrections, suppressions
+        // — leur parvient tel quel ; rien de ce qui passe ailleurs
+        // (`broadcast_all`, `send_to`) ne les atteint jamais. C'est ce qui
+        // fait qu'un invité ne voit que son salon.
+        self.portes.diffuser(channel, &line);
     }
 
     /// Le complément de `broadcast` : à tous ceux qui **peuvent voir** le
@@ -936,6 +998,7 @@ impl AppState {
             color: u.color,
             rank: u.rank,
             online: true,
+            invite: false,
         })
     }
 
@@ -1022,6 +1085,7 @@ impl AppState {
                 color: u.color,
                 rank: u.rank,
                 online: true,
+                invite: false,
             })
             .collect();
         drop(users);
@@ -1054,6 +1118,7 @@ impl AppState {
                 color: self.roles.color_of(&account.roles),
                 rank: account.rank,
                 online: false,
+                invite: false,
             });
         }
         // `cached` et non `sort_by_key` : la clé est une String, donc une
@@ -1083,8 +1148,13 @@ impl AppState {
                 online: true,
                 color: None,
                 rank: 0,
+                invite: false,
             });
         }
+        // Les invités web, en ligne le temps d'une porte : les membres les
+        // voient dans la liste, à part. Ils ne sont jamais dans `users` —
+        // pas de connexion QUIC, pas de rôle, pas de permission.
+        members.extend(self.portes.membres());
         members
     }
 

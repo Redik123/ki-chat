@@ -1,0 +1,566 @@
+/* La porte web de ki-chat — feuille servie à côté de porte.html.
+   Thème sombre du client (theme.rs) : fonds 0c0f14 / 151a21 / 1b212a,
+   texte e7edf4 / 94a2b2, accent 00d26a, danger ff6b6b. Mobile d'abord :
+   une colonne, 16 px de marge, le champ de saisie collé en bas. */
+
+:root {
+  --fond: #0c0f14;
+  --panneau: #151a21;
+  --releve: #1b212a;
+  --survol: #242c37;
+  --bord: #26303c;
+  --texte: #e7edf4;
+  --texte-dim: #94a2b2;
+  --texte-faible: #63707f;
+  --accent: #00d26a;
+  --accent-fonce: #00a352;
+  --danger: #ff6b6b;
+  --alerte: #ffb454;
+  --rayon: 12px;
+  --marge: 16px;
+  --police: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+/* Les états se montrent et se cachent par l'attribut `hidden` : il gagne
+   sur tout `display` posé plus bas. */
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--fond);
+  color: var(--texte);
+  font: 16px/1.45 var(--police);
+  -webkit-text-size-adjust: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* ---- En-tête ---- */
+
+.entete {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(12px + env(safe-area-inset-top)) var(--marge) 12px;
+  background: var(--panneau);
+  border-bottom: 1px solid var(--bord);
+}
+
+.logo { width: 36px; height: 36px; flex: none; }
+
+.entete-texte { min-width: 0; flex: 1; }
+
+h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sous-titre {
+  margin: 0;
+  font-size: 13px;
+  color: var(--texte-dim);
+}
+
+.statut {
+  flex: none;
+  font-size: 12px;
+  color: var(--texte-dim);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--releve);
+  min-height: 24px;
+}
+.statut:empty { display: none; }
+.statut.ok { color: var(--accent); }
+.statut.danger { color: var(--danger); }
+
+/* ---- Corps ---- */
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.carte {
+  margin: var(--marge);
+  padding: 20px var(--marge);
+  background: var(--panneau);
+  border: 1px solid var(--bord);
+  border-radius: var(--rayon);
+}
+
+h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+
+.intro, .attente-info, .compteur { color: var(--texte-dim); margin: 0 0 16px; }
+
+.aide { color: var(--texte-faible); font-size: 13px; margin: 8px 0 0; }
+
+.erreur {
+  color: var(--danger);
+  font-size: 14px;
+  margin: 10px 0 0;
+}
+
+label { display: block; font-size: 14px; color: var(--texte-dim); margin-bottom: 6px; }
+
+input[type="text"], textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 16px; /* moins, iOS zoome */
+  color: var(--texte);
+  background: var(--fond);
+  border: 1px solid var(--bord);
+  border-radius: 10px;
+  padding: 12px 14px;
+  min-height: 44px;
+  outline: none;
+}
+input[type="text"]:focus-visible, textarea:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 210, 106, .25);
+}
+input[aria-invalid="true"] { border-color: var(--danger); }
+
+button, .lien-bouton {
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+button:focus-visible, a:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+.principal {
+  background: var(--accent);
+  color: #06210f;
+  width: 100%;
+  margin-top: 16px;
+}
+.principal:not(:disabled):hover { background: var(--accent-fonce); color: #fff; }
+
+.secondaire {
+  background: var(--releve);
+  color: var(--texte);
+  border-color: var(--bord);
+}
+.secondaire:not(:disabled):hover { background: var(--survol); }
+.carte .secondaire { width: 100%; margin-top: 8px; }
+
+.petit, .carte .petit { min-height: 32px; padding: 4px 12px; font-size: 13px; width: auto; margin: 0; flex: none; }
+
+.croix {
+  background: transparent;
+  color: var(--texte-dim);
+  min-height: 32px;
+  min-width: 32px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+}
+.croix:hover { color: var(--texte); }
+
+/* ---- Attente ---- */
+
+.pulsation {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin: 4px 0 14px;
+  animation: pulser 1.6s ease-in-out infinite;
+}
+@keyframes pulser {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 210, 106, .55); }
+  70% { box-shadow: 0 0 0 14px rgba(0, 210, 106, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulsation { animation: none; }
+}
+
+#attente-compteur { font-variant-numeric: tabular-nums; color: var(--texte); }
+
+/* ---- Salon ---- */
+
+.salon {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.presence {
+  padding: 8px var(--marge);
+  font-size: 13px;
+  color: var(--texte-dim);
+  background: var(--panneau);
+  border-bottom: 1px solid var(--bord);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.presence-titre { color: var(--texte-faible); margin-right: 4px; }
+.presence .web { color: var(--accent); }
+
+.bandeau {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px var(--marge) 0;
+  padding: 8px 8px 8px 12px;
+  border-radius: 10px;
+  background: var(--releve);
+  border: 1px solid var(--bord);
+  font-size: 14px;
+}
+.bandeau > span { flex: 1; }
+.bandeau.danger { border-color: var(--danger); color: var(--danger); }
+.bandeau.alerte { border-color: var(--alerte); color: var(--alerte); }
+.bandeau.ok { border-color: var(--accent); color: var(--accent); }
+
+.fil {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 8px var(--marge) 8px;
+  list-style: none;
+}
+
+.fil:empty::before {
+  content: "Personne n'a encore rien dit. Lance-toi.";
+  display: block;
+  color: var(--texte-faible);
+  text-align: center;
+  padding: 32px 0;
+}
+
+.msg {
+  padding: 6px 0;
+  border-radius: 8px;
+  animation: apparaitre .15s ease-out;
+}
+@keyframes apparaitre { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .msg { animation: none; } }
+
+.msg-tete {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+}
+.auteur { font-weight: 600; color: var(--texte); overflow: hidden; text-overflow: ellipsis; }
+.msg.moi .auteur { color: var(--accent); }
+.msg.web .auteur::after {
+  content: "web";
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #06210f;
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.msg.web.moi .auteur::after { background: var(--texte-dim); }
+.heure { color: var(--texte-faible); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+.modifie { color: var(--texte-faible); font-size: 12px; font-style: italic; }
+
+.texte {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reponse {
+  margin: 2px 0 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--bord);
+  color: var(--texte-dim);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reponse .auteur { font-size: 13px; }
+
+.reactions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.reactions:empty { display: none; }
+.reaction {
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--releve);
+  border: 1px solid var(--bord);
+}
+
+.msg.systeme, .msg.info {
+  font-size: 13px;
+  color: var(--texte-dim);
+  text-align: center;
+  padding: 4px 0;
+}
+.msg.systeme .texte, .msg.info .texte { margin: 0; white-space: normal; }
+/* « Kevin (web) a rejoint » : le texte suffit, sans auteur ni heure. */
+.msg.systeme .msg-tete { display: none; }
+
+/* ---- Saisie ---- */
+
+.saisie {
+  padding: 8px var(--marge) calc(8px + env(safe-area-inset-bottom));
+  background: var(--panneau);
+  border-top: 1px solid var(--bord);
+}
+.saisie textarea {
+  resize: none;
+  max-height: 160px;
+  line-height: 1.4;
+}
+.saisie-barre {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.compteur-texte {
+  color: var(--texte-faible);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  flex: 1;
+}
+.compteur-texte.limite { color: var(--alerte); }
+.compteur-texte.trop { color: var(--danger); }
+.envoyer { width: auto; margin: 0; padding: 8px 20px; min-height: 40px; }
+.saisie-aide { display: none; margin: 6px 0 0; }
+@media (min-width: 640px) { .saisie-aide { display: block; } }
+
+/* Cadence d'envoi : trois points, un par message que le serveur nous
+   laisse envoyer d'un coup. Un point s'éteint à chaque envoi et se rallume
+   avec le temps. */
+.debit { display: inline-flex; gap: 4px; align-items: center; }
+.debit i {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: background .3s, opacity .3s;
+}
+.debit i.vide { background: var(--texte-faible); opacity: .5; }
+.debit.serre i:not(.vide) { background: var(--alerte); }
+
+/* ---- Vocal ---- */
+
+.vocal {
+  padding: 0 var(--marge) calc(8px + env(safe-area-inset-bottom));
+  background: var(--panneau);
+}
+.vocal .secondaire { width: 100%; }
+.vocal .aide { margin: 6px 0 0; }
+
+.vocal-controles {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--bord);
+  border-radius: 10px;
+  background: var(--releve);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vocal-controles p { margin: 0; }
+
+.vocal-tete {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--texte-dim);
+}
+.vocal-salon-ligne { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vocal-salon-ligne strong { color: var(--texte); font-weight: 600; }
+.vocal-latence {
+  flex: none;
+  font-size: 12px;
+  color: var(--texte-faible);
+  font-variant-numeric: tabular-nums;
+}
+
+/* « Tu parles » : vert et net ; « Micro coupé » : rouge ; sinon discret. */
+.vocal-indicateur {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--texte-faible);
+  transition: color .15s;
+}
+.vocal-indicateur.parle { color: var(--accent); }
+.vocal-indicateur.coupe { color: var(--danger); }
+.vocal-indicateur.parle::before {
+  content: "";
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 6px;
+  vertical-align: 1px;
+  animation: pulser 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .vocal-indicateur.parle::before { animation: none; } }
+
+.vocal-qui { font-size: 14px; color: var(--texte-dim); }
+.vocal-qui.parle { color: var(--texte); }
+.vocal-occupants { font-size: 13px; color: var(--texte-faible); overflow-wrap: anywhere; }
+
+/* Le niveau du micro : une barre de −70 à −10 dB, le seuil marqué dessus.
+   La barre passe au vert quand on émet. */
+.vocal-niveau {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--fond);
+  overflow: hidden;
+}
+/* La barre est pleine et s'étire par une transformation, pas par sa
+   largeur : le niveau change dix fois par seconde, et animer une largeur
+   ferait recalculer la mise en page à chaque fois — sur un téléphone, ça
+   se voit. */
+#vocal-niveau-barre {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  border-radius: 3px;
+  background: var(--texte-faible);
+  transition: transform .1s linear, background .15s;
+}
+#vocal-niveau-barre.ouvert { background: var(--accent); }
+#vocal-niveau-seuil {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--alerte);
+}
+
+.vocal-boutons { display: flex; flex-wrap: wrap; gap: 8px; }
+.vocal-boutons .secondaire { width: auto; flex: 1 1 auto; margin: 0; }
+.vocal-controles [aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* « Maintenir pour parler » : large, pas de sélection ni de menu
+   contextuel sous le doigt, aucune interprétation de geste par le
+   navigateur pendant qu'on appuie. */
+.vocal-boutons .parler {
+  flex: 1 1 100%;
+  min-height: 56px;
+  font-size: 17px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.vocal-boutons .parler[aria-pressed="true"] {
+  background: var(--accent);
+  color: #06210f;
+  border-color: var(--accent);
+}
+
+.vocal-reglage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--texte-dim);
+  white-space: nowrap;
+}
+.vocal-reglage input { flex: 1; min-width: 0; accent-color: var(--accent); height: 28px; margin: 0; }
+
+/* ---- Carte d'invitation ---- */
+
+.invitation {
+  position: relative;
+  border-color: var(--accent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .45);
+  animation: apparaitre .2s ease-out;
+}
+.invitation .croix { position: absolute; top: 8px; right: 8px; }
+.invitation p { color: var(--texte-dim); margin: 0 0 12px; }
+.invitation-champs { margin: 0 0 16px; }
+.invitation-champs dt { font-size: 12px; color: var(--texte-faible); text-transform: uppercase; letter-spacing: .05em; }
+.invitation-champs dd {
+  margin: 4px 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.invitation-champs code {
+  font-family: var(--mono);
+  font-size: 15px;
+  background: var(--fond);
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  padding: 6px 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.invitation-champs code.code { font-size: 20px; letter-spacing: .06em; color: var(--accent); }
+.lien-bouton { margin-top: 0; }
+
+/* Le salon remplit l'écran : l'en-tête et les cartes gardent leurs
+   marges, la carte d'invitation flotte par-dessus le fil. */
+.salon:not([hidden]) ~ .invitation {
+  position: fixed;
+  left: var(--marge);
+  right: var(--marge);
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  max-width: 688px;
+  max-height: calc(100dvh - 180px);
+  overflow-y: auto;
+  margin: 0 auto;
+  z-index: 2;
+}
+
+.visuellement-cache {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (min-width: 720px) {
+  main { border-left: 1px solid var(--bord); border-right: 1px solid var(--bord); }
+  .carte { margin: 24px var(--marge); }
+}

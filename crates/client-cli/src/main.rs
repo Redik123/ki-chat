@@ -331,6 +331,17 @@ async fn main() -> anyhow::Result<()> {
                 | ServerMsg::StreamMetaChanged { .. }
                 | ServerMsg::StreamBudget { .. }
                 | ServerMsg::MessageEdited { .. } => {}
+                // Les portes web : le terminal dit ce qui se passe, il n'a
+                // pas de bouton pour y répondre.
+                ServerMsg::PorteOuverte { slug, url, .. } => println!("* porte {slug} ouverte : {url}"),
+                ServerMsg::PorteDemande { slug, nom, ip_masquee, .. } => {
+                    println!("* {nom} ({ip_masquee}) frappe à la porte {slug}");
+                }
+                ServerMsg::PorteEtat { slug, invites, demandes, .. } => {
+                    println!("* porte {slug} : {} invité(s), {} demande(s)", invites.len(), demandes.len());
+                }
+                ServerMsg::PorteFermee { slug, motif } => println!("* porte {slug} fermée : {motif}"),
+                ServerMsg::PorteInvitation { .. } => {}
             }
         }
         println!("connexion fermée par le serveur");

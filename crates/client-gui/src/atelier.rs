@@ -2150,7 +2150,7 @@ fn ip_locale() -> Option<std::net::IpAddr> {
 
 /// Le QR code d'un lien, en image : un module = 6 pixels, une marge de
 /// quatre modules — ce que les téléphones lisent sans hésiter.
-fn qr_image(texte: &str) -> Option<egui::ColorImage> {
+pub(crate) fn qr_image(texte: &str) -> Option<egui::ColorImage> {
     let code = qrcode::QrCode::new(texte.as_bytes()).ok()?;
     let n = code.width();
     let couleurs = code.to_colors();

@@ -107,6 +107,7 @@ pub fn composer(state: &AppState) -> TableauAdmin {
         valorant: state.valorant.compteurs_texte(),
         diagnostics: crate::diag::lignes_resume(&crate::diag::diag_dir(state)),
         fabrique: fabrique(state),
+        portes: state.portes.tableau(),
     }
 }
 

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="fr" data-etat="nom">
+<head>
+<meta charset="utf-8">
+<!-- `interactive-widget=resizes-content` : sur Android, le clavier virtuel
+     rétrécit la fenêtre de mise en page, donc les `100dvh` de la colonne —
+     la saisie se pose juste au-dessus du clavier au lieu de rester dessous.
+     iOS ignore l'attribut sans dommage. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0c0f14">
+<meta name="referrer" content="no-referrer">
+<!-- Remplacé par le serveur au service de la page : le nom du serveur,
+     échappé. Sans lui, le script reprend le nom d'hôte. -->
+<meta name="ki-serveur" content="{{serveur}}">
+<title>ki-chat — porte</title>
+<!-- La feuille et le script sont servis à côté, jamais en ligne : la
+     politique de sécurité de contenu n'autorise que ce qui vient d'ici. -->
+<link rel="stylesheet" href="/s/porte.css">
+<script src="/s/porte.js" defer></script>
+</head>
+<body>
+
+<header class="entete">
+  <svg class="logo" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+    <circle cx="18" cy="18" r="17" fill="#151a21" stroke="#00d26a" stroke-width="2"/>
+    <path d="M11 10v16M11 18l8-8M11 18l8 8" fill="none" stroke="#00d26a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="26" cy="12" r="2.5" fill="#00d26a"/>
+  </svg>
+  <div class="entete-texte">
+    <h1 id="nom-serveur">ki-chat</h1>
+    <p class="sous-titre">porte <span id="nom-porte">…</span></p>
+  </div>
+  <span id="statut" class="statut" role="status" aria-live="polite"></span>
+</header>
+
+<main>
+
+  <!-- (a) Le nom -->
+  <section id="etat-nom" class="carte" aria-labelledby="titre-nom">
+    <h2 id="titre-nom">On t'a donné ce lien ?</h2>
+    <p class="intro">Donne-toi un nom : un membre te verra frapper et t'ouvrira. Pas de compte, rien à installer.</p>
+    <form id="form-nom" autocomplete="off" novalidate>
+      <label for="prenom">Ton nom</label>
+      <input id="prenom" name="prenom" type="text" maxlength="32" autocapitalize="words" autocomplete="nickname" enterkeyhint="go" spellcheck="false" required>
+      <p class="aide">Les membres te verront comme « <span id="apercu-nom">Kevin</span> (web) ».</p>
+      <p id="erreur-nom" class="erreur" role="alert" hidden></p>
+      <button id="bouton-demander" class="principal" type="submit">Demander l'accès</button>
+    </form>
+  </section>
+
+  <!-- (b) L'attente -->
+  <section id="etat-attente" class="carte" aria-labelledby="titre-attente" hidden>
+    <div class="pulsation" aria-hidden="true"></div>
+    <h2 id="titre-attente">On a prévenu les membres</h2>
+    <p id="attente-info" class="attente-info" aria-live="polite">Quelqu'un va t'ouvrir. Reste sur cette page.</p>
+    <p class="compteur">Depuis <span id="attente-compteur">0:00</span></p>
+    <button id="bouton-annuler" class="secondaire" type="button">Annuler</button>
+  </section>
+
+  <!-- (c) Le refus -->
+  <section id="etat-refus" class="carte" aria-labelledby="titre-refus" hidden>
+    <h2 id="titre-refus">Pas cette fois</h2>
+    <p id="refus-motif" class="intro">La demande n'a pas abouti.</p>
+    <button id="bouton-reessayer" class="secondaire" type="button">Refrapper</button>
+  </section>
+
+  <!-- (d) Le salon -->
+  <section id="etat-salon" class="salon" aria-label="Salon" hidden>
+    <div class="presence" aria-live="polite">
+      <span class="presence-titre">Ici :</span><span id="presence-liste">personne pour l'instant</span>
+    </div>
+    <div id="bandeau" class="bandeau" role="status" hidden>
+      <span id="bandeau-texte"></span>
+      <button id="bandeau-fermer" class="croix" type="button" aria-label="Fermer ce message">×</button>
+    </div>
+    <ul id="fil" class="fil" aria-live="polite" aria-relevant="additions"></ul>
+    <form id="form-saisie" class="saisie" autocomplete="off">
+      <label for="texte" class="visuellement-cache">Ton message</label>
+      <textarea id="texte" name="texte" rows="1" placeholder="Écris ici…" enterkeyhint="send" autocapitalize="sentences"></textarea>
+      <div class="saisie-barre">
+        <span id="compteur-texte" class="compteur-texte">0 / 4000</span>
+        <span id="debit" class="debit" aria-hidden="true"><i></i><i></i><i></i></span>
+        <button id="bouton-envoyer" class="principal envoyer" type="submit">Envoyer</button>
+      </div>
+      <p class="aide saisie-aide">Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne.</p>
+    </form>
+    <!-- Le vocal. Le bouton ne s'active qu'une fois qu'un membre nous a mis
+         dans un salon vocal (porte_vocal) et si le navigateur sait encoder
+         Opus (WebCodecs) ; sinon la note dit pourquoi. Les contrôles
+         n'apparaissent qu'une fois dedans. -->
+    <div class="vocal">
+      <button id="bouton-vocal" class="secondaire" type="button" disabled title="Un membre doit d’abord te mettre dans un salon vocal">Rejoindre le vocal</button>
+      <p id="vocal-note" class="aide" hidden></p>
+      <div id="vocal-controles" class="vocal-controles" hidden>
+        <div class="vocal-tete">
+          <span class="vocal-salon-ligne">En vocal : <strong id="vocal-salon">vocal</strong></span>
+          <span id="vocal-latence" class="vocal-latence" title="Latence estimée : trame, tampon, sortie audio et moitié de l’aller-retour">≈ … ms</span>
+        </div>
+        <p id="vocal-indicateur" class="vocal-indicateur" role="status" aria-live="polite">Connexion…</p>
+        <p id="vocal-qui" class="vocal-qui" aria-live="polite">Personne ne parle.</p>
+        <p id="vocal-occupants" class="vocal-occupants"></p>
+        <!-- Le niveau du micro, et le seuil au-dessus duquel on émet. -->
+        <div class="vocal-niveau" aria-hidden="true">
+          <div id="vocal-niveau-barre"></div>
+          <div id="vocal-niveau-seuil"></div>
+        </div>
+        <div class="vocal-boutons">
+          <button id="vocal-parler" class="secondaire parler" type="button" aria-pressed="false" title="Maintiens pour parler (Espace ou Entrée au clavier)" hidden>Parler</button>
+          <button id="vocal-sourdine" class="secondaire" type="button" aria-pressed="false">Sourdine</button>
+          <button id="vocal-mode" class="secondaire" type="button">Mode : voix</button>
+        </div>
+        <label id="vocal-seuil-ligne" class="vocal-reglage">Seuil de la voix <input id="vocal-seuil" type="range" min="-70" max="-15" step="1" value="-40"></label>
+        <label class="vocal-reglage">Volume <input id="vocal-volume" type="range" min="0" max="100" value="100"></label>
+        <button id="vocal-quitter" class="secondaire" type="button">Quitter le vocal</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- (e) La carte « Installe ki-chat » — après le salon : elle flotte
+       par-dessus le fil quand il est affiché. -->
+  <section id="carte-invitation" class="carte invitation" aria-labelledby="titre-invitation" hidden>
+    <button id="invitation-replier" class="croix" type="button" aria-label="Replier">×</button>
+    <h2 id="titre-invitation">Installe ki-chat</h2>
+    <p>Un membre t'offre une place : le serveur, un code d'invitation valable sept jours, et l'application.</p>
+    <dl class="invitation-champs">
+      <dt>Serveur</dt>
+      <dd><code id="invitation-serveur"></code><button class="secondaire petit" type="button" data-copie="invitation-serveur">Copier</button></dd>
+      <dt>Code d'invitation</dt>
+      <dd><code id="invitation-code" class="code"></code><button class="secondaire petit" type="button" data-copie="invitation-code">Copier</button></dd>
+    </dl>
+    <a id="invitation-telechargement" class="lien-bouton principal" href="https://github.com/Redik123/ki-chat/releases/latest" target="_blank" rel="noopener noreferrer">Télécharger ki-chat</a>
+  </section>
+
+  <!-- (f) La fin -->
+  <section id="etat-ferme" class="carte" aria-labelledby="titre-ferme" hidden>
+    <h2 id="titre-ferme">Salon fermé</h2>
+    <p id="ferme-motif" class="intro">Le salon a fermé.</p>
+    <p class="aide">Tu peux fermer cet onglet. Si un membre t'a offert ki-chat, la carte reste au-dessus.</p>
+  </section>
+
+</main>
+
+</body>
+</html>

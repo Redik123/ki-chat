@@ -38,6 +38,11 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 
+[dev-dependencies]
+# Le client WebSocket des tests des portes web : la même bibliothèque
+# qu'axum utilise déjà côté serveur, donc rien de neuf à compiler.
+tokio-tungstenite = "0.29"
+
 # Le grain du minuteur Windows (15,6 ms) est trop grossier pour cadencer le
 # bot musique à 20 ms : `timeBeginPeriod(1)` sur la machine de développement.
 [target.'cfg(windows)'.dependencies]
