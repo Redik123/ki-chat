@@ -233,13 +233,16 @@ pub fn request_restart() {
 }
 
 /// Relance l'exécutable si une mise à jour vient d'être installée. Appelé par
-/// `main` après la fermeture de la fenêtre.
-pub fn relaunch_if_requested() {
+/// `main` après la fermeture de la fenêtre. `reduit` : la mise à jour est
+/// arrivée pendant qu'on était réduit dans la zone de notification — la
+/// nouvelle version y repart (`--reduit`) au lieu de surgir en plein jeu.
+pub fn relaunch_if_requested(reduit: bool) {
     if !RESTART.load(Ordering::SeqCst) {
         return;
     }
     match std::env::current_exe().map(std::process::Command::new) {
         Ok(mut cmd) => {
+            cmd.args(reduit.then_some(crate::zone::ARG_REDUIT));
             if let Err(e) = cmd.spawn() {
                 tracing::error!("redémarrage impossible : {e}");
             }

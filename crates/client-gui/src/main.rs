@@ -32,6 +32,7 @@ mod valorant;
 mod valo_page;
 mod veille;
 mod visionneuse;
+mod zone;
 
 /// Sous `--features mesures`, toutes les allocations du processus passent par
 /// un compteur. C'est ce qui rend vérifiable la cible « ~0 allocation par
@@ -143,7 +144,7 @@ fn main() -> eframe::Result {
         // Une mise à jour installée ne prend effet qu'au prochain lancement :
         // on le déclenche ici, la fenêtre fermée — donc après que les
         // réglages ont été enregistrés et les périphériques audio rendus.
-        Ok(()) => update::relaunch_if_requested(),
+        Ok(()) => update::relaunch_if_requested(zone::repartir_reduit()),
         // eframe tient toute erreur de rendu pour fatale : un seul
         // `SwapBuffers` raté — pilote réinitialisé sous un jeu, veille,
         // bascule de GPU d'un portable — et sa boucle se termine, fenêtre
@@ -157,7 +158,7 @@ fn main() -> eframe::Result {
             // l'embarquera au prochain démarrage, si le joueur a opté.
             secours::consigner_crash(&format!("boucle graphique terminée en erreur : {e}"));
             match secours::decision_relance(relances, depart.elapsed()) {
-                Some(essais) => secours::relancer(essais),
+                Some(essais) => secours::relancer(essais, zone::repartir_reduit()),
                 None => tracing::error!("l'erreur revient dès le démarrage — relances épuisées"),
             }
         }
@@ -641,6 +642,25 @@ struct KiApp {
     /// … et avec insistance : une mention clignote jusqu'au retour du
     /// focus, là où un simple message ne fait qu'un signe.
     attention_critique: bool,
+    /// L'icône de la zone de notification et l'état « réduite » de la
+    /// fenêtre (voir `zone.rs`).
+    zone: zone::Zone,
+    /// Réglage ⚙ : la croix réduit dans la zone au lieu de quitter.
+    reduire_zone: bool,
+    /// L'avertissement « ki-chat continue à côté de l'horloge » a été lu
+    /// une fois ; persisté.
+    zone_avertie: bool,
+    /// L'avertissement est à l'écran : la croix attend la réponse.
+    zone_dialogue: bool,
+    /// On veut vraiment quitter (menu de l'icône, « Plutôt quitter », mise
+    /// à jour) : la prochaine demande de fermeture passe.
+    quitter: bool,
+    /// Lancé avec `--reduit` (relance ou mise à jour pendant qu'on était
+    /// réduit) : la fenêtre se crée, puis se réduit à la première image.
+    reduire_au_demarrage: bool,
+    /// Un poke reçu pendant la réduction : nommé dans le tooltip de
+    /// l'icône jusqu'à la réouverture, là où le bandeau expire tout seul.
+    zone_poke: Option<String>,
     /// Ce qui n'a pas été lu, par salon. Le salon courant y figure aussi
     /// quand on ne le regarde pas — fenêtre à l'arrière-plan, ou fil
     /// remonté dans le passé.
@@ -1167,6 +1187,13 @@ impl KiApp {
             window_focused: true,
             wants_attention: false,
             attention_critique: false,
+            zone: zone::Zone::creer(hwnd_de(cc), cc.egui_ctx.clone()),
+            reduire_zone: get("reduire_zone", "on") == "on",
+            zone_avertie: get("zone_avertie", "off") == "on",
+            zone_dialogue: false,
+            quitter: false,
+            reduire_au_demarrage: zone::demande_au_demarrage(),
+            zone_poke: None,
             non_lus: HashMap::new(),
             serveur_gere_lus: false,
             lu_a_envoyer: None,
@@ -2953,6 +2980,71 @@ impl KiApp {
             })();
             *resultat.lock().unwrap() = Some(r);
         });
+    }
+
+    /// Retour depuis l'icône : la fenêtre revient, l'icône se tait, et ce
+    /// qu'on avait sous les yeux est lu comme au retour du focus.
+    fn rouvrir_depuis_zone(&mut self, ctx: &egui::Context) {
+        if self.zone.reduite() {
+            self.zone.rouvrir(ctx);
+        } else {
+            // Déjà ouverte, derrière le jeu : on la ramène devant.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        self.zone_poke = None;
+    }
+
+    /// La première fois que la croix réduit : on le dit, avant de le
+    /// faire. « Compris » réduit et ne redemandera plus ; « Plutôt
+    /// quitter » ferme pour de bon (le réglage reste coché : c'est le
+    /// choix d'une fois, pas un réglage).
+    fn zone_dialogue_window(&mut self, ctx: &egui::Context) {
+        if !self.zone_dialogue {
+            return;
+        }
+        let mut decision: Option<bool> = None;
+        egui::Window::new("ki-chat continue dans la zone de notification")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(380.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "La croix ne quitte pas ki-chat : il continue à côté de l'horloge, \
+                         et tu reçois toujours les messages, les sons, les pokes et le vocal.",
+                    )
+                    .color(TEXT),
+                );
+                ui::hint(
+                    ui,
+                    "clic sur l'icône pour rouvrir, « Quitter » dans son menu pour partir ; \
+                     réglable dans ⚙ Sons & notifications",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui::primary_button(ui, Some(Icon::Check), "Compris", None).clicked() {
+                        decision = Some(true);
+                    }
+                    if ui::button(ui, Icon::Logout, "Plutôt quitter").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                self.zone_dialogue = false;
+                self.zone_avertie = true;
+                self.zone.reduire(ctx);
+            }
+            Some(false) => {
+                self.zone_dialogue = false;
+                self.quitter = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            None => {}
+        }
     }
 
     fn confirmer_suppression_clip(&mut self, ctx: &egui::Context) {
@@ -4868,6 +4960,9 @@ impl KiApp {
                 self.wants_attention = true;
                 self.attention_critique = true;
                 self.overlay.annoncer(format!("{username} te poke"));
+                if self.zone.reduite() {
+                    self.zone_poke = Some(username.clone());
+                }
                 self.poke_recu = Some((username, std::time::Instant::now()));
             }
             ServerMsg::PokeRefuse { user_id, message } => {
@@ -8735,6 +8830,21 @@ impl KiApp {
                                  clignotement chez toi, jamais en vocal ni en partie ; \
                                  décoché, le serveur lui répond que tu n'en veux pas",
                             );
+
+                            // --- Fermeture ---
+                            ui.add_space(12.0);
+                            ui::group_title(ui, Icon::Info, "Fermeture");
+                            ui.checkbox(
+                                &mut self.reduire_zone,
+                                "Réduire dans la zone de notification à la fermeture \
+                                 (la croix ne quitte pas ki-chat)",
+                            );
+                            ui::hint(
+                                ui,
+                                "ki-chat continue à côté de l'horloge : messages, sons, \
+                                 pokes et vocal ; clic sur l'icône pour rouvrir, « Quitter » \
+                                 dans son menu pour partir vraiment",
+                            );
                         }
                         if onglet == Onglet::Reseau {
                             // --- Réseau & qualité ---
@@ -9128,6 +9238,9 @@ impl KiApp {
                     // s'il veut bien relancer. La fenêtre se ferme, eframe
                     // enregistre, `main` relance.
                     update::request_restart();
+                    // Ce Close-là doit passer, réglage « réduire » ou pas :
+                    // sinon la mise à jour ne redémarre jamais.
+                    self.quitter = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 update::Status::Failed(message) => {
@@ -10252,6 +10365,12 @@ impl KiApp {
             self.regard_detache = false;
             self.regard_barre_sombre = false;
             self.regard_plein_ecran = false;
+            // Le stream revient dans la fenêtre principale : si elle est
+            // réduite dans la zone, il disparaîtrait de l'écran tout en
+            // continuant d'être décodé et mixé — on la rouvre avec lui.
+            if self.zone.reduite() {
+                self.rouvrir_depuis_zone(ctx);
+            }
         }
         if quitter {
             self.fermer_regard(true);
@@ -13307,6 +13426,16 @@ fn megabytes(bytes: u64) -> f32 {
     bytes as f32 / (1024.0 * 1024.0)
 }
 
+/// Le HWND de la fenêtre principale (0 hors Windows ou si inconnu), tel
+/// que `CreationContext` et `eframe::Frame` le donnent — le même, la sonde
+/// l'a vérifié.
+fn hwnd_de(h: &impl raw_window_handle::HasWindowHandle) -> isize {
+    match h.window_handle().map(|w| w.as_raw()) {
+        Ok(raw_window_handle::RawWindowHandle::Win32(w)) => w.hwnd.get(),
+        _ => 0,
+    }
+}
+
 impl eframe::App for KiApp {
     /// Le fond de toute fenêtre est la couleur-clé de l'overlay : Windows
     /// la rend transparente sur la fenêtre de l'overlay (c'est ainsi que le
@@ -13316,7 +13445,7 @@ impl eframe::App for KiApp {
         overlay::CLE
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // La mesure encadre TOUT le corps de `update`, sinon elle mentirait
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
         // celui de la partie qu'on a pensé à instrumenter.
@@ -13327,9 +13456,76 @@ impl eframe::App for KiApp {
         if self.restore_maximized {
             self.restore_maximized = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            // La commande n'est appliquée qu'en fin d'image : ce que winit
+            // rapporte maintenant, c'est la fenêtre d'avant. Lire ici,
+            // c'était perdre « maximisée » si l'on se réduit dès l'image
+            // suivante (`--reduit`) et qu'on quitte sans avoir rouvert.
+        } else if !self.zone.reduite() {
+            // Réduite dans la zone, la fenêtre est minimisée : ce que winit
+            // rapporte alors n'est pas l'état qu'on voudra retrouver.
+            let was_maximized = self.maximized;
+            self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(was_maximized));
         }
-        let was_maximized = self.maximized;
-        self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(was_maximized));
+
+        // La zone de notification. D'abord le cœur qui bat (le garde-fou
+        // l'écoute), puis ce que l'icône a reçu, puis la croix.
+        self.zone.attacher(hwnd_de(frame));
+        match self.zone.tick(ctx) {
+            zone::Constat::Rien => {}
+            zone::Constat::ReouvertureForcee => {
+                self.zone_poke = None;
+                self.info = Some("ki-chat ne répondait plus réduit : fenêtre rouverte".into());
+            }
+            // Revenue par Alt+Tab ou la barre des tâches : elle est sous
+            // les yeux, l'icône n'a plus rien à annoncer.
+            zone::Constat::RouverteDehors => self.zone_poke = None,
+            zone::Constat::ReductionAbandonnee => {
+                self.info = Some("la fenêtre n'a pas pu être réduite dans la zone de notification".into());
+            }
+        }
+        for ev in self.zone.evenements() {
+            match ev {
+                zone::Evenement::Ouvrir => self.rouvrir_depuis_zone(ctx),
+                zone::Evenement::Quitter => {
+                    self.quitter = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        // Lancé `--reduit` : à la zone, mais pas avant que la fenêtre
+        // existe pour le shell. eframe la crée cachée et ne la montre
+        // qu'après la première image : réduire avant, c'est retirer un
+        // onglet qui n'existe pas encore — il apparaîtrait avec la
+        // fenêtre, et un clic dessus restaurerait un ki-chat invisible qui
+        // prend le clavier en plein jeu. On réessaie à l'image suivante,
+        // le drapeau intact.
+        if self.reduire_au_demarrage {
+            if !self.zone.disponible() {
+                self.reduire_au_demarrage = false;
+            } else if self.zone.fenetre_visible(ctx) {
+                self.reduire_au_demarrage = false;
+                self.zone.reduire(ctx);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        // La croix. Avec le réglage, elle réduit — sauf si l'on a demandé à
+        // quitter (menu de l'icône, mise à jour) : la fermeture normale
+        // passe alors, avec `save` et `on_exit` (déconnexion propre,
+        // marqueurs levés). `CancelClose` doit partir dans la même image.
+        // Et sans icône pour revenir, elle ferme comme avant.
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.reduire_zone
+            && self.zone.disponible()
+            && !self.quitter
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.zone_avertie {
+                self.zone.reduire(ctx);
+            } else {
+                self.zone_dialogue = true;
+            }
+        }
 
         // La barre de titre est à Windows (ou macOS), pas à egui : sans
         // ça, elle suit le thème du système et reste blanche au-dessus
@@ -13441,7 +13637,16 @@ impl eframe::App for KiApp {
                 egui::UserAttentionType::Informational
             };
             self.attention_critique = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(genre));
+            // Réduite dans la zone, il n'y a plus de bouton à faire
+            // clignoter : c'est l'icône qui signale, juste en dessous.
+            if !self.zone.reduite() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(genre));
+            }
+        }
+        // Réduite : pastille et tooltip sur l'icône selon ce qui attend.
+        if self.zone.reduite() {
+            let poke = self.zone_poke.clone();
+            self.zone.signaler(self.total_non_lus(), poke.as_deref());
         }
 
         // Le titre compte les non-lus : « (3) ki-chat » se lit dans la barre
@@ -13486,6 +13691,7 @@ impl eframe::App for KiApp {
             self.login_screen(ctx);
         }
         self.update_window(ctx);
+        self.zone_dialogue_window(ctx);
 
         // Repeint périodique **seulement s'il y a quelque chose qui bouge**.
         //
@@ -13533,6 +13739,8 @@ impl eframe::App for KiApp {
         );
         storage.set_string("notif", self.notif.cle().into());
         storage.set_string("pokes", if self.pokes_accepter { "on" } else { "off" }.into());
+        storage.set_string("reduire_zone", if self.reduire_zone { "on" } else { "off" }.into());
+        storage.set_string("zone_avertie", if self.zone_avertie { "on" } else { "off" }.into());
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());

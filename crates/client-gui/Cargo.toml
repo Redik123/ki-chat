@@ -61,6 +61,12 @@ base64 = "0.22"
 # et ne remonte pas par `?`. On ne prend rien d'autre — ni signature, ni
 # génération de clés : ce binaire ne fait que vérifier.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# Le trait `HasWindowHandle`, que `eframe::Frame` et `CreationContext`
+# implémentent : c'est par lui qu'on obtient le HWND de la fenêtre
+# principale (réduction dans la zone de notification, sonde zone_probe).
+# eframe ne le réexporte pas ; même version 0.6 que la sienne, déjà dans
+# l'arbre.
+raw-window-handle = "0.6"
 
 # Icône, bloc de version et manifeste gravés dans l'exécutable (voir build.rs) ;
 # sur macOS, le même dessin rendu en PNG pour l'icône du paquet.
@@ -76,6 +82,14 @@ flate2 = "1"
 tar = "0.4"
 # Le Trousseau (Security.framework) : il garde la clé du coffre à secrets.
 security-framework = "3"
+
+# L'icône de la zone de notification (« réduire dans la zone » au lieu de
+# fermer) et son menu Ouvrir / Quitter. Sans les features par défaut : elles
+# ne servent qu'à Linux (GTK 3, libappindicator sous LGPL), et la
+# dépendance est déclarée pour Windows et macOS seulement afin que
+# cargo-deny, qui résout aussi la cible Linux, ne voie jamais ces licences.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.25", default-features = false }
 
 # Le nom de la machine (empreinte « même machine » du son du jeu), que la
 # libc donne — Unix ne l'exporte pas dans l'environnement d'une application
@@ -109,4 +123,8 @@ windows = { version = "0.61", features = [
     # tenu par Windows, qui passe au-dessus du jeu (raccourci.rs).
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
+    # CoInitializeEx + CoCreateInstance(TaskbarList) : l'interface
+    # ITaskbarList (Win32_UI_Shell) retire et remet le bouton de la barre
+    # des tâches quand ki-chat se réduit dans la zone de notification.
+    "Win32_System_Com",
 ] }

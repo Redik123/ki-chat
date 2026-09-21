@@ -248,14 +248,17 @@ pub fn decision_relance(essais: u32, vecu: Duration) -> Option<u32> {
 
 /// Relance l'exécutable avec le compteur en argument. L'échec est consigné :
 /// il n'y a rien d'autre à faire, l'instance courante est déjà condamnée.
-pub fn relancer(essais: u32) {
+/// `reduit` : on était réduit dans la zone de notification — l'instance
+/// suivante y repart (`--reduit`), plutôt que de surgir en plein jeu.
+pub fn relancer(essais: u32, reduit: bool) {
     match std::env::current_exe() {
         Ok(exe) => match std::process::Command::new(exe)
             .arg(ARG_RELANCE)
             .arg(essais.to_string())
+            .args(reduit.then_some(crate::zone::ARG_REDUIT))
             .spawn()
         {
-            Ok(_) => tracing::info!("relance automatique (tentative {essais})"),
+            Ok(_) => tracing::info!("relance automatique (tentative {essais}, réduit : {reduit})"),
             Err(e) => tracing::error!("relance impossible : {e}"),
         },
         Err(e) => tracing::error!("exécutable introuvable : {e}"),
