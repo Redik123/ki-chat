@@ -14,6 +14,8 @@
      échappé. Sans lui, le script reprend le nom d'hôte. -->
 <meta name="ki-serveur" content="{{serveur}}">
 <title>ki-chat — porte</title>
+<!-- Le pictogramme de ki-chat (appicon.rs), pour l'onglet. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='3' y='3' width='58' height='58' rx='16' fill='%2300d26a'/%3E%3Crect x='11.5' y='26' width='5' height='12' rx='2.5' fill='%230c0f14'/%3E%3Crect x='22.5' y='16' width='5' height='32' rx='2.5' fill='%230c0f14'/%3E%3Crect x='33.5' y='21' width='5' height='22' rx='2.5' fill='%230c0f14'/%3E%3Crect x='44.5' y='29' width='5' height='6' rx='2.5' fill='%230c0f14'/%3E%3C/svg%3E">
 <!-- La feuille et le script sont servis à côté, jamais en ligne : la
      politique de sécurité de contenu n'autorise que ce qui vient d'ici. -->
 <link rel="stylesheet" href="/s/porte.css">
@@ -24,11 +26,7 @@
 <!-- L'en-tête des écrans d'accueil (nom, attente, refus, fin). Dans le
      salon, la colonne de gauche prend le relais, comme dans ki-chat. -->
 <header class="entete">
-  <svg class="logo" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
-    <circle cx="18" cy="18" r="17" fill="#151a21" stroke="#00d26a" stroke-width="2"/>
-    <path d="M11 10v16M11 18l8-8M11 18l8 8" fill="none" stroke="#00d26a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="26" cy="12" r="2.5" fill="#00d26a"/>
-  </svg>
+  <svg class="logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><rect x="3" y="3" width="58" height="58" rx="16" fill="#00d26a"/><rect x="11.5" y="26" width="5" height="12" rx="2.5" fill="#0c0f14"/><rect x="22.5" y="16" width="5" height="32" rx="2.5" fill="#0c0f14"/><rect x="33.5" y="21" width="5" height="22" rx="2.5" fill="#0c0f14"/><rect x="44.5" y="29" width="5" height="6" rx="2.5" fill="#0c0f14"/></svg>
   <div class="entete-texte">
     <h1 id="nom-serveur">ki-chat</h1>
     <p class="sous-titre">porte <span id="nom-porte">…</span></p>
@@ -75,11 +73,7 @@
 
     <aside id="laterale" class="laterale" aria-label="Salons">
       <div class="serveur-badge">
-        <svg class="logo" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
-          <circle cx="18" cy="18" r="17" fill="#151a21" stroke="#00d26a" stroke-width="2"/>
-          <path d="M11 10v16M11 18l8-8M11 18l8 8" fill="none" stroke="#00d26a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-          <circle cx="26" cy="12" r="2.5" fill="#00d26a"/>
-        </svg>
+        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><rect x="3" y="3" width="58" height="58" rx="16" fill="#00d26a"/><rect x="11.5" y="26" width="5" height="12" rx="2.5" fill="#0c0f14"/><rect x="22.5" y="16" width="5" height="32" rx="2.5" fill="#0c0f14"/><rect x="33.5" y="21" width="5" height="22" rx="2.5" fill="#0c0f14"/><rect x="44.5" y="29" width="5" height="6" rx="2.5" fill="#0c0f14"/></svg>
         <div class="serveur-texte">
           <strong id="nom-serveur-lateral">ki-chat</strong>
           <span id="nom-porte-lateral">porte</span>
