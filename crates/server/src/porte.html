@@ -21,6 +21,8 @@
 </head>
 <body>
 
+<!-- L'en-tête des écrans d'accueil (nom, attente, refus, fin). Dans le
+     salon, la colonne de gauche prend le relais, comme dans ki-chat. -->
 <header class="entete">
   <svg class="logo" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
     <circle cx="18" cy="18" r="17" fill="#151a21" stroke="#00d26a" stroke-width="2"/>
@@ -65,56 +67,125 @@
     <button id="bouton-reessayer" class="secondaire" type="button">Refrapper</button>
   </section>
 
-  <!-- (d) Le salon -->
+  <!-- (d) Le salon : la fenêtre de ki-chat, en plus léger. Une grille dont
+       chaque enfant direct a sa place — la colonne des salons à gauche, le
+       fil au centre, les présents à droite ; sur un téléphone, une seule
+       colonne et deux tiroirs. -->
   <section id="etat-salon" class="salon" aria-label="Salon" hidden>
-    <div class="presence" aria-live="polite">
-      <span class="presence-titre">Ici :</span><span id="presence-liste">personne pour l'instant</span>
-    </div>
+
+    <aside id="laterale" class="laterale" aria-label="Salons">
+      <div class="serveur-badge">
+        <svg class="logo" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+          <circle cx="18" cy="18" r="17" fill="#151a21" stroke="#00d26a" stroke-width="2"/>
+          <path d="M11 10v16M11 18l8-8M11 18l8 8" fill="none" stroke="#00d26a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="26" cy="12" r="2.5" fill="#00d26a"/>
+        </svg>
+        <div class="serveur-texte">
+          <strong id="nom-serveur-lateral">ki-chat</strong>
+          <span id="nom-porte-lateral">porte</span>
+        </div>
+      </div>
+
+      <div class="section-titre">Salons textuels</div>
+      <div class="salon-entree actif" aria-current="true">
+        <span class="diese" aria-hidden="true">#</span><span id="salon-nom-lateral">salon</span>
+      </div>
+
+      <div id="vocaux" class="section-vocaux" hidden>
+        <div class="section-titre">Salons vocaux</div>
+        <!-- Le bouton ne s'active qu'une fois qu'un membre nous a mis dans
+             un salon vocal (porte_vocal) et si le navigateur sait encoder
+             Opus (WebCodecs) ; sinon la note dit pourquoi. -->
+        <button id="bouton-vocal" class="salon-entree vocal-entree" type="button" disabled title="Un membre doit d’abord te mettre dans un salon vocal">
+          <svg class="icone-vocal" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M16 8.5a4.5 4.5 0 0 1 0 7M18.5 6a8 8 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <span id="vocal-salon">vocal</span>
+        </button>
+        <p id="vocal-note" class="aide" hidden></p>
+        <ul id="vocal-occupants-liste" class="occupants" aria-label="Dans le vocal"></ul>
+        <!-- Conservé pour le texte lu par les lecteurs d'écran ; la liste
+             au-dessus en est le rendu visible. -->
+        <p id="vocal-occupants" class="visuellement-cache" aria-live="polite"></p>
+      </div>
+
+      <div class="moi">
+        <span id="moi-avatar" class="avatar" aria-hidden="true">?</span>
+        <div class="moi-texte">
+          <strong id="moi-nom">toi</strong>
+          <span class="moi-etat">invité par le web</span>
+        </div>
+      </div>
+    </aside>
+
+    <header class="salon-tete">
+      <button id="bouton-salons" class="icone" type="button" aria-label="Salons" aria-controls="laterale" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <span class="diese" aria-hidden="true">#</span>
+      <h2 id="salon-nom" class="salon-titre">salon</h2>
+      <span id="statut-salon" class="statut" role="status" aria-live="polite"></span>
+      <button id="bouton-presents" class="icone" type="button" aria-label="Présents" aria-controls="presents" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="9" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M2.5 19c.7-3.4 3.2-5 6.5-5s5.8 1.6 6.5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="17" cy="9" r="2.8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 14.2c2.9.1 5.2 1.6 5.9 4.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span id="presents-nb-tete" class="pastille-nb">0</span>
+      </button>
+    </header>
+
     <div id="bandeau" class="bandeau" role="status" hidden>
       <span id="bandeau-texte"></span>
       <button id="bandeau-fermer" class="croix" type="button" aria-label="Fermer ce message">×</button>
     </div>
+
     <ul id="fil" class="fil" aria-live="polite" aria-relevant="additions"></ul>
+
+    <!-- Les commandes du vocal : dans la colonne de gauche sur grand écran
+         (sous les salons, comme le bas de la colonne de ki-chat), entre le
+         fil et la saisie sur un téléphone — la grille les place. -->
+    <div id="vocal-controles" class="vocal-controles" hidden>
+      <div class="vocal-tete">
+        <span class="vocal-salon-ligne">En vocal : <strong id="vocal-salon-actif">vocal</strong></span>
+        <span id="vocal-latence" class="vocal-latence" title="Latence estimée : trame, tampon, sortie audio et moitié de l’aller-retour">≈ … ms</span>
+      </div>
+      <p id="vocal-indicateur" class="vocal-indicateur" role="status" aria-live="polite">Connexion…</p>
+      <p id="vocal-qui" class="vocal-qui" aria-live="polite">Personne ne parle.</p>
+      <!-- Le niveau du micro, et le seuil au-dessus duquel on émet. -->
+      <div class="vocal-niveau" aria-hidden="true">
+        <div id="vocal-niveau-barre"></div>
+        <div id="vocal-niveau-seuil"></div>
+      </div>
+      <div class="vocal-boutons">
+        <button id="vocal-parler" class="secondaire parler" type="button" aria-pressed="false" title="Maintiens pour parler (Espace ou Entrée au clavier)" hidden>Parler</button>
+        <button id="vocal-sourdine" class="secondaire" type="button" aria-pressed="false">Sourdine</button>
+        <button id="vocal-mode" class="secondaire" type="button">Mode : voix</button>
+        <button id="vocal-quitter" class="secondaire quitter" type="button">Quitter</button>
+      </div>
+      <details class="vocal-reglages">
+        <summary>Réglages</summary>
+        <label id="vocal-seuil-ligne" class="vocal-reglage">Seuil de la voix <input id="vocal-seuil" type="range" min="-70" max="-15" step="1" value="-40"></label>
+        <label class="vocal-reglage">Volume <input id="vocal-volume" type="range" min="0" max="100" value="100"></label>
+      </details>
+    </div>
+
     <form id="form-saisie" class="saisie" autocomplete="off">
       <label for="texte" class="visuellement-cache">Ton message</label>
-      <textarea id="texte" name="texte" rows="1" placeholder="Écris ici…" enterkeyhint="send" autocapitalize="sentences"></textarea>
+      <div class="saisie-champ">
+        <textarea id="texte" name="texte" rows="1" placeholder="Message dans #salon" enterkeyhint="send" autocapitalize="sentences"></textarea>
+        <button id="bouton-envoyer" class="envoyer" type="submit" aria-label="Envoyer" title="Envoyer (Entrée)">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 11.5 21 3l-7 18-2.5-7.5L3 11.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
       <div class="saisie-barre">
         <span id="compteur-texte" class="compteur-texte">0 / 4000</span>
         <span id="debit" class="debit" aria-hidden="true"><i></i><i></i><i></i></span>
-        <button id="bouton-envoyer" class="principal envoyer" type="submit">Envoyer</button>
+        <span class="saisie-aide">Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne.</span>
       </div>
-      <p class="aide saisie-aide">Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne.</p>
     </form>
-    <!-- Le vocal. Le bouton ne s'active qu'une fois qu'un membre nous a mis
-         dans un salon vocal (porte_vocal) et si le navigateur sait encoder
-         Opus (WebCodecs) ; sinon la note dit pourquoi. Les contrôles
-         n'apparaissent qu'une fois dedans. -->
-    <div class="vocal">
-      <button id="bouton-vocal" class="secondaire" type="button" disabled title="Un membre doit d’abord te mettre dans un salon vocal">Rejoindre le vocal</button>
-      <p id="vocal-note" class="aide" hidden></p>
-      <div id="vocal-controles" class="vocal-controles" hidden>
-        <div class="vocal-tete">
-          <span class="vocal-salon-ligne">En vocal : <strong id="vocal-salon">vocal</strong></span>
-          <span id="vocal-latence" class="vocal-latence" title="Latence estimée : trame, tampon, sortie audio et moitié de l’aller-retour">≈ … ms</span>
-        </div>
-        <p id="vocal-indicateur" class="vocal-indicateur" role="status" aria-live="polite">Connexion…</p>
-        <p id="vocal-qui" class="vocal-qui" aria-live="polite">Personne ne parle.</p>
-        <p id="vocal-occupants" class="vocal-occupants"></p>
-        <!-- Le niveau du micro, et le seuil au-dessus duquel on émet. -->
-        <div class="vocal-niveau" aria-hidden="true">
-          <div id="vocal-niveau-barre"></div>
-          <div id="vocal-niveau-seuil"></div>
-        </div>
-        <div class="vocal-boutons">
-          <button id="vocal-parler" class="secondaire parler" type="button" aria-pressed="false" title="Maintiens pour parler (Espace ou Entrée au clavier)" hidden>Parler</button>
-          <button id="vocal-sourdine" class="secondaire" type="button" aria-pressed="false">Sourdine</button>
-          <button id="vocal-mode" class="secondaire" type="button">Mode : voix</button>
-        </div>
-        <label id="vocal-seuil-ligne" class="vocal-reglage">Seuil de la voix <input id="vocal-seuil" type="range" min="-70" max="-15" step="1" value="-40"></label>
-        <label class="vocal-reglage">Volume <input id="vocal-volume" type="range" min="0" max="100" value="100"></label>
-        <button id="vocal-quitter" class="secondaire" type="button">Quitter le vocal</button>
-      </div>
-    </div>
+
+    <aside id="presents" class="presents" aria-label="Présents">
+      <div class="section-titre">En ligne <span id="presents-nb" class="section-nb">0</span></div>
+      <ul id="presence-liste" class="liste-presents"></ul>
+    </aside>
+
+    <!-- Le voile qui ferme les tiroirs d'un doigt, sur un téléphone. -->
+    <div id="voile" class="voile" hidden></div>
   </section>
 
   <!-- (e) La carte « Installe ki-chat » — après le salon : elle flotte

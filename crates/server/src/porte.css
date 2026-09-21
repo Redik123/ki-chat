@@ -1,23 +1,34 @@
 /* La porte web de ki-chat — feuille servie à côté de porte.html.
-   Thème sombre du client (theme.rs) : fonds 0c0f14 / 151a21 / 1b212a,
-   texte e7edf4 / 94a2b2, accent 00d26a, danger ff6b6b. Mobile d'abord :
-   une colonne, 16 px de marge, le champ de saisie collé en bas. */
+   Le thème du client (theme.rs), à l'identique : fonds 0c0f14 (creusé),
+   11151b (colonnes), 151a21 (panneaux), 1b212a (relief) ; texte e7edf4 /
+   94a2b2 / 63707f ; accent 00d26a ; danger ff6b6b ; invité f0b86c (l'ambre
+   du badge INVITÉ). Le salon reprend la fenêtre de ki-chat : la colonne des
+   salons à gauche, le fil au centre avec ses avatars, les présents à
+   droite. Mobile d'abord : une colonne, deux tiroirs, la saisie collée en
+   bas. */
 
 :root {
   --fond: #0c0f14;
+  --colonne: #11151b;
   --panneau: #151a21;
   --releve: #1b212a;
   --survol: #242c37;
-  --bord: #26303c;
+  --actif: #2d3744;
+  --bord: #28313c;
+  --bord-doux: #1e252e;
   --texte: #e7edf4;
   --texte-dim: #94a2b2;
   --texte-faible: #63707f;
   --accent: #00d26a;
   --accent-fonce: #00a352;
+  --parle: #00e676;
   --danger: #ff6b6b;
-  --alerte: #ffb454;
+  --alerte: #ffa157;
+  --invite: #f0b86c;
   --rayon: 12px;
   --marge: 16px;
+  --laterale: 236px;
+  --presents: 216px;
   --police: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
@@ -35,7 +46,7 @@ body {
   margin: 0;
   background: var(--fond);
   color: var(--texte);
-  font: 16px/1.45 var(--police);
+  font: 14px/1.45 var(--police);
   -webkit-text-size-adjust: 100%;
   display: flex;
   flex-direction: column;
@@ -44,7 +55,7 @@ body {
   padding-right: env(safe-area-inset-right);
 }
 
-/* ---- En-tête ---- */
+/* ---- En-tête des écrans d'accueil ---- */
 
 .entete {
   display: flex;
@@ -54,6 +65,8 @@ body {
   background: var(--panneau);
   border-bottom: 1px solid var(--bord);
 }
+/* Dans le salon, la colonne de gauche porte le nom du serveur. */
+[data-etat="salon"] .entete { display: none; }
 
 .logo { width: 36px; height: 36px; flex: none; }
 
@@ -69,20 +82,17 @@ h1 {
   white-space: nowrap;
 }
 
-.sous-titre {
-  margin: 0;
-  font-size: 13px;
-  color: var(--texte-dim);
-}
+.sous-titre { margin: 0; font-size: 13px; color: var(--texte-dim); }
 
 .statut {
   flex: none;
   font-size: 12px;
   color: var(--texte-dim);
-  padding: 4px 10px;
+  padding: 3px 10px;
   border-radius: 999px;
   background: var(--releve);
-  min-height: 24px;
+  min-height: 22px;
+  line-height: 16px;
 }
 .statut:empty { display: none; }
 .statut.ok { color: var(--accent); }
@@ -96,31 +106,31 @@ main {
   flex-direction: column;
   min-height: 0;
   width: 100%;
-  max-width: 720px;
+}
+/* Les cartes se centrent dans une colonne étroite ; le salon prend tout. */
+[data-etat="nom"] main, [data-etat="attente"] main, [data-etat="refus"] main, [data-etat="ferme"] main {
+  max-width: 560px;
   margin: 0 auto;
 }
 
 .carte {
   margin: var(--marge);
-  padding: 20px var(--marge);
+  padding: 22px var(--marge);
   background: var(--panneau);
   border: 1px solid var(--bord);
-  border-radius: var(--rayon);
+  border-radius: 14px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .35);
 }
 
-h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+h2 { margin: 0 0 8px; font-size: 19px; font-weight: 600; }
 
-.intro, .attente-info, .compteur { color: var(--texte-dim); margin: 0 0 16px; }
+.intro, .attente-info, .compteur { color: var(--texte-dim); margin: 0 0 16px; font-size: 14px; }
 
-.aide { color: var(--texte-faible); font-size: 13px; margin: 8px 0 0; }
+.aide { color: var(--texte-faible); font-size: 12.5px; margin: 8px 0 0; }
 
-.erreur {
-  color: var(--danger);
-  font-size: 14px;
-  margin: 10px 0 0;
-}
+.erreur { color: var(--danger); font-size: 13.5px; margin: 10px 0 0; }
 
-label { display: block; font-size: 14px; color: var(--texte-dim); margin-bottom: 6px; }
+label { display: block; font-size: 13px; color: var(--texte-dim); margin-bottom: 6px; }
 
 input[type="text"], textarea {
   width: 100%;
@@ -130,22 +140,22 @@ input[type="text"], textarea {
   background: var(--fond);
   border: 1px solid var(--bord);
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 11px 14px;
   min-height: 44px;
   outline: none;
 }
 input[type="text"]:focus-visible, textarea:focus-visible {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(0, 210, 106, .25);
+  box-shadow: 0 0 0 3px rgba(0, 210, 106, .22);
 }
 input[aria-invalid="true"] { border-color: var(--danger); }
 
 button, .lien-bouton {
   font: inherit;
   font-weight: 600;
-  min-height: 44px;
-  padding: 10px 18px;
-  border-radius: 10px;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: 8px;
   border: 1px solid transparent;
   cursor: pointer;
   text-decoration: none;
@@ -153,8 +163,10 @@ button, .lien-bouton {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  color: var(--texte);
+  background: transparent;
 }
-button:focus-visible, a:focus-visible, textarea:focus-visible {
+button:focus-visible, a:focus-visible, textarea:focus-visible, summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -165,6 +177,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   color: #06210f;
   width: 100%;
   margin-top: 16px;
+  min-height: 44px;
 }
 .principal:not(:disabled):hover { background: var(--accent-fonce); color: #fff; }
 
@@ -174,12 +187,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border-color: var(--bord);
 }
 .secondaire:not(:disabled):hover { background: var(--survol); }
-.carte .secondaire { width: 100%; margin-top: 8px; }
+.carte .secondaire { width: 100%; margin-top: 8px; min-height: 44px; }
 
-.petit, .carte .petit { min-height: 32px; padding: 4px 12px; font-size: 13px; width: auto; margin: 0; flex: none; }
+.petit, .carte .petit { min-height: 30px; padding: 3px 12px; font-size: 12.5px; width: auto; margin: 0; flex: none; }
 
 .croix {
-  background: transparent;
   color: var(--texte-dim);
   min-height: 32px;
   min-width: 32px;
@@ -188,6 +200,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   line-height: 1;
 }
 .croix:hover { color: var(--texte); }
+
+/* Un bouton-icône : 36 px, l'icône en trait courant. */
+.icone {
+  width: 36px; height: 36px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 9px;
+  color: var(--texte-dim);
+  position: relative;
+}
+.icone svg { width: 20px; height: 20px; }
+.icone:hover { background: var(--survol); color: var(--texte); }
 
 /* ---- Attente ---- */
 
@@ -202,44 +226,240 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   0%, 100% { box-shadow: 0 0 0 0 rgba(0, 210, 106, .55); }
   70% { box-shadow: 0 0 0 14px rgba(0, 210, 106, 0); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .pulsation { animation: none; }
-}
+@media (prefers-reduced-motion: reduce) { .pulsation { animation: none; } }
 
 #attente-compteur { font-variant-numeric: tabular-nums; color: var(--texte); }
 
-/* ---- Salon ---- */
+/* ---- Le salon : la grille ---- */
 
 .salon {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  /* Téléphone : une colonne, les commandes du vocal entre le fil et la
+     saisie ; les deux colonnes sont des tiroirs (plus bas). */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "tete"
+    "bandeau"
+    "fil"
+    "vocal"
+    "saisie";
+  position: relative;
+  background: var(--panneau);
+}
+.laterale { grid-area: laterale; }
+.salon-tete { grid-area: tete; }
+.bandeau { grid-area: bandeau; }
+.fil { grid-area: fil; }
+.vocal-controles { grid-area: vocal; }
+.saisie { grid-area: saisie; }
+.presents { grid-area: presents; }
+
+@media (min-width: 720px) {
+  .salon {
+    grid-template-columns: var(--laterale) minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "laterale tete"
+      "laterale bandeau"
+      "laterale fil"
+      "vocal    saisie";
+  }
+}
+@media (min-width: 1000px) {
+  .salon {
+    grid-template-columns: var(--laterale) minmax(0, 1fr) var(--presents);
+    grid-template-areas:
+      "laterale tete     presents"
+      "laterale bandeau  presents"
+      "laterale fil      presents"
+      "vocal    saisie   presents";
+  }
+}
+
+/* Les titres de section, comme dans la colonne de ki-chat :
+   « SALONS TEXTUELS », « EN LIGNE 3 ». */
+.section-titre {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--texte-faible);
+  padding: 14px 14px 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.section-nb { color: var(--texte-faible); font-weight: 600; }
+
+/* ---- La colonne de gauche ---- */
+
+.laterale {
+  background: var(--colonne);
+  border-right: 1px solid var(--bord-doux);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
 }
 
-.presence {
-  padding: 8px var(--marge);
+.serveur-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(12px + env(safe-area-inset-top)) 14px 12px;
+  border-bottom: 1px solid var(--bord-doux);
+}
+.serveur-badge .logo { width: 32px; height: 32px; }
+.serveur-texte { min-width: 0; display: flex; flex-direction: column; }
+.serveur-texte strong {
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.serveur-texte span { font-size: 11.5px; color: var(--texte-faible); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Une entrée de salon : « # général », l'active à l'accent sur fond relevé,
+   comme la ligne sélectionnée de ki-chat. */
+.salon-entree {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 16px);
+  margin: 1px 8px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--texte-dim);
+  text-align: left;
+  min-height: 0;
+  justify-content: flex-start;
+}
+.salon-entree.actif { background: var(--actif); color: var(--accent); }
+.salon-entree .diese { color: var(--texte-faible); font-weight: 600; width: 14px; text-align: center; }
+.salon-entree.actif .diese { color: var(--accent); }
+.salon-entree span:not(.diese) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+button.vocal-entree:not(:disabled):hover { background: var(--survol); color: var(--texte); }
+.vocal-entree.dedans { background: var(--actif); color: var(--accent); }
+.vocal-entree:disabled { opacity: .55; }
+.icone-vocal { width: 18px; height: 18px; flex: none; color: currentColor; }
+.section-vocaux .aide { padding: 0 18px; margin: 4px 0 0; }
+
+/* Les occupants du vocal, sous l'entrée, décalés comme dans ki-chat ; un
+   anneau vert autour de qui parle. */
+.occupants { list-style: none; margin: 2px 0 4px; padding: 0 8px 0 30px; }
+.occupants li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border-radius: 7px;
   font-size: 13px;
   color: var(--texte-dim);
-  background: var(--panneau);
-  border-bottom: 1px solid var(--bord);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.presence-titre { color: var(--texte-faible); margin-right: 4px; }
-.presence .web { color: var(--accent); }
+.occupants li.moi { color: var(--texte); }
+.occupants li.parle { color: var(--texte); }
+.occupants .avatar { width: 20px; height: 20px; font-size: 10px; }
+.occupants li.parle .avatar { box-shadow: 0 0 0 2px var(--parle); }
+
+/* Le bas de la colonne : soi-même, comme la barre du compte dans ki-chat. */
+.moi {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 6px;
+  border-top: 1px solid var(--bord-doux);
+}
+.moi-texte { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.moi-texte strong { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.moi-etat { font-size: 11.5px; color: var(--invite); }
+
+/* ---- Avatars : un disque à la couleur du pseudo, l'initiale dedans. ---- */
+
+.avatar {
+  flex: none;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fond);
+  background: var(--texte-faible);
+  user-select: none;
+  text-transform: uppercase;
+}
+.avatar.web { background: var(--invite); }
+
+/* Le badge « WEB » : l'ambre du badge INVITÉ de ki-chat, en petit. */
+.badge-web {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--fond);
+  background: var(--invite);
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: 2px;
+  flex: none;
+}
+
+/* ---- Le centre : en-tête, bandeau, fil, saisie ---- */
+
+.salon-tete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+  border-bottom: 1px solid var(--bord-doux);
+  background: var(--panneau);
+  min-height: 52px;
+}
+.salon-tete .diese { color: var(--texte-faible); font-size: 18px; font-weight: 600; }
+.salon-titre {
+  margin: 0;
+  font-size: 16.5px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pastille-nb {
+  position: absolute;
+  top: 2px; right: 2px;
+  min-width: 16px; height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--releve);
+  color: var(--texte-dim);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+/* Sur grand écran les tiroirs n'existent pas : pas de boutons. */
+@media (min-width: 720px) { #bouton-salons { display: none; } }
+@media (min-width: 1000px) { #bouton-presents { display: none; } }
 
 .bandeau {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px var(--marge) 0;
-  padding: 8px 8px 8px 12px;
-  border-radius: 10px;
+  margin: 8px 12px 0;
+  padding: 7px 8px 7px 12px;
+  border-radius: 9px;
   background: var(--releve);
   border: 1px solid var(--bord);
-  font-size: 14px;
+  font-size: 13.5px;
 }
 .bandeau > span { flex: 1; }
 .bandeau.danger { border-color: var(--danger); color: var(--danger); }
@@ -247,12 +467,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .bandeau.ok { border-color: var(--accent); color: var(--accent); }
 
 .fil {
-  flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
   margin: 0;
-  padding: 8px var(--marge) 8px;
+  padding: 10px 12px 8px;
   list-style: none;
+  background: var(--fond);
 }
 
 .fil:empty::before {
@@ -263,43 +483,38 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   padding: 32px 0;
 }
 
+/* Une ligne du fil : l'avatar, puis le pseudo à sa couleur, l'heure en
+   retrait, le texte. */
 .msg {
-  padding: 6px 0;
-  border-radius: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 9px;
   animation: apparaitre .15s ease-out;
 }
+.msg:hover { background: #1a2028; }
 @keyframes apparaitre { from { opacity: 0; transform: translateY(4px); } }
 @media (prefers-reduced-motion: reduce) { .msg { animation: none; } }
+.msg-corps { min-width: 0; flex: 1; }
 
 .msg-tete {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 14px;
+  font-size: 13.5px;
+  line-height: 1.3;
 }
 .auteur { font-weight: 600; color: var(--texte); overflow: hidden; text-overflow: ellipsis; }
-.msg.moi .auteur { color: var(--accent); }
-.msg.web .auteur::after {
-  content: "web";
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  color: #06210f;
-  background: var(--accent);
-  border-radius: 4px;
-  padding: 1px 5px;
-  margin-left: 6px;
-  vertical-align: 1px;
-}
-.msg.web.moi .auteur::after { background: var(--texte-dim); }
-.heure { color: var(--texte-faible); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
-.modifie { color: var(--texte-faible); font-size: 12px; font-style: italic; }
+.heure { color: var(--texte-faible); font-size: 11px; font-variant-numeric: tabular-nums; flex: none; }
+.modifie { color: var(--texte-faible); font-size: 11.5px; font-style: italic; }
 
 .texte {
   margin: 2px 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  font-size: 14px;
+  color: var(--texte);
 }
 
 .reponse {
@@ -307,69 +522,96 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   padding-left: 10px;
   border-left: 2px solid var(--bord);
   color: var(--texte-dim);
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.reponse .auteur { font-size: 13px; }
+.reponse .auteur { font-size: 12.5px; }
 
 .reactions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .reactions:empty { display: none; }
 .reaction {
-  font-size: 13px;
+  font-size: 12.5px;
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--releve);
   border: 1px solid var(--bord);
 }
 
+/* Les messages du serveur et les notes de la page : une ligne discrète,
+   centrée, sans avatar. */
 .msg.systeme, .msg.info {
-  font-size: 13px;
+  display: block;
+  font-size: 12.5px;
   color: var(--texte-dim);
   text-align: center;
   padding: 4px 0;
 }
-.msg.systeme .texte, .msg.info .texte { margin: 0; white-space: normal; }
-/* « Kevin (web) a rejoint » : le texte suffit, sans auteur ni heure. */
-.msg.systeme .msg-tete { display: none; }
+.msg.systeme .texte, .msg.info .texte { margin: 0; white-space: normal; font-size: 12.5px; color: var(--texte-dim); }
+.msg.systeme .msg-tete, .msg.systeme .avatar, .msg.info .avatar { display: none; }
 
 /* ---- Saisie ---- */
 
 .saisie {
-  padding: 8px var(--marge) calc(8px + env(safe-area-inset-bottom));
+  padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
   background: var(--panneau);
-  border-top: 1px solid var(--bord);
+  border-top: 1px solid var(--bord-doux);
 }
+.saisie-champ {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  background: var(--fond);
+  border: 1px solid var(--bord);
+  border-radius: 12px;
+  padding: 4px 4px 4px 12px;
+}
+.saisie-champ:focus-within { border-color: var(--accent); }
 .saisie textarea {
-  resize: none;
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  padding: 8px 0;
+  min-height: 36px;
   max-height: 160px;
+  resize: none;
   line-height: 1.4;
+  font-size: 15px;
 }
+.saisie textarea:focus-visible { box-shadow: none; outline: none; }
+.envoyer {
+  width: 36px; height: 36px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 9px;
+  color: var(--accent);
+  flex: none;
+}
+.envoyer svg { width: 20px; height: 20px; }
+.envoyer:not(:disabled):hover { background: var(--survol); }
 .saisie-barre {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 8px;
+  margin-top: 6px;
+  padding: 0 4px;
 }
 .compteur-texte {
   color: var(--texte-faible);
-  font-size: 12px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
-  flex: 1;
 }
 .compteur-texte.limite { color: var(--alerte); }
 .compteur-texte.trop { color: var(--danger); }
-.envoyer { width: auto; margin: 0; padding: 8px 20px; min-height: 40px; }
-.saisie-aide { display: none; margin: 6px 0 0; }
-@media (min-width: 640px) { .saisie-aide { display: block; } }
+.saisie-aide { display: none; color: var(--texte-faible); font-size: 11.5px; margin-left: auto; }
+@media (min-width: 720px) { .saisie-aide { display: inline; } }
 
 /* Cadence d'envoi : trois points, un par message que le serveur nous
    laisse envoyer d'un coup. Un point s'éteint à chaque envoi et se rallume
    avec le temps. */
 .debit { display: inline-flex; gap: 4px; align-items: center; }
 .debit i {
-  width: 8px; height: 8px;
+  width: 7px; height: 7px;
   border-radius: 50%;
   background: var(--accent);
   transition: background .3s, opacity .3s;
@@ -377,24 +619,93 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .debit i.vide { background: var(--texte-faible); opacity: .5; }
 .debit.serre i:not(.vide) { background: var(--alerte); }
 
+/* ---- Les présents (colonne de droite) ---- */
+
+.presents {
+  background: var(--colonne);
+  border-left: 1px solid var(--bord-doux);
+  overflow-y: auto;
+  min-height: 0;
+  padding-top: env(safe-area-inset-top);
+}
+.liste-presents { list-style: none; margin: 0; padding: 0 8px; }
+.liste-presents li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  min-height: 38px;
+}
+.liste-presents li:hover { background: var(--survol); }
+.liste-presents .avatar { width: 26px; height: 26px; font-size: 12px; }
+.liste-presents .nom {
+  font-size: 13.5px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.liste-presents li.web .nom { color: var(--invite); }
+.liste-presents li.moi .nom::after { content: " (toi)"; color: var(--texte-faible); font-weight: 400; }
+.liste-presents:empty::before {
+  content: "personne pour l'instant";
+  display: block;
+  color: var(--texte-faible);
+  font-size: 12.5px;
+  padding: 6px 8px;
+}
+
+/* ---- Les tiroirs, sur un téléphone ---- */
+
+@media (max-width: 719.98px) {
+  .laterale {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(84vw, var(--laterale));
+    z-index: 5;
+    transform: translateX(-100%);
+    transition: transform .18s ease-out;
+    box-shadow: 0 0 40px rgba(0, 0, 0, .5);
+  }
+  .salon.laterale-ouverte .laterale { transform: none; }
+  /* Les commandes du vocal restent dans la colonne centrale (zone
+     « vocal » de la grille), à portée du pouce. */
+}
+@media (max-width: 999.98px) {
+  .presents {
+    position: fixed;
+    inset: 0 0 0 auto;
+    width: min(84vw, var(--presents));
+    z-index: 5;
+    transform: translateX(100%);
+    transition: transform .18s ease-out;
+    box-shadow: 0 0 40px rgba(0, 0, 0, .5);
+  }
+  .salon.presents-ouverts .presents { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .laterale, .presents { transition: none; }
+}
+.voile {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .45);
+  z-index: 4;
+}
+
 /* ---- Vocal ---- */
 
-.vocal {
-  padding: 0 var(--marge) calc(8px + env(safe-area-inset-bottom));
-  background: var(--panneau);
-}
-.vocal .secondaire { width: 100%; }
-.vocal .aide { margin: 6px 0 0; }
-
 .vocal-controles {
-  margin-top: 4px;
+  margin: 0;
   padding: 10px 12px;
-  border: 1px solid var(--bord);
-  border-radius: 10px;
-  background: var(--releve);
+  border-top: 1px solid var(--bord-doux);
+  background: var(--colonne);
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+@media (max-width: 719.98px) {
+  .vocal-controles { background: var(--releve); border-top: 1px solid var(--bord); }
 }
 .vocal-controles p { margin: 0; }
 
@@ -403,42 +714,36 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--texte-dim);
 }
 .vocal-salon-ligne { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vocal-salon-ligne strong { color: var(--texte); font-weight: 600; }
-.vocal-latence {
-  flex: none;
-  font-size: 12px;
-  color: var(--texte-faible);
-  font-variant-numeric: tabular-nums;
-}
+.vocal-latence { flex: none; font-size: 11.5px; color: var(--texte-faible); font-variant-numeric: tabular-nums; }
 
 /* « Tu parles » : vert et net ; « Micro coupé » : rouge ; sinon discret. */
 .vocal-indicateur {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--texte-faible);
   transition: color .15s;
 }
-.vocal-indicateur.parle { color: var(--accent); }
+.vocal-indicateur.parle { color: var(--parle); }
 .vocal-indicateur.coupe { color: var(--danger); }
 .vocal-indicateur.parle::before {
   content: "";
   display: inline-block;
   width: 8px; height: 8px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--parle);
   margin-right: 6px;
   vertical-align: 1px;
   animation: pulser 1.2s ease-in-out infinite;
 }
 @media (prefers-reduced-motion: reduce) { .vocal-indicateur.parle::before { animation: none; } }
 
-.vocal-qui { font-size: 14px; color: var(--texte-dim); }
+.vocal-qui { font-size: 13px; color: var(--texte-dim); }
 .vocal-qui.parle { color: var(--texte); }
-.vocal-occupants { font-size: 13px; color: var(--texte-faible); overflow-wrap: anywhere; }
 
 /* Le niveau du micro : une barre de −70 à −10 dB, le seuil marqué dessus.
    La barre passe au vert quand on émet. */
@@ -463,7 +768,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: var(--texte-faible);
   transition: transform .1s linear, background .15s;
 }
-#vocal-niveau-barre.ouvert { background: var(--accent); }
+#vocal-niveau-barre.ouvert { background: var(--parle); }
 #vocal-niveau-seuil {
   position: absolute;
   top: 0; bottom: 0;
@@ -472,8 +777,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: var(--alerte);
 }
 
-.vocal-boutons { display: flex; flex-wrap: wrap; gap: 8px; }
-.vocal-boutons .secondaire { width: auto; flex: 1 1 auto; margin: 0; }
+.vocal-boutons { display: flex; flex-wrap: wrap; gap: 6px; }
+.vocal-boutons .secondaire { width: auto; flex: 1 1 auto; margin: 0; min-height: 36px; padding: 6px 10px; font-size: 13px; }
+.vocal-boutons .quitter { color: var(--danger); }
 .vocal-controles [aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 
 /* « Maintenir pour parler » : large, pas de sélection ni de menu
@@ -494,12 +800,21 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border-color: var(--accent);
 }
 
+.vocal-reglages summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--texte-faible);
+  list-style: none;
+}
+.vocal-reglages summary::-webkit-details-marker { display: none; }
+.vocal-reglages summary::before { content: "▸ "; }
+.vocal-reglages[open] summary::before { content: "▾ "; }
 .vocal-reglage {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 0;
-  font-size: 13px;
+  margin: 6px 0 0;
+  font-size: 12.5px;
   color: var(--texte-dim);
   white-space: nowrap;
 }
@@ -516,7 +831,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .invitation .croix { position: absolute; top: 8px; right: 8px; }
 .invitation p { color: var(--texte-dim); margin: 0 0 12px; }
 .invitation-champs { margin: 0 0 16px; }
-.invitation-champs dt { font-size: 12px; color: var(--texte-faible); text-transform: uppercase; letter-spacing: .05em; }
+.invitation-champs dt { font-size: 11.5px; color: var(--texte-faible); text-transform: uppercase; letter-spacing: .05em; }
 .invitation-champs dd {
   margin: 4px 0 12px;
   display: flex;
@@ -538,18 +853,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .invitation-champs code.code { font-size: 20px; letter-spacing: .06em; color: var(--accent); }
 .lien-bouton { margin-top: 0; }
 
-/* Le salon remplit l'écran : l'en-tête et les cartes gardent leurs
-   marges, la carte d'invitation flotte par-dessus le fil. */
+/* Le salon remplit l'écran : la carte d'invitation flotte par-dessus le fil. */
 .salon:not([hidden]) ~ .invitation {
   position: fixed;
-  left: var(--marge);
-  right: var(--marge);
+  left: 50%;
   bottom: calc(96px + env(safe-area-inset-bottom));
-  max-width: 688px;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 2 * var(--marge)));
   max-height: calc(100dvh - 180px);
   overflow-y: auto;
-  margin: 0 auto;
-  z-index: 2;
+  margin: 0;
+  z-index: 6;
 }
 
 .visuellement-cache {
@@ -558,9 +872,4 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
-}
-
-@media (min-width: 720px) {
-  main { border-left: 1px solid var(--bord); border-right: 1px solid var(--bord); }
-  .carte { margin: 24px var(--marge); }
 }

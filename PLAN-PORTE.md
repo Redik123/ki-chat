@@ -219,6 +219,33 @@ qui reste ouvert est à la fin.
   pastille INVITÉ dans le fil et le roster ; face à un serveur d'avant,
   rien de nouveau ne part et rien ne se montre.
 
+### La page (`porte.html`, `porte.css`, `porte.js`)
+
+- **La fenêtre de ki-chat, en plus léger.** Une grille dont chaque enfant
+  a sa place : la colonne des salons à gauche (le badge du serveur, « Salons
+  textuels » avec le salon de la porte, « Salons vocaux » avec le vocal
+  où l'on a été amené et ses occupants — anneau vert sur qui parle —, et
+  soi-même en bas), le fil au centre (avatar à l'initiale, pseudo à la
+  couleur que ki-chat lui donne — le même hachage que `theme::color_for`,
+  huit teintes —, badge « web » ambré pour les invités), la saisie
+  « Message dans #salon » avec son bouton d'envoi, la colonne « En ligne »
+  à droite. Sous 1000 px la colonne de droite devient un tiroir, sous
+  720 px celle de gauche aussi ; les commandes du vocal passent alors entre
+  le fil et la saisie, à portée du pouce.
+- **Les présents viennent du serveur** (`porte_presents` : le nom du
+  salon, les membres qui le lisent en ce moment, les invités), poussés à
+  l'entrée d'un invité et à chaque changement — un membre qui ouvre ou
+  quitte le salon (`Join`, `Leave`), qui se déconnecte, un invité qui
+  arrive ou part. La page ne devine plus rien aux messages système ; elle
+  garde ce repli pour un serveur d'avant.
+- **L'adresse à saisir dans ki-chat** (carte « Installe ki-chat ») :
+  `KI_PUBLIC_QUIC` si l'admin l'a posée, sinon l'hôte de `KI_PUBLIC_URL`,
+  sinon celui par lequel l'invité a ouvert la page — jamais un texte de
+  repli.
+- **Le lien court** `https://ton-domaine/invite` : la route racine
+  `/{slug}` vient après toutes les routes statiques, qui gardent la
+  priorité ; `/s/{slug}` reste.
+
 ### Le protocole (`crates/protocol`, tout en `#[serde(default)]`)
 
 `ClientMsg` : `PorteOuvrir { slug, nom_salon, ttl_secs }`, `PorteRepondre
@@ -298,6 +325,12 @@ un vrai serveur (routes, 404 sans porte, priorité des routes statiques,
 Reste à faire en soirée, sur le serveur du groupe : le certificat
 (route A d'abord), un essai depuis un téléphone Android et un iPhone,
 et la mesure de la latence vocale affichée par la page.
+
+**Retouches d'après les premiers essais (2026-09-22)** : l'adresse de la
+carte « Installe ki-chat » disait « ce serveur:9987 » sans variable
+d'environnement — elle reprend l'hôte de la page ; la page a pris la
+mise en page de ki-chat (trois colonnes, avatars, présents en direct
+par `porte_presents`) ; le lien court `/invite`.
 
 ### V2 — Le confort (à décider après la première soirée)
 

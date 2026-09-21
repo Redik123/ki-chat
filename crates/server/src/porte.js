@@ -83,7 +83,12 @@
     attenteInfo: $('attente-info'), attenteCompteur: $('attente-compteur'),
     boutonAnnuler: $('bouton-annuler'),
     refusMotif: $('refus-motif'), boutonReessayer: $('bouton-reessayer'),
-    presenceListe: $('presence-liste'),
+    presenceListe: $('presence-liste'), presentsNb: $('presents-nb'), presentsNbTete: $('presents-nb-tete'),
+    salonNom: $('salon-nom'), salonNomLateral: $('salon-nom-lateral'),
+    nomServeurLateral: $('nom-serveur-lateral'), nomPorteLateral: $('nom-porte-lateral'),
+    statutSalon: $('statut-salon'), boutonSalons: $('bouton-salons'), boutonPresents: $('bouton-presents'),
+    vocaux: $('vocaux'), vocalOccupantsListe: $('vocal-occupants-liste'), vocalSalonActif: $('vocal-salon-actif'),
+    moiNom: $('moi-nom'), moiAvatar: $('moi-avatar'), voile: $('voile'),
     bandeau: $('bandeau'), bandeauTexte: $('bandeau-texte'), bandeauFermer: $('bandeau-fermer'),
     fil: $('fil'),
     formSaisie: $('form-saisie'), texte: $('texte'), compteurTexte: $('compteur-texte'),
@@ -112,6 +117,8 @@
   if (!nomServeur || nomServeur.indexOf('{{') !== -1) nomServeur = location.hostname;
   el.nomServeur.textContent = nomServeur;
   el.nomPorte.textContent = slug || '?';
+  el.nomServeurLateral.textContent = nomServeur;
+  el.nomPorteLateral.textContent = 'porte ' + (slug || '?');
   document.title = 'ki-chat — ' + nomServeur;
 
   // ---- État ----
@@ -156,6 +163,8 @@
   function statut(texte, ton) {
     el.statut.textContent = texte || '';
     el.statut.className = 'statut' + (ton ? ' ' + ton : '');
+    el.statutSalon.textContent = texte || '';
+    el.statutSalon.className = 'statut' + (ton ? ' ' + ton : '');
   }
 
   function bandeau(texte, ton) {
@@ -186,6 +195,31 @@
   }
 
   function cle(ref) { return String(ref.user_id) + ':' + String(ref.ts); }
+
+  // La palette des pseudos de ki-chat, et son hachage (theme.rs, color_for) :
+  // h = h * 31 + octet, sur 32 bits, puis l'une des huit teintes.
+  var PALETTE = ['#2dd48f', '#62a8ff', '#ffa95c', '#ff8ac4', '#ba92ff', '#2ad3dd', '#ffd863', '#ff7d7d'];
+  var encodeurUtf8 = (typeof TextEncoder === 'function') ? new TextEncoder() : null;
+  function couleurDe(pseudo) {
+    var nomPropre = sansSuffixe(String(pseudo || ''));
+    var octets = encodeurUtf8 ? encodeurUtf8.encode(nomPropre) : [];
+    if (!encodeurUtf8) for (var j = 0; j < nomPropre.length; j++) octets.push(nomPropre.charCodeAt(j) & 255);
+    var h = 0;
+    for (var i = 0; i < octets.length; i++) h = (Math.imul(h, 31) + octets[i]) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+  function initiale(pseudo) {
+    var n = sansSuffixe(String(pseudo || '')).trim();
+    return n ? n.charAt(0) : '?';
+  }
+  function faireAvatar(pseudo, web) {
+    var a = document.createElement('span');
+    a.className = 'avatar' + (web ? ' web' : '');
+    a.setAttribute('aria-hidden', 'true');
+    a.textContent = initiale(pseudo);
+    if (!web) a.style.background = couleurDe(pseudo);
+    return a;
+  }
 
   function borner(texte, max) {
     var s = String(texte == null ? '' : texte);
@@ -458,6 +492,9 @@
       case 'porte_invitation':
         afficherInvitation(msg);
         break;
+      case 'porte_presents':
+        recevoirPresents(msg);
+        break;
       case 'members':
         (Array.isArray(msg.members) ? msg.members : []).forEach(function (m) {
           presents.set(String(m.user_id), { nom: String(m.username || ''), web: !!m.invite || estInvite(m.user_id) });
@@ -496,6 +533,7 @@
   }
 
   function entrerDansLeSalon() {
+    rendreMoi();
     if (etat === 'salon') return;
     clearInterval(minuteurAttente);
     reprise = false;
@@ -524,12 +562,25 @@
       if (!nomAffiche) nomAffiche = String(m.username);
     }
 
+    var web = li.classList.contains('web');
+    if (!systeme) li.appendChild(faireAvatar(m.username, web));
+    var corps = document.createElement('div');
+    corps.className = 'msg-corps';
+    li.appendChild(corps);
+
     var tete = document.createElement('div');
     tete.className = 'msg-tete';
     var auteur = document.createElement('span');
     auteur.className = 'auteur';
     auteur.textContent = borner(sansSuffixe(m.username), NOM_MAX + 8);
+    auteur.style.color = web ? 'var(--invite)' : couleurDe(m.username);
     tete.appendChild(auteur);
+    if (web) {
+      var badge = document.createElement('span');
+      badge.className = 'badge-web';
+      badge.textContent = 'web';
+      tete.appendChild(badge);
+    }
     var h = document.createElement('span');
     h.className = 'heure';
     h.textContent = heure(m.ts);
@@ -538,7 +589,7 @@
     modifie.className = 'modifie';
     modifie.textContent = m.edited ? '(modifié)' : '';
     tete.appendChild(modifie);
-    li.appendChild(tete);
+    corps.appendChild(tete);
 
     if (m.reply_to && typeof m.reply_to === 'object') {
       var rep = document.createElement('p');
@@ -548,17 +599,17 @@
       ra.textContent = borner(sansSuffixe(m.reply_to.username), NOM_MAX + 8) + ' : ';
       rep.appendChild(ra);
       rep.appendChild(document.createTextNode(borner(m.reply_to.excerpt, 120)));
-      li.appendChild(rep);
+      corps.appendChild(rep);
     }
 
     var texte = document.createElement('p');
     texte.className = 'texte';
     texte.textContent = borner(m.text, MAX_TEXTE);
-    li.appendChild(texte);
+    corps.appendChild(texte);
 
     var reactions = document.createElement('div');
     reactions.className = 'reactions';
-    li.appendChild(reactions);
+    corps.appendChild(reactions);
 
     var entree = { li: li, reactions: new Map() };
     (Array.isArray(m.reactions) ? m.reactions : []).forEach(function (r) {
@@ -672,16 +723,69 @@
   function rendrePresence() {
     var zone = el.presenceListe;
     while (zone.firstChild) zone.removeChild(zone.firstChild);
-    if (presents.size === 0) { zone.textContent = 'personne pour l’instant'; return; }
-    var premier = true;
-    presents.forEach(function (p) {
-      if (!premier) zone.appendChild(document.createTextNode(', '));
-      premier = false;
-      var span = document.createElement('span');
-      if (p.web) span.className = 'web';
-      span.textContent = borner(sansSuffixe(p.nom), NOM_MAX + 8) + (p.moi ? ' (toi)' : '');
-      zone.appendChild(span);
+    var lignes = [];
+    presents.forEach(function (p) { lignes.push(p); });
+    // Les membres d'abord, puis les invités ; chacun par ordre alphabétique.
+    lignes.sort(function (a, b) {
+      if (!!a.web !== !!b.web) return a.web ? 1 : -1;
+      return sansSuffixe(a.nom).localeCompare(sansSuffixe(b.nom), 'fr', { sensitivity: 'base' });
     });
+    lignes.forEach(function (p) {
+      var li = document.createElement('li');
+      if (p.web) li.classList.add('web');
+      if (p.moi) li.classList.add('moi');
+      li.appendChild(faireAvatar(p.nom, !!p.web));
+      var nomEl = document.createElement('span');
+      nomEl.className = 'nom';
+      nomEl.textContent = borner(sansSuffixe(p.nom), NOM_MAX + 8);
+      if (!p.web) nomEl.style.color = couleurDe(p.nom);
+      li.appendChild(nomEl);
+      if (p.web) {
+        var badge = document.createElement('span');
+        badge.className = 'badge-web';
+        badge.textContent = 'web';
+        li.appendChild(badge);
+      }
+      zone.appendChild(li);
+    });
+    el.presentsNb.textContent = String(lignes.length);
+    el.presentsNbTete.textContent = String(lignes.length);
+  }
+
+  // Le nom du salon, partout où il s'affiche.
+  function nommerSalon(n) {
+    var texte = borner(String(n || ''), 40) || 'salon';
+    el.salonNom.textContent = texte;
+    el.salonNomLateral.textContent = texte;
+    el.texte.placeholder = 'Message dans #' + texte;
+    document.title = '#' + texte + ' — ' + nomServeur;
+  }
+
+  // Le serveur dit qui est là : les membres qui lisent le salon, et les
+  // invités — la liste remplace ce qu'on avait deviné.
+  function recevoirPresents(msg) {
+    presents.clear();
+    (Array.isArray(msg.membres) ? msg.membres : []).forEach(function (m) {
+      if (m && m.id != null) presents.set(String(m.id), { nom: String(m.nom || ''), web: false });
+    });
+    var moiTrouve = false;
+    (Array.isArray(msg.invites) ? msg.invites : []).forEach(function (i) {
+      if (!i || i.id == null) return;
+      var n = String(i.nom || '');
+      var moi = (nomAffiche && n === nomAffiche) || n === nom + SUFFIXE_WEB;
+      if (moi) { moiTrouve = true; if (!nomAffiche) nomAffiche = n; }
+      presents.set(String(i.id), { nom: n, web: true, moi: moi });
+    });
+    if (typeof msg.salon === 'string' && msg.salon) nommerSalon(msg.salon);
+    if (moiTrouve) rendreMoi();
+    rendrePresence();
+  }
+
+  function rendreMoi() {
+    var n = nomAffiche || (nom ? nom + SUFFIXE_WEB : '');
+    el.moiNom.textContent = borner(sansSuffixe(n) || 'toi', NOM_MAX + 8);
+    el.moiAvatar.textContent = initiale(n);
+    el.moiAvatar.classList.add('web');
   }
 
   // ---- La saisie ----
@@ -852,13 +956,14 @@
   // Le bouton « Rejoindre le vocal » et sa note, selon ce qu'on sait.
   function majBoutonVocal() {
     var b = el.boutonVocal;
+    rendreVocalSalon();
+    b.classList.toggle('dedans', vocal.actif);
     if (vocal.actif) {
-      b.hidden = true;
+      b.disabled = true;
+      b.title = 'Tu es dans ce salon vocal';
       el.vocalNote.hidden = true;
       return;
     }
-    b.hidden = false;
-    b.textContent = 'Rejoindre le vocal' + (vocal.salon ? ' — ' + borner(vocal.salon, 40) : '');
     if (vocal.supporte === false) {
       b.disabled = true;
       b.title = '';
@@ -874,7 +979,7 @@
       el.vocalNote.hidden = true;
     } else {
       b.disabled = false;
-      b.title = '';
+      b.title = 'Rejoindre le vocal';
       el.vocalNote.hidden = true;
     }
   }
@@ -883,6 +988,7 @@
   function vocalOuvert(msg) {
     var nouveau = !vocal.autorise;
     vocal.autorise = true;
+    el.vocaux.hidden = false;
     vocal.salon = typeof msg.nom_salon === 'string' ? msg.nom_salon : (vocal.salon || '');
     var ancien = vocal.channel;
     if (msg.channel != null) vocal.channel = msg.channel;
@@ -909,6 +1015,7 @@
     vocal.salon = '';
     vocal.channel = null;
     vocal.occupants.clear();
+    el.vocaux.hidden = true;
     quitterVocal(true);
     majBoutonVocal();
     if (etat === 'salon') {
@@ -1290,18 +1397,43 @@
   }
 
   function rendreVocalSalon() {
-    el.vocalSalon.textContent = vocal.salon ? borner(vocal.salon, 40) : 'vocal';
+    var n = vocal.salon ? borner(vocal.salon, 40) : 'vocal';
+    el.vocalSalon.textContent = n;
+    el.vocalSalonActif.textContent = n;
   }
 
+  // Les occupants du vocal, sous son entrée dans la colonne — l'anneau
+  // vert marque qui parle (rendreVocalQui). Le texte caché reste pour les
+  // lecteurs d'écran.
   function rendreVocalOccupants() {
+    var zone = el.vocalOccupantsListe;
+    while (zone.firstChild) zone.removeChild(zone.firstChild);
     var noms = [];
-    vocal.occupants.forEach(function (n) { noms.push(estMonNomVocal(n) ? 'toi' : sansSuffixe(n)); });
+    vocal.occupants.forEach(function (n, id) {
+      var moi = estMonNomVocal(n);
+      noms.push(moi ? 'toi' : sansSuffixe(n));
+      var li = document.createElement('li');
+      li.dataset.id = String(id);
+      if (moi) li.classList.add('moi');
+      var web = estInvite(id) || n.slice(-SUFFIXE_WEB.length) === SUFFIXE_WEB;
+      li.appendChild(faireAvatar(n, web));
+      var nomEl = document.createElement('span');
+      nomEl.textContent = moi ? 'toi' : borner(sansSuffixe(n), NOM_MAX + 8);
+      li.appendChild(nomEl);
+      zone.appendChild(li);
+    });
     el.vocalOccupants.textContent = noms.length
       ? 'Dans le vocal : ' + noms.join(', ')
       : 'Dans le vocal : le serveur ne l’a pas dit.';
   }
 
   function rendreVocalQui(ids) {
+    // L'anneau vert dans la colonne, comme dans ki-chat.
+    var parlent = {};
+    ids.forEach(function (id) { parlent[String(id)] = true; });
+    Array.prototype.forEach.call(el.vocalOccupantsListe.children, function (li) {
+      li.classList.toggle('parle', !!parlent[li.dataset.id]);
+    });
     var noms = [];
     var anonymes = 0;
     ids.forEach(function (id) {
@@ -1546,6 +1678,29 @@
         fini(false);
       }
     });
+  });
+
+  // ---- Les tiroirs (téléphone) ----
+  function tiroir(lequel, ouvrir) {
+    var salon = el.etats.salon;
+    var classe = lequel === 'laterale' ? 'laterale-ouverte' : 'presents-ouverts';
+    var autre = lequel === 'laterale' ? 'presents-ouverts' : 'laterale-ouverte';
+    if (ouvrir) salon.classList.remove(autre);
+    salon.classList.toggle(classe, ouvrir);
+    var ouvert = salon.classList.contains('laterale-ouverte') || salon.classList.contains('presents-ouverts');
+    el.voile.hidden = !ouvert;
+    el.boutonSalons.setAttribute('aria-expanded', salon.classList.contains('laterale-ouverte') ? 'true' : 'false');
+    el.boutonPresents.setAttribute('aria-expanded', salon.classList.contains('presents-ouverts') ? 'true' : 'false');
+  }
+  el.boutonSalons.addEventListener('click', function () {
+    tiroir('laterale', !el.etats.salon.classList.contains('laterale-ouverte'));
+  });
+  el.boutonPresents.addEventListener('click', function () {
+    tiroir('presents', !el.etats.salon.classList.contains('presents-ouverts'));
+  });
+  el.voile.addEventListener('click', function () { tiroir('laterale', false); tiroir('presents', false); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !el.voile.hidden) { tiroir('laterale', false); tiroir('presents', false); }
   });
 
   // ---- Départ ----

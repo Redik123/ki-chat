@@ -570,6 +570,17 @@ impl Portes {
         Some(fermee)
     }
 
+    /// Le nom du salon d'une porte et ses invités — pour dire à leurs pages
+    /// qui est là. `None` si ce salon n'est pas celui d'une porte.
+    pub fn presents_du_salon(&self, salon: ChannelId) -> Option<(String, Vec<(UserId, String)>)> {
+        let inner = self.inner.lock().unwrap();
+        let porte = inner.portes.values().find(|p| p.salon == salon)?;
+        let mut invites: Vec<(UserId, String)> =
+            porte.invites.iter().map(|i| (i.invite_id, i.nom.clone())).collect();
+        invites.sort_by_cached_key(|(_, nom)| nom.to_lowercase());
+        Some((porte.nom_salon.clone(), invites))
+    }
+
     /// Fait suivre une ligne du salon à ses invités. Une file pleine, c'est
     /// une page qui ne lit plus : sa file est lâchée, la session se termine,
     /// comme pour un membre — sans faire payer sa lenteur à la mémoire.
@@ -1400,6 +1411,7 @@ pub fn repondre(
         state.audit.record("porte.accept", acteur_nom, &r.nom, &format!("{slug} depuis {}", r.ip));
         tracing::info!("{} entre par la porte {slug}, accepté par {acteur_nom}", r.nom);
         state.poster_systeme(r.salon, PSEUDO_PORTE, &format!("{} a rejoint par la porte {slug}", r.nom));
+        presents_changes(state, r.salon);
         roster_a_tous(state);
     } else {
         let reason = if motif.trim().is_empty() { "demande refusée".to_string() } else { motif.trim().to_string() };
@@ -1436,6 +1448,7 @@ pub fn expulser(state: &AppState, acteur: UserId, acteur_nom: &str, invite_id: U
     // sa liste de présence, comme pour un départ ordinaire.
     state.poster_systeme(d.salon, PSEUDO_PORTE, &format!("{} est parti — mis à la porte par {acteur_nom}", d.nom));
     roster_a_tous(state);
+    presents_changes(state, d.salon);
     pousser_etat(state, &fiche.slug);
     Ok(())
 }
@@ -1648,8 +1661,42 @@ fn depart(state: &AppState, invite_id: UserId) {
         tracing::info!("{} quitte la porte {}", d.nom, d.slug);
         state.poster_systeme(d.salon, PSEUDO_PORTE, &format!("{} est parti", d.nom));
         roster_a_tous(state);
+        presents_changes(state, d.salon);
     }
     pousser_etat(state, &d.slug);
+}
+
+/// La ligne « qui est là » d'un salon de porte : les membres qui le lisent
+/// en ce moment, et les invités — de quoi tenir la colonne « En ligne » de
+/// la page sans rien deviner aux messages système. Le nom du salon voyage
+/// avec, pour l'en-tête.
+fn ligne_presents(nom_salon: &str, membres: &[(UserId, String)], invites: &[(UserId, String)]) -> Line {
+    let liste = |v: &[(UserId, String)]| -> serde_json::Value {
+        v.iter().map(|(id, nom)| serde_json::json!({ "id": id, "nom": nom })).collect()
+    };
+    ligne_json(serde_json::json!({
+        "type": "porte_presents",
+        "salon": nom_salon,
+        "membres": liste(membres),
+        "invites": liste(invites),
+    }))
+}
+
+/// Qui est dans le salon a changé — un membre l'ouvre ou le quitte, se
+/// déconnecte, un invité arrive ou part : les pages des invités de ce
+/// salon reçoivent la liste. Rien si ce salon n'est pas celui d'une porte.
+pub fn presents_changes(state: &AppState, salon: ChannelId) {
+    let Some((nom_salon, invites)) = state.portes.presents_du_salon(salon) else { return };
+    let mut membres: Vec<(UserId, String)> = {
+        let users = state.users.lock().unwrap();
+        users
+            .iter()
+            .filter(|(_, u)| u.channel == Some(salon))
+            .map(|(id, u)| (*id, u.username.clone()))
+            .collect()
+    };
+    membres.sort_by_cached_key(|(_, nom)| nom.to_lowercase());
+    state.portes.diffuser(salon, &ligne_presents(&nom_salon, &membres, &invites));
 }
 
 /// Un tour d'horloge : les portes expirées ou désertes ferment, les
@@ -2105,6 +2152,24 @@ fn en_tetes(h: &mut HeaderMap) {
 #[cfg(test)]
 mod tests {
 
+    /// La ligne des présents : les membres qui lisent, les invités, et le
+    /// nom du salon pour l'en-tête de la page — rien d'autre.
+    #[test]
+    fn la_ligne_des_presents_dit_qui_lit_et_qui_est_invite() {
+        let ligne = ligne_presents(
+            "soirée",
+            &[(6, "redik".to_string()), (2, "Nono".to_string())],
+            &[(INVITE_ID_BASE + INVITE_ID_PAS, "Kevin (web)".to_string())],
+        );
+        let v: serde_json::Value = serde_json::from_slice(texte_de(&ligne).trim_end().as_bytes()).unwrap();
+        assert_eq!(v["type"], "porte_presents");
+        assert_eq!(v["salon"], "soirée");
+        assert_eq!(v["membres"].as_array().unwrap().len(), 2);
+        assert_eq!(v["membres"][0]["nom"], "redik");
+        assert_eq!(v["invites"][0]["nom"], "Kevin (web)");
+        assert_eq!(v["invites"][0]["id"].as_u64().unwrap(), INVITE_ID_BASE + INVITE_ID_PAS);
+    }
+
     /// L'adresse à saisir dans ki-chat : celle que l'admin a fixée, sinon
     /// l'hôte public, sinon celui par lequel l'invité est venu — jamais un
     /// texte de repli qui ne se tape pas.
@@ -2173,9 +2238,9 @@ mod tests {
         envoyer(ws, &serde_json::json!({ "type": "vocal", "actif": true })).await;
     }
 
-    /// Le prochain message de contrôle, pings et pongs ignorés ; `null`
-    /// quand la connexion est fermée.
-    async fn suivant(ws: &mut Ws) -> serde_json::Value {
+    /// Le prochain message de contrôle, tel quel — pings et pongs ignorés ;
+    /// `null` quand la connexion est fermée.
+    async fn suivant_brut(ws: &mut Ws) -> serde_json::Value {
         loop {
             match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
                 Ok(Some(Ok(Trame::Text(t)))) => return serde_json::from_str(t.as_str()).unwrap(),
@@ -2186,6 +2251,31 @@ mod tests {
                 Err(_) => panic!("rien reçu en cinq secondes"),
             }
         }
+    }
+
+    /// Le prochain message de contrôle, les lignes « présents » passées :
+    /// elles s'intercalent à chaque arrivée, départ ou lecture, et les
+    /// scénarios s'intéressent au reste. `les_presents_arrivent_a_l_invite`
+    /// les lit, elles, avec `suivant_brut`.
+    async fn suivant(ws: &mut Ws) -> serde_json::Value {
+        loop {
+            let v = suivant_brut(ws).await;
+            if v["type"] != "porte_presents" {
+                return v;
+            }
+        }
+    }
+
+    /// La prochaine ligne « présents », les autres passées — bornée : au
+    /// bout de dix lignes sans elle, c'est qu'elle ne vient pas.
+    async fn presents_suivants(ws: &mut Ws) -> serde_json::Value {
+        for _ in 0..10 {
+            let v = suivant_brut(ws).await;
+            if v.is_null() || v["type"] == "porte_presents" {
+                return v;
+            }
+        }
+        panic!("pas de ligne « présents » en dix lignes");
     }
 
     /// Le prochain message de contrôle de ce type, les autres passés —
@@ -2243,6 +2333,9 @@ mod tests {
             tokio::select! {
                 _ = &mut fin => return,
                 trame = ws.next() => match trame {
+                    // La liste des présents suit les entrées et les sorties :
+                    // ce n'est pas « quelque chose de dit ».
+                    Some(Ok(Trame::Text(t))) if t.as_str().contains("\"type\":\"porte_presents\"") => continue,
                     Some(Ok(Trame::Text(t))) => panic!("une ligne est arrivée alors que rien ne devait : {t}"),
                     Some(Ok(_)) => continue,
                     autre => panic!("connexion perdue : {autre:?}"),
@@ -3057,6 +3150,39 @@ mod tests {
 
     /// Un salon vocal supprimé sous les pieds d'un invité l'en sort, comme
     /// un membre, par la remise d'aplomb du serveur.
+    /// À l'entrée, la page reçoit qui est là — le nom du salon, les invités,
+    /// aucun membre tant que personne ne lit — puis la liste à nouveau
+    /// quand un second invité entre, et quand il part.
+    #[tokio::test]
+    async fn les_presents_arrivent_a_l_invite() {
+        let state = etat("presents");
+        let addr = servir(state.clone()).await;
+        let salon = ouvrir_ok(&state, "salon1");
+        let mut kevin = frapper_ws(addr, "salon1", "Kevin").await;
+        suivant(&mut kevin).await;
+        let demande = demande_en_attente(&state, "salon1");
+        repondre(&state, HOTE, HOTE_NOM, demande, true, "").unwrap();
+        let presents = presents_suivants(&mut kevin).await;
+        assert_eq!(presents["salon"], state.channels.get(salon).unwrap().name, "{presents}");
+        assert_eq!(presents["membres"].as_array().unwrap().len(), 0, "personne ne lit encore : {presents}");
+        let invites = presents["invites"].as_array().unwrap();
+        assert_eq!(invites.len(), 1, "{presents}");
+        assert_eq!(invites[0]["nom"], "Kevin (web)");
+
+        // Léa entre : Kevin reçoit la liste à deux.
+        let (mut lea, lea_id) = entrer(&state, addr, "salon1", "Léa").await;
+        let a_deux = presents_suivants(&mut kevin).await;
+        let noms: Vec<&str> = a_deux["invites"].as_array().unwrap().iter().map(|i| i["nom"].as_str().unwrap()).collect();
+        assert_eq!(noms, vec!["Kevin (web)", "Léa (web)"], "{a_deux}");
+        assert!(a_deux["invites"].as_array().unwrap().iter().any(|i| i["id"] == lea_id));
+
+        // Léa s'en va : Kevin reçoit la liste à un.
+        drop(lea.close(None).await);
+        let seul = presents_suivants(&mut kevin).await;
+        assert_eq!(seul["invites"].as_array().unwrap().len(), 1, "{seul}");
+        assert_eq!(seul["invites"][0]["nom"], "Kevin (web)");
+    }
+
     #[tokio::test]
     async fn un_salon_vocal_supprime_sort_l_invite() {
         let state = etat("vocal-supprime");

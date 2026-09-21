@@ -1191,16 +1191,23 @@ impl AppState {
         // `member_of` prend lui-même le verrou des connectés : l'appeler en le
         // tenant déjà serait un interblocage.
         let partant = self.member_of(user_id);
+        // Le salon qu'il lisait : ses invités web, s'il en a, sauront qu'il
+        // n'y est plus.
+        let salon_lu;
         {
             let mut users = self.users.lock().unwrap();
             match users.get(&user_id) {
                 Some(u) if only_if_token.is_none_or(|t| u.voice_token == t) => {
+                    salon_lu = u.channel;
                     let u = users.remove(&user_id).expect("présent à l'instant");
                     u.conn.close(0u32.into(), b"bye");
                 }
                 // Personne, ou une session plus récente : rien à faire.
                 _ => return,
             }
+        }
+        if let Some(salon) = salon_lu {
+            crate::porte::presents_changes(self, salon);
         }
         // Sa diffusion éventuelle s'éteint avec lui, et il quitte les
         // publics qu'il suivait. APRÈS la garde du jeton : une session

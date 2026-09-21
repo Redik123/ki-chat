@@ -920,15 +920,28 @@ fn handle_msg(
                 });
                 return;
             }
-            let mut users = state.users.lock().unwrap();
-            if let Some(u) = users.get_mut(&user_id) {
-                u.channel = Some(channel);
+            let ancien = {
+                let mut users = state.users.lock().unwrap();
+                match users.get_mut(&user_id) {
+                    Some(u) => u.channel.replace(channel),
+                    None => None,
+                }
+            };
+            // Les invités web d'un salon de porte voient qui le lit : on
+            // le leur dit pour le salon qu'on ouvre et pour celui qu'on
+            // quitte. Sans porte, ces appels ne coûtent qu'une recherche.
+            crate::porte::presents_changes(state, channel);
+            if let Some(a) = ancien.filter(|a| *a != channel) {
+                crate::porte::presents_changes(state, a);
             }
         }
         ClientMsg::Leave => {
-            let mut users = state.users.lock().unwrap();
-            if let Some(u) = users.get_mut(&user_id) {
-                u.channel = None;
+            let ancien = {
+                let mut users = state.users.lock().unwrap();
+                users.get_mut(&user_id).and_then(|u| u.channel.take())
+            };
+            if let Some(a) = ancien {
+                crate::porte::presents_changes(state, a);
             }
         }
         ClientMsg::JoinVoice { channel, password } => {
