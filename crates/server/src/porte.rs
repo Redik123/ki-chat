@@ -235,6 +235,10 @@ struct Demande {
     /// Sans le suffixe : c'est ainsi que l'hôte le lit dans la bannière.
     nom: String,
     ip: IpAddr,
+    /// L'hôte par lequel sa page nous a joints (l'en-tête `Host`, sans le
+    /// port) : c'est l'adresse qu'il sait taper, celle qu'on lui redonne
+    /// pour ki-chat quand l'admin n'en a pas fixé une.
+    hote: String,
     depuis: u64,
     arrivee: Instant,
     tx: mpsc::Sender<Line>,
@@ -248,6 +252,8 @@ struct Invite {
     /// Avec le suffixe « (web) » : c'est ainsi qu'il signe.
     nom: String,
     ip: IpAddr,
+    /// L'hôte par lequel sa page nous a joints — voir `Demande::hote`.
+    hote: String,
     depuis: u64,
     /// Le salon vocal où on l'a amené, s'il y est autorisé.
     vocal: Option<ChannelId>,
@@ -325,6 +331,8 @@ struct Fiche {
     hote: UserId,
     nom: String,
     vocal: Option<ChannelId>,
+    /// L'hôte par lequel sa page nous a joints.
+    hote_public: String,
 }
 
 impl Portes {
@@ -379,6 +387,7 @@ impl Portes {
         slug: &str,
         nom: &str,
         ip: IpAddr,
+        hote: String,
         tx: mpsc::Sender<Line>,
         audio: mpsc::Sender<Bytes>,
         now_ms: u64,
@@ -411,6 +420,7 @@ impl Portes {
             invite_id,
             nom: nom.to_string(),
             ip,
+            hote,
             depuis: now_ms,
             arrivee: now,
             tx,
@@ -458,6 +468,7 @@ impl Portes {
             invite_id: d.invite_id,
             nom: nom.clone(),
             ip: d.ip,
+            hote: d.hote,
             depuis: now_ms,
             vocal: None,
             ecoute: false,
@@ -603,6 +614,7 @@ impl Portes {
             hote: porte.hote,
             nom: invite.nom.clone(),
             vocal: invite.vocal,
+            hote_public: invite.hote.clone(),
         })
     }
 
@@ -1198,21 +1210,45 @@ fn lien(slug: &str) -> String {
 }
 
 /// L'adresse à saisir dans ki-chat (« ts.baws.fun:9988 ») : `KI_PUBLIC_QUIC`
-/// si l'admin l'a posée, sinon l'hôte de `KI_PUBLIC_URL` et le port QUIC.
-fn adresse_quic() -> String {
-    if let Some(a) = std::env::var("KI_PUBLIC_QUIC").ok().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) {
-        return a;
-    }
-    let hote = base_publique()
-        .and_then(|b| b.split("://").nth(1).map(str::to_string))
-        .and_then(|sans_schema| sans_schema.split(['/', ':']).next().map(str::to_string))
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "ce serveur".into());
+/// si l'admin l'a posée ; sinon l'hôte de `KI_PUBLIC_URL`, sinon celui par
+/// lequel l'invité a ouvert la page, avec le port QUIC du serveur.
+fn adresse_quic(hote_requete: &str) -> String {
+    let public_quic = std::env::var("KI_PUBLIC_QUIC").ok();
     let port = std::env::var("KI_UDP_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(9987);
+    adresse_quic_de(public_quic.as_deref(), base_publique().as_deref(), hote_requete, port)
+}
+
+/// Le choix de l'adresse, sans l'environnement — pour le tester. L'hôte
+/// de la page vaut mieux qu'un texte de repli : un invité qui nous a
+/// joints par `192.168.2.36:8080` saura taper `192.168.2.36:9987` ; en
+/// dernier recours, la machine elle-même.
+fn adresse_quic_de(public_quic: Option<&str>, base: Option<&str>, hote_requete: &str, port: u16) -> String {
+    if let Some(a) = public_quic.map(str::trim).filter(|a| !a.is_empty()) {
+        return a.to_string();
+    }
+    let hote = base
+        .and_then(|b| b.split("://").nth(1))
+        .and_then(|sans_schema| sans_schema.split(['/', ':']).next())
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let h = hote_sans_port(hote_requete);
+            (!h.is_empty()).then(|| h.to_string())
+        })
+        .unwrap_or_else(|| "127.0.0.1".into());
     format!("{hote}:{port}")
+}
+
+/// L'hôte d'un en-tête `Host`, sans son port — « [::1]:8080 » compris.
+fn hote_sans_port(hote: &str) -> &str {
+    let hote = hote.trim();
+    if let Some(fin) = hote.strip_prefix('[').and_then(|h| h.find(']')) {
+        return &hote[..fin + 2];
+    }
+    hote.rsplit_once(':').map_or(hote, |(h, _)| h)
 }
 
 /// Un nom d'invité acceptable : nettoyé comme un pseudo — espaces réduits,
@@ -1306,6 +1342,7 @@ fn frapper(
     slug: &str,
     nom: &str,
     ip: IpAddr,
+    hote: &str,
     tx: mpsc::Sender<Line>,
     audio: mpsc::Sender<Bytes>,
 ) -> Result<(u64, UserId), String> {
@@ -1322,7 +1359,7 @@ fn frapper(
     }
     state.portes.throttle.record_failure(ip, &cle);
     let (demande_id, invite_id) =
-        state.portes.frapper(slug, &nom, ip, tx, audio, now_millis(), Instant::now())?;
+        state.portes.frapper(slug, &nom, ip, hote.to_string(), tx, audio, now_millis(), Instant::now())?;
     state.audit.record("porte.request", &nom, slug, &format!("depuis {ip}"));
     tracing::info!("{nom} frappe à la porte {slug} depuis {ip}");
     if let Some(hote) = state.portes.hote_de(slug) {
@@ -1470,7 +1507,7 @@ pub fn offrir(state: &AppState, acteur_nom: &str, invite_id: UserId) -> Result<S
     let code = state.accounts.create_invite(acteur_nom, Some(1), &label, INVITATION_TTL_SECS)?;
     state.audit.record("invite.create", acteur_nom, "", &format!("{code} — 1 usage(s) « {label} »"));
     tracing::info!("invitation {code} offerte à {} par {acteur_nom}", fiche.nom);
-    let serveur = adresse_quic();
+    let serveur = adresse_quic(&fiche.hote_public);
     state.poster_systeme(
         fiche.salon,
         PSEUDO_PORTE,
@@ -1737,6 +1774,9 @@ async fn ws(
         tracing::warn!("porte {slug} : WebSocket refusée depuis l'origine {}", origine.unwrap_or("?"));
         return (StatusCode::FORBIDDEN, "cette page n'est pas celle du serveur").into_response();
     }
+    // L'hôte tel que l'invité l'a tapé, sans le port : c'est l'adresse
+    // qu'il saura resaisir dans ki-chat si on la lui offre.
+    let hote_public = hote_sans_port(hote.unwrap_or("")).to_string();
     let ip = adresse.ip();
     let Some(jeton) = state.sas.entrer(ip) else {
         tracing::warn!("sas plein pour {ip} : WebSocket refusée");
@@ -1745,7 +1785,7 @@ async fn ws(
     upgrade
         .max_message_size(TRAME_MAX)
         .max_frame_size(TRAME_MAX)
-        .on_upgrade(move |socket| session(state, socket, slug, ip, jeton))
+        .on_upgrade(move |socket| session(state, socket, slug, ip, hote_public, jeton))
 }
 
 /// L'origine d'une ouverture de WebSocket est-elle la nôtre ? Un
@@ -1804,7 +1844,14 @@ type Entree = futures_util::stream::SplitStream<WebSocket>;
 /// jusqu'au bout, trente-deux pages ouvertes derrière une même box
 /// fermeraient le serveur aux membres qui la partagent. Une fois la
 /// demande posée, ce sont les plafonds de la porte qui bornent.
-async fn session(state: Arc<AppState>, socket: WebSocket, slug: String, ip: IpAddr, place: JetonSas) {
+async fn session(
+    state: Arc<AppState>,
+    socket: WebSocket,
+    slug: String,
+    ip: IpAddr,
+    hote: String,
+    place: JetonSas,
+) {
     let (mut sink, mut stream) = socket.split();
     let nom = match tokio::time::timeout(HELLO_DELAI, stream.next()).await {
         Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<MsgInvite>(&t) {
@@ -1824,7 +1871,7 @@ async fn session(state: Arc<AppState>, socket: WebSocket, slug: String, ip: IpAd
     // Sa file audio, dès maintenant : la table en garde le bout émetteur
     // pour le jour où on l'amène en vocal.
     let (audio_tx, mut audio_rx) = mpsc::channel::<Bytes>(FILE_AUDIO);
-    let invite_id = match frapper(&state, &slug, &nom, ip, tx, audio_tx) {
+    let invite_id = match frapper(&state, &slug, &nom, ip, &hote, tx, audio_tx) {
         Ok((_, invite_id)) => invite_id,
         Err(e) => {
             dire(&mut sink, &ServerMsg::Error { message: e }).await;
@@ -2057,6 +2104,20 @@ fn en_tetes(h: &mut HeaderMap) {
 
 #[cfg(test)]
 mod tests {
+
+    /// L'adresse à saisir dans ki-chat : celle que l'admin a fixée, sinon
+    /// l'hôte public, sinon celui par lequel l'invité est venu — jamais un
+    /// texte de repli qui ne se tape pas.
+    #[test]
+    fn l_adresse_a_saisir_revient_a_l_hote_de_la_page() {
+        assert_eq!(adresse_quic_de(Some("ts.baws.fun:9988"), None, "127.0.0.1", 9987), "ts.baws.fun:9988");
+        assert_eq!(adresse_quic_de(Some("  "), Some("https://ts.baws.fun:8080/"), "127.0.0.1", 9987), "ts.baws.fun:9987");
+        assert_eq!(adresse_quic_de(None, None, "192.168.2.36:8080", 9987), "192.168.2.36:9987");
+        assert_eq!(adresse_quic_de(None, None, "[::1]:8080", 9987), "[::1]:9987");
+        assert_eq!(adresse_quic_de(None, None, "", 9987), "127.0.0.1:9987");
+        assert_eq!(hote_sans_port("ts.baws.fun"), "ts.baws.fun");
+        assert_eq!(hote_sans_port(" 127.0.0.1:8080 "), "127.0.0.1");
+    }
     use super::*;
     use crate::state::SAS_MAX_PAR_IP;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2496,41 +2557,41 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let (audio, _audio_rx) = mpsc::channel(4);
         let ip: IpAddr = "203.0.113.9".parse().unwrap();
-        assert!(frapper(&state, "porte-2", "   ", ip, tx.clone(), audio.clone()).is_err());
-        assert!(frapper(&state, "porte-2", &"x".repeat(MAX_USERNAME + 1), ip, tx.clone(), audio.clone()).is_err());
-        assert!(frapper(&state, "porte-2", "Kevin (WEB)", ip, tx.clone(), audio.clone()).is_err());
-        assert!(frapper(&state, "porte-2", ki_protocol::MUSIQUE_NOM, ip, tx.clone(), audio.clone()).is_err());
-        assert!(frapper(&state, "porte-2", PSEUDO_PORTE, ip, tx.clone(), audio.clone()).is_err());
-        assert!(frapper(&state, "porte-2", "kevin", "203.0.113.10".parse().unwrap(), tx.clone(), audio.clone()).is_ok(), "Kevin attend à porte-1, pas à porte-2 : le nom y est libre");
-        assert!(frapper(&state, "porte-2", "kevin", "203.0.113.11".parse().unwrap(), tx.clone(), audio.clone()).is_err(), "le même nom, casse ignorée, est pris à porte-2");
-        assert!(frapper(&state, "nulle-part", "Ana", ip, tx.clone(), audio.clone()).is_err());
+        assert!(frapper(&state, "porte-2", "   ", ip, "127.0.0.1", tx.clone(), audio.clone()).is_err());
+        assert!(frapper(&state, "porte-2", &"x".repeat(MAX_USERNAME + 1), ip, "127.0.0.1", tx.clone(), audio.clone()).is_err());
+        assert!(frapper(&state, "porte-2", "Kevin (WEB)", ip, "127.0.0.1", tx.clone(), audio.clone()).is_err());
+        assert!(frapper(&state, "porte-2", ki_protocol::MUSIQUE_NOM, ip, "127.0.0.1", tx.clone(), audio.clone()).is_err());
+        assert!(frapper(&state, "porte-2", PSEUDO_PORTE, ip, "127.0.0.1", tx.clone(), audio.clone()).is_err());
+        assert!(frapper(&state, "porte-2", "kevin", "203.0.113.10".parse().unwrap(), "127.0.0.1", tx.clone(), audio.clone()).is_ok(), "Kevin attend à porte-1, pas à porte-2 : le nom y est libre");
+        assert!(frapper(&state, "porte-2", "kevin", "203.0.113.11".parse().unwrap(), "127.0.0.1", tx.clone(), audio.clone()).is_err(), "le même nom, casse ignorée, est pris à porte-2");
+        assert!(frapper(&state, "nulle-part", "Ana", ip, "127.0.0.1", tx.clone(), audio.clone()).is_err());
 
         // Cinq demandes par porte, depuis cinq adresses, pas six.
         for n in 0..PORTE_DEMANDES_MAX {
             let ip: IpAddr = format!("198.51.100.{n}").parse().unwrap();
-            frapper(&state, "porte-3", &format!("invite{n}"), ip, tx.clone(), audio.clone()).unwrap();
+            frapper(&state, "porte-3", &format!("invite{n}"), ip, "127.0.0.1", tx.clone(), audio.clone()).unwrap();
         }
-        let trop = frapper(&state, "porte-3", "encore", "198.51.100.99".parse().unwrap(), tx.clone(), audio.clone()).unwrap_err();
+        let trop = frapper(&state, "porte-3", "encore", "198.51.100.99".parse().unwrap(), "127.0.0.1", tx.clone(), audio.clone()).unwrap_err();
         assert!(trop.contains("trop de demandes"), "{trop}");
 
         // Vingt invités par porte : la vingt-et-unième demande est refusée,
         // et une demande acceptée de trop aussi.
         for n in 0..PORTE_INVITES_MAX {
             let ip: IpAddr = format!("192.0.2.{n}").parse().unwrap();
-            let (id, _) = frapper(&state, "porte-4", &format!("inv{n}"), ip, tx.clone(), audio.clone()).unwrap();
+            let (id, _) = frapper(&state, "porte-4", &format!("inv{n}"), ip, "127.0.0.1", tx.clone(), audio.clone()).unwrap();
             repondre(&state, HOTE, HOTE_NOM, id, true, "").unwrap();
         }
-        let plein = frapper(&state, "porte-4", "de-trop", "192.0.2.200".parse().unwrap(), tx.clone(), audio.clone()).unwrap_err();
+        let plein = frapper(&state, "porte-4", "de-trop", "192.0.2.200".parse().unwrap(), "127.0.0.1", tx.clone(), audio.clone()).unwrap_err();
         assert!(plein.contains("pleine"), "{plein}");
         assert_eq!(state.roster().iter().filter(|m| m.invite).count(), PORTE_INVITES_MAX);
 
         // Le limiteur par adresse : cinq demandes gratuites, puis un délai.
         let ip: IpAddr = "203.0.113.77".parse().unwrap();
         for n in 0..6 {
-            let (_, invite_id) = frapper(&state, "porte-5", &format!("t{n}"), ip, tx.clone(), audio.clone()).unwrap();
+            let (_, invite_id) = frapper(&state, "porte-5", &format!("t{n}"), ip, "127.0.0.1", tx.clone(), audio.clone()).unwrap();
             depart(&state, invite_id);
         }
-        let ralenti = frapper(&state, "porte-5", "t7", ip, tx.clone(), audio.clone()).unwrap_err();
+        let ralenti = frapper(&state, "porte-5", "t7", ip, "127.0.0.1", tx.clone(), audio.clone()).unwrap_err();
         assert!(ralenti.contains("réessaie dans"), "{ralenti}");
     }
 
