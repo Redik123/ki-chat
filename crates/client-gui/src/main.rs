@@ -958,6 +958,8 @@ struct KiApp {
     show_admin: bool,
     /// Nom du serveur en cours d'édition dans le panneau admin.
     admin_name: String,
+    /// Adresse web publique en cours d'édition (Admin → Serveur).
+    admin_adresse_web: String,
     /// Logo choisi dans le panneau admin, pas encore envoyé.
     admin_icon: IconChange,
     admin_users: Vec<AccountInfo>,
@@ -1182,6 +1184,7 @@ impl KiApp {
             account_avatar: IconChange::Keep,
             server_info: ServerInfo::default(),
             admin_name: String::new(),
+            admin_adresse_web: String::new(),
             admin_icon: IconChange::Keep,
             invite: String::new(),
             show_invite: false,
@@ -1742,6 +1745,17 @@ impl KiApp {
         // HTTPS : le partage de fichiers portait le jeton de session et le
         // contenu des fichiers en clair, à côté d'un tunnel QUIC chiffré.
         format!("https://{host}:8080")
+    }
+
+    /// La base des liens des portes : l'adresse web réglée par un admin
+    /// (Admin → Serveur), sinon celle par laquelle on joint le serveur en
+    /// HTTPS — même hôte que le QUIC, port 8080.
+    fn base_web(&self) -> String {
+        if self.server_info.adresse_web.is_empty() {
+            self.http_base()
+        } else {
+            self.server_info.adresse_web.clone()
+        }
     }
 
     /// Client HTTP épinglé sur l'empreinte du serveur courant.
@@ -3315,6 +3329,7 @@ impl KiApp {
             peut_expulser: self.can(KICK),
             mon_vocal: self.voice_channel,
             salons: &self.channels,
+            base_web: self.base_web(),
         }
     }
 
@@ -4627,6 +4642,7 @@ impl KiApp {
                 self.cache_server_identity();
                 if !self.show_admin {
                     self.admin_name = self.server_info.name.clone();
+                    self.admin_adresse_web = self.server_info.adresse_web.clone();
                 }
                 // Reprise réussie : on rend la place qu'on occupait, salon lu
                 // **et** salon vocal. Se reconnecter tout seul pour se
@@ -5160,6 +5176,7 @@ impl KiApp {
                 self.cache_server_identity();
                 if !self.show_admin {
                     self.admin_name = self.server_info.name.clone();
+                    self.admin_adresse_web = self.server_info.adresse_web.clone();
                 }
             }
             ServerMsg::Avatar { user_id, hash, data } => match data {
@@ -5195,6 +5212,9 @@ impl KiApp {
                 // salon temporaire sous les yeux — il arrive par
                 // `ChannelsUpdated`, avant ou après, peu importe : lire
                 // un salon ne demande que son identifiant.
+                // Complet, `https://` compris : un chemin seul (le serveur ne
+                // connaît pas son adresse publique) se complète ici.
+                let url = porte_ui::lien_complet(&self.base_web(), &ki_protocol::safe_display(&url, 300));
                 self.portes.ouverte(&slug, url, salon, expire_le);
                 self.join(salon);
             }
@@ -5211,7 +5231,7 @@ impl KiApp {
                     self.overlay.annoncer(format!("{nom} frappe à la porte {slug}"));
                 }
             }
-            ServerMsg::PorteEtat { slug, salon, invites, demandes, expire_le } => {
+            ServerMsg::PorteEtat { slug, salon, invites, demandes, expire_le, url } => {
                 let invites = invites
                     .into_iter()
                     .map(|mut i| {
@@ -5226,7 +5246,11 @@ impl KiApp {
                         d
                     })
                     .collect();
-                self.portes.etat(&slug, salon, invites, demandes, expire_le);
+                // Vide chez un serveur d'avant 0.1.45 : le lien reçu à
+                // l'ouverture reste alors celui qu'on montre.
+                let url = (!url.is_empty())
+                    .then(|| porte_ui::lien_complet(&self.base_web(), &ki_protocol::safe_display(&url, 300)));
+                self.portes.etat(&slug, salon, invites, demandes, expire_le, url);
             }
             ServerMsg::PorteFermee { slug, motif } => {
                 let motif = ki_protocol::safe_display(&motif, ki_protocol::MAX_PORTE_MOTIF);
@@ -6391,6 +6415,7 @@ impl KiApp {
                         self.show_admin = !self.show_admin;
                         if self.show_admin {
                             self.admin_name = self.server_info.name.clone();
+                            self.admin_adresse_web = self.server_info.adresse_web.clone();
                             self.admin_icon = IconChange::Keep;
                             self.send(ClientMsg::AdminListUsers);
                         }
@@ -9818,6 +9843,49 @@ impl KiApp {
                 name: Some(self.admin_name.trim().to_string()),
                 icon: std::mem::take(&mut self.admin_icon),
             });
+        }
+
+        // L'adresse web publique : la base des liens des portes et des QR
+        // codes. Le serveur ne sait pas sous quel nom on le joint —
+        // derrière Docker ou une box, rien ne le lui dit : un admin le lui
+        // apprend. Un serveur sans portes n'en a pas l'usage.
+        if self.portes.disponible {
+            ui.add_space(14.0);
+            ui::hairline(ui);
+            ui.add_space(8.0);
+            ui::field_label(ui, "Adresse web publique — la base des liens des portes");
+            let auto = self.http_base();
+            ui.add(ui::text_field(&mut self.admin_adresse_web, &format!("automatique : {auto}"), false));
+            let normalisee = ki_protocol::normaliser_adresse_web(&self.admin_adresse_web);
+            match &normalisee {
+                Err(e) => {
+                    ui.label(RichText::new(e.as_str()).color(DANGER).size(12.5));
+                }
+                Ok(n) if n.is_empty() => {
+                    ui::hint(ui, &format!("vide : automatique, les liens partent de l'adresse de connexion — {auto}/salon1"));
+                }
+                Ok(n) => ui::hint(ui, &format!("les liens des portes : {n}/salon1")),
+            }
+            ui::hint(
+                ui,
+                "comme dans la barre d'adresse du navigateur : ex. ts.baws.fun:8080. Le https:// est ajouté \
+                 s'il manque — sans lui, le navigateur tenterait http:// et la page ne s'ouvrirait pas.",
+            );
+            ui.add_space(6.0);
+            let change = normalisee.as_ref().is_ok_and(|n| *n != self.server_info.adresse_web);
+            let enregistrer = ui
+                .add_enabled_ui(change, |ui| {
+                    ui::primary_button(ui, Some(Icon::Check), "Enregistrer l'adresse", None)
+                })
+                .inner
+                .clicked();
+            if enregistrer {
+                if let Ok(adresse) = normalisee {
+                    // Le champ montre tout de suite la forme enregistrée.
+                    self.admin_adresse_web = adresse.clone();
+                    to_send.push(ClientMsg::AdminSetAdresseWeb { adresse });
+                }
+            }
         }
 
         // Le fil de jeu VALORANT : le salon où le serveur annonce les
@@ -13714,6 +13782,9 @@ fn safe_name(username: &str) -> String {
 /// n'oblige le serveur d'en face à être le nôtre.
 fn safe_server_info(mut server: ServerInfo) -> ServerInfo {
     server.name = ki_protocol::safe_display(&server.name, ki_protocol::MAX_SERVER_NAME);
+    // Un lien qu'on montre, qu'on copie et qu'on met en QR code : ce qui ne
+    // se lit pas comme une adresse web est tenu pour absent.
+    server.adresse_web = ki_protocol::normaliser_adresse_web(&server.adresse_web).unwrap_or_default();
     server
 }
 

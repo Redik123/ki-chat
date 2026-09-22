@@ -1430,6 +1430,41 @@ fn handle_msg(
                 }
             });
         }
+        ClientMsg::AdminSetAdresseWeb { adresse } => {
+            if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
+                return;
+            }
+            // Le client normalise déjà ; le serveur ne le croit pas.
+            let adresse = match ki_protocol::normaliser_adresse_web(&adresse) {
+                Ok(adresse) => adresse,
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: format!("adresse web : {e}") });
+                    return;
+                }
+            };
+            let (state, tx) = (state.clone(), tx.clone());
+            let actor = username.to_string();
+            tokio::task::spawn_blocking(move || match state.meta.set_adresse_web(&adresse) {
+                Ok(()) => {
+                    let dit = if adresse.is_empty() { "automatique" } else { adresse.as_str() };
+                    state.audit.record("server.adresse_web", &actor, "", dit);
+                    state.broadcast_all(&ServerMsg::ServerInfo { server: state.meta.get() });
+                    // Les portes ouvertes changent de lien : ceux qui les
+                    // gèrent le reçoivent, QR code compris.
+                    crate::porte::liens_changes(&state);
+                    let _ = tx.send(ServerMsg::Info {
+                        message: if adresse.is_empty() {
+                            "adresse web : automatique (celle de la connexion)".into()
+                        } else {
+                            format!("adresse web : {adresse} — les liens des portes en partent")
+                        },
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(ServerMsg::Error { message: e.to_string() });
+                }
+            });
+        }
         ClientMsg::AdminSetFilValorant { channel } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
                 return;

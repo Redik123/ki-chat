@@ -50,11 +50,17 @@ Une **porte web**, c'est un lien qu'un membre ouvre depuis ki-chat (bouton
 « Portes » au bas de la barre latérale) et qu'il donne à quelqu'un qui n'a
 ni compte ni l'application : `https://ts.baws.fun/s/salon1`. La page demande un nom, un
 membre accepte, et l'invité écrit (et parle, si on l'y met) dans un salon
-temporaire depuis son navigateur. Deux variables lui suffisent :
+temporaire depuis son navigateur. L'adresse dont le lien est fait se règle
+le plus simplement dans ki-chat, **Admin → Serveur → Adresse web
+publique** (`ts.baws.fun:8080` tant que le 443 n'est pas en place — le
+`https://` est ajouté) ; elle l'emporte sur la variable ci-dessous. Sans
+l'une ni l'autre, chaque client complète le lien avec l'adresse par
+laquelle il joint le serveur, en HTTPS sur le port 8080. Deux variables,
+facultatives donc :
 
 | Nom | Valeur | Rôle |
 |-----|--------|------|
-| `KI_PUBLIC_URL` | `https://ts.baws.fun` | l'adresse dont le lien est fait (sans barre finale ; avec `:8080` tant que le 443 n'est pas en place) |
+| `KI_PUBLIC_URL` | `https://ts.baws.fun` | l'adresse dont le lien est fait (sans barre finale ; avec `:8080` tant que le 443 n'est pas en place) — à défaut de celle réglée dans Admin → Serveur |
 | `KI_PUBLIC_QUIC` | `ts.baws.fun:9988` | l'adresse à saisir dans ki-chat, telle qu'une invitation offerte à un invité la donne |
 
 **Sans certificat public, ça marche déjà** : la porte est servie sur

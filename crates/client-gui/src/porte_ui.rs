@@ -34,8 +34,9 @@ use crate::ui::{self, Tone};
 pub const DUREE_DEMANDE: Duration = Duration::from_secs(5 * 60);
 
 /// Les durées proposées à l'ouverture, en minutes. La dernière est le
-/// plafond du serveur ([`ki_protocol::PORTE_TTL_MAX_SECS`]).
-const DUREES: [(u64, &str); 3] = [(30, "30 min"), (60, "1 h"), (120, "2 h")];
+/// plafond du serveur ([`ki_protocol::PORTE_TTL_MAX_SECS`]) : une soirée
+/// entière — une partie avec un invité a duré cinq heures et demie.
+const DUREES: [(u64, &str); 4] = [(30, "30 min"), (60, "1 h"), (120, "2 h"), (360, "6 h")];
 
 /// Le côté du QR code du lien, en points.
 const COTE_QR: f32 = 160.0;
@@ -66,7 +67,9 @@ pub struct Porte {
     pub demandes: Vec<DemandeWeb>,
     /// Fermeture au plus tard (ms Unix).
     pub expire_le: u64,
-    /// Le lien, que le serveur ne donne qu'à l'hôte (`PorteOuverte`).
+    /// Le lien complet, tel qu'on le montre et qu'on le copie : donné à
+    /// l'ouverture (`PorteOuverte`), puis dans chaque état (`PorteEtat`,
+    /// depuis 0.1.45).
     pub url: Option<String>,
     /// Le QR code du lien, dessiné à la première ouverture du panneau.
     qr: Option<egui::TextureHandle>,
@@ -99,6 +102,10 @@ pub struct Contexte<'a> {
     pub peut_expulser: bool,
     pub mon_vocal: Option<ChannelId>,
     pub salons: &'a [ChannelInfo],
+    /// La base des liens : l'adresse web réglée par un admin, sinon celle
+    /// par laquelle on joint le serveur — pour montrer le lien avant même
+    /// d'ouvrir la porte.
+    pub base_web: String,
 }
 
 impl Contexte<'_> {
@@ -223,6 +230,7 @@ impl Portes {
         invites: Vec<InviteWeb>,
         demandes: Vec<DemandeWeb>,
         expire_le: u64,
+        url: Option<String>,
     ) {
         self.disponible = true;
         self.demandes.retain(|d| {
@@ -234,6 +242,15 @@ impl Portes {
         porte.demandes = demandes;
         if expire_le != 0 {
             porte.expire_le = expire_le;
+        }
+        // Le lien voyage aussi dans l'état : qui gère la porte sans l'avoir
+        // ouverte le voit, l'hôte le retrouve après une reconnexion, et il
+        // suit l'adresse publique quand un admin la change — QR compris.
+        if let Some(url) = url {
+            if porte.url.as_deref() != Some(url.as_str()) {
+                porte.url = Some(url);
+                porte.qr = None;
+            }
         }
     }
 
@@ -384,7 +401,7 @@ impl Portes {
                     );
                     ui.add_space(10.0);
                     if contexte.peut_ouvrir {
-                        self.formulaire(ui, &mut actions);
+                        self.formulaire(ui, contexte, &mut actions);
                         ui.add_space(12.0);
                         ui::hairline(ui);
                         ui.add_space(10.0);
@@ -412,7 +429,7 @@ impl Portes {
         actions
     }
 
-    fn formulaire(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    fn formulaire(&mut self, ui: &mut egui::Ui, contexte: &Contexte, actions: &mut Vec<Action>) {
         ui::group_title(ui, Icon::Plus, "Ouvrir une porte");
         ui::field_label(ui, "Nom de la porte (dans le lien)");
         if ui.add(ui::text_field(&mut self.slug, "ex. salon1", false)).changed() {
@@ -433,7 +450,8 @@ impl Portes {
         } else if deja {
             ui::hint(ui, "cette porte est déjà ouverte");
         } else {
-            ui::hint(ui, "un mot qu'on dicte en vocal : « va sur ts point baws point fun, slash s, slash salon1 »");
+            let exemple = if self.slug.is_empty() { "salon1" } else { self.slug.as_str() };
+            ui::hint(ui, &format!("le lien : {}/{exemple} — un mot qu'on dicte en vocal", contexte.base_web));
         }
         ui.add_space(8.0);
         ui::field_label(ui, "Nom du salon temporaire (facultatif)");
@@ -506,7 +524,7 @@ fn carte_porte(
             });
         });
 
-        // Le lien, à l'hôte seul : à copier, ou à scanner.
+        // Le lien complet : à copier, à dicter, ou à scanner.
         if let Some(url) = porte.url.clone() {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -778,6 +796,20 @@ fn reste_court(d: Duration) -> String {
 }
 
 /// L'heure qu'il est, en ms Unix — l'unité des dates du serveur.
+/// Le lien d'une porte tel qu'on le montre et qu'on le copie : complet,
+/// `https://` compris — sans lui, le navigateur tenterait `http://` et la
+/// page, servie en TLS, ne s'ouvrirait pas. Le serveur le donne entier
+/// quand il connaît son adresse publique ; sinon le chemin seul
+/// (`/salon1`), qu'on complète avec `base` : l'adresse réglée par un
+/// admin, ou celle par laquelle on joint le serveur.
+pub fn lien_complet(base: &str, url: &str) -> String {
+    let url = url.trim();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        return url.to_string();
+    }
+    format!("{}/{}", base.trim_end_matches('/'), url.trim_start_matches('/'))
+}
+
 pub fn maintenant_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -831,6 +863,7 @@ mod tests {
             vec![InviteWeb { invite_id: ki_protocol::INVITE_ID_BASE + 1, nom: "Kevin (web)".into(), depuis: 0, vocal: None }],
             vec![DemandeWeb { demande_id: 8, nom: "Léa".into(), depuis: 0 }],
             123,
+            None,
         );
         assert_eq!(portes.demandes.len(), 1);
         assert_eq!(portes.demandes[0].demande_id, 8);
@@ -840,7 +873,7 @@ mod tests {
         assert!(portes.porte_de_l_invite(ki_protocol::INVITE_ID_BASE + 2).is_none());
 
         // Une autre porte n'y touche pas.
-        portes.etat("autre", 10, Vec::new(), Vec::new(), 0);
+        portes.etat("autre", 10, Vec::new(), Vec::new(), 0, None);
         assert_eq!(portes.demandes.len(), 1);
 
         portes.fermee("salon1", "expirée");
@@ -866,22 +899,37 @@ mod tests {
 
     /// La porte que j'ouvre est mienne, garde son lien, et l'état qui suit
     /// ne le lui retire pas. La fermeture et la déconnexion font place nette.
+    /// Un lien relatif se complète sur la base ; un lien complet reste tel
+    /// quel. La dernière durée proposée est le plafond du serveur.
+    #[test]
+    fn un_lien_relatif_se_complete() {
+        assert_eq!(lien_complet("https://ts.baws.fun:8080", "/valo"), "https://ts.baws.fun:8080/valo");
+        assert_eq!(lien_complet("https://ts.baws.fun:8080/", "valo"), "https://ts.baws.fun:8080/valo");
+        assert_eq!(lien_complet("https://autre:8080", "https://ts.baws.fun/valo"), "https://ts.baws.fun/valo");
+        assert_eq!(DUREES[DUREES.len() - 1].0 * 60, ki_protocol::PORTE_TTL_MAX_SECS);
+    }
+
     #[test]
     fn ma_porte_garde_son_lien() {
         let mut portes = Portes::new();
         portes.ouverte("salon1", "https://ts.baws.fun/s/salon1".into(), 9, 5_000);
         assert!(portes.ouvert, "le panneau s'ouvre pour montrer le lien");
-        portes.etat("salon1", 9, Vec::new(), Vec::new(), 6_000);
+        portes.etat("salon1", 9, Vec::new(), Vec::new(), 6_000, None);
         let p = &portes.portes[0];
         assert!(p.mienne);
         assert_eq!(p.url.as_deref(), Some("https://ts.baws.fun/s/salon1"));
         assert_eq!(p.expire_le, 6_000);
+        // Un état qui porte un lien neuf (l'adresse publique a changé) le
+        // remplace.
+        portes.etat("salon1", 9, Vec::new(), Vec::new(), 6_000, Some("https://ts.baws.fun:8080/salon1".into()));
+        assert_eq!(portes.portes[0].url.as_deref(), Some("https://ts.baws.fun:8080/salon1"));
         let salons: Vec<ChannelInfo> = Vec::new();
         let sans_droits = Contexte {
             peut_ouvrir: false,
             peut_expulser: false,
             mon_vocal: None,
             salons: &salons,
+            base_web: "https://ts.baws.fun:8080".into(),
         };
         assert!(portes.peut_fermer("salon1", &sans_droits), "la mienne, sans permission");
         assert!(!portes.peut_fermer("autre", &sans_droits));

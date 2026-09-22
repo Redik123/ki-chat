@@ -152,7 +152,7 @@ qui reste ouvert est à la fin.
   est déconnecté), des trames ≤ 16 Kio, un ping toutes les 20 s et une
   fermeture après 60 s de silence (axum et tungstenite n'ont aucun délai
   d'inactivité, contrairement à QUIC). `PORTE_VIDE_SECS` 10 min sans
-  invité, `PORTE_TTL_MAX_SECS` 2 h ; une boucle par minute (`tour`).
+  invité, `PORTE_TTL_MAX_SECS` 6 h ; une boucle par minute (`tour`).
 - **La page** : `porte.html`, `porte.css`, `porte.js` en `include_str!`,
   servis à part (`/s/porte.css`, `/s/porte.js`) pour une CSP `default-src
   'none'; script-src 'self'` sans `unsafe-inline`, plus `X-Frame-Options:
@@ -206,7 +206,7 @@ qui reste ouvert est à la fin.
   serveur a prouvé qu'il gère les portes (`disponible`, posé par le premier
   message de la famille) et qu'on peut créer des invitations — ou qu'une
   porte existe. La fenêtre : slug (normalisé au clavier, validé par
-  `slug_valide` des deux côtés), durée (30 min, 1 h, 2 h), lien + QR
+  `slug_valide` des deux côtés), durée (30 min, 1 h, 2 h, 6 h), lien + QR
   (`qrcode`), la liste des invités (expulser, mettre dans mon vocal / l'en
   sortir, offrir ki-chat), les demandes en attente.
 - **La bannière** « Kevin veut rejoindre par le web (porte salon1, depuis
@@ -288,7 +288,8 @@ avec l'interstitiel du navigateur.
   dehors » vont ensemble. Ouvrir et offrir exigent `CREATE_INVITE`.
 - **Le salon temporaire est effacé**, pas archivé : `delete_and_forget`.
   Il reste l'audit (qui, quand, d'où, combien).
-- **Expiration** : 10 min sans invité, 2 h au plus, boucle par minute.
+- **Expiration** : 10 min sans invité, 6 h au plus (2 h jusqu'en 0.1.44 : une
+  partie avec un invité a duré cinq heures et demie), boucle par minute.
 - **Plafonds** : 5 portes, 20 invités et 5 demandes par porte, 1 demande
   par adresse par porte.
 - **Identité** : `INVITE_ID_BASE = 1 << 62` (pas de 1024), nom nettoyé
@@ -332,6 +333,22 @@ d'environnement — elle reprend l'hôte de la page ; la page a pris la
 mise en page de ki-chat (trois colonnes, avatars, présents en direct
 par `porte_presents`) ; le lien court `/invite`.
 
+**Le lien exact (0.1.45)** : sans `KI_PUBLIC_URL`, le lien de la porte
+n'était que son chemin (« /valo »), et le QR code ne menait nulle part.
+L'adresse web publique se règle désormais dans **Admin → Serveur**
+(`AdminSetAdresseWeb`, rangée dans `server.json` avec l'identité du
+serveur) : `ts.baws.fun:8080` devient `https://ts.baws.fun:8080` —
+`normaliser_adresse_web`, la même règle chez le client et le serveur —,
+car sans schéma le navigateur tenterait `http://` sur une écoute TLS. Elle
+l'emporte sur `KI_PUBLIC_URL`, sert aussi l'atelier des clips, l'origine
+admise des WebSockets (l'hôte de la requête reste admis : la page ouverte
+par le réseau local garde sa voix) et la CSP de la page. Sans elle, le
+client complète le chemin avec l'adresse par laquelle il joint le serveur
+(HTTPS, port 8080). `PorteEtat` porte le lien : qui gère la porte sans
+l'avoir ouverte le voit, l'hôte le retrouve après une reconnexion, et il
+suit l'adresse quand un admin la change. Une durée de **6 h** rejoint les
+choix (plafond `PORTE_TTL_MAX_SECS`).
+
 ### V2 — Le confort (à décider après la première soirée)
 
 - Répondre à une demande depuis la zone de notification (fenêtre réduite).
@@ -353,7 +370,7 @@ par `porte_presents`) ; le lien court `/invite`.
 | WebSockets tenues ouvertes | `hello` sous 30 s, ping 20 s, silence 60 s, file d'envoi bornée, sas par adresse |
 | Le certificat auto-signé fait fuir l'invité | seconde écoute avec certificat public (V1) ; sans elle, guider « Avancé → Continuer », Chrome/Android d'abord |
 | Firefox / Safari refusent la WSS sur certificat auto-signé même après l'exception | même parade : le 443 public ; à défaut, tester Chrome |
-| Un hôte qui ferme ki-chat laisse la porte ouverte | tout détenteur de `KICK` répond et ferme ; expiration 10 min sans invité, 2 h au plus |
+| Un hôte qui ferme ki-chat laisse la porte ouverte | tout détenteur de `KICK` répond et ferme ; expiration 10 min sans invité, 6 h au plus |
 | Les messages d'invités sur le disque | le journal du salon est effacé à la fermeture (`delete_and_forget`), pas archivé ; les salons temporaires survivants sont purgés au démarrage |
 | Derrière un mandataire, toutes les adresses se ressemblent | pas de mandataire aujourd'hui (IP publique sur le nœud) ; le jour où il y en a un, lire `X-Forwarded-For` **seulement** depuis son adresse |
 | Le renouvellement du certificat change l'empreinte | seule l'écoute publique le porte ; les clients épinglent toujours l'auto-signé du QUIC, inchangé |

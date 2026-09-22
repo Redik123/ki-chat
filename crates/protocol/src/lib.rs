@@ -402,6 +402,14 @@ pub enum ClientMsg {
     /// Les membres peuvent-ils ajouter des morceaux au bot musique ?
     /// Permission « gérer le serveur ».
     AdminSetMusique { membres_ajoutent: bool },
+    /// L'adresse web publique du serveur (`https://ts.baws.fun:8080`) : la
+    /// base des liens des portes web et des QR codes de l'atelier. Le
+    /// serveur ne sait pas sous quel nom on le joint — derrière Docker ou
+    /// une box, rien ne le lui dit. Vide : retour à l'automatique
+    /// (`KI_PUBLIC_URL`, sinon l'adresse de connexion du client). Le
+    /// serveur la normalise ([`normaliser_adresse_web`]) et refuse ce qui
+    /// ne se lit pas. Permission « gérer le serveur ».
+    AdminSetAdresseWeb { adresse: String },
     /// Change son propre mot de passe (l'ancien est vérifié).
     ChangePassword { old_password: String, new_password: String },
     /// Définit ou retire sa propre photo de profil. Chacun ne règle que la
@@ -778,9 +786,12 @@ pub enum ServerMsg {
     /// `ChannelsUpdated`, avec son `expire_le`.
     PorteOuverte {
         slug: String,
-        /// Le lien complet (`https://ts.baws.fun/s/salon1`), construit par
-        /// le serveur depuis son adresse publique — jamais depuis l'en-tête
-        /// `Host` d'une requête, qu'un visiteur choisit.
+        /// Le lien complet (`https://ts.baws.fun:8080/salon1`), construit
+        /// par le serveur depuis son adresse web publique — réglée dans
+        /// Admin → Serveur, ou `KI_PUBLIC_URL` —, jamais depuis l'en-tête
+        /// `Host` d'une requête, qu'un visiteur choisit. Sans adresse
+        /// connue, le chemin seul (`/salon1`) : le client le complète avec
+        /// l'adresse par laquelle il joint le serveur.
         url: String,
         /// Le salon temporaire créé pour cette porte.
         salon: ChannelId,
@@ -818,6 +829,12 @@ pub enum ServerMsg {
         /// Fermeture au plus tard (ms Unix).
         #[serde(default)]
         expire_le: u64,
+        /// Le lien de la porte, comme dans [`ServerMsg::PorteOuverte`] —
+        /// pour qui la gère sans l'avoir ouverte, pour l'hôte revenu d'une
+        /// reconnexion, et à nouveau quand l'adresse publique change. Vide
+        /// chez un serveur d'avant 0.1.45.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        url: String,
     },
     /// À l'invité web, par sa porte : « Voilà ki-chat ». Une invitation à
     /// usage unique, valable sept jours, créée par le serveur au nom de
@@ -908,9 +925,10 @@ pub fn slug_valide(slug: &str) -> bool {
         && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// Durée de vie maximale d'une porte : deux heures. Une porte n'est pas un
-/// salon permanent ouvert sur Internet.
-pub const PORTE_TTL_MAX_SECS: u64 = 2 * 60 * 60;
+/// Durée de vie maximale d'une porte : six heures, une soirée entière —
+/// une partie avec un invité a déjà duré cinq heures et demie. Une porte
+/// n'est pas pour autant un salon permanent ouvert sur Internet.
+pub const PORTE_TTL_MAX_SECS: u64 = 6 * 60 * 60;
 /// Une porte sans invité ferme au bout de dix minutes.
 pub const PORTE_VIDE_SECS: u64 = 10 * 60;
 /// Portes ouvertes en même temps, au plus.
@@ -923,6 +941,81 @@ pub const PORTE_DEMANDES_MAX: usize = 5;
 pub const MAX_PORTE_MOTIF: usize = 200;
 /// Où télécharger ki-chat, tel que la page web et l'invitation le donnent.
 pub const PORTE_TELECHARGEMENT: &str = "https://github.com/Redik123/ki-chat/releases/latest";
+
+/// Longueur maximale de l'adresse web publique, en octets.
+pub const MAX_ADRESSE_WEB: usize = 200;
+
+/// L'adresse web publique telle qu'un admin la tape, rendue canonique :
+/// `ts.baws.fun:8080` devient `https://ts.baws.fun:8080` — sans schéma, un
+/// navigateur tenterait `http://`, et la page, servie en TLS, ne
+/// s'ouvrirait pas. Schéma et hôte en minuscules, pas de barre finale ; un
+/// chemin est permis (un serveur derrière `https://exemple.fr/ki`). Vide
+/// reste vide : retour à l'automatique.
+///
+/// Refusé : un autre schéma que `http(s)`, un hôte vide ou illisible, un
+/// port hors de `1..=65535`, un identifiant (`moi@`), une requête, un
+/// fragment, une espace. La même règle chez le client (qui montre l'erreur
+/// avant l'envoi) et chez le serveur (qui ne croit pas le client).
+pub fn normaliser_adresse_web(brut: &str) -> Result<String, String> {
+    let brut = brut.trim();
+    if brut.is_empty() {
+        return Ok(String::new());
+    }
+    if brut.len() > MAX_ADRESSE_WEB {
+        return Err(format!("adresse trop longue : {MAX_ADRESSE_WEB} caractères au plus"));
+    }
+    let (schema, reste) = match brut.split_once("://") {
+        Some((schema, reste)) => (schema.to_ascii_lowercase(), reste),
+        None => ("https".to_string(), brut),
+    };
+    if schema != "https" && schema != "http" {
+        return Err(format!("« {schema}:// » : l'adresse commence par https://"));
+    }
+    let reste = reste.trim_end_matches('/');
+    let (autorite, chemin) = reste.split_at(reste.find('/').unwrap_or(reste.len()));
+    let (hote, port) = match autorite.strip_prefix('[') {
+        // IPv6 : entre crochets, le port après.
+        Some(v6) => {
+            let Some((ip, apres)) = v6.split_once(']') else {
+                return Err("adresse IPv6 sans crochet fermant".into());
+            };
+            if ip.is_empty() || !ip.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+                return Err(format!("« {ip} » n'est pas une adresse IPv6"));
+            }
+            let port = match apres {
+                "" => None,
+                p => Some(p.strip_prefix(':').ok_or("après l'adresse IPv6, seul un port (« :8080 »)")?),
+            };
+            (format!("[{}]", ip.to_ascii_lowercase()), port)
+        }
+        None => {
+            let (hote, port) = match autorite.rsplit_once(':') {
+                Some((hote, port)) => (hote, Some(port)),
+                None => (autorite, None),
+            };
+            if hote.is_empty() {
+                return Err("il manque l'hôte : ex. ts.baws.fun:8080".into());
+            }
+            if !hote.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+                return Err(format!(
+                    "« {hote} » : un hôte ne contient que des lettres, des chiffres, des points et des tirets"
+                ));
+            }
+            (hote.to_ascii_lowercase(), port)
+        }
+    };
+    let port = match port {
+        None => String::new(),
+        Some(p) => match p.parse::<u16>() {
+            Ok(n) if n > 0 && p.chars().all(|c| c.is_ascii_digit()) => format!(":{n}"),
+            _ => return Err(format!("« {p} » n'est pas un port (1 à 65535)")),
+        },
+    };
+    if !chemin.chars().all(|c| c.is_ascii_alphanumeric() || "/-._~%".contains(c)) {
+        return Err("après l'hôte, ni espace, ni « ? », ni « # »".into());
+    }
+    Ok(format!("{schema}://{hote}{port}{chemin}"))
+}
 
 /// Un invité web présent dans un salon temporaire, vu de l'hôte.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1060,6 +1153,7 @@ mod portes_tests {
                 }],
                 demandes: vec![DemandeWeb { demande_id: 8, nom: "Léa".into(), depuis: 1_700_000_001_000 }],
                 expire_le: 1_800_000_000_000,
+                url: "https://ts.baws.fun:8080/salon1".into(),
             },
             ServerMsg::PorteInvitation {
                 code: "ki-abcdefghij".into(),
@@ -1161,6 +1255,11 @@ pub struct ServerInfo {
     /// ajouter des morceaux en fin de file — pas piloter.
     #[serde(default)]
     pub musique_membres_ajoutent: bool,
+    /// L'adresse web publique réglée par un admin
+    /// ([`ClientMsg::AdminSetAdresseWeb`]), déjà normalisée : schéma, hôte
+    /// et port, sans barre finale. Vide : jamais réglée.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub adresse_web: String,
 }
 
 /// Ce qu'un admin veut faire du logo du serveur.
@@ -4281,6 +4380,59 @@ mod tests {
         };
         assert_eq!(name.as_deref(), Some("Chez Kévin"));
         assert!(matches!(icon, IconChange::Keep));
+    }
+
+    /// L'adresse web publique : ce qu'un admin tape devient une adresse que
+    /// le navigateur ouvre — avec son `https://` —, et ce qui ne se lit pas
+    /// est refusé, des deux côtés.
+    #[test]
+    fn une_adresse_web_se_normalise() {
+        let n = normaliser_adresse_web;
+        assert_eq!(n("ts.baws.fun:8080").unwrap(), "https://ts.baws.fun:8080");
+        assert_eq!(n("  https://ts.baws.fun:8080/  ").unwrap(), "https://ts.baws.fun:8080");
+        assert_eq!(n("HTTPS://TS.Baws.Fun").unwrap(), "https://ts.baws.fun");
+        assert_eq!(n("http://192.168.2.36:8080").unwrap(), "http://192.168.2.36:8080");
+        assert_eq!(n("https://exemple.fr/ki/").unwrap(), "https://exemple.fr/ki");
+        assert_eq!(n("[::1]:8080").unwrap(), "https://[::1]:8080");
+        assert_eq!(n("").unwrap(), "");
+        assert_eq!(n("   ").unwrap(), "");
+        for faux in [
+            "ftp://ts.baws.fun",
+            "https://",
+            "ts.baws.fun:",
+            "ts.baws.fun:0",
+            "ts.baws.fun:99999",
+            "ts.baws.fun:+80",
+            "ts baws.fun",
+            "https://moi@ts.baws.fun",
+            "https://ts.baws.fun/?x=1",
+            "https://ts.baws.fun#haut",
+            "https://[::1",
+        ] {
+            assert!(n(faux).is_err(), "{faux} devrait être refusée");
+        }
+        assert!(n(&"a".repeat(MAX_ADRESSE_WEB + 1)).is_err());
+    }
+
+    /// Les champs de 0.1.45 sont facultatifs : l'identité d'un serveur
+    /// d'avant se lit sans adresse, l'état de sa porte sans lien — et le
+    /// message d'admin a son nom.
+    #[test]
+    fn l_adresse_web_et_le_lien_sont_facultatifs() {
+        let info: ServerInfo = serde_json::from_str(r#"{"name":"BAWS"}"#).unwrap();
+        assert!(info.adresse_web.is_empty());
+        let json = serde_json::to_string(&ServerInfo::default()).unwrap();
+        assert!(!json.contains("adresse_web"), "vide, le champ ne voyage pas : {json}");
+        let etat: ServerMsg =
+            serde_json::from_str(r#"{"type":"porte_etat","slug":"valo","salon":4,"expire_le":5}"#).unwrap();
+        let ServerMsg::PorteEtat { url, .. } = etat else { panic!("{etat:?}") };
+        assert!(url.is_empty());
+        let msg = ClientMsg::AdminSetAdresseWeb { adresse: "https://ts.baws.fun:8080".into() };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"admin_set_adresse_web""#), "{json}");
+        let relu: ClientMsg = serde_json::from_str(&json).unwrap();
+        let ClientMsg::AdminSetAdresseWeb { adresse } = relu else { panic!("{relu:?}") };
+        assert_eq!(adresse, "https://ts.baws.fun:8080");
     }
 
     #[test]

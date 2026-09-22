@@ -32,7 +32,7 @@
 //! en vocal, une file d'envoi bornée (un invité qui ne lit plus est
 //! déconnecté), chaque envoi borné dans le temps, un ping toutes les vingt
 //! secondes et une fermeture après une minute de silence. Une porte sans
-//! invité ferme au bout de dix minutes, et au plus tard deux heures après
+//! invité ferme au bout de dix minutes, et au plus tard six heures après
 //! son ouverture ; supprimer son salon, c'est la fermer. Tout est dans
 //! l'audit.
 //!
@@ -367,6 +367,11 @@ impl Portes {
 
     pub fn nombre(&self) -> usize {
         self.inner.lock().unwrap().portes.len()
+    }
+
+    /// Les noms des portes ouvertes.
+    pub fn slugs(&self) -> Vec<String> {
+        self.inner.lock().unwrap().portes.keys().cloned().collect()
     }
 
     fn hote_de(&self, slug: &str) -> Option<UserId> {
@@ -866,6 +871,9 @@ impl Portes {
                     .map(|d| DemandeWeb { demande_id: d.id, nom: d.nom.clone(), depuis: d.depuis })
                     .collect(),
                 expire_le: porte.expire_le,
+                // Le lien dépend de l'adresse publique, que la table
+                // ignore : `pousser_etat` le pose.
+                url: String::new(),
             },
             porte.hote,
         ))
@@ -1018,8 +1026,19 @@ fn envoyer_aux_membres(state: &AppState, ids: &[UserId], msg: &ServerMsg) {
 /// L'état complet d'une porte, à l'hôte et aux détenteurs d'« Expulser » :
 /// un état et non des événements, trente demandes font une seule liste.
 fn pousser_etat(state: &AppState, slug: &str) {
-    if let Some((msg, hote)) = state.portes.etat(slug) {
+    if let Some((mut msg, hote)) = state.portes.etat(slug) {
+        if let ServerMsg::PorteEtat { url, .. } = &mut msg {
+            *url = lien(state, slug);
+        }
         envoyer_aux_membres(state, &destinataires(state, hote), &msg);
+    }
+}
+
+/// L'adresse publique a changé : chaque porte ouverte repart, avec son
+/// nouveau lien, chez ceux qui la gèrent.
+pub fn liens_changes(state: &AppState) {
+    for slug in state.portes.slugs() {
+        pousser_etat(state, &slug);
     }
 }
 
@@ -1200,36 +1219,27 @@ fn ip_masquee(ip: IpAddr) -> String {
     }
 }
 
-/// L'adresse publique du serveur (`KI_PUBLIC_URL`), sans barre finale.
-/// Jamais l'en-tête `Host` d'une requête : c'est le visiteur qui le choisit.
-fn base_publique() -> Option<String> {
-    std::env::var("KI_PUBLIC_URL")
-        .ok()
-        .map(|u| u.trim().trim_end_matches('/').to_string())
-        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
-}
-
-/// Le lien à partager : la forme courte, criable en vocal.
-fn lien(slug: &str) -> String {
-    match base_publique() {
+/// Le lien à partager : la forme courte, criable en vocal, sur l'adresse
+/// web publique (`ServerMeta::base_publique` : celle d'Admin → Serveur,
+/// sinon `KI_PUBLIC_URL`). Sans adresse connue, le chemin seul : le client
+/// le complète avec l'adresse par laquelle il nous joint.
+fn lien(state: &AppState, slug: &str) -> String {
+    match state.meta.base_publique() {
         Some(base) => format!("{base}/{slug}"),
-        None => {
-            tracing::warn!("KI_PUBLIC_URL absent : le lien de la porte {slug} est relatif");
-            format!("/{slug}")
-        }
+        None => format!("/{slug}"),
     }
 }
 
 /// L'adresse à saisir dans ki-chat (« ts.baws.fun:9988 ») : `KI_PUBLIC_QUIC`
-/// si l'admin l'a posée ; sinon l'hôte de `KI_PUBLIC_URL`, sinon celui par
-/// lequel l'invité a ouvert la page, avec le port QUIC du serveur.
-fn adresse_quic(hote_requete: &str) -> String {
+/// si l'admin l'a posée ; sinon l'hôte de l'adresse web publique, sinon
+/// celui par lequel l'invité a ouvert la page, avec le port QUIC du serveur.
+fn adresse_quic(state: &AppState, hote_requete: &str) -> String {
     let public_quic = std::env::var("KI_PUBLIC_QUIC").ok();
     let port = std::env::var("KI_UDP_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(9987);
-    adresse_quic_de(public_quic.as_deref(), base_publique().as_deref(), hote_requete, port)
+    adresse_quic_de(public_quic.as_deref(), state.meta.base_publique().as_deref(), hote_requete, port)
 }
 
 /// Le choix de l'adresse, sans l'environnement — pour le tester. L'hôte
@@ -1343,7 +1353,7 @@ pub fn ouvrir(
     tracing::info!("porte {slug} ouverte par {hote_nom} (salon {})", salon.id);
     state.push_channels();
     pousser_etat(state, slug);
-    Ok(ServerMsg::PorteOuverte { slug: slug.to_string(), url: lien(slug), salon: salon.id, expire_le })
+    Ok(ServerMsg::PorteOuverte { slug: slug.to_string(), url: lien(state, slug), salon: salon.id, expire_le })
 }
 
 /// Quelqu'un frappe : nom nettoyé, limiteur, table, puis la demande part
@@ -1520,7 +1530,7 @@ pub fn offrir(state: &AppState, acteur_nom: &str, invite_id: UserId) -> Result<S
     let code = state.accounts.create_invite(acteur_nom, Some(1), &label, INVITATION_TTL_SECS)?;
     state.audit.record("invite.create", acteur_nom, "", &format!("{code} — 1 usage(s) « {label} »"));
     tracing::info!("invitation {code} offerte à {} par {acteur_nom}", fiche.nom);
-    let serveur = adresse_quic(&fiche.hote_public);
+    let serveur = adresse_quic(state, &fiche.hote_public);
     state.poster_systeme(
         fiche.salon,
         PSEUDO_PORTE,
@@ -1763,7 +1773,9 @@ async fn page(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> R
     let page = PAGE.replace("{{serveur}}", &echapper(&state.meta.get().name));
     let mut reponse =
         (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response();
-    en_tetes(reponse.headers_mut());
+    // L'adresse publique se règle à chaud (Admin → Serveur) : la CSP de la
+    // page se refait à chaque service.
+    en_tetes(reponse.headers_mut(), &csp_de(PAGE, state.meta.base_publique().as_deref()));
     reponse
 }
 
@@ -1780,7 +1792,7 @@ async fn script() -> Response {
 /// Un fichier de la page, avec les mêmes en-têtes qu'elle.
 fn fichier(genre: &'static str, contenu: &'static str) -> Response {
     let mut reponse = (StatusCode::OK, [(header::CONTENT_TYPE, genre)], contenu).into_response();
-    en_tetes(reponse.headers_mut());
+    en_tetes(reponse.headers_mut(), &CSP);
     reponse
 }
 
@@ -1817,7 +1829,7 @@ async fn ws(
     }
     let origine = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     let hote = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    if !origine_admise(origine, hote, base_publique().as_deref()) {
+    if !origine_admise(origine, hote, state.meta.base_publique().as_deref()) {
         tracing::warn!("porte {slug} : WebSocket refusée depuis l'origine {}", origine.unwrap_or("?"));
         return (StatusCode::FORBIDDEN, "cette page n'est pas celle du serveur").into_response();
     }
@@ -1838,13 +1850,15 @@ async fn ws(
 /// L'origine d'une ouverture de WebSocket est-elle la nôtre ? Un
 /// navigateur envoie toujours `Origin` ; un autre client (un outil, les
 /// tests) ne l'envoie pas, et passe. Présente, elle doit être l'origine
-/// publique du serveur (`KI_PUBLIC_URL` : schéma, hôte et port) ou, à
-/// défaut, avoir pour hôte celui de la requête (`Host`). Sans cela, la page
-/// d'un autre site pourrait ouvrir une WebSocket vers nous depuis le
-/// navigateur de son visiteur — frapper à la porte avec **son** adresse,
-/// celle d'un membre connu par exemple, puis écrire et entendre à sa place.
-/// La politique de sécurité de notre page borne ce qu'elle contacte, pas ce
-/// qu'une autre page ouvre vers nous.
+/// publique du serveur (schéma, hôte et port de l'adresse web publique),
+/// ou avoir pour hôte celui de la requête (`Host`) — la page ouverte par
+/// une autre adresse que la publique, celle du réseau local par exemple,
+/// garde sa WebSocket. Les deux disent « la page vient de chez nous » ;
+/// sans cela, la page d'un autre site pourrait ouvrir une WebSocket vers
+/// nous depuis le navigateur de son visiteur — frapper à la porte avec
+/// **son** adresse, celle d'un membre connu par exemple, puis écrire et
+/// entendre à sa place. La politique de sécurité de notre page borne ce
+/// qu'elle contacte, pas ce qu'une autre page ouvre vers nous.
 fn origine_admise(origine: Option<&str>, hote: Option<&str>, base: Option<&str>) -> bool {
     let Some(origine) = origine else { return true };
     let origine = origine.trim().trim_end_matches('/');
@@ -1852,7 +1866,9 @@ fn origine_admise(origine: Option<&str>, hote: Option<&str>, base: Option<&str>)
         // L'origine de la base : jusqu'au premier `/` après le schéma.
         let apres_schema = base.find("://").map_or(0, |i| i + 3);
         let fin = base[apres_schema..].find('/').map_or(base.len(), |j| apres_schema + j);
-        return origine.eq_ignore_ascii_case(&base[..fin]);
+        if origine.eq_ignore_ascii_case(&base[..fin]) {
+            return true;
+        }
     }
     let Some(hote) = hote else { return false };
     let hote_origine = origine.split("://").nth(1).unwrap_or("");
@@ -2059,9 +2075,11 @@ fn recevoir(state: &AppState, invite_id: UserId, trame: &str) -> Option<Line> {
 /// la page embarquerait, reconnus à leur empreinte. Jamais
 /// `unsafe-inline` : un message qui réussirait à s'écrire dans la page ne
 /// pourrait rien exécuter.
-static CSP: LazyLock<String> = LazyLock::new(|| csp_de(PAGE));
+/// Celle des fichiers de la page (feuille, script), où elle ne sert qu'à
+/// la cohérence ; la page refait la sienne avec l'adresse publique.
+static CSP: LazyLock<String> = LazyLock::new(|| csp_de(PAGE, None));
 
-fn csp_de(page: &str) -> String {
+fn csp_de(page: &str, base: Option<&str>) -> String {
     let sources = |balise: &str| -> String {
         let mut sources = vec!["'self'".to_string()];
         sources.extend(
@@ -2075,7 +2093,7 @@ fn csp_de(page: &str) -> String {
     // ajoute l'origine publique en clair pour les autres — c'est une
     // configuration de l'admin, pas un en-tête du visiteur.
     let mut connexion = String::from("'self'");
-    if let Some(base) = base_publique() {
+    if let Some(base) = base {
         if let Some(hote) = base.split("://").nth(1) {
             let schema = if base.starts_with("https://") { "wss" } else { "ws" };
             connexion.push_str(&format!(" {schema}://{hote}"));
@@ -2135,8 +2153,8 @@ fn base64(octets: &[u8]) -> String {
 /// Les en-têtes de la page : la CSP, jamais dans un cadre, pas de
 /// référent, pas de reniflage de type, pas de cache, le micro pour la page
 /// seule (sa voix), ni caméra ni position.
-fn en_tetes(h: &mut HeaderMap) {
-    let csp = HeaderValue::from_str(&CSP).unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'"));
+fn en_tetes(h: &mut HeaderMap, csp: &str) {
+    let csp = HeaderValue::from_str(csp).unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'"));
     h.insert(header::CONTENT_SECURITY_POLICY, csp);
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -2421,6 +2439,29 @@ mod tests {
     /// LE test : ouvrir, frapper, accepter, écrire dans les deux sens, ne
     /// rien recevoir d'ailleurs, fermer — et que le salon disparaisse sans
     /// laisser de trace.
+    /// L'adresse réglée dans Admin → Serveur fait le lien — celui que
+    /// l'hôte reçoit à l'ouverture et celui que l'état porte — et l'adresse
+    /// à saisir dans ki-chat ; la CSP de la page la reprend. Sans elle, le
+    /// chemin seul, que le client complète.
+    #[tokio::test]
+    async fn l_adresse_reglee_fait_le_lien() {
+        let state = etat("adresse-web");
+        let sans_variable = std::env::var_os("KI_PUBLIC_URL").is_none();
+        if sans_variable {
+            assert_eq!(lien(&state, "valo"), "/valo");
+        }
+        state.meta.set_adresse_web("https://ts.baws.fun:8080").unwrap();
+        let ouverte = ouvrir(&state, HOTE, HOTE_NOM, "valo", "", 3600).unwrap();
+        let ServerMsg::PorteOuverte { url, .. } = ouverte else { panic!("{ouverte:?}") };
+        assert_eq!(url, "https://ts.baws.fun:8080/valo");
+        assert_eq!(lien(&state, "valo"), url);
+        if std::env::var_os("KI_PUBLIC_QUIC").is_none() {
+            assert!(adresse_quic(&state, "192.168.2.36:8080").starts_with("ts.baws.fun:"));
+        }
+        let csp = csp_de(PAGE, state.meta.base_publique().as_deref());
+        assert!(csp.contains("connect-src 'self' wss://ts.baws.fun:8080;"), "{csp}");
+    }
+
     #[tokio::test]
     async fn le_cycle_complet_d_une_porte() {
         let state = etat("cycle");
@@ -2444,7 +2485,7 @@ mod tests {
         let demande_id = demande_en_attente(&state, "salon1");
         // La demande posée, sa place dans le sas est rendue : le sas est
         // celui des connexions QUIC, et une page qui attend — puis reste
-        // deux heures — ne doit pas fermer le serveur aux membres derrière
+        // six heures — ne doit pas fermer le serveur aux membres derrière
         // la même box. Toutes les places sont libres.
         let ip_locale: IpAddr = "127.0.0.1".parse().unwrap();
         let places: Vec<_> = (0..SAS_MAX_PAR_IP).filter_map(|_| state.sas.entrer(ip_locale)).collect();
@@ -2871,11 +2912,11 @@ mod tests {
         let page = "<html><style>a{}</style><scripts>non</scripts><script type=\"module\">x()</script><script>y()</script><script src=\"/s/porte.js\"></script></html>";
         assert_eq!(blocs(page, "script"), vec!["x()", "y()"]);
         assert_eq!(blocs(page, "style"), vec!["a{}"]);
-        let csp = csp_de(page);
+        let csp = csp_de(page, None);
         let empreinte = |s: &str| format!("'sha256-{}'", base64(&Sha256::digest(s.as_bytes())));
         assert!(csp.contains(&format!("script-src 'self' {} {};", empreinte("x()"), empreinte("y()"))), "{csp}");
         assert!(csp.contains(&format!("style-src 'self' {};", empreinte("a{}"))), "{csp}");
-        assert!(csp_de("<html></html>").contains("script-src 'self'; style-src 'self';"));
+        assert!(csp_de("<html></html>", None).contains("script-src 'self'; style-src 'self';"));
         // La page embarquée n'a rien en ligne : rien à hacher.
         assert!(CSP.contains("script-src 'self'; style-src 'self';"), "{}", *CSP);
         assert_eq!(echapper("a<b>&\"c'"), "a&lt;b&gt;&amp;&quot;c&#39;");
@@ -3334,6 +3375,10 @@ mod tests {
         assert!(!origine_admise(Some("https://mechant.example"), Some("ts.baws.fun"), None));
         assert!(!origine_admise(Some("null"), Some("ts.baws.fun"), None));
         assert!(!origine_admise(Some("https://mechant.example"), None, None), "sans hôte non plus");
+        // L'adresse publique réglée n'exclut pas l'hôte de la requête : la
+        // page ouverte par l'adresse du réseau local garde sa WebSocket.
+        assert!(origine_admise(Some("https://192.168.2.36:8080"), Some("192.168.2.36:8080"), base));
+        assert!(!origine_admise(Some("https://mechant.example"), Some("192.168.2.36:8080"), base));
         assert!(!origine_admise(Some("ts.baws.fun"), Some("ts.baws.fun"), None), "une origine a un schéma");
 
         assert_eq!(ip_masquee("82.65.12.34".parse().unwrap()), "82.65.x.x");

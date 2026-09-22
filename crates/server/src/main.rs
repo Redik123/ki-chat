@@ -26,7 +26,8 @@
 //!                       sinon celui du PATH) ; posé, plus de mise à jour
 //!   KI_PUBLIC_URL       l'adresse publique du serveur (https://hote:port), pour
 //!                       les liens que suit un téléphone ; sinon celle du client.
-//!                       Les portes web en font leur lien (https://hote/salon1)
+//!                       Les portes web en font leur lien (https://hote/salon1).
+//!                       L'adresse réglée dans Admin → Serveur l'emporte
 //!   KI_PUBLIC_QUIC      l'adresse à saisir dans ki-chat (« hote:9988 »), telle
 //!                       qu'une invitation offerte par une porte web la donne ;
 //!                       sinon l'hôte de KI_PUBLIC_URL et KI_UDP_PORT

@@ -1,5 +1,5 @@
-//! Identité du serveur : nom et logo, réglés par les admins et persistés
-//! dans `data/server.json`.
+//! Identité du serveur : nom, logo et adresse web publique, réglés par les
+//! admins et persistés dans `data/server.json`.
 //!
 //! Ces données appartiennent au serveur, pas au client : elles sont
 //! distribuées à la connexion et repoussées à tout le monde dès qu'un admin
@@ -54,6 +54,22 @@ impl ServerMeta {
         self.update(|info| info.fil_valorant = channel)
     }
 
+    /// L'adresse web publique, déjà normalisée par l'appelant
+    /// (`ki_protocol::normaliser_adresse_web`) ; vide : retour à
+    /// l'automatique.
+    pub fn set_adresse_web(&self, adresse: &str) -> anyhow::Result<()> {
+        self.update(|info| info.adresse_web = adresse.to_string())
+    }
+
+    /// L'adresse web publique du serveur, sans barre finale : celle qu'un
+    /// admin a réglée (Admin → Serveur), sinon `KI_PUBLIC_URL`. Jamais
+    /// l'en-tête `Host` d'une requête : c'est le visiteur qui le choisit.
+    /// Lue à chaque page et à chaque lien — sans recopier le logo.
+    pub fn base_publique(&self) -> Option<String> {
+        let admin = self.info.lock().unwrap().adresse_web.clone();
+        base_de(&admin, std::env::var("KI_PUBLIC_URL").ok().as_deref())
+    }
+
     /// Le verrou est tenu **pendant** l'écriture, comme dans les trois autres
     /// magasins. Le relâcher avant permettait à deux admins simultanés de
     /// publier chacun son instantané : la mémoire gardait le dernier
@@ -65,6 +81,18 @@ impl ServerMeta {
         let json = serde_json::to_string_pretty(&*info)?;
         crate::store::write_atomic(&self.path, json.as_bytes()).context("écriture de server.json")
     }
+}
+
+/// Le choix de la base, sans l'état ni l'environnement — pour le tester.
+/// Le réglage de l'admin l'emporte sur la variable ; l'un comme l'autre
+/// doit porter son schéma.
+fn base_de(admin: &str, env: Option<&str>) -> Option<String> {
+    [Some(admin), env]
+        .into_iter()
+        .flatten()
+        .map(|u| u.trim().trim_end_matches('/'))
+        .find(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -103,6 +131,26 @@ mod tests {
         let reread = ServerMeta::open(&dir).unwrap();
         assert_eq!(reread.get().name, "Chez Kévin");
         assert!(reread.get().icon.is_none());
+    }
+
+    /// L'adresse web réglée par un admin survit au redémarrage, et
+    /// l'emporte sur la variable d'environnement.
+    #[test]
+    fn l_adresse_web_survit_et_l_emporte_sur_la_variable() {
+        let dir = scratch("adresse-web");
+        {
+            let meta = ServerMeta::open(&dir).unwrap();
+            meta.set_adresse_web("https://ts.baws.fun:8080").unwrap();
+        }
+        let meta = ServerMeta::open(&dir).unwrap();
+        assert_eq!(meta.get().adresse_web, "https://ts.baws.fun:8080");
+        assert_eq!(
+            base_de("https://ts.baws.fun:8080/", Some("https://autre.example")).as_deref(),
+            Some("https://ts.baws.fun:8080")
+        );
+        assert_eq!(base_de("", Some(" https://autre.example/ ")).as_deref(), Some("https://autre.example"));
+        assert_eq!(base_de("", Some("autre.example")), None, "sans schéma, la variable ne vaut rien");
+        assert_eq!(base_de("", None), None);
     }
 
     #[test]
