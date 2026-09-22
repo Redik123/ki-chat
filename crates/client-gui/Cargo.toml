@@ -123,6 +123,13 @@ windows = { version = "0.61", features = [
     # tenu par Windows, qui passe au-dessus du jeu (raccourci.rs).
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
+    # CreateFileMappingW : ki-chat affiche son numéro de processus à côté de
+    # son verrou d'instance, pour qu'un second lancement puisse le nommer —
+    # et le fermer, si l'utilisateur le veut — quand il ne répond plus.
+    "Win32_System_Memory",
+    # CreateToolhelp32Snapshot : une instance d'avant 0.1.45 figée n'affiche
+    # pas son numéro — on la retrouve par le nom de son exécutable.
+    "Win32_System_Diagnostics_ToolHelp",
     # CoInitializeEx + CoCreateInstance(TaskbarList) : l'interface
     # ITaskbarList (Win32_UI_Shell) retire et remet le bouton de la barre
     # des tâches quand ki-chat se réduit dans la zone de notification.

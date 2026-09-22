@@ -79,6 +79,7 @@ const DELAI_SOMMATION: Duration = Duration::from_secs(1);
 /// `Minimized(true)` envoyée, le temps laissé à winit pour qu'on la voie
 /// appliquée ; au-delà, la fenêtre ne se minimise pas et l'on renonce
 /// plutôt que de cloaker une fenêtre qui garde le clavier.
+#[cfg_attr(not(windows), allow(dead_code))]
 const DELAI_MINIMISATION: Duration = Duration::from_secs(1);
 
 /// Taille de l'icône de zone : Windows l'affiche en 16 ou 24 px selon
@@ -94,7 +95,9 @@ pub enum Evenement {
     Quitter,
 }
 
-/// Ce que `tick` rapporte à chaque image.
+/// Ce que `tick` rapporte à chaque image. Hors Windows, la fenêtre ne se
+/// rouvre jamais « dehors » et sa réduction n'est jamais abandonnée.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Constat {
     /// Rien de neuf.

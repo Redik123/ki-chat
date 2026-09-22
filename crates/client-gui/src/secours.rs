@@ -265,6 +265,45 @@ pub fn relancer(essais: u32, reduit: bool) {
     }
 }
 
+/// Au-delà, une fermeture est tenue pour bloquée : un fil qu'on attend et
+/// qui ne revient pas, un pilote qui ne rend pas la main. Une 0.1.43 est
+/// ainsi restée figée trois quarts de minute après avoir installé la
+/// 0.1.44, jusqu'à ce que Windows la tue — et la nouvelle version ne s'est
+/// jamais relancée.
+const FERMETURE_MAX: Duration = Duration::from_secs(10);
+
+/// La fermeture commence : un fil la surveille. Si le processus vit encore
+/// au bout de [`FERMETURE_MAX`], il relance la mise à jour qui attendait,
+/// puis termine le processus sans attendre personne. Le successeur trouve
+/// alors le verrou d'instance abandonné, et le prend.
+pub fn surveiller_fermeture() {
+    let lance = std::thread::Builder::new().name("ki-fermeture".into()).spawn(|| {
+        std::thread::sleep(FERMETURE_MAX);
+        tracing::error!(
+            "fermeture bloquée depuis {} s — processus terminé de force",
+            FERMETURE_MAX.as_secs()
+        );
+        consigner_crash("fermeture bloquée : processus terminé de force");
+        crate::update::relaunch_if_requested(crate::zone::repartir_reduit());
+        terminer_maintenant();
+    });
+    if let Err(e) = lance {
+        tracing::warn!("fermeture : pas de surveillance ({e})");
+    }
+}
+
+/// Termine le processus tout de suite, sans détacher les bibliothèques ni
+/// attendre personne : c'est justement là qu'une fermeture reste bloquée.
+fn terminer_maintenant() -> ! {
+    #[cfg(windows)]
+    // SAFETY : le pseudo-handle du processus courant, toujours valide.
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        let _ = TerminateProcess(GetCurrentProcess(), 0);
+    }
+    std::process::exit(0)
+}
+
 /// Écrit chaque événement sur stderr **et** dans le journal, sans tampon :
 /// entre un abort et des octets encore en mémoire, les octets perdraient.
 struct Tee {

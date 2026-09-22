@@ -237,7 +237,9 @@ pub fn request_restart() {
 /// arrivée pendant qu'on était réduit dans la zone de notification — la
 /// nouvelle version y repart (`--reduit`) au lieu de surgir en plein jeu.
 pub fn relaunch_if_requested(reduit: bool) {
-    if !RESTART.load(Ordering::SeqCst) {
+    // Une seule relance : `main` l'appelle en sortant, et le fil qui
+    // surveille une fermeture bloquée aussi (`secours::surveiller_fermeture`).
+    if !RESTART.swap(false, Ordering::SeqCst) {
         return;
     }
     match std::env::current_exe().map(std::process::Command::new) {

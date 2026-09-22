@@ -117,17 +117,16 @@ fn main() -> eframe::Result {
     }
     // Un seul ki-chat par session : lancé une seconde fois — depuis
     // l'icône du Bureau, alors qu'il est réduit à côté de l'horloge —, on
-    // ramène le premier au premier plan et l'on se retire.
+    // ramène le premier au premier plan et l'on se retire. S'il ne répond
+    // pas, on ne se retire plus en silence : on le dit, et l'utilisateur
+    // choisit de le fermer ou de le garder.
     let verrou = match instance::prendre() {
         instance::Demarrage::Premiere(verrou) => verrou,
-        instance::Demarrage::DejaLancee => {
-            if instance::reveiller_l_autre() {
-                tracing::info!("ki-chat tourne déjà dans cette session : il revient au premier plan, celui-ci se retire");
-            } else {
-                tracing::warn!("ki-chat tourne déjà dans cette session mais ne répond pas au réveil ; celui-ci se retire quand même");
-            }
-            return Ok(());
-        }
+        instance::Demarrage::DejaLancee => return Ok(()),
+        instance::Demarrage::Bloquee(bloquee) => match bloquee.resoudre() {
+            instance::Demarrage::Premiere(verrou) => verrou,
+            _ => return Ok(()),
+        },
     };
 
     let options = eframe::NativeOptions {
@@ -160,6 +159,7 @@ fn main() -> eframe::Result {
     // successeur d'une mise à jour ou d'une relance automatique doit
     // pouvoir le prendre sans attendre notre mort.
     verrou.lacher();
+    tracing::info!("fermeture : boucle graphique sortie, verrou d'instance rendu");
     match &outcome {
         // Une mise à jour installée ne prend effet qu'au prochain lancement :
         // on le déclenche ici, la fenêtre fermée — donc après que les
@@ -950,6 +950,10 @@ struct KiApp {
     /// Identité du serveur courant, telle qu'il l'a annoncée.
     server_info: ServerInfo,
 
+    /// La première image est passée : le journal le dit une fois. Un
+    /// ki-chat qui tient le verrou d'instance sans arriver jusque-là — sans
+    /// fenêtre — se reconnaît à l'absence de cette ligne.
+    premiere_image: bool,
     // Panneau admin
     show_admin: bool,
     /// Nom du serveur en cours d'édition dans le panneau admin.
@@ -1333,6 +1337,7 @@ impl KiApp {
             output_devices: Vec::new(),
             upload_status: Default::default(),
             info: None,
+            premiere_image: false,
             show_admin: false,
             admin_users: Vec::new(),
             admin_invites: Vec::new(),
@@ -13806,6 +13811,10 @@ impl eframe::App for KiApp {
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
         // celui de la partie qu'on a pensé à instrumenter.
         self.perf.debut_image();
+        if !self.premiere_image {
+            self.premiere_image = true;
+            tracing::info!("interface prête : première image");
+        }
 
         // Géométrie : on ne restaure que « maximisée », et on suit l'état
         // courant pour le réenregistrer. Cf. `main` pour le pourquoi.
@@ -13838,9 +13847,14 @@ impl eframe::App for KiApp {
             zone::Constat::ReductionAbandonnee => {
                 self.info = Some("la fenêtre n'a pas pu être réduite dans la zone de notification".into());
             }
-            // Un second ki-chat lancé depuis l'icône du Bureau : il s'est
-            // retiré, à nous de revenir — rouverte si réduite, devant sinon.
-            zone::Constat::Revelee => self.rouvrir_depuis_zone(ctx),
+            // Un second ki-chat lancé depuis l'icône du Bureau nous a
+            // sonnés : à nous de revenir — rouverte si réduite, devant
+            // sinon — et de le lui dire, pour qu'il se retire. Sans cet
+            // accusé, il conclurait qu'on ne répond plus.
+            zone::Constat::Revelee => {
+                self.rouvrir_depuis_zone(ctx);
+                instance::accuser_reveil();
+            }
         }
         for ev in self.zone.evenements() {
             match ev {
@@ -14151,12 +14165,18 @@ impl eframe::App for KiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Une fermeture ne doit pas pouvoir s'éterniser — fenêtre figée,
+        // « ne répond pas », mise à jour jamais relancée : un fil la
+        // surveille, et termine le processus s'il le faut.
+        secours::surveiller_fermeture();
+        tracing::info!("fermeture : arrêt des clips et de la connexion");
         // L'enregistreur s'arrête proprement : son marqueur de plantage est
         // levé, sinon le prochain démarrage croirait à une mort brutale.
         self.arreter_clips();
         if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }
+        tracing::info!("fermeture : connexion rendue");
     }
 }
 
