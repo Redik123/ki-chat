@@ -512,12 +512,25 @@ impl Drop for Bloquee {
     }
 }
 
+/// Le verrou tenu, confié au module pour être rendu dès que la fermeture
+/// commence — par le fil principal, qui tient le mutex.
+static TENU: std::sync::Mutex<Option<Verrou>> = std::sync::Mutex::new(None);
+
 impl Verrou {
-    /// Lâche le verrou avant l'heure — pour laisser la place au successeur
-    /// qu'on relance (mise à jour, relance automatique).
-    pub fn lacher(self) {
-        drop(self);
+    /// Confie le verrou au module jusqu'à [`rendre`].
+    pub fn garder(self) {
+        *TENU.lock().unwrap_or_else(|e| e.into_inner()) = Some(self);
     }
+}
+
+/// Rend le verrou d'instance s'il est encore tenu : au début de la
+/// fermeture — un ki-chat relancé à l'instant démarre sans attendre que
+/// celui-ci ait fini de se démonter —, ou à la sortie de `main`, avant de
+/// relancer un successeur. Depuis le fil principal : c'est lui qui tient
+/// le mutex.
+pub fn rendre() {
+    let verrou = TENU.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(verrou);
 }
 
 impl Drop for Verrou {
@@ -631,7 +644,7 @@ mod tests {
         assert!(retire, "le second se retire");
         assert!(duree < Duration::from_secs(3), "sans attendre : {duree:?}");
         natif::fermer(reveil);
-        verrou.lacher();
+        drop(verrou);
     }
 
     /// Un premier qui n'accuse pas — sans interface, ou figée — est déclaré
@@ -671,6 +684,6 @@ mod tests {
         let Demarrage::Premiere(verrou) = natif::prendre(&noms, Duration::from_secs(1)) else {
             panic!("le verrou abandonné par un mort se reprend");
         };
-        verrou.lacher();
+        drop(verrou);
     }
 }

@@ -93,6 +93,12 @@ const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 const SIDEBAR_WIDTH: f32 = 248.0;
 const ROSTER_WIDTH: f32 = 210.0;
 
+/// À la fermeture, la connexion a une seconde et demie pour se fermer
+/// proprement, le démontage (fils de veille, moteur vocal…) deux secondes :
+/// au-delà, on n'attend plus — le garde-fou de fermeture finit le travail.
+const FERMETURE_CONNEXION: std::time::Duration = std::time::Duration::from_millis(1500);
+const FERMETURE_DEMONTAGE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Au-dessus de ce niveau crête, on considère que la personne parle, même si
 /// son `VoiceState` ne nous est pas parvenu. Le niveau vient du tampon de
 /// gigue et décroît tout seul : l'indicateur s'éteint donc sans message.
@@ -128,6 +134,8 @@ fn main() -> eframe::Result {
             _ => return Ok(()),
         },
     };
+    // Confié au module : la fermeture le rend dès son début.
+    verrou.garder();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -155,10 +163,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(KiApp::new(cc)))),
     );
-    // Le verrou est rendu avant de relancer quoi que ce soit : le
-    // successeur d'une mise à jour ou d'une relance automatique doit
-    // pouvoir le prendre sans attendre notre mort.
-    verrou.lacher();
+    // Le verrou est rendu avant de relancer quoi que ce soit — d'ordinaire
+    // dès le début de la fermeture (`on_exit`) : le successeur d'une mise à
+    // jour ou d'une relance automatique doit pouvoir le prendre sans
+    // attendre notre mort.
+    instance::rendre();
     tracing::info!("fermeture : boucle graphique sortie, verrou d'instance rendu");
     match &outcome {
         // Une mise à jour installée ne prend effet qu'au prochain lancement :
@@ -14240,14 +14249,63 @@ impl eframe::App for KiApp {
         // « ne répond pas », mise à jour jamais relancée : un fil la
         // surveille, et termine le processus s'il le faut.
         secours::surveiller_fermeture();
-        tracing::info!("fermeture : arrêt des clips et de la connexion");
+        // L'icône quitte la zone de notification tout de suite, et son
+        // garde-fou s'arrête : ki-chat a l'air fermé parce qu'il l'est.
+        self.zone.retirer();
+        tracing::info!("fermeture : arrêt des clips, de la diffusion et de la connexion");
         // L'enregistreur s'arrête proprement : son marqueur de plantage est
         // levé, sinon le prochain démarrage croirait à une mort brutale.
         self.arreter_clips();
+        // Diffusion et visionnage : le marqueur de diffusion est levé (même
+        // raison), le serveur prévenu tant que la connexion vit ; leurs fils
+        // s'arrêtent avec le démontage, plus bas.
+        let diffusion = self.go_live.take();
+        if diffusion.is_some() {
+            secours::lever_diffusion();
+            self.send(ClientMsg::StreamStop);
+        }
+        let regard = self.regard.take();
+        if let Some(r) = &regard {
+            self.send(ClientMsg::Unwatch { stream_id: r.stream_id });
+        }
         if let Some(mut conn) = self.conn.take() {
-            conn.quit();
+            conn.quitter_borne(FERMETURE_CONNEXION);
         }
         tracing::info!("fermeture : connexion rendue");
+        // Le verrou d'instance est rendu dès maintenant : relancé à
+        // l'instant, un nouveau ki-chat démarre sans attendre la suite.
+        instance::rendre();
+        // Le reste — fils de veille, push-to-talk, moteur vocal, sorties —
+        // se démonte sur un fil à part, attendu deux secondes au plus : ce
+        // qui traîne est nommé au journal, et ne retient plus la fenêtre.
+        let mut demontage = secours::Demontage::default();
+        if let Some(g) = diffusion {
+            demontage.etape("diffusion", move || g.arreter());
+        }
+        if let Some(r) = regard {
+            demontage.etape("visionnage", move || r.arreter());
+        }
+        if let Some(v) = self.veilleur_valorant.take() {
+            demontage.etape("veille VALORANT", move || drop(v));
+        }
+        if let Some(v) = self.veilleur_jeux.take() {
+            demontage.etape("veille des jeux", move || drop(v));
+        }
+        if let Some(p) = self.ptt.take() {
+            demontage.etape("push-to-talk et raccourcis", move || drop(p));
+        }
+        if let Some(s) = self.sortie_medias.take() {
+            demontage.etape("sortie des médias", move || drop(s));
+        }
+        if let Some(l) = self.labo.take() {
+            demontage.etape("labo vidéo", move || drop(l));
+        }
+        if let Some(d) = self.docteur.take() {
+            demontage.etape("docteur audio", move || drop(d));
+        }
+        let link = self.link.clone();
+        demontage.etape("moteur vocal", move || link.arreter());
+        demontage.jouer(FERMETURE_DEMONTAGE);
     }
 }
 

@@ -31,8 +31,8 @@
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Taille au-delà de laquelle le journal est archivé au démarrage. L'archive
 /// (`.old`) garde la session précédente : c'est souvent elle qu'on veut lire
@@ -292,6 +292,65 @@ pub fn surveiller_fermeture() {
     }
 }
 
+/// Le démontage de fin : des étapes lentes ou fragiles — des fils qu'on
+/// attend, des périphériques qu'on rend —, jouées sur un fil à part et
+/// attendues un temps borné. Ce qui traîne est nommé au journal, et ne
+/// retient plus ni la fenêtre ni le verrou d'instance ; le garde-fou de
+/// fermeture finit le travail. Ces étapes se jouaient une à une sur le fil
+/// de l'interface, en détruisant l'application : une 0.1.44 est ainsi
+/// restée sans fenêtre, le verrou en main, et ki-chat « ne s'ouvrait
+/// plus » jusqu'à une fin de tâche.
+#[derive(Default)]
+pub struct Demontage {
+    etapes: Vec<(&'static str, Etape)>,
+}
+
+/// Une étape du démontage : ce qu'elle arrête, jouée une fois.
+type Etape = Box<dyn FnOnce() + Send>;
+
+impl Demontage {
+    pub fn etape(&mut self, nom: &'static str, etape: impl FnOnce() + Send + 'static) {
+        self.etapes.push((nom, Box::new(etape)));
+    }
+
+    /// Joue les étapes dans l'ordre sur un fil à part, et les attend `max`
+    /// au plus. Rend l'étape sur laquelle on a cessé d'attendre, s'il y en a
+    /// une.
+    pub fn jouer(self, max: Duration) -> Option<&'static str> {
+        let en_cours: Arc<Mutex<&'static str>> = Arc::new(Mutex::new(""));
+        let suivi = en_cours.clone();
+        let (fini_tx, fini_rx) = mpsc::channel();
+        let etapes = self.etapes;
+        let lance = std::thread::Builder::new().name("ki-demontage".into()).spawn(move || {
+            for (nom, etape) in etapes {
+                *suivi.lock().unwrap_or_else(|e| e.into_inner()) = nom;
+                let depart = Instant::now();
+                etape();
+                let ms = depart.elapsed().as_millis();
+                if ms >= 100 {
+                    tracing::info!("fermeture : {nom} en {ms} ms");
+                }
+            }
+            let _ = fini_tx.send(());
+        });
+        if let Err(e) = lance {
+            tracing::warn!("fermeture : pas de fil de démontage ({e})");
+            return None;
+        }
+        match fini_rx.recv_timeout(max) {
+            Ok(()) => None,
+            Err(_) => {
+                let nom = *en_cours.lock().unwrap_or_else(|e| e.into_inner());
+                tracing::warn!(
+                    "fermeture : le démontage traîne sur « {nom} » depuis {} ms — on n'attend plus",
+                    max.as_millis()
+                );
+                Some(nom)
+            }
+        }
+    }
+}
+
 /// Termine le processus tout de suite, sans détacher les bibliothèques ni
 /// attendre personne : c'est justement là qu'une fermeture reste bloquée.
 fn terminer_maintenant() -> ! {
@@ -389,6 +448,26 @@ fn essais_dans(args: impl Iterator<Item = String>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le démontage attend ses étapes, mais pas au-delà de sa borne : ce
+    /// qui traîne est nommé, et l'appelant reprend la main.
+    #[test]
+    fn un_demontage_n_attend_pas_au_dela_de_sa_borne() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fait = Arc::new(AtomicBool::new(false));
+        let mut vite = Demontage::default();
+        let f = fait.clone();
+        vite.etape("rapide", move || f.store(true, Ordering::SeqCst));
+        assert_eq!(vite.jouer(Duration::from_secs(5)), None);
+        assert!(fait.load(Ordering::SeqCst), "l'étape a été jouée");
+
+        let mut lent = Demontage::default();
+        lent.etape("rapide", || {});
+        lent.etape("lente", || std::thread::sleep(Duration::from_secs(3)));
+        let depart = Instant::now();
+        assert_eq!(lent.jouer(Duration::from_millis(200)), Some("lente"));
+        assert!(depart.elapsed() < Duration::from_secs(2), "on n'a pas attendu la lente");
+    }
 
     fn args(liste: &[&str]) -> impl Iterator<Item = String> {
         liste.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter()

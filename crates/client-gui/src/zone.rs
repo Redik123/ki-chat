@@ -500,6 +500,17 @@ impl Zone {
     }
 }
 
+impl Zone {
+    /// La fermeture commence : l'icône quitte la zone de notification tout
+    /// de suite — ki-chat a l'air fermé parce qu'il l'est —, et le
+    /// garde-fou s'arrête, son oreille avec : un lancement qui suit trouve
+    /// le verrou rendu et démarre, sans sonner une instance qui s'en va.
+    pub fn retirer(&mut self) {
+        self.veille.arret.store(true, Ordering::Relaxed);
+        self.plateforme.retirer();
+    }
+}
+
 impl Drop for Zone {
     fn drop(&mut self) {
         self.veille.arret.store(true, Ordering::Relaxed);
@@ -539,6 +550,11 @@ mod plateforme {
     }
 
     impl Icone {
+        /// Retire l'icône de la zone de notification (à la fermeture).
+        pub fn retirer(&mut self) {
+            self.icone = None;
+        }
+
         pub fn creer(tx: Sender<Evenement>, ctx: egui::Context) -> Self {
             let ouvrir = MenuItem::new("Ouvrir ki-chat", true, None);
             let quitter = MenuItem::new("Quitter", true, None);
@@ -689,6 +705,7 @@ mod plateforme {
         pub fn creer(_tx: Sender<Evenement>, _ctx: egui::Context) -> Self {
             Self
         }
+        pub fn retirer(&mut self) {}
         #[cfg(test)]
         pub fn muette() -> Self {
             Self

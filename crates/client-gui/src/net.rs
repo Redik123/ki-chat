@@ -256,6 +256,29 @@ impl NetHandle {
         }
     }
 
+    /// Comme [`quit`](Self::quit), mais sans attendre plus de `max` — à la
+    /// fermeture de ki-chat, où rien ne suit. Une connexion en cours
+    /// d'établissement vers un serveur injoignable ne voit l'ordre qu'au
+    /// bout de sa poignée de main, quinze secondes plus tard : elle ne
+    /// retient plus la fermeture. (Ailleurs, `quit` attend : le fil suivant
+    /// ne doit pas démarrer avant que l'ancien ait rendu son aiguillage.)
+    pub fn quitter_borne(&mut self, max: std::time::Duration) {
+        let _ = self.cmd_tx.send(Cmd::Quit);
+        let Some(worker) = self.worker.take() else { return };
+        let depart = std::time::Instant::now();
+        while !worker.is_finished() && depart.elapsed() < max {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if worker.is_finished() {
+            let _ = worker.join();
+        } else {
+            tracing::warn!(
+                "fermeture : la connexion ne s'est pas fermée en {} ms — on n'attend plus",
+                max.as_millis()
+            );
+        }
+    }
+
     /// RTT QUIC mesuré, en ms.
     pub fn rtt_ms(&self) -> Option<u32> {
         self.link
