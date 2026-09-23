@@ -6549,16 +6549,36 @@ impl KiApp {
                                 ),
                                 None => icons::logo(ui.painter(), rect, ACCENT, theme::BG_SIDE),
                             }
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new(self.server_label())
-                                        .color(TEXT)
-                                        .size(15.0)
-                                        .strong(),
-                                );
-                                ui.label(
-                                    RichText::new(self.url.trim()).color(TEXT_FAINT).size(11.0),
-                                );
+                            // Le nom et l'adresse prennent la place qui reste
+                            // — tronqués s'il le faut —, le bouton de
+                            // déconnexion garde la sienne, à droite.
+                            let place = (ui.available_width() - 36.0).max(40.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(place, 34.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&header_name).color(TEXT).size(15.0).strong(),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(self.url.trim()).color(TEXT_FAINT).size(11.0),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                            );
+                            // Se déconnecter : à côté du serveur qu'on quitte.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui::icon_button(ui, Icon::Logout, "Se déconnecter de ce serveur").clicked() {
+                                    // Voulu : on ne reviendra pas tout
+                                    // seul au prochain lancement.
+                                    self.session_auto = None;
+                                    self.disconnect(None);
+                                }
                             });
                         });
                     });
@@ -6614,13 +6634,6 @@ impl KiApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui::icon_button(ui, Icon::Logout, "Se déconnecter").clicked()
-                                    {
-                                        // Voulu : on ne reviendra pas tout
-                                        // seul au prochain lancement.
-                                        self.session_auto = None;
-                                        self.disconnect(None);
-                                    }
                                     if ui::icon_button(ui, Icon::Gear, "Réglages").clicked()
                                     {
                                         self.show_settings = !self.show_settings;
