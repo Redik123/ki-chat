@@ -501,6 +501,7 @@ pub async fn upload_fin(
         "fichier reçu par morceaux : {nom} ({} Ko) de {username} (id {user_id})",
         total / 1024
     );
+    files::noter_envoi(&state, &file_id, user_id, &username);
     let url = finaliser(&state, &file_id, &dossier, &nom);
     Json(serde_json::json!({ "url": url })).into_response()
 }

@@ -423,6 +423,21 @@ pub enum ClientMsg {
     /// serveur la normalise ([`normaliser_adresse_web`]) et refuse ce qui
     /// ne se lit pas. Permission « gérer le serveur ».
     AdminSetAdresseWeb { adresse: String },
+    /// Les fichiers partagés sur le serveur, pour les gérer (Admin →
+    /// Fichiers) : qui les a envoyés, où, combien ils pèsent. Permission
+    /// « Supprimer les messages » — c'est de la modération. Réponse :
+    /// [`ServerMsg::AdminFichiers`].
+    AdminListFichiers,
+    /// Supprimer des fichiers partagés ([`FICHIERS_PAR_LOT`] au plus par
+    /// demande) et, `messages` vrai, les messages du chat qui les
+    /// partagent : un lien mort n'a rien à faire dans le fil. Irréversible.
+    /// Permission « Supprimer les messages ». Réponse : `Info`, puis la liste
+    /// à jour.
+    AdminSupprimerFichiers {
+        ids: Vec<String>,
+        #[serde(default)]
+        messages: bool,
+    },
     /// Change son propre mot de passe (l'ancien est vérifié).
     ChangePassword { old_password: String, new_password: String },
     /// Définit ou retire sa propre photo de profil. Chacun ne règle que la
@@ -811,6 +826,19 @@ pub enum ServerMsg {
     InviteCreated { code: String },
     /// Message d'information (succès d'une action admin, ...).
     Info { message: String },
+    /// Les fichiers partagés, du plus récent au plus ancien — les
+    /// [`FICHIERS_LISTE_MAX`] derniers au plus : `tronque` dit qu'il y en a
+    /// d'autres. Réponse à `AdminListFichiers` et à `AdminSupprimerFichiers`.
+    AdminFichiers {
+        fichiers: Vec<FichierPartage>,
+        /// Le volume de tout le stock, et son plafond (0 : sans plafond).
+        #[serde(default)]
+        total_octets: u64,
+        #[serde(default)]
+        plafond_octets: u64,
+        #[serde(default)]
+        tronque: bool,
+    },
     /// Rapport qualité réseau : pertes mesurées par le serveur sur le flux
     /// montant du destinataire (en %). Sert au débit adaptatif.
     NetQuality { loss_pct: f32 },
@@ -1268,6 +1296,65 @@ mod portes_tests {
         assert!(relu.invite && est_invite(relu.user_id));
         assert!(relu.username.ends_with(INVITE_SUFFIXE));
     }
+}
+
+/// Un fichier partagé, vu de l'administration (Admin → Fichiers).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FichierPartage {
+    /// Son identifiant : le dossier `files/<id>` du serveur, seize
+    /// caractères hexadécimaux ([`id_de_fichier_valide`]).
+    pub id: String,
+    /// Le nom du fichier principal (la vidéo convertie, l'image, le
+    /// document).
+    pub nom: String,
+    /// Ce qu'il occupe sur le disque, poster et fiche compris.
+    pub octets: u64,
+    /// Déposé à (ms Unix).
+    pub date_ms: u64,
+    /// « video », « image » ou « autre ».
+    pub genre: String,
+    /// Qui l'a envoyé : l'index des envois du serveur, sinon l'auteur du
+    /// premier message qui le partage. Vide : on ne sait pas.
+    #[serde(default)]
+    pub auteur: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auteur_id: Option<UserId>,
+    /// Les salons où il est partagé (trois au plus), et combien de messages
+    /// le montrent encore.
+    #[serde(default)]
+    pub salons: Vec<String>,
+    #[serde(default)]
+    pub messages: u32,
+    /// Son chemin sur le serveur (`/files/<id>/<nom>`), pour l'ouvrir.
+    #[serde(default)]
+    pub chemin: String,
+}
+
+/// Fichiers supprimés au plus par demande.
+pub const FICHIERS_PAR_LOT: usize = 300;
+/// Fichiers listés au plus : la liste tient dans une ligne de protocole.
+pub const FICHIERS_LISTE_MAX: usize = 300;
+
+/// Un identifiant de fichier partagé : seize caractères hexadécimaux en
+/// minuscules, comme le serveur les tire — rien d'autre ne désigne un
+/// dossier du stock, et surtout pas « .. ».
+pub fn id_de_fichier_valide(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Les fichiers du stock qu'un texte partage : chaque `/files/<id>/` qu'il
+/// contient (un lien complet ou un chemin), sans doublon, dans l'ordre.
+pub fn ids_de_fichiers(texte: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut reste = texte;
+    while let Some(i) = reste.find("/files/") {
+        reste = &reste[i + "/files/".len()..];
+        let Some(id) = reste.get(..16) else { break };
+        if id_de_fichier_valide(id) && reste[16..].starts_with('/') && !ids.iter().any(|x| x == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
 }
 
 /// Identité publique d'un serveur, définie par ses admins et distribuée
@@ -4505,6 +4592,34 @@ mod tests {
         let b = ServerMsg::StreamBudget { stream_id: 3, kbps: 6000, basse: Some(1500), montant: false };
         let relu: ServerMsg = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
         assert!(matches!(relu, ServerMsg::StreamBudget { basse: Some(1500), .. }));
+    }
+
+    /// Les liens vers le stock se reconnaissent dans un message — complets
+    /// ou non, un ou plusieurs —, et rien d'autre : un identifiant de
+    /// travers, un chemin qui remonte, un mot qui ressemble.
+    #[test]
+    fn les_fichiers_d_un_message_se_reconnaissent() {
+        assert_eq!(
+            ids_de_fichiers("https://ts.baws.fun:8080/files/0123456789abcdef/clip.mp4"),
+            vec!["0123456789abcdef".to_string()]
+        );
+        assert_eq!(
+            ids_de_fichiers("regarde /files/0123456789abcdef/a.png et /files/fedcba9876543210/b.mp4 \
+                             puis encore /files/0123456789abcdef/a.png"),
+            vec!["0123456789abcdef".to_string(), "fedcba9876543210".to_string()]
+        );
+        assert!(ids_de_fichiers("/files/../../etc/passwd").is_empty());
+        assert!(ids_de_fichiers("/files/0123456789ABCDEF/x").is_empty(), "le serveur tire des minuscules");
+        assert!(ids_de_fichiers("/files/0123456789abcde/x").is_empty(), "quinze caractères");
+        assert!(ids_de_fichiers("/files/0123456789abcdef").is_empty(), "pas de fichier derrière");
+        assert!(ids_de_fichiers("mes files/ préférés").is_empty());
+        assert!(id_de_fichier_valide("0123456789abcdef"));
+        assert!(!id_de_fichier_valide("..23456789abcdef"));
+        // Et la liste se lit d'un serveur qui ne dit pas tout.
+        let l: ServerMsg = serde_json::from_str(r#"{"type":"admin_fichiers","fichiers":[]}"#).unwrap();
+        assert!(matches!(l, ServerMsg::AdminFichiers { tronque: false, total_octets: 0, .. }));
+        let s: ClientMsg = serde_json::from_str(r#"{"type":"admin_supprimer_fichiers","ids":["0123456789abcdef"]}"#).unwrap();
+        assert!(matches!(s, ClientMsg::AdminSupprimerFichiers { messages: false, .. }));
     }
 
     #[test]

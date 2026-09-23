@@ -181,6 +181,14 @@ fn fit_within(messages: Vec<ChatRecord>) -> (Vec<ChatRecord>, bool) {
     (messages[start..].to_vec(), truncated)
 }
 
+/// Un message qui partage un fichier du stock : où, lequel, et de qui.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Partage {
+    pub channel: ChannelId,
+    pub message: MsgRef,
+    pub auteur: String,
+}
+
 pub struct History {
     /// Les N derniers messages de chaque salon. Le fichier correspondant est
     /// tenu par le fil d'écriture, lui seul y touche.
@@ -737,6 +745,68 @@ impl History {
     /// donc lire tout le fichier — et une lecture d'un bout à l'autre bat
     /// largement cent mille repositionnements.
     ///
+    /// Les messages qui partagent des fichiers du stock (`/files/<id>/…`),
+    /// par identifiant de fichier, dans l'ordre du journal. Les messages
+    /// supprimés n'y sont pas ; un message modifié compte pour son texte du
+    /// moment — un lien que la modification a retiré ne compte plus (un lien
+    /// qu'elle aurait ajouté n'est pas vu : le tamis lit la ligne d'origine).
+    ///
+    /// Relit les journaux sur le disque — tamis en octets, « /files/ »
+    /// s'écrit tel quel en JSON —, puis le cache, qui porte les messages pas
+    /// encore écrits. Pour le pool bloquant.
+    pub fn partages_de_fichiers(&self, data_dir: &str, channels: &[ChannelId]) -> HashMap<String, Vec<Partage>> {
+        let mut partages: HashMap<String, Vec<Partage>> = HashMap::new();
+        for &channel in channels {
+            let etats: Etats = self.etats.lock().unwrap().get(&channel).cloned().unwrap_or_default();
+            let recents: Vec<ChatRecord> = self
+                .logs
+                .lock()
+                .unwrap()
+                .get(&channel)
+                .map(|r| r.iter().cloned().collect())
+                .unwrap_or_default();
+            let en_memoire: std::collections::HashSet<(UserId, u64)> =
+                recents.iter().map(|r| (r.user_id, r.ts)).collect();
+            let mut lus: Vec<ChatRecord> = Vec::new();
+            let path = PathBuf::from(data_dir).join(format!("channel-{channel}.jsonl"));
+            if let Ok(file) = File::open(&path) {
+                let mut reader = BufReader::new(file);
+                let mut buf: Vec<u8> = Vec::new();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("relecture des fichiers partagés interrompue : {e}");
+                            break;
+                        }
+                    }
+                    if !contient(&buf, b"/files/") {
+                        continue;
+                    }
+                    if let Ok(rec) = serde_json::from_slice::<ChatRecord>(trim_eol(&buf)) {
+                        if !en_memoire.contains(&(rec.user_id, rec.ts)) {
+                            lus.push(rec);
+                        }
+                    }
+                }
+            }
+            lus.extend(recents);
+            for rec in lus {
+                let Some(rec) = Self::habiller(&etats, rec) else { continue };
+                for id in ki_protocol::ids_de_fichiers(&rec.text) {
+                    partages.entry(id).or_default().push(Partage {
+                        channel,
+                        message: MsgRef { user_id: rec.user_id, ts: rec.ts },
+                        auteur: rec.username.clone(),
+                    });
+                }
+            }
+        }
+        partages
+    }
+
     /// Ce qui coûte cher n'est pas la lecture mais la **désérialisation** :
     /// reconstruire cent mille `ChatRecord` pour en garder trois. D'où le
     /// tamis : on cherche d'abord la chaîne dans la ligne JSON brute, en
@@ -1132,6 +1202,37 @@ mod tests {
             ts,
             ..Default::default()
         }
+    }
+
+    /// Les messages qui partagent un fichier se retrouvent, sur le disque
+    /// comme dans le cache — pas ceux qu'on a supprimés, ni un lien qu'une
+    /// modification a retiré.
+    #[test]
+    fn les_messages_qui_partagent_un_fichier_se_retrouvent() {
+        let dir = scratch("partages");
+        let history = History::open(&dir, &[text_channel(1), text_channel(2)]).unwrap();
+        let lien = |id: &str| format!("https://ts.baws.fun:8080/files/{id}/clip.mp4");
+        let a = "0123456789abcdef";
+        let b = "fedcba9876543210";
+        history.append(1, &dit(7, 1, &lien(a)));
+        history.append(1, &dit(7, 2, &lien(a)));
+        history.append(2, &dit(8, 3, &format!("regarde {}", lien(b))));
+        history.append(1, &dit(7, 4, "rien à voir"));
+        history.append(1, &dit(9, 5, &lien(b)));
+        // Supprimé : il ne compte plus.
+        assert!(history.delete(1, MsgRef { user_id: 9, ts: 5 }));
+        // Modifié pour retirer le lien : non plus.
+        history.append(1, &dit(7, 6, &lien(b)));
+        assert!(history.edit(1, MsgRef { user_id: 7, ts: 6 }, "finalement non".into()));
+        history.attendre_ecritures(std::time::Duration::from_secs(5));
+
+        let p = history.partages_de_fichiers(&dir, &[1, 2]);
+        let de_a: Vec<(ChannelId, u64, &str)> =
+            p[a].iter().map(|x| (x.channel, x.message.ts, x.auteur.as_str())).collect();
+        assert_eq!(de_a, vec![(1, 1, "u7"), (1, 2, "u7")]);
+        let de_b: Vec<(ChannelId, u64)> = p[b].iter().map(|x| (x.channel, x.message.ts)).collect();
+        assert_eq!(de_b, vec![(2, 3)], "ni le supprimé, ni le modifié");
+        assert_eq!(p.len(), 2);
     }
 
     /// Les réactions se posent et se retirent, une suppression fait

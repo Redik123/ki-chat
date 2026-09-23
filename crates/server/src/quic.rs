@@ -1458,6 +1458,60 @@ fn handle_msg(
                 }
             });
         }
+        ClientMsg::AdminListFichiers => {
+            if !require(state, user_id, tx, ki_protocol::perm::DELETE_MESSAGES) {
+                return;
+            }
+            // Le stock et les journaux se relisent sur le pool bloquant.
+            let (state, tx) = (state.clone(), tx.clone());
+            tokio::task::spawn_blocking(move || {
+                let _ = tx.send(crate::files::liste_admin(&state));
+            });
+        }
+        ClientMsg::AdminSupprimerFichiers { ids, messages } => {
+            if !require(state, user_id, tx, ki_protocol::perm::DELETE_MESSAGES) {
+                return;
+            }
+            let mut ids: Vec<String> =
+                ids.into_iter().filter(|id| ki_protocol::id_de_fichier_valide(id)).collect();
+            ids.sort();
+            ids.dedup();
+            ids.truncate(ki_protocol::FICHIERS_PAR_LOT);
+            if ids.is_empty() {
+                let _ = tx.send(ServerMsg::Error { message: "aucun fichier à supprimer".into() });
+                return;
+            }
+            let (state, tx) = (state.clone(), tx.clone());
+            let actor = username.to_string();
+            tokio::task::spawn_blocking(move || {
+                let bilan = crate::files::supprimer_admin(&state, &ids, messages);
+                let mo = bilan.octets as f64 / (1024.0 * 1024.0);
+                state.audit.record(
+                    "fichiers.delete",
+                    &actor,
+                    "",
+                    &format!(
+                        "{} fichier(s), {mo:.1} Mo, {} message(s) retiré(s)",
+                        bilan.fichiers, bilan.messages
+                    ),
+                );
+                tracing::info!(
+                    "{actor} supprime {} fichier(s) ({mo:.1} Mo) et {} message(s)",
+                    bilan.fichiers,
+                    bilan.messages
+                );
+                let _ = tx.send(ServerMsg::Info {
+                    message: match bilan.messages {
+                        0 => format!("{} fichier(s) supprimé(s), {mo:.1} Mo libérés", bilan.fichiers),
+                        n => format!(
+                            "{} fichier(s) supprimé(s), {mo:.1} Mo libérés — {n} message(s) retiré(s) du chat",
+                            bilan.fichiers
+                        ),
+                    },
+                });
+                let _ = tx.send(crate::files::liste_admin(&state));
+            });
+        }
         ClientMsg::AdminSetFilValorant { channel } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
                 return;

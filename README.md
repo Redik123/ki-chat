@@ -155,6 +155,7 @@ Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 ### Diagnostics partagés & Rapports de plantage
 
 - **Tableau de bord** (Administration → Tableau de bord, réservé à l'administrateur) : version et uptime du serveur, connectés et salons vocaux, diffusions en cours, stocks de fichiers et de clips face à leur plafond, disque libre et mémoire, bot musique, service VALORANT et résumé des diagnostics par version — rafraîchi toutes les trente secondes.
+- **Fichiers partagés (0.1.46)** (Administration → Fichiers, pour qui peut supprimer les messages) : tous les fichiers envoyés sur le serveur — qui les a envoyés, dans quel salon, quand, ce qu'ils pèsent —, filtrés par membre (« Kevin — 15 fichiers, 1,2 Go ») et par genre (vidéos, images, autres), triés par date ou par poids, à ouvrir dans la visionneuse. On coche (ou « tout cocher ») et l'on supprime en lot, après confirmation : les fichiers quittent le disque, et les messages qui les partageaient quittent le chat. Journalisé dans l'audit.
 
 En cochant « Partager mes diagnostics » dans les paramètres de l'application, les joueurs transmettent toutes les 10 minutes leur journal technique (modèle GPU, état des pilotes, statistiques réseau et audio — **à l'exclusion stricte de tout message ou donnée vocale**).
 

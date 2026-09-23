@@ -330,6 +330,7 @@ async fn main() -> anyhow::Result<()> {
                 | ServerMsg::KeyframeNeeded { .. }
                 | ServerMsg::StreamMetaChanged { .. }
                 | ServerMsg::StreamBudget { .. }
+                | ServerMsg::AdminFichiers { .. }
                 | ServerMsg::MessageEdited { .. } => {}
                 // Les portes web : le terminal dit ce qui se passe, il n'a
                 // pas de bouton pour y répondre.

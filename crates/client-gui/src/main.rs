@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod appicon;
+mod admin_fichiers;
 mod atelier;
 mod clips;
 mod graphes;
@@ -209,6 +210,7 @@ enum AdminTab {
     Channels,
     Roles,
     Members,
+    Fichiers,
     Invites,
     Audit,
     Diagnostics,
@@ -357,12 +359,13 @@ const DUREE_POKE: std::time::Duration = std::time::Duration::from_secs(10);
 const DELAI_REFUS_POKE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl AdminTab {
-    const ALL: [AdminTab; 8] = [
+    const ALL: [AdminTab; 9] = [
         AdminTab::Tableau,
         AdminTab::Server,
         AdminTab::Channels,
         AdminTab::Roles,
         AdminTab::Members,
+        AdminTab::Fichiers,
         AdminTab::Invites,
         AdminTab::Audit,
         AdminTab::Diagnostics,
@@ -375,6 +378,7 @@ impl AdminTab {
             AdminTab::Channels => "Salons",
             AdminTab::Roles => "Rôles",
             AdminTab::Members => "Membres",
+            AdminTab::Fichiers => "Fichiers",
             AdminTab::Invites => "Invitations",
             AdminTab::Audit => "Journal",
             AdminTab::Diagnostics => "Diagnostics",
@@ -393,6 +397,9 @@ impl AdminTab {
             AdminTab::Channels => MANAGE_CHANNELS,
             AdminTab::Roles => MANAGE_ROLES,
             AdminTab::Members => KICK,
+            // Retirer ce que les autres ont envoyé : de la modération,
+            // comme supprimer leurs messages.
+            AdminTab::Fichiers => DELETE_MESSAGES,
             AdminTab::Invites => CREATE_INVITE,
             AdminTab::Audit => VIEW_AUDIT_LOG,
             // Les journaux techniques des joueurs : réservé au super-admin,
@@ -986,6 +993,9 @@ struct KiApp {
     audit: Vec<AuditRecord>,
     /// Onglet ouvert dans la fenêtre d'administration.
     admin_tab: AdminTab,
+    /// Admin → Fichiers : la liste des fichiers partagés, ses filtres, sa
+    /// sélection.
+    fichiers_admin: admin_fichiers::Fichiers,
     /// L'onglet ouvert de la fenêtre de réglages, mémorisé.
     reglages_onglet: Onglet,
     /// Réglages du prochain code d'invitation à créer.
@@ -1366,6 +1376,7 @@ impl KiApp {
             reset_password: String::new(),
             audit: Vec::new(),
             admin_tab: AdminTab::Server,
+            fichiers_admin: admin_fichiers::Fichiers::new(),
             reglages_onglet: Onglet::depuis(&get("reglages_onglet", "audio")),
             reponse_a: None,
             edition: None,
@@ -3751,6 +3762,7 @@ impl KiApp {
             BAN,
             CREATE_INVITE,
             VIEW_AUDIT_LOG,
+            DELETE_MESSAGES,
         ]
         .iter()
         .any(|p| self.can(*p))
@@ -5179,6 +5191,9 @@ impl KiApp {
             ServerMsg::InviteCreated { code } => {
                 self.last_invite = Some(code);
             }
+            ServerMsg::AdminFichiers { fichiers, total_octets, plafond_octets, tronque } => {
+                self.fichiers_admin.recevoir(fichiers, total_octets, plafond_octets, tronque);
+            }
             ServerMsg::Info { message } => {
                 self.info = Some(ki_protocol::safe_display(&message, 300));
             }
@@ -6431,6 +6446,10 @@ impl KiApp {
                             self.admin_adresse_web = self.server_info.adresse_web.clone();
                             self.admin_icon = IconChange::Keep;
                             self.send(ClientMsg::AdminListUsers);
+                            if self.admin_tab == AdminTab::Fichiers {
+                                let demande = self.fichiers_admin.demander();
+                                self.send(demande);
+                            }
                         }
                     }
 
@@ -11373,6 +11392,11 @@ impl KiApp {
                             if tab == AdminTab::Audit {
                                 to_send.push(ClientMsg::AdminAuditLog { limit: 200 });
                             }
+                            // La liste des fichiers aussi : relire le stock
+                            // coûte au serveur, on ne le fait pas pour rien.
+                            if tab == AdminTab::Fichiers {
+                                to_send.push(self.fichiers_admin.demander());
+                            }
                         }
                     }
                 });
@@ -11397,6 +11421,7 @@ impl KiApp {
                             AdminTab::Channels => self.admin_channels_tab(ui, &mut to_send),
                             AdminTab::Roles => self.admin_roles_tab(ui, &mut to_send),
                             AdminTab::Members => self.admin_members_tab(ui, &mut to_send),
+                            AdminTab::Fichiers => self.admin_fichiers_tab(ui, &mut to_send),
                             AdminTab::Invites => self.admin_invites_tab(ui, ctx, &mut to_send),
                             AdminTab::Audit => self.admin_audit_tab(ui),
                             AdminTab::Diagnostics => self.admin_diag_tab(ui, ctx),
@@ -12143,6 +12168,29 @@ impl KiApp {
     /// Onglet « Journal » : les actions d'administration, du plus récent au
     /// plus ancien. C'est ce qui rend un lien d'invitation permanent
     /// acceptable — on sait toujours qui est entré par où.
+    /// Admin → Fichiers : la liste et ses actions ; ouvrir un fichier passe
+    /// par la visionneuse, sur l'adresse HTTPS du serveur.
+    fn admin_fichiers_tab(&mut self, ui: &mut egui::Ui, to_send: &mut Vec<ClientMsg>) {
+        for action in self.fichiers_admin.onglet(ui) {
+            match action {
+                admin_fichiers::Action::Envoyer(msg) => to_send.push(msg),
+                admin_fichiers::Action::Voir { chemin, video } => {
+                    let url = format!("{}{chemin}", self.http_base());
+                    let cible = if video {
+                        visionneuse::Cible::Video(url)
+                    } else {
+                        visionneuse::Cible::Image(url)
+                    };
+                    self.visionneuse.ouvrir(cible.clone(), vec![cible]);
+                }
+                admin_fichiers::Action::Copier(chemin) => {
+                    ui.ctx().copy_text(format!("{}{chemin}", self.http_base()));
+                    self.info = Some("lien copié".into());
+                }
+            }
+        }
+    }
+
     fn admin_audit_tab(&mut self, ui: &mut egui::Ui) {
         if self.audit.is_empty() {
             ui::hint(ui, "aucune action consignée pour l'instant");
@@ -12395,6 +12443,7 @@ fn audit_label(action: &str) -> String {
         "member.unban" => "ban annulé".into(),
         "member.password_reset" => "mot de passe réinitialisé".into(),
         "server.info" => "identité du serveur".into(),
+        "fichiers.delete" => "fichiers supprimés".into(),
         other => other.to_string(),
     }
 }
@@ -12403,7 +12452,7 @@ fn audit_label(action: &str) -> String {
 /// ouvre un accès. Le journal se parcourt à l'œil avant de se lire.
 fn audit_tone(action: &str) -> egui::Color32 {
     match action {
-        "member.kick" | "member.ban" => DANGER,
+        "member.kick" | "member.ban" | "fichiers.delete" => DANGER,
         "invite.create" | "invite.use" => ACCENT,
         _ => TEXT_DIM,
     }

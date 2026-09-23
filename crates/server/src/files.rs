@@ -24,6 +24,8 @@ use rand::Rng;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use ki_protocol::{FichierPartage, ServerMsg, UserId};
+
 use crate::state::AppState;
 
 /// Taille max d'un fichier : 25 Mo (aligné sur la limite du routeur).
@@ -175,6 +177,7 @@ pub async fn upload(
         "fichier reçu : {name} ({} Ko) de {username} (id {user_id})",
         body.len() / 1024
     );
+    noter_envoi(&state, &file_id, user_id, &username);
     // Une vidéo est mise de côté et convertie ; l'adresse rendue est celle
     // du MP4 à venir.
     let url = crate::medias::finaliser(&state, &file_id, &dir, &name);
@@ -404,6 +407,223 @@ pub fn sweep(root: &FsPath, quota: Quota) -> (usize, u64) {
     (removed, freed)
 }
 
+// ---------------------------------------------------------------------
+// L'administration des fichiers (Admin → Fichiers)
+// ---------------------------------------------------------------------
+
+/// Une ligne de l'index des envois : qui a déposé quel fichier. Le chat le
+/// dit d'ordinaire — le lien part dans un message —, mais pas d'un envoi
+/// dont le message n'est jamais parti, ni d'un message supprimé depuis.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Envoi {
+    id: String,
+    user_id: UserId,
+    username: String,
+}
+
+fn index_envois(data_dir: &str) -> PathBuf {
+    PathBuf::from(data_dir).join("envois.jsonl")
+}
+
+/// Note qui vient de déposer `file_id`, une ligne à la fin de l'index — sur
+/// le pool bloquant, sans faire attendre la réponse. Un index illisible ou
+/// perdu ne coûte que des noms d'expéditeurs : on ne s'arrête pas pour lui.
+pub fn noter_envoi(state: &AppState, file_id: &str, user_id: UserId, username: &str) {
+    let chemin = index_envois(&state.data_dir);
+    let Ok(ligne) = serde_json::to_string(&Envoi { id: file_id.to_string(), user_id, username: username.to_string() })
+    else {
+        return;
+    };
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let ecrit = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&chemin)
+            .and_then(|mut f| writeln!(f, "{ligne}"));
+        if let Err(e) = ecrit {
+            tracing::warn!("index des envois : {e}");
+        }
+    });
+}
+
+/// L'index relu : l'expéditeur de chaque fichier noté.
+fn lire_envois(data_dir: &str) -> std::collections::HashMap<String, (UserId, String)> {
+    let Ok(texte) = std::fs::read_to_string(index_envois(data_dir)) else {
+        return Default::default();
+    };
+    texte
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Envoi>(l).ok())
+        .map(|e| (e.id, (e.user_id, e.username)))
+        .collect()
+}
+
+/// Le genre d'un fichier d'après son nom, pour les filtres de l'administration.
+fn genre_de(nom: &str) -> &'static str {
+    let bas = nom.to_ascii_lowercase();
+    if crate::medias::est_video(&bas) {
+        "video"
+    } else if [".jpg", ".jpeg", ".png", ".gif", ".webp"].iter().any(|e| bas.ends_with(e)) {
+        "image"
+    } else {
+        "autre"
+    }
+}
+
+/// Le fichier principal d'un dossier du stock : celui que la fiche d'une
+/// vidéo nomme, sinon le plus gros — ni la fiche ni le poster.
+fn principal(dir: &FsPath) -> Option<String> {
+    if let Ok(texte) = std::fs::read_to_string(dir.join("meta.json")) {
+        if let Ok(meta) = serde_json::from_str::<crate::medias::Meta>(&texte) {
+            if let Some(sortie) = meta.sortie.filter(|s| dir.join(s).is_file()) {
+                return Some(sortie);
+            }
+        }
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let nom = e.file_name().to_string_lossy().into_owned();
+            let taille = e.metadata().ok()?.len();
+            (nom != "meta.json" && nom != "poster.jpg").then_some((taille, nom))
+        })
+        .max()
+        .map(|(_, nom)| nom)
+}
+
+/// Les fichiers du stock pour l'administration, du plus récent au plus
+/// ancien : ce qu'ils pèsent, qui les a envoyés, où ils sont partagés. La
+/// liste tient dans une ligne de protocole — les plus récents d'abord,
+/// `tronque` sinon. Pour le pool bloquant.
+pub fn liste_admin(state: &AppState) -> ServerMsg {
+    let racine = files_dir(state);
+    let envois = lire_envois(&state.data_dir);
+    let salons = state.channels.list();
+    let ids: Vec<ki_protocol::ChannelId> = salons.iter().map(|c| c.id).collect();
+    let partages = state.history.partages_de_fichiers(&state.data_dir, &ids);
+    let nom_salon = |id: ki_protocol::ChannelId| {
+        salons.iter().find(|c| c.id == id).map_or_else(|| format!("salon {id}"), |c| c.name.clone())
+    };
+    let mut stock = scan(&racine);
+    let total_octets: u64 = stock.iter().map(|s| s.bytes).sum();
+    stock.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    let mut fichiers: Vec<FichierPartage> = Vec::new();
+    let mut tronque = false;
+    for s in &stock {
+        let Some(id) = s.dir.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+        if !ki_protocol::id_de_fichier_valide(&id) {
+            continue;
+        }
+        if fichiers.len() >= ki_protocol::FICHIERS_LISTE_MAX {
+            tronque = true;
+            break;
+        }
+        let nom = principal(&s.dir).unwrap_or_default();
+        let messages = partages.get(&id).map(Vec::as_slice).unwrap_or_default();
+        let (auteur_id, auteur) = match envois.get(&id) {
+            Some((uid, nom)) => (Some(*uid), nom.clone()),
+            None => match messages.first() {
+                Some(p) => (Some(p.message.user_id), p.auteur.clone()),
+                None => (None, String::new()),
+            },
+        };
+        let mut noms_salons: Vec<String> = Vec::new();
+        for p in messages {
+            let n = nom_salon(p.channel);
+            if !noms_salons.contains(&n) && noms_salons.len() < 3 {
+                noms_salons.push(n);
+            }
+        }
+        let date_ms = s
+            .modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        fichiers.push(FichierPartage {
+            genre: genre_de(&nom).to_string(),
+            chemin: if nom.is_empty() { String::new() } else { format!("/files/{id}/{nom}") },
+            id,
+            nom,
+            octets: s.bytes,
+            date_ms,
+            auteur,
+            auteur_id,
+            salons: noms_salons,
+            messages: messages.len() as u32,
+        });
+    }
+    // La ligne ne doit jamais dépasser ce que le client accepte : on retire
+    // les plus anciens tant qu'elle déborde.
+    loop {
+        let msg = ServerMsg::AdminFichiers {
+            fichiers: fichiers.clone(),
+            total_octets,
+            plafond_octets: state.files_quota.max_bytes,
+            tronque,
+        };
+        let taille = serde_json::to_string(&msg).map(|s| s.len()).unwrap_or(0);
+        if taille <= ki_protocol::MAX_LINE - 8 * 1024 || fichiers.is_empty() {
+            return msg;
+        }
+        let garder = fichiers.len() * 3 / 4;
+        fichiers.truncate(garder);
+        tronque = true;
+    }
+}
+
+/// Ce qu'une suppression par l'administration a fait.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BilanSuppression {
+    pub fichiers: usize,
+    pub octets: u64,
+    pub messages: usize,
+}
+
+/// Supprime des fichiers du stock — des identifiants valides seulement, rien
+/// d'autre n'y désigne un dossier — et, `avec_messages`, les messages du chat
+/// qui les partagent, annoncés à leur salon comme une suppression ordinaire.
+/// Pour le pool bloquant.
+pub fn supprimer_admin(state: &AppState, ids: &[String], avec_messages: bool) -> BilanSuppression {
+    let partages = if avec_messages {
+        let salons: Vec<ki_protocol::ChannelId> = state.channels.list().iter().map(|c| c.id).collect();
+        state.history.partages_de_fichiers(&state.data_dir, &salons)
+    } else {
+        Default::default()
+    };
+    let racine = files_dir(state);
+    let mut bilan = BilanSuppression::default();
+    for id in ids.iter().filter(|id| ki_protocol::id_de_fichier_valide(id)) {
+        let dir = racine.join(id);
+        if dir.is_dir() {
+            let octets: u64 = std::fs::read_dir(&dir)
+                .map(|it| it.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum())
+                .unwrap_or(0);
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {
+                    bilan.fichiers += 1;
+                    bilan.octets += octets;
+                }
+                Err(e) => tracing::error!("suppression de {} impossible : {e}", dir.display()),
+            }
+        }
+        for p in partages.get(id).map(Vec::as_slice).unwrap_or_default() {
+            // Un message qui partageait deux fichiers n'est retiré qu'une fois.
+            if state.history.delete(p.channel, p.message) {
+                bilan.messages += 1;
+                state.broadcast(
+                    p.channel,
+                    None,
+                    &ServerMsg::MessageDeleted { channel: p.channel, message: p.message },
+                );
+            }
+        }
+    }
+    bilan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +792,69 @@ mod tests {
         assert_eq!(used_bytes(&root), 2048);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+    /// L'administration des fichiers : la liste nomme l'expéditeur (l'index
+    /// des envois, sinon l'auteur du message), le genre et les salons ; la
+    /// suppression efface le dossier — jamais ce qu'un identifiant de
+    /// travers désignerait — et, si on le demande, les messages qui le
+    /// partagent.
+    #[tokio::test]
+    async fn l_administration_liste_et_supprime_les_fichiers() {
+        let dir = std::env::temp_dir().join(format!("ki-fichiers-admin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let quota = Quota { max_bytes: 0, ttl_days: 0 };
+        let state = AppState::new("changeme".into(), dir.to_str().unwrap(), quota, quota, 512).unwrap();
+        let salon = state
+            .channels
+            .list()
+            .into_iter()
+            .find(|c| c.kind == ki_protocol::ChannelKind::Text)
+            .expect("un salon textuel par défaut");
+        let (video, image) = ("0123456789abcdef", "fedcba9876543210");
+        let racine = dir.join("files");
+        std::fs::create_dir_all(racine.join(video)).unwrap();
+        std::fs::write(racine.join(video).join("clip.mp4"), vec![0u8; 3000]).unwrap();
+        std::fs::create_dir_all(racine.join(image)).unwrap();
+        std::fs::write(racine.join(image).join("photo.png"), vec![0u8; 500]).unwrap();
+        // La vidéo est notée à l'index ; l'image, seul son message dit qui.
+        noter_envoi(&state, video, 7, "kevin");
+        for _ in 0..100 {
+            if index_envois(&state.data_dir).exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let dit = |user_id, username: &str, ts, text: String| ki_protocol::ChatRecord {
+            user_id,
+            username: username.into(),
+            text,
+            ts,
+            ..Default::default()
+        };
+        state.history.append(salon.id, &dit(7, "kevin", 10, format!("https://x:8080/files/{video}/clip.mp4")));
+        state.history.append(salon.id, &dit(8, "lea", 11, format!("/files/{image}/photo.png")));
+
+        let ServerMsg::AdminFichiers { fichiers, total_octets, tronque, .. } = liste_admin(&state) else {
+            panic!("pas une liste de fichiers");
+        };
+        assert_eq!((total_octets, tronque, fichiers.len()), (3500, false, 2));
+        let v = fichiers.iter().find(|f| f.id == video).unwrap();
+        assert_eq!((v.genre.as_str(), v.auteur.as_str(), v.auteur_id, v.messages), ("video", "kevin", Some(7), 1));
+        assert_eq!(v.chemin, format!("/files/{video}/clip.mp4"));
+        let i = fichiers.iter().find(|f| f.id == image).unwrap();
+        assert_eq!((i.genre.as_str(), i.auteur.as_str(), i.auteur_id), ("image", "lea", Some(8)));
+        assert_eq!(i.salons, vec![salon.name.clone()]);
+
+        // La vidéo et son message partent ; l'identifiant piégé, rien.
+        let bilan = supprimer_admin(&state, &[video.to_string(), "../../etc/passwd".into()], true);
+        assert_eq!(bilan, BilanSuppression { fichiers: 1, octets: 3000, messages: 1 });
+        assert!(!racine.join(video).exists());
+        assert!(racine.join(image).exists());
+        assert!(state.history.recent(salon.id, 10).iter().all(|r| r.ts != 10), "le message est retiré");
+        // Sans les messages : le fichier part, le message reste.
+        let bilan = supprimer_admin(&state, &[image.to_string()], false);
+        assert_eq!((bilan.fichiers, bilan.messages), (1, 0));
+        assert!(state.history.recent(salon.id, 10).iter().any(|r| r.ts == 11));
     }
 }
