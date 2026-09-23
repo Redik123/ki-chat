@@ -485,8 +485,9 @@ async fn stream_ingest_task(
     user_id: UserId,
     tx: crate::state::Outbox,
 ) {
-    // 90 trames/s : au-delà du 60 fps + rattrapages, c'est un arrosage.
-    let mut budget = crate::state::TokenBucket::new(90.0, 120.0);
+    // 150 trames/s : la haute à 60 i/s, la basse à 30, plus les
+    // rattrapages — au-delà, c'est un arrosage.
+    let mut budget = crate::state::TokenBucket::new(150.0, 200.0);
     loop {
         let Ok(mut uni) = conn.accept_uni().await else {
             return;
@@ -512,22 +513,14 @@ async fn stream_ingest_task(
         let Some(header) = ki_protocol::parse_media_header(&bytes) else {
             continue;
         };
-        if let crate::stream::Ingest::Ok { ask_idr, palier } =
+        // Un spectateur (nouveau, lent, déplacé d'une qualité à l'autre, ou
+        // sacrifié par le plafond mémoire) attend une trame décodable : prier
+        // le streamer ; le budget vient de changer : le lui dire.
+        if let crate::stream::Ingest::Ok { ask_haute, ask_basse, budget } =
             state.streams.ingest(user_id, &header, bytes)
         {
-            // Un spectateur (nouveau, lent, ou sacrifié par le plafond
-            // mémoire) attend une trame décodable : prier le streamer.
-            if ask_idr {
-                let _ = tx.send(ServerMsg::KeyframeNeeded {
-                    stream_id: header.stream_id,
-                });
-            }
-            // Le palier de débit vient de changer : le dire au streamer.
-            if let Some(kbps) = palier {
-                let _ = tx.send(ServerMsg::StreamBudget {
-                    stream_id: header.stream_id,
-                    kbps,
-                });
+            for msg in crate::stream::messages(header.stream_id, ask_haute, ask_basse, budget) {
+                let _ = tx.send(msg);
             }
         }
     }
@@ -1020,7 +1013,7 @@ fn handle_msg(
                 state.broadcast_member(user_id);
             }
         }
-        ClientMsg::StreamStart { meta, stream_key } => {
+        ClientMsg::StreamStart { meta, stream_key, couches } => {
             // Diffuser exige d'être en vocal : le salon EST le public, et
             // c'est l'appartenance au salon qui donnera droit de regard.
             let channel = {
@@ -1041,7 +1034,7 @@ fn handle_msg(
                 });
                 return;
             }
-            match state.streams.start(user_id, channel, stream_key, meta) {
+            match state.streams.start(user_id, channel, stream_key, meta, couches) {
                 Ok(stream_id) => {
                     {
                         let mut users = state.users.lock().unwrap();
@@ -1077,7 +1070,7 @@ fn handle_msg(
                 );
             }
         }
-        ClientMsg::Watch { stream_id } => {
+        ClientMsg::Watch { stream_id, couches } => {
             let viewer = {
                 let users = state.users.lock().unwrap();
                 users.get(&user_id).map(|u| (u.voice, u.conn.clone()))
@@ -1085,7 +1078,7 @@ fn handle_msg(
             let Some((channel, conn)) = viewer else {
                 return;
             };
-            match state.streams.watch(stream_id, user_id, channel, conn) {
+            match state.streams.watch(stream_id, user_id, channel, conn, couches) {
                 Ok((stream_key, meta, ask_idr, streamer)) => {
                     let _ = tx.send(ServerMsg::WatchAccepted {
                         stream_id,
@@ -1094,7 +1087,7 @@ fn handle_msg(
                     });
                     if ask_idr {
                         // Le nouveau venu a besoin d'une trame décodable.
-                        state.send_to(streamer, &ServerMsg::KeyframeNeeded { stream_id });
+                        state.send_to(streamer, &ServerMsg::KeyframeNeeded { stream_id, basse: false });
                     }
                 }
                 Err(reason) => {

@@ -437,6 +437,10 @@ pub struct GoLive {
     /// survit aux changements de réglages : sans ça, chaque relance de la
     /// capture remettait la vidéo à zéro pendant que le son continuait.
     pub origine: std::time::Instant,
+    /// Les deux qualités : la basse que le serveur demande pour les
+    /// connexions lentes, la haute suspendue quand personne ne la regarde.
+    /// Elles survivent aux relances de la capture.
+    pub qualites: Arc<ki_video::Qualites>,
 }
 
 impl GoLive {
@@ -461,6 +465,7 @@ impl GoLive {
             key,
             audio,
             origine,
+            qualites,
             ..
         } = self;
         boucle.stop();
@@ -472,6 +477,7 @@ impl GoLive {
             reglages.config(),
             force_idr.clone(),
             origine,
+            Some(qualites.clone()),
         )?;
         Ok(Self {
             boucle,
@@ -486,6 +492,7 @@ impl GoLive {
             key,
             audio,
             origine,
+            qualites,
         })
     }
 }
@@ -524,6 +531,16 @@ impl Cadence {
         self.trames = trames;
         self.octets = octets;
         self.depuis = Instant::now();
+    }
+}
+
+/// Une hauteur plafonnée : `reglee` à 0 veut dire « celle de la source »,
+/// que le plafond remplace alors.
+pub fn plafonner_hauteur(reglee: u32, plafond: u32) -> u32 {
+    if reglee == 0 {
+        plafond
+    } else {
+        reglee.min(plafond)
     }
 }
 
@@ -641,9 +658,17 @@ impl Regulateur {
         if n < 2 {
             return None;
         }
+        // La basse, quand elle tourne, passe par le même fil : son coût
+        // compte, au prorata de sa cadence (30 i/s au plus).
+        let basse = if stats.basse_dims().1 > 0 {
+            stats.basse_ms.get() * (30.0 / fps.max(1) as f32).min(1.0)
+        } else {
+            0.0
+        };
         let charge = stats.convert_ms.get()
             + stats.encode_ms.get()
-            + if preview { stats.decode_ms.get() } else { 0.0 };
+            + if preview { stats.decode_ms.get() } else { 0.0 }
+            + basse;
         let budget = 1000.0 / fps.max(1) as f32;
         let sature = charge > 0.9 * budget || delta as f32 > 0.15 * fps as f32;
         let decision = self.decider(sature)?;
@@ -720,6 +745,9 @@ pub struct Regard {
     pub image: Arc<Mutex<Option<egui::ColorImage>>>,
     /// Images décodées depuis le début, pour la cadence affichée.
     pub images: Arc<AtomicU64>,
+    /// On lit la qualité basse : le serveur nous y a mis, notre connexion
+    /// ne suivait pas la haute.
+    pub basse: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     /// Le fil du son du jeu, s'il a pu démarrer.
@@ -742,15 +770,16 @@ impl Regard {
         let stop = Arc::new(AtomicBool::new(false));
         let image = Arc::new(Mutex::new(None));
         let images = Arc::new(AtomicU64::new(0));
+        let basse = Arc::new(AtomicBool::new(false));
         // L'horloge du son : le fil du son y note où en est la lecture, le
         // fil de l'image retient chaque image jusqu'à cet instant-là.
         let horloge: Horloge = Arc::new(Mutex::new(None));
         let worker = {
-            let (stop, image, images, horloge) =
-                (stop.clone(), image.clone(), images.clone(), horloge.clone());
+            let (stop, image, images, horloge, basse) =
+                (stop.clone(), image.clone(), images.clone(), horloge.clone(), basse.clone());
             std::thread::Builder::new()
                 .name("video-regard".into())
-                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx, horloge))
+                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx, horloge, basse))
                 .ok()
         };
         let audio_worker = {
@@ -760,7 +789,7 @@ impl Regard {
                 .spawn(move || fil_audio(stream_id, key, audio_rx, engine, stop, horloge))
                 .ok()
         };
-        Self { stream_id, streamer, image, images, stop, worker, audio_worker }
+        Self { stream_id, streamer, image, images, basse, stop, worker, audio_worker }
     }
 
     pub fn arreter(mut self) {
@@ -856,6 +885,21 @@ fn fil_audio(
 /// d'espérer : saut à la prochaine trame clé disponible, ou table rase.
 const ATTENTE_MAX: usize = 30;
 
+/// Les trames d'une qualité en attente de leur tour, par séquence :
+/// (trame clé ?, horodatage, octets).
+type Attente = BTreeMap<u64, (bool, u64, Vec<u8>)>;
+
+/// La trame clé de l'autre qualité où passer, s'il y en a une : la
+/// première en attente plus récente que ce qu'on a déjà lu. Une plus
+/// ancienne, croisée en route (la petite double la grosse), ne ramène pas
+/// en arrière.
+fn cle_de_bascule(autre: &Attente, lu_pts: Option<u64>) -> Option<u64> {
+    autre
+        .iter()
+        .find(|(_, (idr, pts, _))| *idr && lu_pts.is_none_or(|l| *pts > l))
+        .map(|(s, _)| *s)
+}
+
 /// Le fil d'un spectateur : déchiffre, remet en ordre, décode.
 ///
 /// Les trames arrivent dans le désordre — un flux QUIC chacune, les petites
@@ -880,6 +924,7 @@ fn fil_decodeur(
     stop: Arc<AtomicBool>,
     ctx: egui::Context,
     horloge: Horloge,
+    basse: Arc<AtomicBool>,
 ) {
     let cipher = XChaCha20Poly1305::new(&key.into());
     let Ok(mut decodeur) = ViewerDecoder::new() else {
@@ -888,10 +933,17 @@ fn fil_decodeur(
     };
     let depart = std::time::Instant::now();
     let mut premiere = true;
-    // Les trames déchiffrées en attente de leur tour, par séquence :
-    // (trame clé ?, horodatage, octets).
-    let mut attente: BTreeMap<u64, (bool, u64, Vec<u8>)> = BTreeMap::new();
+    // Les trames déchiffrées en attente de leur tour, par qualité (haute,
+    // basse) puis par séquence : (trame clé ?, horodatage, octets). Deux
+    // qualités, deux séquences — elles ne se mélangent jamais. Celles de
+    // l'autre qualité attendent aussi : après une bascule, les petites
+    // trames qui suivent la trame clé arrivent souvent avant elle.
+    let mut attentes: [Attente; 2] = [BTreeMap::new(), BTreeMap::new()];
     let mut prochaine: Option<u64> = None;
+    // La qualité qu'on lit (0 : haute, 1 : basse), et l'horodatage de la
+    // dernière image décodée.
+    let mut couche = 0usize;
+    let mut lu_pts: Option<u64> = None;
     // Les images décodées qui attendent leur instant sur l'horloge du son.
     let mut a_afficher: std::collections::VecDeque<(u64, egui::ColorImage)> =
         std::collections::VecDeque::new();
@@ -904,18 +956,19 @@ fn fil_decodeur(
             Ok(bytes) => {
                 if let Some(h) = ki_protocol::parse_media_header(&bytes) {
                     if h.stream_id == stream_id {
-                        let nonce = ki_protocol::nonce_for_media(
-                            ki_protocol::MEDIA_DOMAIN_VIDEO,
-                            stream_id,
-                            h.seq,
-                        );
+                        let domaine = if h.basse {
+                            ki_protocol::MEDIA_DOMAIN_VIDEO_BASSE
+                        } else {
+                            ki_protocol::MEDIA_DOMAIN_VIDEO
+                        };
+                        let nonce = ki_protocol::nonce_for_media(domaine, stream_id, h.seq);
                         // L'en-tête est l'AAD : altéré en route, le tag le
                         // trahit.
                         let (aad, sealed) = bytes.split_at(ki_protocol::MEDIA_HEADER_LEN);
                         if let Ok(clair) = cipher
                             .decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
                         {
-                            attente.insert(h.seq, (h.idr, h.pts_us, clair));
+                            attentes[usize::from(h.basse)].insert(h.seq, (h.idr, h.pts_us, clair));
                         }
                     }
                 }
@@ -927,6 +980,21 @@ fn fil_decodeur(
             }
             Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
         }
+
+        // Le serveur nous a changé de qualité : une trame clé de l'autre,
+        // plus récente que ce qu'on a déjà lu, et l'on y passe — la lecture
+        // repart d'elle.
+        let autre = 1 - couche;
+        if let Some(s) = cle_de_bascule(&attentes[autre], lu_pts) {
+            couche = autre;
+            attentes[1 - autre].clear();
+            attentes[autre].retain(|k, _| *k >= s);
+            prochaine = Some(s);
+            basse.store(autre == 1, Ordering::Relaxed);
+        } else if attentes[autre].len() > 2 * ATTENTE_MAX {
+            attentes[autre].clear();
+        }
+        let attente = &mut attentes[couche];
 
         // Point de départ : la première trame clé vue. Tout ce qui la
         // précède est indécodable — jeté sans regret.
@@ -947,6 +1015,7 @@ fn fil_decodeur(
             loop {
                 // Tout ce qui est contigu part au décodeur, dans l'ordre.
                 while let Some((_, pts, clair)) = attente.remove(&next) {
+                    lu_pts = Some(pts);
                     if let Some(frame) = decodeur.decode(&clair) {
                         // La conversion RGBA -> image egui (8 Mo en 1080p)
                         // se paie ici, pas sur le fil d'interface.
@@ -1106,6 +1175,40 @@ mod tests {
         assert!((0..400).filter_map(|_| r.decider(false)).next().is_none());
     }
 
+    /// La résolution et la cadence suivent le débit, sans jamais dépasser le
+    /// réglage : 1080p60 à 8 Mbit/s, 720p30 à 1,5, 360p30 tout en bas.
+    #[test]
+    fn la_resolution_suit_le_debit() {
+        assert_eq!(ki_video::qualite_pour_debit(8000), None);
+        assert_eq!(ki_video::qualite_pour_debit(4000), Some((1080, 30)));
+        assert_eq!(ki_video::qualite_pour_debit(2500), Some((720, 30)));
+        assert_eq!(ki_video::qualite_pour_debit(1500), Some((720, 30)));
+        assert_eq!(ki_video::qualite_pour_debit(1000), Some((540, 30)));
+        assert_eq!(ki_video::qualite_pour_debit(700), Some((480, 30)));
+        assert_eq!(ki_video::qualite_pour_debit(450), Some((360, 30)));
+        assert_eq!(plafonner_hauteur(0, 720), 720, "« native » prend le plafond");
+        assert_eq!(plafonner_hauteur(480, 720), 480, "un réglage plus bas reste");
+        assert_eq!(plafonner_hauteur(1080, 720), 720);
+        // La basse ne dépasse jamais la haute, ni 30 i/s.
+        assert_eq!(ki_video::qualite_basse(2500, 1080, 60), (720, 30));
+        assert_eq!(ki_video::qualite_basse(2500, 480, 60), (480, 30));
+        assert_eq!(ki_video::qualite_basse(1000, 1080, 15), (540, 15));
+    }
+
+    /// Une bascule de qualité se fait à la trame clé de l'autre, si elle est
+    /// plus récente que ce qu'on a lu — jamais sur une trame ordinaire, ni
+    /// sur une trame clé périmée croisée en route.
+    #[test]
+    fn la_bascule_de_qualite_attend_une_trame_cle_recente() {
+        let mut autre: Attente = BTreeMap::new();
+        autre.insert(5, (false, 90, vec![]));
+        assert_eq!(cle_de_bascule(&autre, Some(80)), None, "pas sans trame clé");
+        autre.insert(6, (true, 100, vec![]));
+        assert_eq!(cle_de_bascule(&autre, Some(80)), Some(6));
+        assert_eq!(cle_de_bascule(&autre, None), Some(6), "au départ, n'importe laquelle");
+        assert_eq!(cle_de_bascule(&autre, Some(150)), None, "périmée : on ne revient pas en arrière");
+    }
+
     /// Le chiffrement d'une trame telle que l'émetteur la fabrique doit se
     /// déchiffrer telle que le spectateur la lit — en-tête en AAD compris :
     /// un octet d'en-tête réécrit par le chemin invalide le tag.
@@ -1115,6 +1218,7 @@ mod tests {
         let cipher = XChaCha20Poly1305::new(&key.into());
         let h = ki_protocol::MediaHeader {
             idr: true,
+            basse: false,
             stream_id: 3,
             seq: 41,
             pts_us: 1_000_000,

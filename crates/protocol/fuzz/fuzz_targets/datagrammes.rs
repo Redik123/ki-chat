@@ -32,6 +32,7 @@ fuzz_target!(|data: &[u8]| {
 
     let media = ki_protocol::MediaHeader {
         idr: champs[16] & 1 != 0,
+        basse: champs[16] & 2 != 0,
         stream_id: u32_a(0),
         seq: u64_a(8),
         pts_us: u64_a(16),

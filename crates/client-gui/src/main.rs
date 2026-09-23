@@ -780,6 +780,12 @@ struct KiApp {
     /// Le palier de débit que le serveur demande (un spectateur ne suit
     /// pas) ; `None` = le réglage.
     diffusion_palier: Option<u32>,
+    /// Ce palier vient de ma propre connexion (mes trames arrivent en
+    /// retard au serveur), pas d'un spectateur.
+    diffusion_montant: bool,
+    /// La qualité basse que le serveur fait encoder en plus, pour les
+    /// connexions lentes (kbit/s).
+    diffusion_basse: Option<u32>,
     /// L'encodeur qui se règle tout seul : cadence puis hauteur, quand il
     /// ne suit pas.
     regulateur: partage::Regulateur,
@@ -1264,6 +1270,8 @@ impl KiApp {
             go_live_tex: None,
             diffusion: partage::Reglages::load(get),
             diffusion_palier: None,
+            diffusion_montant: false,
+            diffusion_basse: None,
             regulateur: partage::Regulateur::new(),
             sources: Default::default(),
             show_diffusion: false,
@@ -4966,6 +4974,8 @@ impl KiApp {
             }
             ServerMsg::StreamGranted { stream_id } => {
                 self.diffusion_palier = None;
+                self.diffusion_montant = false;
+                self.diffusion_basse = None;
                 self.diffusion_accordee(stream_id);
             }
             ServerMsg::StreamStarted { stream_id, user_id, .. } => {
@@ -5010,25 +5020,19 @@ impl KiApp {
                 ki_voice::journal(format!("visionnage refusé : {reason}"));
                 self.info = Some(format!("impossible de regarder : {reason}"));
             }
-            ServerMsg::KeyframeNeeded { stream_id } => {
+            ServerMsg::KeyframeNeeded { stream_id, basse } => {
                 if let Some(g) = &self.go_live {
-                    if g.stream_id == stream_id {
+                    if g.stream_id == stream_id && basse {
+                        g.qualites.force_keyframe_basse();
+                    } else if g.stream_id == stream_id {
                         g.boucle.force_keyframe();
                     }
                 }
             }
             ServerMsg::StreamMetaChanged { .. } => {}
-            ServerMsg::StreamBudget { stream_id, kbps } => {
+            ServerMsg::StreamBudget { stream_id, kbps, basse, montant } => {
                 if self.go_live.as_ref().is_some_and(|g| g.stream_id == stream_id) {
-                    let palier = (kbps < self.diffusion.kbps).then_some(kbps);
-                    if palier != self.diffusion_palier {
-                        ki_voice::journal(match palier {
-                            Some(p) => format!("diffusion : palier {p} kbit/s — un spectateur ne suit pas"),
-                            None => "diffusion : le palier revient au réglage".to_string(),
-                        });
-                        self.diffusion_palier = palier;
-                        self.rediffuser();
-                    }
+                    self.budget_de_diffusion(kbps, basse, montant);
                 }
             }
             ServerMsg::LiaisonRiot { ok, message, .. } => {
@@ -7071,7 +7075,7 @@ impl KiApp {
                         if deja {
                             self.fermer_regard(true);
                         } else {
-                            self.send(ClientMsg::Watch { stream_id });
+                            self.send(ClientMsg::Watch { stream_id, couches: true });
                         }
                         ui.close();
                     }
@@ -9989,6 +9993,7 @@ impl KiApp {
         self.send(ClientMsg::StreamStart {
             meta: self.diffusion.meta(),
             stream_key: ki_protocol::hex_encode(&key),
+            couches: true,
         });
     }
 
@@ -9999,9 +10004,18 @@ impl KiApp {
         let force_idr = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cadence = std::sync::Arc::new(std::sync::Mutex::new(self.diffusion.meta()));
         let stats = std::sync::Arc::new(ki_video::StageStats::default());
-        let Some(emit) =
-            conn.video_emit(stream_id, key, force_idr.clone(), cadence.clone(), stats.clone())
-        else {
+        // Les deux qualités : la basse, que le serveur demandera pour les
+        // connexions lentes, et la haute, suspendue quand plus personne ne
+        // la regarde.
+        let qualites = std::sync::Arc::new(ki_video::Qualites::default());
+        let Some(emit) = conn.video_emit(
+            stream_id,
+            key,
+            force_idr.clone(),
+            cadence.clone(),
+            stats.clone(),
+            qualites.clone(),
+        ) else {
             self.info = Some("diffusion impossible : pas de connexion".into());
             return;
         };
@@ -10030,6 +10044,7 @@ impl KiApp {
             reglages.config(),
             force_idr.clone(),
             origine,
+            Some(qualites.clone()),
         ) {
             Ok(boucle) => {
                 let avec_son = reglages.son;
@@ -10046,6 +10061,7 @@ impl KiApp {
                     key,
                     audio: None,
                     origine,
+                    qualites,
                 });
                 self.cadence_live = partage::Cadence::new();
                 self.journal_flux = std::time::Instant::now();
@@ -10095,13 +10111,65 @@ impl KiApp {
     fn reglages_effectifs(&self) -> partage::Reglages {
         let mut r = self.diffusion.clone();
         if let Some(p) = self.diffusion_palier {
-            r.kbps = r.kbps.min(p.max(500));
+            r.kbps = r.kbps.min(p.max(450));
+            // La résolution et la cadence suivent le débit : à 1,5 Mbit/s,
+            // du 720p30 net vaut mieux que du 1080p60 en bouillie — c'est
+            // ce qui rendait la vidéo « infâme mais fluide ».
+            if let Some((hauteur, fps)) = ki_video::qualite_pour_debit(r.kbps) {
+                r.max_height = partage::plafonner_hauteur(r.max_height, hauteur);
+                r.fps = r.fps.min(fps);
+            }
         }
         if let Some((hauteur, fps)) = self.regulateur.cran_actuel() {
-            r.max_height = hauteur;
-            r.fps = fps;
+            r.max_height = partage::plafonner_hauteur(r.max_height, hauteur);
+            r.fps = r.fps.min(fps);
         }
         r
+    }
+
+    /// Le budget que le serveur demande pour ma diffusion : le palier de la
+    /// haute (0 : plus personne ne la regarde, elle ne part plus), la basse
+    /// à encoder en plus pour les connexions lentes, et d'où vient la
+    /// contrainte.
+    fn budget_de_diffusion(&mut self, kbps: u32, basse: Option<u32>, montant: bool) {
+        let Some(g) = &self.go_live else { return };
+        // La haute suspendue : l'aperçu continue, rien ne part ; elle repart
+        // d'une trame clé.
+        if kbps == 0 {
+            if g.qualites.suspendre_haute(true) {
+                ki_voice::journal("diffusion : personne ne regarde la qualité haute — elle ne part plus".to_string());
+            }
+        } else if g.qualites.suspendre_haute(false) {
+            g.force_idr.store(true, std::sync::atomic::Ordering::Relaxed);
+            ki_voice::journal("diffusion : la qualité haute repart".to_string());
+        }
+        // La basse : réglée à chaud, sans relancer la capture.
+        if g.qualites.basse() != basse {
+            g.qualites.regler_basse(basse);
+            ki_voice::journal(match basse {
+                Some(k) => {
+                    let (h, f) = ki_video::qualite_basse(k, g.stats.dims().1.max(360), g.reglages.fps);
+                    format!("diffusion : qualité basse {h}p{f} à {k} kbit/s pour les connexions lentes")
+                }
+                None => "diffusion : plus personne en qualité basse".to_string(),
+            });
+        }
+        self.diffusion_basse = basse;
+        if kbps == 0 {
+            return;
+        }
+        // Le palier de la haute, comme avant — la cause en plus.
+        let palier = (kbps < self.diffusion.kbps).then_some(kbps);
+        self.diffusion_montant = montant && palier.is_some();
+        if palier != self.diffusion_palier {
+            ki_voice::journal(match palier {
+                Some(p) if montant => format!("diffusion : palier {p} kbit/s — ta connexion montante ne suit pas"),
+                Some(p) => format!("diffusion : palier {p} kbit/s — un spectateur ne suit pas"),
+                None => "diffusion : le palier revient au réglage".to_string(),
+            });
+            self.diffusion_palier = palier;
+            self.rediffuser();
+        }
     }
 
     fn rediffuser(&mut self) {
@@ -10158,12 +10226,14 @@ impl KiApp {
             ));
             return;
         }
-        self.send(ClientMsg::Watch { stream_id });
+        self.send(ClientMsg::Watch { stream_id, couches: true });
     }
 
     /// Arrête sa propre diffusion, côté capture ET côté serveur.
     fn arreter_diffusion(&mut self) {
         self.diffusion_palier = None;
+        self.diffusion_montant = false;
+        self.diffusion_basse = None;
         self.regulateur = partage::Regulateur::new();
         secours::lever_diffusion();
         if let Some(g) = self.go_live.take() {
@@ -10389,8 +10459,23 @@ impl KiApp {
                 g.stats.net_dropped.load(Relaxed),
             );
             let etat = match self.diffusion_palier {
+                Some(p) if self.diffusion_montant => format!("{etat} · palier {p} kbit/s (ta connexion ne suit pas)"),
                 Some(p) => format!("{etat} · palier {p} kbit/s (un spectateur ne suit pas)"),
                 None => etat,
+            };
+            // La qualité basse, pour les connexions lentes ; la haute que
+            // plus personne ne regarde.
+            let etat = match g.stats.basse_dims() {
+                (w, h) if h > 0 => format!(
+                    "{etat} · qualité basse {w}x{h} à {} kbit/s (connexions lentes)",
+                    self.diffusion_basse.unwrap_or(0)
+                ),
+                _ => etat,
+            };
+            let etat = if g.qualites.haute_suspendue() {
+                format!("{etat} · qualité haute suspendue (personne ne la regarde)")
+            } else {
+                etat
             };
             // L'encodeur qui ne suit pas : un cran plus bas, et on le dit.
             let regle = self.regulateur.tick(&g.stats, g.reglages.fps, g.reglages.preview);
@@ -10488,10 +10573,18 @@ impl KiApp {
         self.cadence_regard
             .relever(r.images.load(std::sync::atomic::Ordering::Relaxed), 0);
         let titre = format!("Écran de {}", r.streamer);
+        // En qualité basse, le dire : l'image plus petite n'est pas une
+        // panne, c'est sa connexion qui ne suivait pas la haute.
+        let reduite = r.basse.load(std::sync::atomic::Ordering::Relaxed);
         let etat = match &self.regard_tex {
             Some(tex) => {
                 let [w, h] = tex.size();
-                format!("{w}x{h} · {:.0} i/s", self.cadence_regard.fps)
+                let base = format!("{w}x{h} · {:.0} i/s", self.cadence_regard.fps);
+                if reduite {
+                    format!("{base} · qualité réduite pour ta connexion")
+                } else {
+                    base
+                }
             }
             None => String::new(),
         };

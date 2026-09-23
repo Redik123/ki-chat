@@ -261,6 +261,12 @@ pub enum ClientMsg {
         meta: StreamMeta,
         /// Clé XChaCha20-Poly1305 du stream (32 octets, hex).
         stream_key: String,
+        /// Ce client sait encoder une seconde qualité, basse, à la demande
+        /// du serveur (`StreamBudget.basse`) — depuis 0.1.46. Un streamer
+        /// d'avant n'en produit qu'une : ses spectateurs n'ont que le palier
+        /// commun.
+        #[serde(default)]
+        couches: bool,
     },
     /// Arrêter son partage d'écran.
     StreamStop,
@@ -268,7 +274,14 @@ pub enum ClientMsg {
     /// rediffuse au salon en StreamMetaChanged.
     StreamMetaUpdate { meta: StreamMeta },
     /// Regarder le stream d'un membre de son salon vocal.
-    Watch { stream_id: u32 },
+    Watch {
+        stream_id: u32,
+        /// Ce client sait recevoir la qualité basse et passer d'une qualité
+        /// à l'autre en cours de route (depuis 0.1.46) : le serveur peut l'y
+        /// mettre quand sa connexion ne suit pas la haute.
+        #[serde(default)]
+        couches: bool,
+    },
     /// Cesser de regarder.
     Unwatch { stream_id: u32 },
     /// Expulse un utilisateur du serveur (admin uniquement). Il peut se
@@ -702,15 +715,35 @@ pub enum ServerMsg {
     /// Regard refusé (pas dans le salon vocal du streamer, stream éteint…).
     WatchDenied { stream_id: u32, reason: String },
     /// Au streamer : un spectateur (nouveau, ou qui a perdu pied) a besoin
-    /// d'une trame clé. Cadence bornée par le serveur (≤ 1 / 500 ms).
-    KeyframeNeeded { stream_id: u32 },
+    /// d'une trame clé. Cadence bornée par le serveur (≤ 1 / 500 ms par
+    /// qualité).
+    KeyframeNeeded {
+        stream_id: u32,
+        /// Sur la qualité basse (sinon la haute, la seule d'avant 0.1.46).
+        #[serde(default)]
+        basse: bool,
+    },
     /// Les caractéristiques d'un stream ont changé (dimensions, débit).
     StreamMetaChanged { stream_id: u32, meta: StreamMeta },
     /// Au streamer : le palier de débit que ses spectateurs avalent, à
     /// appliquer à l'encodeur — il descend dès qu'un lien sature, remonte
     /// d'un cran toutes les cinq secondes sans saturation, et revient au
     /// réglage quand tout passe. Un client d'avant l'ignore.
-    StreamBudget { stream_id: u32, kbps: u32 },
+    StreamBudget {
+        stream_id: u32,
+        /// Le débit de la qualité haute, en kbit/s.
+        kbps: u32,
+        /// La qualité basse à encoder en plus, en kbit/s — des spectateurs
+        /// dont la connexion ne suit pas la haute la regardent. `None` :
+        /// personne, elle s'arrête. Seulement vers un streamer qui a dit
+        /// `couches` à `StreamStart`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        basse: Option<u32>,
+        /// Le palier vient de la connexion **du streamer** (ses trames
+        /// arrivent en retard, ou pas du tout), pas d'un spectateur.
+        #[serde(default)]
+        montant: bool,
+    },
     /// Liste complète des membres. Envoyée à la connexion, et chaque fois
     /// qu'un changement touche potentiellement tout le monde (rôles remaniés,
     /// salon supprimé).
@@ -3098,7 +3131,7 @@ pub fn write_voice_header(buf: &mut [u8], id: u64, counter: u64) {
 ///
 ///   [0..2]   magic  "KF"
 ///   [2]      version (1)
-///   [3]      drapeaux — bit 0 : trame clé (IDR)
+///   [3]      drapeaux — bit 0 : trame clé (IDR) ; bit 1 : qualité basse
 ///   [4..8]   stream_id (u32) — attribué par le serveur à StreamStart
 ///   [8..16]  seq (u64) — strictement croissant, jamais réinitialisé (nonce)
 ///   [16..24] pts_us (u64) — horodatage de capture, base de la sync A/V
@@ -3119,15 +3152,24 @@ pub const MEDIA_MAX_FRAME: usize = 4 * 1024 * 1024;
 /// Drapeau : la trame est une trame clé (IDR) — un spectateur peut décoder
 /// à partir d'elle sans rien avoir vu avant.
 pub const MEDIA_FLAG_IDR: u8 = 1 << 0;
-
-/// Domaines de nonce sous une clé de stream.
+/// Drapeau : la trame est de la qualité **basse** — la seconde image, plus
+/// petite, que le streamer encode pour les connexions qui ne suivent pas la
+/// haute (depuis 0.1.46). Sa séquence est la sienne, son domaine de nonce
+/// aussi ([`MEDIA_DOMAIN_VIDEO_BASSE`]).
+pub const MEDIA_FLAG_BASSE: u8 = 1 << 1;
+/// Domaines de nonce sous une clé de stream. Deux qualités, deux
+/// séquences qui partent chacune de zéro : sans domaine distinct, elles
+/// réutiliseraient les mêmes nonces sous la même clé.
 pub const MEDIA_DOMAIN_VIDEO: u8 = 1;
 pub const MEDIA_DOMAIN_GAME_AUDIO: u8 = 2;
+pub const MEDIA_DOMAIN_VIDEO_BASSE: u8 = 3;
 
 /// En-tête d'une trame média, tel qu'il circule en clair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaHeader {
     pub idr: bool,
+    /// Qualité basse ([`MEDIA_FLAG_BASSE`]).
+    pub basse: bool,
     pub stream_id: u32,
     pub seq: u64,
     pub pts_us: u64,
@@ -3140,7 +3182,7 @@ pub struct MediaHeader {
 pub fn write_media_header(buf: &mut [u8], h: &MediaHeader) {
     buf[0..2].copy_from_slice(&MEDIA_MAGIC_VIDEO);
     buf[2] = MEDIA_VERSION;
-    buf[3] = if h.idr { MEDIA_FLAG_IDR } else { 0 };
+    buf[3] = if h.idr { MEDIA_FLAG_IDR } else { 0 } | if h.basse { MEDIA_FLAG_BASSE } else { 0 };
     buf[4..8].copy_from_slice(&h.stream_id.to_le_bytes());
     buf[8..16].copy_from_slice(&h.seq.to_le_bytes());
     buf[16..24].copy_from_slice(&h.pts_us.to_le_bytes());
@@ -3156,6 +3198,7 @@ pub fn parse_media_header(buf: &[u8]) -> Option<MediaHeader> {
     }
     Some(MediaHeader {
         idr: buf[3] & MEDIA_FLAG_IDR != 0,
+        basse: buf[3] & MEDIA_FLAG_BASSE != 0,
         stream_id: u32::from_le_bytes(buf[4..8].try_into().ok()?),
         seq: u64::from_le_bytes(buf[8..16].try_into().ok()?),
         pts_us: u64::from_le_bytes(buf[16..24].try_into().ok()?),
@@ -3237,7 +3280,7 @@ mod audio_tests {
         let mut video = [0u8; MEDIA_HEADER_LEN];
         write_media_header(
             &mut video,
-            &MediaHeader { idr: true, stream_id: 7, seq: 1, pts_us: 0, group_id: 0, width: 1, height: 1 },
+            &MediaHeader { idr: true, basse: false, stream_id: 7, seq: 1, pts_us: 0, group_id: 0, width: 1, height: 1 },
         );
         assert!(!is_audio_datagram(&video));
         // Et les nonces vidéo et audio d'une même séquence diffèrent.
@@ -3285,6 +3328,7 @@ mod media_tests {
     fn en_tete_media_aller_retour() {
         let h = MediaHeader {
             idr: true,
+            basse: false,
             stream_id: 7,
             seq: 123_456_789_012,
             pts_us: 42_000_000,
@@ -3295,6 +3339,18 @@ mod media_tests {
         let mut buf = [0u8; MEDIA_HEADER_LEN];
         write_media_header(&mut buf, &h);
         assert_eq!(parse_media_header(&buf), Some(h));
+        // La qualité basse voyage dans son drapeau, sans toucher au reste.
+        for (idr, basse) in [(false, true), (true, true), (false, false)] {
+            let b = MediaHeader { idr, basse, ..h };
+            let mut buf = [0u8; MEDIA_HEADER_LEN];
+            write_media_header(&mut buf, &b);
+            assert_eq!(parse_media_header(&buf), Some(b));
+        }
+        // Et ses nonces ne croisent jamais ceux de la haute.
+        assert_ne!(
+            nonce_for_media(MEDIA_DOMAIN_VIDEO, 7, 1),
+            nonce_for_media(MEDIA_DOMAIN_VIDEO_BASSE, 7, 1)
+        );
 
         // Magie ou version faussées : rejet net.
         let mut faux = buf;
@@ -4433,6 +4489,22 @@ mod tests {
         let relu: ClientMsg = serde_json::from_str(&json).unwrap();
         let ClientMsg::AdminSetAdresseWeb { adresse } = relu else { panic!("{relu:?}") };
         assert_eq!(adresse, "https://ts.baws.fun:8080");
+    }
+
+    /// Les champs des deux qualités (0.1.46) sont facultatifs : les
+    /// messages d'un pair d'avant se lisent comme avant.
+    #[test]
+    fn les_deux_qualites_sont_facultatives() {
+        let w: ClientMsg = serde_json::from_str(r#"{"type":"watch","stream_id":3}"#).unwrap();
+        assert!(matches!(w, ClientMsg::Watch { stream_id: 3, couches: false }));
+        let k: ServerMsg = serde_json::from_str(r#"{"type":"keyframe_needed","stream_id":3}"#).unwrap();
+        assert!(matches!(k, ServerMsg::KeyframeNeeded { stream_id: 3, basse: false }));
+        let b: ServerMsg = serde_json::from_str(r#"{"type":"stream_budget","stream_id":3,"kbps":2500}"#).unwrap();
+        let ServerMsg::StreamBudget { kbps, basse, montant, .. } = b else { panic!("{b:?}") };
+        assert_eq!((kbps, basse, montant), (2500, None, false));
+        let b = ServerMsg::StreamBudget { stream_id: 3, kbps: 6000, basse: Some(1500), montant: false };
+        let relu: ServerMsg = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert!(matches!(relu, ServerMsg::StreamBudget { basse: Some(1500), .. }));
     }
 
     #[test]

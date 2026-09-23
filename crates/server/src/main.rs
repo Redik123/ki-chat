@@ -165,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
     // personne n'occupe ferment, et les demandes sans réponse sont
     // congédiées.
     tokio::spawn(porte::boucle(state.clone()));
+    tokio::spawn(stream::boucle(state.clone()));
     // Les repères de lecture : écrits à retardement, une fois toutes les
     // cinq secondes au plus, quand il y a du neuf. Une écriture disque, donc
     // sur le pool bloquant — jamais sur la boucle qui relaie la voix.

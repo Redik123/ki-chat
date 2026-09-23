@@ -399,6 +399,7 @@ impl Tampon {
                 pts_us: i.pts_us,
                 width: i.width,
                 height: i.height,
+                basse: false,
             })
             .collect();
         let t0 = images.first()?.pts_us;
@@ -681,6 +682,7 @@ impl Enregistreur {
             config,
             self.force_idr.clone(),
             self.origine,
+            None,
         )?;
         self.boucle = Some(boucle);
         self.source = source;
@@ -1159,7 +1161,7 @@ mod tests {
     use super::*;
 
     fn image(pts_us: u64, idr: bool) -> EncodedFrame {
-        EncodedFrame { data: vec![0u8; 100], idr, pts_us, width: 16, height: 16 }
+        EncodedFrame { data: vec![0u8; 100], idr, pts_us, width: 16, height: 16, basse: false }
     }
 
     #[test]

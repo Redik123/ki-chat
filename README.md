@@ -182,6 +182,7 @@ curl -k -H "x-ki-admin: $(cat data/diag.token)" https://ton-serveur:8080/diag
 
 - **Regarder à sa façon** : le stream d'un copain se regarde dans ki-chat, ou détaché dans sa propre fenêtre — sur le second écran, ou en plein écran (F11, double-clic, Échap pour en sortir), avec le volume du son du jeu sous la main.
 - **Un encodeur qui se règle tout seul** : quand la carte ne tient pas la cadence demandée (une GTX 1080 à 1080p60, par exemple), la diffusion passe seule en 30 i/s, puis en 720p, le dit au streamer et au journal — et remonte prudemment quand la marge revient.
+- **Deux qualités (0.1.46)** : un spectateur dont la connexion ne suit pas passe tout seul sur une seconde image, plus petite (720p30 à 360p30 selon ce qu'il avale) et fluide, pendant que ceux qui ont la fibre gardent la haute — au lieu de tirer tout le monde vers le bas. Il retente la haute de temps en temps. La résolution suit le débit quand le réseau le bride (plus de 1080p en bouillie à 1 Mbit/s), et le serveur voit aussi quand c'est la connexion **du streamer** qui ne suit pas, et baisse le débit avant que le retard ne s'accumule. Personne ne regarde la haute : elle ne part plus.
 
 - **Windows Graphics Capture (WGC)** : Capture matérielle au niveau de l'OS sans accrochage Direct3D ni injection de DLL dans les processus de jeu.
 - **NVENC sans SDK tiers** : Chargement dynamique direct de `nvEncodeAPI64.dll` présent dans les pilotes NVIDIA modernes (API 12.0+) ; repli transparent sur l'encodeur logiciel openh264 en cas de matériel non supporté.

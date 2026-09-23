@@ -54,6 +54,14 @@ pub struct StageStats {
     pub encode_ms: EwmaMs,
     pub decode_ms: EwmaMs,
 
+    /// La qualité basse (0.1.46) : trames encodées, octets, coût moyen
+    /// (réduction comprise) — et ses dimensions, (0, 0) quand elle ne
+    /// tourne pas.
+    pub basse_encoded: AtomicU64,
+    pub basse_bytes: AtomicU64,
+    pub basse_ms: EwmaMs,
+    basse_dims: AtomicU64,
+
     /// Dimensions courantes de la source (bits hauts = largeur).
     dims: AtomicU64,
     /// Départ de la session (pour les débits moyens).
@@ -80,6 +88,16 @@ impl StageStats {
 
     pub fn elapsed_secs(&self) -> f32 {
         self.started.get().map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0).max(0.001)
+    }
+
+    pub fn set_basse_dims(&self, w: u32, h: u32) {
+        self.basse_dims.store(((w as u64) << 32) | h as u64, Ordering::Relaxed);
+    }
+
+    /// Les dimensions de la qualité basse ; (0, 0) : elle ne tourne pas.
+    pub fn basse_dims(&self) -> (u32, u32) {
+        let d = self.basse_dims.load(Ordering::Relaxed);
+        ((d >> 32) as u32, d as u32)
     }
 
     pub fn set_dims(&self, w: u32, h: u32) {

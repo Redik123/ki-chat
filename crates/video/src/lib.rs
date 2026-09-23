@@ -71,7 +71,7 @@ pub fn journal(msg: impl Into<String>) {
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -435,6 +435,75 @@ pub struct EncodedFrame {
     pub pts_us: u64,
     pub width: u16,
     pub height: u16,
+    /// De la qualité basse (0.1.46) : la seconde image, plus petite, pour
+    /// les connexions qui ne suivent pas la haute.
+    pub basse: bool,
+}
+
+/// Les deux qualités d'une diffusion, réglées à chaud par l'interface sur
+/// ordre du serveur (`StreamBudget`) et lues à chaque image : la basse — son
+/// débit, 0 quand elle est éteinte, et une trame clé exigée —, et la haute
+/// **suspendue** quand plus personne ne la regarde (tous les spectateurs en
+/// basse) : la couche réseau ne l'envoie plus, l'aperçu continue.
+#[derive(Default)]
+pub struct Qualites {
+    basse_kbps: AtomicU32,
+    basse_idr: AtomicBool,
+    haute_suspendue: AtomicBool,
+}
+
+impl Qualites {
+    /// Le débit de la basse ; `None` l'éteint.
+    pub fn regler_basse(&self, kbps: Option<u32>) {
+        self.basse_kbps.store(kbps.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    pub fn basse(&self) -> Option<u32> {
+        let k = self.basse_kbps.load(Ordering::Relaxed);
+        (k > 0).then_some(k)
+    }
+
+    /// La prochaine image basse sera une trame clé.
+    pub fn force_keyframe_basse(&self) {
+        self.basse_idr.store(true, Ordering::Relaxed);
+    }
+
+    fn prendre_idr_basse(&self) -> bool {
+        self.basse_idr.swap(false, Ordering::Relaxed)
+    }
+
+    /// Suspend (ou reprend) l'envoi de la haute. Vrai si l'état change.
+    pub fn suspendre_haute(&self, oui: bool) -> bool {
+        self.haute_suspendue.swap(oui, Ordering::Relaxed) != oui
+    }
+
+    pub fn haute_suspendue(&self) -> bool {
+        self.haute_suspendue.load(Ordering::Relaxed)
+    }
+}
+
+/// La résolution (hauteur) et la cadence qui vont avec un débit : à débit
+/// égal, une image plus petite et plus lente est nette là où du 1080p60
+/// n'est que bouillie. Seuils : ~0,055 bit par pixel et par image en H.264
+/// temps réel, la cadence descendue avant la résolution. `None` : pas de
+/// plafond (7 Mbit/s et plus).
+pub fn qualite_pour_debit(kbps: u32) -> Option<(u32, u32)> {
+    match kbps {
+        k if k >= 7000 => None,
+        k if k >= 3500 => Some((1080, 30)),
+        k if k >= 1500 => Some((720, 30)),
+        k if k >= 900 => Some((540, 30)),
+        k if k >= 650 => Some((480, 30)),
+        _ => Some((360, 30)),
+    }
+}
+
+/// La hauteur et la cadence de la qualité basse à un débit donné : celles
+/// du débit, jamais au-dessus de la haute (`hauteur` et `fps` émis), 30 i/s
+/// au plus.
+pub fn qualite_basse(kbps: u32, hauteur: u32, fps: u32) -> (u32, u32) {
+    let (h, f) = qualite_pour_debit(kbps).unwrap_or((720, 30));
+    (h.min(hauteur.max(2)), f.min(fps.max(1)).min(30))
 }
 
 /// Réceptacle des trames encodées : la boucle streamer y verse chaque trame.
@@ -502,6 +571,9 @@ impl StreamerLoop {
     /// `origine` est l'instant zéro des horodatages : donné par l'appelant
     /// pour être le même que celui du son du jeu, et survivre à une
     /// relance de la capture.
+    /// `qualites` : la qualité basse à produire en plus, quand le serveur la
+    /// demande — `None` pour un clip, qui n'en a qu'une.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         stats: Arc<StageStats>,
         preview: FrameSink,
@@ -509,6 +581,7 @@ impl StreamerLoop {
         config: StreamConfig,
         force_idr: Arc<AtomicBool>,
         origine: Instant,
+        qualites: Option<Arc<Qualites>>,
     ) -> anyhow::Result<Self> {
         stats.mark_started();
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
@@ -534,7 +607,7 @@ impl StreamerLoop {
                 .spawn(move || {
                     streamer_pipeline(
                         stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr,
-                        origine,
+                        origine, qualites,
                     )
                 })
                 .context("thread streamer vidéo")?
@@ -575,8 +648,19 @@ fn streamer_pipeline(
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
     origine: Instant,
+    qualites: Option<Arc<Qualites>>,
 ) {
     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
+    // La qualité basse : son encodeur, sa réduction, ses réglages en
+    // vigueur (largeur, hauteur, débit, cadence), la dernière image émise —
+    // et un refus d'encodeur, qui l'arrête pour cette capture (le serveur
+    // s'en apercevra et s'en passera).
+    let mut basse_enc: Option<Box<dyn VideoEncoder>> = None;
+    let mut basse_scaler = scale::Scaler::new();
+    let mut basse_params: Option<(u32, u32, u32, u32)> = None;
+    let mut basse_pts: Option<u64> = None;
+    let mut basse_hs = false;
+    let basse_stats = StageStats::default();
     // L'encodeur voulu, et les refus de NVENC en cours de route : au second
     // (un par chemin d'entrée), on passe au logiciel et on le dit — plutôt
     // que de recréer une session à chaque image sans jamais émettre.
@@ -787,7 +871,78 @@ fn streamer_pipeline(
         }
 
         // 4. Émission : la couche réseau chiffre, encadre, envoie.
-        emit(EncodedFrame { data: packet, idr, pts_us, width: ow as u16, height: oh as u16 });
+        emit(EncodedFrame { data: packet, idr, pts_us, width: ow as u16, height: oh as u16, basse: false });
+
+        // 5. La qualité basse, quand le serveur la demande : la même image,
+        //    réduite depuis la source, encodée à part et à sa cadence — pour
+        //    les connexions qui ne suivent pas la haute.
+        let Some(q) = qualites.as_ref() else { continue };
+        let Some(kbps) = q.basse().filter(|_| !basse_hs) else {
+            if basse_enc.take().is_some() {
+                stats.set_basse_dims(0, 0);
+                basse_params = None;
+                journal("diffusion : qualité basse arrêtée");
+            }
+            continue;
+        };
+        let (hb, fb) = qualite_basse(kbps, oh, config.fps);
+        let (bw, bh) = scale::target_dims(w, h, hb);
+        if basse_params != Some((bw, bh, kbps, fb)) {
+            basse_params = Some((bw, bh, kbps, fb));
+            basse_enc = None;
+        }
+        // Sa cadence : une image sur deux quand la capture va deux fois
+        // plus vite — à un quart d'intervalle près, la gigue de la capture.
+        let pas_us = 1_000_000 / u64::from(fb.max(1));
+        if basse_pts.is_some_and(|d| pts_us + pas_us / 4 < d + pas_us) {
+            continue;
+        }
+        basse_pts = Some(pts_us);
+        let t3 = Instant::now();
+        if basse_enc.is_none() {
+            let choix_basse = if choix == EncoderChoice::Logiciel { EncoderChoice::Logiciel } else { EncoderChoice::Auto };
+            match creer_encodeur(choix_basse, bw, bh, kbps.saturating_mul(1000), fb, config.gop_s, Profil::Diffusion, &basse_stats, 0) {
+                Ok(e) => {
+                    journal(format!("diffusion : qualité basse {bw}x{bh} à {fb} i/s, {kbps} kbit/s"));
+                    stats.set_basse_dims(bw, bh);
+                    basse_enc = Some(e);
+                }
+                Err(e) => {
+                    journal(format!("diffusion : qualité basse impossible ({e:#})"));
+                    basse_hs = true;
+                    continue;
+                }
+            }
+        }
+        let Some(enc) = basse_enc.as_mut() else { continue };
+        let petite = basse_scaler.scale(&*yuv_buf, bw as usize, bh as usize);
+        let force = q.prendre_idr_basse();
+        match enc.encode(petite, force) {
+            Ok(Some(p)) => {
+                stats.basse_ms.record(t3.elapsed().as_secs_f32() * 1000.0);
+                stats.basse_encoded.fetch_add(1, Ordering::Relaxed);
+                stats.basse_bytes.fetch_add(p.data.len() as u64, Ordering::Relaxed);
+                emit(EncodedFrame {
+                    data: p.data,
+                    idr: p.idr,
+                    pts_us,
+                    width: bw as u16,
+                    height: bh as u16,
+                    basse: true,
+                });
+            }
+            Ok(None) => {
+                if force {
+                    q.force_keyframe_basse();
+                }
+            }
+            Err(e) => {
+                // Recréé à l'image suivante ; son premier paquet est une
+                // trame clé.
+                journal(format!("diffusion : qualité basse, encodage raté ({e:#}) — encodeur recréé"));
+                basse_enc = None;
+            }
+        }
     }
 }
 

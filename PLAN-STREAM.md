@@ -239,11 +239,46 @@ capture, le tableau de bord et le journal le disent. Fixé par deux tests
 sans horloge. À valider chez Cheekyyyy (GTX 1080 à 1080p60).
 **Livré aussi : la fenêtre de visionnage détachée** (viewport immédiat,
 plein écran F11/double-clic/Échap, barre de commandes qui s'efface).
+**Livré en 0.1.46 : deux qualités, et la connexion du streamer.** Retour
+du terrain : « pour certains ça lag énormément mais la qualité est bien,
+pour d'autres la qualité est infâme mais fluide, et ceux qui ont une bonne
+fibre, aucun problème ». C'était la limite d'un débit unique : descendu
+pour le plus lent, il rendait du 1080p à 1 Mbit/s à tout le monde ;
+ignoré (le plus lent ne comptait plus à partir de quatre spectateurs), il
+laissait ce dernier geler. Désormais :
+- **Une seconde qualité, basse**, encodée à la demande du serveur
+  (`StreamBudget.basse`) à partir de la même image I420 pleine taille,
+  réduite par un second `Scaler` et encodée par un second encodeur (une
+  seconde session NVENC, ou le logiciel), à 30 i/s au plus — sa propre
+  séquence, son domaine de nonce (`MEDIA_DOMAIN_VIDEO_BASSE`), son drapeau
+  d'en-tête (`MEDIA_FLAG_BASSE`), sa file et sa tâche d'envoi. Échelle
+  2500/1500/1000/700/450 kbit/s, la résolution suivant le débit.
+- **Le serveur place chaque spectateur** (`Watch.couches`) : qui sature
+  sous le plancher de la haute (la moitié du réglage, 2500 au moins) passe
+  en basse au lieu de tirer tout le monde vers le bas ; il retente la haute
+  au bout de 30 s, puis 60, 120… (480 au plus) s'il échoue ; la haute garde
+  le palier commun pour les connexions moyennes, la basse a le sien ; une
+  basse demandée qui n'arrive pas en 4 s est abandonnée deux minutes.
+  Chez le spectateur, une file par qualité, et la bascule à la trame clé de
+  l'autre si elle est plus récente que ce qu'il a lu ; « qualité réduite
+  pour ta connexion » s'affiche.
+- **La haute suspendue** quand personne ne la regarde (budget 0) : la
+  liaison montante du streamer ne porte plus une image que personne ne
+  voit ; elle repart d'une trame clé. Un battement serveur (250 ms) prend
+  ces décisions même quand rien n'arrive.
+- **La connexion du streamer** : trous de séquence, ou retard (arrivée −
+  capture) à plus de 200 ms au-dessus de son plancher glissant de deux
+  minutes deux secondes de suite → palier sous 0,85 × ce qui arrive (moins
+  la basse), remontée d'un cran après 10 s de calme ; `StreamBudget.montant`
+  le dit au streamer. Plus de spirale « trame perdue → trame clé → encore
+  plus perdues ».
+- **La résolution et la cadence suivent le débit** quand le réseau le bride
+  (`qualite_pour_debit` : 1080p30 sous 7 Mbit/s, 720p30 sous 3,5, 540p30
+  sous 1,5, 480p30 sous 900 kbit/s, 360p30 sous 650) ; échelle prolongée à
+  700 et 450 kbit/s.
 **Reste** : la validation sur un vrai lien bridé (limiteur de débit chez
-un spectateur : la vidéo doit descendre en quelques secondes et remonter
-cran par cran) ; la résolution et la cadence comme crans suivants du
-palier **réseau** (le plan : débit d'abord, résolution ensuite) ; les
-vignettes dans le sélecteur.
+un spectateur : il doit passer en basse en quelques secondes, et les
+autres garder la haute) ; les vignettes dans le sélecteur.
 **Validation** : WAN réel (Jelastic) + pertes simulées : la vidéo s'adapte,
 la voix reste parfaite, écart A/V < 100 ms.
 
@@ -281,5 +316,7 @@ demandent.
 ## Écarté volontairement
 
 Fragmentation sur datagrammes, flux par GOP (MoQ — `group_id` conservé en
-en-tête pour garder la porte ouverte), flux long unique, simulcast/SVC, NACK
-applicatifs, tampon de GOP serveur, 1080p60 en ladder automatique.
+en-tête pour garder la porte ouverte), flux long unique, SVC, NACK
+applicatifs, tampon de GOP serveur, 1080p60 en ladder automatique. (Le
+simulcast à deux qualités, écarté en v1, est venu en 0.1.46 : le terrain
+l'a demandé.)
