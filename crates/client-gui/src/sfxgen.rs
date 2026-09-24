@@ -42,6 +42,10 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     // Quelqu'un frappe à une porte web : un carillon de porte, deux notes
     // descendantes et tenues — « ding, dong » — que rien d'autre ne fait.
     sounds.insert("porte".into(), seq(&[(659.3, 160), (523.3, 260)], 0.4));
+    // Quelqu'un de mon vocal lance un stream : une petite fanfare, deux
+    // brèves puis la quinte tenue — « ta-ta-taa », l'appel « venez voir »,
+    // qu'aucun autre son ne rythme ainsi.
+    sounds.insert("diffusion".into(), seq(&[(659.3, 70), (659.3, 70), (987.8, 240)], 0.4));
     sounds
 }
 
@@ -90,6 +94,7 @@ mod tests {
             "clip",
             "poke",
             "porte",
+            "diffusion",
         ] {
             let pcm = sounds.get(name).unwrap_or_else(|| panic!("son manquant : {name}"));
             assert!(!pcm.is_empty());

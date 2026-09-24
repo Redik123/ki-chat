@@ -4997,14 +4997,26 @@ impl KiApp {
             }
             ServerMsg::StreamStarted { stream_id, user_id, .. } => {
                 let mut nom = String::new();
+                let mut son_vocal = None;
                 if let Some(m) = self.members.iter_mut().find(|m| m.user_id == user_id) {
                     m.streaming = Some(stream_id);
                     nom = m.username.clone();
+                    son_vocal = m.voice;
                 }
                 if Some(user_id) != self.my_id && !nom.is_empty() {
                     self.info = Some(format!(
                         "{nom} diffuse son écran — clique sur l'icône à côté de son nom pour regarder"
                     ));
+                    // Le bandeau ne se voit que fenêtre ouverte : quand le
+                    // stream part dans MON salon vocal — le seul dont on
+                    // peut regarder les streams —, un son, et l'overlay le
+                    // dit par-dessus le jeu. Le serveur n'annonce qu'au
+                    // départ : un changement de réglage du streamer passe
+                    // par `StreamMetaChanged`, sans refaire sonner.
+                    if son_vocal.is_some() && son_vocal == self.voice_channel {
+                        self.play_sfx(sfx::DIFFUSION);
+                        self.overlay.annoncer(format!("{nom} diffuse son écran"));
+                    }
                 }
             }
             ServerMsg::StreamStopped { stream_id } => {
@@ -9095,6 +9107,7 @@ impl KiApp {
                                     (sfx::PORTE, "Quelqu'un frappe à une porte web"),
                                     (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
                                     (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
+                                    (sfx::DIFFUSION, "Quelqu'un de mon vocal lance un stream"),
                                     (sfx::SELF_JOIN, "Je rejoins un vocal"),
                                     (sfx::SELF_LEAVE, "Je quitte le vocal"),
                                     (sfx::MUTE, "Micro coupé"),
@@ -12267,6 +12280,8 @@ mod sfx {
     pub const POKE: &str = "poke";
     /// Quelqu'un frappe à une porte web : il attend qu'on lui ouvre.
     pub const PORTE: &str = "porte";
+    /// Quelqu'un de mon salon vocal lance un stream : on peut aller voir.
+    pub const DIFFUSION: &str = "diffusion";
     pub const MUTE: &str = "micro-coupe";
     pub const UNMUTE: &str = "micro-actif";
 }
