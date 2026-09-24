@@ -2769,7 +2769,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "ki-aec"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "cc",
  "flate2",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-cli"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-gui"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-quic"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "ki-load"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -2864,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "ki-media"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "rayon",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "ki-opus"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "cmake",
  "flate2",
@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "ki-protocol"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "base64",
  "criterion",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "ki-server"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2927,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "ki-video"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "openh264",
@@ -2939,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "ki-voice"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "anyhow",
  "bytes",
