@@ -6699,23 +6699,28 @@ impl KiApp {
                         egui::ScrollArea::vertical()
                             .auto_shrink(false)
                             .show(ui, |ui| {
-                                // `take` et non `clone`, comme pour le roster :
-                                // la liste est empruntée le temps du rendu et
-                                // remise à la sortie. Voir plus bas.
-                                let channels = std::mem::take(&mut self.channels);
+                                // Les salons se parcourent par rang, sans rien
+                                // retirer ni copier : les menus ouverts depuis
+                                // cette barre — « Déplacer en vocal » d'un
+                                // occupant, le vocal d'un invité web — lisent
+                                // `self.channels` pendant le rendu et doivent le
+                                // trouver entier. La liste en était retirée le
+                                // temps du rendu (`mem::take`), et le sous-menu
+                                // « Déplacer en vocal » s'ouvrait vide.
 
                                 // --- Salons textuels : on les ouvre ---
                                 ui::section_label(ui, "Salons textuels");
-                                for ch in channels
-                                    .iter()
-                                    .filter(|c| c.kind == ChannelKind::Text && c.expire_le.is_none())
-                                {
-                                    let selected = self.current == Some(ch.id);
-                                    let kind = ChannelKind::Text;
-                                    let pastille = self.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
-                                    let row = channel_row(ui, &ch.name, selected, kind, pastille, false);
+                                for i in 0..self.channels.len() {
+                                    let Some(ch) = self.channels.get(i) else { break };
+                                    if ch.kind != ChannelKind::Text || ch.expire_le.is_some() {
+                                        continue;
+                                    }
+                                    let id = ch.id;
+                                    let selected = self.current == Some(id);
+                                    let pastille = self.non_lus.get(&id).filter(|n| n.nb > 0).copied();
+                                    let row = channel_row(ui, &ch.name, selected, ChannelKind::Text, pastille, false);
                                     if row.clicked() && !selected {
-                                        self.join(ch.id);
+                                        self.join(id);
                                     }
                                 }
 
@@ -6723,8 +6728,9 @@ impl KiApp {
                                 // avec ce qu'il leur reste à vivre. Un client
                                 // antérieur les voit parmi les textuels, c'est
                                 // voulu : `expire_le` lui est inconnu.
-                                let temporaires: Vec<&ChannelInfo> =
-                                    channels.iter().filter(|c| c.expire_le.is_some()).collect();
+                                let temporaires: Vec<usize> = (0..self.channels.len())
+                                    .filter(|&i| self.channels[i].expire_le.is_some())
+                                    .collect();
                                 if !temporaires.is_empty() {
                                     ui.add_space(10.0);
                                     ui::section_label(ui, "Invités");
@@ -6732,7 +6738,8 @@ impl KiApp {
                                     let contexte = self.contexte_portes();
                                     let mut actions = Vec::new();
                                     let mut lire = None;
-                                    for ch in temporaires {
+                                    for i in temporaires {
+                                        let Some(ch) = self.channels.get(i) else { continue };
                                         let selected = self.current == Some(ch.id);
                                         let pastille = self.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
                                         let reste = porte_ui::reste_texte(ch.expire_le.unwrap_or(0), maintenant);
@@ -6771,29 +6778,39 @@ impl KiApp {
                                 // --- Salons vocaux : on y entre ---
                                 ui.add_space(10.0);
                                 ui::section_label(ui, "Salons vocaux");
-                                for ch in channels.iter().filter(|c| c.kind == ChannelKind::Voice) {
-                                    let here = self.voice_channel == Some(ch.id);
+                                for i in 0..self.channels.len() {
+                                    let Some(ch) = self.channels.get(i) else { break };
+                                    if ch.kind != ChannelKind::Voice {
+                                        continue;
+                                    }
+                                    let id = ch.id;
+                                    let here = self.voice_channel == Some(id);
                                     let row = channel_row(ui, &ch.name, here, ChannelKind::Voice, None, false);
                                     if row.clicked() {
                                         if here {
                                             self.leave_voice();
                                         } else {
-                                            self.join_voice(ch.id);
+                                            self.join_voice(id);
                                         }
                                     }
                                     // Qui est dans ce salon vocal, comme sur
                                     // Discord : la présence se lit d'un coup
                                     // d'œil, sans y entrer.
-                                    self.voice_occupants(ui, ch.id, voice);
+                                    let occupants = self.voice_occupants(ui, id, voice);
+                                    // L'intitulé et ses occupants : une seule
+                                    // cible où déposer quelqu'un qu'on glisse.
+                                    let bloc = occupants.map_or(row.rect, |r| row.rect.union(r));
+                                    self.deposer_en_vocal(ui, bloc, id);
                                 }
-                                self.channels = channels;
+                                fantome_deplacement(ui.ctx());
                             });
                     });
             });
     }
 
-    /// Occupants d'un salon vocal, listés sous son intitulé.
-    fn voice_occupants(&mut self, ui: &mut egui::Ui, channel: ChannelId, voice: &VoiceSnapshot) {
+    /// Occupants d'un salon vocal, listés sous son intitulé. Rend la place
+    /// qu'ils prennent : la cible du glisser-déposer les couvre aussi.
+    fn voice_occupants(&mut self, ui: &mut egui::Ui, channel: ChannelId, voice: &VoiceSnapshot) -> Option<egui::Rect> {
         let members: Vec<Member> = self
             .members
             .iter()
@@ -6801,9 +6818,10 @@ impl KiApp {
             .cloned()
             .collect();
         if members.is_empty() {
-            return;
+            return None;
         }
 
+        let mut place: Option<egui::Rect> = None;
         for m in &members {
             let is_me = Some(m.user_id) == self.my_id;
             let level = if is_me {
@@ -6821,16 +6839,65 @@ impl KiApp {
             // « muet » s'y montre sans autre condition. Pour soi, l'état
             // local fait foi — l'écho serveur peut être en retard d'un aller.
             let muted = if is_me { self.muted } else { m.muted };
+            // S'attrape : soi-même (le déposer ailleurs, c'est y aller), et
+            // qui l'on a le pouvoir de déplacer.
+            let glissable = is_me || self.peut_deplacer(m);
             let (response, regarder) = member_row(
                 ui,
-                MemberRow { member: m, speaking, muted, is_me, photo, rang_icone: None },
+                MemberRow { member: m, speaking, muted, is_me, photo, rang_icone: None, glissable },
             );
+            if glissable && response.drag_started_by(egui::PointerButton::Primary) {
+                egui::DragAndDrop::set_payload(
+                    ui.ctx(),
+                    DeplacementVocal { username: m.username.clone(), depuis: channel, moi: is_me },
+                );
+            }
+            place = Some(place.map_or(response.rect, |p| p.union(response.rect)));
             if regarder {
                 self.regarder(m);
             }
             self.member_menu(response, m, is_me);
         }
         ui.add_space(6.0);
+        place
+    }
+
+    /// Le pouvoir de changer `m` de salon vocal : celui que le serveur
+    /// exige (« Déplacer en vocal », et un rang au-dessus du sien), sur
+    /// quelqu'un de connecté — ni un bot, ni un invité web, que sa porte
+    /// gère à part.
+    fn peut_deplacer(&self, m: &Member) -> bool {
+        !est_bot(m.user_id)
+            && !est_invite_membre(m)
+            && m.online
+            && self.outranks(m.rank)
+            && self.can(ki_protocol::perm::MOVE_MEMBERS)
+    }
+
+    /// Un salon vocal comme cible du glisser-déposer (son intitulé et ses
+    /// occupants) : survolé avec quelqu'un en main, il s'entoure ; lâché
+    /// dessus, la personne y est déplacée — ou l'on y va, si c'est soi.
+    /// Le serveur revérifie tout, et dit pourquoi s'il refuse.
+    fn deposer_en_vocal(&mut self, ui: &egui::Ui, bloc: egui::Rect, channel: ChannelId) {
+        let Some(glisse) = egui::DragAndDrop::payload::<DeplacementVocal>(ui.ctx()) else { return };
+        if glisse.depuis == channel || !ui.rect_contains_pointer(bloc) {
+            return;
+        }
+        ui.painter().rect_stroke(
+            bloc,
+            egui::CornerRadius::same(9),
+            egui::Stroke::new(1.5_f32, ACCENT),
+            egui::StrokeKind::Inside,
+        );
+        if !ui.input(|i| i.pointer.any_released()) {
+            return;
+        }
+        egui::DragAndDrop::clear_payload(ui.ctx());
+        if glisse.moi {
+            self.join_voice(channel);
+        } else {
+            self.send(ClientMsg::AdminVoiceMove { username: glisse.username.clone(), channel: Some(channel) });
+        }
     }
 
     /// Clic sur soi-même : son compte. Clic droit sur un autre : volume et
@@ -7030,9 +7097,7 @@ impl KiApp {
             // gens par salon, et tout le monde n'a pas à pouvoir les deux.
             let peut_sanctionner =
                 self.outranks(m.rank) && self.can(ki_protocol::perm::MUTE_MEMBERS);
-            let peut_deplacer = self.outranks(m.rank)
-                && self.can(ki_protocol::perm::MOVE_MEMBERS)
-                && m.online;
+            let peut_deplacer = self.peut_deplacer(m);
             if peut_sanctionner || peut_deplacer {
                 ui.add_space(4.0);
                 ui::hairline(ui);
@@ -7225,6 +7290,7 @@ impl KiApp {
                                 is_me,
                                 photo,
                                 rang_icone,
+                                glissable: false,
                             },
                         );
                         if regarder {
@@ -7265,6 +7331,7 @@ impl KiApp {
                                     is_me: false,
                                     photo: None,
                                     rang_icone: None,
+                                    glissable: false,
                                 },
                             );
                             self.member_menu(response, m, false);
@@ -12847,6 +12914,18 @@ struct MemberRow<'a> {
     photo: Option<&'a egui::TextureHandle>,
     /// L'icône de son rang, si elle est prête.
     rang_icone: Option<&'a egui::TextureHandle>,
+    /// La ligne s'attrape à la souris (glisser quelqu'un vers un autre
+    /// salon vocal) en plus de se cliquer.
+    glissable: bool,
+}
+
+/// Ce que l'on glisse d'un salon vocal à l'autre dans la barre des salons.
+struct DeplacementVocal {
+    username: String,
+    /// Le salon d'où il part : le relâcher là ne fait rien.
+    depuis: ChannelId,
+    /// C'est soi : le relâcher sur un autre salon, c'est y aller.
+    moi: bool,
 }
 
 /// Le palier à montrer pour un membre : sa fiche s'il a lié son compte,
@@ -12869,6 +12948,7 @@ impl<'a> MemberRow<'a> {
             is_me: false,
             photo,
             rang_icone: None,
+            glissable: false,
         }
     }
 }
@@ -13012,11 +13092,30 @@ pub(crate) fn il_y_a(ms: u64) -> String {
     }
 }
 
+/// Ce qu'on glisse d'un salon vocal à l'autre suit la souris : le pseudo,
+/// dans une bulle, sur la couche des infobulles — qui ne prend pas la
+/// souris : la cible dessous reste survolée.
+fn fantome_deplacement(ctx: &egui::Context) {
+    let Some(glisse) = egui::DragAndDrop::payload::<DeplacementVocal>(ctx) else { return };
+    let Some(pos) = ctx.pointer_hover_pos() else { return };
+    egui::Area::new(egui::Id::new("deplacement-vocal"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + Vec2::new(14.0, 10.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(RichText::new(&glisse.username).color(TEXT).strong());
+            });
+        });
+}
+
 fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
-    let MemberRow { member, speaking, muted, is_me, photo, rang_icone } = row;
+    let MemberRow { member, speaking, muted, is_me, photo, rang_icone, glissable } = row;
     let height = 38.0;
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    // Un clic reste un clic (menu, fiche) : egui ne parle de glisser
+    // qu'une fois la souris partie de quelques pixels.
+    let sense = if glissable { Sense::click_and_drag() } else { Sense::click() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), sense);
     if !ui.is_rect_visible(rect) {
         return (response, false);
     }

@@ -364,6 +364,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **C3 (0.1.38)** — Atelier de coupe et de recadrage au format téléphone (9:16, quatre mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
 - [x] **Clips tout-GPU (0.1.47)** — L'enregistreur ne ralentit plus la machine : capture, conversion et NVENC sur la carte sans passer par le processeur, NVENC sans CUDA, capture au rythme demandé, son sans gouffre mémoire ni dérive au fil des heures, écriture en arrière-plan, couleurs BT.709 déclarées, fenêtre de VALORANT enfin trouvée par l'automatique.
 - [x] **Son de stream (0.1.47)** — Quand quelqu'un de son salon vocal lance un stream, une petite fanfare (« ta-ta-taa ») et l'overlay affiche « X diffuse son écran » par-dessus le jeu. Réglable dans ⚙ → Sons & notifications, remplaçable par un `diffusion.wav`.
+- [x] **Glisser en vocal (0.1.48)** — Un occupant d'un salon vocal se glisse vers un autre salon et s'y retrouve (permission « Déplacer en vocal », rang au-dessus du sien ; se glisser soi-même, c'est y entrer). Et le clic droit → « Déplacer en vocal » ouvert depuis la barre des salons liste de nouveau les salons.
 
 - [x] **Présence (0.1.39)** — « joue à … » sous le pseudo pour tous les jeux reconnus à leur fenêtre, VALORANT gardant sa partie détaillée.
 - [x] **Soundboard (0.1.39)** — des sons à la touche entendus par le salon, mixés à la voix dans le moteur vocal.
