@@ -31,6 +31,12 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+
 use super::{CaptureFlags, CaptureSource, CapturedFrame, MonitorInfo, WindowInfo};
 
 
@@ -77,9 +83,70 @@ pub fn list_windows() -> Vec<WindowInfo> {
 
 pub struct ScreenGrab {
     flags: CaptureFlags,
-    scratch: Vec<u8>,
+    /// La texture de transit, lisible par le processeur, gardée d'une image
+    /// à l'autre. `Frame::buffer()` de windows-capture en crée une neuve à
+    /// chaque image : 8 Mo (en 1080p) alloués, épinglés pour la carte puis
+    /// rendus, soixante fois par seconde — et une copie de plus vers son
+    /// tampon sans remplissage, par rayon quand les lignes en ont.
+    transit: Option<(ID3D11Texture2D, D3D11_TEXTURE2D_DESC)>,
+    /// Un tampon que le pipeline n'a pas pu prendre (il était occupé) :
+    /// gardé pour l'image suivante plutôt que rendu au système.
+    reserve: Option<Vec<u8>>,
+    /// Les tampons en circulation : deux au plus, l'un chez le pipeline,
+    /// l'autre qu'on remplit.
+    tampons: usize,
     /// Instant de la dernière trame retenue.
     last: Option<Instant>,
+}
+
+impl ScreenGrab {
+    /// Copie l'image de la carte vers `sortie` (BGRA serré), par la texture
+    /// de transit.
+    fn lire(&mut self, frame: &mut Frame, sortie: &mut Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let desc = *frame.desc();
+        let a_refaire = self
+            .transit
+            .as_ref()
+            .is_none_or(|(_, d)| (d.Width, d.Height, d.Format) != (desc.Width, desc.Height, desc.Format));
+        if a_refaire {
+            let d = D3D11_TEXTURE2D_DESC {
+                Width: desc.Width,
+                Height: desc.Height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: desc.Format,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut t: Option<ID3D11Texture2D> = None;
+            unsafe { frame.device().CreateTexture2D(&d, None, Some(&mut t))? };
+            self.transit = Some((t.ok_or("texture de transit absente")?, d));
+        }
+        let Some((transit, _)) = self.transit.as_ref() else { return Err("texture de transit absente".into()) };
+        let ctx = frame.device_context();
+        let (w, h) = (desc.Width as usize, desc.Height as usize);
+        let ligne = w * 4;
+        sortie.resize(ligne * h, 0);
+        unsafe {
+            ctx.CopyResource(transit, frame.as_raw_texture());
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(transit, 0, D3D11_MAP_READ, 0, Some(&mut m))?;
+            let src = m.pData as *const u8;
+            let pas = m.RowPitch as usize;
+            if pas == ligne {
+                std::ptr::copy_nonoverlapping(src, sortie.as_mut_ptr(), ligne * h);
+            } else {
+                for y in 0..h {
+                    std::ptr::copy_nonoverlapping(src.add(y * pas), sortie.as_mut_ptr().add(y * ligne), ligne);
+                }
+            }
+            ctx.Unmap(transit, 0);
+        }
+        Ok(())
+    }
 }
 
 impl GraphicsCaptureApiHandler for ScreenGrab {
@@ -87,7 +154,7 @@ impl GraphicsCaptureApiHandler for ScreenGrab {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { flags: ctx.flags, scratch: Vec::new(), last: None })
+        Ok(Self { flags: ctx.flags, transit: None, reserve: None, tampons: 0, last: None })
     }
 
     fn on_frame_arrived(
@@ -104,29 +171,41 @@ impl GraphicsCaptureApiHandler for ScreenGrab {
                 return Ok(());
             }
         }
+        // Un tampon à remplir : gardé, recyclé, ou neuf tant qu'il n'y en a
+        // pas deux. Sinon le pipeline tient encore les deux : la trame est
+        // sautée AVANT d'être lue de la carte — elle ne coûte rien.
+        let mut owned = match self.reserve.take().or_else(|| self.flags.recycle.try_recv().ok()) {
+            Some(b) => b,
+            None if self.tampons < 2 => {
+                self.tampons += 1;
+                Vec::new()
+            }
+            None => {
+                self.flags.stats.skipped.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        };
         self.last = Some(now);
 
         let (w, h) = (frame.width(), frame.height());
-        let buffer = frame.buffer()?;
-        let bgra = buffer.as_nopadding_buffer(&mut self.scratch);
-
+        if let Err(e) = self.lire(frame, &mut owned) {
+            self.reserve = Some(owned);
+            return Err(e);
+        }
         self.flags.stats.captured.fetch_add(1, Ordering::Relaxed);
-
-        // Tampon recyclé si disponible, sinon nouveau (démarrage).
-        let mut owned = self.flags.recycle.try_recv().unwrap_or_default();
-        owned.clear();
-        owned.extend_from_slice(bgra);
 
         match self.flags.tx.try_send(CapturedFrame { width: w, height: h, bgra: owned }) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                // Pipeline occupé : on saute la trame (le tampon repartira
-                // au recyclage via le drop, on en réallouera un — rare).
+            Err(TrySendError::Full(f)) => {
+                // Pipeline occupé : on saute la trame, et l'on garde son
+                // tampon pour la suivante.
                 self.flags.stats.skipped.fetch_add(1, Ordering::Relaxed);
+                self.reserve = Some(f.bgra);
             }
-            Err(TrySendError::Disconnected(_)) => {
+            Err(TrySendError::Disconnected(f)) => {
                 // Le pipeline est arrêté : la capture va être stoppée par
                 // le handle, rien à faire ici.
+                self.reserve = Some(f.bgra);
             }
         }
         Ok(())
@@ -165,8 +244,19 @@ pub fn start_capture(
             lancer(m, cursor, fps, flags)
         }
         CaptureSource::Window(title) => {
+            // Le titre exact d'abord, puis aux espaces de bord près :
+            // `list_windows` rend les titres nettoyés, et celui de VALORANT
+            // finit par deux espaces — la recherche exacte ne le trouvait
+            // jamais.
             let w = Window::from_name(title)
-                .map_err(|_| anyhow::anyhow!("fenêtre « {title} » introuvable — fermée ?"))?;
+                .ok()
+                .or_else(|| {
+                    Window::enumerate()
+                        .ok()?
+                        .into_iter()
+                        .find(|w| w.title().is_ok_and(|t| t.trim() == title.trim()))
+                })
+                .ok_or_else(|| anyhow::anyhow!("fenêtre « {title} » introuvable — fermée ?"))?;
             lancer(w, cursor, fps, flags)
         }
     }

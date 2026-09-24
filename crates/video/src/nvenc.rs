@@ -8,6 +8,11 @@
 //! d'entrée du pilote, le flux H.264 (Annex B, SPS/PPS répétés à chaque
 //! IDR) relu en synchrone. Tout ce qui manque — DLL, carte, pilote trop
 //! vieux — se dit en clair, et la boucle retombe sur l'encodeur logiciel.
+//!
+//! La chaîne des clips (`clip_gpu.rs`) entre autrement : la session vit sur
+//! SON device, et l'image est déjà sur la carte, dans une texture NV12
+//! enregistrée une fois (`Nvenc::sur_texture`, `encoder_texture`) — rien
+//! ne passe par la mémoire centrale.
 
 use std::ffi::{c_void, CStr};
 use std::ptr::null_mut;
@@ -178,6 +183,12 @@ pub fn avertissement_pilote() -> Option<String> {
 
 /// Un device Direct3D 11 sur la première carte NVIDIA matérielle, et son nom.
 fn device_nvidia() -> anyhow::Result<(ID3D11Device, String)> {
+    device_nvidia_avec(D3D11_CREATE_DEVICE_FLAG(0))
+}
+
+/// Le même, avec les options de création voulues — la chaîne des clips
+/// (`clip_gpu.rs`) y ajoute le processeur vidéo et le BGRA de la capture.
+pub(crate) fn device_nvidia_avec(options: D3D11_CREATE_DEVICE_FLAG) -> anyhow::Result<(ID3D11Device, String)> {
     unsafe {
         let fabrique: IDXGIFactory1 = CreateDXGIFactory1().context("fabrique DXGI")?;
         let mut i = 0;
@@ -196,7 +207,7 @@ fn device_nvidia() -> anyhow::Result<(ID3D11Device, String)> {
                 &base,
                 D3D_DRIVER_TYPE_UNKNOWN,
                 HMODULE::default(),
-                D3D11_CREATE_DEVICE_FLAG(0),
+                options,
                 None,
                 D3D11_SDK_VERSION,
                 Some(&mut device),
@@ -289,35 +300,9 @@ impl Nvenc {
     ) -> anyhow::Result<Self> {
         let api = api()?;
         let (device, carte) = device_nvidia()?;
-        let contexte = unsafe { device.GetImmediateContext() }.context("contexte Direct3D 11")?;
         unsafe {
-            let ouvrir = api.fl.nvEncOpenEncodeSessionEx.context("nvEncOpenEncodeSessionEx absent")?;
-            let mut params: ffi::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS = std::mem::zeroed();
-            params.version = ffi::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-            params.deviceType = ffi::NV_ENC_DEVICE_TYPE_DIRECTX;
-            params.device = device.as_raw();
-            params.apiVersion = ffi::NVENCAPI_VERSION;
-            let mut session = null_mut();
-            let st = ouvrir(&mut params, &mut session);
-            if st != ffi::NV_ENC_SUCCESS {
-                bail!("ouverture de session NVENC sur {carte} : {}", ffi::status_name(st));
-            }
-            let mut moi = Self {
-                api,
-                device,
-                contexte,
-                session,
-                entree: null_mut(),
-                texture: None,
-                enregistree: null_mut(),
-                nv12: Vec::new(),
-                sortie: null_mut(),
-                width,
-                height,
-                trame: 0,
-                carte,
-            };
-            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), profil)?;
+            let mut moi = Self::ouvrir(api, device, carte, width, height)?;
+            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), profil, false)?;
             let mut par_tampon = entree == Entree::Tampon;
             if !par_tampon {
                 if let Err(e) = moi.preparer_texture() {
@@ -331,6 +316,91 @@ impl Nvenc {
                 moi.preparer_tampon()?;
             }
             Ok(moi)
+        }
+    }
+
+    /// La session des clips tout-GPU (`clip_gpu.rs`) : sur le device de
+    /// l'appelant — celui de la capture et de la conversion —, avec SA
+    /// texture NV12 enregistrée une fois pour toutes. Chaque image s'encode
+    /// ensuite par [`Nvenc::encoder_texture`], sans que rien ne passe par
+    /// la mémoire centrale. Profil clip, sans option CUDA, couleurs BT.709
+    /// déclarées dans le flux (la conversion de la carte les produit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sur_texture(
+        device: &ID3D11Device,
+        carte: &str,
+        texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+        bitrate_bps: u32,
+        fps: u32,
+        gop_s: u32,
+    ) -> anyhow::Result<Self> {
+        let api = api()?;
+        unsafe {
+            let mut moi = Self::ouvrir(api, device.clone(), carte.to_string(), width, height)?;
+            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), crate::Profil::Clip, true)?;
+            moi.enregistrer(texture)?;
+            Ok(moi)
+        }
+    }
+
+    /// Ouvre la session sur `device` ; l'encodeur reste à initialiser.
+    unsafe fn ouvrir(
+        api: &'static Api,
+        device: ID3D11Device,
+        carte: String,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Self> {
+        let contexte = unsafe { device.GetImmediateContext() }.context("contexte Direct3D 11")?;
+        let ouvrir = api.fl.nvEncOpenEncodeSessionEx.context("nvEncOpenEncodeSessionEx absent")?;
+        let mut params: ffi::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS = unsafe { std::mem::zeroed() };
+        params.version = ffi::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+        params.deviceType = ffi::NV_ENC_DEVICE_TYPE_DIRECTX;
+        params.device = device.as_raw();
+        params.apiVersion = ffi::NVENCAPI_VERSION;
+        let mut session = null_mut();
+        let st = unsafe { ouvrir(&mut params, &mut session) };
+        if st != ffi::NV_ENC_SUCCESS {
+            bail!("ouverture de session NVENC sur {carte} : {}", ffi::status_name(st));
+        }
+        Ok(Self {
+            api,
+            device,
+            contexte,
+            session,
+            entree: null_mut(),
+            texture: None,
+            enregistree: null_mut(),
+            nv12: Vec::new(),
+            sortie: null_mut(),
+            width,
+            height,
+            trame: 0,
+            carte,
+        })
+    }
+
+    /// Encode l'image que la texture enregistrée par
+    /// [`Nvenc::sur_texture`] contient à cet instant. Le pilote attend de
+    /// lui-même que Direct3D ait fini d'y écrire (même device).
+    pub fn encoder_texture(&mut self, force_idr: bool) -> anyhow::Result<Option<Paquet>> {
+        if self.enregistree.is_null() || !self.nv12.is_empty() {
+            bail!("NVENC : pas de texture externe enregistrée sur cette session");
+        }
+        let fl = &self.api.fl;
+        unsafe {
+            let mapper = fl.nvEncMapInputResource.context("nvEncMapInputResource absent")?;
+            let mut mp: Box<ffi::NV_ENC_MAP_INPUT_RESOURCE> = Box::new(std::mem::zeroed());
+            mp.version = ffi::NV_ENC_MAP_INPUT_RESOURCE_VER;
+            mp.registeredResource = self.enregistree;
+            self.verif(mapper(self.session, &mut *mp), "mappage de la texture")?;
+            let resultat = self.encoder_et_lire(mp.mappedResource, mp.mappedBufferFmt, 0, force_idr);
+            if let Some(demapper) = fl.nvEncUnmapInputResource {
+                demapper(self.session, mp.mappedResource);
+            }
+            resultat
         }
     }
 
@@ -360,8 +430,6 @@ impl Nvenc {
 
     /// Le chemin standard : une texture NV12 que le pilote connaît.
     unsafe fn preparer_texture(&mut self) -> anyhow::Result<()> {
-        let fl = &self.api.fl;
-        let enregistrer = fl.nvEncRegisterResource.context("nvEncRegisterResource absent")?;
         let desc = D3D11_TEXTURE2D_DESC {
             Width: self.width,
             Height: self.height,
@@ -375,11 +443,18 @@ impl Nvenc {
             MiscFlags: 0,
         };
         let mut texture: Option<ID3D11Texture2D> = None;
-        self.device
-            .CreateTexture2D(&desc, None, Some(&mut texture))
-            .context("texture NV12 d'entrée")?;
+        unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut texture)) }.context("texture NV12 d'entrée")?;
         let texture = texture.context("texture NV12 absente")?;
-        let mut rr: Box<ffi::NV_ENC_REGISTER_RESOURCE> = Box::new(std::mem::zeroed());
+        unsafe { self.enregistrer(&texture)? };
+        self.nv12 = vec![0u8; (self.width * self.height * 3 / 2) as usize];
+        Ok(())
+    }
+
+    /// Enregistre une texture NV12 de la taille de la session comme entrée.
+    unsafe fn enregistrer(&mut self, texture: &ID3D11Texture2D) -> anyhow::Result<()> {
+        let fl = &self.api.fl;
+        let enregistrer = fl.nvEncRegisterResource.context("nvEncRegisterResource absent")?;
+        let mut rr: Box<ffi::NV_ENC_REGISTER_RESOURCE> = Box::new(unsafe { std::mem::zeroed() });
         rr.version = ffi::NV_ENC_REGISTER_RESOURCE_VER;
         rr.resourceType = ffi::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
         rr.width = self.width;
@@ -389,10 +464,9 @@ impl Nvenc {
         rr.resourceToRegister = texture.as_raw();
         rr.bufferFormat = ffi::NV_ENC_BUFFER_FORMAT_NV12;
         rr.bufferUsage = ffi::NV_ENC_INPUT_IMAGE;
-        self.verif(enregistrer(self.session, &mut *rr), "enregistrement de la texture")?;
+        self.verif(unsafe { enregistrer(self.session, &mut *rr) }, "enregistrement de la texture")?;
         self.enregistree = rr.registeredResource;
-        self.texture = Some(texture);
-        self.nv12 = vec![0u8; (self.width * self.height * 3 / 2) as usize];
+        self.texture = Some(texture.clone());
         Ok(())
     }
 
@@ -443,16 +517,18 @@ impl Nvenc {
     /// « faible latence », débit constant tenu à la trame près (VBV d'une
     /// image, deux passes en quart de résolution), profil Main — celui que
     /// tous les décodeurs lisent. Pour un clip : « haute qualité », débit
-    /// variable avec l'image, VBV d'une seconde, deux passes en pleine
-    /// résolution, AQ dans l'espace et le temps, profil High. Dans les deux
-    /// cas : pas de trame B ni de réordonnancement, SPS/PPS répétés à chaque
-    /// IDR — pour qui arrive en cours de route, et pour le MP4 des clips.
+    /// variable avec l'image, VBV d'une seconde, une seule passe et aucune
+    /// option qui passe par CUDA, profil High. Dans les deux cas : pas de
+    /// trame B ni de réordonnancement, SPS/PPS répétés à chaque IDR — pour
+    /// qui arrive en cours de route, et pour le MP4 des clips. `bt709` :
+    /// les couleurs sont déclarées dans le flux (chemin tout-GPU).
     unsafe fn initialiser(
         &mut self,
         bitrate_bps: u32,
         fps: u32,
         gop_s: u32,
         profil: crate::Profil,
+        bt709: bool,
     ) -> anyhow::Result<()> {
         let fl = &self.api.fl;
         let tuning = match profil {
@@ -493,20 +569,26 @@ impl Nvenc {
             crate::Profil::Clip => {
                 // Un clip ne part pas sur le réseau : le débit peut suivre
                 // l'image (crête à une fois et demie), le VBV tient une
-                // seconde, les deux passes en pleine résolution, l'AQ dans
-                // le temps aussi, et la transformée 8×8 du profil High.
+                // seconde, et la transformée 8×8 du profil High.
                 config.profileGUID = ffi::NV_ENC_H264_PROFILE_HIGH_GUID;
                 rc.rateControlMode = ffi::NV_ENC_PARAMS_RC_VBR;
                 rc.averageBitRate = bitrate_bps;
                 rc.maxBitRate = bitrate_bps.saturating_mul(3) / 2;
                 rc.vbvBufferSize = bitrate_bps;
                 rc.vbvInitialDelay = rc.vbvBufferSize;
-                // Deux passes en quart de résolution, comme la diffusion :
-                // la pleine résolution coûte trop aux cartes d'avant Turing
-                // — un GTX 1080 tient déjà à peine 1080p60 (diagnostics de
-                // Cheekyyyy, 2026-09-15), et le clip tourne pendant la partie.
-                rc.multiPass = ffi::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
-                rc.flags |= ffi::RC_ENABLE_AQ | ffi::RC_ENABLE_TEMPORAL_AQ | ffi::RC_ZERO_REORDER_DELAY;
+                // Et rien qui passe par CUDA. Le guide de programmation
+                // NVENC (SDK 13.0) le dit : le moteur d'encodage est
+                // indépendant des cœurs de la carte, SAUF pour les deux
+                // passes des préréglages de qualité, l'anticipation, toutes
+                // les AQ, la prédiction pondérée et le RGB, qui passent par
+                // CUDA. Le clip tourne pendant toute la partie : ces options
+                // prenaient du temps de carte au jeu à chaque image (10 % du
+                // moteur 3D d'une RTX 3080 au bureau, mesuré par le banc
+                // `charge_clips`). Le moteur d'encodage seul ; la qualité
+                // vient du débit.
+                rc.multiPass = ffi::NV_ENC_MULTI_PASS_DISABLED;
+                rc.flags &= !(ffi::RC_ENABLE_AQ | ffi::RC_ENABLE_TEMPORAL_AQ);
+                rc.flags |= ffi::RC_ZERO_REORDER_DELAY;
             }
         }
         rc.flags &= !ffi::RC_ENABLE_LOOKAHEAD;
@@ -519,6 +601,19 @@ impl Nvenc {
         h264.chromaFormatIDC = 1;
         h264.sliceMode = 0;
         h264.sliceModeData = 0;
+        if bt709 {
+            // Les couleurs que la conversion de la carte produit, dites
+            // dans le flux : BT.709, plage limitée (16-235). Sans elles, un
+            // lecteur devine — et devine parfois BT.601.
+            let vui = &mut h264.h264VUIParameters;
+            vui.videoSignalTypePresentFlag = 1;
+            vui.videoFormat = 5;
+            vui.videoFullRangeFlag = 0;
+            vui.colourDescriptionPresentFlag = 1;
+            vui.colourPrimaries = 1;
+            vui.transferCharacteristics = 1;
+            vui.colourMatrix = 1;
+        }
 
         let initialiser = fl.nvEncInitializeEncoder.context("nvEncInitializeEncoder absent")?;
         let mut init: Box<ffi::NV_ENC_INITIALIZE_PARAMS> = Box::new(std::mem::zeroed());
@@ -561,6 +656,9 @@ impl VideoEncoder for Nvenc {
         let (w, h) = src.dimensions();
         if (w as u32, h as u32) != (self.width, self.height) {
             bail!("NVENC : image {w}x{h} pour une session {}x{}", self.width, self.height);
+        }
+        if self.texture.is_some() && self.nv12.is_empty() {
+            bail!("NVENC : session sur une texture de l'appelant — encoder_texture");
         }
         let fl = &self.api.fl;
         unsafe {

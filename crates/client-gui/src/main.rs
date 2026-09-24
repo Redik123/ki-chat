@@ -3260,6 +3260,11 @@ impl KiApp {
             }
         });
         ui::hint(ui, "en mémoire : 45 Mo pour 30 s en qualité équilibrée, 300 Mo pour 120 s en haute");
+        ui::hint(
+            ui,
+            "avec une carte NVIDIA, capture et encodage restent sur la carte (NVENC seul, sans ses cœurs \
+             de calcul) : ni le processeur ni le jeu ne le sentent",
+        );
         ui.add_space(10.0);
 
         ui::field_label(ui, "Source");

@@ -352,11 +352,10 @@ question posée.
 - **Mémoire** (tampon) : débit × durée ÷ 8 — 12 Mbit/s × 30 s = 45 Mo,
   20 Mbit/s × 120 s = 300 Mo ; audio 384 ko/s par piste, 35 Mo pour trois
   pistes de 30 s.
-- **Processeur en jeu** : le chemin actuel copie la trame en RAM,
-  convertit en I420 (SIMD) et la remonte en NV12 : ~3-4 ms par image, soit
-  ~20 % d'un cœur à 60 images/s. Acceptable pour commencer ; le **chemin
-  tout-GPU** (texture WGC → NVENC sur le même device, entrée BGRA) ramène
-  ça à zéro — C4, si le profileur le demande.
+- **Processeur en jeu** : le premier chemin copiait la trame en RAM,
+  convertissait en I420 (SIMD) et la remontait en NV12 : ~26 % d'un cœur
+  à 60 images/s, mesuré. Le **chemin tout-GPU** (0.1.47, voir plus bas :
+  capture, conversion NV12 et NVENC sur un même device) le ramène à 1-3 %.
 - **Carte graphique** : NVENC à 1080p60 est fait pour ça (c'est ShadowPlay) ;
   deux sessions (diffusion + clips) tiennent dans la limite des GeForce.
 - **Disque** : 45 Mo par clip de 30 s en équilibré ; la jauge le dit.
@@ -631,9 +630,10 @@ un récap « clips de la semaine » dans le fil de jeu. Au fil de l'eau.
   ce plan-là.
 
 Écartés, par choix : l'encodeur AMD/Intel (tout le monde est en NVIDIA),
-le chemin tout-GPU et la capture unique (« si le profileur le demande »,
-et personne ne sent la charge), macOS (laissé de côté par drion), la
-manette, le récap hebdo (à voir si l'envie vient).
+la capture unique, macOS (laissé de côté par drion), la manette, le récap
+hebdo (à voir si l'envie vient). Le chemin tout-GPU, lui, a été fait en
+0.1.47 : la charge se sentait (voir « L'enregistreur sans le
+processeur »).
 
 ### Robustesse du partage (0.1.43)
 
@@ -734,6 +734,97 @@ Pas fait, à décider : nommer chaque export avec un horodatage (le cache
 client est indexé par l'adresse, un second `telephone.mp4` est servi
 depuis l'ancien chez qui a vu le premier) ; un vrai `docker run --cpus=1`
 pour rejouer les temps du conteneur.
+
+### L'enregistreur sans le processeur (0.1.47)
+
+Le rapport de drion (2026-09-24) : « pas possible de l'utiliser, tout
+l'ordinateur ralentit énormément au bout d'un moment, on ne peut même plus
+jouer ». Les journaux ne montraient rien d'anormal côté pipeline (54 i/s,
+0 sautée, encodage 4,7 ms) : le coût était ailleurs, là où le pipeline ne
+regarde pas. Mesuré avec un banc (`crates/video/examples/charge_clips.rs`,
+qui lit les compteurs de Windows : processeur utilisateur et noyau,
+défauts de page, mémoire privée et vidéo, moteurs de la carte par type),
+sur la RTX 3080 de drion, écran 1080p à 280 Hz, bureau :
+
+| | ancien chemin | tout-GPU |
+|---|---|---|
+| processeur | ~26 % d'un cœur (dont ~6 % noyau) | ~1-3 % |
+| moteur 3D de la carte (pris au jeu) | ~10 % (~4 % jeu lancé) | 0,2 % |
+| encodeur NVENC | 20-24 % | 13-14 % |
+| mémoire vidéo / partagée | 81 / 34 Mo | 39 / 11 Mo |
+| encodage d'une image | 5-6 ms | 2,7 ms |
+
+Ce qui coûtait, et ce qu'on a fait :
+
+- **NVENC passait par CUDA.** Le guide de programmation NVENC (SDK 13.0)
+  est explicite : le moteur d'encodage est indépendant des cœurs de la
+  carte, *sauf* pour les deux passes des préréglages de qualité,
+  l'anticipation, **toutes les AQ**, la prédiction pondérée et le RGB, qui
+  passent par CUDA. Le profil clip de 0.1.38 cumulait deux passes, AQ
+  spatiale et AQ temporelle : un contexte CUDA servi soixante fois par
+  seconde sur la carte du jeu (les 10 % de 3D ci-dessus). → Le profil clip
+  est désormais **une passe, sans AQ ni anticipation** : le moteur
+  d'encodage seul, la qualité par le débit (VBR, crête 1,5×).
+- **L'image faisait l'aller-retour carte → mémoire → carte.** Lue dans
+  une texture de transit **recréée à chaque image** par windows-capture
+  (`Frame::buffer()` : 8 Mo alloués, épinglés, rendus, 60 fois par
+  seconde), recopiée deux fois, convertie en I420 sur un cœur, repliée en
+  NV12, renvoyée à la carte. → **`ki_video::ClipGpu`** (`clip_gpu.rs`) :
+  un seul device Direct3D 11 sur la carte NVIDIA pour la capture
+  (Windows.Graphics.Capture, notre propre session, plus windows-capture),
+  la conversion BGRA → NV12 BT.709 par le **processeur vidéo de Direct3D**
+  (`VideoProcessorBlt`, réduction comprise) et **NVENC sur cette texture**
+  enregistrée une fois (`Nvenc::sur_texture` / `encoder_texture`). Seul le
+  flux H.264 remonte (~25 ko par image).
+- **Le compositeur copiait chaque image de l'écran**, 280 fois par seconde
+  sur un écran à 280 Hz, pour qu'on en garde 60 (l'intervalle minimal de
+  capture n'existe que depuis Windows 11 24H2). → Une réserve d'**une
+  seule image**, prise à l'échéance (sommeil précis — `park_timeout` suit
+  l'horloge système de 15,6 ms) : tant qu'on ne l'a pas prise, le
+  compositeur n'en fabrique pas d'autre. Horodatage à la composition
+  (`SystemRelativeTime`), pas à l'arrivée.
+- **Un piège mémoire dans le son.** Une piste muette un moment (vocal
+  quitté puis rejoint) comblait le trou de zéros d'un coup, sans borne :
+  une heure de silence, 1,4 Go alloués — et l'anneau gardait cette place.
+  → Un trou plus long que le tampon vide la piste. Et l'anneau s'ancre
+  sur l'arrivée du dernier bloc : les arrondis d'horodatage ne dérivent
+  plus au fil des heures (trois heures de session décalaient le son d'un
+  dixième de seconde, puis un trou de 150 ms s'insérait).
+- **La photographie du tampon recopiait 45 Mo sous le verrou** que les
+  fils temps réel du son attendaient. → Les images sont des `Bytes`
+  partagés (la photographie prend des références), chaque piste a son
+  verrou, le micro et les copains sont gardés en mono (moitié moins de
+  mémoire, stéréo à l'écriture), les robinets n'allouent plus rien.
+  L'écriture du MP4 passe en priorité « arrière-plan »
+  (`THREAD_MODE_BACKGROUND_BEGIN` : processeur, disque, mémoire).
+- **Les couleurs.** L'ancien chemin convertissait en BT.601 (openh264)
+  sans le dire ; les lecteurs, la visionneuse comprise, supposent BT.709
+  en HD. → Conversion BT.709 plage limitée sur la carte, **déclarée dans
+  le flux** (VUI : ffprobe lit `bt709`, `tv`).
+- **La fenêtre du jeu** : `list_windows` rend des titres nettoyés, celui
+  de VALORANT finit par deux espaces, et la recherche exacte ne le
+  trouvait pas — l'automatique retombait sur l'écran. → Recherche aux
+  espaces de bord près (capture des clips comme du partage d'écran) ; une
+  fenêtre qui refuse laisse la place à l'écran, redemandée une minute plus
+  tard seulement.
+- **Le chemin du processeur** reste pour une machine sans NVIDIA ou une
+  carte qui refuse la chaîne (il prend le relais seul, et le dit), mais
+  sans CUDA lui non plus, avec une texture de transit gardée d'une image à
+  l'autre, et sans lecture de la carte quand le pipeline est occupé.
+
+Vérifié : 14 tests du tampon (dont le long silence, l'ancrage sur une
+heure, la photographie sans copie), les tests de la chaîne (cadrage,
+horloge), le test de bout en bout qui filme l'écran et relit le MP4
+(« NVENC, tout sur la carte »), un essai de quinze minutes (mémoire vidéo
+constante), le flux inspecté par ffprobe. Reste à valider **en jeu** chez
+drion et Cheekyyyy (GTX 1080, Windows 10 : pas d'intervalle minimal, la
+réserve d'une image tient la cadence), et chez CR0W (portable : l'écran
+interne est câblé sur la puce Intel — c'est le cas de presque tous les
+portables, sans commutateur MUX —, la capture traverse d'une carte à
+l'autre). Ce passage est **vérifié à l'envers** sur la machine de drion
+(test ignoré `la_capture_passe_d_une_carte_a_l_autre`) : écran sur la
+RTX 3080, capture sur l'UHD 750 qui n'affiche rien — l'image arrive
+entière (32 398 pixels allumés sur 32 400 relevés), la première en 0,4 s.
 
 ## Risques et parades
 

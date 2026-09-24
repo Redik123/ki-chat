@@ -112,6 +112,7 @@ pub const NV_ENC_PIC_TYPE_I: u32 = 2;
 pub const NV_ENC_PIC_TYPE_IDR: u32 = 3;
 pub const NV_ENC_PARAMS_RC_VBR: u32 = 1;
 pub const NV_ENC_PARAMS_RC_CBR: u32 = 2;
+pub const NV_ENC_MULTI_PASS_DISABLED: u32 = 0;
 pub const NV_ENC_TWO_PASS_QUARTER_RESOLUTION: u32 = 1;
 pub const NV_ENC_TUNING_INFO_HIGH_QUALITY: u32 = 1;
 pub const NV_ENC_TUNING_INFO_LOW_LATENCY: u32 = 2;

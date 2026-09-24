@@ -9,6 +9,8 @@
 
 pub mod capture;
 #[cfg(windows)]
+mod clip_gpu;
+#[cfg(windows)]
 mod nvenc;
 #[cfg(windows)]
 mod nvenc_ffi;
@@ -16,8 +18,51 @@ pub mod scale;
 pub mod stats;
 
 pub use capture::{list_monitors, list_windows, CaptureSource, MonitorInfo, WindowInfo};
+#[cfg(windows)]
+pub use clip_gpu::ClipGpu;
 pub use nvenc::{avertissement_pilote, inventaire, inventaire_lancer, inventaire_pret, sonde};
 pub use stats::StageStats;
+
+/// Les réglages de la chaîne des clips sur la carte (`ClipGpu`).
+#[derive(Clone, Debug)]
+pub struct ConfigClip {
+    pub source: CaptureSource,
+    /// Hauteur plafond de l'image enregistrée (0 : celle de l'écran).
+    pub hauteur_max: u32,
+    pub fps: u32,
+    pub debit_bps: u32,
+    pub curseur: bool,
+    /// Longueur du groupe d'images, en secondes : le clip se coupe à la
+    /// trame clé.
+    pub gop_s: u32,
+}
+
+/// Hors de Windows, pas de chaîne sur la carte : l'enregistreur prend le
+/// chemin du processeur (qui, lui-même, dit qu'il ne sait pas capturer).
+#[cfg(not(windows))]
+pub struct ClipGpu;
+
+#[cfg(not(windows))]
+impl ClipGpu {
+    pub fn demarrer(
+        _config: ConfigClip,
+        _stats: std::sync::Arc<StageStats>,
+        _emit: FrameEmit,
+        _origine: std::time::Instant,
+    ) -> anyhow::Result<Self> {
+        anyhow::bail!("chaîne des clips sur la carte : Windows seulement")
+    }
+
+    pub fn source_fermee(&self) -> bool {
+        false
+    }
+
+    pub fn en_panne(&self) -> bool {
+        true
+    }
+
+    pub fn arreter(self) {}
+}
 
 /// NVENC est l'encodeur des cartes NVIDIA **sous Windows** (Direct3D 11 en
 /// dessous). Ailleurs, l'inventaire matériel se réduit à ce que l'on sait :

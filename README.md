@@ -197,13 +197,15 @@ curl -k -H "x-ki-admin: $(cat data/diag.token)" https://ton-serveur:8080/diag
 Ne laissez plus passer un tir incroyable ou un moment mémorable :
 
 ```
-[ Jeu / Écran ] ──► Capture WGC ──► NVENC (GOP 1s) ──► Tampon circulaire RAM (30s)
+[ Jeu / Écran ] ──► Capture WGC ──► NV12 (proc. vidéo D3D) ──► NVENC (GOP 1s) ──► Tampon circulaire RAM (30s)
+                    └──────────────── tout sur la carte graphique ─────────────┘
 [ Son du jeu ]  ──► WASAPI Loopback ───────────────► ┌── Alt+F10 ────────────────┐
 [ Micro traité] ──► Filtres IA / Opus ─────────────► │ Écriture MP4 multi-pistes │
 [ Voix salon ]  ──► Moteur vocal ──────────────────► └──► Vidéos\ki-chat\ ───────┘
 ```
 
-1. **Tampon mémoire léger** : L'enregistreur conserve les N dernières secondes en mémoire vive (réglable de 15 à 120 secondes, 30 s par défaut). Rien n'est écrit sur le disque tant que la touche n'a pas été pressée.
+0. **Invisible en jeu (0.1.47)** : l'image ne passe jamais par le processeur. Capture, conversion NV12 (BT.709, par le processeur vidéo de Direct3D) et NVENC partagent un même device sur la carte NVIDIA, et NVENC n'utilise aucune option qui passe par CUDA — les cœurs qui dessinent le jeu ne sont pas touchés. Mesuré sur une RTX 3080 : ~1-3 % d'un cœur au lieu de ~26 %, 0,2 % du moteur 3D de la carte au lieu de ~10 %. La capture se fait au rythme demandé (60 i/s) même sur un écran à 280 Hz. Sans carte NVIDIA, l'ancien chemin prend le relais (plus lourd : « Légère » à 30 i/s conseillée).
+1. **Tampon mémoire léger** : L'enregistreur conserve les N dernières secondes en mémoire vive (réglable de 15 à 120 secondes, 30 s par défaut). Rien n'est écrit sur le disque tant que la touche n'a pas été pressée, et l'écriture du fichier se fait en priorité « arrière-plan ».
 2. **Pistes audio indépendantes** : Le fichier `.mp4` généré par le Sink Writer de Media Foundation contient **quatre pistes audio distinctes** :
    - *Piste 1* : Mix stéréo global équilibré (compatible avec tous les lecteurs multimédias du commerce et les réseaux sociaux).
    - *Piste 2* : Le son du jeu pur (système sans ki-chat).
@@ -269,7 +271,8 @@ crates/
   voice/        Moteur audio client : backend WASAPI natif (cpal en secours),
                 gestionnaire Opus, jitter buffer adaptatif, annulation d'écho Speex,
                 docteur audio, isolation du son du jeu
-  video/        Capture d'écran WGC, réduction d'image, encodeurs NVENC et openh264
+  video/        Capture d'écran WGC, réduction d'image, encodeurs NVENC et openh264,
+                chaîne des clips tout-GPU (capture → processeur vidéo D3D → NVENC)
   media/        ki-media : couche Media Foundation Windows. Décodage Source Reader
                 (NV12/PCM) et écriture MP4 par Sink Writer (clips multi-pistes)
   ki-opus/      Bindings et compilation de libopus 1.6.1 officielle (DRED, Deep PLC)
@@ -359,6 +362,7 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 - [x] **C1 (0.1.35)** — Enregistreur de clips rétroactif (30 secondes à la touche Alt+F10), pistes audio séparées en MP4 et galerie de clips locale.
 - [x] **C2 (0.1.37)** — Partage de clips dans les salons textuels : stock à part sur le serveur, une seule piste son (avec ou sans les voix des copains), message au nom du membre, carte vidéo — et la touche des clips tenue par Windows, qui passe au-dessus du jeu.
 - [x] **C3 (0.1.38)** — Atelier de coupe et de recadrage au format téléphone (9:16, quatre mises en page, titre, mixage), export ffmpeg côté serveur d'après une recette validée, et envoi sur le téléphone par QR code.
+- [x] **Clips tout-GPU (0.1.47)** — L'enregistreur ne ralentit plus la machine : capture, conversion et NVENC sur la carte sans passer par le processeur, NVENC sans CUDA, capture au rythme demandé, son sans gouffre mémoire ni dérive au fil des heures, écriture en arrière-plan, couleurs BT.709 déclarées, fenêtre de VALORANT enfin trouvée par l'automatique.
 
 - [x] **Présence (0.1.39)** — « joue à … » sous le pseudo pour tous les jeux reconnus à leur fenêtre, VALORANT gardant sa partie détaillée.
 - [x] **Soundboard (0.1.39)** — des sons à la touche entendus par le salon, mixés à la voix dans le moteur vocal.
@@ -375,5 +379,5 @@ L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Qui
 
 ### Perspectives & Prochains jalons
 
-- [ ] **C4** — Pipeline de capture vidéo tout-GPU (zéro copie mémoire centrale), encodeur AMD/Intel, une seule capture pour la diffusion et les clips.
+- [ ] **C4** — Encodeur AMD/Intel, une seule capture pour la diffusion et les clips, et le chemin tout-GPU des clips (fait en 0.1.47) étendu au partage d'écran.
 - [ ] **Général** — Résolution et cadence comme crans du débit adaptatif côté spectateur (le débit s'adapte déjà au spectateur qui ne suit pas, l'encodeur au streamer qui ne tient pas la cadence, et le son du jeu arrive en stéréo).

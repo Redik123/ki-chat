@@ -1,15 +1,19 @@
 //! L'enregistreur de clips : les trente dernières secondes, à la touche
-//! (PLAN-CLIPS.md, jalon C1).
+//! (PLAN-CLIPS.md, jalons C1 et C4).
 //!
-//! Tant qu'il tourne, la capture du partage d'écran et son encodeur (NVENC,
-//! GOP d'une seconde) tournent aussi, mais rien ne part sur le réseau : les
-//! trames encodées vont dans un **tampon circulaire** en mémoire, coupé à la
-//! trame clé, qui ne garde que les N dernières secondes. À côté, trois
-//! anneaux de son : le système sauf ki-chat (le jeu), le micro traité, le
-//! mélange des copains — les deux derniers par les robinets du moteur vocal,
-//! quand il est là. À l'appui, le tampon est photographié et un fil à part
-//! écrit le MP4 (H.264 tel quel, AAC par piste : le mélange d'abord, pour
-//! les lecteurs ordinaires, puis chaque source), sa vignette et sa fiche.
+//! Tant qu'il tourne, l'écran — ou la fenêtre du jeu — est filmé et encodé
+//! **sur la carte graphique**, sans que l'image passe jamais par le
+//! processeur (`ki_video::ClipGpu` : capture, conversion NV12 et NVENC sur
+//! un même device, NVENC sans aucune option CUDA) ; sans carte NVIDIA, par
+//! le chemin du partage d'écran. Rien ne part sur le réseau : les trames
+//! encodées vont dans un **tampon circulaire** en mémoire, coupé à la trame
+//! clé, qui ne garde que les N dernières secondes. À côté, trois anneaux de
+//! son : le système sauf ki-chat (le jeu, stéréo), le micro traité et le
+//! mélange des copains (mono) — les deux derniers par les robinets du moteur
+//! vocal, quand il est là. À l'appui, le tampon est photographié (des
+//! références, aucune copie d'image) et un fil en arrière-plan écrit le MP4
+//! (H.264 tel quel, AAC par piste : le mélange d'abord, pour les lecteurs
+//! ordinaires, puis chaque source), sa vignette et sa fiche.
 //!
 //! Rien ne quitte la machine : la galerie est locale, le partage est un geste
 //! (jalon C2).
@@ -20,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use eframe::egui;
 use ki_media::annexb;
 use ki_video::{CaptureSource, EncodedFrame, EncoderChoice, StageStats, StreamConfig, StreamerLoop};
@@ -256,107 +261,64 @@ fn nom_sur(titre: &str) -> String {
 // Le tampon
 // ---------------------------------------------------------------------
 
-/// Durée, en µs, de `n` échantillons stéréo entrelacés à 48 kHz.
-fn duree_stereo_us(n: usize) -> u64 {
-    (n as u64 / 2) * 1_000_000 / 48_000
+/// La cadence du son de toutes les pistes.
+const CADENCE: u64 = 48_000;
+
+/// Un verrou qui survit à un fil tombé en le tenant : les robinets du son
+/// tournent sur les fils du moteur vocal, qui ne doivent jamais paniquer
+/// pour un tampon de clips.
+fn verrou<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Le nombre d'échantillons stéréo (entrelacés) pour `us` microsecondes.
-fn echantillons_stereo(us: u64) -> usize {
-    ((us * 48_000 / 1_000_000) * 2) as usize
+/// Une image encodée gardée. Le flux H.264 est un `Bytes` : photographier
+/// le tampon prend des références, ne recopie rien (c'étaient 45 Mo
+/// recopiés sous le verrou à chaque clip, pendant que le son attendait).
+#[derive(Clone)]
+struct Image {
+    data: Bytes,
+    idr: bool,
+    pts_us: u64,
+    width: u16,
+    height: u16,
 }
 
-/// Un anneau de son stéréo, horodaté à son premier échantillon.
-#[derive(Default)]
-struct PisteAudio {
-    echantillons: VecDeque<f32>,
-    debut_us: u64,
-}
-
-impl PisteAudio {
-    /// Ajoute un bloc qui **finit** à `fin_us`. Un trou (capture arrêtée
-    /// un moment) se comble de silence, pour que l'horodatage reste vrai.
-    fn pousser(&mut self, stereo: &[f32], fin_us: u64, garde_us: u64) {
-        let duree = duree_stereo_us(stereo.len());
-        if self.echantillons.is_empty() {
-            self.debut_us = fin_us.saturating_sub(duree);
-        } else {
-            let fin_attendue = self.debut_us + duree_stereo_us(self.echantillons.len()) + duree;
-            if fin_us > fin_attendue + 150_000 {
-                let trou = echantillons_stereo(fin_us - fin_attendue);
-                self.echantillons.extend(std::iter::repeat_n(0.0, trou));
-            }
-        }
-        self.echantillons.extend(stereo.iter().copied());
-        // On ne garde que ce qui peut encore servir, plus une marge.
-        let total = duree_stereo_us(self.echantillons.len());
-        if total > garde_us {
-            let trop = echantillons_stereo(total - garde_us) & !1;
-            self.echantillons.drain(..trop.min(self.echantillons.len()));
-            self.debut_us += duree_stereo_us(trop);
-        }
-    }
-
-    /// Les échantillons entre deux instants, silence là où l'on n'a rien.
-    fn extraire(&self, de_us: u64, a_us: u64) -> Vec<f32> {
-        let n = echantillons_stereo(a_us.saturating_sub(de_us));
-        let mut sortie = vec![0.0f32; n];
-        if self.echantillons.is_empty() {
-            return sortie;
-        }
-        let fin_us = self.debut_us + duree_stereo_us(self.echantillons.len());
-        // Le recouvrement entre [de, a] et [debut, fin].
-        let d = de_us.max(self.debut_us);
-        let f = a_us.min(fin_us);
-        if d >= f {
-            return sortie;
-        }
-        let depuis_source = echantillons_stereo(d - self.debut_us);
-        let depuis_sortie = echantillons_stereo(d - de_us);
-        let longueur = echantillons_stereo(f - d).min(n.saturating_sub(depuis_sortie));
-        for i in 0..longueur {
-            if let Some(v) = self.echantillons.get(depuis_source + i) {
-                sortie[depuis_sortie + i] = *v;
-            }
-        }
-        sortie
-    }
-}
-
-/// Ce que l'on garde en mémoire.
-struct Tampon {
-    images: VecDeque<EncodedFrame>,
+/// Les images des N dernières secondes, coupées à la trame clé.
+struct Video {
+    images: VecDeque<Image>,
     octets: usize,
     duree_max_us: u64,
-    jeu: PisteAudio,
-    micro: PisteAudio,
-    copains: PisteAudio,
     /// SPS et PPS de la dernière trame clé vue : la première image du clip
     /// doit les porter.
     parametres: Option<Vec<u8>>,
 }
 
-impl Tampon {
-    fn new(duree_s: u32) -> Self {
-        Self {
-            images: VecDeque::new(),
-            octets: 0,
-            duree_max_us: u64::from(duree_s) * 1_000_000,
-            jeu: PisteAudio::default(),
-            micro: PisteAudio::default(),
-            copains: PisteAudio::default(),
-            parametres: None,
-        }
+impl Video {
+    fn new(duree_max_us: u64) -> Self {
+        Self { images: VecDeque::new(), octets: 0, duree_max_us, parametres: None }
     }
 
-    fn pousser_image(&mut self, image: EncodedFrame) {
+    fn pousser(&mut self, image: EncodedFrame) {
+        // Une autre taille, c'est un autre flux (source changée, encodeur
+        // recréé) : un MP4 ne mêle pas deux tailles, on repart de celle-ci.
+        if self.images.back().is_some_and(|d| (d.width, d.height) != (image.width, image.height)) {
+            self.images.clear();
+            self.octets = 0;
+            self.parametres = None;
+        }
         if image.idr {
             if let Some(p) = annexb::parametres(&image.data) {
                 self.parametres = Some(p);
             }
         }
         self.octets += image.data.len();
-        self.images.push_back(image);
+        self.images.push_back(Image {
+            data: Bytes::from(image.data),
+            idr: image.idr,
+            pts_us: image.pts_us,
+            width: image.width,
+            height: image.height,
+        });
         // On jette par l'avant ce qui dépasse, en s'arrêtant sur une trame
         // clé : le tampon commence toujours par une image décodable.
         while let (Some(premiere), Some(derniere)) = (self.images.front(), self.images.back()) {
@@ -381,27 +343,163 @@ impl Tampon {
         }
     }
 
-    fn garde_us(&self) -> u64 {
-        self.duree_max_us + 3_000_000
+    /// La durée couverte, en secondes.
+    fn secondes(&self) -> f32 {
+        match (self.images.front(), self.images.back()) {
+            (Some(a), Some(b)) => b.pts_us.saturating_sub(a.pts_us) as f32 / 1_000_000.0,
+            _ => 0.0,
+        }
+    }
+}
+
+/// Un anneau de son à 48 kHz, mono ou stéréo entrelacé, horodaté à son
+/// premier échantillon sur l'horloge commune (`origine`, celle des images).
+/// Le micro et les copains sont mono : les garder en mono, c'est deux fois
+/// moins de mémoire et de copies — la stéréo se fait à l'écriture.
+struct PisteAudio {
+    canaux: usize,
+    echantillons: VecDeque<f32>,
+    debut_us: u64,
+}
+
+impl PisteAudio {
+    fn new(canaux: usize) -> Self {
+        Self { canaux: canaux.max(1), echantillons: VecDeque::new(), debut_us: 0 }
+    }
+
+    /// Durée, en µs, de `n` échantillons (tous canaux confondus).
+    fn duree_us(&self, n: usize) -> u64 {
+        (n / self.canaux) as u64 * 1_000_000 / CADENCE
+    }
+
+    /// Le nombre d'échantillons (tous canaux) pour `us` µs : un nombre
+    /// entier de trames.
+    fn echantillons_pour(&self, us: u64) -> usize {
+        (us * CADENCE / 1_000_000) as usize * self.canaux
+    }
+
+    /// Ajoute un bloc qui **finit** à `fin_us`. Un trou (capture arrêtée un
+    /// moment) se comble de silence pour que l'horodatage reste vrai — mais
+    /// jamais plus long que ce qu'on garde.
+    fn pousser(&mut self, bloc: &[f32], fin_us: u64, garde_us: u64) {
+        let bloc = &bloc[..bloc.len() - bloc.len() % self.canaux];
+        let duree = self.duree_us(bloc.len());
+        if !self.echantillons.is_empty() {
+            let fin_attendue = self.debut_us + self.duree_us(self.echantillons.len()) + duree;
+            if fin_us > fin_attendue + 150_000 {
+                let trou_us = fin_us - fin_attendue;
+                if trou_us >= garde_us {
+                    // Plus long que tout ce qu'on garde (le vocal quitté
+                    // puis rejoint, un son du jeu coupé longtemps) : rien
+                    // d'avant ne servira plus. Le combler allouait d'un coup
+                    // la durée du silence — une heure, 1,4 Go de zéros —,
+                    // et l'anneau gardait ensuite cette place pour lui.
+                    self.echantillons.clear();
+                } else {
+                    let trou = self.echantillons_pour(trou_us);
+                    self.echantillons.extend(std::iter::repeat_n(0.0, trou));
+                }
+            }
+        }
+        self.echantillons.extend(bloc.iter().copied());
+        // On ne garde que ce qui peut encore servir, plus une marge.
+        let total = self.duree_us(self.echantillons.len());
+        if total > garde_us {
+            let trop = self.echantillons_pour(total - garde_us).min(self.echantillons.len());
+            self.echantillons.drain(..trop);
+        }
+        // L'anneau s'ancre sur l'arrivée du dernier bloc : les arrondis
+        // d'horodatage et l'écart d'horloge entre la carte son et le
+        // système ne s'accumulent pas au fil des heures (une session de
+        // trois heures décalait le son d'un dixième de seconde, puis un
+        // « trou » de 150 ms s'insérait pour rattraper).
+        self.debut_us = fin_us.saturating_sub(self.duree_us(self.echantillons.len()));
+    }
+
+    /// Les échantillons entre deux instants (au nombre de canaux de la
+    /// piste), silence là où l'on n'a rien.
+    fn extraire(&self, de_us: u64, a_us: u64) -> Vec<f32> {
+        let n = self.echantillons_pour(a_us.saturating_sub(de_us));
+        let mut sortie = vec![0.0f32; n];
+        if self.echantillons.is_empty() {
+            return sortie;
+        }
+        let fin_us = self.debut_us + self.duree_us(self.echantillons.len());
+        // Le recouvrement entre [de, a] et [debut, fin].
+        let d = de_us.max(self.debut_us);
+        let f = a_us.min(fin_us);
+        if d >= f {
+            return sortie;
+        }
+        let depuis_source = self.echantillons_pour(d - self.debut_us);
+        let depuis_sortie = self.echantillons_pour(d - de_us);
+        let longueur = self
+            .echantillons_pour(f - d)
+            .min(n.saturating_sub(depuis_sortie))
+            .min(self.echantillons.len().saturating_sub(depuis_source));
+        copier_plage(&self.echantillons, depuis_source, &mut sortie[depuis_sortie..depuis_sortie + longueur]);
+        sortie
+    }
+}
+
+/// Copie `dest.len()` échantillons de l'anneau à partir de `debut`, par ses
+/// deux moitiés contiguës (des `memcpy`, pas un accès indexé par
+/// échantillon).
+fn copier_plage(anneau: &VecDeque<f32>, debut: usize, dest: &mut [f32]) {
+    let (a, b) = anneau.as_slices();
+    let mut fait = 0;
+    if debut < a.len() {
+        let k = (a.len() - debut).min(dest.len());
+        dest[..k].copy_from_slice(&a[debut..debut + k]);
+        fait = k;
+    }
+    if fait < dest.len() {
+        let j = debut + fait - a.len();
+        let k = (dest.len() - fait).min(b.len().saturating_sub(j));
+        dest[fait..fait + k].copy_from_slice(&b[j..j + k]);
+    }
+}
+
+/// Ce que l'on garde en mémoire : l'image et trois pistes de son, chacune
+/// sous son propre verrou — l'encodeur et les fils du son ne s'attendent
+/// jamais les uns les autres.
+struct Tampon {
+    video: Mutex<Video>,
+    /// Le son du système sauf ki-chat, stéréo.
+    jeu: Mutex<PisteAudio>,
+    /// Le micro traité, mono.
+    micro: Mutex<PisteAudio>,
+    /// Le mélange des copains, mono.
+    copains: Mutex<PisteAudio>,
+    /// Ce que les pistes de son gardent : la durée, plus une marge.
+    garde_us: u64,
+}
+
+impl Tampon {
+    fn new(duree_s: u32) -> Self {
+        let duree_max_us = u64::from(duree_s) * 1_000_000;
+        Self {
+            video: Mutex::new(Video::new(duree_max_us)),
+            jeu: Mutex::new(PisteAudio::new(2)),
+            micro: Mutex::new(PisteAudio::new(1)),
+            copains: Mutex::new(PisteAudio::new(1)),
+            garde_us: duree_max_us + 3_000_000,
+        }
+    }
+
+    fn pousser_image(&self, image: EncodedFrame) {
+        verrou(&self.video).pousser(image);
     }
 
     /// Ce qu'il y a à écrire : les images depuis la première trame clé, et
-    /// le son qui va avec.
+    /// le son qui va avec. Rapide et sans copie d'image : c'est le fil du
+    /// raccourci qui l'appelle, à l'instant de l'appui.
     fn instantane(&self, pistes: (bool, bool, bool)) -> Option<Instantane> {
-        let depart = self.images.iter().position(|i| i.idr)?;
-        let images: Vec<EncodedFrame> = self
-            .images
-            .iter()
-            .skip(depart)
-            .map(|i| EncodedFrame {
-                data: i.data.clone(),
-                idr: i.idr,
-                pts_us: i.pts_us,
-                width: i.width,
-                height: i.height,
-                basse: false,
-            })
-            .collect();
+        let (images, parametres) = {
+            let v = verrou(&self.video);
+            let depart = v.images.iter().position(|i| i.idr)?;
+            (v.images.iter().skip(depart).cloned().collect::<Vec<Image>>(), v.parametres.clone())
+        };
         let t0 = images.first()?.pts_us;
         let t1 = images.last()?.pts_us;
         if t1 <= t0 {
@@ -410,24 +508,41 @@ impl Tampon {
         // Une image de plus, pour que le son couvre la dernière.
         let t1 = t1 + 1_000_000 / 30;
         let mut sources = Vec::new();
-        if pistes.0 {
-            sources.push(("jeu", self.jeu.extraire(t0, t1)));
+        for (garder, nom, piste) in
+            [(pistes.0, "jeu", &self.jeu), (pistes.1, "micro", &self.micro), (pistes.2, "copains", &self.copains)]
+        {
+            if garder {
+                let p = verrou(piste);
+                sources.push(SourceSon { nom, canaux: p.canaux, echantillons: p.extraire(t0, t1) });
+            }
         }
-        if pistes.1 {
-            sources.push(("micro", self.micro.extraire(t0, t1)));
+        Some(Instantane { images, sources, parametres })
+    }
+}
+
+/// Une piste de son photographiée : son nom, ses canaux, ses échantillons.
+struct SourceSon {
+    nom: &'static str,
+    canaux: usize,
+    echantillons: Vec<f32>,
+}
+
+impl SourceSon {
+    /// En stéréo entrelacée, comme le fichier la veut.
+    fn en_stereo(self) -> Vec<f32> {
+        if self.canaux == 2 {
+            self.echantillons
+        } else {
+            self.echantillons.iter().flat_map(|v| [*v, *v]).collect()
         }
-        if pistes.2 {
-            sources.push(("copains", self.copains.extraire(t0, t1)));
-        }
-        Some(Instantane { images, sources, parametres: self.parametres.clone() })
     }
 }
 
 /// La photographie du tampon, prête à écrire.
 struct Instantane {
-    images: Vec<EncodedFrame>,
-    /// (nom de piste, stéréo entrelacé) — dans l'ordre des pistes du fichier.
-    sources: Vec<(&'static str, Vec<f32>)>,
+    images: Vec<Image>,
+    /// Les pistes, dans l'ordre du fichier (après le mélange).
+    sources: Vec<SourceSon>,
     parametres: Option<Vec<u8>>,
 }
 
@@ -469,7 +584,7 @@ pub type Fini = Arc<dyn Fn(&Result<Clip, String>) + Send + Sync>;
 /// tampon doit être photographié à l'instant de l'appui, pas au retour.
 #[derive(Clone)]
 pub struct Declencheur {
-    tampon: Arc<Mutex<Tampon>>,
+    tampon: Arc<Tampon>,
     ecriture: Arc<Mutex<Option<Ecriture>>>,
     nom_source: Arc<Mutex<String>>,
     reglages: Reglages,
@@ -481,15 +596,13 @@ pub struct Declencheur {
 impl Declencheur {
     /// L'appui : photographie le tampon et écrit le clip sur un fil.
     pub fn sauver(&self) -> Result<(), String> {
-        let mut ecriture = self.ecriture.lock().unwrap();
+        let mut ecriture = verrou(&self.ecriture);
         if ecriture.is_some() {
             return Err("un clip est déjà en cours d'écriture".into());
         }
         let pistes = (self.reglages.jeu, self.reglages.micro, self.reglages.copains);
         let instantane = self
             .tampon
-            .lock()
-            .unwrap()
             .instantane(pistes)
             .ok_or("rien à enregistrer encore : le tampon se remplit")?;
         let dossier = self.reglages.dossier_effectif();
@@ -498,7 +611,7 @@ impl Declencheur {
                 return Err("moins de 500 Mo libres sur le disque des clips".into());
             }
         }
-        let source_nom = self.nom_source.lock().unwrap().clone();
+        let source_nom = verrou(&self.nom_source).clone();
         let nom = format!("{} {}.mp4", chrono::Local::now().format("%Y-%m-%d %Hh%Mm%S"), source_nom);
         let chemin = dossier.join(nom);
         let fps = self.reglages.fps;
@@ -509,16 +622,19 @@ impl Declencheur {
         let fil = std::thread::Builder::new()
             .name("clips-ecriture".into())
             .spawn(move || {
+                // L'écriture passe après le jeu : processeur, disque et
+                // mémoire en priorité « arrière-plan » le temps du fichier.
+                arriere_plan();
                 let sortie = ecrire_clip(instantane, &chemin, fps, debit);
                 if let Ok(c) = &sortie {
                     let _ = vignette(&c.chemin);
                     ecrire_fiche(c, &source_nom);
                 }
-                let rappel = fini.lock().unwrap().clone();
+                let rappel = verrou(&fini).clone();
                 if let Some(f) = rappel {
                     f(&sortie);
                 }
-                *r.lock().unwrap() = Some(sortie);
+                *verrou(&r) = Some(sortie);
             })
             .map_err(|e| e.to_string())?;
         *ecriture = Some(Ecriture { resultat, fil: Some(fil) });
@@ -530,29 +646,76 @@ impl Declencheur {
     pub fn appuyer(&self) {
         if let Err(m) = self.sauver() {
             ki_video::journal(format!("clips : appui sans clip : {m}"));
-            self.avis.lock().unwrap().push_back(m);
+            verrou(&self.avis).push_back(m);
         }
     }
 
     /// Ce qui se passe quand un clip est écrit — le son de confirmation,
     /// depuis le fil d'écriture, pour qu'il parte même interface endormie.
     pub fn quand_fini(&self, f: Option<Fini>) {
-        *self.fini.lock().unwrap() = f;
+        *verrou(&self.fini) = f;
     }
 
     fn ecriture_en_cours(&self) -> bool {
-        self.ecriture.lock().unwrap().is_some()
+        verrou(&self.ecriture).is_some()
+    }
+}
+
+/// Le fil courant passe en arrière-plan (processeur, disque, mémoire) :
+/// l'écriture d'un clip ne doit pas faire hoqueter la partie.
+fn arriere_plan() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+/// La boucle qui filme et encode.
+enum Boucle {
+    /// Tout sur la carte : capture, conversion et NVENC sans passer par le
+    /// processeur (`ki_video::ClipGpu`). Le chemin normal.
+    Carte(ki_video::ClipGpu),
+    /// Le chemin du partage d'écran : l'image lue par le processeur,
+    /// convertie, puis encodée — pour une machine sans NVIDIA, ou une carte
+    /// qui refuse la chaîne.
+    Processeur(StreamerLoop),
+}
+
+impl Boucle {
+    fn source_fermee(&self) -> bool {
+        match self {
+            Boucle::Carte(c) => c.source_fermee(),
+            Boucle::Processeur(p) => p.source_closed(),
+        }
+    }
+
+    fn en_panne(&self) -> bool {
+        matches!(self, Boucle::Carte(c) if c.en_panne())
+    }
+
+    fn arreter(self) {
+        match self {
+            Boucle::Carte(c) => c.arreter(),
+            Boucle::Processeur(p) => p.stop(),
+        }
     }
 }
 
 pub struct Enregistreur {
-    tampon: Arc<Mutex<Tampon>>,
+    tampon: Arc<Tampon>,
     stats: Arc<StageStats>,
     origine: Instant,
-    boucle: Option<StreamerLoop>,
+    boucle: Option<Boucle>,
     force_idr: Arc<AtomicBool>,
     reglages: Reglages,
     source: CaptureSource,
+    /// La chaîne sur la carte a échoué sur cette machine : le chemin du
+    /// processeur jusqu'au prochain démarrage de l'enregistreur.
+    carte_refusee: bool,
+    /// Une fenêtre que la capture a refusée, et quand : l'automatique ne
+    /// la redemande qu'une minute plus tard, pas toutes les dix secondes.
+    source_refusee: Option<(CaptureSource, Instant)>,
     son_systeme: Option<ki_voice::jeu::SonSysteme>,
     robinet_micro: Option<ki_voice::Robinet>,
     robinet_copains: Option<ki_voice::Robinet>,
@@ -579,7 +742,7 @@ impl Enregistreur {
     /// Démarre la capture et l'encodage vers le tampon.
     pub fn demarrer(reglages: &Reglages) -> anyhow::Result<Self> {
         let (source, nom_source) = resoudre_source(&reglages.source);
-        let tampon = Arc::new(Mutex::new(Tampon::new(reglages.duree_s)));
+        let tampon = Arc::new(Tampon::new(reglages.duree_s));
         let origine = Instant::now();
         let stats = Arc::new(StageStats::default());
         let force_idr = Arc::new(AtomicBool::new(false));
@@ -599,6 +762,8 @@ impl Enregistreur {
             force_idr,
             reglages: reglages.clone(),
             source: source.clone(),
+            carte_refusee: false,
+            source_refusee: None,
             son_systeme: None,
             robinet_micro: None,
             robinet_copains: None,
@@ -609,15 +774,27 @@ impl Enregistreur {
             stats_a: Instant::now(),
             stats_avant: (0, 0, 0, 0),
         };
-        moi.lancer_capture(source)?;
+        if let Err(e) = moi.lancer_capture(source.clone()) {
+            // La fenêtre du jeu refuse : l'écran, plutôt qu'aucun clip.
+            if !matches!(source, CaptureSource::Window(_)) {
+                return Err(e);
+            }
+            ki_video::journal(format!("clips : capture de la fenêtre refusée ({e:#}) — l'écran à la place"));
+            moi.source_refusee = Some((source, Instant::now()));
+            *verrou(&moi.declencheur.nom_source) = "Écran".into();
+            moi.lancer_capture(CaptureSource::Monitor(0))?;
+        }
 
-        // Le son : le système sauf ki-chat, et les robinets du moteur.
-        let garde = tampon.lock().unwrap().garde_us();
+        // Le son : le système sauf ki-chat, et les robinets du moteur. Les
+        // robinets tournent sur les fils temps réel du moteur vocal : ni
+        // allocation, ni attente longue — chaque piste a son verrou, que
+        // personne ne tient plus que le temps d'une copie.
+        let garde = tampon.garde_us;
         if reglages.jeu {
             let t = tampon.clone();
             let recevoir: ki_voice::Robinet = Arc::new(move |stereo: &[f32]| {
                 let fin = origine.elapsed().as_micros() as u64;
-                t.lock().unwrap().jeu.pousser(stereo, fin, garde);
+                verrou(&t.jeu).pousser(stereo, fin, garde);
             });
             match ki_voice::jeu::SonSysteme::start(recevoir) {
                 Ok(s) => moi.son_systeme = Some(s),
@@ -630,17 +807,15 @@ impl Enregistreur {
         if reglages.micro {
             let t = tampon.clone();
             moi.robinet_micro = Some(Arc::new(move |mono: &[f32]| {
-                let stereo: Vec<f32> = mono.iter().flat_map(|v| [*v, *v]).collect();
                 let fin = origine.elapsed().as_micros() as u64;
-                t.lock().unwrap().micro.pousser(&stereo, fin, garde);
+                verrou(&t.micro).pousser(mono, fin, garde);
             }));
         }
         if reglages.copains {
             let t = tampon.clone();
             moi.robinet_copains = Some(Arc::new(move |mono: &[f32]| {
-                let stereo: Vec<f32> = mono.iter().flat_map(|v| [*v, *v]).collect();
                 let fin = origine.elapsed().as_micros() as u64;
-                t.lock().unwrap().copains.pousser(&stereo, fin, garde);
+                verrou(&t.copains).pousser(mono, fin, garde);
             }));
         }
         crate::secours::marquer_clips();
@@ -658,7 +833,30 @@ impl Enregistreur {
         Ok(moi)
     }
 
+    /// Lance la capture de `source` : sur la carte d'abord, par le
+    /// processeur si la carte refuse.
     fn lancer_capture(&mut self, source: CaptureSource) -> anyhow::Result<()> {
+        let tampon = self.tampon.clone();
+        let emit: ki_video::FrameEmit = Arc::new(move |image: EncodedFrame| tampon.pousser_image(image));
+        let mut refus_carte = None;
+        if !self.carte_refusee {
+            let config = ki_video::ConfigClip {
+                source: source.clone(),
+                hauteur_max: self.reglages.qualite.hauteur_max(),
+                fps: self.reglages.fps,
+                debit_bps: self.reglages.qualite.debit_bps(),
+                curseur: true,
+                gop_s: 1,
+            };
+            match ki_video::ClipGpu::demarrer(config, self.stats.clone(), emit.clone(), self.origine) {
+                Ok(c) => {
+                    self.boucle = Some(Boucle::Carte(c));
+                    self.source = source;
+                    return Ok(());
+                }
+                Err(e) => refus_carte = Some(format!("{e:#}")),
+            }
+        }
         let config = StreamConfig {
             source: source.clone(),
             max_height: self.reglages.qualite.hauteur_max(),
@@ -670,10 +868,6 @@ impl Enregistreur {
             gop_s: 1,
             profil: ki_video::Profil::Clip,
         };
-        let tampon = self.tampon.clone();
-        let emit: ki_video::FrameEmit = Arc::new(move |image: EncodedFrame| {
-            tampon.lock().unwrap().pousser_image(image);
-        });
         let apercu: ki_video::FrameSink = Arc::new(|_| {});
         let boucle = StreamerLoop::start(
             self.stats.clone(),
@@ -684,9 +878,34 @@ impl Enregistreur {
             self.origine,
             None,
         )?;
-        self.boucle = Some(boucle);
+        // La carte a refusé là où le processeur réussit : c'est elle, pas la
+        // source. On ne la redemandera pas pour cet enregistreur.
+        if let Some(e) = refus_carte {
+            ki_video::journal(format!("clips : chaîne tout-GPU refusée ({e}) — chemin du processeur"));
+            self.carte_refusee = true;
+        }
+        self.boucle = Some(Boucle::Processeur(boucle));
         self.source = source;
         Ok(())
+    }
+
+    /// Relance la capture sur une autre source (ou la même, autrement). Une
+    /// fenêtre qui refuse laisse la place à l'écran principal, plutôt qu'à
+    /// un enregistreur qui ne filme plus rien.
+    fn relancer(&mut self, source: CaptureSource) {
+        if let Some(b) = self.boucle.take() {
+            b.arreter();
+        }
+        let Err(e) = self.lancer_capture(source.clone()) else { return };
+        self.erreur = Some(format!("capture : {e:#}"));
+        if matches!(source, CaptureSource::Window(_)) {
+            ki_video::journal(format!("clips : capture de la fenêtre refusée ({e:#}) — l'écran à la place"));
+            self.source_refusee = Some((source, Instant::now()));
+            *verrou(&self.declencheur.nom_source) = "Écran".into();
+            if let Err(e) = self.lancer_capture(CaptureSource::Monitor(0)) {
+                self.erreur = Some(format!("capture : {e:#}"));
+            }
+        }
     }
 
     /// Les robinets à brancher sur le moteur vocal — à rappeler quand il
@@ -706,20 +925,29 @@ impl Enregistreur {
     }
 
     fn nom_source(&self) -> String {
-        self.declencheur.nom_source.lock().unwrap().clone()
+        verrou(&self.declencheur.nom_source).clone()
+    }
+
+    fn sur_la_carte(&self) -> bool {
+        matches!(self.boucle, Some(Boucle::Carte(_)))
     }
 
     /// Ce que montre l'interface.
     pub fn etat(&self) -> Etat {
-        let t = self.tampon.lock().unwrap();
-        let secondes = match (t.images.front(), t.images.back()) {
-            (Some(a), Some(b)) => b.pts_us.saturating_sub(a.pts_us) as f32 / 1_000_000.0,
-            _ => 0.0,
+        let (secondes, octets) = {
+            let v = verrou(&self.tampon.video);
+            (v.secondes(), v.octets)
         };
         Etat {
             secondes,
-            megaoctets: t.octets as f32 / (1024.0 * 1024.0),
-            encodeur: if self.stats.materiel.load(Ordering::Relaxed) { "NVENC".into() } else { "logiciel".into() },
+            megaoctets: octets as f32 / (1024.0 * 1024.0),
+            encodeur: if self.sur_la_carte() {
+                "NVENC, tout sur la carte".into()
+            } else if self.stats.materiel.load(Ordering::Relaxed) {
+                "NVENC".into()
+            } else {
+                "logiciel".into()
+            },
             source: self.nom_source(),
             ecriture_en_cours: self.declencheur.ecriture_en_cours(),
         }
@@ -730,30 +958,32 @@ impl Enregistreur {
     pub fn tick(&mut self) -> Option<Result<Clip, String>> {
         // La source s'est évanouie (le jeu fermé) : on repasse sur l'écran,
         // ou sur ce que l'automatique trouve.
-        if self.boucle.as_ref().is_some_and(|b| b.source_closed()) {
+        if self.boucle.as_ref().is_some_and(Boucle::source_fermee) {
             ki_video::journal("clips : la fenêtre filmée a disparu — on repasse sur l'écran");
-            if let Some(b) = self.boucle.take() {
-                b.stop();
-            }
             let (source, nom) = resoudre_source(&Source::Auto);
-            *self.declencheur.nom_source.lock().unwrap() = nom;
-            if let Err(e) = self.lancer_capture(source) {
-                self.erreur = Some(format!("capture perdue : {e:#}"));
-            }
+            *verrou(&self.declencheur.nom_source) = nom;
+            self.relancer(source);
+        }
+        // La chaîne sur la carte a renoncé (carte perdue plusieurs fois) :
+        // le chemin du processeur prend la suite, et on le dit.
+        if self.boucle.as_ref().is_some_and(Boucle::en_panne) {
+            ki_video::journal("clips : la chaîne tout-GPU a renoncé — chemin du processeur");
+            self.carte_refusee = true;
+            let source = self.source.clone();
+            self.relancer(source);
         }
         // Toutes les dix secondes, en automatique : le jeu est-il arrivé ?
         if self.reglages.source == Source::Auto && self.verif_source.elapsed() > Duration::from_secs(10) {
             self.verif_source = Instant::now();
             let (source, nom) = resoudre_source(&Source::Auto);
-            if source != self.source && !self.declencheur.ecriture_en_cours() {
+            let refusee_recemment = self
+                .source_refusee
+                .as_ref()
+                .is_some_and(|(s, quand)| *s == source && quand.elapsed() < Duration::from_secs(60));
+            if source != self.source && !refusee_recemment && !self.declencheur.ecriture_en_cours() {
                 ki_video::journal(format!("clips : on filme maintenant {nom}"));
-                if let Some(b) = self.boucle.take() {
-                    b.stop();
-                }
-                *self.declencheur.nom_source.lock().unwrap() = nom;
-                if let Err(e) = self.lancer_capture(source) {
-                    self.erreur = Some(format!("capture : {e:#}"));
-                }
+                *verrou(&self.declencheur.nom_source) = nom;
+                self.relancer(source);
             }
         }
         if let Some(a) = self.stats.prendre_avis() {
@@ -770,7 +1000,8 @@ impl Enregistreur {
         {
             self.fatal = true;
             self.erreur = Some(
-                "NVENC indisponible : l'enregistreur s'arrête plutôt que d'encoder en logiciel à cette                  qualité — passe en « Légère » à 30 i/s pour réessayer"
+                "NVENC indisponible : l'enregistreur s'arrête plutôt que d'encoder en logiciel à cette \
+                 qualité — passe en « Légère » à 30 i/s pour réessayer"
                     .into(),
             );
         }
@@ -787,11 +1018,12 @@ impl Enregistreur {
             let avant = self.stats_avant;
             let etat = self.etat();
             ki_video::journal(format!(
-                "clips : {:.0} i/s capturées, {:.0} encodées, {} sautées, {} kbit/s, conversion {:.1} ms,                  encodage {:.1} ms, tampon {:.0} s / {:.0} Mo, {}",
+                "clips : {:.0} i/s capturées, {:.0} encodées, {} sautées, {:.0} kbit/s, conversion {:.1} ms, \
+                 encodage {:.1} ms, tampon {:.0} s / {:.0} Mo, {}",
                 (maintenant.0 - avant.0) as f32 / dt,
                 (maintenant.1 - avant.1) as f32 / dt,
                 maintenant.2 - avant.2,
-                (maintenant.3 - avant.3) * 8 / 1000 / dt as u64,
+                (maintenant.3 - avant.3) as f32 * 8.0 / 1000.0 / dt,
                 self.stats.convert_ms.get(),
                 self.stats.encode_ms.get(),
                 etat.secondes,
@@ -802,19 +1034,19 @@ impl Enregistreur {
             self.stats_avant = maintenant;
         }
         // Un appui du raccourci qui n'a rien donné : à dire, un par image.
-        if let Some(m) = self.declencheur.avis.lock().unwrap().pop_front() {
+        if let Some(m) = verrou(&self.declencheur.avis).pop_front() {
             return Some(Err(m));
         }
         let ecriture_finie = {
-            let mut ecriture = self.declencheur.ecriture.lock().unwrap();
-            let finie = ecriture.as_ref().is_some_and(|e| e.resultat.lock().unwrap().is_some());
+            let mut ecriture = verrou(&self.declencheur.ecriture);
+            let finie = ecriture.as_ref().is_some_and(|e| verrou(&e.resultat).is_some());
             finie.then(|| ecriture.take()).flatten()
         };
         if let Some(mut e) = ecriture_finie {
             if let Some(f) = e.fil.take() {
                 let _ = f.join();
             }
-            return e.resultat.lock().unwrap().take();
+            return verrou(&e.resultat).take();
         }
         None
     }
@@ -829,10 +1061,10 @@ impl Enregistreur {
     /// l'application, qui tient le moteur.
     pub fn arreter(mut self) {
         if let Some(b) = self.boucle.take() {
-            b.stop();
+            b.arreter();
         }
         self.son_systeme = None;
-        let en_cours = self.declencheur.ecriture.lock().unwrap().take();
+        let en_cours = verrou(&self.declencheur.ecriture).take();
         if let Some(mut e) = en_cours {
             if let Some(f) = e.fil.take() {
                 let _ = f.join();
@@ -863,7 +1095,7 @@ fn espace_libre(_dossier: &Path) -> Option<u64> {
 /// d'abord quand il y a plusieurs sources, puis chaque source.
 fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Result<Clip, String> {
     let premiere = inst.images.first().ok_or("aucune image")?;
-    let noms: Vec<&'static str> = inst.sources.iter().map(|(n, _)| *n).collect();
+    let noms: Vec<&'static str> = inst.sources.iter().map(|s| s.nom).collect();
     let t0 = premiere.pts_us;
     let (largeur, hauteur) = (u32::from(premiere.width), u32::from(premiere.height));
     let format = ki_media::FormatVideo {
@@ -873,12 +1105,13 @@ fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Res
         debit_bps,
         parametres: inst.parametres.clone(),
     };
-    // Les pistes : [mélange, source…] ou [la source seule].
+    // Les pistes, en stéréo : [mélange, source…] ou [la source seule].
+    let sources: Vec<Vec<f32>> = inst.sources.into_iter().map(SourceSon::en_stereo).collect();
     let mut pistes: Vec<Vec<f32>> = Vec::new();
-    if inst.sources.len() > 1 {
-        let n = inst.sources.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+    if sources.len() > 1 {
+        let n = sources.iter().map(Vec::len).max().unwrap_or(0);
         let mut mix = vec![0.0f32; n];
-        for (_, s) in &inst.sources {
+        for s in &sources {
             for (m, v) in mix.iter_mut().zip(s.iter()) {
                 *m += v;
             }
@@ -888,14 +1121,13 @@ fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Res
         }
         pistes.push(mix);
     }
-    for (_, s) in inst.sources {
-        pistes.push(s);
-    }
+    pistes.extend(sources);
     let mut e = ki_media::ecrire(chemin, &format, pistes.len()).map_err(|e| format!("{e:#}"))?;
     let duree_image = 1_000_000 / u64::from(fps.max(1));
     // Entrelacé par le temps : le son de chaque piste suit les images.
     let mut curseurs = vec![0usize; pistes.len()];
     const BLOC: usize = 1920; // 20 ms de stéréo
+    let duree_stereo_us = |n: usize| (n as u64 / 2) * 1_000_000 / CADENCE;
     for (i, image) in inst.images.iter().enumerate() {
         let pts = image.pts_us - t0;
         let duree = inst
@@ -1235,67 +1467,151 @@ mod tests {
 
     #[test]
     fn le_tampon_commence_par_une_trame_cle_et_tient_sa_duree() {
-        let mut t = Tampon::new(2);
+        let t = Tampon::new(2);
         // 5 s d'images à 10 i/s, trame clé chaque seconde.
         for i in 0..50u64 {
             t.pousser_image(image(i * 100_000, i % 10 == 0));
         }
-        let premiere = t.images.front().unwrap();
+        let v = verrou(&t.video);
+        let premiere = v.images.front().unwrap();
         assert!(premiere.idr);
-        let duree = t.images.back().unwrap().pts_us - premiere.pts_us;
+        let duree = v.images.back().unwrap().pts_us - premiere.pts_us;
         assert!(duree <= 3_000_000, "{duree}");
         assert!(duree >= 2_000_000, "{duree}");
-        assert_eq!(t.octets, t.images.len() * 100);
+        assert_eq!(v.octets, v.images.len() * 100);
+    }
+
+    /// Une source qui change de taille ouvre un autre flux : le tampon
+    /// repart de lui, un MP4 ne mêle pas deux tailles d'image.
+    #[test]
+    fn une_image_d_une_autre_taille_repart_de_zero() {
+        let t = Tampon::new(30);
+        for i in 0..20u64 {
+            t.pousser_image(image(i * 100_000, i % 10 == 0));
+        }
+        let mut autre = image(2_000_000, true);
+        autre.width = 32;
+        t.pousser_image(autre);
+        let v = verrou(&t.video);
+        assert_eq!(v.images.len(), 1);
+        assert_eq!(v.octets, 100);
+        assert_eq!(v.images[0].width, 32);
     }
 
     #[test]
     fn l_instantane_part_de_la_trame_cle_et_le_son_suit() {
-        let mut t = Tampon::new(30);
+        let t = Tampon::new(30);
         for i in 0..20u64 {
             t.pousser_image(image(1_000_000 + i * 100_000, i == 0 || i == 10));
         }
-        // Du son sur la piste jeu de 0,5 s à 3,5 s.
-        let bloc = vec![0.5f32; 1920];
+        // Du son de 0,5 s à 3,5 s : le jeu en stéréo, le micro en mono.
+        let stereo = vec![0.5f32; 1920];
+        let mono = vec![0.25f32; 960];
         for b in 0..150u64 {
-            t.jeu.pousser(&bloc, 500_000 + (b + 1) * 20_000, t.garde_us());
+            let fin = 500_000 + (b + 1) * 20_000;
+            verrou(&t.jeu).pousser(&stereo, fin, t.garde_us);
+            verrou(&t.micro).pousser(&mono, fin, t.garde_us);
         }
-        let inst = t.instantane((true, false, true)).unwrap();
+        let inst = t.instantane((true, true, true)).unwrap();
         assert_eq!(inst.images.len(), 20);
         assert!(inst.images[0].idr);
-        assert_eq!(inst.sources.len(), 2);
-        let (nom, jeu) = &inst.sources[0];
-        assert_eq!(*nom, "jeu");
+        assert_eq!(inst.sources.len(), 3);
+        let jeu = &inst.sources[0];
+        assert_eq!((jeu.nom, jeu.canaux), ("jeu", 2));
         // 1,9 s d'images plus une : ~1,93 s de son.
-        assert!((jeu.len() as f64 / 96_000.0 - 1.93).abs() < 0.05, "{}", jeu.len());
-        assert!(jeu.iter().all(|v| (v - 0.5).abs() < 1e-6));
-        // Les copains n'ont rien dit : du silence, de la même longueur.
-        assert_eq!(inst.sources[1].1.len(), jeu.len());
-        assert!(inst.sources[1].1.iter().all(|v| *v == 0.0));
+        assert!((jeu.echantillons.len() as f64 / 96_000.0 - 1.93).abs() < 0.05, "{}", jeu.echantillons.len());
+        assert!(jeu.echantillons.iter().all(|v| (v - 0.5).abs() < 1e-6));
+        let micro = &inst.sources[1];
+        assert_eq!((micro.nom, micro.canaux), ("micro", 1));
+        assert_eq!(micro.echantillons.len() * 2, jeu.echantillons.len());
+        assert!(micro.echantillons.iter().all(|v| (v - 0.25).abs() < 1e-6));
+        // Les copains n'ont rien dit : du silence, de la même durée.
+        assert_eq!(inst.sources[2].echantillons.len(), micro.echantillons.len());
+        assert!(inst.sources[2].echantillons.iter().all(|v| *v == 0.0));
+        // La photographie ne recopie pas les images : elle les partage.
+        let v = verrou(&t.video);
+        assert_eq!(inst.images[0].data.as_ptr(), v.images[0].data.as_ptr());
+        // Et à l'écriture, la stéréo : le mono dupliqué.
+        let s = SourceSon { nom: "micro", canaux: 1, echantillons: vec![0.1, 0.2] }.en_stereo();
+        assert_eq!(s, vec![0.1, 0.1, 0.2, 0.2]);
     }
 
     #[test]
     fn un_trou_dans_le_son_se_comble_de_silence() {
-        let mut p = PisteAudio::default();
+        let mut p = PisteAudio::new(2);
         p.pousser(&[1.0; 1920], 20_000, 10_000_000);
         // Le bloc suivant arrive 500 ms trop tard.
         p.pousser(&[1.0; 1920], 540_000, 10_000_000);
         assert_eq!(p.debut_us, 0);
         let s = p.extraire(0, 540_000);
-        assert_eq!(s.len(), echantillons_stereo(540_000));
+        assert_eq!(s.len(), p.echantillons_pour(540_000));
         assert!(s[..1920].iter().all(|v| *v == 1.0));
         assert!(s[2000..40_000].iter().all(|v| *v == 0.0));
         assert!(s[s.len() - 1920..].iter().all(|v| *v == 1.0));
     }
 
+    /// Le vocal quitté une heure puis rejoint : le trou n'est pas comblé
+    /// d'une heure de zéros (1,4 Go en stéréo), la piste repart.
+    #[test]
+    fn un_silence_plus_long_que_le_tampon_ne_gonfle_pas_la_memoire() {
+        let mut p = PisteAudio::new(1);
+        let garde = 33_000_000;
+        p.pousser(&[0.5; 960], 20_000, garde);
+        let heure = 3_600_000_000u64;
+        p.pousser(&[0.5; 960], heure, garde);
+        assert_eq!(p.echantillons.len(), 960);
+        assert!(p.echantillons.capacity() < 1_000_000, "{}", p.echantillons.capacity());
+        assert_eq!(p.debut_us, heure - 20_000);
+    }
+
+    /// Une heure de blocs de 10 ms : le dernier échantillon reste à
+    /// l'instant de son arrivée, aucun arrondi ne s'accumule.
+    #[test]
+    fn l_anneau_reste_ancre_sur_l_horloge_au_fil_des_heures() {
+        let mut p = PisteAudio::new(1);
+        let garde = 5_000_000;
+        let bloc = [0.1f32; 480];
+        let mut fin = 0;
+        for _ in 0..360_000u64 {
+            fin += 10_000;
+            p.pousser(&bloc, fin, garde);
+        }
+        let duree = p.duree_us(p.echantillons.len());
+        assert_eq!(p.debut_us + duree, fin);
+        assert!(duree <= garde);
+    }
+
     #[test]
     fn extraire_hors_de_la_piste_donne_du_silence() {
-        let mut p = PisteAudio::default();
+        let mut p = PisteAudio::new(2);
         p.pousser(&[0.3; 1920], 1_020_000, 10_000_000);
         let avant = p.extraire(0, 500_000);
         assert!(avant.iter().all(|v| *v == 0.0));
         let dedans = p.extraire(1_000_000, 1_020_000);
         assert_eq!(dedans.len(), 1920);
         assert!(dedans.iter().all(|v| (v - 0.3).abs() < 1e-6));
+    }
+
+    #[test]
+    fn la_copie_traverse_les_deux_moities_de_l_anneau() {
+        let mut anneau: VecDeque<f32> = VecDeque::new();
+        anneau.reserve_exact(8);
+        let cap = anneau.capacity();
+        for i in 0..cap {
+            anneau.push_back(i as f32);
+        }
+        for _ in 0..cap / 2 {
+            anneau.pop_front();
+        }
+        for i in cap..cap + cap / 2 {
+            anneau.push_back(i as f32);
+        }
+        assert!(!anneau.as_slices().1.is_empty(), "l'anneau fait le tour");
+        let mut dest = vec![0.0; cap - 2];
+        copier_plage(&anneau, 1, &mut dest);
+        for (k, v) in dest.iter().enumerate() {
+            assert_eq!(*v, (cap / 2 + 1 + k) as f32);
+        }
     }
 
     #[test]
