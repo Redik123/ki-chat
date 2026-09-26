@@ -32,6 +32,7 @@ mod theme;
 mod ui;
 mod update;
 mod valorant;
+mod valo_catalogue;
 mod valo_page;
 mod veille;
 mod visionneuse;
@@ -831,6 +832,9 @@ struct KiApp {
     dernier_envoi: Option<std::time::Instant>,
     /// Les icônes de rang VALORANT, téléchargées une fois.
     rangs: rangs::Rangs,
+    /// Les portraits d'agents, bandeaux de cartes et cartes de joueur de
+    /// valorant-api.com, et les noms des modes sortis depuis.
+    catalogue: valo_catalogue::Catalogue,
     /// La boutique du jour, lue dans son propre client Riot.
     boutique: boutique::Lecteur,
     /// L'état du bot musique, tel que le serveur le pousse, et l'adresse
@@ -1304,6 +1308,7 @@ impl KiApp {
             fiche: None,
             dernier_envoi: None,
             rangs: rangs::Rangs::new(),
+            catalogue: valo_catalogue::Catalogue::new(),
             boutique: boutique::Lecteur::new(),
             musique: ki_protocol::EtatMusique::default(),
             musique_recu: std::time::Instant::now(),
@@ -1828,8 +1833,9 @@ impl KiApp {
                 self.rangs.preparer(ctx, tier);
             }
         }
+        self.catalogue.demarrer();
         if let Some(f) = &self.fiche {
-            if !self.valo.fiche(ctx, f, &self.stats, &self.members, &self.rangs) {
+            if !self.valo.fiche(ctx, f, &self.stats, &self.members, &self.rangs, &self.catalogue) {
                 self.fiche = None;
                 self.valo.fermer_fiche();
             }
@@ -3602,6 +3608,13 @@ impl KiApp {
                 self.rangs.preparer(ctx, pic.tier);
             }
         }
+        // « En direct » montre le rang de ceux qui jouent, fiche ou pas.
+        for m in &self.members {
+            if let Some(tier) = palier_de(m) {
+                self.rangs.preparer(ctx, tier);
+            }
+        }
+        self.catalogue.demarrer();
         // La boutique est à soi : elle sort de `self` le temps de la fenêtre,
         // les fiches et les icônes n'y sont lues qu'en lecture.
         let mut boutique = std::mem::take(&mut self.boutique);
@@ -3614,6 +3627,7 @@ impl KiApp {
             self.my_id,
             &self.members,
             &self.rangs,
+            &self.catalogue,
             &mut boutique,
         );
         self.boutique = boutique;
@@ -9528,7 +9542,7 @@ impl KiApp {
                                 None => "désactivé".to_string(),
                                 Some(v) => match v.releve().1 {
                                     None => "actif — client Riot fermé, ou pas en jeu".to_string(),
-                                    Some(j) => j.ligne(),
+                                    Some(j) => valo_catalogue::ligne(&j),
                                 },
                             };
                             ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
@@ -13244,7 +13258,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         painter.text(
             egui::pos2(name_left, rect.center().y + 8.0),
             egui::Align2::LEFT_CENTER,
-            j.ligne(),
+            valo_catalogue::ligne(j),
             egui::FontId::proportional(10.5),
             teinte,
         );
@@ -14241,6 +14255,9 @@ impl eframe::App for KiApp {
             self.premiere_image = true;
             tracing::info!("interface prête : première image");
         }
+        // Les images VALORANT arrivées depuis l'image d'avant deviennent des
+        // textures ; rien ne se télécharge ici.
+        self.catalogue.preparer(ctx);
 
         // Géométrie : on ne restaure que « maximisée », et on suit l'état
         // courant pour le réenregistrer. Cf. `main` pour le pourquoi.

@@ -364,6 +364,51 @@ jamais une panique) ; lire la taille des lignes `StatsValorant` et le
 palier retenu dans le journal en debug (`VALORANT : page du groupe en N
 octets`).
 
+### V6 — La page en images — (0.1.49, commit local)
+
+Après la 13.06 (22-23 septembre : Performance Score, Accolades, Rank
+Legacy, Agent Mastery, la Warden, Gauntlet: Glitched).
+
+**Livré, client.** `client-gui/src/valo_catalogue.rs` : le catalogue de
+valorant-api.com — portraits d'agents (`minimapPortrait`, 64 px, 6 Ko ;
+le `displayIcon` fait 1024 px et 570 Ko), bandeaux de cartes
+(`listViewIcon`, 456 × 100), cartes de joueur (`wideart`, 452 × 128),
+noms des files (`/v1/gamemodes/queues?language=fr-FR`) et des titres.
+Relu sur le disque (`valorant/catalogue.json`) tant que `/v1/version` ne
+change pas ; une image se télécharge la première fois qu'on la montre
+(`valorant/images/`), par un seul fil, jamais deux fois par session.
+Rien ne part tant que rien de VALORANT ne s'affiche. La page du groupe
+ouvre sur **« En direct »** : qui est sur VALORANT d'après la présence
+partagée (le roster, pas les fiches), la partie sur le bandeau de sa
+carte, une étiquette (en partie, sélection, en file, au menu), le score
+en couleur, et ceux d'une même partie — même file, même carte, même
+score vu du même camp — sur une ligne. Les tables de matchs (fil et
+fiche) montrent le portrait de l'agent et la carte sur son bandeau ;
+les barres « Agents » et « Cartes » de la fiche aussi
+(`graphes::Barre.icone`, `graphes::uv_couvrant`). La fiche s'ouvre sur
+la carte de joueur, un dégradé pour lire le Riot ID, le niveau et le
+titre.
+
+**Livré, noms.** `ki_protocol::nom_de_file` : Gauntlet
+(`abilitydraftarena`), K.-O., Retake, réplication, escarmouches… ; trois
+cartes du team deathmatch étaient **permutées** dans `nom_de_carte`
+(`HURM_Alley` = District, `HURM_Bowl` = Kasbah, `HURM_Yard` = Piazza) ;
+Summit (`Plummet`), l'arène Gauntlet, le nouveau stand. Ce que la table
+ignore — un mode sorti après la version — prend le nom du catalogue
+(`Index::nommer`, dans la liste des membres aussi). Gauntlet n'entre
+dans aucune moyenne (`MODES_SANS_MANCHES`, protocole et serveur).
+
+**Livré, serveur.** `FicheValorant.{carte_joueur, titre_joueur}` : deux
+uuid (`ki_protocol::uuid_valorant`), lus dans `customization` du match le
+plus récent (`personnalisation`), dans `v2/account` à la liaison, gardés
+par la fusion quand une relecture n'en dit rien. Aucune requête de plus.
+Un serveur d'avant n'en envoie pas : la fiche garde sa ligne de texte.
+
+**À suivre.** Les médailles (`goldstars/v1/players/{puuid}`, pd, jetons
+du joueur : lues par son propre client comme la boutique, filtrées sur
+lui seul avant tout envoi), le Performance Score quand HenrikDev le
+rendra, l'Agent Mastery quand son endpoint sera documenté.
+
 ## Risques et parades
 
 - Riot change un endpoint ou le format de présence → la fonctionnalité

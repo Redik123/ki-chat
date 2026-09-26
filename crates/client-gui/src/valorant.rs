@@ -240,12 +240,22 @@ pub(crate) fn nom_de_carte(chemin: &str) -> String {
         "Juliett" => "Sunset",
         "Infinity" => "Abyss",
         "Rook" => "Corrode",
-        "Range" => "Stand de tir",
-        "HURM_Alley" => "Kasbah",
-        "HURM_Bowl" => "Piazza",
+        "Plummet" => "Summit",
+        "Range" | "RangeV2" => "Stand de tir",
+        "NPEV2" => "Entraînement de base",
+        // Les cartes du team deathmatch, d'après valorant-api.com (mapUrl).
+        "HURM_Alley" => "District",
+        "HURM_Bowl" => "Kasbah",
         "HURM_Helix" => "Drift",
-        "HURM_Yard" => "District",
+        "HURM_Yard" => "Piazza",
         "HURM_HighTide" => "Glitch",
+        // Les arènes du battle royale Gauntlet (13.06).
+        "AbilityDraft" => "Gauntlet",
+        "Skirmish_A" => "Escarmouche A",
+        "Skirmish_B" => "Escarmouche B",
+        "Skirmish_C" => "Escarmouche C",
+        "Skirmish_D" => "Escarmouche D",
+        "Skirmish_E" => "Escarmouche E",
         autre => autre,
     };
     connu.to_string()
@@ -459,5 +469,14 @@ mod tests {
         assert_eq!(nom_de_carte("/Game/Maps/Ascent/Ascent"), "Ascent");
         assert_eq!(nom_de_carte("/Game/Maps/Inconnue/Zeta"), "Zeta");
         assert_eq!(nom_de_carte(""), "");
+        // Les trois cartes du TDM qui étaient permutées, et celles de la
+        // 13.06 — d'après les `mapUrl` de valorant-api.com.
+        assert_eq!(nom_de_carte("/Game/Maps/HURM/HURM_Alley/HURM_Alley"), "District");
+        assert_eq!(nom_de_carte("/Game/Maps/HURM/HURM_Bowl/HURM_Bowl"), "Kasbah");
+        assert_eq!(nom_de_carte("/Game/Maps/HURM/HURM_Yard/HURM_Yard"), "Piazza");
+        assert_eq!(nom_de_carte("/Game/Maps/Plummet/Plummet"), "Summit");
+        assert_eq!(nom_de_carte("/Game/Maps/AbilityDraft/AbilityDraft"), "Gauntlet");
+        assert_eq!(nom_de_carte("/Game/Maps/PovegliaV2/RangeV2"), "Stand de tir");
+        assert_eq!(nom_de_carte("/Game/Maps/Duel/Duel_1/Skirmish_A"), "Escarmouche A");
     }
 }

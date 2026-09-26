@@ -2031,6 +2031,15 @@ pub struct FicheValorant {
     /// Les actes joués d'après v3/mmr, du plus ancien au plus récent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saisons: Vec<StatsSaison>,
+    /// La carte de joueur qu'il portait à son dernier match (ou à la
+    /// liaison) : un uuid, que le client montre en bandeau par
+    /// valorant-api.com. Vide d'un serveur d'avant 0.1.49.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub carte_joueur: String,
+    /// Son titre de joueur, un uuid lui aussi (« Chasseur de têtes » par
+    /// le catalogue). Vide s'il n'en porte pas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub titre_joueur: String,
 }
 
 /// Un acte tel que v3/mmr le résume (`seasonal[]`) : combien de parties,
@@ -2424,13 +2433,14 @@ pub struct EstimationMmr {
 /// Le nom français du mode classé, tel que le serveur le traduit.
 const MODE_CLASSE: &str = "Compétitif";
 /// Les modes sans manches : un combat à mort n'a ni camp ni score par
-/// manche, il n'entre dans aucune moyenne.
-const MODES_SANS_MANCHES: [&str; 2] = ["Combat à mort", "Combat à mort par équipe"];
+/// manche, il n'entre dans aucune moyenne. Gauntlet non plus : huit duos
+/// en battle royale, rien à comparer à une manche à cinq contre cinq.
+const MODES_SANS_MANCHES: [&str; 3] = ["Combat à mort", "Combat à mort par équipe", "Gauntlet"];
 
 impl FicheValorant {
-    /// Les matchs à manches : tout sauf « Combat à mort » et « Combat à
-    /// mort par équipe » — et tout match dont `manches == (0, 0)`, qui
-    /// n'a rien à dire sur une manche non plus.
+    /// Les matchs à manches : tout sauf « Combat à mort », « Combat à
+    /// mort par équipe » et « Gauntlet » — et tout match dont
+    /// `manches == (0, 0)`, qui n'a rien à dire sur une manche non plus.
     pub fn a_des_manches(m: &MatchResume) -> bool {
         !MODES_SANS_MANCHES.contains(&m.mode.as_str()) && m.manches != (0, 0)
     }
@@ -2650,8 +2660,22 @@ impl FicheValorant {
             matchs,
             maj: self.maj,
             saisons: Vec::new(),
+            carte_joueur: self.carte_joueur.clone(),
+            titre_joueur: self.titre_joueur.clone(),
         }
     }
+}
+
+/// Un uuid tel que valorant-api.com les écrit (8-4-4-4-12 chiffres
+/// hexadécimaux), en minuscules ; `None` pour tout le reste. Ce qui en
+/// sort finit dans une adresse d'image : rien d'autre n'y entre.
+pub fn uuid_valorant(s: &str) -> Option<String> {
+    let s = s.trim();
+    let groupes: Vec<&str> = s.split('-').collect();
+    let formes = [8, 4, 4, 4, 12];
+    let bon = groupes.len() == formes.len()
+        && groupes.iter().zip(formes).all(|(g, n)| g.len() == n && g.chars().all(|c| c.is_ascii_hexdigit()));
+    bon.then(|| s.to_ascii_lowercase())
 }
 
 /// La fiche d'un membre avec son identité, pour la page de stats du
@@ -2726,6 +2750,33 @@ pub fn nom_de_rang(tier: u8) -> String {
     }
 }
 
+/// Le nom français d'une file VALORANT connue de cette version, par son
+/// identifiant sans le préfixe `console_` (`competitive`, `hurm`…) ;
+/// `None` pour une file inconnue — un mode sorti depuis — ou vide.
+pub fn nom_de_file(file: &str) -> Option<&'static str> {
+    Some(match file {
+        "competitive" => "compétitive",
+        "unrated" => "non classée",
+        "swiftplay" => "swiftplay",
+        "spikerush" => "spike rush",
+        "deathmatch" => "deathmatch",
+        "ggteam" => "escalade",
+        "hurm" => "team deathmatch",
+        "premier" => "Premier",
+        "newmap" => "nouvelle carte",
+        "abilitydraftarena" => "gauntlet",
+        "valaram" => "all random one site",
+        "dodgeball" => "K.-O.",
+        "fortcollins" => "retake",
+        "onefa" => "réplication",
+        "snowball" => "boules de neige",
+        "skirmish2v2" => "escarmouche 2c2",
+        "skirmishascension1v1" => "escarmouche ascension 1c1",
+        "skirmishascension2v2" => "escarmouche ascension 2c2",
+        _ => return None,
+    })
+}
+
 /// Le Riot ID « Pseudo#TAG » découpé et vérifié : un pseudo de 3 à 16
 /// caractères, un tag de 3 à 5 lettres ou chiffres.
 pub fn parser_riot_id(s: &str) -> Option<(String, String)> {
@@ -2787,25 +2838,19 @@ impl JeuStatut {
     }
 
     /// Le nom français de la file. Les files console portent un préfixe
-    /// (`console_competitive`) : même nom, avec la mention.
+    /// (`console_competitive`) : même nom, avec la mention. Une file que
+    /// cette version ne connaît pas garde son identifiant — le client le
+    /// remplace par le nom du catalogue de valorant-api.com quand il l'a.
     pub fn libelle_file(&self) -> String {
         let (file, console) = match self.file.strip_prefix("console_") {
             Some(reste) => (reste, true),
             None => (self.file.as_str(), false),
         };
-        let nom = match file {
-            "competitive" => "compétitive",
-            "unrated" => "non classée",
-            "swiftplay" => "swiftplay",
-            "spikerush" => "spike rush",
-            "deathmatch" => "deathmatch",
-            "ggteam" => "escalade",
-            "hurm" => "team deathmatch",
-            "premier" => "Premier",
-            "newmap" => "nouvelle carte",
-            "" if self.custom => "personnalisée",
-            "" => "",
-            autre => autre,
+        let nom = match (file, nom_de_file(file)) {
+            (_, Some(nom)) => nom,
+            ("", None) if self.custom => "personnalisée",
+            ("", None) => "",
+            (autre, None) => autre,
         };
         if console && !nom.is_empty() {
             format!("{nom} (console)")
@@ -3610,6 +3655,51 @@ mod tests {
         assert!(m.jeu.is_none() && m.riot_id.is_none() && m.rang_valorant.is_none());
     }
 
+    /// Les files de la 13.06 ont leur nom, console comprise ; une file
+    /// inconnue garde son identifiant — c'est au client de la nommer.
+    #[test]
+    fn les_nouvelles_files_ont_leur_nom() {
+        let en_jeu = |file: &str| JeuStatut {
+            etat: JeuEtat::EnJeu,
+            file: file.into(),
+            carte: "Gauntlet".into(),
+            ..JeuStatut::default()
+        };
+        assert_eq!(en_jeu("abilitydraftarena").ligne(), "gauntlet · Gauntlet · 0-0");
+        assert_eq!(en_jeu("console_abilitydraftarena").libelle_file(), "gauntlet (console)");
+        assert_eq!(en_jeu("dodgeball").libelle_file(), "K.-O.");
+        assert_eq!(en_jeu("modefutur").libelle_file(), "modefutur");
+        assert_eq!(nom_de_file("modefutur"), None);
+        assert_eq!(nom_de_file(""), None);
+        let perso = JeuStatut { custom: true, ..en_jeu("") };
+        assert_eq!(perso.libelle_file(), "personnalisée");
+    }
+
+    /// Seul un vrai uuid passe : il finit dans une adresse d'image.
+    #[test]
+    fn un_uuid_valorant_se_verifie() {
+        assert_eq!(
+            uuid_valorant(" 9FB348BC-41A0-91AD-8A3E-818035C4E561 ").as_deref(),
+            Some("9fb348bc-41a0-91ad-8a3e-818035c4e561")
+        );
+        for faux in ["", "9fb348bc", "../../etc/passwd", "9fb348bc-41a0-91ad-8a3e-818035c4e56z", "9fb348bc-41a0-91ad-8a3e-818035c4e561-00"] {
+            assert_eq!(uuid_valorant(faux), None, "{faux}");
+        }
+    }
+
+    /// Une fiche d'avant 0.1.49 se relit sans carte ni titre, et une fiche
+    /// qui n'en a pas ne les écrit pas.
+    #[test]
+    fn la_carte_de_joueur_est_facultative() {
+        let ancienne: FicheValorant =
+            serde_json::from_str(r#"{"riot_id":"a#b","region":"eu","plateforme":"pc"}"#).unwrap();
+        assert!(ancienne.carte_joueur.is_empty() && ancienne.titre_joueur.is_empty());
+        assert!(!serde_json::to_string(&ancienne).unwrap().contains("carte_joueur"));
+        let avec = FicheValorant { carte_joueur: "c".into(), titre_joueur: "t".into(), ..ancienne };
+        let resume = avec.resume(0, 0);
+        assert_eq!((resume.carte_joueur.as_str(), resume.titre_joueur.as_str()), ("c", "t"));
+    }
+
     /// Le bot n'accepte que YouTube et SoundCloud, en HTTPS, sans espace.
     #[test]
     fn un_autre_jeu_se_dit_en_une_ligne() {
@@ -3842,6 +3932,8 @@ mod tests {
                 tier_fin: 16,
                 rr_fin: 57,
             }],
+            carte_joueur: "9fb348bc-41a0-91ad-8a3e-818035c4e561".into(),
+            titre_joueur: "48d870a2-4493-ebf8-7d6f-979be914dc43".into(),
         };
         let json = serde_json::to_string(&pleine).unwrap();
         let relu: FicheValorant = serde_json::from_str(&json).unwrap();

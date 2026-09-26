@@ -21,16 +21,17 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{Datelike, TimeZone, Timelike};
-use eframe::egui::{self, Color32, Pos2, Rect, Response, RichText, Sense, Ui, Vec2};
+use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, RichText, Sense, Ui, Vec2};
 use ki_protocol::{
-    nom_de_rang, Bilan, BilanMembre, FicheMembre, FicheValorant, MatchEsport, MatchResume, Member,
-    PointRR, PositionMmr, UserId,
+    nom_de_rang, Bilan, BilanMembre, FicheMembre, FicheValorant, JeuEtat, JeuStatut, MatchEsport,
+    MatchResume, Member, PointRR, PositionMmr, UserId,
 };
 
 use crate::graphes::{self, Barre, PointCourbe};
 use crate::icons;
 use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT};
 use crate::ui;
+use crate::valo_catalogue::Catalogue;
 use crate::{boutique, rangs, FicheOuverte};
 
 // ---------------------------------------------------------------------
@@ -53,6 +54,14 @@ const TUILE_FICHE: f32 = 140.0;
 const MARGE_TUILE: f32 = 12.0;
 /// La ligne de matchs de la page groupe se déroule sur cette hauteur.
 const HAUTEUR_COURBE: f32 = 120.0;
+/// Le portrait d'un agent dans une ligne de table.
+const PORTRAIT: f32 = 18.0;
+/// La pastille d'une carte dans une ligne de table : son nom sur son
+/// bandeau.
+const HAUTEUR_PASTILLE: f32 = 18.0;
+const LARGEUR_PASTILLE_MIN: f32 = 64.0;
+/// Le bandeau de la carte de joueur en tête de fiche.
+const HAUTEUR_BANDEAU_FICHE: f32 = 76.0;
 const JOURS_LONGS: [&str; 7] = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"];
 const TIRET: &str = "—";
 
@@ -718,6 +727,233 @@ fn rang_court(ui: &mut Ui, tier: u8, rr: u16, taille: f32, rangs: &rangs::Rangs)
     }
 }
 
+/// L'agent d'une ligne de table : son portrait (valorant-api.com) puis son
+/// nom — le nom seul tant que l'image n'est pas là.
+fn agent_cellule(ui: &mut Ui, agent: &str, catalogue: &Catalogue) -> Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if let Some(portrait) = catalogue.agent(agent).filter(|_| !agent.is_empty()) {
+            ui.add(egui::Image::new(portrait).fit_to_exact_size(Vec2::splat(PORTRAIT)));
+        }
+        cellule(ui, agent, TEXT_DIM);
+    })
+    .response
+}
+
+/// La carte d'une ligne de table : son nom sur son bandeau, assombri pour
+/// que le texte se lise — le nom seul tant que l'image n'est pas là.
+fn carte_cellule(ui: &mut Ui, carte: &str, catalogue: &Catalogue) -> Response {
+    let Some(bandeau) = catalogue.bandeau(carte).filter(|_| !carte.is_empty()) else {
+        return cellule(ui, carte, TEXT);
+    };
+    pastille_carte(ui, carte, bandeau, HAUTEUR_PASTILLE, 11.5)
+}
+
+/// Un nom sur le bandeau de sa carte : l'image rognée au centre pour
+/// remplir la pastille, un voile sombre, le texte en blanc.
+fn pastille_carte(ui: &mut Ui, texte: &str, bandeau: &egui::TextureHandle, hauteur: f32, taille: f32) -> Response {
+    let galley = ui.fonts(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(taille), Color32::WHITE));
+    let dimensions = Vec2::new((galley.size().x + 16.0).max(LARGEUR_PASTILLE_MIN), hauteur);
+    let (rect, reponse) = ui.allocate_exact_size(dimensions, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        egui::Image::new(bandeau)
+            .uv(graphes::uv_couvrant(bandeau.size_vec2(), rect.size()))
+            .corner_radius(4)
+            .paint_at(ui, rect);
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), Color32::from_black_alpha(120));
+        ui.painter().galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+    }
+    reponse
+}
+
+/// Une étiquette en capitales sur un fond de sa couleur : « EN PARTIE ».
+fn badge(ui: &mut Ui, texte: &str, couleur: Color32) -> Response {
+    let galley = ui.fonts(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(9.5), couleur));
+    let (rect, reponse) = ui.allocate_exact_size(Vec2::new(galley.size().x + 10.0, 16.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(couleur, 36));
+        ui.painter().galley(Pos2::new(rect.left() + 5.0, rect.center().y - galley.size().y / 2.0), galley, couleur);
+    }
+    reponse
+}
+
+// ---------------------------------------------------------------------
+// En direct
+// ---------------------------------------------------------------------
+
+/// Où en est une partie, pour trier « En direct » : les parties d'abord,
+/// puis la sélection d'agents, les files, les menus.
+fn rang_d_etat(j: &JeuStatut) -> u8 {
+    match j.etat {
+        JeuEtat::EnJeu => 0,
+        JeuEtat::PreGame => 1,
+        JeuEtat::Menus if !j.file.is_empty() => 2,
+        JeuEtat::Menus => 3,
+    }
+}
+
+/// Les lignes d'« En direct » : les indices des joueurs réunis quand ils
+/// sont dans la même partie de toute évidence — en jeu ou en sélection,
+/// même file, même carte et même score vu du même camp — un par ligne
+/// sinon, dans l'ordre reçu. Deux membres dans des camps opposés restent
+/// sur deux lignes : leurs scores sont inversés.
+fn regrouper_en_direct(statuts: &[&JeuStatut]) -> Vec<Vec<usize>> {
+    let cle = |j: &JeuStatut| {
+        (matches!(j.etat, JeuEtat::EnJeu | JeuEtat::PreGame) && !j.carte.is_empty())
+            .then(|| (j.etat == JeuEtat::EnJeu, j.file.clone(), j.carte.clone(), j.score_allie, j.score_adverse))
+    };
+    let mut lignes: Vec<Vec<usize>> = Vec::new();
+    let mut par_partie: HashMap<(bool, String, String, u8, u8), usize> = HashMap::new();
+    for (i, j) in statuts.iter().enumerate() {
+        match cle(j) {
+            Some(k) => match par_partie.get(&k) {
+                Some(&ligne) => lignes[ligne].push(i),
+                None => {
+                    par_partie.insert(k, lignes.len());
+                    lignes.push(vec![i]);
+                }
+            },
+            None => lignes.push(vec![i]),
+        }
+    }
+    lignes
+}
+
+/// Ce qu'on dit d'une partie en direct, sans la carte (elle est sur le
+/// bandeau) : la file, puis où il en est, et sa party.
+fn etat_en_direct(j: &JeuStatut) -> (String, Option<(String, Color32)>) {
+    let file = j.libelle_file();
+    let party = if j.party_taille > 1 {
+        format!(" · party {}/{}", j.party_taille, j.party_max.max(j.party_taille))
+    } else {
+        String::new()
+    };
+    match j.etat {
+        JeuEtat::EnJeu => {
+            let score = (!(j.custom && j.score_allie == 0 && j.score_adverse == 0)).then(|| {
+                let teinte = teinte_de_score((j.score_allie != j.score_adverse).then_some(j.score_allie > j.score_adverse));
+                (format!("{}-{}", j.score_allie, j.score_adverse), teinte)
+            });
+            (format!("{file}{party}"), score)
+        }
+        JeuEtat::PreGame if file.is_empty() => (format!("sélection des agents{party}"), None),
+        JeuEtat::PreGame => (format!("{file} · sélection des agents{party}"), None),
+        JeuEtat::Menus if file.is_empty() => (format!("au menu{party}"), None),
+        JeuEtat::Menus => (format!("en file {file}{party}"), None),
+    }
+}
+
+/// L'étiquette d'une partie en direct, et sa couleur.
+fn badge_d_etat(j: &JeuStatut) -> (&'static str, Color32) {
+    match rang_d_etat(j) {
+        0 => ("EN PARTIE", SPEAK),
+        1 => ("SÉLECTION", ACCENT),
+        2 => ("EN FILE", ACCENT),
+        _ => ("AU MENU", TEXT_FAINT),
+    }
+}
+
+/// « En direct » : qui est sur VALORANT en ce moment, d'après la présence
+/// que chacun partage — rien de plus que ce que la liste des membres dit
+/// déjà, rangé et illustré. Ceux qui jouent ensemble tiennent sur une
+/// ligne.
+#[allow(clippy::too_many_arguments)]
+fn en_direct(
+    ui: &mut Ui,
+    membres: &[Member],
+    noms: &Annuaire,
+    rangs: &rangs::Rangs,
+    catalogue: &Catalogue,
+    my_id: Option<UserId>,
+    demandes: &mut Vec<Demande>,
+) {
+    let mut joueurs: Vec<(&Member, Cow<JeuStatut>)> = membres
+        .iter()
+        .filter(|m| m.online)
+        .filter_map(|m| m.jeu.as_ref().filter(|j| j.est_valorant()).map(|j| (m, catalogue.nommer(j))))
+        .collect();
+    joueurs.sort_by_key(|(m, j)| (rang_d_etat(j), m.username.to_lowercase()));
+    let en_partie = joueurs.iter().filter(|(_, j)| j.etat == JeuEtat::EnJeu).count();
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("En direct").strong().size(13.5));
+        if !joueurs.is_empty() {
+            let (point, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            icons::dot(ui.painter(), point.center(), 3.5, if en_partie > 0 { SPEAK } else { TEXT_FAINT });
+            let texte = match (joueurs.len(), en_partie) {
+                (n, 0) => format!("{} sur VALORANT", pluriel(n as u32, "membre")),
+                (n, p) if p == n => format!("{} en partie", pluriel(n as u32, "membre")),
+                (n, p) => format!("{} sur VALORANT, {p} en partie", pluriel(n as u32, "membre")),
+            };
+            ui.label(RichText::new(texte).color(TEXT_DIM).size(11.5));
+        }
+    });
+    if joueurs.is_empty() {
+        ui::hint(ui, "personne sur VALORANT en ce moment — chacun peut partager sa partie dans ⚙ → Jeu");
+        return;
+    }
+    ui.add_space(4.0);
+    let statuts: Vec<&JeuStatut> = joueurs.iter().map(|(_, j)| j.as_ref()).collect();
+    for ligne in regrouper_en_direct(&statuts) {
+        let j = statuts[ligne[0]];
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // Le bandeau de la carte en tête, ou sa place vide : les noms
+            // s'alignent d'une ligne à l'autre.
+            let carte = if j.etat == JeuEtat::Menus { "" } else { j.carte.as_str() };
+            match catalogue.bandeau(carte).filter(|_| !carte.is_empty()) {
+                Some(bandeau) => {
+                    pastille_carte(ui, carte, bandeau, 24.0, 12.0);
+                }
+                None if !carte.is_empty() => {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(LARGEUR_PASTILLE_MIN + 24.0, 24.0), Sense::hover());
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(TEXT, 10));
+                    ui.painter().text(
+                        Pos2::new(rect.left() + 8.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        carte,
+                        FontId::proportional(12.0),
+                        TEXT,
+                    );
+                }
+                None => {
+                    ui.allocate_exact_size(Vec2::new(LARGEUR_PASTILLE_MIN + 24.0, 24.0), Sense::hover());
+                }
+            }
+            let (etiquette, couleur) = badge_d_etat(j);
+            badge(ui, etiquette, couleur);
+            for (n, &i) in ligne.iter().enumerate() {
+                let (m, statut) = (&joueurs[i].0, &joueurs[i].1);
+                if n > 0 {
+                    ui.label(RichText::new("·").color(TEXT_FAINT));
+                }
+                let mut pseudo = RichText::new(&m.username).color(noms.couleur(m.user_id)).size(12.5);
+                if my_id == Some(m.user_id) {
+                    pseudo = pseudo.strong();
+                }
+                let lie = m.riot_id.is_some();
+                let reponse = ui.add(egui::Label::new(pseudo).sense(if lie { Sense::click() } else { Sense::hover() }));
+                if lie && reponse.on_hover_text("ouvrir sa fiche").clicked() {
+                    demandes.push(Demande::OuvrirFiche(m.user_id, m.username.clone()));
+                }
+                let palier = m.rang_valorant.unwrap_or(statut.rang);
+                if let Some(icone) = rangs.texture(palier).filter(|_| palier >= 3) {
+                    ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(16.0)))
+                        .on_hover_text(nom_de_rang(palier));
+                }
+            }
+            let (texte, score) = etat_en_direct(j);
+            if let Some((score, teinte)) = score {
+                ui.label(RichText::new(score).color(teinte).strong().size(12.5));
+            }
+            if !texte.is_empty() {
+                ui.label(RichText::new(texte).color(TEXT_DIM).size(11.5));
+            }
+        });
+        ui.add_space(2.0);
+    }
+}
+
 // ---------------------------------------------------------------------
 // La page du groupe
 // ---------------------------------------------------------------------
@@ -738,6 +974,7 @@ impl PageValo {
         my_id: Option<UserId>,
         membres: &[Member],
         rangs: &rangs::Rangs,
+        catalogue: &Catalogue,
         boutique: &mut boutique::Lecteur,
     ) -> Vec<Demande> {
         let mut demandes = Vec::new();
@@ -805,6 +1042,13 @@ impl PageValo {
                 ui.add_space(8.0);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.onglet {
                     Onglet::Groupe | Onglet::Matchs => {
+                        // Qui joue en ce moment : ça vient du roster, pas des
+                        // fiches — ça se montre avant qu'elles arrivent, et
+                        // même si personne n'a lié de compte.
+                        if self.onglet == Onglet::Groupe {
+                            en_direct(ui, membres, &noms, rangs, catalogue, my_id, &mut demandes);
+                            ui.add_space(14.0);
+                        }
                         if !recu {
                             ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
                             return;
@@ -822,7 +1066,7 @@ impl PageValo {
                         if self.onglet == Onglet::Groupe {
                             self.onglet_groupe(ui, &lignes, &noms, activite, my_id, rangs, &mut demandes);
                         } else {
-                            self.onglet_matchs(ui, &lignes, &noms, my_id, maintenant, &mut demandes);
+                            self.onglet_matchs(ui, &lignes, &noms, my_id, maintenant, catalogue, &mut demandes);
                         }
                     }
                     Onglet::Esport => esports_ui(ui, esports),
@@ -992,6 +1236,7 @@ impl PageValo {
 
     /// L'onglet Matchs : la somme de la période, deux filtres, et le fil
     /// de tout le groupe — les matchs joués ensemble regroupés.
+    #[allow(clippy::too_many_arguments)]
     fn onglet_matchs(
         &mut self,
         ui: &mut Ui,
@@ -999,6 +1244,7 @@ impl PageValo {
         noms: &Annuaire,
         my_id: Option<UserId>,
         maintenant: u64,
+        catalogue: &Catalogue,
         demandes: &mut Vec<Demande>,
     ) {
         let periode = self.periode;
@@ -1112,7 +1358,7 @@ impl PageValo {
                         cellule(ui, crate::il_y_a(m.date), TEXT_FAINT);
                         ui.label(RichText::new(format!("ENSEMBLE ×{}", bloc.len())).color(ACCENT).strong().size(11.0));
                         cellule(ui, &m.mode, TEXT);
-                        cellule(ui, &m.carte, TEXT);
+                        carte_cellule(ui, &m.carte, catalogue);
                         for _ in 0..6 {
                             ui.label("");
                         }
@@ -1126,7 +1372,7 @@ impl PageValo {
                     for &i in bloc {
                         let (qui, m) = tous[i];
                         let point = points.get(&(qui, m.id.as_str())).copied();
-                        ligne_du_fil(ui, qui, m, ensemble, point, noms, my_id, demandes);
+                        ligne_du_fil(ui, qui, m, ensemble, point, noms, my_id, catalogue, demandes);
                     }
                 }
             });
@@ -1429,6 +1675,7 @@ fn ligne_du_fil(
     point: Option<&PointRR>,
     noms: &Annuaire,
     my_id: Option<UserId>,
+    catalogue: &Catalogue,
     demandes: &mut Vec<Demande>,
 ) {
     // Dans un bloc, le quand, le mode et la carte sont sur l'en-tête.
@@ -1451,9 +1698,9 @@ fn ligne_du_fil(
         ui.label("");
     } else {
         cellule(ui, &m.mode, TEXT);
-        cellule(ui, &m.carte, TEXT);
+        carte_cellule(ui, &m.carte, catalogue);
     }
-    cellule(ui, &m.agent, TEXT_DIM);
+    agent_cellule(ui, &m.agent, catalogue);
     cellule(ui, format!("{} / {} / {}", m.kills, m.deaths, m.assists), TEXT);
     cellule(ui, opt_entier(acs_de(m)), TEXT_DIM);
     cellule(ui, opt_entier(adr_de(m)), TEXT_DIM);
@@ -1528,6 +1775,7 @@ struct Vue<'a> {
     periode: PeriodeFiche,
     noms: Annuaire<'a>,
     rangs: &'a rangs::Rangs,
+    catalogue: &'a Catalogue,
     /// Les bilans du groupe s'il a déjà été reçu — pour la médiane.
     groupe: Vec<Ligne<'a>>,
 }
@@ -1542,6 +1790,7 @@ impl<'a> Vue<'a> {
         stats: &'a [FicheMembre],
         membres: &'a [Member],
         rangs: &'a rangs::Rangs,
+        catalogue: &'a Catalogue,
         maintenant: u64,
     ) -> Self {
         let (depuis, derniers) = periode.fenetre(maintenant);
@@ -1565,7 +1814,7 @@ impl<'a> Vue<'a> {
         }
         b.rr = p.iter().fold(0i32, |acc, x| acc.saturating_add(x.delta));
         let (groupe, _) = lignes_du_groupe(stats, maintenant);
-        Self { username, fiche, e, p, b, classe, periode, noms: Annuaire::new(stats, membres), rangs, groupe }
+        Self { username, fiche, e, p, b, classe, periode, noms: Annuaire::new(stats, membres), rangs, catalogue, groupe }
     }
 
     /// Les matchs à manches de la sélection, ceux qui pèsent.
@@ -1626,6 +1875,7 @@ impl PageValo {
         stats: &[FicheMembre],
         membres: &[Member],
         rangs: &rangs::Rangs,
+        catalogue: &Catalogue,
     ) -> bool {
         let mut open = true;
         let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
@@ -1649,7 +1899,7 @@ impl PageValo {
                     ui.label(RichText::new("pas de compte Riot lié — ou pas encore de fiche.").color(TEXT_DIM));
                 }
                 (true, Some(fiche)) => {
-                    self.fiche_corps(ui, &ouverte.username, fiche, stats, membres, rangs);
+                    self.fiche_corps(ui, &ouverte.username, fiche, stats, membres, rangs, catalogue);
                 }
             });
         open
@@ -1657,6 +1907,7 @@ impl PageValo {
 
     /// Le corps de la fiche : l'identité et les filtres en tête, puis les
     /// sections qui se déroulent.
+    #[allow(clippy::too_many_arguments)]
     fn fiche_corps(
         &mut self,
         ui: &mut Ui,
@@ -1665,20 +1916,14 @@ impl PageValo {
         stats: &[FicheMembre],
         membres: &[Member],
         rangs: &rangs::Rangs,
+        catalogue: &Catalogue,
     ) {
-        // L'identité sur sa ligne, les filtres sur la leur — comme la
-        // ligne d'onglets de la page du groupe. Six boutons et un Riot ID
-        // sur une seule ligne dépassent les 640 px de la fenêtre, et un
-        // `right_to_left` ne se replie pas : il se dessinait par-dessus
-        // « EU · PC · niveau … ».
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&fiche.riot_id).strong().size(16.0));
-            let mut detail = format!("{} · {}", fiche.region.to_uppercase(), fiche.plateforme.to_uppercase());
-            if fiche.niveau > 0 {
-                detail.push_str(&format!(" · niveau {}", fiche.niveau));
-            }
-            ui.label(RichText::new(detail).color(TEXT_DIM).size(11.5));
-        });
+        // L'identité sur sa ligne — sur sa carte de joueur quand on la
+        // connaît —, les filtres sur la leur, comme la ligne d'onglets de
+        // la page du groupe. Six boutons et un Riot ID sur une seule ligne
+        // dépassent les 640 px de la fenêtre, et un `right_to_left` ne se
+        // replie pas : il se dessinait par-dessus « EU · PC · niveau … ».
+        identite(ui, fiche, catalogue);
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             for p in PeriodeFiche::TOUTES {
@@ -1699,7 +1944,17 @@ impl PageValo {
         });
         ui.add_space(6.0);
 
-        let vue = Vue::new(username, fiche, self.fiche_periode, self.fiche_classe, stats, membres, rangs, maintenant_ms());
+        let vue = Vue::new(
+            username,
+            fiche,
+            self.fiche_periode,
+            self.fiche_classe,
+            stats,
+            membres,
+            rangs,
+            catalogue,
+            maintenant_ms(),
+        );
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             en_tete_fiche(ui, &vue);
             ui.add_space(10.0);
@@ -1823,8 +2078,8 @@ impl PageValo {
                     if !vue.classe {
                         cellule(ui, &m.mode, TEXT);
                     }
-                    cellule(ui, &m.carte, TEXT);
-                    cellule(ui, &m.agent, TEXT_DIM);
+                    carte_cellule(ui, &m.carte, vue.catalogue);
+                    agent_cellule(ui, &m.agent, vue.catalogue);
                     cellule(ui, format!("{} / {} / {}", m.kills, m.deaths, m.assists), TEXT)
                         .on_hover_text(format!("éliminations / morts / assistances — {} points", milliers(m.score)));
                     cellule(ui, opt_entier(acs_de(m)), TEXT_DIM);
@@ -1910,6 +2165,67 @@ fn frontieres_d_acte(chrono: &[&PointRR]) -> Vec<(u64, String)> {
         .filter(|w| !w[0].saison.is_empty() && !w[1].saison.is_empty() && w[0].saison != w[1].saison)
         .map(|w| (w[1].date, format!("{} → {}", w[0].saison, w[1].saison)))
         .collect()
+}
+
+/// L'identité en tête de fiche : le Riot ID, la région, la plateforme, le
+/// niveau et le titre — posés sur la carte de joueur qu'il portait à son
+/// dernier match quand le serveur la connaît (0.1.49 et après), en une
+/// ligne de texte sinon.
+fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
+    let mut detail = format!("{} · {}", fiche.region.to_uppercase(), fiche.plateforme.to_uppercase());
+    if fiche.niveau > 0 {
+        detail.push_str(&format!(" · niveau {}", fiche.niveau));
+    }
+    let titre = catalogue.titre(&fiche.titre_joueur).map(|t| format!("« {t} »"));
+    if fiche.carte_joueur.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&fiche.riot_id).strong().size(16.0));
+            ui.label(RichText::new(&detail).color(TEXT_DIM).size(11.5));
+            if let Some(titre) = &titre {
+                ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.5));
+            }
+        });
+        return;
+    }
+    // La place du bandeau se prend tout de suite, image ou pas : rien ne
+    // saute quand elle arrive.
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HAUTEUR_BANDEAU_FICHE), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let image = catalogue.carte_joueur(&fiche.carte_joueur);
+    match image {
+        Some(carte) => {
+            egui::Image::new(carte)
+                .uv(graphes::uv_couvrant(carte.size_vec2(), rect.size()))
+                .corner_radius(6)
+                .paint_at(ui, rect);
+            if let Some(voile) = catalogue.voile() {
+                egui::Image::new(voile).corner_radius(6).paint_at(ui, rect);
+            }
+        }
+        None => {
+            ui.painter().rect_filled(rect, egui::CornerRadius::same(6), theme::alpha(TEXT, 10));
+        }
+    }
+    let (fort, doux) = if image.is_some() {
+        (Color32::WHITE, Color32::from_white_alpha(200))
+    } else {
+        (TEXT, TEXT_DIM)
+    };
+    let mut lignes = vec![ui.fonts(|f| f.layout_no_wrap(fiche.riot_id.clone(), FontId::proportional(19.0), fort))];
+    lignes.push(ui.fonts(|f| f.layout_no_wrap(detail, FontId::proportional(11.5), doux)));
+    if let Some(titre) = titre {
+        lignes.push(ui.fonts(|f| f.layout_no_wrap(titre, FontId::proportional(11.5), doux)));
+    }
+    let hauteur: f32 = lignes.iter().map(|g| g.size().y).sum::<f32>() + 2.0 * (lignes.len() as f32 - 1.0);
+    let mut y = rect.center().y - hauteur / 2.0;
+    let painter = ui.painter().with_clip_rect(rect);
+    for galley in lignes {
+        let h = galley.size().y;
+        painter.galley(Pos2::new(rect.left() + 14.0, y), galley, fort);
+        y += h + 2.0;
+    }
 }
 
 /// L'en-tête de la fiche : le rang en grand, la jauge vers le palier
@@ -2247,9 +2563,11 @@ fn agents_et_cartes(ui: &mut Ui, vue: &Vue) {
                         b.kills,
                         b.deaths
                     ),
+                    icone: vue.catalogue.agent(nom),
                 })
                 .collect();
-            graphes::barres(&mut cols[0], &lignes, 70.0, 20.0);
+            // La colonne du libellé prend le portrait en plus du nom.
+            graphes::barres(&mut cols[0], &lignes, 94.0, 22.0);
         }
         cols[1].label(RichText::new("Cartes").color(TEXT_DIM).size(11.5));
         if cartes.is_empty() {
@@ -2272,10 +2590,12 @@ fn agents_et_cartes(ui: &mut Ui, vue: &Vue) {
                             b.victoires,
                             b.defaites
                         ),
+                        icone: vue.catalogue.bandeau(nom),
                     }
                 })
                 .collect();
-            graphes::barres(&mut cols[1], &lignes, 70.0, 20.0);
+            // Le bandeau de la carte, rogné, devant son nom.
+            graphes::barres(&mut cols[1], &lignes, 118.0, 22.0);
         }
     });
 }
@@ -2656,11 +2976,12 @@ mod tests {
         // La fiche, avec ses filtres : « 10 derniers » de tous les modes
         // garde le Spike Rush dans la table, « Compétitif » l'écarte.
         let rangs = rangs::Rangs::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &[], &[], &rangs, maintenant);
+        let catalogue = Catalogue::new();
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &[], &[], &rangs, &catalogue, maintenant);
         assert_eq!(vue.e.len(), 5);
         assert_eq!(vue.b.matchs, 5, "un Spike Rush a des manches, il compte");
         assert_eq!(vue.e[0].id, "a", "du plus récent au plus ancien");
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &[], &[], &rangs, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &[], &[], &rangs, &catalogue, maintenant);
         assert_eq!(vue.e.len(), 2);
         assert_eq!(vue.b.rr, 20);
         assert!(vue.point_de("a").is_some());
@@ -2736,6 +3057,10 @@ mod tests {
                 ki_protocol::StatsSaison { saison: "e9a2".into(), victoires: 30, parties: 55, tier_fin: 15, rr_fin: 80 },
                 ki_protocol::StatsSaison { saison: "e9a3".into(), victoires: 14, parties: 25, tier_fin: 16, rr_fin: 57 },
             ],
+            // Une carte connue du serveur : le bandeau garde sa place même
+            // sans image (pas de réseau dans les tests).
+            carte_joueur: "9fb348bc-41a0-91ad-8a3e-818035c4e561".into(),
+            titre_joueur: String::new(),
         }
     }
 
@@ -2814,6 +3139,7 @@ mod tests {
         let maintenant = maintenant_ms();
         let ctx = egui::Context::default();
         let rangs = rangs::Rangs::new();
+        let catalogue = Catalogue::new();
         let membres = membres();
         let mut boutique = boutique::Lecteur::new();
         let activite: Vec<u16> = (0..168u16).map(|i| i % 5).collect();
@@ -2830,7 +3156,7 @@ mod tests {
                     for souris in [None, Some(Pos2::new(300.0, 300.0)), Some(Pos2::new(700.0, 500.0))] {
                         dessiner(&ctx, souris, |ctx| {
                             let demandes =
-                                page.fenetre(ctx, &stats, true, &[], &activite, Some(1), &membres, &rangs, &mut boutique);
+                                page.fenetre(ctx, &stats, true, &[], &activite, Some(1), &membres, &rangs, &catalogue, &mut boutique);
                             assert!(demandes.is_empty());
                         });
                     }
@@ -2842,7 +3168,7 @@ mod tests {
                 page.tri = tri;
                 page.tri_desc = !page.tri_desc;
                 dessiner(&ctx, None, |ctx| {
-                    page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &mut boutique);
+                    page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &catalogue, &mut boutique);
                 });
             }
             page.onglet = Onglet::Matchs;
@@ -2850,12 +3176,12 @@ mod tests {
             page.filtre_mode = Some(MODE_CLASSE.into());
             page.plus = true;
             dessiner(&ctx, None, |ctx| {
-                page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &mut boutique);
+                page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &catalogue, &mut boutique);
             });
             // Avant la réponse du serveur, et sans personne de lié.
             dessiner(&ctx, None, |ctx| {
-                page.fenetre(ctx, &stats, false, &[], &[], None, &membres, &rangs, &mut boutique);
-                page.fenetre(ctx, &[], true, &[], &[], None, &[], &rangs, &mut boutique);
+                page.fenetre(ctx, &stats, false, &[], &[], None, &membres, &rangs, &catalogue, &mut boutique);
+                page.fenetre(ctx, &[], true, &[], &[], None, &[], &rangs, &catalogue, &mut boutique);
             });
             assert!(page.ouvert);
 
@@ -2874,7 +3200,7 @@ mod tests {
                         page.fiche_plus = periode == PeriodeFiche::Tout;
                         for souris in [None, Some(Pos2::new(200.0, 250.0)), Some(Pos2::new(320.0, 600.0))] {
                             dessiner(&ctx, souris, |ctx| {
-                                assert!(page.fiche(ctx, ouverte, &stats, &membres, &rangs));
+                                assert!(page.fiche(ctx, ouverte, &stats, &membres, &rangs, &catalogue));
                             });
                         }
                     }
@@ -2958,11 +3284,12 @@ mod tests {
         };
         let fiche = FicheValorant::default();
         let rangs = rangs::Rangs::new();
+        let catalogue = Catalogue::new();
         let deux = [membre(1, 10), membre(2, 20)];
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &deux, &[], &rangs, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &deux, &[], &rangs, &catalogue, maintenant);
         assert!(vue.repere(Bilan::kd, 1.0).is_none());
         let trois = [membre(1, 10), membre(2, 20), membre(3, 30)];
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &trois, &[], &rangs, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &trois, &[], &rangs, &catalogue, maintenant);
         let (mediane, max) = vue.repere(Bilan::kd, 5.0).expect("trois membres assez classés");
         assert_eq!(mediane, 2.0);
         assert_eq!(max, 5.0, "le plafond prend en compte la valeur du membre");
@@ -3011,6 +3338,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let rangs = rangs::Rangs::new();
+        let catalogue = Catalogue::new();
         let mut boutique = boutique::Lecteur::default();
         let mut page = PageValo::load(|_, d| d.to_string());
         page.ouvert = true;
@@ -3023,8 +3351,8 @@ mod tests {
         // stabilisent à la deuxième.
         for _ in 0..4 {
             let _ = ctx.run(entree(), |ctx| {
-                page.fenetre(ctx, &stats, true, &[], &[], Some(1), &membres, &rangs, &mut boutique);
-                page.fiche(ctx, &ouverte, &stats, &membres, &rangs);
+                page.fenetre(ctx, &stats, true, &[], &[], Some(1), &membres, &rangs, &catalogue, &mut boutique);
+                page.fiche(ctx, &ouverte, &stats, &membres, &rangs, &catalogue);
             });
         }
         let groupe = ctx.memory(|m| m.area_rect(egui::Id::new("valo_page_v5"))).expect("la page est ouverte");
@@ -3033,5 +3361,73 @@ mod tests {
         assert!((850.0..=900.0).contains(&groupe.width()), "page du groupe : {}", groupe.width());
         assert!((630.0..=680.0).contains(&fiche.width()), "fiche : {}", fiche.width());
         assert!(fiche.height() <= 1000.0 && groupe.height() <= 1000.0);
+    }
+
+    fn partie(file: &str, carte: &str, allie: u8, adverse: u8) -> JeuStatut {
+        JeuStatut {
+            etat: JeuEtat::EnJeu,
+            file: file.into(),
+            carte: carte.into(),
+            score_allie: allie,
+            score_adverse: adverse,
+            party_taille: 2,
+            party_max: 5,
+            rang: 15,
+            ..JeuStatut::default()
+        }
+    }
+
+    /// Ceux qui sont dans la même partie, du même camp, tiennent sur une
+    /// ligne ; un adversaire (le score inversé), une file et un menu ont
+    /// chacun la leur. Et chaque ligne dit où il en est, sans la carte.
+    #[test]
+    fn en_direct_regroupe_ceux_qui_jouent_ensemble() {
+        let a = partie("competitive", "Ascent", 7, 5);
+        let b = partie("competitive", "Ascent", 7, 5);
+        let adversaire = partie("competitive", "Ascent", 5, 7);
+        let file = JeuStatut { etat: JeuEtat::Menus, file: "competitive".into(), ..JeuStatut::default() };
+        let menu = JeuStatut::default();
+        let choix = JeuStatut { etat: JeuEtat::PreGame, ..partie("unrated", "Bind", 0, 0) };
+        let lignes = regrouper_en_direct(&[&a, &b, &adversaire, &file, &menu, &choix]);
+        assert_eq!(lignes, vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]]);
+
+        let (texte, score) = etat_en_direct(&a);
+        assert_eq!(texte, "compétitive · party 2/5");
+        assert_eq!(score, Some(("7-5".to_string(), SPEAK)));
+        assert_eq!(etat_en_direct(&adversaire).1.map(|(_, c)| c), Some(DANGER));
+        assert_eq!(etat_en_direct(&file).0, "en file compétitive");
+        assert_eq!(etat_en_direct(&menu).0, "au menu");
+        assert_eq!(etat_en_direct(&choix).0, "non classée · sélection des agents · party 2/5");
+        let perso = JeuStatut { custom: true, ..partie("", "Ascent", 0, 0) };
+        assert!(etat_en_direct(&perso).1.is_none(), "une personnalisée à 0-0 ne dit pas de score");
+        assert_eq!([&a, &choix, &file, &menu].map(|j| badge_d_etat(j).0), ["EN PARTIE", "SÉLECTION", "EN FILE", "AU MENU"]);
+    }
+
+    /// La page se dessine avec des membres en partie — ensemble, seul, en
+    /// file, un autre jeu — et sans catalogue ni image.
+    #[test]
+    fn en_direct_se_dessine() {
+        let maintenant = maintenant_ms();
+        let ctx = egui::Context::default();
+        let rangs = rangs::Rangs::new();
+        let catalogue = Catalogue::new();
+        let mut boutique = boutique::Lecteur::new();
+        let mut membres = membres();
+        membres[0].jeu = Some(partie("competitive", "Ascent", 7, 5));
+        membres[0].riot_id = Some("redik#EUW".into());
+        membres[1].jeu = Some(partie("competitive", "Ascent", 7, 5));
+        membres[2].jeu = Some(JeuStatut { etat: JeuEtat::Menus, file: "abilitydraftarena".into(), ..JeuStatut::default() });
+        membres[3].jeu = Some(JeuStatut::autre_jeu("Rocket League"));
+        let stats = groupe(maintenant, false);
+        let mut page = PageValo::load(|_, d| d.to_string());
+        page.ouvert = true;
+        page.onglet = Onglet::Groupe;
+        for recu in [false, true] {
+            for souris in [None, Some(Pos2::new(200.0, 160.0))] {
+                dessiner(&ctx, souris, |ctx| {
+                    page.fenetre(ctx, &stats, recu, &[], &[], Some(1), &membres, &rangs, &catalogue, &mut boutique);
+                });
+            }
+        }
     }
 }

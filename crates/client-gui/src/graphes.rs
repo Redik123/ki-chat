@@ -578,12 +578,19 @@ pub struct Barre<'a> {
     pub texte: String,
     pub couleur: Color32,
     pub info: String,
+    /// Une image devant le libellé — portrait d'agent, bandeau de carte —,
+    /// à la hauteur de la ligne, rognée au centre si elle est trop large.
+    pub icone: Option<&'a egui::TextureHandle>,
 }
 
+/// La largeur au plus d'une icône de [`Barre`], en hauteurs de ligne : un
+/// portrait tient dans un carré, un bandeau de carte s'arrête là.
+const ICONE_LARGE: f32 = 2.4;
+
 /// Des barres horizontales, une par ligne de `hauteur_ligne` : le libellé
-/// sur `largeur_label` pixels (rogné s'il déborde), le rail creusé, le
-/// `fond` gris (BG_ACTIVE) derrière la `part` colorée, le texte à droite ;
-/// `info` en tooltip. Sans ligne, rien n'est dessiné.
+/// sur `largeur_label` pixels (rogné s'il déborde, icône comprise), le
+/// rail creusé, le `fond` gris (BG_ACTIVE) derrière la `part` colorée, le
+/// texte à droite ; `info` en tooltip. Sans ligne, rien n'est dessiné.
 pub fn barres(ui: &mut Ui, lignes: &[Barre], largeur_label: f32, hauteur_ligne: f32) {
     let police = FontId::proportional(12.0);
     let largeur = ui.available_width();
@@ -597,12 +604,24 @@ pub fn barres(ui: &mut Ui, lignes: &[Barre], largeur_label: f32, hauteur_ligne: 
         let painter = ui.painter();
         let centre_y = rect.center().y;
 
-        // Le libellé, rogné à sa colonne.
+        // L'icône, puis le libellé, rognés à leur colonne.
         let zone_label = Rect::from_min_max(rect.min, Pos2::new(rect.left() + largeur_label, rect.bottom()));
+        let mut gauche_libelle = rect.left();
+        if let Some(icone) = ligne.icone {
+            let haut = (hauteur_ligne - 2.0).max(4.0);
+            let taille = icone.size_vec2();
+            let large = if taille.y > 0.0 { (haut * taille.x / taille.y).min(haut * ICONE_LARGE) } else { haut };
+            let cadre = Rect::from_min_size(Pos2::new(rect.left(), centre_y - haut / 2.0), Vec2::new(large, haut));
+            egui::Image::new(icone)
+                .uv(uv_couvrant(taille, cadre.size()))
+                .corner_radius(3)
+                .paint_at(ui, cadre);
+            gauche_libelle = cadre.right() + 6.0;
+        }
         let hauteur_libelle = libelle.size().y;
         painter
             .with_clip_rect(zone_label)
-            .galley(Pos2::new(rect.left(), centre_y - hauteur_libelle / 2.0), libelle, TEXT_DIM);
+            .galley(Pos2::new(gauche_libelle, centre_y - hauteur_libelle / 2.0), libelle, TEXT_DIM);
 
         // Le texte, calé à droite ; le rail prend ce qui reste entre les deux.
         let largeur_texte = texte.size().x;
@@ -632,6 +651,25 @@ pub fn barres(ui: &mut Ui, lignes: &[Barre], largeur_label: f32, hauteur_ligne: 
         if !ligne.info.is_empty() {
             reponse.on_hover_text(&ligne.info);
         }
+    }
+}
+
+/// La portion d'une image (en coordonnées de texture, 0 à 1) qui remplit
+/// un cadre sans la déformer : rognée au centre sur l'axe qui déborde,
+/// comme `object-fit: cover`. Une taille nulle rend l'image entière.
+pub fn uv_couvrant(image: Vec2, cadre: Vec2) -> Rect {
+    let entiere = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    if !(image.x > 0.0 && image.y > 0.0 && cadre.x > 0.0 && cadre.y > 0.0) {
+        return entiere;
+    }
+    let (ri, rc) = (image.x / image.y, cadre.x / cadre.y);
+    if ri > rc {
+        // Plus large que le cadre : on garde le milieu en largeur.
+        let marge = (1.0 - rc / ri) / 2.0;
+        Rect::from_min_max(Pos2::new(marge, 0.0), Pos2::new(1.0 - marge, 1.0))
+    } else {
+        let marge = (1.0 - ri / rc) / 2.0;
+        Rect::from_min_max(Pos2::new(0.0, marge), Pos2::new(1.0, 1.0 - marge))
     }
 }
 
@@ -1069,5 +1107,22 @@ mod tests {
         assert_eq!(PointCourbe::from(&p).monte, None);
         let p = PointRR { delta: -3, ..Default::default() };
         assert_eq!(PointCourbe::from(&p).monte, Some(false));
+    }
+
+    /// Une image remplit son cadre sans se déformer : le bandeau d'une
+    /// carte (456 × 100) dans un carré garde son milieu, une carte de
+    /// joueur (452 × 128) dans un bandeau plus plat garde sa bande
+    /// centrale ; une taille nulle rend tout.
+    #[test]
+    fn une_image_couvre_son_cadre_sans_se_deformer() {
+        let proche = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let uv = uv_couvrant(Vec2::new(456.0, 100.0), Vec2::splat(20.0));
+        assert!(proche(uv.min.y, 0.0) && proche(uv.max.y, 1.0));
+        assert!(proche(uv.width(), 100.0 / 456.0) && proche(uv.center().x, 0.5));
+        let uv = uv_couvrant(Vec2::new(452.0, 128.0), Vec2::new(620.0, 76.0));
+        assert!(proche(uv.min.x, 0.0) && proche(uv.max.x, 1.0));
+        assert!(proche(uv.height(), (452.0 / 128.0) / (620.0 / 76.0)) && proche(uv.center().y, 0.5));
+        let tout = uv_couvrant(Vec2::ZERO, Vec2::splat(10.0));
+        assert_eq!(tout, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)));
     }
 }

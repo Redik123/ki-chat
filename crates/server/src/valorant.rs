@@ -1809,7 +1809,15 @@ fn lier(
     };
     let niveau = d["account_level"].as_u64().unwrap_or(0) as u32;
     let lies = etat.lies();
-    let (fiche, _) = construire(api, &compte, Some(niveau), &lies)?;
+    let (mut fiche, _) = construire(api, &compte, Some(niveau), &lies)?;
+    // Le compte dit la carte et le titre portés maintenant ; ses matchs,
+    // ceux de sa dernière partie. Le compte d'abord, à la liaison.
+    if let Some(carte) = d["card"].as_str().and_then(ki_protocol::uuid_valorant) {
+        fiche.carte_joueur = carte;
+    }
+    if let Some(titre) = d["title"].as_str().and_then(ki_protocol::uuid_valorant) {
+        fiche.titre_joueur = titre;
+    }
     // Si le membre relie le même compte (ou se renomme : même puuid), sa
     // fiche accumulée reste ; un autre compte repart de zéro. Ça se lit
     // avant d'écrire le nouveau compte — et avant le rattrapage, parce
@@ -1936,6 +1944,14 @@ fn fusionner(ancienne: FicheValorant, neuve: FicheValorant) -> FicheValorant {
     }
     if fiche.saisons.is_empty() {
         fiche.saisons = ancienne.saisons;
+    }
+    // Une relecture sans match (429, liste vide) ne dit rien de la carte :
+    // celle d'avant reste.
+    if fiche.carte_joueur.is_empty() {
+        fiche.carte_joueur = ancienne.carte_joueur;
+    }
+    if fiche.titre_joueur.is_empty() {
+        fiche.titre_joueur = ancienne.titre_joueur;
     }
     // Un match d'id vide n'est comparable à rien : il reste des deux côtés.
     let connus: BTreeSet<String> = fiche
@@ -2071,6 +2087,7 @@ fn construire(
                 .collect()
         })
         .unwrap_or_default();
+    (fiche.carte_joueur, fiche.titre_joueur) = personnalisation(&matchs, &compte.puuid);
     if niveau.is_none() {
         // Le niveau de compte vient avec chaque match : le plus récent.
         if let Some(n) = matchs["data"]
@@ -2087,6 +2104,28 @@ fn construire(
         }
     }
     Ok((fiche, co_membres))
+}
+
+/// La carte et le titre de joueur du membre à son match le plus récent
+/// (`customization`, les matchs de `v4/matches` viennent du plus récent
+/// au plus ancien) : deux uuid, vérifiés, que le client montre par
+/// valorant-api.com. Rien des neuf autres. Vides si aucun match ne les
+/// dit — la fusion gardera alors ceux d'avant.
+fn personnalisation(matchs: &Value, puuid: &str) -> (String, String) {
+    for m in matchs["data"].as_array().into_iter().flatten() {
+        let Some(joueur) =
+            m["players"].as_array().and_then(|ps| ps.iter().find(|p| p["puuid"].as_str() == Some(puuid)))
+        else {
+            continue;
+        };
+        let c = &joueur["customization"];
+        let carte = c["card"].as_str().and_then(ki_protocol::uuid_valorant).unwrap_or_default();
+        let titre = c["title"].as_str().and_then(ki_protocol::uuid_valorant).unwrap_or_default();
+        if !carte.is_empty() || !titre.is_empty() {
+            return (carte, titre);
+        }
+    }
+    (String::new(), String::new())
 }
 
 /// Le calendrier esport de HenrikDev réduit à ce qu'on montre : les
@@ -2429,8 +2468,10 @@ fn resumer_match_stocke(m: &Value) -> Option<MatchResume> {
 }
 
 /// Les modes sans manches, tels que `queue.id` les nomme : un combat à
-/// mort n'a ni camp ni premier sang.
-const MODES_SANS_MANCHES: [&str; 3] = ["deathmatch", "team deathmatch", "hurm"];
+/// mort n'a ni camp ni premier sang, et le battle royale de Gauntlet met
+/// huit duos face à face — rien de ce qu'on compte à cinq contre cinq.
+const MODES_SANS_MANCHES: [&str; 6] =
+    ["deathmatch", "team deathmatch", "hurm", "abilitydraftarena", "gauntlet", "gauntlet: glitched"];
 
 /// Le puuid d'un objet joueur (`killer`, `victim`, `assistants[]`,
 /// `plant.player`…) — vide s'il n'y en a pas.
@@ -2613,10 +2654,16 @@ fn mode_en_francais(mode: &str) -> String {
         "spikerush" | "spike rush" => "Spike Rush".into(),
         "deathmatch" => "Combat à mort".into(),
         "team deathmatch" | "hurm" => "Combat à mort par équipe".into(),
-        "escalation" => "Escalade".into(),
-        "replication" => "Réplication".into(),
+        "escalation" | "ggteam" => "Escalade".into(),
+        "replication" | "onefa" => "Réplication".into(),
         "premier" => "Premier".into(),
         "custom" | "custom game" => "Personnalisée".into(),
+        // La 13.06 : le battle royale en duos, sous ses noms possibles.
+        "gauntlet" | "gauntlet: glitched" | "abilitydraftarena" => "Gauntlet".into(),
+        "knockout" | "dodgeball" => "K.-O.".into(),
+        "retake" | "fortcollins" => "Retake".into(),
+        "all random one site" | "valaram" => "All Random One Site".into(),
+        "snowball fight" | "snowball" => "Bataille de boules de neige".into(),
         _ => mode.to_string(),
     }
 }
@@ -2822,6 +2869,52 @@ mod tests {
         let mut en_cours = m.clone();
         en_cours["metadata"]["is_completed"] = serde_json::json!(false);
         assert!(resumer_match(&en_cours, "moi", &lies).is_none());
+    }
+
+    /// La carte et le titre viennent du match le plus récent où le membre
+    /// les montre — les siens, jamais ceux des autres — et un uuid
+    /// douteux ne passe pas.
+    #[test]
+    fn la_carte_de_joueur_vient_du_dernier_match() {
+        let carte = "9fb348bc-41a0-91ad-8a3e-818035c4e561";
+        let titre = "5f2c3f2a-4ba1-e8f2-a44e-65a9b6a4b3a1";
+        let matchs = serde_json::json!({"data": [
+            {"players": [
+                {"puuid": "autre", "customization": {"card": "11111111-1111-1111-1111-111111111111", "title": ""}},
+                {"puuid": "moi", "customization": {"card": "pas-un-uuid", "title": null}}
+            ]},
+            {"players": [{"puuid": "moi", "customization": {"card": carte.to_uppercase(), "title": titre}}]},
+            {"players": [{"puuid": "moi", "customization": {"card": "22222222-2222-2222-2222-222222222222", "title": titre}}]}
+        ]});
+        // Le premier match ne dit rien d'utilisable pour moi : on passe au
+        // suivant, pas aux autres joueurs.
+        assert_eq!(personnalisation(&matchs, "moi"), (carte.to_string(), titre.to_string()));
+        assert_eq!(personnalisation(&matchs, "inconnu"), (String::new(), String::new()));
+        assert_eq!(personnalisation(&Value::Null, "moi"), (String::new(), String::new()));
+
+        // Une relecture sans match garde la carte d'avant ; une neuve la
+        // remplace.
+        let ancienne = FicheValorant { carte_joueur: carte.into(), titre_joueur: titre.into(), ..Default::default() };
+        let muette = fusionner(ancienne.clone(), FicheValorant::default());
+        assert_eq!((muette.carte_joueur.as_str(), muette.titre_joueur.as_str()), (carte, titre));
+        let neuve = FicheValorant { carte_joueur: "c2".into(), ..Default::default() };
+        let fusion = fusionner(ancienne, neuve);
+        assert_eq!((fusion.carte_joueur.as_str(), fusion.titre_joueur.as_str()), ("c2", titre));
+    }
+
+    /// Les modes de la 13.06 ont leur nom français, et Gauntlet n'a pas de
+    /// manches à détailler.
+    #[test]
+    fn les_modes_de_la_13_06_se_traduisent() {
+        assert_eq!(mode_en_francais("Gauntlet: Glitched"), "Gauntlet");
+        assert_eq!(mode_en_francais("abilitydraftarena"), "Gauntlet");
+        assert_eq!(mode_en_francais("Knockout"), "K.-O.");
+        assert_eq!(mode_en_francais("mode du futur"), "mode du futur");
+        let m = serde_json::json!({
+            "metadata": {"queue": {"id": "abilitydraftarena", "name": "Gauntlet: Glitched"}},
+            "rounds": [{}, {}, {}], "kills": [], "players": [{"puuid": "moi", "team_id": "Red"}]
+        });
+        assert!(detailler_manches(&m, "moi", "Red").is_none());
     }
 
     /// Un kill de la fixture v4 : qui, qui, quand, avec l'aide de qui.
@@ -3406,6 +3499,9 @@ mod tests {
                 .collect(),
             maj: maintenant,
             saisons: (0..12).map(|i| StatsSaison { saison: format!("e{}a{}", i / 3 + 6, i % 3 + 1), victoires: 40, parties: 80, tier_fin: 15, rr_fin: 40 }).collect(),
+            // La carte et le titre voyagent avec le résumé : ils comptent.
+            carte_joueur: "9fb348bc-41a0-91ad-8a3e-818035c4e561".into(),
+            titre_joueur: "48d870a2-4493-ebf8-7d6f-979be914dc43".into(),
         };
         let fiches: Vec<(UserId, FicheValorant)> = (0..40).map(|n| (n, pleine(n))).collect();
         let resumes = |n_m: usize, n_p: usize| -> Vec<FicheMembre> {
