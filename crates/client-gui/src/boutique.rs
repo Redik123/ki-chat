@@ -6,10 +6,11 @@
 //! ne quittent pas la machine — ils ne sont ni journalisés ni gardés, la
 //! lecture faite ils disparaissent avec le fil qui les portait.
 //!
-//! Le chemin : le lockfile → la session (puuid) → les jetons
-//! (`/entitlements/v1/token`) → la région (`-ares-deployment` de la session
-//! externe) → la boutique (`pd.<région>.a.pvp.net/store/v3/storefront`) →
-//! le nom et l'image de chaque skin chez valorant-api.com, en français.
+//! Le chemin : [`valorant::Acces`] — le lockfile → la session (puuid) →
+//! les jetons (`/entitlements/v1/token`) → la région (`-ares-deployment`
+//! du jeu lancé, sinon celle du client Riot) — → la boutique
+//! (`pd.<région>.a.pvp.net/store/v3/storefront`) → le nom et l'image de
+//! chaque skin chez valorant-api.com, en français.
 //! Rien de tout cela n'est supporté par Riot : un jour ça casse, et ce
 //! jour-là la section dit « indisponible », sans plus.
 
@@ -26,9 +27,6 @@ use crate::valorant;
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// L'image d'un skin pèse quelques centaines de kilo-octets.
 const IMAGE_MAX: u64 = 4 * 1024 * 1024;
-/// Ce que VALORANT lui-même annonce à ses serveurs ; sans quoi la porte
-/// est fermée (Cloudflare, code 1010).
-const AGENT_DU_JEU: &str = "ShooterGame/13 Windows/10.0.19043.1.256.64bit";
 
 /// Une offre du jour : le skin, son prix en VP, son image.
 pub struct Offre {
@@ -186,61 +184,13 @@ fn maintenant_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Toute la lecture, sur le fil à part. Les jetons vivent ici et nulle
-/// part ailleurs.
+/// Toute la lecture, sur le fil à part. Les jetons vivent dans l'accès
+/// et nulle part ailleurs.
 fn lire() -> anyhow::Result<Boutique> {
-    let lf = valorant::lire_lockfile().ok_or_else(|| anyhow::anyhow!("client Riot fermé"))?;
-    let client = valorant::Client::new(&lf);
-    let session: valorant::Session = client.get("/chat/v1/session")?;
-    if session.puuid.is_empty() {
-        anyhow::bail!("pas encore connecté au client Riot");
-    }
-    let jetons: serde_json::Value = client.get("/entitlements/v1/token")?;
-    let acces = jetons["accessToken"].as_str().unwrap_or("").to_string();
-    let droit = jetons["token"].as_str().unwrap_or("").to_string();
-    if acces.is_empty() || droit.is_empty() {
-        anyhow::bail!("le client Riot n'a pas de jeton (pas connecté ?)");
-    }
-    let sessions: serde_json::Value = client.get("/product-session/v1/external-sessions")?;
-    let region = sessions
-        .as_object()
-        .into_iter()
-        .flat_map(|m| m.values())
-        .filter_map(|s| s["launchConfiguration"]["arguments"].as_array())
-        .flatten()
-        .filter_map(|a| a.as_str())
-        .find_map(|a| a.strip_prefix("-ares-deployment="))
-        .ok_or_else(|| anyhow::anyhow!("VALORANT n'est pas lancé (région inconnue)"))?
-        .to_string();
-    if !region.chars().all(|c| c.is_ascii_lowercase()) {
-        anyhow::bail!("région inattendue");
-    }
-
-    let version: serde_json::Value = ureq::get("https://valorant-api.com/v1/version")
-        .set("User-Agent", "ki-chat")
-        .timeout(TIMEOUT)
-        .call()?
-        .into_json()?;
-    let version = version["data"]["riotClientVersion"].as_str().unwrap_or("").to_string();
-    let plateforme = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        r#"{"platformType":"PC","platformOS":"Windows","platformOSVersion":"10.0.19042.1.256.64bit","platformChipset":"Unknown"}"#,
-    );
-    let url = format!("https://pd.{region}.a.pvp.net/store/v3/storefront/{}", session.puuid);
-    let reponse = ureq::post(&url)
-        .set("User-Agent", AGENT_DU_JEU)
-        .set("Authorization", &format!("Bearer {acces}"))
-        .set("X-Riot-Entitlements-JWT", &droit)
-        .set("X-Riot-ClientPlatform", &plateforme)
-        .set("X-Riot-ClientVersion", &version)
-        .set("Content-Type", "application/json")
-        .timeout(TIMEOUT)
-        .send_string("{}")
-        .map_err(|e| match e {
-            ureq::Error::Status(code, _) => anyhow::anyhow!("boutique refusée (HTTP {code})"),
-            e => anyhow::anyhow!("boutique injoignable : {e}"),
-        })?;
-    let magasin: serde_json::Value = reponse.into_json()?;
+    let acces = valorant::Acces::ouvrir()?;
+    let magasin = acces
+        .post(&format!("/store/v3/storefront/{}", acces.puuid), "{}")
+        .map_err(|e| anyhow::anyhow!("boutique : {e}"))?;
     let panneau = &magasin["SkinsPanelLayout"];
     let reste = panneau["SingleItemOffersRemainingDurationInSeconds"].as_u64().unwrap_or(0);
     let mut offres = Vec::new();

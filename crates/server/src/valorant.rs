@@ -55,7 +55,7 @@
 //! comptée par motif et par point d'API, les soixante dernières gardées
 //! en anneau, pour que `/diag-resume` dise *pourquoi* on a appelé.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -63,8 +63,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ki_protocol::{
-    BilanMembre, DetailManches, FicheMembre, FicheValorant, MatchEsport, MatchResume, PointRR,
-    RangValorant, ServerMsg, StatsSaison, UserId, STATS_MAX_BYTES,
+    BilanMembre, DetailManches, FicheMembre, FicheValorant, MatchEsport, MatchResume, Medaille,
+    MedailleGagnee, Medailles, PointRR, RangValorant, ServerMsg, StatsSaison, UserId,
+    STATS_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -372,6 +373,8 @@ pub struct LigneAnnonce {
     pub user_id: UserId,
     pub resume: MatchResume,
     pub rr: Option<(i32, RangValorant)>,
+    /// Ses médailles du match, quand son client les a envoyées à temps.
+    pub medailles: Vec<MedailleGagnee>,
 }
 
 /// Un match à annoncer : les lignes des membres du groupe qui y étaient.
@@ -452,7 +455,13 @@ pub struct Valorant {
     /// `None` : pas de clé, pas de fil.
     travaux: Option<Sender<Travail>>,
     resultats: Mutex<Receiver<Resultat>>,
+    /// Quand chaque membre a envoyé ses médailles pour la dernière fois.
+    medailles_recues: Mutex<HashMap<UserId, Instant>>,
 }
+
+/// Des médailles d'un même membre ne se rangent pas plus souvent : chaque
+/// fois, c'est fiches.json qui se réécrit.
+const MEDAILLES_ECART: Duration = Duration::from_secs(20);
 
 impl Valorant {
     /// Charge les comptes et fiches, cherche la clé, lance le fil si elle
@@ -510,7 +519,37 @@ impl Valorant {
             etat,
             travaux,
             resultats: Mutex::new(rx_res),
+            medailles_recues: Mutex::default(),
         }
+    }
+
+    /// Ses médailles, telles que son client Riot les a lues : rangées dans
+    /// sa fiche s'il a lié son compte, nettoyées, datées par le serveur.
+    /// Pas plus d'une fois toutes les vingt secondes par membre. Écrit
+    /// fiches.json : à appeler hors du fil réseau. `false` si rien n'a
+    /// été gardé.
+    pub fn medailles(&self, user_id: UserId, medailles: &Medailles) -> bool {
+        {
+            let mut recues = self.medailles_recues.lock().unwrap();
+            if recues.get(&user_id).is_some_and(|t| t.elapsed() < MEDAILLES_ECART) {
+                return false;
+            }
+            recues.insert(user_id, Instant::now());
+        }
+        if !self.etat.comptes.lock().unwrap().contains_key(&user_id) {
+            return false;
+        }
+        let mut propres = medailles.nettoyer();
+        propres.maj = maintenant_ms();
+        {
+            let mut fiches = self.etat.fiches.lock().unwrap();
+            let Some(fiche) = fiches.get_mut(&user_id) else {
+                return false;
+            };
+            fiche.medailles = Some(propres);
+        }
+        self.etat.sauver_fiches();
+        true
     }
 
     pub fn riot_id(&self, user_id: UserId) -> Option<String> {
@@ -774,7 +813,24 @@ impl Valorant {
                 travaux,
             );
         }
-        self.etat.fil.pretes()
+        let mut annonces = self.etat.fil.pretes();
+        if !annonces.is_empty() {
+            // Les médailles du match, si le client du membre les a déjà
+            // envoyées — il les lit une quarantaine de secondes après la
+            // fin, l'annonce vient après la relance de 75 s.
+            let fiches = self.etat.fiches.lock().unwrap();
+            for a in &mut annonces {
+                for l in &mut a.lignes {
+                    l.medailles = fiches
+                        .get(&l.user_id)
+                        .and_then(|f| f.medailles.as_ref())
+                        .and_then(|m| m.du_match(&a.match_id))
+                        .map(|m| m.medailles.clone())
+                        .unwrap_or_default();
+                }
+            }
+        }
+        annonces
     }
 
     /// Le récap de la semaine, s'il est l'heure (dimanche soir) et qu'il
@@ -1060,6 +1116,7 @@ impl Fil {
                     user_id,
                     resume: m.clone(),
                     rr,
+                    medailles: Vec::new(),
                 });
             }
             for autre in autres {
@@ -1150,8 +1207,46 @@ pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
                 rang.rr
             ));
         }
+        if let Some(medailles) = medailles_en_texte(&l.medailles) {
+            texte.push_str(&format!(" · {medailles}"));
+        }
     }
     texte
+}
+
+/// Les médailles d'une ligne d'annonce : « 🏅 MVP (412 / 500), top frag »,
+/// puis le premier record d'acte (« record d'acte : 26 kills ») ; rien
+/// sans médaille. La Distinction se tait devant le MVP : c'est la même
+/// note.
+fn medailles_en_texte(medailles: &[MedailleGagnee]) -> Option<String> {
+    let mut connues: Vec<&MedailleGagnee> = medailles.iter().filter(|g| g.medaille != Medaille::Inconnue).collect();
+    connues.sort_by_key(|g| g.medaille.ordre());
+    let mvp = connues.iter().any(|g| g.medaille == Medaille::Mvp);
+    let noms: Vec<String> = connues
+        .iter()
+        .filter(|g| !(mvp && g.medaille == Medaille::Distinction))
+        .map(|g| match g.medaille {
+            Medaille::Mvp | Medaille::Distinction => format!("{} ({})", g.medaille.nom(), g.medaille.valeur(g.valeur)),
+            m => minuscule_initiale(m.nom()),
+        })
+        .collect();
+    if noms.is_empty() {
+        return None;
+    }
+    let mut texte = format!("🏅 {}", noms.join(", "));
+    if let Some(r) = connues.iter().find(|g| g.record && !matches!(g.medaille, Medaille::Mvp | Medaille::Distinction)) {
+        texte.push_str(&format!(" · record d'acte : {}", r.medaille.valeur(r.valeur)));
+    }
+    Some(texte)
+}
+
+/// « Top frag » → « top frag », au milieu d'une phrase.
+fn minuscule_initiale(s: &str) -> String {
+    let mut lettres = s.chars();
+    match lettres.next() {
+        Some(premiere) => premiere.to_lowercase().chain(lettres).collect(),
+        None => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1952,6 +2047,11 @@ fn fusionner(ancienne: FicheValorant, neuve: FicheValorant) -> FicheValorant {
     }
     if fiche.titre_joueur.is_empty() {
         fiche.titre_joueur = ancienne.titre_joueur;
+    }
+    // Les médailles viennent du client du membre, jamais de HenrikDev :
+    // une relecture ne les connaît pas, celles d'avant restent.
+    if fiche.medailles.is_none() {
+        fiche.medailles = ancienne.medailles;
     }
     // Un match d'id vide n'est comparable à rien : il reste des deux côtés.
     let connus: BTreeSet<String> = fiche
@@ -3502,6 +3602,24 @@ mod tests {
             // La carte et le titre voyagent avec le résumé : ils comptent.
             carte_joueur: "9fb348bc-41a0-91ad-8a3e-818035c4e561".into(),
             titre_joueur: "48d870a2-4493-ebf8-7d6f-979be914dc43".into(),
+            // Les médailles aussi : toutes, cet acte et en carrière, et
+            // trois par match sur les vingt derniers.
+            medailles: Some(Medailles {
+                maj: maintenant,
+                acte: "V26 · ACTE V".into(),
+                cet_acte: Medaille::TOUTES.iter().map(|m| ki_protocol::CompteMedaille { medaille: *m, fois: 12, meilleur: 482.81 }).collect(),
+                carriere: Medaille::TOUTES.iter().map(|m| ki_protocol::CompteMedaille { medaille: *m, fois: 40, meilleur: 482.81 }).collect(),
+                matchs: (0..20u64)
+                    .map(|i| ki_protocol::MedaillesDuMatch {
+                        id: format!("0123abcd-4567-89ef-0123-456789abc{n:02}{i:02}"),
+                        debut: maintenant - i * 3_600_000,
+                        medailles: [Medaille::Mvp, Medaille::Degats, Medaille::PremiersSangs]
+                            .into_iter()
+                            .map(|medaille| MedailleGagnee { medaille, valeur: 349.49786, record: i % 2 == 0 })
+                            .collect(),
+                    })
+                    .collect(),
+            }),
         };
         let fiches: Vec<(UserId, FicheValorant)> = (0..40).map(|n| (n, pleine(n))).collect();
         let resumes = |n_m: usize, n_p: usize| -> Vec<FicheMembre> {
@@ -3614,7 +3732,62 @@ mod tests {
                     },
                 )
             }),
+            medailles: Vec::new(),
         }
+    }
+
+    /// Les médailles d'une ligne : le MVP avec sa note, la distinction
+    /// tue devant lui, les autres en minuscules, le premier record ; rien
+    /// sans médaille connue.
+    #[test]
+    fn les_medailles_se_disent_dans_l_annonce() {
+        let g = |medaille, valeur, record| MedailleGagnee { medaille, valeur, record };
+        let mut l = ligne(1, "Jett", (24, 12, 6), 6000, Some(true), Some((18, 14, 57)));
+        l.medailles = vec![
+            g(Medaille::PremiersSangs, 4.0, false),
+            g(Medaille::Distinction, 412.2, false),
+            g(Medaille::Kills, 24.0, true),
+            g(Medaille::Mvp, 412.2, true),
+        ];
+        let a = Annonce { match_id: "m1".into(), lignes: vec![l] };
+        let texte = composer(&a, |_| "Jerem".into());
+        assert!(
+            texte.ends_with("Jerem — Jett 24/12/6 · +18 RR (Or 3, 57 RR) · 🏅 MVP (412 / 500), premiers sangs, éliminations · record d'acte : 24 kills"),
+            "{texte}"
+        );
+        assert_eq!(medailles_en_texte(&[]), None);
+        assert_eq!(medailles_en_texte(&[g(Medaille::Inconnue, 1.0, true)]), None);
+        assert_eq!(medailles_en_texte(&[g(Medaille::Distinction, 430.0, false)]).as_deref(), Some("🏅 Distinction (430 / 500)"));
+    }
+
+    /// Les médailles se rangent dans la fiche d'un membre lié, nettoyées et
+    /// datées par le serveur ; pas pour un membre sans compte, pas deux fois
+    /// en vingt secondes ; une relecture HenrikDev ne les efface pas ; et
+    /// l'annonce du match les reprend.
+    #[test]
+    fn les_medailles_se_rangent_dans_la_fiche() {
+        let (v, _rx, dir) = service_a_l_arret("medailles");
+        let recues = Medailles {
+            acte: "V26 · ACTE V".into(),
+            matchs: vec![ki_protocol::MedaillesDuMatch {
+                id: "8f1c0a2e-0000-4000-8000-000000000001".into(),
+                debut: 1,
+                medailles: vec![MedailleGagnee { medaille: Medaille::Mvp, valeur: 400.0, record: true }],
+            }],
+            ..Medailles::default()
+        };
+        assert!(!v.medailles(7, &recues), "sans compte lié, rien");
+        compte(8, &v);
+        v.etat.fiches.lock().unwrap().insert(8, FicheValorant::default());
+        assert!(v.medailles(8, &recues));
+        let gardees = v.fiche(8).and_then(|f| f.medailles).expect("rangées");
+        assert!(gardees.maj > 0, "datées par le serveur");
+        assert_eq!(gardees.matchs.len(), 1);
+        assert!(!v.medailles(8, &recues), "pas deux fois en vingt secondes");
+        // Une relecture HenrikDev n'en dit rien : elles restent.
+        let relue = fusionner(v.fiche(8).unwrap(), FicheValorant::default());
+        assert_eq!(relue.medailles, Some(gardees));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// L'annonce d'une victoire à deux : le résultat en tête, le meilleur
@@ -3801,6 +3974,7 @@ mod tests {
             etat,
             travaux: Some(tx),
             resultats: Mutex::new(mpsc::channel().1),
+            medailles_recues: Mutex::default(),
         };
         (v, rx, dir)
     }

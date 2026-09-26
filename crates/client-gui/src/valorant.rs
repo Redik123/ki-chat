@@ -134,6 +134,152 @@ impl Client {
 pub(crate) struct Session {
     #[serde(default)]
     pub(crate) puuid: String,
+    /// Le Riot ID de la session, en deux morceaux (« Redik », « 6162 »).
+    #[serde(default)]
+    pub(crate) game_name: String,
+    #[serde(default)]
+    pub(crate) game_tag: String,
+}
+
+/// Ce que VALORANT lui-même annonce à ses serveurs ; sans quoi la porte
+/// est fermée (Cloudflare, code 1010).
+const AGENT_DU_JEU: &str = "ShooterGame/13 Windows/10.0.19043.1.256.64bit";
+const TIMEOUT_PD: Duration = Duration::from_secs(15);
+
+/// De quoi parler aux serveurs de VALORANT (`pd.<région>.a.pvp.net`) au
+/// nom de soi-même, prêté par son propre client Riot. Vit le temps d'une
+/// lecture, sur un fil à part : les jetons ne sont ni journalisés, ni
+/// gardés, ni envoyés ailleurs qu'à Riot — ils permettraient d'acheter.
+pub(crate) struct Acces {
+    pub(crate) puuid: String,
+    /// « Pseudo#TAG » : ce que ki-chat compare au compte lié.
+    pub(crate) riot_id: String,
+    /// La région des serveurs de jeu (`eu`, `na`, `ap`, `kr`).
+    pub(crate) region: String,
+    agent: ureq::Agent,
+    acces: String,
+    droit: String,
+    version: String,
+    plateforme: String,
+}
+
+impl Acces {
+    /// Le lockfile → la session → les jetons → la région → la version du
+    /// client. Échoue proprement si le client Riot est fermé ou déconnecté.
+    pub(crate) fn ouvrir() -> anyhow::Result<Self> {
+        let lf = lire_lockfile().ok_or_else(|| anyhow::anyhow!("client Riot fermé"))?;
+        let client = Client::new(&lf);
+        let session: Session = client.get("/chat/v1/session")?;
+        if session.puuid.is_empty() {
+            anyhow::bail!("pas encore connecté au client Riot");
+        }
+        let jetons: serde_json::Value = client.get("/entitlements/v1/token")?;
+        let acces = jetons["accessToken"].as_str().unwrap_or("").to_string();
+        let droit = jetons["token"].as_str().unwrap_or("").to_string();
+        if acces.is_empty() || droit.is_empty() {
+            anyhow::bail!("le client Riot n'a pas de jeton (pas connecté ?)");
+        }
+        let region = region_du_jeu(&client).or_else(|| region_du_client(&client)).ok_or_else(|| {
+            anyhow::anyhow!("région inconnue (VALORANT n'est pas lancé, et le client Riot ne la dit pas)")
+        })?;
+        let version: serde_json::Value = ureq::get("https://valorant-api.com/v1/version")
+            .set("User-Agent", "ki-chat")
+            .timeout(TIMEOUT_PD)
+            .call()?
+            .into_json()?;
+        let version = version["data"]["riotClientVersion"].as_str().unwrap_or("").to_string();
+        let plateforme = base64::engine::general_purpose::STANDARD.encode(
+            r#"{"platformType":"PC","platformOS":"Windows","platformOSVersion":"10.0.19042.1.256.64bit","platformChipset":"Unknown"}"#,
+        );
+        let riot_id = if session.game_name.is_empty() {
+            String::new()
+        } else {
+            format!("{}#{}", session.game_name, session.game_tag)
+        };
+        Ok(Self {
+            puuid: session.puuid,
+            riot_id,
+            region,
+            agent: ureq::AgentBuilder::new().timeout(TIMEOUT_PD).build(),
+            acces,
+            droit,
+            version,
+            plateforme,
+        })
+    }
+
+    fn requete(&self, methode: &str, chemin: &str) -> ureq::Request {
+        self.agent
+            .request(methode, &format!("https://pd.{}.a.pvp.net{chemin}", self.region))
+            .set("User-Agent", AGENT_DU_JEU)
+            .set("Authorization", &format!("Bearer {}", self.acces))
+            .set("X-Riot-Entitlements-JWT", &self.droit)
+            .set("X-Riot-ClientPlatform", &self.plateforme)
+            .set("X-Riot-ClientVersion", &self.version)
+    }
+
+    /// `GET` sur les serveurs de jeu ; une erreur ne dit que son code HTTP.
+    pub(crate) fn get(&self, chemin: &str) -> anyhow::Result<serde_json::Value> {
+        let reponse = self.requete("GET", chemin).call().map_err(erreur_pd)?;
+        Ok(reponse.into_json()?)
+    }
+
+    /// `POST` d'un corps JSON sur les serveurs de jeu.
+    pub(crate) fn post(&self, chemin: &str, corps: &str) -> anyhow::Result<serde_json::Value> {
+        let reponse = self
+            .requete("POST", chemin)
+            .set("Content-Type", "application/json")
+            .send_string(corps)
+            .map_err(erreur_pd)?;
+        Ok(reponse.into_json()?)
+    }
+}
+
+fn erreur_pd(e: ureq::Error) -> anyhow::Error {
+    match e {
+        ureq::Error::Status(code, _) => anyhow::anyhow!("refusé par Riot (HTTP {code})"),
+        e => anyhow::anyhow!("serveurs de VALORANT injoignables : {e}"),
+    }
+}
+
+/// La région telle que le jeu lancé l'annonce (`-ares-deployment=eu` dans
+/// les arguments de la session externe) : la plus sûre.
+fn region_du_jeu(client: &Client) -> Option<String> {
+    let sessions: serde_json::Value = client.get("/product-session/v1/external-sessions").ok()?;
+    let region = sessions
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter_map(|s| s["launchConfiguration"]["arguments"].as_array())
+        .flatten()
+        .filter_map(|a| a.as_str())
+        .find_map(|a| a.strip_prefix("-ares-deployment="))?
+        .to_ascii_lowercase();
+    (!region.is_empty() && region.chars().all(|c| c.is_ascii_lowercase())).then_some(region)
+}
+
+/// Sans le jeu : la région du client Riot (`/riotclient/region-locale`),
+/// ramenée à celle des serveurs de VALORANT — l'Amérique latine et le
+/// Brésil jouent sur `na`, le Japon sur `ap`.
+fn region_du_client(client: &Client) -> Option<String> {
+    let r: serde_json::Value = client.get("/riotclient/region-locale").ok()?;
+    region_de_jeu(r["region"].as_str().or_else(|| r["webRegion"].as_str())?)
+}
+
+/// La région des serveurs de VALORANT pour une région du client Riot.
+fn region_de_jeu(region: &str) -> Option<String> {
+    let r = region.trim().to_ascii_lowercase();
+    let r = r.trim_end_matches(|c: char| c.is_ascii_digit());
+    Some(
+        match r {
+            "eu" | "euw" | "eune" | "tr" | "ru" | "me" => "eu",
+            "na" | "latam" | "la" | "lan" | "las" | "br" | "pbe" => "na",
+            "ap" | "oc" | "oce" | "jp" | "sea" | "ph" | "sg" | "th" | "tw" | "vn" => "ap",
+            "kr" => "kr",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -461,6 +607,31 @@ mod tests {
         let inconnu = Prive { session_loop_state: "AUTRE".into(), ..Default::default() };
         assert!(normaliser(&inconnu).is_none());
         assert!(decoder_prive("pas du base64 !!").is_none());
+    }
+
+    /// Les régions du client Riot se ramènent à celles des serveurs de
+    /// VALORANT ; une inconnue ne se devine pas.
+    #[test]
+    fn la_region_du_client_se_ramene_a_celle_du_jeu() {
+        for (client, jeu) in [("EUW", "eu"), ("eu", "eu"), ("NA1", "na"), ("BR", "na"), ("LA2", "na"), ("KR", "kr"), ("JP1", "ap"), ("oce", "ap")] {
+            assert_eq!(region_de_jeu(client).as_deref(), Some(jeu), "{client}");
+        }
+        assert_eq!(region_de_jeu("mars"), None);
+        assert_eq!(region_de_jeu(""), None);
+    }
+
+    /// Contre le vrai client Riot (ouvert) — ignorée :
+    /// `cargo test -p ki-client-gui -- --ignored --nocapture sonde_region`.
+    /// Ce que le jeu et le client disent de la région ; rien d'autre.
+    #[test]
+    #[ignore]
+    fn sonde_region() {
+        let lf = lire_lockfile().expect("client Riot ouvert");
+        let client = Client::new(&lf);
+        println!("région du jeu : {:?}", region_du_jeu(&client));
+        println!("région du client : {:?}", region_du_client(&client));
+        let brut: serde_json::Value = client.get("/riotclient/region-locale").unwrap_or_default();
+        println!("region-locale : region={} webRegion={}", brut["region"], brut["webRegion"]);
     }
 
     #[test]

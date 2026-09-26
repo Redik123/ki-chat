@@ -24,7 +24,8 @@ use chrono::{Datelike, TimeZone, Timelike};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, RichText, Sense, Ui, Vec2};
 use ki_protocol::{
     nom_de_rang, Bilan, BilanMembre, FicheMembre, FicheValorant, JeuEtat, JeuStatut, MatchEsport,
-    MatchResume, Member, PointRR, PositionMmr, UserId,
+    MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, Member, PointRR,
+    PositionMmr, UserId,
 };
 
 use crate::graphes::{self, Barre, PointCourbe};
@@ -766,6 +767,73 @@ fn pastille_carte(ui: &mut Ui, texte: &str, bandeau: &egui::TextureHandle, haute
     reponse
 }
 
+/// L'or pour le MVP et la distinction, le texte pour les autres.
+fn teinte_de_medaille(m: Medaille) -> Color32 {
+    match m {
+        Medaille::Mvp | Medaille::Distinction => theme::WARN,
+        _ => TEXT_DIM,
+    }
+}
+
+/// Le nom court d'une médaille dans une case de table : les mots des
+/// joueurs. Le nom entier est au survol.
+fn nom_court(m: Medaille) -> &'static str {
+    match m {
+        Medaille::Mvp => "MVP",
+        Medaille::Distinction => "DIST",
+        Medaille::TopFrag => "TOP",
+        Medaille::Degats => "ADR",
+        Medaille::Tetes => "HS",
+        Medaille::Kills => "KILLS",
+        Medaille::Assists => "ASSISTS",
+        Medaille::Poses => "POSES",
+        Medaille::PremiersSangs => "FB",
+        Medaille::Aces => "ACE",
+        Medaille::Clutchs => "CLUTCH",
+        Medaille::Echanges => "TRADES",
+        Medaille::Inconnue => "?",
+    }
+}
+
+/// Les médailles d'un match à montrer, dans l'ordre : sans les inconnues,
+/// et sans la distinction quand il y a le MVP — c'est la même note.
+fn medailles_a_montrer(md: &MedaillesDuMatch) -> Vec<&MedailleGagnee> {
+    let mut liste: Vec<&MedailleGagnee> = md.medailles.iter().filter(|g| g.medaille != Medaille::Inconnue).collect();
+    liste.sort_by_key(|g| g.medaille.ordre());
+    let mvp = liste.iter().any(|g| g.medaille == Medaille::Mvp);
+    liste.retain(|g| !(mvp && g.medaille == Medaille::Distinction));
+    liste
+}
+
+/// Les médailles d'un match dans une case : trois pastilles au plus (★ :
+/// record de l'acte), puis « +N » ; le détail au survol de chacune. Une
+/// case vide sans médaille.
+fn medailles_cellule(ui: &mut Ui, md: Option<&MedaillesDuMatch>) -> Response {
+    let liste = md.map(medailles_a_montrer).unwrap_or_default();
+    if liste.is_empty() {
+        return ui.label("");
+    }
+    let detail = liste
+        .iter()
+        .map(|g| {
+            let record = if g.record { " · record de l'acte" } else { "" };
+            format!("{} — {}{record}", g.medaille.nom(), g.medaille.valeur(g.valeur))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        for g in liste.iter().take(3) {
+            let texte = if g.record { format!("{}★", nom_court(g.medaille)) } else { nom_court(g.medaille).to_string() };
+            badge(ui, &texte, teinte_de_medaille(g.medaille)).on_hover_text(&detail);
+        }
+        if liste.len() > 3 {
+            ui.label(RichText::new(format!("+{}", liste.len() - 3)).color(TEXT_FAINT).size(10.5)).on_hover_text(&detail);
+        }
+    })
+    .response
+}
+
 /// Une étiquette en capitales sur un fond de sa couleur : « EN PARTIE ».
 fn badge(ui: &mut Ui, texte: &str, couleur: Color32) -> Response {
     let galley = ui.fonts(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(9.5), couleur));
@@ -1105,6 +1173,7 @@ impl PageValo {
         records(ui, lignes, self.periode, rangs);
         ui.add_space(14.0);
         self.classement(ui, lignes, noms, my_id, rangs, demandes);
+        medailles_du_groupe(ui, lignes, noms, my_id, demandes);
         duos(ui, lignes, noms);
         quand_le_groupe_joue(ui, activite);
     }
@@ -1331,15 +1400,19 @@ impl PageValo {
             .flat_map(|l| l.f.fiche.historique_rr.iter().map(move |p| ((l.f.user_id, p.match_id.as_str()), p)))
             .filter(|((_, id), _)| !id.is_empty())
             .collect();
+        // Les médailles de chacun, pour la dernière colonne.
+        let medailles: HashMap<UserId, &Medailles> =
+            lignes.iter().filter_map(|l| l.f.fiche.medailles.as_ref().map(|m| (l.f.user_id, m))).collect();
         let limite = if self.plus { usize::MAX } else { LIGNES_FIL };
         let mut lignes_montrees = 0usize;
         let mut tronque = false;
 
         egui::ScrollArea::horizontal().id_salt("valo_fil").show(ui, |ui| {
             egui::Grid::new("stats_matchs").striped(true).spacing([12.0, 5.0]).show(ui, |ui| {
-                for titre in
-                    ["Quand", "Joueur", "Mode", "Carte", "Agent", "K / D / A", "ACS", "ADR", "KAST", "FK", "Score", "ΔRR", "Avec"]
-                {
+                for titre in [
+                    "Quand", "Joueur", "Mode", "Carte", "Agent", "K / D / A", "ACS", "ADR", "KAST", "FK", "Score", "ΔRR", "Avec",
+                    "Médailles",
+                ] {
                     en_tete(ui, titre);
                 }
                 ui.end_row();
@@ -1372,7 +1445,8 @@ impl PageValo {
                     for &i in bloc {
                         let (qui, m) = tous[i];
                         let point = points.get(&(qui, m.id.as_str())).copied();
-                        ligne_du_fil(ui, qui, m, ensemble, point, noms, my_id, catalogue, demandes);
+                        let md = medailles.get(&qui).and_then(|x| x.du_match(&m.id));
+                        ligne_du_fil(ui, qui, m, ensemble, point, md, noms, my_id, catalogue, demandes);
                     }
                 }
             });
@@ -1556,6 +1630,93 @@ fn records(ui: &mut Ui, lignes: &[Ligne], periode: Periode, rangs: &rangs::Rangs
 /// Les paires qui jouent ensemble, d'après les duos de chacun : clé
 /// ordonnée, le plus grand des deux sens gagne, deux parties au moins,
 /// les plus assidues d'abord. Rend `(a, b, parties, victoires)`.
+/// Les médailles montrées dans le tableau du groupe.
+const MEDAILLES_DU_GROUPE: [Medaille; 6] =
+    [Medaille::Mvp, Medaille::Distinction, Medaille::TopFrag, Medaille::Aces, Medaille::Clutchs, Medaille::PremiersSangs];
+
+/// L'acte dont parlent la plupart des membres (« V26 · ACTE V ») : celui
+/// d'une lecture d'avant un changement d'acte ne compte plus.
+fn acte_du_groupe<'a>(medailles: impl Iterator<Item = &'a Medailles>) -> String {
+    let mut comptes: BTreeMap<&str, usize> = BTreeMap::new();
+    for m in medailles.filter(|m| !m.acte.is_empty()) {
+        *comptes.entry(m.acte.as_str()).or_default() += 1;
+    }
+    comptes.into_iter().max_by_key(|(acte, n)| (*n, *acte)).map(|(acte, _)| acte.to_string()).unwrap_or_default()
+}
+
+/// Les médailles de l'acte, membre par membre, le MVP d'abord — lues par
+/// le client de chacun. Une ligne d'aide tant que personne ne les partage.
+fn medailles_du_groupe(
+    ui: &mut Ui,
+    lignes: &[Ligne],
+    noms: &Annuaire,
+    my_id: Option<UserId>,
+    demandes: &mut Vec<Demande>,
+) {
+    let avec: Vec<(&Ligne, &Medailles)> = lignes
+        .iter()
+        .filter_map(|l| l.f.fiche.medailles.as_ref().map(|m| (l, m)))
+        .filter(|(_, m)| !m.cet_acte.is_empty() || !m.carriere.is_empty())
+        .collect();
+    let acte = acte_du_groupe(avec.iter().map(|(_, m)| *m));
+    ui.add_space(14.0);
+    let titre = if acte.is_empty() { "Médailles de l'acte".to_string() } else { format!("Médailles — {acte}") };
+    ui.label(RichText::new(titre).strong().size(13.5));
+    if avec.is_empty() {
+        ui::hint(
+            ui,
+            "personne ne les partage encore : ⚙ → Jeu → « Ajouter mes médailles à ma fiche », \
+             avec « Partager mon activité Valorant »",
+        );
+        return;
+    }
+    // Les sommes de l'acte du groupe ; une lecture d'un autre acte ne dit
+    // rien de celui-ci.
+    let a_jour = |m: &Medailles| acte.is_empty() || m.acte.is_empty() || m.acte == acte;
+    let fois = |m: &Medailles, medaille| if a_jour(m) { m.fois(medaille, false) } else { 0 };
+    let total = |m: &Medailles| if a_jour(m) { m.cet_acte.iter().map(|c| c.fois).sum::<u32>() } else { 0 };
+    let mut ordre = avec.clone();
+    ordre.sort_by_key(|(l, m)| {
+        (std::cmp::Reverse(fois(m, Medaille::Mvp)), std::cmp::Reverse(total(m)), l.f.username.to_lowercase())
+    });
+    ui.add_space(4.0);
+    egui::ScrollArea::horizontal().id_salt("valo_medailles").show(ui, |ui| {
+        egui::Grid::new("stats_medailles").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+            en_tete(ui, "Joueur");
+            for m in MEDAILLES_DU_GROUPE {
+                en_tete(ui, m.nom());
+            }
+            en_tete(ui, "Toutes");
+            en_tete(ui, "Lues");
+            ui.end_row();
+            for (l, md) in ordre {
+                let mut pseudo = RichText::new(&l.f.username).color(noms.couleur(l.f.user_id));
+                if my_id == Some(l.f.user_id) {
+                    pseudo = pseudo.strong();
+                }
+                if ui.add(egui::Label::new(pseudo).sense(Sense::click())).on_hover_text("ouvrir sa fiche").clicked() {
+                    demandes.push(Demande::OuvrirFiche(l.f.user_id, l.f.username.clone()));
+                }
+                for m in MEDAILLES_DU_GROUPE {
+                    let n = fois(md, m);
+                    if n == 0 {
+                        cellule(ui, TIRET, TEXT_FAINT);
+                        continue;
+                    }
+                    let couleur = if matches!(m, Medaille::Mvp | Medaille::Distinction) { theme::WARN } else { TEXT };
+                    let reponse = ui.label(RichText::new(n.to_string()).color(couleur).strong().size(11.5));
+                    if let Some(c) = md.cet_acte.iter().find(|c| c.medaille == m) {
+                        reponse.on_hover_text(format!("record de l'acte : {}", m.valeur(c.meilleur)));
+                    }
+                }
+                cellule(ui, total(md).to_string(), TEXT_DIM);
+                cellule(ui, crate::il_y_a(md.maj), TEXT_FAINT);
+                ui.end_row();
+            }
+        });
+    });
+}
+
 fn paires_de_duos<'a>(duos: impl Iterator<Item = (UserId, &'a [(UserId, u16, u16)])>) -> Vec<(UserId, UserId, u16, u16)> {
     let mut paires: BTreeMap<(UserId, UserId), (u16, u16)> = BTreeMap::new();
     for (moi, liste) in duos {
@@ -1673,6 +1834,7 @@ fn ligne_du_fil(
     m: &MatchResume,
     dans_bloc: bool,
     point: Option<&PointRR>,
+    medailles: Option<&MedaillesDuMatch>,
     noms: &Annuaire,
     my_id: Option<UserId>,
     catalogue: &Catalogue,
@@ -1722,6 +1884,7 @@ fn ligne_du_fil(
     if pastilles(ui, &m.avec, &m.contre, noms).is_none() {
         ui.label("");
     }
+    medailles_cellule(ui, medailles);
     ui.end_row();
 }
 
@@ -1832,6 +1995,11 @@ impl<'a> Vue<'a> {
         let mut v: Vec<(String, Bilan)> = par.into_iter().map(|(k, b)| (k.to_string(), b)).collect();
         v.sort_by_key(|(_, b)| std::cmp::Reverse(b.matchs));
         v
+    }
+
+    /// Les médailles d'un match, pour leur colonne.
+    fn medailles_du(&self, id: &str) -> Option<&'a MedaillesDuMatch> {
+        self.fiche.medailles.as_ref()?.du_match(id)
     }
 
     /// Le point de RR d'un match, pour la colonne ΔRR.
@@ -1963,6 +2131,7 @@ impl PageValo {
             ui.add_space(10.0);
             tuiles(ui, &vue);
             ui.add_space(10.0);
+            medailles_fiche(ui, &vue);
             agents_et_cartes(ui, &vue);
             mes_heures(ui, &vue);
             ui.add_space(10.0);
@@ -2047,7 +2216,9 @@ impl PageValo {
                 if !vue.classe {
                     en_tete(ui, "Mode");
                 }
-                for titre in ["Carte", "Agent", "K / D / A", "ACS", "ADR", "KAST", "FK / FD", "Score", "ΔRR", "Rang", "Avec", ""] {
+                for titre in
+                    ["Carte", "Agent", "K / D / A", "ACS", "ADR", "KAST", "FK / FD", "Score", "ΔRR", "Rang", "Avec", "Médailles", ""]
+                {
                     en_tete(ui, titre);
                 }
                 ui.end_row();
@@ -2119,6 +2290,7 @@ impl PageValo {
                     if pastilles(ui, &m.avec, &m.contre, &vue.noms).is_none() {
                         ui.label("");
                     }
+                    medailles_cellule(ui, vue.medailles_du(&m.id));
                     let dernier = triangle(ui, if deplie { Sens::Bas } else { Sens::Droite }, TEXT_DIM);
 
                     // Le cadre tel qu'il est vraiment : de la première à la
@@ -2537,6 +2709,48 @@ fn multi_kills(triples: u16, quadruples: u16, aces: u16) -> String {
 }
 
 /// Agents et cartes en barres, côte à côte.
+/// Ses médailles de l'acte en tuiles — combien de fois, et son record —,
+/// puis la carrière en une ligne quand elle en dit plus. Rien si son
+/// ki-chat ne les a jamais envoyées.
+fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
+    let Some(md) = vue.fiche.medailles.as_ref() else { return };
+    let (liste, titre) = if md.cet_acte.is_empty() {
+        (&md.carriere, "Médailles — carrière".to_string())
+    } else if md.acte.is_empty() {
+        (&md.cet_acte, "Médailles — acte en cours".to_string())
+    } else {
+        (&md.cet_acte, format!("Médailles — {}", md.acte))
+    };
+    let mut connues: Vec<_> = liste.iter().filter(|c| c.medaille != Medaille::Inconnue && c.fois > 0).collect();
+    if connues.is_empty() {
+        return;
+    }
+    connues.sort_by_key(|c| c.medaille.ordre());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(titre).color(TEXT_DIM).size(11.5));
+        ui.label(RichText::new(format!("· lues dans son client Riot {}", crate::il_y_a(md.maj))).color(TEXT_FAINT).size(10.5));
+    });
+    let mut grille = Grille::new(TUILE_FICHE, 70.0);
+    for c in connues {
+        let teinte = if matches!(c.medaille, Medaille::Mvp | Medaille::Distinction) { theme::WARN } else { TEXT };
+        grille.tuile(
+            Tuile::new(c.medaille.nom(), format!("×{}", c.fois), teinte).sous(format!("record : {}", c.medaille.valeur(c.meilleur))),
+            |_| {},
+        );
+    }
+    grille.montrer(ui);
+    // La carrière, si elle dit autre chose que l'acte.
+    if !md.cet_acte.is_empty() && md.carriere != md.cet_acte {
+        let mut carriere: Vec<_> = md.carriere.iter().filter(|c| c.medaille != Medaille::Inconnue && c.fois > 0).collect();
+        carriere.sort_by_key(|c| c.medaille.ordre());
+        if !carriere.is_empty() {
+            let texte = carriere.iter().map(|c| format!("{} ×{}", c.medaille.nom(), c.fois)).collect::<Vec<_>>().join(" · ");
+            ui.label(RichText::new(format!("en carrière : {texte}")).color(TEXT_FAINT).size(11.0));
+        }
+    }
+    ui.add_space(10.0);
+}
+
 fn agents_et_cartes(ui: &mut Ui, vue: &Vue) {
     let agents = vue.ventiler(|m| m.agent.as_str());
     let cartes = vue.ventiler(|m| m.carte.as_str());
@@ -3061,6 +3275,38 @@ mod tests {
             // sans image (pas de réseau dans les tests).
             carte_joueur: "9fb348bc-41a0-91ad-8a3e-818035c4e561".into(),
             titre_joueur: String::new(),
+            medailles: Some(medailles_de_test(maintenant)),
+        }
+    }
+
+    /// Les médailles d'un membre : deux MVP cet acte, quatre en carrière,
+    /// et celles de ses deux derniers matchs (« m0 », « m1 »).
+    fn medailles_de_test(maintenant: u64) -> ki_protocol::Medailles {
+        use ki_protocol::{CompteMedaille, Medaille, MedailleGagnee, MedaillesDuMatch};
+        let compte = |medaille, fois, meilleur| CompteMedaille { medaille, fois, meilleur };
+        let gagnee = |medaille, valeur, record| MedailleGagnee { medaille, valeur, record };
+        ki_protocol::Medailles {
+            maj: maintenant - 3_600_000,
+            acte: "V26 · ACTE V".into(),
+            cet_acte: vec![
+                compte(Medaille::Mvp, 2, 482.8),
+                compte(Medaille::Distinction, 1, 482.8),
+                compte(Medaille::PremiersSangs, 5, 6.0),
+                compte(Medaille::Degats, 4, 254.19),
+            ],
+            carriere: vec![compte(Medaille::Mvp, 4, 482.8), compte(Medaille::Aces, 1, 1.0)],
+            matchs: vec![
+                MedaillesDuMatch {
+                    id: "m0".into(),
+                    debut: maintenant,
+                    medailles: vec![gagnee(Medaille::Mvp, 412.0, true), gagnee(Medaille::TopFrag, 26.0, false)],
+                },
+                MedaillesDuMatch {
+                    id: "m1".into(),
+                    debut: maintenant - 6 * 3_600_000,
+                    medailles: vec![gagnee(Medaille::PremiersSangs, 4.0, true)],
+                },
+            ],
         }
     }
 

@@ -39,7 +39,8 @@ const JSON_MAX: u64 = 4 * 1024 * 1024;
 /// joueur 100.
 const IMAGE_MAX: u64 = 1024 * 1024;
 /// La forme de `catalogue.json` : la changer invalide celui du disque.
-const FORME: u32 = 1;
+/// 2 : les actes (pour les médailles).
+const FORME: u32 = 2;
 
 // ---------------------------------------------------------------------
 // Les noms
@@ -65,6 +66,9 @@ struct Liste {
     /// (uuid, titre français).
     #[serde(default)]
     titres: Vec<(String, String)>,
+    /// (uuid, « V26 · ACTE V », début, fin en millisecondes Unix).
+    #[serde(default)]
+    actes: Vec<(String, String, u64, u64)>,
 }
 
 /// Une table cherchée telle quelle d'abord — c'est le cas courant, sans
@@ -99,6 +103,7 @@ pub struct Index {
     cartes: Table<(String, String)>,
     files: Table<String>,
     titres: HashMap<String, String>,
+    actes: Vec<(String, String, u64, u64)>,
 }
 
 impl Index {
@@ -118,7 +123,17 @@ impl Index {
         for (uuid, titre) in liste.titres {
             index.titres.insert(uuid.to_lowercase(), titre);
         }
+        index.actes = liste.actes;
         index
+    }
+
+    /// L'acte en cours à cette date : son uuid et son nom
+    /// (« V26 · ACTE V »).
+    pub fn acte_en_cours(&self, maintenant_ms: u64) -> Option<(&str, &str)> {
+        self.actes
+            .iter()
+            .find(|(_, _, debut, fin)| *debut <= maintenant_ms && maintenant_ms < *fin)
+            .map(|(uuid, nom, _, _)| (uuid.as_str(), nom.as_str()))
     }
 
     /// Le nom d'une carte, qu'on la donne par son nom interne
@@ -262,9 +277,12 @@ fn telecharger_liste(version: String) -> anyhow::Result<Liste> {
     let agents = lire_json(&format!("{API}agents?isPlayableCharacter=true"))?;
     let cartes = lire_json(&format!("{API}maps"))?;
     let files = lire_json(&format!("{API}gamemodes/queues?language=fr-FR"))?;
-    // Les titres ne sont qu'un détail de la fiche : sans eux, le reste sert.
+    // Les titres et les actes ne sont que des détails de la fiche : sans
+    // eux, le reste sert.
     let titres = lire_json(&format!("{API}playertitles?language=fr-FR")).unwrap_or(Value::Null);
-    let liste = liste_depuis(version, &agents, &cartes, &files, &titres);
+    let saisons = lire_json(&format!("{API}seasons?language=fr-FR")).unwrap_or(Value::Null);
+    let mut liste = liste_depuis(version, &agents, &cartes, &files, &titres);
+    liste.actes = actes_depuis(&saisons);
     if liste.agents.is_empty() && liste.cartes.is_empty() {
         anyhow::bail!("catalogue vide");
     }
@@ -306,6 +324,37 @@ fn liste_depuis(version: String, agents: &Value, cartes: &Value, files: &Value, 
         }
     }
     liste
+}
+
+/// Les actes de `/v1/seasons` (ceux dont le type dit `Act`), nommés avec
+/// leur épisode : « V26 · ACTE V ».
+fn actes_depuis(saisons: &Value) -> Vec<(String, String, u64, u64)> {
+    let liste = saisons["data"].as_array().cloned().unwrap_or_default();
+    let nom_de = |uuid: &str| {
+        liste
+            .iter()
+            .find(|s| s["uuid"].as_str() == Some(uuid))
+            .and_then(|s| s["displayName"].as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let date = |v: &Value| {
+        v.as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.timestamp_millis().max(0) as u64)
+    };
+    liste
+        .iter()
+        .filter(|s| s["type"].as_str().is_some_and(|t| t.ends_with("Act")))
+        .filter_map(|s| {
+            let uuid = ki_protocol::uuid_valorant(s["uuid"].as_str()?)?;
+            let acte = s["displayName"].as_str()?.trim();
+            let episode = s["parentUuid"].as_str().map(nom_de).unwrap_or_default();
+            let nom = if episode.is_empty() { acte.to_string() } else { format!("{episode} · {acte}") };
+            Some((uuid, nom, date(&s["startTime"])?, date(&s["endTime"])?))
+        })
+        .collect()
 }
 
 fn lire_json(url: &str) -> anyhow::Result<Value> {
@@ -633,12 +682,36 @@ mod tests {
         assert_eq!(index.nom_de_carte("HURM_Alley"), Some("District"));
         assert!(index.files.chercher("abilitydraftarena").is_some());
         assert!(!index.titres.is_empty());
+        // Le 27 septembre 2026, c'est l'acte V de V26.
+        assert_eq!(
+            index.acte_en_cours(1_790_467_200_000),
+            Some(("8102cd81-43a0-d0d7-bd59-47b8fe9bed1b", "V26 · ACTE V"))
+        );
         assert!(dossier.join("catalogue.json").exists());
         let url = index.agents.chercher("Jett").unwrap().clone();
         let image = charger_image(&url, Some(&dossier)).expect("le portrait se télécharge");
         assert_eq!(image.size, [64, 64]);
         assert!(dossier.join(nom_de_fichier(&url)).exists(), "et se garde sur le disque");
         let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    /// Les actes se nomment avec leur épisode et se trouvent à leur date ;
+    /// un épisode n'est pas un acte.
+    #[test]
+    fn l_acte_en_cours_se_trouve_a_sa_date() {
+        let saisons = serde_json::json!({"data": [
+            {"uuid": "3737c391-497a-6e82-aeb5-cc9f701f72e2", "displayName": "V26", "type": null,
+             "startTime": "2026-06-24T00:00:00Z", "endTime": "2027-01-06T00:00:00Z"},
+            {"uuid": "8102cd81-43a0-d0d7-bd59-47b8fe9bed1b", "displayName": "ACTE V", "type": "EAresSeasonType::Act",
+             "startTime": "2026-08-19T00:00:00Z", "endTime": "2026-10-14T00:00:00Z", "parentUuid": "3737c391-497a-6e82-aeb5-cc9f701f72e2"},
+            {"uuid": "d816f426-48ea-f052-117f-9697a155b319", "displayName": "ACTE VI", "type": "EAresSeasonType::Act",
+             "startTime": "2026-10-14T00:00:00Z", "endTime": "pas une date"}
+        ]});
+        let actes = actes_depuis(&saisons);
+        assert_eq!(actes.len(), 1, "l'épisode et l'acte mal daté ne passent pas");
+        let index = Index::depuis(Liste { actes, ..Liste::default() });
+        assert_eq!(index.acte_en_cours(1_790_467_200_000), Some(("8102cd81-43a0-d0d7-bd59-47b8fe9bed1b", "V26 · ACTE V")));
+        assert_eq!(index.acte_en_cours(1_700_000_000_000), None);
     }
 
     #[test]

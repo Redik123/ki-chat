@@ -404,9 +404,49 @@ plus récent (`personnalisation`), dans `v2/account` à la liaison, gardés
 par la fusion quand une relecture n'en dit rien. Aucune requête de plus.
 Un serveur d'avant n'en envoie pas : la fiche garde sa ligne de texte.
 
-**À suivre.** Les médailles (`goldstars/v1/players/{puuid}`, pd, jetons
-du joueur : lues par son propre client comme la boutique, filtrées sur
-lui seul avant tout envoi), le Performance Score quand HenrikDev le
+### V7 — Les médailles — (0.1.49, commit local)
+
+Les « goldstars » de Riot — les Accolades du jeu depuis la 13.06 :
+`GET pd.<région>.a.pvp.net/goldstars/v1/players/{puuid}`, avec les jetons
+du joueur, comme la boutique. **Sondé en vrai le 2026-09-27** (compte de
+drion, test ignoré `medailles::tests::sonde_medailles`) : format 131, la
+doc communautaire est dépassée sur deux points — le `tempT` du catalogue
+est un nombre (les médailles ne se reconnaissent qu'à leur uuid :
+`medailles::GOLDSTARS`), et **chaque match porte son id**, celui de
+l'historique (plus besoin de rapprocher par l'heure). `tempS` = l'acte
+en cours et l'acte « zéro » (la carrière) ; `tempM` = quinze matchs,
+dix joueurs chacun.
+
+- **Client** (`client-gui/src/medailles.rs`) : `valorant::Acces` (mis en
+  commun avec la boutique ; la région vient du jeu lancé, sinon de
+  `/riotclient/region-locale`, « EUW » → `eu`), `normaliser` réduit la
+  réponse au membre (ses sommes de l'acte en cours — nommé par le
+  catalogue, `/v1/seasons` — et de carrière, ses médailles match par
+  match ; les neuf autres jetés), `Lecteur` : une lecture vingt secondes
+  après l'arrivée de VALORANT, deux après chaque partie (40 s, 150 s),
+  jamais deux en trente secondes. Seulement avec « Partager mon
+  activité » (c'est la présence qui voit la partie finir), l'option
+  « Ajouter mes médailles à ma fiche » (cochée de base, ⚙ → Jeu → Compte
+  Riot), un compte lié, un serveur qui a dit les garder
+  (`Welcome.medailles`), et un client Riot ouvert sur le compte lié.
+- **Protocole** : `Medaille` (douze, `Inconnue` pour celles d'une version
+  future), `Medailles` / `CompteMedaille` / `MedaillesDuMatch` /
+  `MedailleGagnee`, `nettoyer()` (bornes, doublons, uuid),
+  `ClientMsg::Medailles`, `FicheValorant.medailles`.
+- **Serveur** : `Valorant::medailles` (compte lié, une fois toutes les
+  vingt secondes, datées par le serveur, fiches.json écrit hors du fil
+  réseau), gardées par la fusion, et le fil de jeu les reprend :
+  « 🏅 MVP (412 / 500), premiers sangs · record d'acte : 24 kills ».
+- **Page** : tuiles « Médailles — V26 · ACTE V » dans la fiche (et la
+  carrière en une ligne), une colonne « Médailles » dans les deux tables
+  de matchs (MVP, FB, ADR… ★ pour un record), et dans l'onglet Groupe le
+  tableau des médailles de l'acte, MVP d'abord.
+
+La note du MVP plafonne à 500 : c'est, selon toute vraisemblance, le
+Performance Score de la 13.06 — seulement pour le MVP et les
+distinctions.
+
+**À suivre.** Le Performance Score de tout le monde quand HenrikDev le
 rendra, l'Agent Mastery quand son endpoint sera documenté.
 
 ## Risques et parades

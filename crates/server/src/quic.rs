@@ -360,6 +360,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         server: state.meta.get(),
         // La preuve que le client attend avant de parler de portes.
         portes: true,
+        // Et avant d'envoyer ses médailles VALORANT.
+        medailles: true,
     });
     tracing::info!("connexion : {username} (id {user_id})");
     // La liste du serveur vient de changer, pour tout le monde.
@@ -1398,6 +1400,17 @@ fn handle_msg(
             let _ = tx.send(ServerMsg::FicheValorant {
                 user_id: cible,
                 fiche,
+            });
+        }
+        ClientMsg::Medailles { medailles } => {
+            // Ses propres médailles, lues dans son client Riot : rangées
+            // dans sa fiche s'il a lié son compte. fiches.json pèse un
+            // mégaoctet : l'écriture se fait à côté du fil réseau.
+            let state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                if state.valorant.medailles(user_id, &medailles) {
+                    tracing::debug!("VALORANT : médailles de {user_id} rangées ({} matchs)", medailles.matchs.len());
+                }
             });
         }
         ClientMsg::AdminSetMusique { membres_ajoutent } => {

@@ -12,6 +12,7 @@ mod images;
 mod instance;
 mod jeux;
 mod markup;
+mod medailles;
 mod medias;
 mod net;
 mod overlay;
@@ -822,6 +823,20 @@ struct KiApp {
     /// Partager son activité VALORANT (lue dans son propre client Riot).
     /// Désactivé de base : personne ne partage sans l'avoir choisi.
     valorant_presence: bool,
+    /// Ajouter ses médailles à sa fiche, lues après chaque partie dans son
+    /// client Riot — sous « Partager mon activité », qui dit quand une
+    /// partie finit. Coché de base : lier son compte, c'est déjà montrer
+    /// ses statistiques au groupe.
+    valorant_medailles: bool,
+    /// Les lectures de médailles prévues, et la dernière.
+    medailles: medailles::Lecteur,
+    /// Le serveur garde les médailles (`Welcome.medailles`) : sans cette
+    /// preuve, rien ne lui part.
+    serveur_medailles: bool,
+    /// L'état VALORANT du tour d'avant, pour voir une partie finir.
+    valorant_avant: Option<ki_protocol::JeuEtat>,
+    /// Le dernier ennui des médailles consigné : on ne le répète pas.
+    medailles_ennui: String,
     /// Le Riot ID en cours de saisie dans ⚙ → Jeu, et la dernière réponse
     /// du serveur à une liaison (réussie ou non, et pourquoi).
     riot_saisie: String,
@@ -1303,6 +1318,11 @@ impl KiApp {
             journal_flux: std::time::Instant::now(),
             pilote_averti: false,
             valorant_presence: get("valorant_presence", "off") == "on",
+            valorant_medailles: get("valorant_medailles", "on") == "on",
+            medailles: medailles::Lecteur::new(),
+            serveur_medailles: false,
+            valorant_avant: None,
+            medailles_ennui: String::new(),
             riot_saisie: String::new(),
             riot_message: None,
             fiche: None,
@@ -4324,6 +4344,7 @@ impl KiApp {
         }
         // VALORANT d'abord : sa présence dit plus qu'un nom de fenêtre.
         let valorant = self.veilleur_valorant.as_ref().and_then(|v| v.releve().1);
+        self.tick_medailles(valorant.as_ref().map(|j| j.etat));
         let voulu = valorant.or_else(|| {
             self.veilleur_jeux
                 .as_ref()
@@ -4341,6 +4362,59 @@ impl KiApp {
         if self.serveur_gere_lus && self.pokes_envoye != Some(self.pokes_accepter) {
             self.send(ClientMsg::AccepterPokes { accepter: self.pokes_accepter });
             self.pokes_envoye = Some(self.pokes_accepter);
+        }
+    }
+
+    /// Mon Riot ID lié, d'après le roster.
+    fn mon_riot_id(&self) -> Option<String> {
+        let id = self.my_id?;
+        self.members.iter().find(|m| m.user_id == id)?.riot_id.clone()
+    }
+
+    /// Les médailles VALORANT : une lecture prévue quand le jeu arrive et
+    /// après chaque partie ; envoyée au serveur si tout le permet — l'option,
+    /// un serveur qui les garde, un compte lié, et le client Riot ouvert sur
+    /// ce compte-là. `etat` : où en est VALORANT à ce tour (`None` : fermé,
+    /// ou la présence n'est pas partagée).
+    fn tick_medailles(&mut self, etat: Option<ki_protocol::JeuEtat>) {
+        use ki_protocol::JeuEtat;
+        // À chaque image : rien n'est copié tant qu'aucune lecture n'arrive.
+        let lie_existe = self
+            .my_id
+            .and_then(|id| self.members.iter().find(|m| m.user_id == id))
+            .is_some_and(|m| m.riot_id.is_some());
+        let voulu = self.valorant_medailles && self.serveur_medailles && lie_existe;
+        if voulu {
+            match (self.valorant_avant, etat) {
+                (None, Some(_)) => self.medailles.au_lancement(),
+                (Some(JeuEtat::EnJeu), apres) if apres != Some(JeuEtat::EnJeu) => self.medailles.apres_partie(),
+                _ => {}
+            }
+        } else {
+            self.medailles.oublier();
+        }
+        self.valorant_avant = etat;
+        let Some(resultat) = self.medailles.tick(&self.app_ctx) else { return };
+        let lie = self.mon_riot_id();
+        let ennui = match (resultat, lie) {
+            (Err(e), _) => format!("médailles VALORANT : {e}"),
+            (Ok(lecture), Some(lie)) if voulu && medailles::meme_riot_id(&lie, &lecture.riot_id) => {
+                let n = lecture.medailles.matchs.len();
+                self.send(ClientMsg::Medailles { medailles: lecture.medailles });
+                ki_voice::journal(format!("médailles VALORANT envoyées ({n} matchs médaillés)"));
+                self.medailles_ennui.clear();
+                return;
+            }
+            (Ok(_), Some(_)) if voulu => {
+                "médailles VALORANT : le client Riot est ouvert sur un autre compte que celui lié — rien d'envoyé"
+                    .to_string()
+            }
+            // L'option coupée pendant la lecture : rien à dire.
+            (Ok(_), _) => return,
+        };
+        if ennui != self.medailles_ennui {
+            ki_voice::journal(ennui.clone());
+            self.medailles_ennui = ennui;
         }
     }
 
@@ -4660,6 +4734,7 @@ impl KiApp {
                 channels,
                 server,
                 portes,
+                medailles,
                 ..
             } => {
                 self.welcomed = true;
@@ -4667,6 +4742,8 @@ impl KiApp {
                 // serveur antérieur ne pose pas le champ, et le panneau
                 // reste caché — rien de nouveau ne lui part.
                 self.portes.disponible = portes;
+                // Même preuve pour les médailles VALORANT.
+                self.serveur_medailles = medailles;
                 self.connecting = false;
                 self.connect_started = None;
                 self.error = None;
@@ -6331,7 +6408,7 @@ impl KiApp {
                         ui,
                         Tone::Info,
                         &format!(
-                            "{what} n'a pas été trouvé — on utilise le périphérique par                              défaut, et on le reprend dès son retour."
+                            "{what} n'a pas été trouvé — on utilise le périphérique par défaut, et on le reprend dès son retour."
                         ),
                         false,
                     );
@@ -9567,7 +9644,7 @@ impl KiApp {
                                     ui.label(RichText::new(texte).color(TEXT_DIM));
                                     ui::hint(
                                         ui,
-                                        "le serveur garde ton rang, tes derniers RR et tes derniers                                          matchs — ta ligne seulement — et les montre aux membres au                                          clic droit sur ton pseudo.",
+                                        "le serveur garde ton rang, tes derniers RR et tes derniers matchs — ta ligne seulement — et les montre aux membres au clic droit sur ton pseudo.",
                                     );
                                     ui.horizontal(|ui| {
                                         if ui::button(ui, Icon::Screen, "Ma fiche").clicked() {
@@ -9578,11 +9655,29 @@ impl KiApp {
                                             self.riot_message = None;
                                         }
                                     });
+                                    ui.add_space(4.0);
+                                    ui.checkbox(&mut self.valorant_medailles, "Ajouter mes médailles à ma fiche").on_hover_text(
+                                        "lues dans ton client Riot après chaque partie : MVP, top frag, aces, \
+                                         clutchs, records de l'acte… Les tiennes seulement — celles des \
+                                         autres joueurs du match ne partent jamais.",
+                                    );
+                                    let pourquoi_pas = if !self.valorant_medailles {
+                                        None
+                                    } else if !self.valorant_presence {
+                                        Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui dit quand une partie finit")
+                                    } else if !self.serveur_medailles {
+                                        Some("le serveur ne les garde pas encore : il doit être mis à jour")
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(pourquoi) = pourquoi_pas {
+                                        ui::hint(ui, pourquoi);
+                                    }
                                 }
                                 _ => {
                                     ui::hint(
                                         ui,
-                                        "ton Riot ID, « Pseudo#TAG » : le serveur le cherche par                                          HenrikDev et garde ton rang et tes derniers matchs. Rien                                          n'est stocké sur les autres joueurs.",
+                                        "ton Riot ID, « Pseudo#TAG » : le serveur le cherche par HenrikDev et garde ton rang et tes derniers matchs. Rien n'est stocké sur les autres joueurs.",
                                     );
                                     ui.horizontal(|ui| {
                                         let champ = ui.add(
@@ -14574,6 +14669,7 @@ impl eframe::App for KiApp {
         storage.set_string("aec", if self.aec_on { "on" } else { "off" }.into());
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
         storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
+        storage.set_string("valorant_medailles", if self.valorant_medailles { "on" } else { "off" }.into());
         storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
         self.soundboard.save(storage);
         self.valo.save(storage);

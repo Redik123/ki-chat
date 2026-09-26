@@ -237,6 +237,11 @@ pub enum ClientMsg {
     },
     /// La fiche VALORANT d'un membre lié, telle que le serveur la garde.
     FicheValorant { user_id: UserId },
+    /// Ses propres médailles VALORANT, lues dans son client Riot : le
+    /// serveur les range dans sa fiche. Seulement vers un serveur qui a
+    /// dit les connaître (`Welcome.medailles`), et seulement pour le compte
+    /// lié.
+    Medailles { medailles: Medailles },
     /// Toutes les fiches des membres liés, pour la page de stats.
     StatsValorant,
     /// Une commande au bot musique (permission « Contrôler la musique »).
@@ -554,6 +559,11 @@ pub enum ServerMsg {
         /// prouve rien ici : la 0.1.43 l'envoie déjà.
         #[serde(default)]
         portes: bool,
+        /// Ce serveur garde les médailles VALORANT (depuis 0.1.49) : la
+        /// preuve qu'il faut avant d'envoyer `ClientMsg::Medailles`, qu'un
+        /// serveur antérieur prendrait pour un message invalide.
+        #[serde(default)]
+        medailles: bool,
     },
     /// L'identité du serveur vient de changer : poussée à tout le monde.
     ServerInfo { server: ServerInfo },
@@ -2040,6 +2050,10 @@ pub struct FicheValorant {
     /// le catalogue). Vide s'il n'en porte pas.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub titre_joueur: String,
+    /// Ses médailles, telles que son ki-chat les a lues dans son client
+    /// Riot (0.1.49 et après) ; `None` tant qu'il ne les a pas envoyées.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medailles: Option<Medailles>,
 }
 
 /// Un acte tel que v3/mmr le résume (`seasonal[]`) : combien de parties,
@@ -2199,6 +2213,226 @@ pub struct DetailManches {
     /// Une lettre par manche dans l'ordre : `V` gagnée, `D` perdue.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub deroule: String,
+}
+
+/// Une médaille VALORANT — un « goldstar » chez Riot, une Accolade dans
+/// le jeu depuis la 13.06 : ce que l'écran de fin de partie décerne en
+/// compétition et en Premier. Riot ne les nomme pas (son catalogue n'a que
+/// des uuid et des nombres) : ce sont nos noms, d'après ce que la valeur
+/// mesure. Une médaille qu'un client plus récent connaît et pas celui-ci
+/// se lit [`Medaille::Inconnue`], et ne s'affiche pas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Medaille {
+    /// Le meilleur de la partie, un seul par match. La valeur est une note
+    /// sur 500 — selon toute vraisemblance le Performance Score, qui
+    /// désigne le MVP depuis la 13.06.
+    Mvp,
+    /// La même note, décernée à tous ceux qui passent environ 420.
+    Distinction,
+    /// Le plus d'éliminations de la partie ; la valeur est ce nombre.
+    TopFrag,
+    /// Dégâts par manche (ADR).
+    Degats,
+    /// Part de tirs à la tête.
+    Tetes,
+    Kills,
+    Assists,
+    /// Poses du spike.
+    Poses,
+    PremiersSangs,
+    Aces,
+    /// Clutchs à un contre deux ou plus.
+    Clutchs,
+    /// Éliminations d'échange.
+    Echanges,
+    #[serde(other)]
+    Inconnue,
+}
+
+impl Medaille {
+    /// Toutes les médailles connues, dans l'ordre où on les montre.
+    pub const TOUTES: [Medaille; 12] = [
+        Medaille::Mvp,
+        Medaille::Distinction,
+        Medaille::TopFrag,
+        Medaille::Aces,
+        Medaille::Clutchs,
+        Medaille::PremiersSangs,
+        Medaille::Kills,
+        Medaille::Degats,
+        Medaille::Tetes,
+        Medaille::Assists,
+        Medaille::Echanges,
+        Medaille::Poses,
+    ];
+
+    pub fn nom(self) -> &'static str {
+        match self {
+            Medaille::Mvp => "MVP",
+            Medaille::Distinction => "Distinction",
+            Medaille::TopFrag => "Top frag",
+            Medaille::Degats => "Dégâts",
+            Medaille::Tetes => "Tirs à la tête",
+            Medaille::Kills => "Éliminations",
+            Medaille::Assists => "Assistances",
+            Medaille::Poses => "Poses du spike",
+            Medaille::PremiersSangs => "Premiers sangs",
+            Medaille::Aces => "Aces",
+            Medaille::Clutchs => "Clutchs",
+            Medaille::Echanges => "Échanges",
+            Medaille::Inconnue => "Médaille",
+        }
+    }
+
+    /// Le rang d'affichage : le MVP d'abord.
+    pub fn ordre(self) -> usize {
+        Self::TOUTES.iter().position(|m| *m == self).unwrap_or(Self::TOUTES.len())
+    }
+
+    /// Une valeur telle qu'on la lit : « 482 / 500 », « 254 ADR »,
+    /// « 26 kills ». Riot l'envoie en flottant (`24.000001`) : arrondie.
+    pub fn valeur(self, v: f32) -> String {
+        let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+        let n = v.round() as u32;
+        let compte = |un: &str, plusieurs: &str| format!("{n} {}", if n > 1 { plusieurs } else { un });
+        match self {
+            Medaille::Mvp | Medaille::Distinction => format!("{n} / 500"),
+            Medaille::Degats => format!("{n} ADR"),
+            // Une part (0,35) ou un pourcentage (35) : on n'a pas encore vu
+            // passer l'un ou l'autre, les deux se lisent.
+            Medaille::Tetes => format!("{} %", if v <= 1.0 { (v * 100.0).round() as u32 } else { n }),
+            Medaille::TopFrag | Medaille::Kills => compte("kill", "kills"),
+            Medaille::Assists => compte("assistance", "assistances"),
+            Medaille::Poses => compte("pose", "poses"),
+            Medaille::PremiersSangs => compte("premier sang", "premiers sangs"),
+            Medaille::Aces => compte("ace", "aces"),
+            Medaille::Clutchs => compte("clutch", "clutchs"),
+            Medaille::Echanges => compte("échange", "échanges"),
+            Medaille::Inconnue => format!("{n}"),
+        }
+    }
+}
+
+/// Combien de fois une médaille, et sa meilleure valeur, sur un acte ou
+/// sur toute la carrière.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompteMedaille {
+    pub medaille: Medaille,
+    #[serde(default)]
+    pub fois: u32,
+    #[serde(default)]
+    pub meilleur: f32,
+}
+
+/// Une médaille gagnée dans un match, sa valeur, et si c'est le record
+/// de l'acte.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MedailleGagnee {
+    pub medaille: Medaille,
+    #[serde(default)]
+    pub valeur: f32,
+    #[serde(default)]
+    pub record: bool,
+}
+
+/// Les médailles d'un match : son id (celui de [`MatchResume::id`]), son
+/// début, et ce que le membre y a gagné.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MedaillesDuMatch {
+    #[serde(default)]
+    pub id: String,
+    /// Début du match, en millisecondes Unix.
+    #[serde(default)]
+    pub debut: u64,
+    #[serde(default)]
+    pub medailles: Vec<MedailleGagnee>,
+}
+
+/// Les médailles VALORANT d'un membre, lues par son **propre** client Riot
+/// et envoyées par son ki-chat (`goldstars/v1/players/{puuid}`) : l'acte en
+/// cours, la carrière, et ses derniers matchs médaille par médaille. Rien
+/// des autres joueurs : la réponse de Riot en contient, le client les
+/// jette avant d'envoyer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Medailles {
+    /// Quand le serveur les a reçues, en millisecondes Unix.
+    #[serde(default)]
+    pub maj: u64,
+    /// L'acte de `cet_acte`, en clair (« V26 · ACTE V ») ; vide s'il n'a
+    /// pas pu être nommé.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub acte: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cet_acte: Vec<CompteMedaille>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carriere: Vec<CompteMedaille>,
+    /// Les matchs récents où il en a gagné, du plus récent au plus ancien.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matchs: Vec<MedaillesDuMatch>,
+}
+
+/// Bornes de ce qu'un client peut envoyer en médailles.
+pub const MEDAILLES_MATCHS_MAX: usize = 20;
+const MEDAILLE_VALEUR_MAX: f32 = 100_000.0;
+
+impl Medailles {
+    /// Telles que le serveur les garde : les médailles connues seulement,
+    /// une fois chacune, les nombres finis et bornés, vingt matchs au
+    /// plus, des ids qui sont des uuid. Elles viennent d'un client, comme
+    /// tout le reste.
+    pub fn nettoyer(&self) -> Self {
+        let propre = |v: f32| if v.is_finite() { v.clamp(0.0, MEDAILLE_VALEUR_MAX) } else { 0.0 };
+        let comptes = |liste: &[CompteMedaille]| {
+            let mut vus = std::collections::BTreeSet::new();
+            let mut sortie: Vec<CompteMedaille> = liste
+                .iter()
+                .filter(|c| c.medaille != Medaille::Inconnue && vus.insert(c.medaille))
+                .map(|c| CompteMedaille { medaille: c.medaille, fois: c.fois.min(100_000), meilleur: propre(c.meilleur) })
+                .collect();
+            sortie.sort_by_key(|c| c.medaille.ordre());
+            sortie
+        };
+        let mut matchs: Vec<MedaillesDuMatch> = self
+            .matchs
+            .iter()
+            .map(|m| {
+                let mut vus = std::collections::BTreeSet::new();
+                let mut medailles: Vec<MedailleGagnee> = m
+                    .medailles
+                    .iter()
+                    .filter(|g| g.medaille != Medaille::Inconnue && vus.insert(g.medaille))
+                    .map(|g| MedailleGagnee { medaille: g.medaille, valeur: propre(g.valeur), record: g.record })
+                    .collect();
+                medailles.sort_by_key(|g| g.medaille.ordre());
+                MedaillesDuMatch { id: uuid_valorant(&m.id).unwrap_or_default(), debut: m.debut, medailles }
+            })
+            .filter(|m| !m.medailles.is_empty())
+            .collect();
+        matchs.sort_by_key(|m| std::cmp::Reverse(m.debut));
+        matchs.truncate(MEDAILLES_MATCHS_MAX);
+        Self {
+            maj: self.maj,
+            acte: safe_display(&self.acte, 40),
+            cet_acte: comptes(&self.cet_acte),
+            carriere: comptes(&self.carriere),
+            matchs,
+        }
+    }
+
+    /// Les médailles d'un match, par son id.
+    pub fn du_match(&self, id: &str) -> Option<&MedaillesDuMatch> {
+        if id.is_empty() {
+            return None;
+        }
+        self.matchs.iter().find(|m| m.id.eq_ignore_ascii_case(id))
+    }
+
+    /// Combien de fois une médaille sur l'acte en cours (ou la carrière).
+    pub fn fois(&self, medaille: Medaille, carriere: bool) -> u32 {
+        let liste = if carriere { &self.carriere } else { &self.cet_acte };
+        liste.iter().find(|c| c.medaille == medaille).map(|c| c.fois).unwrap_or(0)
+    }
 }
 
 /// Des sommes sur un ensemble de matchs : elles s'additionnent, se
@@ -2641,11 +2875,17 @@ impl FicheValorant {
     pub fn resume(&self, n_matchs: usize, n_points: usize) -> FicheValorant {
         let mut matchs: Vec<&MatchResume> = self.matchs.iter().collect();
         matchs.sort_by_key(|m| std::cmp::Reverse(m.date));
-        let matchs = matchs
+        let matchs: Vec<MatchResume> = matchs
             .into_iter()
             .take(n_matchs)
             .map(|m| MatchResume { manches_detail: None, ..m.clone() })
             .collect();
+        // Les médailles : les sommes entières, et celles des seuls matchs
+        // qui partent.
+        let medailles = self.medailles.as_ref().map(|md| Medailles {
+            matchs: md.matchs.iter().filter(|x| matchs.iter().any(|m| !m.id.is_empty() && m.id == x.id)).cloned().collect(),
+            ..md.clone()
+        });
         let mut points: Vec<&PointRR> = self.historique_rr.iter().collect();
         points.sort_by_key(|p| std::cmp::Reverse(p.date));
         let historique_rr = points.into_iter().take(n_points).cloned().collect();
@@ -2662,6 +2902,7 @@ impl FicheValorant {
             saisons: Vec::new(),
             carte_joueur: self.carte_joueur.clone(),
             titre_joueur: self.titre_joueur.clone(),
+            medailles,
         }
     }
 }
@@ -3687,6 +3928,90 @@ mod tests {
         }
     }
 
+    /// Les médailles se nettoient comme tout ce qui vient d'un client :
+    /// l'inconnue et le doublon tombent, les nombres fous se bornent, un id
+    /// qui n'est pas un uuid se vide, vingt matchs au plus, du plus récent
+    /// au plus ancien, un match sans médaille disparaît.
+    #[test]
+    fn les_medailles_se_nettoient() {
+        let gagnee = |medaille, valeur| MedailleGagnee { medaille, valeur, record: false };
+        let sale = Medailles {
+            maj: 1,
+            acte: "ACTE\u{7} V".into(),
+            cet_acte: vec![
+                CompteMedaille { medaille: Medaille::Aces, fois: 1, meilleur: f32::NAN },
+                CompteMedaille { medaille: Medaille::Mvp, fois: 9_999_999, meilleur: f32::INFINITY },
+                CompteMedaille { medaille: Medaille::Mvp, fois: 1, meilleur: 1.0 },
+                CompteMedaille { medaille: Medaille::Inconnue, fois: 3, meilleur: 1.0 },
+            ],
+            carriere: Vec::new(),
+            matchs: (0..30u64)
+                .map(|i| MedaillesDuMatch {
+                    id: if i == 29 { "../../x".into() } else { format!("{i:08}-0000-0000-0000-000000000000") },
+                    debut: i,
+                    medailles: if i == 28 { Vec::new() } else { vec![gagnee(Medaille::Kills, -5.0), gagnee(Medaille::Kills, 3.0)] },
+                })
+                .collect(),
+        };
+        let propre = sale.nettoyer();
+        assert_eq!(propre.acte, "ACTE V");
+        assert_eq!(propre.cet_acte.iter().map(|c| c.medaille).collect::<Vec<_>>(), [Medaille::Mvp, Medaille::Aces]);
+        assert_eq!((propre.cet_acte[0].fois, propre.cet_acte[0].meilleur), (100_000, 0.0));
+        assert_eq!(propre.cet_acte[1].meilleur, 0.0);
+        assert_eq!(propre.matchs.len(), MEDAILLES_MATCHS_MAX);
+        assert_eq!(propre.matchs[0].id, "", "l'id douteux est vidé");
+        assert_eq!(propre.matchs[0].debut, 29, "du plus récent au plus ancien");
+        assert!(propre.matchs.iter().all(|m| m.debut != 28), "un match sans médaille disparaît");
+        assert_eq!(propre.matchs[1].medailles, vec![gagnee(Medaille::Kills, 0.0)], "une seule fois, bornée à zéro");
+        assert_eq!(propre.du_match("00000027-0000-0000-0000-000000000000").map(|m| m.debut), Some(27));
+        assert!(propre.du_match("").is_none());
+    }
+
+    /// Une médaille qu'on ne connaît pas encore se lit sans erreur ; les
+    /// valeurs se disent avec leur unité, arrondies.
+    #[test]
+    fn une_medaille_se_lit_et_se_dit() {
+        let inconnue: MedailleGagnee = serde_json::from_str(r#"{"medaille":"danse_de_la_victoire","valeur":1}"#).unwrap();
+        assert_eq!(inconnue.medaille, Medaille::Inconnue);
+        assert_eq!(Medaille::Mvp.valeur(482.81036), "483 / 500");
+        assert_eq!(Medaille::Degats.valeur(254.1875), "254 ADR");
+        assert_eq!(Medaille::Kills.valeur(24.000_001), "24 kills");
+        assert_eq!(Medaille::Clutchs.valeur(1.0), "1 clutch");
+        assert_eq!(Medaille::Tetes.valeur(0.35), "35 %");
+        assert_eq!(Medaille::Tetes.valeur(42.0), "42 %");
+        assert_eq!(Medaille::Aces.valeur(f32::NAN), "0 ace");
+        assert_eq!(Medaille::Mvp.ordre(), 0);
+        assert!(Medaille::Inconnue.ordre() > Medaille::Poses.ordre());
+        // Un serveur d'avant n'annonce pas les médailles.
+        let welcome = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"00","channels":[]}"#;
+        let ServerMsg::Welcome { medailles, .. } = serde_json::from_str(welcome).unwrap() else { panic!() };
+        assert!(!medailles);
+    }
+
+    /// Le résumé pour la page du groupe garde les sommes, et les médailles
+    /// des seuls matchs qui partent.
+    #[test]
+    fn le_resume_garde_les_medailles_des_matchs_qui_partent() {
+        let mut fiche = FicheValorant::default();
+        for (id, date) in [("a", 3), ("b", 2), ("c", 1)] {
+            fiche.matchs.push(MatchResume { id: id.into(), date, ..MatchResume::default() });
+        }
+        let une = |id: &str| MedaillesDuMatch {
+            id: id.into(),
+            debut: 0,
+            medailles: vec![MedailleGagnee { medaille: Medaille::Mvp, valeur: 400.0, record: false }],
+        };
+        fiche.medailles = Some(Medailles {
+            cet_acte: vec![CompteMedaille { medaille: Medaille::Mvp, fois: 3, meilleur: 400.0 }],
+            matchs: vec![une("a"), une("c"), une("zz")],
+            ..Medailles::default()
+        });
+        let resume = fiche.resume(2, 0);
+        let md = resume.medailles.expect("les médailles partent");
+        assert_eq!(md.cet_acte.len(), 1);
+        assert_eq!(md.matchs.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a"]);
+    }
+
     /// Une fiche d'avant 0.1.49 se relit sans carte ni titre, et une fiche
     /// qui n'en a pas ne les écrit pas.
     #[test]
@@ -3934,6 +4259,17 @@ mod tests {
             }],
             carte_joueur: "9fb348bc-41a0-91ad-8a3e-818035c4e561".into(),
             titre_joueur: "48d870a2-4493-ebf8-7d6f-979be914dc43".into(),
+            medailles: Some(Medailles {
+                maj: 1_700_000_002_000,
+                acte: "V26 · ACTE V".into(),
+                cet_acte: vec![CompteMedaille { medaille: Medaille::Mvp, fois: 2, meilleur: 482.81036 }],
+                carriere: vec![CompteMedaille { medaille: Medaille::Clutchs, fois: 3, meilleur: 1.0 }],
+                matchs: vec![MedaillesDuMatch {
+                    id: "m1".into(),
+                    debut: 1_700_000_000_000,
+                    medailles: vec![MedailleGagnee { medaille: Medaille::Degats, valeur: 185.22728, record: true }],
+                }],
+            }),
         };
         let json = serde_json::to_string(&pleine).unwrap();
         let relu: FicheValorant = serde_json::from_str(&json).unwrap();
