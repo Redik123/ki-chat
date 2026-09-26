@@ -44,7 +44,8 @@ use windows::core::{implement, PCWSTR};
 use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, AudioCategory_Communications, AudioCategory_Other,
+    eCapture, eCommunications, eConsole, eRender, AudioCategory_Communications,
+    AudioCategory_Other,
     EDataFlow, ERole, IAudioCaptureClient, IAudioClient2, IAudioRenderClient, IMMDevice,
     IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
     AudioClientProperties, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
@@ -361,6 +362,28 @@ pub fn default_endpoint_id(input: bool) -> Option<String> {
     endpoint_id(&device).ok()
 }
 
+/// Les deux défauts de Windows quand ils diffèrent : (le périphérique par
+/// défaut, que suit ki-chat en « défaut système » ; le périphérique de
+/// communication, que suit le « Défaut » de Discord). `None` quand c'est le
+/// même — le cas courant — ou quand Windows ne répond pas.
+///
+/// C'est le piège du « ça marche sur Discord, pas sur ki-chat » : un casque
+/// réglé comme périphérique de communication seulement, ou un autre micro
+/// (webcam, manette) qui a pris le rôle de défaut. Le défaut de communication
+/// est **lu, jamais ouvert** : un flux ouvert sur lui serait un appel aux yeux
+/// de Windows (voir `pick`).
+pub fn defauts_divergents(input: bool) -> Option<(String, String)> {
+    let enu = enumerator().ok()?;
+    let flow = if input { eCapture } else { eRender };
+    let lire = |role: ERole| -> Option<(String, String)> {
+        let device = unsafe { enu.GetDefaultAudioEndpoint(flow, role) }.ok()?;
+        Some((endpoint_id(&device).ok()?, friendly_name(&device).ok()?))
+    };
+    let (id_defaut, defaut) = lire(eConsole)?;
+    let (id_communication, communication) = lire(eCommunications)?;
+    (id_defaut != id_communication).then_some((defaut, communication))
+}
+
 pub fn device_signature(name: Option<&str>, input: bool) -> Option<String> {
     let enu = enumerator().ok()?;
     let (device, fallback) = pick(&enu, name, input).ok()?;
@@ -594,25 +617,26 @@ impl Drop for NativeStream {
 
 /// Ouvre le micro en natif. Livre des blocs mono f32 dans `tx`, à la
 /// fréquence annoncée en retour (48 kHz sauf repli sur le format de mixage).
-/// `alive` est abaissé si le flux meurt — mêmes conventions que cpal.
+/// `alive` est abaissé si le flux meurt — mêmes conventions que cpal. Rend
+/// aussi le nom du micro ouvert : c'est lui qu'on nomme s'il ne livre rien.
 pub fn open_input(
     device_name: Option<&str>,
     raw: bool,
     comms: bool,
     tx: crate::ChunkTx,
     alive: Arc<AtomicBool>,
-) -> anyhow::Result<(NativeStream, u32, bool)> {
+) -> anyhow::Result<(NativeStream, u32, bool, String)> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let name = device_name.map(str::to_owned);
     // L'ouverture se fait dans le fil de travail (les objets COM y restent
     // confinés) ; le résultat revient par ce canal.
-    let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<(u32, bool)>>();
+    let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<(u32, bool, String)>>();
 
     let thread = std::thread::Builder::new()
         .name("wasapi-capture".into())
         .spawn(move || {
-            let opened = (|| -> anyhow::Result<(OpenClient, IAudioCaptureClient, bool)> {
+            let opened = (|| -> anyhow::Result<(OpenClient, IAudioCaptureClient, bool, String)> {
                 let enu = enumerator()?;
                 let (device, fallback) = pick(&enu, name.as_deref(), true)?;
                 let dev_name = friendly_name(&device).unwrap_or_default();
@@ -636,16 +660,16 @@ pub fn open_input(
                     if name.is_none() { ", défaut Windows" } else { ", choisi" },
                     if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
                 ));
-                Ok((open, capture, fallback))
+                Ok((open, capture, fallback, dev_name))
             })();
-            let (open, capture, fallback) = match opened {
+            let (open, capture, fallback, dev_name) = match opened {
                 Ok(parts) => parts,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
                     return;
                 }
             };
-            let _ = ready_tx.send(Ok((open.rate, fallback)));
+            let _ = ready_tx.send(Ok((open.rate, fallback, dev_name)));
             // Priorité temps réel, tenue jusqu'à la fin du fil. Un bloc de
             // micro livré en retard finit en trou chez ceux qui écoutent.
             let _priorite = ProAudio::claim("capture");
@@ -654,10 +678,11 @@ pub fn open_input(
         .context("création du fil de capture natif")?;
 
     match ready_rx.recv() {
-        Ok(Ok((rate, fallback))) => Ok((
+        Ok(Ok((rate, fallback, dev_name))) => Ok((
             NativeStream { stop, thread: Some(thread) },
             rate,
             fallback,
+            dev_name,
         )),
         Ok(Err(e)) => {
             let _ = thread.join();

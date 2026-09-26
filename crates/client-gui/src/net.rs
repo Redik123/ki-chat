@@ -39,8 +39,8 @@ pub struct VoicePrefs {
     /// Mode brut du micro (effets tiers court-circuités). Natif seulement.
     pub raw_mic: bool,
     /// Micro en catégorie « communications » dès l'ouverture (partage de la
-    /// voie de traitement avec la voix des jeux). Le moteur y bascule seul
-    /// en cas de micro affamé ; la case rend le choix permanent.
+    /// voie de traitement avec la voix des jeux). Le moteur le propose en cas
+    /// de micro affamé ; la case rend le choix permanent.
     pub comms_mic: bool,
     /// Sortie robuste : tampon de lecture profond pour les machines saturées
     /// et les cartes son USB fragiles (+70 ms de latence). Natif seulement.

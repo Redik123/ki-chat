@@ -37,10 +37,10 @@ ki-opus = { path = "../ki-opus" }
 # Annulation d'écho acoustique (SpeexDSP MDF + suppression de résidu).
 ki-aec = { path = "../ki-aec" }
 
-# Moteur audio Windows natif (WASAPI direct) : rôle communication, conversion
-# de format déléguée à Windows, notifications de périphériques, mode brut —
-# tout ce que cpal ne demande pas et qui fait la robustesse de Discord face
-# aux jeux. Même version que la GUI pour ne compiler le crate qu'une fois.
+# Moteur audio Windows natif (WASAPI direct) : conversion de format déléguée
+# à Windows, notifications de périphériques, mode brut — tout ce que cpal ne
+# demande pas et qui fait la robustesse de Discord face aux jeux. Même
+# version que la GUI pour ne compiler le crate qu'une fois.
 [target.'cfg(windows)'.dependencies]
 # Le macro #[implement] émet des chemins ::windows_core : sans cette
 # dépendance directe, ils résoudraient vers le windows-core 0.54 de cpal.

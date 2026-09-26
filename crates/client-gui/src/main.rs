@@ -925,6 +925,10 @@ struct KiApp {
     diag_last_sent_ts: u64,
     /// Dernier envoi périodique, pour la cadence de dix minutes.
     diag_last_flush: Option<std::time::Instant>,
+    /// Le rapport du docteur de la session est parti. Il attend la première
+    /// ouverture du micro : calculé avant, il décrivait un micro que personne
+    /// n'avait encore ouvert.
+    diag_docteur_envoye: bool,
     /// Horodatage de modification du rapport de plantage déjà transmis
     /// (préférence persistée) : un même crash ne repart pas à chaque session.
     diag_crash_envoye: String,
@@ -1080,7 +1084,7 @@ struct KiApp {
     /// (Sonar, Nahimic…). Moteur natif seulement.
     raw_mic: bool,
     /// Micro en catégorie « communications » dès l'ouverture (sinon le moteur
-    /// n'y bascule que s'il détecte un micro affamé).
+    /// ne le propose que s'il détecte un micro affamé).
     comms_mic: bool,
     /// Sortie robuste : tampon de lecture profond (+70 ms de latence) pour
     /// les machines saturées et les cartes son USB fragiles.
@@ -1145,6 +1149,10 @@ struct VoiceSnapshot {
     /// Le moteur propose de basculer le micro en catégorie « communications »
     /// (micro affamé) et attend la réponse de l'utilisateur.
     comms_proposal: bool,
+    /// Le micro qui ne livre rien, pour le nommer dans la proposition : son
+    /// nom, et s'il est pris comme défaut de Windows. Relevé seulement quand
+    /// une proposition est ouverte.
+    micro_muet: Option<(String, bool)>,
 }
 
 impl KiApp {
@@ -1351,6 +1359,7 @@ impl KiApp {
             diag_share: get("diag_share", "off") == "on",
             diag_last_sent_ts: 0,
             diag_last_flush: None,
+            diag_docteur_envoye: false,
             diag_crash_envoye: get("diag_crash_envoye", ""),
             crash_verifie: false,
             diag_admin: Default::default(),
@@ -1713,15 +1722,19 @@ impl KiApp {
         // continue de bouger, les réglages audio restent utilisables.
         let ping = self.conn.as_ref().and_then(|c| c.rtt_ms());
         match self.link.engine.lock().unwrap().as_ref() {
-            Some(engine) => VoiceSnapshot {
-                engine_up: true,
-                stats: engine.stats(),
-                ping,
-                levels: engine.user_levels().into_iter().collect(),
-                device_trouble: engine.device_trouble(),
-                device_fallback: engine.device_fallback(),
-                comms_proposal: engine.comms_proposal(),
-            },
+            Some(engine) => {
+                let comms_proposal = engine.comms_proposal();
+                VoiceSnapshot {
+                    engine_up: true,
+                    stats: engine.stats(),
+                    ping,
+                    levels: engine.user_levels().into_iter().collect(),
+                    device_trouble: engine.device_trouble(),
+                    device_fallback: engine.device_fallback(),
+                    comms_proposal,
+                    micro_muet: comms_proposal.then(|| engine.micro_en_service()).flatten(),
+                }
+            }
             None => VoiceSnapshot {
                 ping,
                 ..Default::default()
@@ -5315,8 +5328,9 @@ impl KiApp {
     }
 
     /// Envoie au serveur les diagnostics accumulés depuis le dernier envoi :
-    /// méta (version, système), nouvelles lignes du journal audio, et — au
-    /// premier envoi de la session ou sur demande — le rapport du docteur.
+    /// méta (version, système), nouvelles lignes du journal audio, et — une
+    /// fois par session, dès la première ouverture du micro, ou sur demande —
+    /// le rapport du docteur.
     ///
     /// C'est TOUT ce qui transite, et rien d'autre : pas un message, pas une
     /// trame audio. Le lot part en JSONL sur le canal HTTPS épinglé du
@@ -5329,7 +5343,23 @@ impl KiApp {
         let journal = ki_voice::journal_snapshot();
         let fresh: Vec<&(u64, String)> =
             journal.iter().filter(|(t, _)| *t > self.diag_last_sent_ts).collect();
-        if fresh.is_empty() && !manual {
+        // Le docteur énumère les processus : pas de quoi le faire chaque
+        // minute. Une fois par session, et pas avant la première ouverture du
+        // micro — calculé au démarrage du moteur, il annonçait un « moteur de
+        // secours » et zéro famine dans la moitié des rapports reçus. À la
+        // demande, il part tel quel : le rapport dit lui-même s'il est tôt.
+        let docteur = if manual || !self.diag_docteur_envoye {
+            self.link
+                .engine
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|e| manual || e.docteur_pret())
+                .map(|e| e.docteur().rapport())
+        } else {
+            None
+        };
+        if fresh.is_empty() && docteur.is_none() && !manual {
             return;
         }
         let now_ms = chrono::Local::now().timestamp_millis().max(0) as u64;
@@ -5347,15 +5377,12 @@ impl KiApp {
                 serde_json::Value::String((*msg).clone())
             ));
         }
-        // Le docteur énumère les processus : pas de quoi le faire chaque
-        // minute. Au premier envoi et à la demande, c'est là qu'il compte.
-        if manual || self.diag_last_sent_ts == 0 {
-            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                lot.push_str(&format!(
-                    "{{\"type\":\"docteur\",\"t\":{now_ms},\"rapport\":{}}}\n",
-                    serde_json::Value::String(engine.docteur().rapport())
-                ));
-            }
+        if let Some(rapport) = docteur {
+            lot.push_str(&format!(
+                "{{\"type\":\"docteur\",\"t\":{now_ms},\"rapport\":{}}}\n",
+                serde_json::Value::String(rapport)
+            ));
+            self.diag_docteur_envoye = true;
         }
         // Le plantage de la session précédente, si le dispositif de secours
         // en a consigné un : il part avec le premier lot de la session, et
@@ -5449,10 +5476,22 @@ impl KiApp {
             .diag_last_flush
             .map(|t| t.elapsed() > std::time::Duration::from_secs(600))
             .unwrap_or(true);
-        if !due {
+        // Le rapport du docteur part dès que le micro s'est ouvert, sans
+        // attendre la cadence : c'est le premier état fiable de la session.
+        let docteur_du = !self.diag_docteur_envoye
+            && self
+                .link
+                .engine
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|e| e.docteur_pret());
+        if !due && !docteur_du {
             return;
         }
-        self.diag_last_flush = Some(std::time::Instant::now());
+        if due {
+            self.diag_last_flush = Some(std::time::Instant::now());
+        }
         self.flush_diag(false);
     }
 
@@ -8479,6 +8518,16 @@ impl KiApp {
                                 &self.output_devices.clone(),
                                 &mut self.pref_output,
                             );
+                            // Le piège du « ça marche sur Discord » : les deux
+                            // logiciels ne suivent pas le même défaut Windows.
+                            ui::hint(
+                                ui,
+                                "« défaut système » suit le périphérique par défaut de \
+                                 Windows — pas celui de communication, que suit Discord. \
+                                 Choisis ton casque ici pour que ki-chat le prenne quoi que \
+                                 Windows désigne.",
+                            );
+                            ui.add_space(4.0);
                             if ui::button(ui, Icon::Refresh, "Actualiser la liste").clicked() {
                                 let (inputs, outputs) = ki_voice::list_devices();
                                 self.input_devices = inputs;
@@ -8492,10 +8541,12 @@ impl KiApp {
                                         "Moteur audio natif (recommandé)",
                                     )
                                     .on_hover_text(
-                                        "parle à Windows comme Discord : suit le périphérique \
-                                         de communication, survit aux jeux qui changent le \
-                                         format audio. Décoche si le son se comporte moins \
-                                         bien qu'avant.",
+                                        "parle à Windows sans intermédiaire : survit aux jeux \
+                                         qui changent le format audio, et rouvre vite un \
+                                         périphérique qui change. En « défaut système », suit \
+                                         le périphérique par défaut de Windows — pas celui de \
+                                         communication, que suit Discord. Décoche si le son se \
+                                         comporte moins bien qu'avant.",
                                     )
                                     .changed()
                                 {
@@ -8526,8 +8577,8 @@ impl KiApp {
                                             "ouvre le micro dans la voie « communications » de \
                                              Windows, celle des voix intégrées des jeux — \
                                              nécessaire quand elles affament le micro (le \
-                                             moteur le fait tout seul au besoin, cette case le \
-                                             rend permanent). Revers : Windows peut baisser le \
+                                             moteur le propose au besoin ; cette case le rend \
+                                             permanent). Revers : Windows peut baisser le \
                                              volume des autres sons pendant le vocal → Panneau \
                                              son → Communication → « Ne rien faire ».",
                                         )
@@ -10966,6 +11017,10 @@ impl KiApp {
     /// des autres sons (l'atténuation Windows) — alors on demande, on
     /// n'impose pas. Refuser vaut pour la session : à l'utilisateur de
     /// régler son casque, le docteur audio lui dit comment.
+    ///
+    /// La fenêtre nomme le micro et parle d'abord de l'appareil éteint — la
+    /// cause que le terrain a montrée — et se ferme d'elle-même quand le son
+    /// revient : le moteur retire alors sa proposition.
     fn comms_popup(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
         if !voice.comms_proposal {
             return;
@@ -10977,24 +11032,41 @@ impl KiApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
             .show(ctx, |ui| {
                 ui.set_max_width(380.0);
+                // Nommer le micro change tout : « ton micro ne capte rien » ne
+                // dit pas que c'est une manette que Windows a prise par défaut.
+                let (qui, par_defaut) = match &voice.micro_muet {
+                    Some((nom, par_defaut)) => (format!("« {nom} »"), *par_defaut),
+                    None => ("Ton micro".to_string(), false),
+                };
+                ui.label(format!(
+                    "{qui} s'ouvre mais ne capte rien{}.",
+                    if par_defaut {
+                        " — c'est le micro que Windows désigne par défaut"
+                    } else {
+                        ""
+                    }
+                ));
+                ui.add_space(6.0);
                 ui.label(
-                    "Ton micro s'ouvre mais ne capte rien : un autre logiciel — la \
-                     voix intégrée d'un jeu, le pilote du casque — tient probablement \
-                     la voie de capture.",
+                    "Le plus souvent, l'appareil est éteint ou en veille alors que son \
+                     récepteur reste branché — casque sans fil, manette. Rallume-le : \
+                     cette fenêtre se fermera d'elle-même quand le son reviendra. Si ce \
+                     n'est pas ton micro, choisis le bon dans ⚙ Audio.",
                 );
                 ui.add_space(6.0);
                 ui.label(
-                    "ki-chat peut demander la même voie que lui (catégorie \
-                     « communications » de Windows). Revers possible : Windows peut \
-                     alors baisser le volume de tes autres sons — réglable dans \
-                     Panneau son → Communications → « Ne rien faire ».",
+                    "Sinon, un autre logiciel — la voix intégrée d'un jeu — tient \
+                     peut-être la voie de capture. ki-chat peut demander la même voie \
+                     que lui (catégorie « communications » de Windows). Revers possible : \
+                     Windows peut alors baisser le volume de tes autres sons — réglable \
+                     dans Panneau son → Communications → « Ne rien faire ».",
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui::button(ui, Icon::Check, "Basculer (cette session)").clicked() {
                         reponse = Some(true);
                     }
-                    if ui::button(ui, Icon::Close, "Non — je règle mon casque").clicked() {
+                    if ui::button(ui, Icon::Close, "Non — je vérifie mon micro").clicked() {
                         reponse = Some(false);
                     }
                 });

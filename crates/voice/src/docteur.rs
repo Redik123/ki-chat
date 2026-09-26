@@ -37,6 +37,41 @@ pub struct Suite {
     pub conseil: &'static str,
 }
 
+/// Le moteur qui tient le micro, d'après sa dernière tentative d'ouverture.
+///
+/// Quatre états et non un booléen : « pas encore ouvert » se confondait avec
+/// « moteur de secours ». Le rapport qui part au démarrage de la session
+/// était calculé avant la première ouverture du micro, et la moitié des
+/// rapports reçus annonçaient un repli sur cpal qui n'avait jamais eu lieu.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Moteur {
+    /// Aucune tentative encore : le moteur vient de démarrer.
+    #[default]
+    PasEncore = 0,
+    /// La dernière ouverture a échoué, moteur natif comme moteur de secours.
+    Aucun = 1,
+    /// Le moteur WASAPI natif.
+    Natif = 2,
+    /// Le moteur de secours (cpal).
+    Secours = 3,
+}
+
+impl Moteur {
+    /// L'état tel que le fil de capture le range dans un atomique.
+    pub(crate) fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) fn depuis_code(code: u8) -> Self {
+        match code {
+            1 => Self::Aucun,
+            2 => Self::Natif,
+            3 => Self::Secours,
+            _ => Self::PasEncore,
+        }
+    }
+}
+
 /// Ce que le docteur a trouvé.
 #[derive(Clone, Debug, Default)]
 pub struct Diagnostic {
@@ -57,20 +92,35 @@ pub struct Diagnostic {
     pub exclusif_micro: Option<bool>,
     /// Idem pour la sortie.
     pub exclusif_sortie: Option<bool>,
-    /// Périphériques réellement en service, s'ils sont connus. Sert à
+    /// Périphériques en service, s'ils sont connus : le micro tel que le
+    /// moteur l'a ouvert, la sortie telle qu'elle est réglée. Sert à
     /// reconnaître un **pilote virtuel**, que l'énumération des processus ne
-    /// peut pas voir.
+    /// peut pas voir, et à nommer le micro qui ne livre rien.
     pub peripherique_micro: Option<String>,
     pub peripherique_sortie: Option<String>,
+    /// Le micro suit-il le défaut de Windows — « défaut système » dans les
+    /// réglages, ou repli faute du micro choisi ? Les conseils sur les
+    /// défauts de Windows ne valent que dans ce cas : un périphérique choisi
+    /// les ignore.
+    pub micro_suit_defaut: bool,
+    /// Idem pour la sortie.
+    pub sortie_suit_defaut: bool,
+    /// Quand Windows a deux micros par défaut : (le périphérique par défaut,
+    /// que suit ki-chat ; le périphérique de communication, que suit le
+    /// « Défaut » de Discord). `None` quand c'est le même, le cas courant.
+    pub micro_defauts: Option<(String, String)>,
+    /// Idem pour la sortie.
+    pub sortie_defauts: Option<(String, String)>,
     /// Ouvertures du micro sans un seul bloc reçu, depuis le démarrage du
     /// moteur. C'est **la** signature du micro affamé : le flux s'ouvre sans
-    /// erreur, mais un autre logiciel tient la voie et la nôtre n'est jamais
-    /// servie.
+    /// erreur, mais rien n'en sort — l'appareil est éteint derrière un
+    /// récepteur resté branché, ou un autre logiciel tient la voie.
     pub ouvertures_affamees: u32,
     /// Trames incomplètes parties vers la carte son (voir `VoiceStats`).
     pub trames_incompletes: u64,
-    /// Le moteur natif est-il en service, ou est-on retombé sur cpal ?
-    pub moteur_natif: bool,
+    /// Le moteur qui tient le micro : natif, secours (cpal), aucun, ou pas
+    /// encore essayé.
+    pub moteur: Moteur,
     /// Le micro tourne en catégorie « communications » — la case « partager
     /// le micro avec la voix du jeu », ou l'escalade anti-famine. Aux yeux
     /// de Windows, c'est un appel permanent.
@@ -112,6 +162,38 @@ impl Diagnostic {
             }
         }
 
+        // Deux défauts Windows différents : en « défaut système », ki-chat
+        // suit le périphérique par défaut, et le « Défaut » de Discord le
+        // périphérique de communication. C'est le « ça marche sur Discord, pas
+        // sur ki-chat » : un casque réglé comme périphérique de communication
+        // seulement, ou un autre micro (webcam, manette) qui a pris le rôle de
+        // défaut. Sans objet quand le périphérique est choisi dans les
+        // réglages : ki-chat ignore alors les défauts.
+        if self.micro_suit_defaut {
+            if let Some((defaut, communication)) = &self.micro_defauts {
+                out.push(format!(
+                    "Windows a deux micros par défaut : « {defaut} » (le périphérique \
+                     par défaut, que ki-chat suit en « défaut système ») et \
+                     « {communication} » (le périphérique de communication, que suit \
+                     Discord). Si ton micro est « {communication} », choisis-le dans \
+                     ⚙ Audio → Micro, ou règle-le aussi comme périphérique par défaut \
+                     dans le panneau son de Windows."
+                ));
+            }
+        }
+        if self.sortie_suit_defaut {
+            if let Some((defaut, communication)) = &self.sortie_defauts {
+                out.push(format!(
+                    "Windows a deux sorties par défaut : « {defaut} » (le périphérique \
+                     par défaut, que ki-chat suit en « défaut système ») et \
+                     « {communication} » (le périphérique de communication, que suit \
+                     Discord). Si tu entends Discord dans « {communication} » mais \
+                     ki-chat ailleurs, choisis « {communication} » dans ⚙ Audio → \
+                     Sortie."
+                ));
+            }
+        }
+
         // Le micro en catégorie « communications » + le réglage d'atténuation
         // de Windows : c'est LA chaîne qui fait chuter le volume du jeu — vue
         // sur le terrain, typiquement chez qui a un micro séparé du casque
@@ -133,10 +215,10 @@ impl Diagnostic {
                      une communication : c'est LUI qui baisse le volume du jeu tant \
                      que le vocal est ouvert. Remède immédiat : Panneau de \
                      configuration → Son → onglet Communications → « Ne rien \
-                     faire ». Et si cette catégorie s'est enclenchée toute seule \
-                     (micro affamé), le vrai correctif est de choisir dans ⚙ Audio \
-                     le micro physique — pas un périphérique virtuel dont \
-                     l'application ne tourne pas."
+                     faire ». Et si tu as accepté la bascule parce que le micro ne \
+                     livrait rien, le vrai correctif est ailleurs : rallumer \
+                     l'appareil, ou choisir dans ⚙ Audio le micro physique — pas un \
+                     périphérique virtuel dont l'application ne tourne pas."
                 )),
                 None => out.push(
                     "Le micro tourne en catégorie « communications », mais Windows \
@@ -154,12 +236,27 @@ impl Diagnostic {
         // quelqu'un l'a touché, si bien que son absence ne prouve rien. La
         // famine du micro, elle, est mesurée par le moteur lui-même.
         if self.ouvertures_affamees >= 3 && !self.micro_communications {
+            // L'appareil éteint d'abord : c'est ce que le terrain a montré à
+            // chaque fois — un casque abîmé, une manette endormie dont le
+            // récepteur restait branché. La voix d'un jeu qui tiendrait la
+            // voie n'a jamais été prouvée ; elle vient donc en second.
+            let micro = match &self.peripherique_micro {
+                Some(nom) => format!("Le micro « {nom} »"),
+                None => "Le micro".into(),
+            };
+            let pas_le_tien = if self.micro_suit_defaut {
+                " Et si ce n'est pas ton micro — c'est celui que Windows désigne par \
+                 défaut —, choisis le bon dans ⚙ Audio."
+            } else {
+                ""
+            };
             out.push(format!(
-                "Le micro s'est ouvert {} fois sans livrer un seul bloc. C'est la \
-                 signature d'une voie de capture tenue par un autre logiciel — la voix \
-                 intégrée d'un jeu, le plus souvent. Dans Valorant : Réglages → Audio → \
-                 Chat vocal → couper le micro de la voix intégrée, que tu n'utilises pas \
-                 puisque tu es ici.",
+                "{micro} s'est ouvert {} fois sans livrer un seul bloc. Le plus \
+                 souvent, l'appareil est éteint ou en veille alors que son récepteur \
+                 reste branché — casque sans fil, manette : rallume-le.{pas_le_tien} \
+                 Sinon, un autre logiciel tient la voie de capture — la voix intégrée \
+                 d'un jeu : dans Valorant, Réglages → Audio → Chat vocal → couper le \
+                 micro de la voix intégrée, que tu n'utilises pas puisque tu es ici.",
                 self.ouvertures_affamees
             ));
             let etat = match self.exclusif_micro {
@@ -173,14 +270,21 @@ impl Diagnostic {
             };
             out.push(etat.into());
         }
-        if !self.moteur_natif {
-            out.push(
+        match self.moteur {
+            Moteur::Secours => out.push(
                 "Le moteur audio natif n'a pas pu s'ouvrir : on tourne sur le moteur de \
-                 secours, qui ne demande à Windows ni le périphérique de communication, \
-                 ni la conversion de format automatique, ni le mode brut. Le journal \
-                 audio dit pourquoi."
+                 secours, qui ne demande à Windows ni la conversion de format \
+                 automatique, ni le mode brut. Le journal audio dit pourquoi."
                     .into(),
-            );
+            ),
+            Moteur::Aucun => out.push(
+                "Le micro refuse de s'ouvrir, moteur natif comme moteur de secours : il \
+                 a disparu, ou un autre logiciel le tient en mode exclusif. Le journal \
+                 audio donne l'erreur de Windows."
+                    .into(),
+            ),
+            // Pas encore essayé : rien à conseiller, le rapport le dit.
+            Moteur::PasEncore | Moteur::Natif => {}
         }
         if self.trames_incompletes > 0 {
             out.push(format!(
@@ -208,13 +312,31 @@ impl Diagnostic {
         let mut out = String::from("--- docteur audio ---\n");
         out.push_str(&format!(
             "moteur : {}\n",
-            if self.moteur_natif { "natif (WASAPI)" } else { "secours (cpal)" }
+            match self.moteur {
+                Moteur::Natif => "natif (WASAPI)",
+                Moteur::Secours => "secours (cpal)",
+                Moteur::Aucun => "aucun — le micro refuse de s'ouvrir",
+                Moteur::PasEncore => "micro pas encore ouvert",
+            }
         ));
         out.push_str(&format!(
-            "périphériques : micro {} · sortie {}\n",
+            "périphériques : micro {} ({}) · sortie {} ({})\n",
             self.peripherique_micro.as_deref().unwrap_or("inconnu"),
-            self.peripherique_sortie.as_deref().unwrap_or("inconnu")
+            origine(self.micro_suit_defaut),
+            self.peripherique_sortie.as_deref().unwrap_or("inconnu"),
+            origine(self.sortie_suit_defaut),
         ));
+        // Consigné même quand un périphérique choisi le rend sans effet :
+        // de loin, c'est ce qui départage « ki-chat prend le mauvais micro »
+        // et « le micro choisi ne marche pas ».
+        for (quoi, defauts) in [("micro", &self.micro_defauts), ("sortie", &self.sortie_defauts)] {
+            if let Some((defaut, communication)) = defauts {
+                out.push_str(&format!(
+                    "défauts Windows différents ({quoi}) : « {defaut} » par défaut, \
+                     « {communication} » en communication\n"
+                ));
+            }
+        }
         out.push_str(&format!(
             "mode exclusif : micro {} · sortie {}\n",
             etat(self.exclusif_micro),
@@ -246,6 +368,15 @@ impl Diagnostic {
             out.push_str(&format!("{}. {c}\n", i + 1));
         }
         out
+    }
+}
+
+/// D'où vient le périphérique en service, en clair.
+fn origine(suit_defaut: bool) -> &'static str {
+    if suit_defaut {
+        "défaut Windows"
+    } else {
+        "choisi"
     }
 }
 
@@ -574,7 +705,7 @@ mod tests {
     /// une réponse, « aucun conseil » n'en est pas une.
     #[test]
     fn un_diagnostic_vierge_dit_quand_meme_quelque_chose() {
-        let d = Diagnostic { moteur_natif: true, ..Default::default() };
+        let d = Diagnostic { moteur: Moteur::Natif, ..Default::default() };
         let conseils = d.conseils();
         assert_eq!(conseils.len(), 1);
         assert!(conseils[0].contains("Rien à signaler"));
@@ -594,27 +725,134 @@ mod tests {
             exclusif_sortie: None,
             peripherique_micro: Some("CABLE Output (VB-Audio Virtual Cable)".into()),
             peripherique_sortie: None,
+            micro_suit_defaut: true,
+            sortie_suit_defaut: false,
+            micro_defauts: Some((
+                "CABLE Output (VB-Audio Virtual Cable)".into(),
+                "Microphone (PRO X 2 LIGHTSPEED)".into(),
+            )),
+            sortie_defauts: None,
             ouvertures_affamees: 4,
             trames_incompletes: 12,
-            moteur_natif: false,
+            moteur: Moteur::Secours,
             micro_communications: false,
             attenuation_windows: None,
         };
         let conseils = d.conseils();
-        // Ce qui s'interpose d'abord, les symptômes ensuite.
+        // Ce qui s'interpose d'abord, le périphérique en service ensuite, les
+        // symptômes en dernier.
         assert!(conseils[0].starts_with("SteelSeries Sonar est en cours"));
         assert!(conseils[1].starts_with("Le micro en service"));
-        assert!(conseils[2].contains("Valorant"));
-        assert!(conseils[3].contains("contrôle exclusif"));
-        assert!(conseils[4].contains("secours"));
-        assert!(conseils[5].contains("craquements"));
+        assert!(conseils[2].starts_with("Windows a deux micros par défaut"));
+        assert!(conseils[3].contains("Valorant"));
+        assert!(conseils[4].contains("contrôle exclusif"));
+        assert!(conseils[5].contains("secours"));
+        assert!(conseils[6].contains("craquements"));
 
         // Le rapport se copie : il doit porter l'essentiel sans l'interface.
         let rapport = d.rapport();
         assert!(rapport.contains("moteur : secours"));
         assert!(rapport.contains("VB-Audio"));
+        assert!(rapport.contains("(défaut Windows)"));
+        assert!(rapport.contains("défauts Windows différents (micro)"));
         assert!(rapport.contains("jamais réglé"));
         assert!(rapport.contains("SteelSeries Sonar"));
+    }
+
+    /// Deux défauts Windows différents : le conseil ne vaut qu'en « défaut
+    /// système » — un micro choisi ignore les défauts. Le rapport, lui, le
+    /// consigne toujours : de loin, c'est ce qui départage les deux pannes.
+    #[test]
+    fn les_defauts_divergents_ne_comptent_qu_en_defaut_systeme() {
+        let defauts = Some((
+            "Microphone (HD Webcam C270)".to_string(),
+            "Microphone (PRO X 2 LIGHTSPEED)".to_string(),
+        ));
+        let d = Diagnostic {
+            moteur: Moteur::Natif,
+            micro_suit_defaut: true,
+            micro_defauts: defauts.clone(),
+            ..Default::default()
+        };
+        let conseils = d.conseils();
+        assert_eq!(conseils.len(), 1);
+        assert!(conseils[0].contains("« Microphone (HD Webcam C270) »"));
+        assert!(conseils[0].contains("« Microphone (PRO X 2 LIGHTSPEED) »"));
+        assert!(conseils[0].contains("Discord"));
+
+        let d = Diagnostic {
+            moteur: Moteur::Natif,
+            micro_suit_defaut: false,
+            micro_defauts: defauts,
+            ..Default::default()
+        };
+        assert!(d.conseils()[0].contains("Rien à signaler"));
+        assert!(d.rapport().contains("défauts Windows différents (micro)"));
+        assert!(d.rapport().contains("(choisi)"));
+
+        // La sortie a son propre conseil, qui parle de la sortie.
+        let d = Diagnostic {
+            moteur: Moteur::Natif,
+            sortie_suit_defaut: true,
+            sortie_defauts: Some((
+                "Haut-parleurs (Realtek(R) Audio)".into(),
+                "Haut-parleurs (PRO X 2 LIGHTSPEED)".into(),
+            )),
+            ..Default::default()
+        };
+        let conseils = d.conseils();
+        assert_eq!(conseils.len(), 1);
+        assert!(conseils[0].contains("deux sorties"));
+        assert!(conseils[0].contains("⚙ Audio → Sortie"));
+    }
+
+    /// Un rapport pris avant la première ouverture du micro ne crie pas au
+    /// moteur de secours : il dit qu'il est trop tôt. C'est ce qui faussait
+    /// la moitié des rapports partagés.
+    #[test]
+    fn un_rapport_trop_tot_dit_qu_il_est_trop_tot() {
+        let d = Diagnostic::default();
+        assert_eq!(d.moteur, Moteur::PasEncore);
+        assert!(d.rapport().contains("moteur : micro pas encore ouvert"));
+        assert!(d.conseils().iter().all(|c| !c.contains("secours")));
+
+        // Un micro qui refuse de s'ouvrir n'est pas un repli sur cpal non plus.
+        let d = Diagnostic { moteur: Moteur::Aucun, ..Default::default() };
+        assert!(d.rapport().contains("refuse de s'ouvrir"));
+        assert!(d.conseils()[0].contains("refuse de s'ouvrir"));
+
+        // Et l'état fait l'aller-retour par l'atomique du fil de capture.
+        for m in [Moteur::PasEncore, Moteur::Aucun, Moteur::Natif, Moteur::Secours] {
+            assert_eq!(Moteur::depuis_code(m.code()), m);
+        }
+    }
+
+    /// Le micro qui ne livre rien est nommé, et l'appareil éteint passe avant
+    /// le logiciel qui tiendrait la voie : sur le terrain, c'était à chaque
+    /// fois l'appareil — une manette endormie dont le récepteur restait
+    /// branché, un casque abîmé.
+    #[test]
+    fn le_micro_affame_est_nomme_et_la_veille_vient_d_abord() {
+        let d = Diagnostic {
+            moteur: Moteur::Natif,
+            peripherique_micro: Some("Microphone sur casque (2- Wireless Controller)".into()),
+            micro_suit_defaut: true,
+            ouvertures_affamees: 12,
+            exclusif_micro: Some(false),
+            ..Default::default()
+        };
+        let conseils = d.conseils();
+        let c = &conseils[0];
+        assert!(c.contains("« Microphone sur casque (2- Wireless Controller) »"));
+        let veille = c.find("éteint ou en veille").expect("la veille est citée");
+        let logiciel = c.find("autre logiciel").expect("le logiciel aussi");
+        assert!(veille < logiciel);
+        // Pris comme défaut Windows : on dit de choisir le bon micro.
+        assert!(c.contains("choisis le bon"));
+
+        // Choisi dans les réglages : pas de renvoi vers le défaut Windows.
+        let d = Diagnostic { micro_suit_defaut: false, ..d };
+        assert!(!d.conseils()[0].contains("choisis le bon"));
     }
 
     /// La chaîne complète du « volume du jeu qui baisse » : micro passé en
@@ -625,7 +863,7 @@ mod tests {
     fn le_micro_en_communications_nomme_l_attenuation() {
         let d = Diagnostic {
             micro_communications: true,
-            moteur_natif: true,
+            moteur: Moteur::Natif,
             ..Default::default()
         };
         let conseils = d.conseils();
@@ -635,7 +873,7 @@ mod tests {
         let d = Diagnostic {
             micro_communications: true,
             attenuation_windows: Some(3),
-            moteur_natif: true,
+            moteur: Moteur::Natif,
             ..Default::default()
         };
         let conseils = d.conseils();

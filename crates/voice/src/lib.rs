@@ -141,9 +141,11 @@ pub struct VoiceConfig {
     pub input_device: Option<String>,
     /// Périphérique de sortie à utiliser (nom cpal), None = défaut système.
     pub output_device: Option<String>,
-    /// Moteur audio Windows natif (WASAPI direct) : rôle communication,
-    /// conversion de format par Windows, notifications. Sans effet hors
-    /// Windows, et retombe sur cpal à la moindre erreur d'ouverture.
+    /// Moteur audio Windows natif (WASAPI direct) : conversion de format par
+    /// Windows, notifications, mode brut. Son défaut est, comme celui de
+    /// cpal, le périphérique par défaut de Windows — pas celui de
+    /// communication (voir `wasapi::pick`). Sans effet hors Windows, et
+    /// retombe sur cpal à la moindre erreur d'ouverture.
     pub native_audio: bool,
     /// Mode brut du micro : demande à Windows de court-circuiter les effets
     /// tiers (Sonar, Nahimic…). Moteur natif seulement.
@@ -152,7 +154,7 @@ pub struct VoiceConfig {
     /// avec la voix intégrée des jeux (nécessaire quand elle affame notre
     /// capture), au prix de l'« appel permanent » côté Windows — volume des
     /// autres sons réduit chez qui n'a pas réglé « Ne rien faire ». Faux par
-    /// défaut ; le moteur y bascule de lui-même s'il détecte la famine.
+    /// défaut ; le moteur le propose (fenêtre) s'il détecte la famine.
     pub comms_mic: bool,
     /// Sortie robuste : tampon de lecture trois fois plus profond (cible
     /// 100 ms au lieu de 30) pour les machines saturées par un jeu et les
@@ -438,7 +440,8 @@ fn attenuation_communications() -> Option<u32> {
     None
 }
 
-/// Le nom du périphérique réellement en service.
+/// Le nom du périphérique par défaut de Windows — celui que prend « défaut
+/// système ».
 #[cfg(windows)]
 fn peripherique_par_defaut(input: bool) -> Option<String> {
     wasapi::default_endpoint_name(input)
@@ -446,6 +449,20 @@ fn peripherique_par_defaut(input: bool) -> Option<String> {
 
 #[cfg(not(windows))]
 fn peripherique_par_defaut(_input: bool) -> Option<String> {
+    None
+}
+
+/// Les deux défauts de Windows quand ils diffèrent : (celui que suit
+/// ki-chat, celui que suit Discord). Voir `wasapi::defauts_divergents`.
+#[cfg(windows)]
+fn defauts_divergents(input: bool) -> Option<(String, String)> {
+    wasapi::defauts_divergents(input)
+}
+
+#[cfg(not(windows))]
+fn defauts_divergents(_input: bool) -> Option<(String, String)> {
+    // Le rôle « communication » est une notion Windows : un seul défaut
+    // ailleurs.
     None
 }
 
@@ -503,19 +520,21 @@ struct Counters {
     /// des échantillons qu'aucun tampon de lecture n'avait. C'est la mesure
     /// du craquement, ramassée par le rappel de sortie.
     underruns: AtomicU64,
-    /// Le moteur natif est-il **réellement** en service ?
+    /// Le moteur qui tient **réellement** le micro, d'après la dernière
+    /// tentative d'ouverture (`docteur::Moteur`, rangé en code).
     ///
     /// Distinct du réglage `native_audio`, qui dit ce qu'on a demandé : toute
     /// erreur d'ouverture fait retomber sur cpal, silencieusement et par
     /// conception. Le docteur doit rapporter ce qui tourne, pas ce qu'on
-    /// espérait.
-    native_ok: AtomicBool,
+    /// espérait — et « pas encore essayé » n'est pas « secours ».
+    input_engine: std::sync::atomic::AtomicU8,
     /// Ouvertures du micro qui n'ont livré **aucun** bloc.
     ///
-    /// La signature du micro affamé : le flux s'ouvre sans erreur, mais un
-    /// autre logiciel tient la voie de capture et la nôtre n'est jamais
-    /// servie. La boucle de capture s'en sert déjà pour escalader en
-    /// catégorie communications ; le docteur audio s'en sert pour le dire.
+    /// La signature du micro affamé : le flux s'ouvre sans erreur, mais rien
+    /// n'en sort — l'appareil est éteint derrière un récepteur resté branché,
+    /// ou un autre logiciel tient la voie de capture. La boucle de capture
+    /// s'en sert pour proposer la catégorie communications ; le docteur
+    /// audio pour le dire.
     starved_opens: AtomicU64,
     /// Le micro tourne en catégorie « communications » (réglage, ou escalade
     /// anti-famine). Aux yeux de Windows c'est un appel permanent : son
@@ -630,6 +649,15 @@ struct Shared {
     output_lost: AtomicBool,
     /// Idem pour la sortie.
     output_fallback: AtomicBool,
+    /// Les périphériques réglés pour ce moteur (`None` = défaut système).
+    /// Fixes : changer de périphérique redémarre le moteur.
+    input_choice: Option<String>,
+    output_choice: Option<String>,
+    /// Le micro réellement ouvert à la dernière ouverture réussie, et s'il
+    /// l'a été comme défaut de Windows (défaut système, ou repli). C'est lui
+    /// qu'on nomme quand il ne livre rien : « ton micro ne capte rien » ne
+    /// dit pas qu'il s'agit d'une manette que Windows a prise par défaut.
+    input_device: Mutex<Option<(String, bool)>>,
     /// État de décodage par locuteur : fil réseau, et lectures d'information
     /// depuis l'interface. **Jamais** le rappel de sortie.
     receivers: Mutex<HashMap<u64, Receiver>>,
@@ -696,6 +724,9 @@ impl VoiceEngine {
             input_fallback: AtomicBool::new(false),
             output_lost: AtomicBool::new(false),
             output_fallback: AtomicBool::new(false),
+            input_choice: cfg.input_device.clone(),
+            output_choice: cfg.output_device.clone(),
+            input_device: Mutex::new(None),
             receivers: Mutex::new(HashMap::new()),
             playouts: Mutex::new(HashMap::new()),
             volumes: Mutex::new(cfg.volumes.clone()),
@@ -1040,19 +1071,58 @@ impl VoiceEngine {
     /// Coûteux — il énumère les processus et interroge le registre — donc
     /// appelé à la demande, jamais sur un chemin chaud.
     pub fn docteur(&self) -> docteur::Diagnostic {
+        let sh = &self.shared;
+        // Le micro tel que le moteur l'a ouvert ; avant la première
+        // ouverture, tel qu'il le sera — le choisi, ou le défaut Windows.
+        let ouvert = sh.input_device.lock().unwrap().clone();
+        let (peripherique_micro, micro_suit_defaut) = match ouvert {
+            Some((nom, suit_defaut)) => (Some(nom), suit_defaut),
+            None => match &sh.input_choice {
+                Some(nom) => (Some(nom.clone()), false),
+                None => (peripherique_par_defaut(true), true),
+            },
+        };
+        // La sortie telle qu'elle est réglée : le défaut Windows en « défaut
+        // système » ou en repli, sinon celle qui est choisie.
+        let sortie_suit_defaut =
+            sh.output_choice.is_none() || sh.output_fallback.load(Ordering::Relaxed);
+        let peripherique_sortie = if sortie_suit_defaut {
+            peripherique_par_defaut(false)
+        } else {
+            sh.output_choice.clone()
+        };
         docteur::Diagnostic {
             suites: docteur::suites_en_cours(),
             exclusif_micro: exclusif_autorise(true),
             exclusif_sortie: exclusif_autorise(false),
-            peripherique_micro: peripherique_par_defaut(true),
-            peripherique_sortie: peripherique_par_defaut(false),
-            ouvertures_affamees: self.shared.counters.starved_opens.load(Ordering::Relaxed)
-                as u32,
-            trames_incompletes: self.shared.counters.underruns.load(Ordering::Relaxed),
-            moteur_natif: self.shared.counters.native_ok.load(Ordering::Relaxed),
-            micro_communications: self.shared.counters.comms_capture.load(Ordering::Relaxed),
+            peripherique_micro,
+            peripherique_sortie,
+            micro_suit_defaut,
+            sortie_suit_defaut,
+            micro_defauts: defauts_divergents(true),
+            sortie_defauts: defauts_divergents(false),
+            ouvertures_affamees: sh.counters.starved_opens.load(Ordering::Relaxed) as u32,
+            trames_incompletes: sh.counters.underruns.load(Ordering::Relaxed),
+            moteur: docteur::Moteur::depuis_code(sh.counters.input_engine.load(Ordering::Relaxed)),
+            micro_communications: sh.counters.comms_capture.load(Ordering::Relaxed),
             attenuation_windows: attenuation_communications(),
         }
+    }
+
+    /// Le docteur a-t-il de quoi parler ? Vrai dès la première tentative
+    /// d'ouverture du micro, réussie ou non. Avant, son rapport décrirait un
+    /// micro que personne n'a encore essayé d'ouvrir — « moteur de secours »,
+    /// zéro famine : la moitié des rapports partagés disaient ça.
+    pub fn docteur_pret(&self) -> bool {
+        docteur::Moteur::depuis_code(self.shared.counters.input_engine.load(Ordering::Relaxed))
+            != docteur::Moteur::PasEncore
+    }
+
+    /// Le micro que tient le moteur : son nom Windows, et s'il est pris comme
+    /// défaut de Windows (« défaut système », ou repli faute du micro choisi).
+    /// `None` avant la première ouverture réussie.
+    pub fn micro_en_service(&self) -> Option<(String, bool)> {
+        self.shared.input_device.lock().unwrap().clone()
     }
 
     /// Une bascule du micro en catégorie « communications » attend-elle la
@@ -1387,12 +1457,10 @@ fn capture_loop(
     'device: while !is_shutdown(&sh) {
         // La bascule « communications » proposée a-t-elle été acceptée
         // depuis ? Elle s'applique à cette réouverture — pendant une famine,
-        // il y en a une toutes les quelques secondes.
-        if native
-            && !comms
-            && sh.comms_proposed.load(Ordering::Relaxed)
-            && sh.comms_decision.load(Ordering::Relaxed) == 1
-        {
+        // il y en a une toutes les quelques secondes. La réponse seule fait
+        // foi : la proposition peut avoir été retirée (le son revenu) à
+        // l'instant même où l'utilisateur acceptait.
+        if native && !comms && sh.comms_decision.load(Ordering::Relaxed) == 1 {
             comms = true;
             sh.counters.comms_capture.store(true, Ordering::Relaxed);
             journal(
@@ -1403,7 +1471,7 @@ fn capture_loop(
             );
         }
         let opened = open_input(device_name.as_deref(), native, raw, comms);
-        let OpenedInput { stream, chunks, rate: in_rate, alive, fallback } = match opened {
+        let OpenedInput { stream, chunks, rate: in_rate, alive, fallback, name } = match opened {
             Ok(parts) => {
                 // Le repli est signalé — sans quoi débrancher son micro pour
                 // le rebrancher laissait capter celui de la webcam en silence,
@@ -1413,15 +1481,19 @@ fn capture_loop(
                 sh.input_fallback.store(parts.fallback, Ordering::Relaxed);
                 // Ce qui s'est réellement ouvert, et non ce qu'on a demandé.
                 #[cfg(windows)]
-                sh.counters.native_ok.store(
-                    matches!(parts.stream, InputStream::Native(_)),
-                    Ordering::Relaxed,
-                );
+                let natif = matches!(parts.stream, InputStream::Native(_));
                 #[cfg(not(windows))]
-                sh.counters.native_ok.store(false, Ordering::Relaxed);
+                let natif = false;
+                let moteur = if natif { docteur::Moteur::Natif } else { docteur::Moteur::Secours };
+                sh.counters.input_engine.store(moteur.code(), Ordering::Relaxed);
+                *sh.input_device.lock().unwrap() =
+                    Some((parts.name.clone(), device_name.is_none() || parts.fallback));
                 parts
             }
             Err(e) => {
+                sh.counters
+                    .input_engine
+                    .store(docteur::Moteur::Aucun.code(), Ordering::Relaxed);
                 // Le micro n'est pas là : on le signale et on réessaie.
                 // Rien d'autre à faire — il reviendra peut-être.
                 if !sh.input_lost.swap(true, Ordering::Relaxed) {
@@ -1436,6 +1508,9 @@ fn capture_loop(
         let mut resampler = CubicResampler::new(in_rate as f64 / SAMPLE_RATE as f64);
         let mut last_chunk = Instant::now();
         let mut got_any_chunk = false;
+        // Arrivée du premier bloc de ce flux : mesure depuis quand le son
+        // est revenu.
+        let mut first_chunk_at = Instant::now();
         let mut last_probe = Instant::now();
         // L'état du monde au moment de l'ouverture : générations de reset et
         // empreinte du périphérique. Toute divergence ultérieure = réouverture.
@@ -1520,6 +1595,21 @@ fn capture_loop(
                 if !got_any_chunk {
                     got_any_chunk = true;
                     starved_opens = 0;
+                    first_chunk_at = last_chunk;
+                }
+                // Le son est revenu, et tient depuis deux secondes — pas un
+                // bloc isolé : une bascule proposée et restée sans réponse n'a
+                // plus d'objet, la fenêtre se ferme d'elle-même. Rallumer son
+                // casque ne doit pas laisser à l'écran une question dont la
+                // réponse la plus tentante baisserait le son du jeu.
+                if sh.comms_proposed.load(Ordering::Relaxed)
+                    && sh.comms_decision.load(Ordering::Relaxed) == 0
+                    && first_chunk_at.elapsed() > Duration::from_secs(2)
+                    && sh.comms_proposed.swap(false, Ordering::Relaxed)
+                {
+                    journal(format!(
+                        "le micro « {name} » livre de nouveau — bascule proposée retirée"
+                    ));
                 }
                 c
             }
@@ -1542,21 +1632,23 @@ fn capture_loop(
                 }
                 // Trois ouvertures d'affilée sans le moindre bloc : ce n'est
                 // plus un accident, c'est un micro affamé — le flux s'ouvre,
-                // mais un autre logiciel (voix d'un jeu, pilote du casque)
-                // tient la voie de capture. On escalade alors en catégorie
-                // « communications » : la même voie que lui, donc partagée.
-                // Nommé une fois par épisode, pas égrené.
+                // mais rien n'en sort. Le plus souvent l'appareil est éteint
+                // derrière un récepteur resté branché (casque sans fil,
+                // manette endormie : vu sur le terrain) ; sinon un autre
+                // logiciel tient la voie de capture, et pour ce cas-là on
+                // propose la catégorie « communications » — la même voie que
+                // lui, donc partagée. Nommé une fois par épisode, pas égrené.
                 if !got_any_chunk {
                     starved_opens += 1;
                     sh.counters.starved_opens.fetch_add(1, Ordering::Relaxed);
                     if starved_opens == 3 {
                         tracing::warn!("micro affamé : 3 ouvertures sans un seul bloc");
-                        journal(
-                            "le micro s'ouvre mais ne livre rien (3 fois de suite) — un \
-                             autre logiciel tient probablement la voie de capture (voix \
-                             intégrée d'un jeu, pilote du casque)"
-                                .into(),
-                        );
+                        journal(format!(
+                            "le micro « {name} » s'ouvre mais ne livre rien (3 fois de \
+                             suite) — appareil éteint ou en veille derrière son récepteur \
+                             (casque sans fil, manette), ou voie de capture tenue par un \
+                             autre logiciel (voix intégrée d'un jeu)"
+                        ));
                         // La bascule n'est plus imposée : elle est PROPOSÉE.
                         // C'est elle qui peut faire baisser le volume des
                         // autres sons chez l'utilisateur — à lui de choisir,
@@ -1934,6 +2026,8 @@ pub(crate) struct OpenedInput {
     /// Vrai si l'on tourne sur un périphérique de repli, le demandé étant
     /// absent.
     fallback: bool,
+    /// Le nom Windows du micro ouvert : celui qu'on nomme s'il ne livre rien.
+    name: String,
 }
 
 /// Génération du parc de périphériques signalée par Windows. Hors Windows,
@@ -1954,9 +2048,9 @@ fn native_generation() -> u64 {
 /// zombie : il tourne, mais le son ne passe plus. On rouvre.
 ///
 /// L'empreinte suit le moteur : le natif voit l'identifiant d'endpoint (qui
-/// change à la ré-énumération USB) et le défaut *communication*, cpal le nom
-/// et le défaut console. Comparer des empreintes d'un même moteur suffit —
-/// elles ne se croisent jamais.
+/// change à la ré-énumération USB), cpal le nom ; tous deux prennent le
+/// défaut console. Comparer des empreintes d'un même moteur suffit — elles
+/// ne se croisent jamais.
 fn device_signature(device_name: Option<&str>, input: bool, native: bool) -> Option<String> {
     #[cfg(windows)]
     if native {
@@ -1994,13 +2088,14 @@ fn open_input(
         let (tx, chunks) = chunk_channel();
         let alive = Arc::new(AtomicBool::new(true));
         match wasapi::open_input(device_name, raw, comms, tx, alive.clone()) {
-            Ok((stream, in_rate, fallback)) => {
+            Ok((stream, in_rate, fallback, name)) => {
                 return Ok(OpenedInput {
                     stream: InputStream::Native(stream),
                     chunks,
                     rate: in_rate,
                     alive,
                     fallback,
+                    name,
                 });
             }
             Err(e) => {
@@ -2051,6 +2146,7 @@ fn open_input(
         rate: in_rate,
         alive,
         fallback,
+        name: device.name().unwrap_or_default(),
     })
 }
 
