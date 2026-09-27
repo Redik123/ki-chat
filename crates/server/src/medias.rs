@@ -817,6 +817,60 @@ pub(crate) fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
     Ok(sonde)
 }
 
+/// Les instants des trames clés de la première piste vidéo, en
+/// microsecondes croissantes, lus dans les en-têtes des paquets — rien
+/// n'est décodé. C'est de l'une d'elles que part une coupe en copie
+/// (`export::debut_copie_us`).
+pub(crate) fn trames_cles(outils: &Outils, source: &Path) -> Result<Vec<u64>, String> {
+    let sortie = executer_borne(
+        Command::new(&outils.ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=time_base:packet=pts,flags",
+                "-of",
+                "json",
+            ])
+            .arg(source),
+        Duration::from_secs(60),
+    )?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&sortie).map_err(|e| format!("ffprobe : {e}"))?;
+    Ok(instants_des_trames_cles(&v))
+}
+
+/// Les trames clés d'une sortie JSON de ffprobe (`packets` avec `pts` et
+/// `flags`, `streams[0].time_base`), en microsecondes arrondies **vers le
+/// haut**. L'arrondi compte : `-ss` cherche la trame clé à ou avant sa
+/// cible, et un instant arrondi au plus proche peut tomber juste avant la
+/// trame — ffprobe écrit 11,797883 pour une trame à 11,7978833 s, et y
+/// chercher retombait sur la trame clé d'avant, une seconde plus tôt.
+fn instants_des_trames_cles(v: &serde_json::Value) -> Vec<u64> {
+    let Some((num, den)) = v["streams"][0]["time_base"]
+        .as_str()
+        .and_then(|t| t.split_once('/'))
+        .and_then(|(n, d)| Some((n.trim().parse::<i128>().ok()?, d.trim().parse::<i128>().ok()?)))
+        .filter(|(n, d)| *n > 0 && *d > 0)
+    else {
+        return Vec::new();
+    };
+    let mut instants: Vec<u64> = v["packets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["flags"].as_str().is_some_and(|f| f.starts_with('K')))
+        .filter_map(|p| p["pts"].as_i64())
+        .filter(|pts| *pts >= 0)
+        .filter_map(|pts| u64::try_from((i128::from(pts) * num * 1_000_000 + den - 1) / den).ok())
+        .collect();
+    instants.sort_unstable();
+    instants.dedup();
+    instants
+}
+
 /// Comment le son de la version partagée est composé. Une vidéo ordinaire
 /// garde tout ; un clip ne livre qu'une piste — le mélange, ou un mélange
 /// refait sans les voix des copains — : les pistes séparées ne quittent
@@ -1091,6 +1145,26 @@ mod tests {
         assert!(est_video("IMG_0001.MOV"));
         assert!(!est_video("photo.png"));
         assert!(!est_video("archive.zip"));
+    }
+
+    /// Les trames clés se lisent dans le JSON de ffprobe, triées, arrondies
+    /// vers le haut à la microseconde : 707873/60000 s = 11,7978833 s donne
+    /// 11 797 884 µs, jamais 11 797 883 (qui tomberait avant la trame).
+    #[test]
+    fn les_trames_cles_s_arrondissent_vers_le_haut() {
+        let v = serde_json::json!({
+            "packets": [
+                {"pts": 707873, "flags": "K__"},
+                {"pts": 708874, "flags": "___"},
+                {"pts": 0, "flags": "K_"},
+                {"flags": "K__"},
+                {"pts": -1024, "flags": "K__"}
+            ],
+            "streams": [{"time_base": "1/60000"}]
+        });
+        assert_eq!(instants_des_trames_cles(&v), [0, 11_797_884]);
+        // Sans base de temps lisible : aucune, donc pas de copie.
+        assert!(instants_des_trames_cles(&serde_json::json!({"packets": [{"pts": 0, "flags": "K"}]})).is_empty());
     }
 
     #[test]

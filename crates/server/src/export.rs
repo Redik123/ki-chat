@@ -15,10 +15,13 @@
 //! sa progression (`-progress pipe:1`).
 //!
 //! Une simple coupe (16:9, sans titre, sans changement de cadence, sur une
-//! source déjà en H.264 1080p) ne réencode pas la vidéo : `-c:v copy`, coupe
-//! à la trame clé qui précède — deux secondes de marge au plus, contre des
-//! minutes de x264 sur un conteneur à un cœur. Tout le reste passe par x264,
-//! sur un nombre de fils borné, avec un délai qui suit la durée de la sortie.
+//! source déjà en H.264 1080p) ne réencode pas la vidéo : `-c:v copy`, contre
+//! des minutes de x264 sur un conteneur à un cœur. Une vidéo copiée ne peut
+//! partir que d'une trame clé : l'export commence à celle qui précède le
+//! début demandé (une seconde au plus sur un clip de ki-chat), **le son
+//! aussi** — voir [`debut_copie_us`]. Tout le reste passe par x264, coupé à
+//! l'image près, sur un nombre de fils borné, avec un délai qui suit la
+//! durée de la sortie.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -129,6 +132,10 @@ pub struct Source {
     /// Le codec de la piste vidéo (« h264 ») : décide si une coupe peut se
     /// faire en copie.
     pub codec: String,
+    /// Les trames clés de la vidéo, en microsecondes croissantes
+    /// (`medias::trames_cles`) : d'où une coupe en copie peut partir. Vide
+    /// tant qu'on ne les a pas lues — et alors, pas de copie.
+    pub trames_cles_us: Vec<u64>,
 }
 
 impl Source {
@@ -146,6 +153,7 @@ impl Source {
             pistes,
             pistes_audio: sonde.pistes_audio,
             codec,
+            trames_cles_us: Vec::new(),
         })
     }
 }
@@ -179,6 +187,10 @@ pub struct Etat {
     /// « x264 ».
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Une coupe en copie part de la trame clé qui précède le début
+    /// demandé : de combien plus tôt, en millisecondes (0.1.51).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avance_ms: Option<u64>,
     /// L'instant (secondes Unix) de la dernière écriture : le client sait
     /// si l'état bouge encore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -432,10 +444,15 @@ fn chaine_audio(recette: &Recette, source: &Source) -> Option<String> {
         "copains" => recette.audio.copains,
         _ => 0.0,
     };
+    // Le mélange en première piste quand le clip a plusieurs sources ; une
+    // source seule est la seule piste du fichier (l'enregistreur n'écrit
+    // pas de mélange d'une piste) — la viser en `0:a:1` faisait échouer
+    // ffmpeg.
+    let decalage = u32::from(source.pistes_audio as usize > pistes.len());
     let gardees: Vec<(u32, f32)> = pistes
         .iter()
         .enumerate()
-        .map(|(i, nom)| (i as u32 + 1, niveau(nom)))
+        .map(|(i, nom)| (i as u32 + decalage, niveau(nom)))
         .filter(|(_, v)| *v > 0.001)
         .collect();
     match gardees.len() {
@@ -460,14 +477,43 @@ fn chaine_audio(recette: &Recette, source: &Source) -> Option<String> {
 
 /// Vrai si la recette n'est qu'une coupe d'une source déjà bonne : ni
 /// titre, ni cadence imposée, ni format téléphone, du H.264 qui tient dans
-/// le 1080p. Alors la vidéo se copie au lieu de se réencoder.
-pub fn coupe_en_copie(recette: &Recette, source: &Source) -> bool {
+/// le 1080p. La vidéo peut alors se copier au lieu de se réencoder.
+pub fn copie_possible(recette: &Recette, source: &Source) -> bool {
     recette.format == Format::Original
         && recette.titre.is_none()
         && recette.cadence == 0
         && source.codec == "h264"
         && source.largeur <= 1920
         && source.hauteur <= 1080
+}
+
+/// Une copie possible, et une trame clé d'où la faire partir : la coupe se
+/// fait en copie. Sans trames clés connues, x264 coupe à l'image près.
+pub fn coupe_en_copie(recette: &Recette, source: &Source) -> bool {
+    copie_possible(recette, source) && debut_copie_us(recette, source).is_some()
+}
+
+/// Une trame clé à moins de ça après le début demandé compte comme le
+/// début : l'atelier règle à la milliseconde, pas à l'image.
+const TOLERANCE_TRAME_US: u64 = 10_000;
+
+/// Là où une coupe en copie commence vraiment, en microsecondes : la
+/// dernière trame clé à ou avant le début demandé. La vidéo copiée ne peut
+/// partir que d'elle — et **le son part du même instant**. Avant 0.1.51, le
+/// son partait du début demandé et ne tenait en place que par une liste
+/// d'édition du MP4 (un blanc devant la piste), que Media Foundation — la
+/// visionneuse de ki-chat, les lecteurs de Windows — ignore : le son y
+/// jouait jusqu'à une seconde en avance sur l'image (0,878 s sur un export
+/// de drion, le 2026-09-27). L'export commence donc un peu plus tôt que
+/// demandé, et l'état le dit (`Etat::avance_ms`).
+pub fn debut_copie_us(recette: &Recette, source: &Source) -> Option<u64> {
+    let debut_us = recette.debut_ms * 1000;
+    source.trames_cles_us.iter().copied().take_while(|t| *t <= debut_us + TOLERANCE_TRAME_US).last()
+}
+
+/// Des microsecondes comme ffmpeg les lit (`-ss`, `-t`), sans arrondi.
+fn secondes_us(us: u64) -> String {
+    format!("{}.{:06}", us / 1_000_000, us % 1_000_000)
 }
 
 /// Les arguments de ffmpeg pour une recette validée : ceux d'avant
@@ -477,15 +523,18 @@ pub fn composer(
     source: &Source,
     titre: Option<(&Path, &Path)>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
-    let debut_s = recette.debut_ms as f64 / 1000.0;
-    let duree_s = (recette.fin_ms - recette.debut_ms) as f64 / 1000.0;
-    let avant = vec!["-ss".to_string(), format!("{debut_s:.3}")];
-    if coupe_en_copie(recette, source) {
-        // La coupe seule : `-ss` avant l'entrée saute à la trame clé qui
-        // précède, la vidéo se copie, le son se compose comme d'habitude
-        // (c'est le pas cher). `-avoid_negative_ts` remet la première
-        // image à zéro, sinon un lecteur attend le début manquant.
-        let mut apres: Vec<String> = vec!["-t".into(), format!("{duree_s:.3}")];
+    if let Some(debut_us) = debut_copie_us(recette, source).filter(|_| copie_possible(recette, source)) {
+        // La coupe seule : la vidéo se copie depuis la trame clé, le son se
+        // compose comme d'habitude (c'est le pas cher) et part du même
+        // instant — `-ss` avant l'entrée tombe sur la trame clé, et le son,
+        // réencodé, est rogné exactement là. Les instants de trame clé sont
+        // arrondis vers le haut à la microseconde : `-ss` cherche la trame
+        // clé à ou avant sa cible, une cible arrondie juste en dessous
+        // retomberait sur la précédente. `-avoid_negative_ts` efface ce
+        // reste de moins d'une microseconde.
+        let avant = vec!["-ss".to_string(), secondes_us(debut_us)];
+        let fin_us = recette.fin_ms * 1000;
+        let mut apres: Vec<String> = vec!["-t".into(), secondes_us(fin_us.saturating_sub(debut_us))];
         match chaine_audio(recette, source) {
             Some(a) => apres.extend(
                 [
@@ -505,6 +554,11 @@ pub fn composer(
         );
         return Ok((avant, apres));
     }
+    // Réencodé : image et son rognés ensemble au début demandé, à l'image
+    // près.
+    let debut_s = recette.debut_ms as f64 / 1000.0;
+    let duree_s = (recette.fin_ms - recette.debut_ms) as f64 / 1000.0;
+    let avant = vec!["-ss".to_string(), format!("{debut_s:.3}")];
     let video = chaine_video(recette, source, titre)?;
     let audio = chaine_audio(recette, source);
     let graphe = match &audio {
@@ -573,10 +627,25 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
         let source_chemin = dossier.join("source.mp4");
         let sonde = crate::medias::sonder(outils, &source_chemin)?;
         let pistes = crate::medias::lire_meta(dossier).and_then(|m| m.pistes);
-        let source = Source::depuis(&sonde, pistes).ok_or("source sans image")?;
+        let mut source = Source::depuis(&sonde, pistes).ok_or("source sans image")?;
         let police = police();
         valider(recette, &source, police.is_some())?;
-        etat.mode = Some(if coupe_en_copie(recette, &source) { "copie" } else { "x264" }.into());
+        if copie_possible(recette, &source) {
+            // Les trames clés, lues dans les en-têtes des paquets : sans
+            // elles, x264 coupe à l'image près.
+            source.trames_cles_us = crate::medias::trames_cles(outils, &source_chemin).unwrap_or_else(|e| {
+                tracing::warn!("export : trames clés illisibles ({e}), coupe réencodée");
+                Vec::new()
+            });
+        }
+        if coupe_en_copie(recette, &source) {
+            etat.mode = Some("copie".into());
+            etat.avance_ms = debut_copie_us(recette, &source)
+                .map(|k| (recette.debut_ms * 1000).saturating_sub(k) / 1000)
+                .filter(|a| *a > 0);
+        } else {
+            etat.mode = Some("x264".into());
+        }
         let _ = ecrire_etat(dossier, &etat);
         // Le titre, dans un fichier que drawtext lit tel quel.
         let fichier_titre = dossier.join("titre.txt");
@@ -724,6 +793,8 @@ mod tests {
             pistes: Some(vec!["jeu".into(), "micro".into(), "copains".into()]),
             pistes_audio: 4,
             codec: "h264".into(),
+            // Une trame clé par seconde, comme l'enregistreur de ki-chat.
+            trames_cles_us: (0..=30).map(|s| s * 1_000_000).collect(),
         }
     }
 
@@ -898,6 +969,16 @@ mod tests {
         let (_, apres) = composer(&recette(Format::Original), &inconnue, None).unwrap();
         assert!(apres[3].ends_with("[0:a:0]volume=1[son]"));
 
+        // Une source seule : pas de mélange dans le fichier, elle est la
+        // piste 0 — pas `0:a:1`, qui n'existe pas.
+        let mut seule = s.clone();
+        seule.pistes = Some(vec!["jeu".into()]);
+        seule.pistes_audio = 1;
+        let mut r = recette(Format::Original);
+        r.audio.jeu = 0.5;
+        let (_, apres) = composer(&r, &seule, None).unwrap();
+        assert!(apres[3].ends_with("[0:a:0]volume=0.500[son]"), "{}", apres[3]);
+
         // Le titre : police et texte par leurs fichiers, deux-points échappés.
         let mut titre = recette(Format::Telephone {
             cadre: Cadre::FondFlou,
@@ -929,8 +1010,8 @@ mod tests {
         let simple = recette(Format::Original);
         assert!(coupe_en_copie(&simple, &s));
         let (avant, apres) = composer(&simple, &s, None).unwrap();
-        assert_eq!(avant, ["-ss", "1.000"]);
-        assert_eq!(&apres[..2], ["-t", "10.000"]);
+        assert_eq!(avant, ["-ss", "1.000000"]);
+        assert_eq!(&apres[..2], ["-t", "10.000000"]);
         let copie = apres.windows(2).any(|w| w == ["-c:v", "copy"]);
         assert!(copie, "{apres:?}");
         assert!(!apres.contains(&"libx264".to_string()));
@@ -958,6 +1039,40 @@ mod tests {
         grande.largeur = 2560;
         grande.hauteur = 1440;
         assert!(!coupe_en_copie(&simple, &grande));
+    }
+
+    /// Une coupe en copie part de la trame clé qui précède le début, **le
+    /// son comme l'image** : un son parti du début exact ne tenait que par
+    /// une liste d'édition que Media Foundation ignore — il jouait 0,878 s
+    /// en avance sur l'export de drion (coupe à 12,676 s, trame clé à
+    /// 11,797883 s).
+    #[test]
+    fn la_coupe_en_copie_part_de_la_trame_cle_pour_l_image_et_le_son() {
+        let s = source();
+        let mut r = recette(Format::Original);
+        r.debut_ms = 12_676;
+        r.fin_ms = 30_000;
+        assert_eq!(debut_copie_us(&r, &s), Some(12_000_000));
+        let (avant, apres) = composer(&r, &s, None).unwrap();
+        assert_eq!(avant, ["-ss", "12.000000"], "image et son partent de la trame clé");
+        assert_eq!(&apres[..2], ["-t", "18.000000"], "jusqu'à la fin demandée");
+        // Une trame clé à quelques millisecondes après le début demandé
+        // compte comme le début : pas une seconde de plus pour si peu.
+        r.debut_ms = 12_995;
+        assert_eq!(debut_copie_us(&r, &s), Some(13_000_000));
+        // Les vraies trames clés du clip de drion, arrondies vers le haut :
+        // la cible tombe sur la trame, jamais juste avant.
+        let mut vraie = s.clone();
+        vraie.trames_cles_us = vec![0, 10_716_650, 11_797_884, 12_867_700];
+        r.debut_ms = 12_676;
+        assert_eq!(composer(&r, &vraie, None).unwrap().0, ["-ss", "11.797884"]);
+        // Sans trames clés connues : pas de copie, x264 coupe à l'image près.
+        let mut sans = s.clone();
+        sans.trames_cles_us.clear();
+        assert!(copie_possible(&r, &sans) && !coupe_en_copie(&r, &sans));
+        let (avant, apres) = composer(&r, &sans, None).unwrap();
+        assert_eq!(avant, ["-ss", "12.676"]);
+        assert!(apres.contains(&"libx264".to_string()));
     }
 
     /// Ce que le client lit dans `export.json` : les états et les champs

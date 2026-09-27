@@ -13,8 +13,14 @@
 //! tombait sur la **dernière** piste du fichier — et un clip s'ouvrait muet.
 //! Voir `flux_disponibles`.
 //!
+//! L'aperçu de l'atelier, lui, mêle plusieurs pistes d'un clip (le jeu, le
+//! micro, les copains) à des gains qu'on règle en cours de lecture : chaque
+//! piste mêlée a son flux, son format et ce qu'elle a décodé d'avance (voir
+//! `son_mele`).
+//!
 //! Tout ce qui parle à COM vit ici, derrière le trait `Lecteur`.
 
+use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::ptr::null_mut;
@@ -78,6 +84,28 @@ struct FormatAudio {
     mono: Vec<f32>,
 }
 
+/// Une piste son mêlée aux autres : les pistes se décodent chacune à son
+/// rythme, le mélange prend ce que toutes ont.
+struct PisteMelee {
+    flux: u32,
+    format: FormatAudio,
+    /// Décodé d'avance, mono 48 kHz.
+    attente: VecDeque<f32>,
+    /// L'instant (ms) du paquet qui a commencé l'attente, et ce qui en a été
+    /// pris depuis : l'instant du premier échantillon en attente, sans
+    /// arrondi qui s'accumule.
+    debut_ms: u64,
+    pris: u64,
+    fin: bool,
+    gain: f32,
+}
+
+impl PisteMelee {
+    fn instant_ms(&self) -> u64 {
+        self.debut_ms + self.pris * 1000 / u64::from(crate::CADENCE)
+    }
+}
+
 pub struct LecteurMf {
     reader: IMFSourceReader,
     infos: Infos,
@@ -86,6 +114,9 @@ pub struct LecteurMf {
     /// Les numéros de flux retenus (`u32::MAX` : pas de tel flux).
     flux_video: u32,
     flux_audio: u32,
+    /// Les pistes mêlées (`ouvrir_avec_pistes`) ; vide : la seule première
+    /// piste son, `audio`.
+    melange: Vec<PisteMelee>,
 }
 
 /// Ouvre le fichier avec le lecteur, sans encore choisir de flux.
@@ -113,7 +144,9 @@ fn lecteur_brut(chemin: &Path) -> anyhow::Result<IMFSourceReader> {
     Ok(reader)
 }
 
-pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
+/// Ouvre `chemin` : sa première piste son, ou — `rangs` non vide — ces
+/// pistes son-là, mêlées (rangs dans l'ordre du fichier).
+pub fn ouvrir(chemin: &Path, rangs: &[usize]) -> anyhow::Result<Box<dyn Lecteur>> {
     let reader = lecteur_brut(chemin)?;
     let (iv, ia) = flux_disponibles(&reader);
     let mut infos = Infos::default();
@@ -136,23 +169,41 @@ pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
         }
         None => None,
     };
-    let audio = match ia.map(|i| choisir_audio(&reader, i)) {
-        Some(Ok(f)) => {
-            infos.audio = true;
-            Some(f)
-        }
-        Some(Err(e)) => {
-            tracing::info!("ki-media : pas de son lisible dans {} ({e:#})", chemin.display());
-            if let Some(i) = ia {
-                unsafe {
-                    let _ = reader.SetStreamSelection(i, false);
+    let mut melange = Vec::new();
+    let audio = if rangs.is_empty() {
+        match ia.map(|i| choisir_audio(&reader, i)) {
+            Some(Ok(f)) => Some(f),
+            Some(Err(e)) => {
+                tracing::info!("ki-media : pas de son lisible dans {} ({e:#})", chemin.display());
+                if let Some(i) = ia {
+                    unsafe {
+                        let _ = reader.SetStreamSelection(i, false);
+                    }
                 }
+                None
             }
-            None
+            None => None,
         }
-        None => None,
+    } else {
+        let pistes = pistes_son(&reader);
+        for &rang in rangs {
+            let flux = *pistes
+                .get(rang)
+                .with_context(|| format!("pas de piste son n° {rang} ({} dans le fichier)", pistes.len()))?;
+            melange.push(PisteMelee {
+                flux,
+                format: choisir_audio(&reader, flux)?,
+                attente: VecDeque::new(),
+                debut_ms: 0,
+                pris: 0,
+                fin: false,
+                gain: 1.0,
+            });
+        }
+        None
     };
-    if video.is_none() && audio.is_none() {
+    infos.audio = audio.is_some() || !melange.is_empty();
+    if video.is_none() && !infos.audio {
         bail!("ni image ni son lisibles dans ce fichier");
     }
     infos.duree_ms = duree_ms(&reader).unwrap_or(0);
@@ -163,6 +214,7 @@ pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
         flux_audio: if audio.is_some() { ia.unwrap_or(u32::MAX) } else { u32::MAX },
         video,
         audio,
+        melange,
     }))
 }
 
@@ -190,6 +242,18 @@ fn flux_disponibles(reader: &IMFSourceReader) -> (Option<u32>, Option<u32>) {
     let flux = enumerer(reader);
     let dernier = |majeur: GUID| flux.iter().rev().find(|(_, m)| *m == majeur).map(|(i, _)| *i);
     (dernier(MFMediaType_Video), dernier(MFMediaType_Audio))
+}
+
+/// Les flux son dans l'ordre des pistes **du fichier** — le lecteur les
+/// énumère à l'envers (voir `flux_disponibles`). Vérifié sur un clip : le
+/// premier est le mélange, puis le jeu, le micro, les copains.
+fn pistes_son(reader: &IMFSourceReader) -> Vec<u32> {
+    enumerer(reader)
+        .into_iter()
+        .rev()
+        .filter(|(_, m)| *m == MFMediaType_Audio)
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Sélectionne la piste vidéo `index` et lui demande du NV12.
@@ -342,7 +406,11 @@ impl LecteurMf {
                     self.infos.hauteur = f.hauteur as u32;
                     self.video = Some(f);
                 } else {
-                    self.audio = Some(format_audio(&self.reader, flux)?);
+                    let f = format_audio(&self.reader, flux)?;
+                    match self.melange.iter_mut().find(|p| p.flux == flux) {
+                        Some(p) => p.format = f,
+                        None => self.audio = Some(f),
+                    }
                 }
             }
             if let Some(s) = sample {
@@ -409,24 +477,77 @@ impl LecteurMf {
 
     fn son(&mut self, sample: &IMFSample, horodatage: i64) -> anyhow::Result<Paquet> {
         let a = self.audio.as_mut().context("format audio inconnu")?;
-        let buffer = unsafe { sample.ConvertToContiguousBuffer() }.context("tampon de son")?;
-        let mut ptr: *mut u8 = null_mut();
-        let mut longueur = 0u32;
-        unsafe { buffer.Lock(&mut ptr, None, Some(&mut longueur)) }.context("verrou du tampon")?;
-        a.entrelace.clear();
-        if !ptr.is_null() {
-            let octets = unsafe { std::slice::from_raw_parts(ptr, longueur as usize) };
-            // Copie par octets : l'alignement d'un tampon COM n'est pas garanti.
-            a.entrelace.extend(octets.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
-        }
-        unsafe {
-            let _ = buffer.Unlock();
-        }
-        en_mono(&a.entrelace, a.canaux, &mut a.mono);
-        let mut mono = Vec::with_capacity(a.mono.len() * 48_000 / a.cadence as usize + 8);
-        a.reech.pousser(&a.mono, &mut mono);
-        Ok(Paquet::Audio { pts_ms: horodatage.max(0) as u64 / 10_000, mono })
+        Ok(Paquet::Audio { pts_ms: horodatage.max(0) as u64 / 10_000, mono: decoder_son(a, sample)? })
     }
+
+    /// Le son des pistes mêlées : chacune décode d'avance au moins un bloc,
+    /// le mélange prend ce que toutes ont — une piste finie ne retient rien
+    /// et compte pour du silence —, chacune à son gain.
+    fn son_mele(&mut self) -> anyhow::Result<Paquet> {
+        const BLOC: usize = 1024;
+        for k in 0..self.melange.len() {
+            while !self.melange[k].fin && self.melange[k].attente.len() < BLOC {
+                let flux = self.melange[k].flux;
+                match self.lire(flux)? {
+                    Some((s, ts)) => {
+                        let p = &mut self.melange[k];
+                        let mono = decoder_son(&mut p.format, &s)?;
+                        if p.attente.is_empty() {
+                            p.debut_ms = ts.max(0) as u64 / 10_000;
+                            p.pris = 0;
+                        }
+                        p.attente.extend(mono);
+                    }
+                    None => self.melange[k].fin = true,
+                }
+            }
+        }
+        // Une piste pas finie a au moins un bloc : n n'est nul que si toutes
+        // sont finies et vidées.
+        let n = self
+            .melange
+            .iter()
+            .filter(|p| !p.fin)
+            .map(|p| p.attente.len())
+            .min()
+            .unwrap_or_else(|| self.melange.iter().map(|p| p.attente.len()).max().unwrap_or(0));
+        if n == 0 {
+            return Ok(Paquet::Fin);
+        }
+        let pts_ms = self.melange.iter().find(|p| !p.attente.is_empty()).map_or(0, PisteMelee::instant_ms);
+        let mut mono = vec![0.0f32; n];
+        for p in &mut self.melange {
+            let k = n.min(p.attente.len());
+            let gain = p.gain;
+            for (m, v) in mono.iter_mut().zip(p.attente.drain(..k)) {
+                *m += gain * v;
+            }
+            p.pris += k as u64;
+        }
+        Ok(Paquet::Audio { pts_ms, mono })
+    }
+}
+
+/// Un paquet de son décodé (float entrelacé, au format de `a`) rendu en
+/// mono 48 kHz.
+fn decoder_son(a: &mut FormatAudio, sample: &IMFSample) -> anyhow::Result<Vec<f32>> {
+    let buffer = unsafe { sample.ConvertToContiguousBuffer() }.context("tampon de son")?;
+    let mut ptr: *mut u8 = null_mut();
+    let mut longueur = 0u32;
+    unsafe { buffer.Lock(&mut ptr, None, Some(&mut longueur)) }.context("verrou du tampon")?;
+    a.entrelace.clear();
+    if !ptr.is_null() {
+        let octets = unsafe { std::slice::from_raw_parts(ptr, longueur as usize) };
+        // Copie par octets : l'alignement d'un tampon COM n'est pas garanti.
+        a.entrelace.extend(octets.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
+    }
+    unsafe {
+        let _ = buffer.Unlock();
+    }
+    en_mono(&a.entrelace, a.canaux, &mut a.mono);
+    let mut mono = Vec::with_capacity(a.mono.len() * 48_000 / a.cadence as usize + 8);
+    a.reech.pousser(&a.mono, &mut mono);
+    Ok(mono)
 }
 
 /// Découpe les deux plans NV12 dans le tampon et convertit l'image utile.
@@ -472,6 +593,11 @@ impl Lecteur for LecteurMf {
         if let Some(a) = self.audio.as_mut() {
             a.reech.reinitialiser();
         }
+        for p in &mut self.melange {
+            p.attente.clear();
+            p.fin = false;
+            p.format.reech.reinitialiser();
+        }
         Ok(())
     }
 
@@ -487,6 +613,9 @@ impl Lecteur for LecteurMf {
                 }
             }
             Flux::Audio => {
+                if !self.melange.is_empty() {
+                    return self.son_mele();
+                }
                 if self.audio.is_none() {
                     return Ok(Paquet::Fin);
                 }
@@ -495,6 +624,12 @@ impl Lecteur for LecteurMf {
                     None => Ok(Paquet::Fin),
                 }
             }
+        }
+    }
+
+    fn regler_gains(&mut self, gains: &[f32]) {
+        for (p, g) in self.melange.iter_mut().zip(gains) {
+            p.gain = if g.is_finite() { g.clamp(0.0, 4.0) } else { 0.0 };
         }
     }
 }
@@ -533,6 +668,7 @@ mod tests {
                     audio: Some(f),
                     flux_video: u32::MAX,
                     flux_audio: index,
+                    melange: Vec::new(),
                 };
                 for _ in 0..50 {
                     match l.suivant(Flux::Audio) {

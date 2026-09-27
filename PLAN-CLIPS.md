@@ -826,6 +826,43 @@ l'autre). Ce passage est **vérifié à l'envers** sur la machine de drion
 RTX 3080, capture sur l'UHD 750 qui n'affiche rien — l'image arrive
 entière (32 398 pixels allumés sur 32 400 relevés), la première en 0,4 s.
 
+### L'atelier juste à l'oreille (0.1.51)
+
+Retour de drion le 2026-09-27, en raccourcissant un clip et en baissant
+des pistes : « mon volume ne change rien », et « à l'export la vidéo a un
+décalage son horrible ». Les deux étaient vrais, pour deux raisons
+différentes, établies sur son export et sa vidéo d'origine.
+
+- **Le décalage : la coupe en copie.** L'image copiée partait de la trame
+  clé qui précède (11,798 s), le son de la coupe exacte (12,676 s) ; le son
+  ne tenait en place que par une liste d'édition du MP4, un blanc de
+  0,878 s devant sa piste — que Media Foundation ignore (vérifié : la
+  visionneuse lit l'image et le son à 0 ms). Dans ki-chat et les lecteurs
+  de Windows, le son jouait donc 0,878 s en avance tout du long. →
+  `export::debut_copie_us` : la coupe en copie part de la trame clé pour
+  l'image **et** pour le son. Les trames clés se lisent dans les en-têtes
+  des paquets (`medias::trames_cles`, ffprobe, rien de décodé), en
+  microsecondes arrondies vers le haut — arrondies au plus proche, la cible
+  de `-ss` tombait parfois juste avant la trame et ffmpeg partait de la
+  précédente. L'export commence donc jusqu'à une seconde avant le début
+  demandé : `export.json` le dit (`avance_ms`), l'atelier aussi
+  (« commence 0,9 s avant ton début »). Sans trames clés lisibles, x264
+  coupe à l'image près. Refait sur la vidéo de drion : le son colle à
+  l'image à 21 ms près (l'amorce de l'encodeur AAC).
+- **Les curseurs : l'aperçu.** Les niveaux étaient bien appliqués à
+  l'export (jeu 100 %, micro 37 %, copains 85 %, retrouvés par moindres
+  carrés dans son fichier), mais l'aperçu jouait le mélange enregistré :
+  les curseurs ne changeaient rien à ce qu'on entendait. →
+  `ki_media::ouvrir_avec_pistes` mêle les pistes séparées (chacune son
+  décodeur et son attente, le mélange prend ce que toutes ont) à des gains
+  réglables en lecture (`Lecteur::regler_gains`, `Commande::Gains` de la
+  visionneuse) : un curseur s'entend en 300 ms au plus. Vérifié contre
+  ffmpeg sur le clip de drion : corrélation 1,0000, gains et calage justes,
+  y compris après une recherche.
+- **Au passage** : un clip à une seule source (sans piste de mélange)
+  s'exportait vers `0:a:1`, une piste qui n'existe pas — ffmpeg échouait.
+  Le rang tient maintenant compte du nombre réel de pistes.
+
 ## Risques et parades
 
 - **NVENC fragile chez certains** (le GTX 1080 de Cheekyyyy a eu un écran

@@ -929,7 +929,8 @@ mod tests {
                 "-f", "lavfi", "-i", "sine=frequency=1100:sample_rate=48000",
                 "-t", "4",
                 "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a", "-map", "4:a",
-                "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ac", "2",
             ])
             .arg(&source)
@@ -985,15 +986,19 @@ mod tests {
         assert!(!fichier_servable(&dossier_clip, "source.mp4"));
 
         // `/clips/{id}/exporter` : la recette validée, l'état « en attente »
-        // écrit avant la file, puis la fabrique.
+        // écrit avant la file, puis la fabrique. Le début tombe au milieu
+        // d'un groupe d'images (une trame clé par seconde).
         let recette: Recette = serde_json::from_str(
-            r#"{"debut_ms":1000,"fin_ms":3000,"format":{"type":"original"},"audio":{"jeu":1.0,"micro":1.0,"copains":0.0}}"#,
+            r#"{"debut_ms":1500,"fin_ms":3000,"format":{"type":"original"},"audio":{"jeu":1.0,"micro":1.0,"copains":0.0}}"#,
         )
         .unwrap();
         let sonde = medias::sonder(&outils, &dossier_clip.join("source.mp4")).unwrap();
-        let src = export::Source::depuis(&sonde, m.pistes.clone()).unwrap();
+        let mut src = export::Source::depuis(&sonde, m.pistes.clone()).unwrap();
         export::valider(&recette, &src, false).unwrap();
+        src.trames_cles_us = medias::trames_cles(&outils, &dossier_clip.join("source.mp4")).unwrap();
+        assert_eq!(&src.trames_cles_us[..4], [0, 1_000_000, 2_000_000, 3_000_000]);
         assert!(export::coupe_en_copie(&recette, &src), "une coupe seule : en copie");
+        assert_eq!(export::debut_copie_us(&recette, &src), Some(1_000_000));
         export::ecrire_etat(
             &dossier_clip,
             &export::Etat {
@@ -1015,7 +1020,23 @@ mod tests {
         fabrique.terminee();
         assert_eq!(fini.etat, "pret");
         assert_eq!(fini.mode.as_deref(), Some("copie"));
-        assert!((1.0..=4.5).contains(&fini.duree_s), "coupe à la trame clé : {} s", fini.duree_s);
+        assert!((1.9..=2.3).contains(&fini.duree_s), "de la trame clé (1 s) à la fin (3 s) : {} s", fini.duree_s);
+        assert_eq!(fini.avance_ms, Some(500), "commence une demi-seconde avant le début demandé");
+        // L'image et le son partent ensemble : aucun blanc devant le son,
+        // qui ne tiendrait que par une liste d'édition — Media Foundation
+        // l'ignore et jouait le son en avance.
+        let debuts = std::process::Command::new(&outils.ffprobe)
+            .args(["-v", "error", "-show_entries", "stream=codec_type,start_time", "-of", "json"])
+            .arg(dossier_clip.join("export.mp4"))
+            .output()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&debuts.stdout).unwrap();
+        let flux = v["streams"].as_array().unwrap();
+        assert_eq!(flux.len(), 2);
+        for f in flux {
+            let debut: f64 = f["start_time"].as_str().unwrap().parse().unwrap();
+            assert!(debut.abs() < 0.03, "{} commence à {debut} s", f["codec_type"]);
+        }
         let etat = export::lire_etat(&dossier_clip).unwrap();
         assert_eq!((etat.etat.as_str(), etat.pour_cent, etat.fichier.as_deref()), ("pret", 100, Some("export.mp4")));
         assert!(etat.depuis.is_some());

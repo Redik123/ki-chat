@@ -81,17 +81,32 @@ pub trait Lecteur {
 
     /// Le prochain paquet du flux demandé, ou `Paquet::Fin`.
     fn suivant(&mut self, flux: Flux) -> anyhow::Result<Paquet>;
+
+    /// Les gains des pistes mêlées, dans l'ordre donné à l'ouverture
+    /// ([`ouvrir_avec_pistes`]). Ils valent pour le son décodé ensuite ;
+    /// sans effet sur un fichier ouvert pour sa seule première piste.
+    fn regler_gains(&mut self, _gains: &[f32]) {}
 }
 
 /// Ouvre un fichier. L'erreur dit pourquoi, en français, pour l'interface.
 pub fn ouvrir(chemin: &Path) -> anyhow::Result<Box<dyn Lecteur>> {
+    ouvrir_avec_pistes(chemin, &[])
+}
+
+/// Ouvre un fichier en mêlant plusieurs de ses pistes son au lieu de ne
+/// lire que la première : `pistes` sont leurs rangs dans le fichier (0 : la
+/// première piste son), mêlées à gain 1 jusqu'à ce que
+/// [`Lecteur::regler_gains`] dise autre chose. C'est l'aperçu de l'atelier,
+/// qui fait entendre le jeu, le micro et les copains d'un clip aux niveaux
+/// choisis. Vide : comme [`ouvrir`].
+pub fn ouvrir_avec_pistes(chemin: &Path, pistes: &[usize]) -> anyhow::Result<Box<dyn Lecteur>> {
     #[cfg(windows)]
     {
-        mf::ouvrir(chemin)
+        mf::ouvrir(chemin, pistes)
     }
     #[cfg(not(windows))]
     {
-        let _ = chemin;
+        let _ = (chemin, pistes);
         anyhow::bail!(
             "lecture vidéo indisponible sur {} (Windows seulement pour l'instant)",
             std::env::consts::OS

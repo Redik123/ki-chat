@@ -79,6 +79,8 @@ enum Commande {
     Lecture(bool),
     Chercher(u64),
     Boucle(bool),
+    /// Les gains des pistes mêlées (l'aperçu de l'atelier).
+    Gains(Vec<f32>),
 }
 
 /// Ce que le fil de lecture et l'interface se partagent.
@@ -104,12 +106,28 @@ pub struct Lecture {
 
 impl Lecture {
     pub(crate) fn demarrer(chemin: PathBuf, file: Arc<File>, ctx: egui::Context) -> Self {
+        Self::demarrer_avec_pistes(chemin, Vec::new(), Vec::new(), file, ctx)
+    }
+
+    /// Lit `chemin` en mêlant ces pistes son (rangs dans le fichier) à ces
+    /// gains, réglables ensuite par [`Lecture::regler_gains`] — l'aperçu
+    /// de l'atelier. Sans pistes : la première piste son, telle quelle.
+    pub(crate) fn demarrer_avec_pistes(
+        chemin: PathBuf,
+        pistes: Vec<usize>,
+        gains: Vec<f32>,
+        file: Arc<File>,
+        ctx: egui::Context,
+    ) -> Self {
         let partage = Arc::new(Partage::default());
         let (tx, rx) = mpsc::channel();
+        if !gains.is_empty() {
+            let _ = tx.send(Commande::Gains(gains));
+        }
         let p = partage.clone();
         let fil = std::thread::Builder::new()
             .name("visionneuse-lecture".into())
-            .spawn(move || fil_lecture(chemin, file, p, rx, ctx))
+            .spawn(move || fil_lecture(chemin, pistes, file, p, rx, ctx))
             .ok();
         Self {
             partage,
@@ -134,6 +152,12 @@ impl Lecture {
 
     fn boucle(&self, on: bool) {
         self.commander(Commande::Boucle(on));
+    }
+
+    /// Les gains des pistes mêlées, dans l'ordre donné au démarrage : ils
+    /// s'entendent dès le son décodé ensuite (300 ms d'avance au plus).
+    pub(crate) fn regler_gains(&self, gains: Vec<f32>) {
+        self.commander(Commande::Gains(gains));
     }
 
     pub(crate) fn prendre_image(&self) -> Option<egui::ColorImage> {
@@ -178,6 +202,7 @@ const RETARD_MAX_MS: u64 = 80;
 
 fn fil_lecture(
     chemin: PathBuf,
+    pistes: Vec<usize>,
     file: Arc<File>,
     partage: Arc<Partage>,
     rx: mpsc::Receiver<Commande>,
@@ -185,7 +210,16 @@ fn fil_lecture(
 ) {
     file.vider();
     file.set_pause(true);
-    let mut lecteur = match ki_media::ouvrir(&chemin) {
+    // Des pistes à mêler qu'on n'arrive pas à ouvrir (un clip réécrit, une
+    // fiche fausse) : le son tel quel plutôt que rien.
+    let ouvert = ki_media::ouvrir_avec_pistes(&chemin, &pistes).or_else(|e| {
+        if pistes.is_empty() {
+            return Err(e);
+        }
+        ki_voice::journal(format!("visionneuse : pistes {pistes:?} illisibles ({e:#}), le son tel quel"));
+        ki_media::ouvrir(&chemin)
+    });
+    let mut lecteur = match ouvert {
         Ok(l) => l,
         Err(e) => {
             *partage.erreur.lock().unwrap() = Some(format!("{e:#}"));
@@ -252,6 +286,7 @@ fn fil_lecture(
                 }
                 Ok(Commande::Chercher(ms)) => recherche = Some(ms.min(duree)),
                 Ok(Commande::Boucle(b)) => boucle = b,
+                Ok(Commande::Gains(g)) => lecteur.regler_gains(&g),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }

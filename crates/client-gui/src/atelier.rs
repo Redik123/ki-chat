@@ -93,6 +93,9 @@ struct Suivi {
     /// Le serveur a répondu « clip inconnu » pour l'identifiant de la fiche
     /// (purgé, effacé) : la fiche doit l'oublier.
     serveur_perdu: bool,
+    /// Une coupe sans réencodage part de l'image clé qui précède le début
+    /// demandé : de combien plus tôt, en millisecondes (serveur 0.1.51).
+    avance_ms: Option<u64>,
     /// Le nom du fichier produit, ou l'erreur.
     fini: Option<Result<String, String>>,
 }
@@ -161,6 +164,10 @@ struct EtatExport {
     /// « copie » ou « x264 » (0.1.43).
     #[serde(default)]
     mode: Option<String>,
+    /// De combien une coupe en copie commence avant le début demandé
+    /// (0.1.51).
+    #[serde(default)]
+    avance_ms: Option<u64>,
 }
 
 /// Ce qu'on en fait.
@@ -207,6 +214,34 @@ fn interpreter(etat: &EtatExport, fichier: &str) -> Verdict {
             pour_cent: None,
         },
     }
+}
+
+/// Les pistes que l'aperçu mêle, par leur rang dans le fichier, dans
+/// l'ordre de la fiche : après le mélange (rang 0) quand le clip a
+/// plusieurs sources ; seule, la source est l'unique piste du fichier
+/// (`clips::ecrire_clip`). Sans pistes connues : rien à mêler, le son tel
+/// quel.
+fn rangs_des_pistes(pistes: &[String]) -> Vec<usize> {
+    match pistes.len() {
+        0 => Vec::new(),
+        1 => vec![0],
+        n => (1..=n).collect(),
+    }
+}
+
+/// Les gains de ces pistes, dans leur ordre : ceux des curseurs — et zéro
+/// pour une piste qu'on ne sait pas nommer, comme l'export la laisse de
+/// côté.
+fn gains_des_pistes(pistes: &[String], jeu: f32, micro: f32, copains: f32) -> Vec<f32> {
+    pistes
+        .iter()
+        .map(|nom| match nom.as_str() {
+            "jeu" => jeu,
+            "micro" => micro,
+            "copains" => copains,
+            _ => 0.0,
+        })
+        .collect()
 }
 
 /// Une fiche relue en boucle (`meta.json`, `export.json`) : `Ok(None)` tant
@@ -290,7 +325,10 @@ fn journal(texte: String) {
 enum Export {
     Rien,
     EnCours(Arc<Mutex<Suivi>>),
-    Pret { fichier: String },
+    Pret {
+        fichier: String,
+        avance_ms: Option<u64>,
+    },
     Erreur(String),
 }
 
@@ -348,6 +386,9 @@ struct Projet {
     jeu: f32,
     micro: f32,
     copains: f32,
+    /// Les gains que la lecture de l'aperçu applique, dans l'ordre des
+    /// pistes de la fiche : les curseurs s'entendent (voir `gains_apercu`).
+    gains_envoyes: Vec<f32>,
     cadence: u32,
     export: Export,
     qr: Option<Qr>,
@@ -406,13 +447,21 @@ impl Atelier {
                 0.0
             }
         };
+        // L'aperçu mêle lui-même les pistes séparées du clip, aux niveaux
+        // des curseurs. Il jouait le mélange enregistré : les curseurs ne
+        // changeaient rien à ce qu'on entendait, seulement à l'export
+        // (drion, 2026-09-27).
+        let (jeu, micro, copains) = (a("jeu"), a("micro"), a("copains"));
+        let gains = gains_des_pistes(&pistes, jeu, micro, copains);
         self.projet = Some(Projet {
             chemin: clip.chemin.clone(),
             nom: clip.nom.clone(),
             fiche: clip.fiche.clone(),
             reseau,
-            lecture: Some(Lecture::demarrer(
+            lecture: Some(Lecture::demarrer_avec_pistes(
                 clip.chemin.clone(),
+                rangs_des_pistes(&pistes),
+                gains.clone(),
                 self.file.clone(),
                 ctx.clone(),
             )),
@@ -437,9 +486,10 @@ impl Atelier {
             zy: 0.5,
             titre: String::new(),
             titre_bas: false,
-            jeu: a("jeu"),
-            micro: a("micro"),
-            copains: a("copains"),
+            jeu,
+            micro,
+            copains,
+            gains_envoyes: gains,
             cadence: 0,
             export: Export::Rien,
             qr: None,
@@ -590,6 +640,14 @@ impl Atelier {
         let Some(p) = self.projet.as_mut() else {
             return;
         };
+        let pistes = p.fiche.as_ref().and_then(|f| f.pistes.clone()).unwrap_or_default();
+        let gains = gains_des_pistes(&pistes, p.jeu, p.micro, p.copains);
+        if gains != p.gains_envoyes {
+            if let Some(l) = &p.lecture {
+                l.regler_gains(gains.clone());
+            }
+            p.gains_envoyes = gains;
+        }
         if let Some(l) = &p.lecture {
             if let Some(e) = l.erreur() {
                 self.info = Some((format!("lecture impossible : {e}"), Instant::now()));
@@ -660,7 +718,7 @@ impl Atelier {
             match &s.fini {
                 Some(Ok(fichier)) => {
                     relire_fiche(p, &s);
-                    p.export = Export::Pret { fichier: fichier.clone() };
+                    p.export = Export::Pret { fichier: fichier.clone(), avance_ms: s.avance_ms };
                     self.info = Some(("export prêt".into(), Instant::now()));
                 }
                 Some(Err(e)) => {
@@ -901,7 +959,7 @@ impl Atelier {
 
     fn fichier_pret(p: &Projet) -> Option<(String, String)> {
         let fichier = match &p.export {
-            Export::Pret { fichier } => fichier.clone(),
+            Export::Pret { fichier, .. } => fichier.clone(),
             _ => return None,
         };
         let id = p.fiche.as_ref().and_then(|f| f.serveur.clone())?;
@@ -1153,7 +1211,10 @@ fn suivre_export(
                     s.pour_cent = pc;
                 }
             }
-            Verdict::Pret => return Ok(()),
+            Verdict::Pret => {
+                suivi.lock().unwrap().avance_ms = etat.avance_ms;
+                return Ok(());
+            }
             Verdict::Erreur(m) => return Err(m),
         }
     }
@@ -1915,8 +1976,8 @@ fn panneau_reglages(
         "l'original reste sur ce PC ; le serveur fabrique la vidéo d'après tes réglages",
     );
 
-    if let Export::Pret { fichier } = &p.export {
-        let fichier = fichier.clone();
+    if let Export::Pret { fichier, avance_ms } = &p.export {
+        let (fichier, avance_ms) = (fichier.clone(), *avance_ms);
         ui.add_space(10.0);
         ui::section_label(ui, "C'est prêt");
         ui::hint(
@@ -1931,6 +1992,17 @@ fn panneau_reglages(
                 fichier
             ),
         );
+        // Une coupe sans réencodage ne peut partir que d'une image clé :
+        // mieux vaut le dire que laisser croire à une coupe ratée.
+        if let Some(a) = avance_ms.filter(|a| *a >= 50) {
+            ui::hint(
+                ui,
+                &format!(
+                    "commence {} s avant ton début : coupée sans réencodage, la vidéo part de l'image clé qui précède",
+                    format!("{:.1}", a as f32 / 1000.0).replace('.', ",")
+                ),
+            );
+        }
         let en_cours = p.enregistrement.is_some();
         ui.add_enabled_ui(!en_cours, |ui| {
             if ui::button(ui, Icon::Download, "Enregistrer sous…").clicked() {
@@ -2182,6 +2254,20 @@ pub(crate) fn qr_image(texte: &str) -> Option<egui::ColorImage> {
 mod tests {
     use super::*;
 
+    /// L'aperçu mêle les pistes séparées : après le mélange quand il y a
+    /// plusieurs sources, la source seule sinon — aux gains des curseurs,
+    /// une piste inconnue laissée de côté comme à l'export.
+    #[test]
+    fn l_apercu_mele_les_pistes_aux_niveaux_des_curseurs() {
+        let noms = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let trois = noms(&["jeu", "micro", "copains"]);
+        assert_eq!(rangs_des_pistes(&trois), [1, 2, 3]);
+        assert_eq!(gains_des_pistes(&trois, 1.0, 0.37, 0.85), [1.0, 0.37, 0.85]);
+        assert_eq!(rangs_des_pistes(&noms(&["jeu"])), [0], "une source seule : pas de mélange devant");
+        assert!(rangs_des_pistes(&[]).is_empty(), "pistes inconnues : le son tel quel");
+        assert_eq!(gains_des_pistes(&noms(&["jeu", "musique"]), 0.5, 1.0, 1.0), [0.5, 0.0]);
+    }
+
     #[test]
     fn une_image_se_reduit_en_gardant_ses_proportions() {
         let image = egui::ColorImage::filled([640, 360], Color32::RED);
@@ -2227,6 +2313,7 @@ mod tests {
             jeu: 1.0,
             micro: 0.5,
             copains: 0.0,
+            gains_envoyes: vec![1.0, 0.5, 0.0],
             cadence: 30,
             export: Export::Rien,
             qr: None,
