@@ -3185,6 +3185,30 @@ pub struct TableauAdmin {
     pub portes: Vec<TableauPorte>,
 }
 
+/// Le débit réseau du serveur (GET /admin/reseau, depuis 0.1.50 ; `null`
+/// hors Linux), en kbit/s : la moyenne des cinq dernières secondes, la
+/// pointe et la courbe sur la fenêtre, le total depuis le démarrage. C'est
+/// lui qui dit si la liaison du serveur porte les streams — chaque
+/// spectateur reçoit sa propre copie. À part du tableau de bord : il se
+/// relit toutes les cinq secondes, le tableau (qui parcourt des dossiers)
+/// toutes les trente.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauReseau {
+    pub entrant_kbps: u32,
+    pub sortant_kbps: u32,
+    pub pointe_entrant_kbps: u32,
+    pub pointe_sortant_kbps: u32,
+    /// La fenêtre de la pointe et de la courbe, en secondes.
+    pub fenetre_s: u32,
+    /// Les relevés de la fenêtre, du plus ancien au plus récent : (entrant,
+    /// sortant) en kbit/s, un toutes les `periode_s` secondes.
+    pub historique: Vec<(u32, u32)>,
+    pub periode_s: u32,
+    pub total_entrant_octets: u64,
+    pub total_sortant_octets: u64,
+}
+
 /// Une porte web ouverte, vue du tableau de bord.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -5037,6 +5061,31 @@ mod tests {
         let relu: ServerMsg = serde_json::from_str(&json).unwrap();
         let ServerMsg::StreamViewers { stream_id, viewers } = relu else { panic!("{relu:?}") };
         assert_eq!((stream_id, viewers), (7, vec![3, 11]));
+    }
+
+    /// Le débit du serveur (GET /admin/reseau) : `null` quand il n'y a rien
+    /// à dire (hors Linux, ou juste après le démarrage), la courbe en
+    /// paires, et un champ inconnu ou manquant ne casse pas la lecture —
+    /// client et serveur ne changent pas de version ensemble.
+    #[test]
+    fn le_debit_du_serveur_fait_l_aller_retour() {
+        let rien: Option<TableauReseau> = None;
+        assert_eq!(serde_json::to_string(&rien).unwrap(), "null");
+        assert_eq!(serde_json::from_str::<Option<TableauReseau>>("null").unwrap(), None);
+
+        let r = TableauReseau {
+            entrant_kbps: 1200,
+            sortant_kbps: 38_400,
+            historique: vec![(1000, 40_000), (1200, 38_400)],
+            periode_s: 5,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&Some(r.clone())).unwrap();
+        assert!(json.contains(r#""historique":[[1000,40000],[1200,38400]]"#), "{json}");
+        assert_eq!(serde_json::from_str::<Option<TableauReseau>>(&json).unwrap(), Some(r));
+
+        let partiel: TableauReseau = serde_json::from_str(r#"{"sortant_kbps":5,"plus_tard":1}"#).unwrap();
+        assert_eq!((partiel.sortant_kbps, partiel.historique.len()), (5, 0));
     }
 
     /// Les liens vers le stock se reconnaissent dans un message — complets

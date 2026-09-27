@@ -968,6 +968,12 @@ struct KiApp {
     tableau_admin: TableauRecu,
     tableau_demande: Option<std::time::Instant>,
     tableau_en_vol: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Le débit réseau du serveur, à part du tableau : relu toutes les cinq
+    /// secondes tant que l'onglet est ouvert — la route ne fait que lire
+    /// des relevés en mémoire.
+    reseau_admin: ReseauRecu,
+    reseau_demande: Option<std::time::Instant>,
+    reseau_en_vol: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Dernier diagnostic établi. Coûteux — il énumère les processus et
     /// interroge le registre — donc calculé au clic, pas à chaque image.
     docteur: Option<ki_voice::docteur::Diagnostic>,
@@ -1396,6 +1402,9 @@ impl KiApp {
             tableau_admin: Default::default(),
             tableau_demande: None,
             tableau_en_vol: Default::default(),
+            reseau_admin: Default::default(),
+            reseau_demande: None,
+            reseau_en_vol: Default::default(),
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
@@ -11467,14 +11476,54 @@ impl KiApp {
         });
     }
 
+    /// Demande le débit réseau au serveur, sur un fil ; la courbe d'avant
+    /// reste affichée le temps que la nouvelle arrive.
+    fn demander_reseau(&mut self) {
+        if self.reseau_en_vol.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        self.reseau_demande = Some(std::time::Instant::now());
+        let base = self.http_base();
+        let agent = self.http_agent();
+        let token_hex = format!("{:x}", self.voice_token);
+        let slot = self.reseau_admin.clone();
+        let en_vol = self.reseau_en_vol.clone();
+        let ctx = self.app_ctx.clone();
+        std::thread::spawn(move || {
+            let resultat = agent
+                .get(&format!("{base}/admin/reseau"))
+                .set("x-ki-token", &token_hex)
+                .timeout(std::time::Duration::from_secs(10))
+                .call()
+                .map_err(|e| match e {
+                    ureq::Error::Status(404, _) => {
+                        "le serveur ne le relève pas encore (version d'avant 0.1.50)".to_string()
+                    }
+                    e => erreur_http(e),
+                })
+                .and_then(|r| {
+                    r.into_json::<Option<ki_protocol::TableauReseau>>().map_err(|e| e.to_string())
+                });
+            *slot.lock().unwrap() = Some(resultat);
+            en_vol.store(false, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+    }
+
     /// Onglet « Tableau de bord » : l'état du serveur en un écran, demandé
-    /// à l'ouverture puis toutes les trente secondes tant qu'il est ouvert.
+    /// à l'ouverture puis toutes les trente secondes tant qu'il est ouvert ;
+    /// le débit réseau, lui, toutes les cinq.
     fn admin_tableau_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let perime = self
             .tableau_demande
             .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(30));
         if perime {
             self.demander_tableau();
+        }
+        // Quatre secondes et non cinq : le réveil ci-dessous tombe à cinq,
+        // un seuil égal raterait un tour sur deux.
+        if self.reseau_demande.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(4)) {
+            self.demander_reseau();
         }
         // Pour l'« il y a … » et le rafraîchissement, même sans souris.
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
@@ -11496,6 +11545,7 @@ impl KiApp {
         });
         if rafraichir {
             self.tableau_demande = None;
+            self.reseau_demande = None;
         }
         ui.add_space(4.0);
         let tableau = self.tableau_admin.lock().unwrap().clone();
@@ -11506,6 +11556,56 @@ impl KiApp {
             }
             Some(Ok(t)) => self.peindre_tableau(ui, &t),
         }
+    }
+
+    /// La carte « Réseau » : le débit du serveur maintenant, sa courbe sur
+    /// dix minutes, la pointe et le total depuis le démarrage.
+    fn peindre_reseau(&self, ui: &mut egui::Ui) {
+        let recu = self.reseau_admin.lock().unwrap().clone();
+        ui::card(ui, |ui| {
+            ui::section_label(ui, "Réseau");
+            let r = match recu {
+                None => return ui::hint(ui, "relevé du débit…"),
+                Some(Err(e)) => return ui::hint(ui, &format!("débit indisponible : {e}")),
+                Some(Ok(None)) => {
+                    return ui::hint(
+                        ui,
+                        "pas encore de relevé : le serveur vient de démarrer, ou ne tourne pas sous Linux",
+                    );
+                }
+                Some(Ok(Some(r))) => r,
+            };
+            // Les deux mots en couleur servent de légende à la courbe.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new("entrant").color(INFO).size(12.5));
+                ui.label(RichText::new(debit_lisible(r.entrant_kbps)).color(TEXT).size(12.5).strong());
+                ui.label(RichText::new("·").color(TEXT_FAINT).size(12.5));
+                ui.label(RichText::new("sortant").color(ACCENT).size(12.5));
+                ui.label(RichText::new(debit_lisible(r.sortant_kbps)).color(TEXT).size(12.5).strong());
+                ui.label(RichText::new(format!("sur les {} dernières secondes", r.periode_s)).color(TEXT_FAINT).size(11.0));
+            });
+            ui.add_space(4.0);
+            graphes::debits(ui, &r.historique, r.periode_s, 76.0, (INFO, ACCENT), debit_lisible);
+            ui.add_space(4.0);
+            let fenetre = if r.fenetre_s < 60 {
+                format!("{} s", r.fenetre_s)
+            } else {
+                duree_lisible(u64::from(r.fenetre_s))
+            };
+            ui.label(
+                RichText::new(format!(
+                    "pointe sur {fenetre} : entrant {} · sortant {} · depuis le démarrage : reçu {}, envoyé {}",
+                    debit_lisible(r.pointe_entrant_kbps),
+                    debit_lisible(r.pointe_sortant_kbps),
+                    admin_fichiers::taille_lisible(r.total_entrant_octets),
+                    admin_fichiers::taille_lisible(r.total_sortant_octets),
+                ))
+                .color(TEXT_DIM)
+                .size(12.0),
+            );
+            ui::hint(ui, "le sortant porte les streams : chaque spectateur reçoit sa propre copie");
+        });
     }
 
     /// Le tableau lui-même, carte par carte.
@@ -11557,6 +11657,9 @@ impl KiApp {
                 ui.label(dim(mots.join(" · ")));
             }
         });
+        ui.add_space(8.0);
+
+        self.peindre_reseau(ui);
         ui.add_space(8.0);
 
         ui::card(ui, |ui| {
@@ -12548,6 +12651,7 @@ impl KiApp {
     fn close_admin(&mut self) {
         // Rouvrir redemande le tableau : l'état d'un serveur bouge.
         self.tableau_demande = None;
+        self.reseau_demande = None;
         self.show_admin = false;
         self.info = None;
         self.last_invite = None;
@@ -12682,6 +12786,10 @@ type RetraitClip = std::sync::Arc<std::sync::Mutex<Option<Result<String, String>
 /// Ce que le fil du tableau de bord rapporte : l'état du serveur, ou l'erreur.
 type TableauRecu =
     std::sync::Arc<std::sync::Mutex<Option<Result<ki_protocol::TableauAdmin, String>>>>;
+/// Ce que le fil du débit rapporte : les relevés (`None` s'il n'y en a pas
+/// encore, ou hors Linux), ou l'erreur.
+type ReseauRecu =
+    std::sync::Arc<std::sync::Mutex<Option<Result<Option<ki_protocol::TableauReseau>, String>>>>;
 
 /// Le partage d'un clip dans un salon : la boîte de dialogue, puis l'envoi
 /// (PLAN-CLIPS.md, jalon C2). L'original reste sur ce PC ; le serveur en
@@ -14367,6 +14475,15 @@ fn stock_ligne(ui: &mut egui::Ui, nom: &str, s: &ki_protocol::TableauStock) {
                 .color(TEXT_DIM)
                 .size(12.0),
         );
+    }
+}
+
+/// Un débit lisible, virgule à la française : « 850 kbit/s », « 38,4 Mbit/s ».
+fn debit_lisible(kbps: u32) -> String {
+    if kbps < 1000 {
+        format!("{kbps} kbit/s")
+    } else {
+        format!("{:.1} Mbit/s", f64::from(kbps) / 1000.0).replace('.', ",")
     }
 }
 

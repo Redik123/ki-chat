@@ -33,6 +33,17 @@ pub async fn tableau(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     }
 }
 
+/// GET /admin/reseau — le débit réseau du serveur, en JSON (`null` tant
+/// qu'il n'y a pas deux relevés, ou hors Linux). Rien à parcourir : les
+/// relevés sont en mémoire, le client peut le redemander toutes les cinq
+/// secondes sans rien coûter.
+pub async fn reseau(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if !crate::diag::lecteur_autorise(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "accès réservé à l'administration").into_response();
+    }
+    axum::Json(state.reseau.tableau()).into_response()
+}
+
 /// Tout ce que le tableau montre, relevé d'un coup.
 pub fn composer(state: &AppState) -> TableauAdmin {
     let channels = state.channels.list();

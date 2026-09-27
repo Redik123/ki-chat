@@ -2,7 +2,8 @@
 //! une courbe dans le temps avec les paliers de rang en fond, une
 //! sparkline, une bande de forme, des barres horizontales, une barre
 //! victoires/défaites, une jauge, une heatmap de la semaine et les cases
-//! d'un match manche par manche.
+//! d'un match manche par manche. Et, pour le tableau de bord de
+//! l'administration, les débits du serveur dans le temps.
 //!
 //! Rien ici ne connaît les types du protocole, sauf [`ki_protocol::PointRR`]
 //! (qui se convertit en [`PointCourbe`]) et [`ki_protocol::nom_de_rang`]
@@ -496,6 +497,134 @@ pub fn sparkline(ui: &mut Ui, valeurs: &[f32], taille: Vec2, teinte: Color32) ->
     painter.add(Shape::line(trace, Stroke::new(1.5_f32, teinte)));
     painter.circle_filled(pos(n - 1), 2.0, teinte);
     reponse
+}
+
+// ---------------------------------------------------------------------
+// Débits
+// ---------------------------------------------------------------------
+
+/// Le haut d'une échelle de débit, en kbit/s : la première valeur ronde
+/// (1, 2 ou 5 fois une puissance de dix) qui contient `max`, jamais sous
+/// 100 kbit/s — un serveur au repos reste une ligne au pied, au lieu d'un
+/// bruit grossi jusqu'en haut.
+pub(crate) fn echelle_ronde(max: u32) -> u32 {
+    let max = u64::from(max.max(100));
+    let mut puissance: u64 = 1;
+    loop {
+        for m in [1, 2, 5] {
+            if m * puissance >= max {
+                return (m * puissance).min(u64::from(u32::MAX)) as u32;
+            }
+        }
+        puissance *= 10;
+    }
+}
+
+/// Le relevé sous l'abscisse `x` (depuis le bord gauche de la zone) quand
+/// `n` relevés s'étalent sur `largeur` : le plus proche, bornes comprises.
+pub(crate) fn releve_sous(x: f32, largeur: f32, n: usize) -> Option<usize> {
+    if n == 0 || largeur <= 0.0 || !x.is_finite() {
+        return None;
+    }
+    if n == 1 {
+        return Some(0);
+    }
+    let pas = largeur / (n - 1) as f32;
+    Some(((x / pas).round().max(0.0) as usize).min(n - 1))
+}
+
+/// « maintenant », « il y a 35 s », « il y a 2 min 05 », « il y a 10 min ».
+pub(crate) fn il_y_a(secondes: u64) -> String {
+    match (secondes / 60, secondes % 60) {
+        (0, 0) => "maintenant".into(),
+        (0, s) => format!("il y a {s} s"),
+        (m, 0) => format!("il y a {m} min"),
+        (m, s) => format!("il y a {m} min {s:02}"),
+    }
+}
+
+/// Deux débits dans le temps, pleine largeur sur `hauteur` pixels et sur
+/// une même échelle qui part de zéro : `releves` du plus ancien au plus
+/// récent, (entrant, sortant) en kbit/s, un toutes les `periode_s`
+/// secondes, tracés aux `teintes` (entrant, sortant) sur leur aire pâle.
+/// Le haut de l'échelle se lit en haut à gauche, la durée couverte en
+/// bas ; le survol marque le relevé le plus proche et dit ses deux
+/// valeurs, que `lisible` écrit. À moins de deux relevés, le cadre est là
+/// mais rien n'est tracé.
+pub fn debits(
+    ui: &mut Ui,
+    releves: &[(u32, u32)],
+    periode_s: u32,
+    hauteur: f32,
+    teintes: (Color32, Color32),
+    lisible: impl Fn(u32) -> String,
+) -> Response {
+    let (rect, reponse) = ui.allocate_exact_size(Vec2::new(ui.available_width(), hauteur), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return reponse;
+    }
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, CornerRadius::same(6), BG_DEEP);
+    let n = releves.len();
+    if n < 2 {
+        return reponse;
+    }
+    let zone = rect.shrink2(MARGE);
+    let haut = echelle_ronde(releves.iter().map(|&(e, s)| e.max(s)).max().unwrap_or(0));
+    let x_de = |i: usize| zone.left() + zone.width() * i as f32 / (n - 1) as f32;
+    let y_de = |v: u32| zone.bottom() - zone.height() * (v as f32 / haut as f32).clamp(0.0, 1.0);
+
+    // La grille : le haut de l'échelle et sa moitié.
+    for y in [zone.top(), zone.center().y] {
+        painter.line_segment(
+            [Pos2::new(zone.left(), y), Pos2::new(zone.right(), y)],
+            Stroke::new(1.0_f32, BORDER_SOFT),
+        );
+    }
+
+    // Chaque courbe sur son aire pâle : une bande par intervalle, chacune
+    // un trapèze à côtés verticaux, donc convexe.
+    let serie = |choix: fn(&(u32, u32)) -> u32, teinte: Color32| {
+        let points: Vec<Pos2> =
+            releves.iter().enumerate().map(|(i, r)| Pos2::new(x_de(i), y_de(choix(r)))).collect();
+        for paire in points.windows(2) {
+            painter.add(Shape::convex_polygon(
+                vec![paire[0], paire[1], Pos2::new(paire[1].x, zone.bottom()), Pos2::new(paire[0].x, zone.bottom())],
+                theme::alpha(teinte, 22),
+                Stroke::NONE,
+            ));
+        }
+        painter.add(Shape::line(points, Stroke::new(1.5_f32, teinte)));
+    };
+    serie(|r| r.1, teintes.1);
+    serie(|r| r.0, teintes.0);
+
+    let legende = |pos: Pos2, ancre: Align2, texte: String| {
+        painter.text(pos, ancre, texte, FontId::proportional(LEGENDE), TEXT_FAINT);
+    };
+    legende(zone.left_top() + Vec2::new(2.0, 1.0), Align2::LEFT_TOP, lisible(haut));
+    legende(
+        zone.left_bottom() + Vec2::new(2.0, -1.0),
+        Align2::LEFT_BOTTOM,
+        il_y_a((n as u64 - 1) * u64::from(periode_s)),
+    );
+    legende(zone.right_bottom() + Vec2::new(-2.0, -1.0), Align2::RIGHT_BOTTOM, "maintenant".into());
+
+    // Le survol : le relevé le plus proche, marqué et commenté.
+    let Some(i) = reponse.hover_pos().and_then(|souris| releve_sous(souris.x - zone.left(), zone.width(), n)) else {
+        return reponse;
+    };
+    let x = x_de(i);
+    painter.line_segment([Pos2::new(x, zone.top()), Pos2::new(x, zone.bottom())], Stroke::new(1.0_f32, BORDER_STRONG));
+    let (entrant, sortant) = releves[i];
+    painter.circle_filled(Pos2::new(x, y_de(sortant)), 3.0, teintes.1);
+    painter.circle_filled(Pos2::new(x, y_de(entrant)), 3.0, teintes.0);
+    reponse.on_hover_text(format!(
+        "{} · entrant {} · sortant {}",
+        il_y_a((n - 1 - i) as u64 * u64::from(periode_s)),
+        lisible(entrant),
+        lisible(sortant)
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -1107,6 +1236,35 @@ mod tests {
         assert_eq!(PointCourbe::from(&p).monte, None);
         let p = PointRR { delta: -3, ..Default::default() };
         assert_eq!(PointCourbe::from(&p).monte, Some(false));
+    }
+
+    /// L'échelle des débits s'arrondit vers le haut, jamais sous
+    /// 100 kbit/s ; le survol tombe sur le relevé le plus proche ; la
+    /// durée se dit comme on la lit.
+    #[test]
+    fn les_debits_ont_une_echelle_ronde_et_un_survol_borne() {
+        assert_eq!(echelle_ronde(0), 100);
+        assert_eq!(echelle_ronde(100), 100);
+        assert_eq!(echelle_ronde(101), 200);
+        assert_eq!(echelle_ronde(38_400), 50_000);
+        assert_eq!(echelle_ronde(60_000), 100_000);
+        assert_eq!(echelle_ronde(u32::MAX), u32::MAX);
+
+        assert_eq!(releve_sous(0.0, 100.0, 3), Some(0));
+        assert_eq!(releve_sous(24.0, 100.0, 3), Some(0));
+        assert_eq!(releve_sous(26.0, 100.0, 3), Some(1));
+        assert_eq!(releve_sous(100.0, 100.0, 3), Some(2));
+        assert_eq!(releve_sous(-40.0, 100.0, 3), Some(0), "à gauche du cadre");
+        assert_eq!(releve_sous(400.0, 100.0, 3), Some(2), "à droite du cadre");
+        assert_eq!(releve_sous(50.0, 100.0, 1), Some(0));
+        assert_eq!(releve_sous(50.0, 100.0, 0), None);
+        assert_eq!(releve_sous(50.0, 0.0, 3), None);
+        assert_eq!(releve_sous(f32::NAN, 100.0, 3), None);
+
+        assert_eq!(il_y_a(0), "maintenant");
+        assert_eq!(il_y_a(35), "il y a 35 s");
+        assert_eq!(il_y_a(125), "il y a 2 min 05");
+        assert_eq!(il_y_a(600), "il y a 10 min");
     }
 
     /// Une image remplit son cadre sans se déformer : le bandeau d'une

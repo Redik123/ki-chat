@@ -276,6 +276,40 @@ laissait ce dernier geler. Désormais :
   (`qualite_pour_debit` : 1080p30 sous 7 Mbit/s, 720p30 sous 3,5, 540p30
   sous 1,5, 480p30 sous 900 kbit/s, 360p30 sous 650) ; échelle prolongée à
   700 et 450 kbit/s.
+**Livré en 0.1.50 : le flou à plusieurs, 60 Mbit/s, et qui regarde.**
+Retour du terrain : « 20 Mbit/s c'est trop limite, s'il y a plusieurs
+personnes sur le stream ça devient flou pour eux, et on ne voit pas qui
+nous regarde ». Les diagnostics de Redik_ (2026-09-27) montraient la
+cause, côté serveur : la file de deux trames par spectateur débordait à
+chaque trame clé (plusieurs fois le poids d'une trame ordinaire à
+20 Mbit/s) ; chaque débordement comptait une saturation, le plancher de
+la haute (la moitié du réglage) tombait, et tout le monde partait en
+basse — les essais de retour échouaient en deux secondes, avec un délai
+qui doublait. Désormais :
+- **Le retard se juge au temps, pas à la file** : 30 trames de file par
+  spectateur, et c'est l'âge d'une trame au moment de l'envoyer qui
+  compte (`RETARD_MAX`, 500 ms) — plus vieille, elle est jetée, le
+  spectateur attend la prochaine trame clé et une saturation est
+  comptée. Une trame clé qui passe n'est plus une saturation.
+- **Une saturation se confirme** : un spectateur n'est « saturé » que
+  sur deux des trois dernières secondes (`juger`), et pas pendant les
+  trois premières secondes après son placement (`GRACE`) ; il ne
+  retente la haute que sur trois secondes calmes.
+- **Des échelles jusqu'à 60 Mbit/s** : le réglage lui-même, puis
+  40/30/20/15/12/10/8/6/4/2,5 Mbit/s… ; le plancher de la haute est la
+  moitié du réglage entre 2,5 et 8 Mbit/s (`plancher_haute`), la basse
+  monte à 5 Mbit/s (`PALIERS_BASSE`). Curseur 1 à 60 Mbit/s.
+- **Qui regarde** : `StreamViewers` (le stream, la liste entière)
+  part au salon vocal du streamer une première fois puis à chaque
+  changement, et à qui entre dans le salon. Le streamer lit « 3
+  spectateurs : a, b, c » dans sa fenêtre de diffusion, le salon voit
+  le nombre à côté de l'icône d'écran. Un client d'avant l'ignore.
+- **Le débit du serveur au tableau de bord** (`/admin/reseau`) :
+  entrant et sortant, courbe sur dix minutes — le sortant, c'est une
+  copie de chaque stream par spectateur, de quoi voir quand la liaison
+  du serveur devient le plafond.
+Fixé par `une_saturation_compte_quand_elle_revient_pas_pour_un_hoquet`
+et `le_public_s_annonce_une_fois_puis_a_chaque_changement`.
 **Reste** : la validation sur un vrai lien bridé (limiteur de débit chez
 un spectateur : il doit passer en basse en quelques secondes, et les
 autres garder la haute) ; les vignettes dans le sélecteur.

@@ -53,6 +53,7 @@ mod meta;
 mod musique;
 mod porte;
 mod quic;
+mod reseau;
 mod roles;
 mod state;
 mod store;
@@ -166,6 +167,9 @@ async fn main() -> anyhow::Result<()> {
     // congédiées.
     tokio::spawn(porte::boucle(state.clone()));
     tokio::spawn(stream::boucle(state.clone()));
+    // Le débit réseau du tableau de bord : un petit fichier du noyau relu
+    // toutes les cinq secondes, rien sur le chemin des paquets.
+    tokio::spawn(reseau::boucle(state.clone()));
     // Les repères de lecture : écrits à retardement, une fois toutes les
     // cinq secondes au plus, quand il y a du neuf. Une écriture disque, donc
     // sur le pool bloquant — jamais sur la boucle qui relaie la voix.
@@ -314,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
         // joueurs, sessions, réouvertures, famines, erreurs, crashs, taille.
         .route("/diag-resume", get(diag::resume))
         .route("/admin/tableau", get(tableau::tableau))
+        .route("/admin/reseau", get(tableau::reseau))
         // Les vignettes du bot musique : les clients ne parlent qu'à ki-chat.
         .route("/musique/vignette/{id}", get(musique::vignette))
         .route("/diag/{version}", axum::routing::delete(diag::supprimer))

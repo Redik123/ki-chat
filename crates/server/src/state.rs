@@ -444,6 +444,8 @@ pub struct AppState {
     pub voice_routes: std::sync::RwLock<RouteTable>,
     /// Les partages d'écran en cours (relais SFU vidéo).
     pub streams: crate::stream::Streams,
+    /// Le débit réseau de la machine, relevé pour le tableau de bord.
+    pub reseau: crate::reseau::Reseau,
     pub history: History,
     /// Journal des actions d'administration.
     pub audit: crate::audit::Audit,
@@ -504,6 +506,7 @@ impl AppState {
             users: Mutex::new(HashMap::new()),
             voice_routes: std::sync::RwLock::new(RouteTable::default()),
             streams: crate::stream::Streams::new(),
+            reseau: crate::reseau::Reseau::new(),
             history,
             audit,
             valorant: crate::valorant::Valorant::open(data_dir),
