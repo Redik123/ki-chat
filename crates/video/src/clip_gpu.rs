@@ -27,6 +27,9 @@
 //!    cœurs qui dessinent le jeu.
 //!
 //! Il ne remonte vers le processeur que le flux H.264 : ~25 ko par image.
+//!
+//! Les briques — device, capture, conversion, horloge — servent aussi à la
+//! diffusion (`diffusion_gpu.rs`), qui les assemble à sa façon.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
@@ -44,8 +47,9 @@ use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT,
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
+    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
@@ -231,10 +235,10 @@ fn boucle(
 }
 
 /// `RoInitialize` pour la vie du fil.
-struct Appartement(bool);
+pub(crate) struct Appartement(bool);
 
 impl Appartement {
-    fn entrer() -> Self {
+    pub(crate) fn entrer() -> Self {
         Self(unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok())
     }
 }
@@ -249,12 +253,12 @@ impl Drop for Appartement {
 
 /// Les instants de la capture (horloge des performances, en centaines de
 /// nanosecondes) rapportés à l'origine des horodatages, en µs.
-struct Horloge {
+pub(crate) struct Horloge {
     origine_100ns: i64,
 }
 
 impl Horloge {
-    fn new(origine: Instant) -> Self {
+    pub(crate) fn new(origine: Instant) -> Self {
         let (mut qpc, mut freq) = (0i64, 1i64);
         unsafe {
             let _ = QueryPerformanceCounter(&mut qpc);
@@ -267,7 +271,7 @@ impl Horloge {
 
     /// L'horodatage d'une image composée à `systeme` (100 ns), s'il est
     /// plausible — sinon l'instant présent.
-    fn pts_us(&self, systeme: i64, origine: Instant) -> u64 {
+    pub(crate) fn pts_us(&self, systeme: i64, origine: Instant) -> u64 {
         let present = origine.elapsed().as_micros() as u64;
         let d = systeme - self.origine_100ns;
         if d <= 0 {
@@ -287,17 +291,17 @@ impl Horloge {
 /// Le device de la chaîne : sur la carte NVIDIA, processeur vidéo et BGRA
 /// compris, protégé pour plusieurs fils (la capture y alloue ses surfaces
 /// depuis les siens).
-struct Appareil {
-    device: ID3D11Device,
-    contexte: ID3D11DeviceContext,
-    video: ID3D11VideoDevice,
-    video_ctx: ID3D11VideoContext,
-    winrt: IDirect3DDevice,
-    carte: String,
+pub(crate) struct Appareil {
+    pub(crate) device: ID3D11Device,
+    pub(crate) contexte: ID3D11DeviceContext,
+    pub(crate) video: ID3D11VideoDevice,
+    pub(crate) video_ctx: ID3D11VideoContext,
+    pub(crate) winrt: IDirect3DDevice,
+    pub(crate) carte: String,
 }
 
 impl Appareil {
-    fn nvidia() -> anyhow::Result<Self> {
+    pub(crate) fn nvidia() -> anyhow::Result<Self> {
         let (device, carte) = crate::nvenc::device_nvidia_avec(
             D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
         )?;
@@ -320,13 +324,13 @@ impl Appareil {
 
 /// Windows.Graphics.Capture sur le device de la chaîne : une réserve d'une
 /// image, prise à la demande (voir le point 2 en tête du module).
-struct Capture {
+pub(crate) struct Capture {
     item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     /// La taille des surfaces de la réserve.
-    taille: SizeInt32,
-    fermee: Arc<AtomicBool>,
+    pub(crate) taille: SizeInt32,
+    pub(crate) fermee: Arc<AtomicBool>,
     jeton_image: i64,
     jeton_fermee: i64,
 }
@@ -337,13 +341,15 @@ impl Capture {
     /// La capture de `item` sur le device `winrt` — pas forcément celui de
     /// la carte qui affiche : sur un portable, l'écran est sur la puce
     /// Intel et la chaîne sur la carte NVIDIA, Windows fait passer chaque
-    /// image de l'une à l'autre.
-    fn ouvrir(
+    /// image de l'une à l'autre. `nom` (« clips », « diffusion ») signe ce
+    /// qu'elle dit au journal.
+    pub(crate) fn ouvrir(
         winrt: &IDirect3DDevice,
         item: GraphicsCaptureItem,
         curseur: bool,
         fps: u32,
         reveil: std::thread::Thread,
+        nom: &str,
     ) -> anyhow::Result<Self> {
         let taille = item.Size().context("taille de la source")?;
         if taille.Width <= 0 || taille.Height <= 0 {
@@ -385,7 +391,7 @@ impl Capture {
             refus.push("intervalle minimal");
         }
         if !refus.is_empty() {
-            journal(format!("clips : ce Windows ignore les options de capture : {}", refus.join(", ")));
+            journal(format!("{nom} : ce Windows ignore les options de capture : {}", refus.join(", ")));
         }
         session.StartCapture().context("démarrage de la capture")?;
         Ok(Self { item, pool, session, taille, fermee, jeton_image, jeton_fermee })
@@ -393,7 +399,7 @@ impl Capture {
 
     /// La dernière image arrivée, s'il y en a une ; les plus anciennes sont
     /// rendues au passage.
-    fn prendre(&self) -> anyhow::Result<Option<Direct3D11CaptureFrame>> {
+    pub(crate) fn prendre(&self) -> anyhow::Result<Option<Direct3D11CaptureFrame>> {
         let mut derniere: Option<Direct3D11CaptureFrame> = None;
         loop {
             match self.pool.TryGetNextFrame() {
@@ -412,7 +418,7 @@ impl Capture {
     }
 
     /// La source a changé de taille : la réserve suit.
-    fn recreer(&mut self, winrt: &IDirect3DDevice, taille: SizeInt32) -> anyhow::Result<()> {
+    pub(crate) fn recreer(&mut self, winrt: &IDirect3DDevice, taille: SizeInt32) -> anyhow::Result<()> {
         self.pool.Recreate(winrt, FORMAT, 1, taille).context("réserve de la capture")?;
         self.taille = taille;
         Ok(())
@@ -430,7 +436,7 @@ impl Drop for Capture {
 
 /// L'élément de capture de la source, et l'écran sur lequel elle se
 /// trouve — c'est lui qui donne la taille de l'image enregistrée.
-fn element(source: &CaptureSource) -> anyhow::Result<(GraphicsCaptureItem, GraphicsCaptureItem)> {
+pub(crate) fn element(source: &CaptureSource) -> anyhow::Result<(GraphicsCaptureItem, GraphicsCaptureItem)> {
     if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
         bail!("la capture d'écran de Windows n'est pas disponible (Windows 10 1903 ou plus récent requis)");
     }
@@ -508,11 +514,37 @@ fn fenetre_par_titre(titre: &str) -> Option<HWND> {
     r.trouvee
 }
 
+/// Ce que la conversion produit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Couleurs {
+    /// NV12 BT.709 plage limitée : les clips, des MP4 que les lecteurs
+    /// ordinaires lisent d'après ce que le flux déclare.
+    Nv12Bt709,
+    /// NV12 BT.601 plage limitée : la diffusion. Ses spectateurs décodent
+    /// avec openh264, qui reconvertit toujours en BT.601 — comme le chemin
+    /// du processeur encodait ; en BT.709, rouges et verts viraient.
+    Nv12Bt601,
+    /// BGRA pleine plage : l'aperçu de la diffusion.
+    Bgra,
+}
+
+impl Couleurs {
+    fn format(self) -> DXGI_FORMAT {
+        match self {
+            Couleurs::Nv12Bt709 | Couleurs::Nv12Bt601 => DXGI_FORMAT_NV12,
+            Couleurs::Bgra => DXGI_FORMAT_B8G8R8A8_UNORM,
+        }
+    }
+}
+
 /// La conversion BGRA → NV12 (et la réduction) par le processeur vidéo de
-/// Direct3D, vers la texture que NVENC lit.
-struct Convertisseur {
+/// Direct3D, vers la texture que NVENC lit — ou vers une petite texture
+/// BGRA (l'aperçu de la diffusion).
+pub(crate) struct Convertisseur {
     /// La taille des surfaces d'entrée pour laquelle il a été bâti.
-    entree: (u32, u32),
+    pub(crate) entree: (u32, u32),
+    /// Qui parle au journal : « clips », « diffusion ».
+    nom: &'static str,
     enumerateur: ID3D11VideoProcessorEnumerator,
     processeur: ID3D11VideoProcessor,
     vue_sortie: ID3D11VideoProcessorOutputView,
@@ -529,7 +561,18 @@ struct Convertisseur {
 }
 
 impl Convertisseur {
-    fn new(appareil: &Appareil, entree: (u32, u32), sortie: (u32, u32), nv12: &ID3D11Texture2D, fps: u32) -> anyhow::Result<Self> {
+    /// Vers `cible`, de taille `sortie`, dans les couleurs voulues.
+    pub(crate) fn new(
+        appareil: &Appareil,
+        entree: (u32, u32),
+        sortie: (u32, u32),
+        cible: &ID3D11Texture2D,
+        couleurs: Couleurs,
+        fps: u32,
+        nom: &'static str,
+    ) -> anyhow::Result<Self> {
+        let format = couleurs.format();
+        let rgb = couleurs == Couleurs::Bgra;
         unsafe {
             let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -551,8 +594,8 @@ impl Convertisseur {
             if !accepte(DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) {
                 bail!("le processeur vidéo de la carte ne lit pas le BGRA");
             }
-            if !accepte(DXGI_FORMAT_NV12, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) {
-                bail!("le processeur vidéo de la carte n'écrit pas le NV12");
+            if !accepte(format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) {
+                bail!("le processeur vidéo de la carte n'écrit pas le {}", if rgb { "BGRA" } else { "NV12" });
             }
             let processeur = appareil
                 .video
@@ -564,13 +607,26 @@ impl Convertisseur {
             // lecteurs attendent d'une image HD.
             if let Ok(ctx1) = ctx.cast::<ID3D11VideoContext1>() {
                 ctx1.VideoProcessorSetStreamColorSpace1(&processeur, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-                ctx1.VideoProcessorSetOutputColorSpace1(&processeur, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+                ctx1.VideoProcessorSetOutputColorSpace1(
+                    &processeur,
+                    match couleurs {
+                        Couleurs::Nv12Bt709 => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                        Couleurs::Nv12Bt601 => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+                        Couleurs::Bgra => DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                    },
+                );
             } else {
                 // Champs de bits : Usage:1, RGB_Range:1 (0 = pleine),
                 // YCbCr_Matrix:1 (1 = BT.709), xvYCC:1, Nominal_Range:2
                 // (1 = 16-235).
                 let entree_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
-                let sortie_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: (1 << 2) | (1 << 4) };
+                let sortie_cs = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: match couleurs {
+                        Couleurs::Nv12Bt709 => (1 << 2) | (1 << 4),
+                        Couleurs::Nv12Bt601 => 1 << 4,
+                        Couleurs::Bgra => 0,
+                    },
+                };
                 ctx.VideoProcessorSetStreamColorSpace(&processeur, 0, &entree_cs);
                 ctx.VideoProcessorSetOutputColorSpace(&processeur, &sortie_cs);
             }
@@ -583,13 +639,17 @@ impl Convertisseur {
                 true,
                 Some(&RECT { left: 0, top: 0, right: sortie.0 as i32, bottom: sortie.1 as i32 }),
             );
-            // Le fond (bandes d'une fenêtre cadrée) : noir, en YCbCr limité.
-            let noir = D3D11_VIDEO_COLOR {
-                Anonymous: D3D11_VIDEO_COLOR_0 {
-                    YCbCr: D3D11_VIDEO_COLOR_YCbCrA { Y: 16.0 / 255.0, Cb: 0.5, Cr: 0.5, A: 1.0 },
-                },
+            // Le fond (bandes d'une fenêtre cadrée) : noir.
+            let noir = if rgb {
+                D3D11_VIDEO_COLOR { Anonymous: D3D11_VIDEO_COLOR_0 { RGBA: D3D11_VIDEO_COLOR_RGBA { R: 0.0, G: 0.0, B: 0.0, A: 1.0 } } }
+            } else {
+                D3D11_VIDEO_COLOR {
+                    Anonymous: D3D11_VIDEO_COLOR_0 {
+                        YCbCr: D3D11_VIDEO_COLOR_YCbCrA { Y: 16.0 / 255.0, Cb: 0.5, Cr: 0.5, A: 1.0 },
+                    },
+                }
             };
-            ctx.VideoProcessorSetOutputBackgroundColor(&processeur, true, &noir);
+            ctx.VideoProcessorSetOutputBackgroundColor(&processeur, !rgb, &noir);
             let desc_sortie = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
                 Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
@@ -597,10 +657,11 @@ impl Convertisseur {
             let mut vue_sortie = None;
             appareil
                 .video
-                .CreateVideoProcessorOutputView(nv12, &enumerateur, &desc_sortie, Some(&mut vue_sortie))
+                .CreateVideoProcessorOutputView(cible, &enumerateur, &desc_sortie, Some(&mut vue_sortie))
                 .context("vue de sortie du processeur vidéo")?;
             Ok(Self {
                 entree,
+                nom,
                 enumerateur,
                 processeur,
                 vue_sortie: vue_sortie.context("vue de sortie absente")?,
@@ -646,7 +707,7 @@ impl Convertisseur {
                     return Ok(v);
                 }
                 Err(e) => {
-                    journal(format!("clips : vue directe sur la capture refusée ({e:#}) — copie sur la carte"));
+                    journal(format!("{} : vue directe sur la capture refusée ({e:#}) — copie sur la carte", self.nom));
                     self.par_copie = true;
                     self.vues.clear();
                 }
@@ -678,7 +739,7 @@ impl Convertisseur {
 
     /// Une image : la surface de la capture (dont `contenu` est la partie
     /// utile) cadrée dans la sortie, convertie en NV12.
-    fn convertir(
+    pub(crate) fn convertir(
         &mut self,
         appareil: &Appareil,
         surface: &ID3D11Texture2D,
@@ -725,7 +786,7 @@ impl Convertisseur {
 
 /// Le rectangle, dans une sortie `sortie`, où tient `contenu` sans être
 /// déformé : centré, aux dimensions paires.
-fn cadrer(contenu: (u32, u32), sortie: (u32, u32)) -> RECT {
+pub(crate) fn cadrer(contenu: (u32, u32), sortie: (u32, u32)) -> RECT {
     let (cw, ch) = (u64::from(contenu.0.max(1)), u64::from(contenu.1.max(1)));
     let (ow, oh) = (u64::from(sortie.0), u64::from(sortie.1));
     // La plus grande taille au même rapport qui tienne dans la sortie.
@@ -793,8 +854,9 @@ impl Chaine {
             config.debit_bps,
             config.fps,
             config.gop_s,
+            crate::Profil::Clip,
         )?;
-        let capture = Capture::ouvrir(&appareil.winrt, item, config.curseur, config.fps, reveil)?;
+        let capture = Capture::ouvrir(&appareil.winrt, item, config.curseur, config.fps, reveil, "clips")?;
         Ok(Self { nvenc, conv: None, nv12, capture, sortie, fps: config.fps, appareil, idr: true, dernier_pts: None })
     }
 
@@ -851,7 +913,15 @@ impl Chaine {
         unsafe { surface.GetDesc(&mut desc) };
         let entree = (desc.Width, desc.Height);
         if self.conv.as_ref().is_none_or(|c| c.entree != entree) {
-            self.conv = Some(Convertisseur::new(&self.appareil, entree, self.sortie, &self.nv12, self.fps)?);
+            self.conv = Some(Convertisseur::new(
+                &self.appareil,
+                entree,
+                self.sortie,
+                &self.nv12,
+                Couleurs::Nv12Bt709,
+                self.fps,
+                "clips",
+            )?);
         }
         let contenu = (contenu.Width as u32, contenu.Height as u32);
         if let Some(conv) = self.conv.as_mut() {
@@ -991,7 +1061,7 @@ mod tests {
             CreateDirect3D11DeviceFromDXGIDevice(&device.cast::<IDXGIDevice>().unwrap()).unwrap().cast().unwrap()
         };
         let (item, _) = element(&CaptureSource::Monitor(0)).unwrap();
-        let capture = Capture::ouvrir(&winrt, item, true, 60, std::thread::current()).unwrap();
+        let capture = Capture::ouvrir(&winrt, item, true, 60, std::thread::current(), "clips").unwrap();
         let debut = Instant::now();
         let image = loop {
             if let Some(i) = capture.prendre().unwrap() {

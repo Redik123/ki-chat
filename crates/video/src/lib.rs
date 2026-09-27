@@ -11,6 +11,8 @@ pub mod capture;
 #[cfg(windows)]
 mod clip_gpu;
 #[cfg(windows)]
+mod diffusion_gpu;
+#[cfg(windows)]
 mod nvenc;
 #[cfg(windows)]
 mod nvenc_ffi;
@@ -554,22 +556,34 @@ pub fn qualite_basse(kbps: u32, hauteur: u32, fps: u32) -> (u32, u32) {
 /// Réceptacle des trames encodées : la boucle streamer y verse chaque trame.
 pub type FrameEmit = Arc<dyn Fn(EncodedFrame) + Send + Sync>;
 
-/// Boucle streamer S1b : capture -> I420 -> H.264 -> **émission** + aperçu.
+/// Boucle streamer : capture -> H.264 -> **émission** + aperçu.
 ///
-/// C'est la boucle locale (S1a) plus deux choses : chaque trame encodée part
-/// vers `emit` (la couche réseau chiffre et envoie), et une trame clé peut
-/// être exigée à tout moment (`force_keyframe`) — c'est ainsi qu'un nouveau
-/// spectateur obtient de quoi décoder en moins d'une demi-seconde.
+/// Chaque trame encodée part vers `emit` (la couche réseau chiffre et
+/// envoie), et une trame clé peut être exigée à tout moment
+/// (`force_keyframe`) — c'est ainsi qu'un nouveau spectateur obtient de quoi
+/// décoder en moins d'une demi-seconde.
 ///
-/// L'aperçu passe par le décodage local, comme au labo : ce que le streamer
-/// voit est EXACTEMENT ce que ses spectateurs reçoivent, artefacts du codec
-/// compris — jamais un aller-retour serveur.
+/// Deux chemins. **Sur la carte** d'abord (`diffusion_gpu`, 0.1.51) : sous
+/// Windows avec une carte NVIDIA, la capture, la conversion et l'encodage
+/// ne quittent pas la carte, et l'aperçu est une vignette de l'image
+/// capturée. **Par le processeur** sinon (`streamer_pipeline`) : l'image
+/// est lue, convertie et réduite sur un cœur, encodée par NVENC ou
+/// openh264, et l'aperçu passe par le décodage local — le streamer y voit
+/// exactement ce que reçoivent ses spectateurs, artefacts compris.
 pub struct StreamerLoop {
-    control: capture::Control,
-    stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
-    closed: Arc<AtomicBool>,
-    worker: std::thread::JoinHandle<()>,
+    boucle: Boucle,
+}
+
+enum Boucle {
+    #[cfg(windows)]
+    Carte(diffusion_gpu::DiffusionGpu),
+    Processeur {
+        control: capture::Control,
+        stop: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+        worker: std::thread::JoinHandle<()>,
+    },
 }
 
 /// Les réglages d'une diffusion, tels que l'interface les tient.
@@ -628,6 +642,23 @@ impl StreamerLoop {
         origine: Instant,
         qualites: Option<Arc<Qualites>>,
     ) -> anyhow::Result<Self> {
+        // La carte d'abord, pour une diffusion qui peut s'y faire : un clip
+        // a sa propre chaîne (`ClipGpu`), le logiciel imposé reste logiciel.
+        #[cfg(windows)]
+        if config.profil == Profil::Diffusion && config.encoder != EncoderChoice::Logiciel {
+            match diffusion_gpu::DiffusionGpu::demarrer(
+                stats.clone(),
+                preview.clone(),
+                emit.clone(),
+                config.clone(),
+                force_idr.clone(),
+                origine,
+                qualites.clone(),
+            ) {
+                Ok(carte) => return Ok(Self { force_idr, boucle: Boucle::Carte(carte) }),
+                Err(e) => journal(format!("diffusion : pas de chaîne sur la carte ({e:#}) — chemin du processeur")),
+            }
+        }
         stats.mark_started();
         let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
         let (recycle_tx, recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -657,7 +688,7 @@ impl StreamerLoop {
                 })
                 .context("thread streamer vidéo")?
         };
-        Ok(Self { control, stop, force_idr, closed, worker })
+        Ok(Self { force_idr, boucle: Boucle::Processeur { control, stop, closed, worker } })
     }
 
     /// La prochaine trame encodée sera une trame clé (IDR) — pour un
@@ -669,16 +700,63 @@ impl StreamerLoop {
     /// La source s'est évanouie (fenêtre fermée) : plus rien ne viendra,
     /// à l'appelant de conclure la diffusion.
     pub fn source_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        match &self.boucle {
+            #[cfg(windows)]
+            Boucle::Carte(carte) => carte.source_fermee(),
+            Boucle::Processeur { closed, .. } => closed.load(Ordering::Relaxed),
+        }
     }
 
     pub fn stop(self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Err(e) = self.control.stop() {
-            tracing::warn!("arrêt de la capture : {e}");
+        match self.boucle {
+            #[cfg(windows)]
+            Boucle::Carte(carte) => carte.arreter(),
+            Boucle::Processeur { control, stop, worker, .. } => {
+                stop.store(true, Ordering::Relaxed);
+                if let Err(e) = control.stop() {
+                    tracing::warn!("arrêt de la capture : {e}");
+                }
+                let _ = worker.join();
+            }
         }
-        let _ = self.worker.join();
     }
+}
+
+/// Le chemin du processeur, sur le fil de l'appelant, jusqu'à `stop` : la
+/// diffusion sur la carte qui renonce en route le prend ainsi à son compte,
+/// sans couper le stream.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn diffuser_par_le_processeur(
+    stats: Arc<StageStats>,
+    preview: FrameSink,
+    emit: FrameEmit,
+    config: StreamConfig,
+    force_idr: Arc<AtomicBool>,
+    origine: Instant,
+    qualites: Option<Arc<Qualites>>,
+    stop: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
+    let (recycle_tx, recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let control = capture::start_capture(
+        &config.source,
+        config.cursor,
+        config.fps,
+        capture::CaptureFlags {
+            stats: stats.clone(),
+            tx: frame_tx,
+            recycle: recycle_rx,
+            closed,
+            interval: Duration::ZERO,
+        },
+    )?;
+    streamer_pipeline(stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr, origine, qualites);
+    if let Err(e) = control.stop() {
+        tracing::warn!("arrêt de la capture : {e}");
+    }
+    Ok(())
 }
 
 /// Le pipeline streamer : mêmes étages que le labo, plus l'émission.
@@ -1089,5 +1167,54 @@ mod tests {
         let decoded = decoder.decode(&bytes).expect("décodage");
         let frame = decoded.expect("une image décodée");
         assert_eq!(frame.dimensions(), (w, h));
+    }
+
+    /// La boucle telle que l'application la lance : sur une machine NVIDIA,
+    /// elle prend la carte (encodeur matériel, aperçu en vignettes), émet
+    /// du H.264 décodable par un spectateur, et s'arrête proprement.
+    /// Ignoré par défaut (écran et carte NVIDIA) :
+    /// `cargo test -p ki-video boucle_de_diffusion -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn la_boucle_de_diffusion_prend_la_carte() {
+        let stats = Arc::new(StageStats::default());
+        let trames = Arc::new(std::sync::Mutex::new(Vec::<(bool, Vec<u8>)>::new()));
+        let emit: FrameEmit = {
+            let t = trames.clone();
+            Arc::new(move |f: EncodedFrame| t.lock().unwrap().push((f.idr, f.data)))
+        };
+        let apercus = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let preview: FrameSink = {
+            let a = apercus.clone();
+            Arc::new(move |_| {
+                a.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        let config = StreamConfig { fps: 60, bitrate_bps: 12_000_000, ..StreamConfig::default() };
+        let boucle = StreamerLoop::start(
+            stats.clone(),
+            preview,
+            emit,
+            config,
+            Arc::new(AtomicBool::new(false)),
+            Instant::now(),
+            Some(Arc::new(Qualites::default())),
+        )
+        .expect("la boucle démarre");
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(!boucle.source_closed());
+        boucle.stop();
+        let trames = trames.lock().unwrap();
+        eprintln!("{} trames, {} aperçus, {}", trames.len(), apercus.load(Ordering::Relaxed), stats.summary());
+        if !stats.materiel.load(Ordering::Relaxed) {
+            eprintln!("pas de carte NVIDIA ici : chemin du processeur, rien de plus à vérifier");
+            return;
+        }
+        assert!(!trames.is_empty() && trames[0].0, "une trame clé en tête");
+        assert!(apercus.load(Ordering::Relaxed) > 0, "des vignettes d'aperçu");
+        // Ce qu'un spectateur en fait : le décodeur logiciel du visionnage.
+        let mut spectateur = ViewerDecoder::new().unwrap();
+        let images = trames.iter().filter(|(_, d)| spectateur.decode(d).is_some()).count();
+        assert!(images * 10 >= trames.len() * 9, "{images} images décodées sur {} trames", trames.len());
     }
 }

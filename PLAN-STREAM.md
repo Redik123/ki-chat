@@ -331,10 +331,47 @@ NVENC / logiciel » dans les réglages, repli logiciel automatique et dit au
 journal. Les stats du streamer nomment l'encodeur et distinguent les
 trames sautées par la capture, l'encodeur et le réseau — de quoi lire le
 prochain goulot.
-Reste : shader YUV (`PaintCallback`) pour le 60 fps, intra-refresh
-(supprime les pics d'IDR), enveloppes X25519 (niveau 2), qualité manuelle
-par viewer, AMD/Intel (AMF / QuickSync) si des joueurs sans NVIDIA le
-demandent.
+**Livré en 0.1.51 : la diffusion sur la carte** (`diffusion_gpu.rs`).
+Retour du terrain : Pandora (GTX 1050 Ti, Windows 10, VALORANT sur un
+écran de 3440×1440) diffusait à 25 Mbit/s mais à 13-20 images par
+seconde. Ses diagnostics du 2026-09-27 : zéro trame perdue par le réseau
+ou l'encodeur, des milliers « sautées : capture », un encodage de 31 à
+39 ms par image en pleine taille et encore 11 à 30 ms en 720p — le
+régulateur descendait jusqu'à 720p30 sans jamais tenir la cadence. La
+cause : l'ancien chemin rapatriait chaque image (20 Mo) de la carte vers
+la mémoire centrale, en attendant que la carte ait fini derrière le jeu,
+la convertissait et la réduisait sur un cœur, la renvoyait à la carte, et
+NVENC passait par CUDA (deux passes, AQ) — les cœurs du jeu. Désormais,
+comme les clips depuis 0.1.47 :
+- **Capture, conversion, encodage sur la carte** : un device Direct3D 11
+  NVIDIA, la capture Windows.Graphics.Capture prise à l'échéance, le
+  processeur vidéo de la carte pour convertir et réduire (en **BT.601**,
+  ce que le décodeur openh264 des spectateurs reconvertit — mesuré : un
+  rouge pur sort à Y 82, Cb 90, Cr 240), NVENC sur la texture. Seul le
+  flux H.264 remonte. La taille émise est fixée à l'ouverture : une
+  fenêtre qui oscille de deux lignes (3440×1438 ↔ 1440 chez Pandora) ne
+  relance plus l'encodeur, elle est cadrée dedans.
+- **La basse** : une seconde conversion de la même surface, une seconde
+  session NVENC, à sa cadence. **La haute** que plus personne ne regarde
+  n'est plus encodée du tout.
+- **L'aperçu** : une vignette 854×480 au plus, faite par la carte et
+  relue sans l'attendre (trois textures en rotation, `DO_NOT_WAIT`), 15
+  fois par seconde — au lieu du décodage de tout le flux sur un cœur. Il
+  montre l'image capturée plutôt que le flux décodé.
+- **NVENC sans CUDA** pour la diffusion aussi (chemin du processeur
+  compris) : une passe, sans AQ.
+- **Les secours** : pas de carte NVIDIA, capture refusée → l'ancien
+  chemin au démarrage ; la carte perdue trois fois en une minute → la
+  chaîne prend l'ancien chemin elle-même, sans couper le stream.
+- **Les spectateurs** disent désormais, toutes les dix secondes, ce qu'ils
+  reçoivent, décodent et affichent, et le temps de décodage : de quoi voir
+  si un stream très grand (3440×1440 à 60 i/s) dépasse leur processeur.
+Mesuré sur la RTX 3080 de drion : 2,5 à 4 ms d'encodage par image en
+1080p, 0,2 ms de conversion, aucune image sautée. À valider chez Pandora.
+Reste : shader YUV (`PaintCallback`) et décodage matériel chez le
+spectateur pour les très grandes images, intra-refresh (supprime les pics
+d'IDR), enveloppes X25519 (niveau 2), qualité manuelle par viewer,
+AMD/Intel (AMF / QuickSync) si des joueurs sans NVIDIA le demandent.
 
 ## Risques et parades
 

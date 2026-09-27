@@ -914,6 +914,49 @@ fn cle_de_bascule(autre: &Attente, lu_pts: Option<u64>) -> Option<u64> {
 const TOLERANCE_US: u64 = 15_000;
 /// Images décodées en attente d'affichage au plus (≈ 400 ms à 30 i/s).
 const FILE_AFFICHAGE_MAX: usize = 12;
+/// Le bilan du spectateur au journal, toutes les tant.
+const BILAN_PAS: Duration = Duration::from_secs(10);
+
+/// Ce qu'un spectateur a reçu, décodé et affiché depuis le dernier bilan —
+/// de quoi voir, dans les diagnostics, si c'est son décodage (sur le
+/// processeur) qui ne suit pas un stream trop gros.
+struct Bilan {
+    depuis: std::time::Instant,
+    recues: u32,
+    decodees: u32,
+    affichees: u32,
+    decodage_ms: f64,
+    taille: (usize, usize),
+}
+
+impl Bilan {
+    fn new() -> Self {
+        Self { depuis: std::time::Instant::now(), recues: 0, decodees: 0, affichees: 0, decodage_ms: 0.0, taille: (0, 0) }
+    }
+
+    /// Au journal si c'est l'heure (et qu'il s'est passé quelque chose),
+    /// puis à zéro.
+    fn peut_etre_dire(&mut self, basse: bool) {
+        let dt = self.depuis.elapsed();
+        if dt < BILAN_PAS {
+            return;
+        }
+        if self.recues > 0 {
+            let s = dt.as_secs_f64();
+            ki_video::journal(format!(
+                "visionnage : {}x{} ({}) · {:.0} i/s reçues, {:.0} décodées, {:.0} affichées · décodage {:.1} ms par image",
+                self.taille.0,
+                self.taille.1,
+                if basse { "basse" } else { "haute" },
+                f64::from(self.recues) / s,
+                f64::from(self.decodees) / s,
+                f64::from(self.affichees) / s,
+                self.decodage_ms / f64::from(self.decodees.max(1)),
+            ));
+        }
+        *self = Self { taille: self.taille, ..Self::new() };
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn fil_decodeur(
@@ -948,8 +991,10 @@ fn fil_decodeur(
     // Les images décodées qui attendent leur instant sur l'horloge du son.
     let mut a_afficher: std::collections::VecDeque<(u64, egui::ColorImage)> =
         std::collections::VecDeque::new();
+    let mut bilan = Bilan::new();
 
     loop {
+        bilan.peut_etre_dire(couche == 1);
         // Une image en attente : on se réveille souvent pour la poser à
         // l'heure ; sinon, au rythme des trames.
         let delai = if a_afficher.is_empty() { 200 } else { 5 };
@@ -970,6 +1015,9 @@ fn fil_decodeur(
                             .decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
                         {
                             attentes[usize::from(h.basse)].insert(h.seq, (h.idr, h.pts_us, clair));
+                            if usize::from(h.basse) == couche {
+                                bilan.recues += 1;
+                            }
                         }
                     }
                 }
@@ -1017,7 +1065,12 @@ fn fil_decodeur(
                 // Tout ce qui est contigu part au décodeur, dans l'ordre.
                 while let Some((_, pts, clair)) = attente.remove(&next) {
                     lu_pts = Some(pts);
-                    if let Some(frame) = decodeur.decode(&clair) {
+                    let t0 = std::time::Instant::now();
+                    let decodee = decodeur.decode(&clair);
+                    bilan.decodage_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                    if let Some(frame) = decodee {
+                        bilan.decodees += 1;
+                        bilan.taille = (frame.width, frame.height);
                         // La conversion RGBA -> image egui (8 Mo en 1080p)
                         // se paie ici, pas sur le fil d'interface.
                         let prete = egui::ColorImage::from_rgba_unmultiplied(
@@ -1083,6 +1136,7 @@ fn fil_decodeur(
             }
             *image.lock().unwrap() = Some(prete);
             images.fetch_add(1, Ordering::Relaxed);
+            bilan.affichees += 1;
             // Seul moyen de peindre au rythme du stream : la boucle de
             // repeint de l'application est plafonnée à 20 fps sinon.
             ctx.request_repaint();

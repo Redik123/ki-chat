@@ -302,7 +302,7 @@ impl Nvenc {
         let (device, carte) = device_nvidia()?;
         unsafe {
             let mut moi = Self::ouvrir(api, device, carte, width, height)?;
-            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), profil, false)?;
+            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), profil, None)?;
             let mut par_tampon = entree == Entree::Tampon;
             if !par_tampon {
                 if let Err(e) = moi.preparer_texture() {
@@ -319,12 +319,13 @@ impl Nvenc {
         }
     }
 
-    /// La session des clips tout-GPU (`clip_gpu.rs`) : sur le device de
-    /// l'appelant — celui de la capture et de la conversion —, avec SA
-    /// texture NV12 enregistrée une fois pour toutes. Chaque image s'encode
-    /// ensuite par [`Nvenc::encoder_texture`], sans que rien ne passe par
-    /// la mémoire centrale. Profil clip, sans option CUDA, couleurs BT.709
-    /// déclarées dans le flux (la conversion de la carte les produit).
+    /// La session des chaînes tout-GPU (`clip_gpu.rs`, `diffusion_gpu.rs`) :
+    /// sur le device de l'appelant — celui de la capture et de la
+    /// conversion —, avec SA texture NV12 enregistrée une fois pour toutes.
+    /// Chaque image s'encode ensuite par [`Nvenc::encoder_texture`], sans
+    /// que rien ne passe par la mémoire centrale. Les couleurs que la
+    /// conversion de la carte produit sont déclarées dans le flux : BT.709
+    /// pour un clip, BT.601 pour une diffusion (voir `Couleurs`).
     #[allow(clippy::too_many_arguments)]
     pub fn sur_texture(
         device: &ID3D11Device,
@@ -335,11 +336,16 @@ impl Nvenc {
         bitrate_bps: u32,
         fps: u32,
         gop_s: u32,
+        profil: crate::Profil,
     ) -> anyhow::Result<Self> {
         let api = api()?;
         unsafe {
             let mut moi = Self::ouvrir(api, device.clone(), carte.to_string(), width, height)?;
-            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), crate::Profil::Clip, true)?;
+            let matrice = match profil {
+                crate::Profil::Clip => 1,
+                crate::Profil::Diffusion => 6,
+            };
+            moi.initialiser(bitrate_bps, fps.clamp(1, 120), gop_s.clamp(1, 10), profil, Some(matrice))?;
             moi.enregistrer(texture)?;
             Ok(moi)
         }
@@ -515,20 +521,21 @@ impl Nvenc {
 
     /// Le préréglage P4, accordé selon ce qu'on encode. Pour un stream :
     /// « faible latence », débit constant tenu à la trame près (VBV d'une
-    /// image, deux passes en quart de résolution), profil Main — celui que
-    /// tous les décodeurs lisent. Pour un clip : « haute qualité », débit
-    /// variable avec l'image, VBV d'une seconde, une seule passe et aucune
-    /// option qui passe par CUDA, profil High. Dans les deux cas : pas de
-    /// trame B ni de réordonnancement, SPS/PPS répétés à chaque IDR — pour
-    /// qui arrive en cours de route, et pour le MP4 des clips. `bt709` :
-    /// les couleurs sont déclarées dans le flux (chemin tout-GPU).
+    /// image), profil Main — celui que tous les décodeurs lisent. Pour un
+    /// clip : « haute qualité », débit variable avec l'image, VBV d'une
+    /// seconde, profil High. Dans les deux cas : une seule passe et aucune
+    /// option qui passe par CUDA, pas de trame B ni de réordonnancement,
+    /// SPS/PPS répétés à chaque IDR — pour qui arrive en cours de route, et
+    /// pour le MP4 des clips. `matrice` : les couleurs sont déclarées dans
+    /// le flux (chemin tout-GPU) — primaires et transfert BT.709, la matrice
+    /// YCbCr donnée (1 : BT.709, 6 : BT.601), plage limitée.
     unsafe fn initialiser(
         &mut self,
         bitrate_bps: u32,
         fps: u32,
         gop_s: u32,
         profil: crate::Profil,
-        bt709: bool,
+        matrice: Option<u8>,
     ) -> anyhow::Result<()> {
         let fl = &self.api.fl;
         let tuning = match profil {
@@ -563,8 +570,15 @@ impl Nvenc {
                 rc.maxBitRate = bitrate_bps;
                 rc.vbvBufferSize = bitrate_bps / fps;
                 rc.vbvInitialDelay = rc.vbvBufferSize;
-                rc.multiPass = ffi::NV_ENC_TWO_PASS_QUARTER_RESOLUTION;
-                rc.flags |= ffi::RC_ENABLE_AQ | ffi::RC_ZERO_REORDER_DELAY;
+                // Rien qui passe par CUDA, comme les clips depuis 0.1.47 (voir
+                // plus bas) : les deux passes et l'AQ prenaient leur temps de
+                // carte au jeu. Sur la GTX 1050 Ti de Pandora, VALORANT
+                // ouvert, un encodage de 720p prenait 11 à 30 ms au lieu de
+                // deux ou trois (le 2026-09-27) — la diffusion tombait à 15
+                // images par seconde.
+                rc.multiPass = ffi::NV_ENC_MULTI_PASS_DISABLED;
+                rc.flags &= !(ffi::RC_ENABLE_AQ | ffi::RC_ENABLE_TEMPORAL_AQ);
+                rc.flags |= ffi::RC_ZERO_REORDER_DELAY;
             }
             crate::Profil::Clip => {
                 // Un clip ne part pas sur le réseau : le débit peut suivre
@@ -601,10 +615,10 @@ impl Nvenc {
         h264.chromaFormatIDC = 1;
         h264.sliceMode = 0;
         h264.sliceModeData = 0;
-        if bt709 {
+        if let Some(matrice) = matrice {
             // Les couleurs que la conversion de la carte produit, dites
-            // dans le flux : BT.709, plage limitée (16-235). Sans elles, un
-            // lecteur devine — et devine parfois BT.601.
+            // dans le flux, plage limitée (16-235). Sans elles, un lecteur
+            // devine — et devine parfois mal.
             let vui = &mut h264.h264VUIParameters;
             vui.videoSignalTypePresentFlag = 1;
             vui.videoFormat = 5;
@@ -612,7 +626,7 @@ impl Nvenc {
             vui.colourDescriptionPresentFlag = 1;
             vui.colourPrimaries = 1;
             vui.transferCharacteristics = 1;
-            vui.colourMatrix = 1;
+            vui.colourMatrix = u32::from(matrice);
         }
 
         let initialiser = fl.nvEncInitializeEncoder.context("nvEncInitializeEncoder absent")?;
