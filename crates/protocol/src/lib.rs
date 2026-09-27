@@ -769,6 +769,10 @@ pub enum ServerMsg {
         #[serde(default)]
         montant: bool,
     },
+    /// Qui regarde un stream, en entier : au salon vocal du streamer — le
+    /// public possible, lui compris —, à chaque changement, et à qui y
+    /// entre pendant la diffusion. Un client d'avant l'ignore.
+    StreamViewers { stream_id: u32, viewers: Vec<UserId> },
     /// Liste complète des membres. Envoyée à la connexion, et chaque fois
     /// qu'un changement touche potentiellement tout le monde (rôles remaniés,
     /// salon supprimé).
@@ -5020,6 +5024,19 @@ mod tests {
         let b = ServerMsg::StreamBudget { stream_id: 3, kbps: 6000, basse: Some(1500), montant: false };
         let relu: ServerMsg = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
         assert!(matches!(relu, ServerMsg::StreamBudget { basse: Some(1500), .. }));
+    }
+
+    /// Qui regarde un stream : un message à part, qu'un client d'avant ne
+    /// sait pas lire — il l'ignore (ses lectures sont des `if let Ok`), rien
+    /// d'autre ne bouge.
+    #[test]
+    fn les_spectateurs_d_un_stream_font_l_aller_retour() {
+        let m = ServerMsg::StreamViewers { stream_id: 7, viewers: vec![3, 11] };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""type":"stream_viewers""#), "{json}");
+        let relu: ServerMsg = serde_json::from_str(&json).unwrap();
+        let ServerMsg::StreamViewers { stream_id, viewers } = relu else { panic!("{relu:?}") };
+        assert_eq!((stream_id, viewers), (7, vec![3, 11]));
     }
 
     /// Les liens vers le stock se reconnaissent dans un message — complets

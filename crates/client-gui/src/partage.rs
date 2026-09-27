@@ -88,7 +88,7 @@ impl Reglages {
             source,
             max_height: nombre("stream_max_height", d.max_height),
             fps: nombre("stream_fps", d.fps).clamp(1, 120),
-            kbps: nombre("stream_kbps", d.kbps).clamp(500, 50_000),
+            kbps: nombre("stream_kbps", d.kbps).clamp(500, 60_000),
             cursor: get("stream_cursor", "on") != "off",
             preview: get("stream_preview", "on") != "off",
             son: get("stream_audio", "on") != "off",
@@ -356,7 +356,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
         let mut mbit = r.kbps as f32 / 1000.0;
         if ui
             .add(
-                egui::Slider::new(&mut mbit, 1.0..=20.0)
+                egui::Slider::new(&mut mbit, 1.0..=60.0)
                     .step_by(0.5)
                     .fixed_decimals(1)
                     .suffix(" Mbit/s"),
@@ -369,9 +369,10 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
     });
     ui::hint(
         ui,
-        "720p · 30 i/s · 4 Mbit/s passe partout ; 1080p · 60 i/s demande 10 Mbit/s et un \
-         CPU disponible — le débit sort de ta connexion une fois, le serveur le \
-         redistribue",
+        "720p · 30 i/s · 4 Mbit/s passe partout ; 1080p · 60 i/s est net dès 10 Mbit/s. \
+         Le débit sort de ta connexion une fois, le serveur le redistribue — et l'adapte \
+         à chaque spectateur : qui ne suit pas le reçoit plus bas, sans rien retirer aux \
+         autres",
     );
 
     ui.add_space(6.0);

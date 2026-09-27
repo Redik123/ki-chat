@@ -801,6 +801,9 @@ struct KiApp {
     /// Clé générée, en attente du StreamGranted du serveur.
     go_live_attente: Option<[u8; 32]>,
     go_live_tex: Option<egui::TextureHandle>,
+    /// Qui regarde chaque stream (le mien compris), tel que le serveur
+    /// l'annonce au salon vocal. Vide face à un serveur d'avant.
+    spectateurs: HashMap<u32, Vec<UserId>>,
     /// Le stream que je regarde.
     regard: Option<partage::Regard>,
     regard_tex: Option<egui::TextureHandle>,
@@ -1305,6 +1308,7 @@ impl KiApp {
             go_live: None,
             go_live_attente: None,
             go_live_tex: None,
+            spectateurs: HashMap::new(),
             diffusion: partage::Reglages::load(get),
             diffusion_palier: None,
             diffusion_montant: false,
@@ -4107,6 +4111,7 @@ impl KiApp {
         self.voice_channel = None;
         self.voice_intent = None;
         self.members.clear();
+        self.spectateurs.clear();
         self.messages.clear();
         self.edition = None;
         self.history_more = false;
@@ -5124,6 +5129,7 @@ impl KiApp {
                 }
             }
             ServerMsg::StreamStopped { stream_id } => {
+                self.spectateurs.remove(&stream_id);
                 for m in self.members.iter_mut() {
                     if m.streaming == Some(stream_id) {
                         m.streaming = None;
@@ -5163,6 +5169,9 @@ impl KiApp {
                 }
             }
             ServerMsg::StreamMetaChanged { .. } => {}
+            ServerMsg::StreamViewers { stream_id, viewers } => {
+                self.spectateurs.insert(stream_id, viewers);
+            }
             ServerMsg::StreamBudget { stream_id, kbps, basse, montant } => {
                 if self.go_live.as_ref().is_some_and(|g| g.stream_id == stream_id) {
                     self.budget_de_diffusion(kbps, basse, montant);
@@ -6974,7 +6983,16 @@ impl KiApp {
             let glissable = is_me || self.peut_deplacer(m);
             let (response, regarder) = member_row(
                 ui,
-                MemberRow { member: m, speaking, muted, is_me, photo, rang_icone: None, glissable },
+                MemberRow {
+                    member: m,
+                    speaking,
+                    muted,
+                    is_me,
+                    photo,
+                    rang_icone: None,
+                    glissable,
+                    spectateurs: self.nb_spectateurs(m),
+                },
             );
             if glissable && response.drag_started_by(egui::PointerButton::Primary) {
                 egui::DragAndDrop::set_payload(
@@ -6990,6 +7008,12 @@ impl KiApp {
         }
         ui.add_space(6.0);
         place
+    }
+
+    /// Combien regardent le stream de `m`, s'il diffuse — selon la
+    /// dernière annonce du serveur (rien face à un serveur d'avant).
+    fn nb_spectateurs(&self, m: &Member) -> usize {
+        m.streaming.and_then(|s| self.spectateurs.get(&s)).map_or(0, Vec::len)
     }
 
     /// Le pouvoir de changer `m` de salon vocal : celui que le serveur
@@ -7421,6 +7445,7 @@ impl KiApp {
                                 photo,
                                 rang_icone,
                                 glissable: false,
+                                spectateurs: self.nb_spectateurs(m),
                             },
                         );
                         if regarder {
@@ -7462,6 +7487,7 @@ impl KiApp {
                                     photo: None,
                                     rang_icone: None,
                                     glissable: false,
+                                    spectateurs: 0,
                                 },
                             );
                             self.member_menu(response, m, false);
@@ -10759,6 +10785,20 @@ impl KiApp {
                 ki_voice::journal(format!("diffusion : {avis}"));
                 self.info = Some(avis);
             }
+            // Qui regarde, d'après la dernière annonce du serveur — rien
+            // face à un serveur d'avant, qui n'en dit rien.
+            let qui_regarde = self.spectateurs.get(&g.stream_id).map(|ids| {
+                let noms: Vec<&str> = ids
+                    .iter()
+                    .filter_map(|id| self.members.iter().find(|m| m.user_id == *id))
+                    .map(|m| m.username.as_str())
+                    .collect();
+                match noms.as_slice() {
+                    [] => "personne ne regarde encore".to_string(),
+                    [seul] => format!("1 spectateur : {seul}"),
+                    _ => format!("{} spectateurs : {}", noms.len(), noms.join(", ")),
+                }
+            });
             let mut arreter = false;
             let mut reglages = false;
             let mut ouvert = true;
@@ -10787,6 +10827,9 @@ impl KiApp {
                         );
                     }
                     ui.add_space(4.0);
+                    if let Some(qui) = &qui_regarde {
+                        ui.label(RichText::new(qui).color(TEXT).size(12.5));
+                    }
                     ui.label(RichText::new(etat).color(TEXT_FAINT).size(11.0).monospace());
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -13098,6 +13141,8 @@ struct MemberRow<'a> {
     /// La ligne s'attrape à la souris (glisser quelqu'un vers un autre
     /// salon vocal) en plus de se cliquer.
     glissable: bool,
+    /// Combien regardent son stream, s'il diffuse (0 : rien à afficher).
+    spectateurs: usize,
 }
 
 /// Ce que l'on glisse d'un salon vocal à l'autre dans la barre des salons.
@@ -13130,6 +13175,7 @@ impl<'a> MemberRow<'a> {
             photo,
             rang_icone: None,
             glissable: false,
+            spectateurs: 0,
         }
     }
 }
@@ -13291,7 +13337,7 @@ fn fantome_deplacement(ctx: &egui::Context) {
 }
 
 fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
-    let MemberRow { member, speaking, muted, is_me, photo, rang_icone, glissable } = row;
+    let MemberRow { member, speaking, muted, is_me, photo, rang_icone, glissable, spectateurs } = row;
     let height = 38.0;
     // Un clic reste un clic (menu, fiche) : egui ne parle de glisser
     // qu'une fois la souris partie de quelques pixels.
@@ -13434,10 +13480,28 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
             egui::pos2(apres_nom, name_y - 7.0),
             Vec2::splat(14.0),
         );
-        let hit = ui.interact(badge.expand(3.0), response.id.with("diffuse"), Sense::click());
+        // Combien le regardent, à côté de l'écran : ce qu'un streamer veut
+        // savoir d'un coup d'œil, et les autres aussi.
+        let mut zone = badge;
+        if spectateurs > 0 {
+            let g = painter.layout_no_wrap(spectateurs.to_string(), egui::FontId::proportional(11.0), TEXT_DIM);
+            let pos = egui::pos2(badge.right() + 3.0, name_y - g.size().y / 2.0);
+            zone = zone.union(egui::Rect::from_min_size(pos, g.size()));
+            painter.galley(pos, g, TEXT_DIM);
+        }
+        let hit = ui.interact(zone.expand(3.0), response.id.with("diffuse"), Sense::click());
         let couleur = if hit.hovered() && !is_me { SPEAK } else { ACCENT };
         icons::draw(painter, badge, Icon::Screen, couleur);
-        let mot = if is_me { "tu diffuses ton écran" } else { "diffuse son écran — clic pour regarder" };
+        let qui = match spectateurs {
+            0 => String::new(),
+            1 => " — 1 spectateur".to_string(),
+            n => format!(" — {n} spectateurs"),
+        };
+        let mot = if is_me {
+            format!("tu diffuses ton écran{qui}")
+        } else {
+            format!("diffuse son écran{qui} — clic pour regarder")
+        };
         regarder = hit.on_hover_text(mot).clicked() && !is_me;
     }
 

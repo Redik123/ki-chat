@@ -990,6 +990,11 @@ fn handle_msg(
             // est où dans la liste de droite. Mais **une seule** personne a
             // bougé — inutile de rediffuser tous les comptes du serveur.
             state.broadcast_member(user_id);
+            // Qui regarde les diffusions de ce salon : le nouveau venu ne l'a
+            // pas entendu annoncer.
+            for (stream_id, viewers) in state.streams.spectateurs_du_salon(channel) {
+                let _ = tx.send(ServerMsg::StreamViewers { stream_id, viewers });
+            }
         }
         ClientMsg::LeaveVoice => {
             // **Jamais** limité. Refuser une sortie laissait la personne dans

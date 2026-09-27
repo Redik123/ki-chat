@@ -922,6 +922,16 @@ impl AppState {
         }
     }
 
+    /// Envoie un message à tous ceux qui sont dans ce salon vocal — le
+    /// public d'une diffusion, typiquement.
+    pub fn broadcast_vocal(&self, channel: ChannelId, msg: &ServerMsg) {
+        let Some(line) = encode(msg) else { return };
+        let users = self.users.lock().unwrap();
+        for u in users.values().filter(|u| u.voice == Some(channel)) {
+            let _ = u.tx.send_line(&line);
+        }
+    }
+
     /// Envoie un message à UN connecté — le streamer à qui l'on demande une
     /// trame clé, typiquement.
     pub fn send_to(&self, user_id: UserId, msg: &ServerMsg) {

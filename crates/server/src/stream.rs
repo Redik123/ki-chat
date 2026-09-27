@@ -61,19 +61,36 @@ use ki_protocol::{ChannelId, MediaHeader, StreamMeta, UserId};
 const MAX_PAR_SALON: usize = 2;
 /// Mémoire totale des trames en transit vers les spectateurs.
 const MEM_MAX: usize = 32 * 1024 * 1024;
-/// File par spectateur : deux trames d'avance, pas une de plus.
-const FILE_VIEWER: usize = 2;
+/// File par spectateur : une demi-seconde à 60 i/s. De quoi absorber la
+/// rafale d'une trame clé — plusieurs centaines de Ko en 1080p, qu'aucun
+/// lien n'avale en 16 ms — sans la prendre pour une saturation. Avec deux
+/// trames, la file débordait à chaque trame clé : tous les spectateurs
+/// passaient en qualité basse, et chaque retour en haute, qui commence par
+/// une trame clé, échouait en deux secondes. Le retard, lui, est borné à
+/// part ([`RETARD_MAX`]).
+const FILE_VIEWER: usize = 30;
+/// L'âge au-delà duquel une trame ne part plus : le spectateur a pris du
+/// retard, il saute à la prochaine trame clé plutôt que de regarder le
+/// passé — et c'est une saturation, la vraie.
+const RETARD_MAX: Duration = Duration::from_millis(500);
+/// Le temps de s'installer sur une qualité — l'arrivée, le passage en
+/// basse, l'essai de la haute : la trame clé qui ouvre, la fenêtre de
+/// congestion qui s'ouvre. Rien de ce qui s'y passe ne compte pour placer
+/// le spectateur ni pour le palier.
+const GRACE: Duration = Duration::from_secs(3);
 /// Une demande de trame clé au plus par demi-seconde, par stream et par
 /// qualité.
 const IDR_COOLDOWN: Duration = Duration::from_millis(500);
 
 /// En dessous de ce débit, la qualité haute ne descend pas pour un
-/// spectateur qui sait changer de qualité : il passe en basse.
+/// spectateur qui sait changer de qualité : il passe en basse. Entre ces
+/// deux bornes, selon le réglage (voir [`plancher_haute`]).
 const PLANCHER_HAUTE_MIN: u32 = 2500;
+const PLANCHER_HAUTE_MAX: u32 = 8000;
 /// L'échelle de la qualité basse, du plus haut au plus bas — la résolution
-/// suit le débit chez le streamer (720p30 à 1500, 480p30 à 700, 360p30 en
-/// dessous).
-const PALIERS_BASSE: [u32; 5] = [2500, 1500, 1000, 700, 450];
+/// suit le débit chez le streamer (1080p30 dès 3500, 720p30 à 1500, 480p30
+/// à 700, 360p30 en dessous).
+const PALIERS_BASSE: [u32; 7] = [5000, 3500, 2500, 1500, 1000, 700, 450];
 /// Sans spectateur en basse depuis ce délai, elle s'éteint.
 const BASSE_INUTILE: Duration = Duration::from_secs(10);
 /// Demandée, la basse doit arriver dans ce délai — sinon le streamer ne sait
@@ -108,6 +125,9 @@ pub struct Trame {
     /// La priorité QUIC de son flux, calculée à l'ingestion sur la séquence
     /// de SA qualité — les deux qualités ont chacune la leur.
     pub priorite: i32,
+    /// Son arrivée du streamer : l'âge qu'elle a quand vient son tour dit
+    /// si le spectateur suit.
+    pub arrivee: Instant,
     mem: Arc<AtomicUsize>,
 }
 
@@ -151,6 +171,10 @@ struct Viewer {
     /// Le prochain essai permis, et l'attente qui suivra un échec.
     essai_le: Instant,
     attente_essai: Duration,
+    /// Ses secondes saturées, la plus récente au bit 0 : une saturation
+    /// compte quand elle revient — deux secondes sur les trois dernières —,
+    /// pas pour un hoquet.
+    historique: u8,
 }
 
 /// Une diffusion en cours.
@@ -171,6 +195,9 @@ struct Live {
     montant: Montant,
     /// Le dernier budget dit au streamer.
     annonce: Budget,
+    /// Les derniers spectateurs annoncés au salon, triés — `None` : pas
+    /// encore annoncés (même personne : le streamer doit le lire).
+    spectateurs_annonces: Option<Vec<UserId>>,
 }
 
 /// Le palier de débit de la qualité haute : ce que le serveur demande au
@@ -242,15 +269,20 @@ pub struct Budget {
 #[derive(Clone, Copy, Debug)]
 struct Avale {
     kbps: u32,
+    /// Il sature pour de bon : deux secondes sur les trois dernières, hors
+    /// du temps de s'installer.
     sature: bool,
+    /// Pas une saturation depuis trois secondes : il peut retenter la haute.
+    calme: bool,
 }
 
-/// Les paliers possibles sous un plafond (le réglage du streamer), du plus
-/// haut au plus bas.
+/// Les paliers possibles sous un plafond (le réglage du streamer, jusqu'à
+/// 60 Mbit/s), du plus haut au plus bas. Des crans serrés en haut : un
+/// spectateur qui tient 25 Mbit/s fait descendre la haute à 20, pas à 8.
 fn paliers(plafond: u32) -> Vec<u32> {
     let mut v = vec![plafond];
     v.extend(
-        [8000u32, 6000, 4000, 2500, 1500, 1000, 700, 450]
+        [40_000u32, 30_000, 20_000, 15_000, 12_000, 10_000, 8000, 6000, 4000, 2500, 1500, 1000, 700, 450]
             .into_iter()
             .filter(|p| *p < plafond),
     );
@@ -258,11 +290,13 @@ fn paliers(plafond: u32) -> Vec<u32> {
 }
 
 /// Sous ce débit, la haute ne descend pas pour un spectateur qui sait
-/// changer de qualité : il passe en basse. La moitié du réglage, 2500 kbit/s
-/// au moins — en deçà, la basse (720p30 à 2500) vaut autant, et seul lui
-/// y perd.
+/// changer de qualité : il passe en basse. La moitié du réglage, entre
+/// 2500 et 8000 kbit/s : à 8 Mbit/s la haute tient encore le 1080p, et y
+/// descendre pour un spectateur vaut mieux que de l'envoyer en basse. Sans
+/// ce plafond, la moitié d'un réglage à 60 Mbit/s — 30 — renvoyait en
+/// basse quiconque ne les tenait pas : presque tout le monde.
 pub fn plancher_haute(plafond: u32) -> u32 {
-    PLANCHER_HAUTE_MIN.max(plafond / 2)
+    (plafond / 2).clamp(PLANCHER_HAUTE_MIN, PLANCHER_HAUTE_MAX)
 }
 
 /// Le palier suivant : descente immédiate sous 0,9 fois ce qu'avale le
@@ -310,8 +344,9 @@ enum Mouvement {
 
 /// La place d'un spectateur, vue une seconde — sans horloge, pour se
 /// tester. En haute, il passe en basse s'il sature sous le plancher ; en
-/// basse, il retente la haute quand il ne sature pas et que son essai est
-/// permis. Qui ne sait pas changer de qualité reste en haute.
+/// basse, il retente la haute quand il est calme depuis trois secondes et
+/// que son essai est permis. Qui ne sait pas changer de qualité reste en
+/// haute.
 fn placer(a: Avale, couches: bool, basse: bool, plancher: u32, essai_permis: bool) -> Option<Mouvement> {
     if !couches {
         return None;
@@ -320,7 +355,16 @@ fn placer(a: Avale, couches: bool, basse: bool, plancher: u32, essai_permis: boo
         let tenable = (f64::from(a.kbps) * 0.9) as u32;
         return (a.sature && tenable < plancher).then_some(Mouvement::VersBasse);
     }
-    (!a.sature && essai_permis).then_some(Mouvement::VersHaute)
+    (a.calme && essai_permis).then_some(Mouvement::VersHaute)
+}
+
+/// La seconde d'un spectateur, jugée d'après son historique (bit 0 : la
+/// seconde qui vient de finir) et son installation sur sa qualité : il
+/// sature s'il a saturé deux des trois dernières secondes — hors du temps
+/// de s'installer —, il est calme s'il n'a pas saturé une seule fois.
+fn juger(kbps: u32, historique: u8, installe: bool) -> Avale {
+    let recentes = (historique & 0b111).count_ones();
+    Avale { kbps, sature: installe && recentes >= 2, calme: recentes == 0 }
 }
 
 /// Le plus haut palier de la basse sous la haute effective — elle ne sert à
@@ -501,16 +545,19 @@ fn mesurer(live: &mut Live) -> Issue {
         live.montant.dernier_change = maintenant;
     }
 
-    // 2. Ce que chaque spectateur a avalé depuis la dernière mesure.
+    // 2. Ce que chaque spectateur a avalé depuis la dernière mesure, et ce
+    //    que dit son historique : un hoquet (une trame clé qui tarde, un
+    //    Wi-Fi qui tousse) ne compte pas, une saturation qui revient, si.
     let mut avales: HashMap<UserId, Avale> = HashMap::with_capacity(live.viewers.len());
     let mut avant = HashMap::with_capacity(live.viewers.len());
-    for (user, v) in &live.viewers {
+    for (user, v) in live.viewers.iter_mut() {
         let octets = v.mesure.octets.load(Ordering::Relaxed);
         let sat = v.mesure.saturations.load(Ordering::Relaxed);
         let (o0, s0) = live.palier.avant.get(user).copied().unwrap_or((octets, sat));
         avant.insert(*user, (octets, sat));
         let kbps = ((octets.saturating_sub(o0)) as f64 * 8.0 / 1000.0 / secondes) as u32;
-        avales.insert(*user, Avale { kbps, sature: sat > s0 });
+        v.historique = (v.historique << 1) | u8::from(sat > s0);
+        avales.insert(*user, juger(kbps, v.historique, v.depuis.elapsed() >= GRACE));
     }
     live.palier.avant = avant;
 
@@ -738,9 +785,41 @@ impl Streams {
                 basse: Basse::eteinte(),
                 montant: Montant::neuf(meta.kbps),
                 annonce: Budget { haute: meta.kbps, basse: None, montant: false },
+                spectateurs_annonces: None,
             },
         );
         Ok(id)
+    }
+
+    /// Les publics qui ont changé depuis leur dernière annonce : (stream,
+    /// salon du streamer, spectateurs triés). Chacun est noté annoncé.
+    pub fn spectateurs_changes(&self) -> Vec<(u32, ChannelId, Vec<UserId>)> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut changes = Vec::new();
+        for (id, live) in inner.by_id.iter_mut() {
+            let mut actuels: Vec<UserId> = live.viewers.keys().copied().collect();
+            actuels.sort_unstable();
+            if live.spectateurs_annonces.as_ref() != Some(&actuels) {
+                live.spectateurs_annonces = Some(actuels.clone());
+                changes.push((*id, live.channel, actuels));
+            }
+        }
+        changes
+    }
+
+    /// Les publics des diffusions d'un salon vocal, pour qui y entre.
+    pub fn spectateurs_du_salon(&self, channel: ChannelId) -> Vec<(u32, Vec<UserId>)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .by_id
+            .iter()
+            .filter(|(_, l)| l.channel == channel)
+            .map(|(id, l)| {
+                let mut v: Vec<UserId> = l.viewers.keys().copied().collect();
+                v.sort_unstable();
+                (*id, v)
+            })
+            .collect()
     }
 
     /// Met à jour les caractéristiques annoncées ; rend l'identifiant pour la
@@ -847,6 +926,7 @@ impl Streams {
                 en_essai: false,
                 essai_le: maintenant + ESSAI_PREMIER,
                 attente_essai: ESSAI_PREMIER,
+                historique: 0,
             },
         );
         let ask = live.last_idr_ask.elapsed() >= IDR_COOLDOWN;
@@ -919,6 +999,7 @@ impl Streams {
             bytes,
             idr: header.idr,
             priorite: priorite(header.seq, seq_start),
+            arrivee: Instant::now(),
             mem: self.mem.clone(),
         });
 
@@ -1023,7 +1104,9 @@ pub fn messages(stream_id: u32, ask_haute: bool, ask_basse: bool, budget: Option
 }
 
 /// Le battement des diffusions, quatre fois par seconde tant que le serveur
-/// tourne : chaque consigne part à son streamer.
+/// tourne : chaque consigne part à son streamer, et qui regarde, au salon
+/// du streamer quand ça change — arrivée, départ, spectateur perdu, tout
+/// passe par la même table.
 pub async fn boucle(state: Arc<crate::state::AppState>) {
     let mut tic = tokio::time::interval(Duration::from_millis(250));
     tic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1033,6 +1116,9 @@ pub async fn boucle(state: Arc<crate::state::AppState>) {
             for msg in messages(c.stream_id, c.ask_haute, c.ask_basse, c.budget) {
                 state.send_to(c.streamer, &msg);
             }
+        }
+        for (stream_id, salon, viewers) in state.streams.spectateurs_changes() {
+            state.broadcast_vocal(salon, &ki_protocol::ServerMsg::StreamViewers { stream_id, viewers });
         }
     }
 }
@@ -1096,8 +1182,26 @@ async fn diffuser(
     mesure: Arc<Mesure>,
 ) {
     let mut en_vol: VecDeque<quinn::SendStream> = VecDeque::new();
+    // Des trames ont été sautées : les P qui suivent ne décoderaient que de
+    // la bouillie, on attend la prochaine trame clé.
+    let mut attend_idr = false;
     while let Some(trame) = rx.recv().await {
+        if !trame.idr && attend_idr {
+            continue;
+        }
+        // Trop vieille quand vient son tour : le spectateur a pris du
+        // retard. Il saute à la prochaine trame clé (demandée au streamer)
+        // plutôt que de regarder le passé — c'est la saturation qui compte.
+        // Une trame clé qui tarde n'en est pas une tant qu'elle reste sous
+        // la borne : c'est la file qui l'absorbe.
+        if trame.arrivee.elapsed() > RETARD_MAX {
+            needs_idr.store(true, Ordering::Relaxed);
+            mesure.saturations.fetch_add(1, Ordering::Relaxed);
+            attend_idr = true;
+            continue;
+        }
         if trame.idr {
+            attend_idr = false;
             for mut vieux in en_vol.drain(..) {
                 // Déjà arrivée : l'annulation est refusée, sans conséquence.
                 let _ = vieux.reset(quinn::VarInt::from_u32(0));
@@ -1116,6 +1220,7 @@ async fn diffuser(
                 let _ = flux.reset(quinn::VarInt::from_u32(0));
                 needs_idr.store(true, Ordering::Relaxed);
                 mesure.saturations.fetch_add(1, Ordering::Relaxed);
+                attend_idr = true;
                 continue;
             }
         }
@@ -1123,7 +1228,12 @@ async fn diffuser(
         en_vol.push_back(flux);
         while en_vol.len() > EN_VOL_MAX {
             if let Some(mut vieux) = en_vol.pop_front() {
-                let _ = vieux.reset(quinn::VarInt::from_u32(0));
+                // Une trame annulée avant d'arriver casse les P qui la
+                // suivent : repartir d'une trame clé.
+                if vieux.reset(quinn::VarInt::from_u32(0)).is_ok() {
+                    needs_idr.store(true, Ordering::Relaxed);
+                    attend_idr = true;
+                }
                 mesure.saturations.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1146,7 +1256,7 @@ mod tests {
 
     #[test]
     fn le_palier_descend_sous_le_spectateur_sature_et_remonte_cran_par_cran() {
-        let a = |kbps, sature| Avale { kbps, sature };
+        let a = |kbps, sature| Avale { kbps, sature, calme: !sature };
         let calme = Duration::from_secs(0);
         let cinq = Duration::from_secs(5);
         // Personne ne sature : rien ne bouge avant cinq secondes.
@@ -1174,6 +1284,11 @@ mod tests {
         assert_eq!(prochain_palier(2500, 3000, &[a(2400, false)], cinq), Some(3000));
         // Sans réglage connu (client d'avant), pas de palier.
         assert_eq!(prochain_palier(0, 0, &[a(0, true)], calme), None);
+        // Un réglage à 60 Mbit/s descend par crans serrés : qui tient
+        // 25 Mbit/s fait descendre la haute à 20, pas à 8.
+        assert_eq!(&paliers(60_000)[..5], &[60_000, 40_000, 30_000, 20_000, 15_000]);
+        assert_eq!(prochain_palier(60_000, 60_000, &[a(25_000, true)], calme), Some(20_000));
+        assert_eq!(prochain_palier(20_000, 60_000, &[a(19_000, false)], cinq), Some(30_000));
     }
 
     /// Qui sature sous le plancher passe en basse au lieu de faire
@@ -1183,10 +1298,15 @@ mod tests {
     /// sature pas et que l'essai est permis.
     #[test]
     fn un_spectateur_lent_passe_en_basse_au_lieu_de_tirer_tout_le_monde() {
-        let a = |kbps, sature| Avale { kbps, sature };
+        let a = |kbps, sature| Avale { kbps, sature, calme: !sature };
         let plancher = plancher_haute(8000);
         assert_eq!(plancher, 4000, "la moitié du réglage");
         assert_eq!(plancher_haute(4000), 2500, "jamais sous 2500");
+        // Jamais au-dessus de 8 Mbit/s : à 60, la moitié (30) renvoyait
+        // presque tout le monde en basse.
+        assert_eq!(plancher_haute(20_000), 8000);
+        assert_eq!(plancher_haute(60_000), 8000);
+        assert_eq!(placer(a(12_000, true), true, false, plancher_haute(60_000), false), None, "la haute descend pour lui");
         // 2 Mbit/s sur une haute à 8 : en basse.
         assert_eq!(placer(a(2000, true), true, false, plancher, false), Some(Mouvement::VersBasse));
         // 6 Mbit/s : il tient 5400, au-dessus du plancher — la haute
@@ -1206,7 +1326,8 @@ mod tests {
     /// de la haute ; son échelle a son plancher.
     #[test]
     fn la_basse_part_sous_le_spectateur_et_sous_la_haute() {
-        assert_eq!(max_basse(8000), 2500);
+        assert_eq!(max_basse(8000), 5000, "la basse monte jusqu'à 5 Mbit/s (1080p30)");
+        assert_eq!(max_basse(5000), 3500);
         assert_eq!(max_basse(2500), 1500, "strictement sous la haute");
         assert_eq!(max_basse(400), 450, "le plancher de la basse");
         assert_eq!(palier_initial_basse(2000, 2500), 1500, "0,9 × 2000 = 1800 → 1500");
@@ -1214,7 +1335,7 @@ mod tests {
         assert_eq!(palier_initial_basse(600, 2500), 450, "0,9 × 600 = 540 → 450");
         assert_eq!(palier_initial_basse(0, 2500), 450, "un lien mort : le plancher");
         // Et elle suit ses spectateurs comme la haute suit les siens.
-        let a = |kbps, sature| Avale { kbps, sature };
+        let a = |kbps, sature| Avale { kbps, sature, calme: !sature };
         let echelle: Vec<u32> = PALIERS_BASSE.to_vec();
         assert_eq!(prochain_palier_sur(&echelle, 1500, &[a(900, true)], Duration::ZERO), Some(700));
         assert_eq!(prochain_palier_sur(&echelle, 700, &[a(650, false)], Duration::from_secs(5)), Some(1000));
@@ -1276,6 +1397,18 @@ mod tests {
         assert!(!m.bilan(1.0).1);
     }
 
+    /// Le public s'annonce une première fois même vide — le streamer lit
+    /// « personne ne regarde encore » —, puis seulement quand il change.
+    #[test]
+    fn le_public_s_annonce_une_fois_puis_a_chaque_changement() {
+        let s = Streams::new();
+        let id = s.start(1, 10, "k1".into(), meta(), true).unwrap();
+        assert_eq!(s.spectateurs_changes(), vec![(id, 10, vec![])]);
+        assert!(s.spectateurs_changes().is_empty(), "rien de neuf");
+        assert_eq!(s.spectateurs_du_salon(10), vec![(id, vec![])]);
+        assert!(s.spectateurs_du_salon(11).is_empty());
+    }
+
     #[test]
     fn un_stream_par_compte_et_deux_par_salon() {
         let s = Streams::new();
@@ -1328,6 +1461,30 @@ mod tests {
         assert_eq!(priorite(50, 100), 0);
     }
 
+    /// Une saturation compte quand elle revient — deux secondes sur les
+    /// trois dernières —, pas pour un hoquet : une trame clé qui tarde, un
+    /// Wi-Fi qui tousse. Et rien ne compte le temps de s'installer sur une
+    /// qualité (l'arrivée, l'essai de la haute, qui commencent tous deux par
+    /// une trame clé) : c'est ce qui renvoyait chaque essai en basse en deux
+    /// secondes.
+    #[test]
+    fn une_saturation_compte_quand_elle_revient_pas_pour_un_hoquet() {
+        let hoquet = juger(3000, 0b001, true);
+        assert!(!hoquet.sature && !hoquet.calme);
+        assert!(juger(3000, 0b011, true).sature);
+        assert!(juger(3000, 0b101, true).sature);
+        // Plus vieilles que trois secondes : oubliées.
+        let ancien = juger(3000, 0b1111_1000, true);
+        assert!(!ancien.sature && ancien.calme);
+        // Le temps de s'installer : rien ne compte encore.
+        assert!(!juger(3000, 0b111, false).sature);
+        assert!(juger(3000, 0, true).calme);
+        // En basse, un spectateur qui vient de saturer une fois ne retente
+        // pas la haute : il faut trois secondes calmes.
+        assert_eq!(placer(juger(1400, 0b001, true), true, true, 4000, true), None);
+        assert_eq!(placer(juger(1400, 0, true), true, true, 4000, true), Some(Mouvement::VersHaute));
+    }
+
     /// La comptabilité mémoire est portée par le Drop de la trame : quand la
     /// dernière copie part, le compteur redescend — chemin d'erreur compris.
     #[test]
@@ -1338,6 +1495,7 @@ mod tests {
             bytes: vec![0u8; 1000],
             idr: false,
             priorite: 0,
+            arrivee: Instant::now(),
             mem: mem.clone(),
         });
         let t2 = t.clone();
