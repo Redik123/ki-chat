@@ -364,6 +364,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 mdp_budget: crate::state::TokenBucket::new(1.0 / 5.0, 2.0),
                 photo_budget: crate::state::TokenBucket::new(1.0 / 10.0, 3.0),
                 recherche_en_cours: Default::default(),
+                riot_budget: crate::state::TokenBucket::new(1.0 / 120.0, 2.0),
             },
         )
     };
@@ -659,7 +660,25 @@ async fn voice_task(
                 continue;
             }
             if let Some(h) = ki_protocol::parse_audio_header(&dat) {
-                state.streams.relayer_audio(user_id, h.stream_id, &dat);
+                // Les sanctions vocales valent pour le son du jeu comme pour
+                // la voix, et se lisent dans la même table : un micro coupé
+                // par un modérateur n'y a pas de salon (rien ne part), un
+                // sourd n'est pas parmi ceux qui entendent (rien ne lui
+                // arrive). Sans ça, un membre rendu muet diffusait quand même
+                // le son de son jeu, et un membre rendu sourd l'entendait.
+                let entendent: Option<Vec<UserId>> = {
+                    let routes = state.voice_routes.read().unwrap();
+                    routes.channel_of.get(&user_id).map(|c| {
+                        routes
+                            .peers
+                            .get(c)
+                            .map(|p| p.iter().map(|(id, _)| *id).collect())
+                            .unwrap_or_default()
+                    })
+                };
+                if let Some(entendent) = entendent {
+                    state.streams.relayer_audio(user_id, h.stream_id, &dat, &entendent);
+                }
             }
             continue;
         }
@@ -1468,16 +1487,20 @@ fn handle_msg(
             // qu'un message, un client modifié ne fait pas cliquer le fil
             // en rafale. (Et le service refuse de lui-même une seconde
             // liaison du même membre tant que la première attend.)
+            // Et son budget propre : deux liaisons d'affilée, puis une toutes
+            // les deux minutes. Le budget du chat seul laissait un membre
+            // enchaîner les liaisons et accaparer les vingt requêtes par
+            // minute que HenrikDev accorde à tout le serveur.
             let allowed = {
                 let mut users = state.users.lock().unwrap();
                 users
                     .get_mut(&user_id)
-                    .is_some_and(|u| u.chat_budget.take())
+                    .is_some_and(|u| u.chat_budget.take() && u.riot_budget.take())
             };
             if !allowed {
                 let _ = tx.send(ServerMsg::LiaisonRiot {
                     ok: false,
-                    message: "trop de demandes d'un coup, réessaie dans un instant".into(),
+                    message: "trop de demandes de liaison — réessaie dans deux minutes".into(),
                     riot_id: None,
                 });
                 return;

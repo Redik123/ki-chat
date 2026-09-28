@@ -1211,7 +1211,9 @@ pub fn composer(a: &Annonce, pseudo: impl Fn(UserId) -> String) -> String {
             texte.push_str(&format!(" · {medailles}"));
         }
     }
-    texte
+    // Carte, mode et agent viennent tels quels de l'API : le texte passe le
+    // même nettoyage qu'un message de membre avant de partir dans le salon.
+    ki_protocol::safe_display(&texte, ki_protocol::MAX_CHAT_TEXT)
 }
 
 /// Les médailles d'une ligne d'annonce : « 🏅 MVP (412 / 500), top frag »,
@@ -1604,6 +1606,26 @@ struct Api {
     motif: Motif,
 }
 
+/// Ce qu'une réponse de HenrikDev peut peser : l'historique de cinq matchs
+/// en fait un ou deux mégaoctets. Au-delà, ce n'est pas une réponse normale,
+/// et la lire entière ferait gonfler la mémoire du serveur.
+const REPONSE_MAX: u64 = 8 * 1024 * 1024;
+
+/// Le JSON d'une réponse, lu avec une borne.
+fn json_borne(reponse: ureq::Response) -> Result<Value, String> {
+    use std::io::Read as _;
+    let mut octets = Vec::new();
+    reponse
+        .into_reader()
+        .take(REPONSE_MAX + 1)
+        .read_to_end(&mut octets)
+        .map_err(|e| e.to_string())?;
+    if octets.len() as u64 > REPONSE_MAX {
+        return Err("réponse trop grosse".into());
+    }
+    serde_json::from_slice(&octets).map_err(|e| e.to_string())
+}
+
 impl Api {
     /// Une requête, une seule : un 429 gèle le seau le temps que
     /// HenrikDev demande (`Retry-After`, sinon [`GEL_DEFAUT`]) et rend
@@ -1629,9 +1651,7 @@ impl Api {
             duree_ms: depart.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
         });
         match reponse {
-            Ok(reponse) => reponse
-                .into_json::<Value>()
-                .map_err(|e| Erreur::Autre(e.to_string())),
+            Ok(reponse) => json_borne(reponse).map_err(Erreur::Autre),
             Err(ureq::Error::Status(404, _)) => Err(Erreur::Introuvable),
             Err(ureq::Error::Status(429, reponse)) => {
                 let gel = lire_retry_after(reponse.header("Retry-After")).unwrap_or(GEL_DEFAUT);
@@ -1645,10 +1665,9 @@ impl Api {
                 Err(Erreur::Limite)
             }
             Err(ureq::Error::Status(code, reponse)) => {
-                let detail = reponse
-                    .into_json::<Value>()
+                let detail = json_borne(reponse)
                     .ok()
-                    .and_then(|v| v["errors"][0]["message"].as_str().map(str::to_string))
+                    .and_then(|v| v["errors"][0]["message"].as_str().map(|m| ki_protocol::safe_display(m, 160)))
                     .unwrap_or_default();
                 Err(Erreur::Autre(
                     format!("HTTP {code} {detail}").trim().to_string(),

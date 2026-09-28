@@ -59,6 +59,16 @@ use ki_protocol::{ChannelId, MediaHeader, StreamMeta, UserId};
 /// Deux diffusions au plus par salon (v1) : au-delà, plus personne ne sait
 /// quel écran regarder, et la liaison montante du serveur non plus.
 const MAX_PAR_SALON: usize = 2;
+
+/// Le débit qu'un streamer peut annoncer : il sert de plafond aux paliers et
+/// de base aux calculs de débit, et venait du client sans borne.
+const KBPS_MAX: u32 = 100_000;
+
+/// Les réglages annoncés par le streamer, débit ramené à [`KBPS_MAX`].
+fn debit_borne(mut meta: StreamMeta) -> StreamMeta {
+    meta.kbps = meta.kbps.min(KBPS_MAX);
+    meta
+}
 /// Mémoire totale des trames en transit vers les spectateurs.
 const MEM_MAX: usize = 32 * 1024 * 1024;
 /// File par spectateur : une demi-seconde à 60 i/s. De quoi absorber la
@@ -756,6 +766,7 @@ impl Streams {
         meta: StreamMeta,
         couches: bool,
     ) -> Result<u32, &'static str> {
+        let meta = debit_borne(meta);
         let mut inner = self.inner.lock().unwrap();
         if let Some((id, _)) = inner.by_id.iter().find(|(_, l)| l.streamer == streamer) {
             return Ok(*id);
@@ -825,6 +836,7 @@ impl Streams {
     /// Met à jour les caractéristiques annoncées ; rend l'identifiant pour la
     /// rediffusion au salon.
     pub fn meta_update(&self, streamer: UserId, meta: StreamMeta) -> Option<u32> {
+        let meta = debit_borne(meta);
         let mut inner = self.inner.lock().unwrap();
         let (id, live) = inner
             .by_id
@@ -947,7 +959,16 @@ impl Streams {
     /// spectateur, tel quel — le serveur ne déchiffre rien, et un
     /// datagramme qui ne part pas (file pleine) est simplement perdu, comme
     /// la voix. `false` si ce compte ne diffuse pas ce stream.
-    pub fn relayer_audio(&self, streamer: UserId, stream_id: u32, dat: &bytes::Bytes) -> bool {
+    /// Relaie un paquet du son du jeu aux spectateurs de ce stream — ceux
+    /// d'entre eux qui sont dans `entendent`, les autres ayant été rendus
+    /// sourds par un modérateur.
+    pub fn relayer_audio(
+        &self,
+        streamer: UserId,
+        stream_id: u32,
+        dat: &bytes::Bytes,
+        entendent: &[UserId],
+    ) -> bool {
         let inner = self.inner.lock().unwrap();
         let Some(live) = inner.by_id.get(&stream_id) else {
             return false;
@@ -955,8 +976,10 @@ impl Streams {
         if live.streamer != streamer {
             return false;
         }
-        for v in live.viewers.values() {
-            let _ = v.conn.send_datagram(dat.clone());
+        for (id, v) in live.viewers.iter() {
+            if entendent.contains(id) {
+                let _ = v.conn.send_datagram(dat.clone());
+            }
         }
         true
     }
@@ -1211,8 +1234,18 @@ async fn diffuser(
                 let _ = vieux.reset(quinn::VarInt::from_u32(0));
             }
         }
-        let Ok(mut flux) = conn.open_uni().await else {
-            return;
+        // Ouvrir un flux attend que le spectateur en ait libéré un : un
+        // spectateur qui ne lit plus tenait cette tâche indéfiniment. Borné
+        // comme l'écriture, et compté comme une saturation.
+        let mut flux = match tokio::time::timeout(ECRITURE_MAX, conn.open_uni()).await {
+            Ok(Ok(flux)) => flux,
+            Ok(Err(_)) => return,
+            Err(_) => {
+                needs_idr.store(true, Ordering::Relaxed);
+                mesure.saturations.fetch_add(1, Ordering::Relaxed);
+                attend_idr = true;
+                continue;
+            }
         };
         let _ = flux.set_priority(trame.priorite);
         match tokio::time::timeout(ECRITURE_MAX, flux.write_all(&trame.bytes)).await {
