@@ -47,23 +47,73 @@ pub(crate) fn diag_dir(state: &AppState) -> PathBuf {
     PathBuf::from(&state.data_dir).join("diag")
 }
 
+/// Une archive que plus personne n'a touchée depuis ce temps est jetée.
+const ARCHIVE_AGE_MAX: std::time::Duration = std::time::Duration::from_secs(90 * 24 * 3600);
+/// Ce que tout le dossier des diagnostics peut peser : au-delà, les archives
+/// les plus anciennes partent d'abord. La rotation ne bornait qu'un fichier
+/// par membre et par version, jamais le total.
+const DIAG_OCTETS_MAX: u64 = 1024 * 1024 * 1024;
+
+/// Purge le dossier des diagnostics : les archives trop vieilles, puis les
+/// plus anciennes tant que le total dépasse [`DIAG_OCTETS_MAX`], puis les
+/// dossiers de version devenus vides. Rend le nombre d'archives jetées.
+pub fn purger(dir: &std::path::Path) -> usize {
+    purger_selon(dir, ARCHIVE_AGE_MAX, DIAG_OCTETS_MAX)
+}
+
+fn purger_selon(dir: &std::path::Path, age_max: std::time::Duration, octets_max: u64) -> usize {
+    let maintenant = std::time::SystemTime::now();
+    let mut archives: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    for version in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        for archive in std::fs::read_dir(version.path()).into_iter().flatten().flatten() {
+            let Ok(meta) = archive.metadata() else { continue };
+            if meta.is_file() {
+                let quand = meta.modified().unwrap_or(maintenant);
+                archives.push((quand, meta.len(), archive.path()));
+            }
+        }
+    }
+    // Les plus anciennes d'abord.
+    archives.sort_by_key(|(quand, _, _)| *quand);
+    let mut total: u64 = archives.iter().map(|(_, taille, _)| taille).sum();
+    let mut jetees = 0;
+    for (quand, taille, chemin) in archives {
+        let trop_vieille = maintenant.duration_since(quand).is_ok_and(|age| age > age_max);
+        if !trop_vieille && total <= octets_max {
+            continue;
+        }
+        if std::fs::remove_file(&chemin).is_ok() {
+            total = total.saturating_sub(taille);
+            jetees += 1;
+        }
+    }
+    for version in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        // `remove_dir` ne retire qu'un dossier vide : c'est ce qu'on veut.
+        let _ = std::fs::remove_dir(version.path());
+    }
+    jetees
+}
+
 /// La version annoncée par le client (en-tête x-ki-version), réduite à un
 /// nom de dossier sûr. Les archives sont **classées par version** : c'est
 /// l'historique des bugs de chaque livraison, et ce qui permet de purger
 /// « tout ce qui date de la 0.1.12 » d'un geste.
 fn version_propre(v: Option<&str>) -> String {
-    let propre: String = v
-        .unwrap_or("")
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        .take(24)
-        .collect();
-    // Un nom fait uniquement de points (« .. » !) serait un chemin, pas une
-    // version : au rebut avec les vides.
-    if propre.is_empty() || propre.chars().all(|c| c == '.') {
-        "inconnue".into()
+    // Une version comme le client les écrit, `0.1.51`, et rien d'autre.
+    // L'en-tête est libre : nettoyé seulement, il ouvrait un dossier par
+    // valeur envoyée, et la rotation, qui vaut par (membre, version), ne
+    // bornait plus rien — un membre remplissait le disque en changeant de
+    // « version » à chaque lot.
+    let v = v.unwrap_or("").trim();
+    let morceaux: Vec<&str> = v.split('.').collect();
+    let valide = morceaux.len() == 3
+        && morceaux
+            .iter()
+            .all(|m| (1..=5).contains(&m.len()) && m.bytes().all(|b| b.is_ascii_digit()));
+    if valide {
+        v.to_string()
     } else {
-        propre
+        "inconnue".into()
     }
 }
 
@@ -101,16 +151,11 @@ fn fichier_de(user_id: u64, username: &str) -> String {
 /// d'un client connecté, et le serveur retrouve qui il est.
 pub async fn upload(
     State(state): State<Arc<AppState>>,
+    // Lue dans les en-têtes, avant le corps : un inconnu ne fait rien lire.
+    crate::limites_http::Session { user_id, username }: crate::limites_http::Session,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let token = headers
-        .get("x-ki-token")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| u64::from_str_radix(s, 16).ok());
-    let Some((user_id, username)) = token.and_then(|t| state.user_by_voice_token(t)) else {
-        return (StatusCode::UNAUTHORIZED, "jeton invalide").into_response();
-    };
     if body.is_empty() {
         return (StatusCode::BAD_REQUEST, "lot vide").into_response();
     }
@@ -182,7 +227,9 @@ fn jeton_admin(state: &AppState) -> std::io::Result<String> {
         Ok(t) if !t.trim().is_empty() => Ok(t.trim().to_string()),
         _ => {
             let neuf = format!("{:032x}", rand::rng().random::<u128>());
-            std::fs::write(&chemin, &neuf)?;
+            // Lisible du seul compte du serveur : c'est un accès aux
+            // journaux de tous les joueurs.
+            crate::store::write_atomic_prive(&chemin, neuf.as_bytes())?;
             tracing::info!(
                 "jeton d'accès aux diagnostics généré : {}",
                 chemin.display()
@@ -208,7 +255,7 @@ pub fn init(state: &AppState) {
 pub(crate) fn lecteur_autorise(state: &AppState, headers: &HeaderMap) -> bool {
     let admin = headers.get("x-ki-admin").and_then(|v| v.to_str().ok());
     if let (Some(fourni), Ok(attendu)) = (admin, jeton_admin(state)) {
-        if fourni == attendu {
+        if crate::state::secret_eq(fourni, &attendu) {
             return true;
         }
     }
@@ -559,7 +606,14 @@ mod tests {
     #[test]
     fn la_version_est_reduite_a_un_dossier_sur() {
         assert_eq!(version_propre(Some("0.1.15")), "0.1.15");
-        assert_eq!(version_propre(Some("../../etc")), "....etc");
+        assert_eq!(version_propre(Some("../../etc")), "inconnue");
+        // Tout ce qui n'est pas une version telle que le client l'écrit
+        // tombe dans un seul dossier : l'en-tête est libre, et un dossier
+        // par valeur envoyée remplissait le disque sans que la rotation,
+        // qui vaut par (membre, version), borne rien.
+        for libre in ["0.1.15-dev", "v0.1.15", "1.2", "1.2.3.4", "a.b.c", "0.1.123456", " "] {
+            assert_eq!(version_propre(Some(libre)), "inconnue", "{libre:?}");
+        }
         assert_eq!(version_propre(None), "inconnue");
         assert_eq!(version_propre(Some("")), "inconnue");
         // « .. » filtré reste « .. » : sans ce garde-fou, l'écriture
@@ -568,6 +622,34 @@ mod tests {
         assert_eq!(version_propre(Some("//")), "inconnue");
         // Et côté chemin, seuls nos dossiers passent.
         assert!(segment_version_valide("0.1.15"));
+        assert!(segment_version_valide("inconnue"));
+    }
+
+    /// Les archives trop vieilles partent, puis les plus anciennes tant que
+    /// le dossier dépasse son plafond ; les dossiers vidés aussi.
+    #[test]
+    fn la_purge_des_diagnostics_borne_l_age_et_la_place() {
+        let dir = std::env::temp_dir().join(format!("ki-diag-purge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (version, fichier) in [("0.1.1", "a.jsonl"), ("0.1.2", "b.jsonl"), ("0.1.2", "c.jsonl")] {
+            std::fs::create_dir_all(dir.join(version)).unwrap();
+            std::fs::write(dir.join(version).join(fichier), vec![b'x'; 1000]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Rien de trop vieux, rien de trop lourd : rien ne part.
+        assert_eq!(purger_selon(&dir, std::time::Duration::from_secs(3600), 10_000), 0);
+        // Plafond à 2 500 octets : la plus ancienne part, et son dossier vide.
+        assert_eq!(purger_selon(&dir, std::time::Duration::from_secs(3600), 2_500), 1);
+        assert!(!dir.join("0.1.1").exists());
+        assert!(dir.join("0.1.2").join("b.jsonl").exists());
+        // Tout est « trop vieux » à un âge nul : tout part.
+        assert_eq!(purger_selon(&dir, std::time::Duration::ZERO, 10_000), 2);
+        assert!(!dir.join("0.1.2").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn un_segment_de_version_se_verifie() {
         assert!(segment_version_valide("inconnue"));
         assert!(!segment_version_valide(".."));
         assert!(!segment_version_valide(""));

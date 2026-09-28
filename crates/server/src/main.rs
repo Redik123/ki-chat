@@ -46,12 +46,14 @@ mod diag;
 mod export;
 mod files;
 mod history;
+mod limites_http;
 mod lus;
 mod pokes;
 mod medias;
 mod meta;
 mod musique;
 mod porte;
+mod processus;
 mod quic;
 mod reseau;
 mod roles;
@@ -120,6 +122,9 @@ async fn main() -> anyhow::Result<()> {
         max_bytes: env_u64("KI_CLIPS_MAX_BYTES", clips::DEFAULT_MAX_BYTES),
         ttl_days: env_u64("KI_CLIPS_TTL_DAYS", clips::DEFAULT_TTL_DAYS),
     };
+    // Le dossier temporaire des outils externes, avant tout lancement : ce
+    // qu'une exécution précédente y a laissé part d'abord.
+    processus::init();
     let state = Arc::new(AppState::new(token, &data_dir, files_quota, clips_quota, fichier_max_mb)?);
 
     // Purge du partage de fichiers, et des clips à part. Sans elle,
@@ -220,6 +225,26 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::error!("purge des téléversements : {e}"),
                 }
+                // Ce que les outils externes auraient laissé derrière eux —
+                // un yt-dlp tué avant d'avoir nettoyé son dossier extrait.
+                // Six heures : un direct peut durer, et son dossier sert
+                // tant qu'il joue.
+                let jetes = tokio::task::spawn_blocking(|| {
+                    processus::purger(std::time::Duration::from_secs(6 * 3600))
+                })
+                .await
+                .unwrap_or(0);
+                if jetes > 0 {
+                    tracing::info!("outils : {jetes} reste(s) temporaire(s) jeté(s)");
+                }
+                // Les diagnostics aussi ont une fin : trop vieux, ou trop
+                // nombreux pour le disque (voir `diag::purger`).
+                let d = std::path::PathBuf::from(&data_dir).join("diag");
+                match tokio::task::spawn_blocking(move || diag::purger(&d)).await {
+                    Ok(n) if n > 0 => tracing::info!("diagnostics : {n} archive(s) jetée(s)"),
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("purge des diagnostics : {e}"),
+                }
             }
         });
     }
@@ -317,14 +342,27 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/upload/fin", post(medias::upload_fin))
         // Un clip : les mêmes morceaux, un autre stock, et le message posté
-        // au nom du membre dans le salon choisi.
-        .route("/clips/fin", post(clips::fin))
+        // au nom du membre dans le salon choisi. Ces routes-ci ne portent
+        // qu'un petit JSON : 64 Kio au lieu des 2 Mio d'axum par défaut.
+        .route(
+            "/clips/fin",
+            post(clips::fin).layer(DefaultBodyLimit::max(CORPS_JSON_MAX)),
+        )
         // L'atelier : exporter d'après une recette, obtenir un lien pour le
         // téléphone, reposter, supprimer — par celui qui a déposé le clip.
         .route("/clips/{id}", axum::routing::delete(clips::supprimer))
-        .route("/clips/{id}/exporter", post(clips::exporter))
-        .route("/clips/{id}/telephone", post(clips::telephone))
-        .route("/clips/{id}/partager", post(clips::partager))
+        .route(
+            "/clips/{id}/exporter",
+            post(clips::exporter).layer(DefaultBodyLimit::max(CORPS_JSON_MAX)),
+        )
+        .route(
+            "/clips/{id}/telephone",
+            post(clips::telephone).layer(DefaultBodyLimit::max(CORPS_JSON_MAX)),
+        )
+        .route(
+            "/clips/{id}/partager",
+            post(clips::partager).layer(DefaultBodyLimit::max(CORPS_JSON_MAX)),
+        )
         // Le lien du téléphone : un jeton, une heure, un fichier.
         .route("/tel/{jeton}", get(clips::tel))
         // Diagnostics partagés : dépôt par les clients volontaires (jeton
@@ -364,12 +402,21 @@ async fn main() -> anyhow::Result<()> {
     // La seconde écoute, publique : le même routeur derrière un certificat
     // qu'un navigateur reconnaît, pour les portes web. Elle ne remplace pas
     // celle-ci — les clients ki-chat en épinglent le certificat.
-    ecouter_publique(app.clone(), env_port("KI_TLS_PORT", 8443));
-    axum_server::bind_rustls(addr, tls)
+    //
+    // Les deux partagent un même plafond de connexions, posé sous TLS, et
+    // hyper reçoit son horloge (voir `limites_http`).
+    let limiteur = limites_http::Limiteur::default();
+    ecouter_publique(app.clone(), env_port("KI_TLS_PORT", 8443), limiteur.clone());
+    let mut serveur = axum_server::bind_rustls(addr, tls).map(|rustls| rustls.acceptor(limiteur));
+    limites_http::borner(serveur.http_builder());
+    serveur
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
 }
+
+/// Ce que peut peser le corps d'une route qui ne porte qu'un petit JSON.
+const CORPS_JSON_MAX: usize = 64 * 1024;
 
 /// Relecture du certificat public : toutes les heures. Let's Encrypt
 /// renouvelle à trente jours de l'échéance, une heure de retard ne se voit
@@ -398,7 +445,7 @@ const TLS_REESSAI: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// illisibles ou port pris, le journal le dit et le serveur continue sur
 /// son écoute principale — les portes y restent joignables, avec
 /// l'avertissement du navigateur.
-fn ecouter_publique(app: Router, port: u16) {
+fn ecouter_publique(app: Router, port: u16, limiteur: limites_http::Limiteur) {
     let variable = |nom: &str| std::env::var(nom).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let (cert, key) = match (variable("KI_TLS_CERT"), variable("KI_TLS_KEY")) {
         (Some(cert), Some(key)) => (cert, key),
@@ -454,7 +501,10 @@ fn ecouter_publique(app: Router, port: u16) {
                 }
             });
         }
-        if let Err(e) = axum_server::bind_rustls(addr, tls)
+        let mut serveur =
+            axum_server::bind_rustls(addr, tls).map(|rustls| rustls.acceptor(limiteur));
+        limites_http::borner(serveur.http_builder());
+        if let Err(e) = serveur
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
         {

@@ -114,20 +114,17 @@ pub fn sanitize(name: &str) -> String {
 }
 
 /// POST /upload?name=<nom> — corps brut, en-tête x-ki-token = jeton voix (hex).
+///
+/// La session et la place d'envoi sont des extracteurs d'en-têtes : axum les
+/// passe **avant** de lire le corps, qui n'est donc jamais lu pour un inconnu
+/// (voir `limites_http`).
 pub async fn upload(
     State(state): State<Arc<AppState>>,
+    crate::limites_http::Session { user_id, username }: crate::limites_http::Session,
+    _place: crate::limites_http::PlaceEnvoi,
     Query(params): Query<UploadParams>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Authentification : le jeton voix n'est connu que d'un client connecté.
-    let token = headers
-        .get("x-ki-token")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| u64::from_str_radix(s, 16).ok());
-    let Some((user_id, username)) = token.and_then(|t| state.user_by_voice_token(t)) else {
-        return (StatusCode::UNAUTHORIZED, "jeton invalide").into_response();
-    };
     // Le partage de fichiers est une permission comme une autre : elle
     // s'affiche dans l'éditeur de rôles, elle doit donc être appliquée. Ce
     // chemin passe par HTTP et non par le flux de contrôle, d'où le contrôle
@@ -303,6 +300,15 @@ pub(crate) async fn servir_fichier(
         .header(
             header::CONTENT_DISPOSITION,
             format!("{disposition}; filename=\"{nom}\""),
+        )
+        // La même origine sert la page des portes web, sous `script-src
+        // 'self'` : un fichier envoyé par un membre ne doit jamais pouvoir y
+        // passer pour un script. Le navigateur ne devine pas le type, et
+        // rien de ce qui est servi ici n'exécute quoi que ce soit.
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox",
         );
     if statut == StatusCode::PARTIAL_CONTENT {
         reponse = reponse.header(header::CONTENT_RANGE, format!("bytes {debut}-{fin}/{total}"));

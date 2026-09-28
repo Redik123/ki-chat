@@ -114,6 +114,10 @@ const SCRIPT: &str = include_str!("porte.js");
 /// Le premier message (`hello`) doit arriver dans ce délai, sinon la
 /// WebSocket est fermée : un onglet ouvert « pour voir » ne coûte rien.
 const HELLO_DELAI: Duration = Duration::from_secs(30);
+/// Le compteur de trames qu'une page peut annoncer : 2⁴⁸, soit des
+/// millénaires de voix à cinquante trames par seconde. Au-delà, c'est une
+/// page qui cherche à faire reboucler le nonce.
+const COMPTEUR_PAGE_MAX: u64 = 1 << 48;
 /// Une demande sans réponse est retirée au bout de cinq minutes.
 const DEMANDE_ATTENTE: Duration = Duration::from_secs(5 * 60);
 /// Un ping serveur toutes les vingt secondes…
@@ -482,9 +486,13 @@ impl Portes {
             budget: TokenBucket::new(1.0 / 3.0, 3.0),
             budget_voix: TokenBucket::new(60.0, 120.0),
             budget_vocal: TokenBucket::new(1.0, 4.0),
-            // Le bit de poids fort libre : de la marge pour compter sans
-            // reboucler, comme le bot musique.
-            base_compteur: rand::rng().random::<u64>() >> 1,
+            // Tiré sur 48 bits, comme les membres et le bot musique : de la
+            // marge pour compter sans reboucler, et surtout sous 2⁵³ — la page
+            // lit les compteurs en nombres JavaScript. Tirée sur 63 bits, la
+            // base dépassait 2⁵³ presque à tout coup, deux trames voisines y
+            // devenaient égales, et la page jetait la plupart des trames des
+            // autres invités.
+            base_compteur: rand::rng().random::<u64>() >> 16,
             dernier_compteur: None,
         });
         Ok(Reponse {
@@ -682,8 +690,8 @@ impl Portes {
         // consommé, et tout ce qu'elle enverra sera neuf. Et si sa page
         // était dans l'ancien, elle est dans le nouveau : elle suit le
         // déplacement sans rien redire.
-        let consommes = invite.dernier_compteur.map_or(0, |d| d.wrapping_add(1));
-        invite.base_compteur = invite.base_compteur.wrapping_add(consommes);
+        let consommes = invite.dernier_compteur.map_or(0, |d| d.saturating_add(1));
+        invite.base_compteur = invite.base_compteur.saturating_add(consommes);
         invite.dernier_compteur = None;
         self.recalculer_ecoutes(&inner);
         Ok((salon, nom, false))
@@ -773,11 +781,20 @@ impl Portes {
         if invite.dernier_compteur.is_some_and(|d| compteur_page <= d) {
             return Err("compteur qui recule");
         }
+        // Borné, et additionné sans reboucler : après un changement de salon
+        // la page repart de n'importe où, et un compteur démesuré, ajouté en
+        // arithmétique modulaire, retombait sur un nonce déjà servi.
+        if compteur_page >= COMPTEUR_PAGE_MAX {
+            return Err("compteur hors bornes");
+        }
+        let Some(nonce) = invite.base_compteur.checked_add(compteur_page) else {
+            return Err("compteur hors bornes");
+        };
         if !invite.budget_voix.take() {
             return Err("trop de trames");
         }
         invite.dernier_compteur = Some(compteur_page);
-        Ok((vocal, invite.base_compteur.wrapping_add(compteur_page)))
+        Ok((vocal, nonce))
     }
 
     /// Quelqu'un écoute-t-il ce salon ? Une lecture partagée, rien d'autre :
@@ -1263,13 +1280,26 @@ fn adresse_quic_de(public_quic: Option<&str>, base: Option<&str>, hote_requete: 
     format!("{hote}:{port}")
 }
 
-/// L'hôte d'un en-tête `Host`, sans son port — « [::1]:8080 » compris.
+/// L'hôte d'un en-tête `Host`, sans son port — « [::1]:8080 » compris. Vide
+/// s'il n'a pas l'allure d'un nom d'hôte ou d'une adresse : l'en-tête vient
+/// d'un inconnu, et ce qu'on en tire est recopié dans un message que le
+/// serveur signe « Porte » dans le salon.
 fn hote_sans_port(hote: &str) -> &str {
     let hote = hote.trim();
-    if let Some(fin) = hote.strip_prefix('[').and_then(|h| h.find(']')) {
-        return &hote[..fin + 2];
+    let nu = if let Some(fin) = hote.strip_prefix('[').and_then(|h| h.find(']')) {
+        &hote[..fin + 2]
+    } else {
+        hote.rsplit_once(':').map_or(hote, |(h, _)| h)
+    };
+    let plausible = nu.len() <= 253
+        && nu
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'[' | b']' | b':'));
+    if plausible {
+        nu
+    } else {
+        ""
     }
-    hote.rsplit_once(':').map_or(hote, |(h, _)| h)
 }
 
 /// Un nom d'invité acceptable : nettoyé comme un pseudo — espaces réduits,
@@ -1288,6 +1318,11 @@ fn nom_propre(nom: &str) -> Result<String, String> {
     }
     if plat.to_lowercase().ends_with("(web)") {
         return Err("« (web) » est réservé : le serveur l'ajoute lui-même".into());
+    }
+    // Rien d'invisible ni de mise en forme : « Re​dik veut rejoindre », un
+    // espace de largeur nulle au milieu, s'affichait comme un membre.
+    if plat.chars().any(ki_protocol::caractere_de_nom_refuse) {
+        return Err("ce nom contient un caractère invisible — choisis-en un autre".into());
     }
     Ok(plat)
 }
@@ -1368,9 +1403,6 @@ fn frapper(
     audio: mpsc::Sender<Bytes>,
 ) -> Result<(u64, UserId), String> {
     let nom = nom_propre(nom)?;
-    if nom_reserve(state, &nom) {
-        return Err("ce nom est celui d'un membre — choisis-en un autre".into());
-    }
     // Chaque demande compte comme un « échec » : cinq gratuites, puis un
     // délai qui double. Refusée avant tout le reste, elle ne coûte qu'une
     // recherche dans une table.
@@ -1379,6 +1411,12 @@ fn frapper(
         return Err(format!("trop de demandes — réessaie dans {} s", attente.as_secs().max(1)));
     }
     state.portes.throttle.record_failure(ip, &cle);
+    // Après le limiteur, et pas avant : « ce nom est celui d'un membre »
+    // répondu sans limite, c'était la liste des comptes, devinée pseudo par
+    // pseudo par un inconnu.
+    if nom_reserve(state, &nom) {
+        return Err("ce nom est celui d'un membre — choisis-en un autre".into());
+    }
     let (demande_id, invite_id) =
         state.portes.frapper(slug, &nom, ip, hote.to_string(), tx, audio, now_millis(), Instant::now())?;
     state.audit.record("porte.request", &nom, slug, &format!("depuis {ip}"));
@@ -3172,7 +3210,12 @@ mod tests {
         // sous le compteur du serveur — celui de la page, décalé du tirage.
         let (salon_max, base) = state.portes.emettre(max_id, 0).unwrap();
         assert_eq!(salon_max, autre);
-        assert_eq!(state.portes.emettre(max_id, 1), Ok((autre, base.wrapping_add(1))));
+        assert_eq!(state.portes.emettre(max_id, 1), Ok((autre, base + 1)));
+        // La page lit ces compteurs en nombres JavaScript : sous 2⁵³, ou
+        // deux trames voisines y deviennent égales et l'une est jetée.
+        assert!(base < 1 << 53, "base {base} au-delà de 2⁵³");
+        // Et un compteur démesuré ne fait pas reboucler le nonce.
+        assert_eq!(state.portes.emettre(max_id, u64::MAX), Err("compteur hors bornes"));
 
         // Expulsé, Kevin n'écoute plus — et Léa, restée seule, l'apprend ;
         // la porte fermée, plus personne.

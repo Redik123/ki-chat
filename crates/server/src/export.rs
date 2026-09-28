@@ -23,7 +23,7 @@
 //! l'image près, sur un nombre de fils borné, avec un délai qui suit la
 //! durée de la sortie.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -662,6 +662,8 @@ pub fn executer(outils: &Outils, dossier: &Path, recette: &Recette) -> Result<Et
         let mut cmd = crate::medias::commande_ffmpeg(outils);
         cmd.args(["-y", "-nostdin", "-hide_banner", "-loglevel", "error"])
             .args(&avant)
+            // Le fichier du clip, et rien d'autre : ni réseau, ni autre chemin.
+            .args(["-protocol_whitelist", "file"])
             .arg("-i")
             .arg(&source_chemin)
             .args(&apres)
@@ -711,16 +713,18 @@ fn lancer_avec_progression(
     delai: Duration,
     mut avancer: impl FnMut(u8),
 ) -> Result<(), String> {
-    let mut enfant = cmd
+    // Environnement sans secret et groupe de processus à lui : voir
+    // `processus`.
+    let mut enfant = crate::processus::preparer(cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("lancement impossible : {e}"))?;
     let sortie = enfant.stdout.take().expect("stdout");
-    let mut erreur = enfant.stderr.take().expect("stderr");
+    let erreur = enfant.stderr.take().expect("stderr");
     let (tx, rx) = std::sync::mpsc::channel::<u64>();
-    let lecteur = std::thread::spawn(move || {
+    let lecteur = crate::processus::fil("export-progression", move || {
         for ligne in BufReader::new(sortie).lines().map_while(Result::ok) {
             // `out_time_us` (ffmpeg récent) ou `out_time_ms` (qui, malgré
             // son nom, est en microsecondes) : les deux disent la même chose.
@@ -734,11 +738,22 @@ fn lancer_avec_progression(
             }
         }
     });
-    let lecteur_err = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = erreur.read_to_end(&mut buf);
-        buf
-    });
+    let lecteur = match lecteur {
+        Ok(l) => l,
+        Err(e) => {
+            crate::processus::arreter(&mut enfant);
+            return Err(e);
+        }
+    };
+    // La sortie d'erreur, bornée : de quoi dire pourquoi, pas davantage.
+    let lecteur_err =
+        match crate::processus::fil("export-erreur", move || crate::processus::lire_borne(erreur, 64 * 1024).0) {
+            Ok(l) => l,
+            Err(e) => {
+                crate::processus::arreter(&mut enfant);
+                return Err(e);
+            }
+        };
     let debut = Instant::now();
     let mut dernier: u8 = 0;
     let statut = loop {
@@ -752,12 +767,14 @@ fn lancer_avec_progression(
         match enfant.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) if debut.elapsed() > delai => {
-                let _ = enfant.kill();
-                let _ = enfant.wait();
+                crate::processus::arreter(&mut enfant);
                 break None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => break None,
+            Err(_) => {
+                crate::processus::arreter(&mut enfant);
+                break None;
+            }
         }
     };
     let _ = lecteur.join();

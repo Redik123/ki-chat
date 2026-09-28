@@ -87,6 +87,8 @@ pub async fn fin(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ParamsFin>,
     headers: HeaderMap,
+    // Lue dans les en-têtes, avant le corps JSON : un inconnu ne fait rien lire.
+    _session: crate::limites_http::Session,
     Json(demande): Json<Demande>,
 ) -> impl IntoResponse {
     let (user_id, username) = match medias::authentifier(&state, &headers) {
@@ -390,6 +392,8 @@ pub async fn exporter(
     State(state): State<Arc<AppState>>,
     Param(id): Param<String>,
     headers: HeaderMap,
+    // Lue dans les en-têtes, avant le corps JSON : un inconnu ne fait rien lire.
+    _session: crate::limites_http::Session,
     Json(recette): Json<Recette>,
 ) -> impl IntoResponse {
     let (user_id, username) = match medias::authentifier(&state, &headers) {
@@ -500,6 +504,8 @@ pub async fn telephone(
     State(state): State<Arc<AppState>>,
     Param(id): Param<String>,
     headers: HeaderMap,
+    // Lue dans les en-têtes, avant le corps JSON : un inconnu ne fait rien lire.
+    _session: crate::limites_http::Session,
     Json(d): Json<DemandeFichier>,
 ) -> impl IntoResponse {
     let (user_id, _) = match membre(&state, &headers) {
@@ -608,6 +614,8 @@ pub async fn partager(
     State(state): State<Arc<AppState>>,
     Param(id): Param<String>,
     headers: HeaderMap,
+    // Lue dans les en-têtes, avant le corps JSON : un inconnu ne fait rien lire.
+    _session: crate::limites_http::Session,
     Json(d): Json<DemandePartage>,
 ) -> impl IntoResponse {
     let (user_id, username) = match medias::authentifier(&state, &headers) {

@@ -376,6 +376,19 @@ pub(crate) fn upload_valide(id: &str) -> bool {
     (8..=32).contains(&id.len()) && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Envois par morceaux en cours d'un même membre.
+const ENVOIS_EN_COURS_PAR_MEMBRE: usize = 4;
+
+/// La place occupée par un dossier d'envoi (ses morceaux, à plat).
+fn taille_dossier(dossier: &std::path::Path) -> u64 {
+    std::fs::read_dir(dossier)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+        .sum()
+}
+
 pub(crate) fn dossier_partiel(state: &AppState, user_id: u64, upload: &str) -> PathBuf {
     PathBuf::from(&state.data_dir)
         .join("upload-partiel")
@@ -412,6 +425,9 @@ pub(crate) fn authentifier(
 /// `POST /upload/partiel?upload=<id>&index=<n>` : un morceau.
 pub async fn upload_partiel(
     State(state): State<Arc<AppState>>,
+    // Session et place d'envoi : lues dans les en-têtes, **avant** le corps.
+    _session: crate::limites_http::Session,
+    _place: crate::limites_http::PlaceEnvoi,
     Query(params): Query<ParamsMorceau>,
     headers: HeaderMap,
     body: Bytes,
@@ -429,21 +445,41 @@ pub async fn upload_partiel(
     let dossier = dossier_partiel(&state, user_id, &params.upload);
     let max = state.medias.fichier_max;
     let ecrit = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dossier)?;
-        // Le total reçu jusqu'ici, ce morceau compris, reste sous le plafond.
-        let deja: u64 = std::fs::read_dir(&dossier)?
-            .flatten()
-            .filter_map(|e| e.metadata().ok().map(|m| m.len()))
-            .sum();
-        if deja + body.len() as u64 > max {
+        // Les envois en cours de ce membre : les identifiants sont choisis
+        // par le client, et rien n'en bornait le nombre — ni la place, ce
+        // dossier n'entrant dans aucun quota. Quatre à la fois, et à eux
+        // tous jamais plus qu'un fichier entier.
+        let siens = dossier.parent().map(std::path::Path::to_path_buf);
+        let mut deja_tous = 0u64;
+        let mut en_cours = 0usize;
+        if let Some(siens) = &siens {
+            for envoi in std::fs::read_dir(siens).into_iter().flatten().flatten() {
+                if envoi.path() != dossier {
+                    en_cours += 1;
+                }
+                deja_tous += taille_dossier(&envoi.path());
+            }
+        }
+        if !dossier.exists() && en_cours >= ENVOIS_EN_COURS_PAR_MEMBRE {
+            return Err(std::io::Error::other("trop d'envois"));
+        }
+        if deja_tous + body.len() as u64 > max {
+            // L'envoi en cours qui déborde est abandonné ; les autres
+            // restent — ils peuvent finir.
             let _ = std::fs::remove_dir_all(&dossier);
             return Err(std::io::Error::other("trop gros"));
         }
+        std::fs::create_dir_all(&dossier)?;
         std::fs::write(dossier.join(format!("{:05}", params.index)), &body)
     })
     .await;
     match ecrit {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) if e.to_string().contains("trop d'envois") => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "trop d'envois en cours — attends que l'un d'eux finisse",
+        )
+            .into_response(),
         Ok(Err(e)) if e.to_string().contains("trop gros") => {
             tracing::warn!(
                 "morceaux refusés : plus de {} Mo (membre {user_id})",
@@ -773,6 +809,8 @@ pub(crate) fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
             .args([
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-show_entries",
                 "format=duration,bit_rate,format_name:stream=codec_type,codec_name,width,height,bit_rate,r_frame_rate",
                 "-of",
@@ -822,47 +860,65 @@ pub(crate) fn sonder(outils: &Outils, source: &Path) -> Result<Sonde, String> {
 /// n'est décodé. C'est de l'une d'elles que part une coupe en copie
 /// (`export::debut_copie_us`).
 pub(crate) fn trames_cles(outils: &Outils, source: &Path) -> Result<Vec<u64>, String> {
+    // En CSV, pas en JSON : un paquet par ligne, et seules les trames clés
+    // restent en mémoire. Le JSON de tous les paquets d'un fichier envoyé
+    // par un membre, chargé en `serde_json::Value`, pesait dix fois sa
+    // taille — et le nombre de paquets, c'est le fichier qui le décide.
     let sortie = executer_borne(
         Command::new(&outils.ffprobe)
             .args([
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-select_streams",
                 "v:0",
                 "-show_entries",
                 "stream=time_base:packet=pts,flags",
                 "-of",
-                "json",
+                "csv=p=0",
             ])
             .arg(source),
         Duration::from_secs(60),
     )?;
-    let v: serde_json::Value =
-        serde_json::from_slice(&sortie).map_err(|e| format!("ffprobe : {e}"))?;
-    Ok(instants_des_trames_cles(&v))
+    Ok(instants_des_trames_cles(&String::from_utf8_lossy(&sortie)))
 }
 
-/// Les trames clés d'une sortie JSON de ffprobe (`packets` avec `pts` et
-/// `flags`, `streams[0].time_base`), en microsecondes arrondies **vers le
-/// haut**. L'arrondi compte : `-ss` cherche la trame clé à ou avant sa
-/// cible, et un instant arrondi au plus proche peut tomber juste avant la
-/// trame — ffprobe écrit 11,797883 pour une trame à 11,7978833 s, et y
-/// chercher retombait sur la trame clé d'avant, une seconde plus tôt.
-fn instants_des_trames_cles(v: &serde_json::Value) -> Vec<u64> {
-    let Some((num, den)) = v["streams"][0]["time_base"]
-        .as_str()
-        .and_then(|t| t.split_once('/'))
-        .and_then(|(n, d)| Some((n.trim().parse::<i128>().ok()?, d.trim().parse::<i128>().ok()?)))
-        .filter(|(n, d)| *n > 0 && *d > 0)
-    else {
+/// Les trames clés d'une sortie CSV de ffprobe — une ligne `pts,flags` par
+/// paquet, et quelque part la base de temps `num/den` du flux —, en
+/// microsecondes arrondies **vers le haut**. L'arrondi compte : `-ss`
+/// cherche la trame clé à ou avant sa cible, et un instant arrondi au plus
+/// proche peut tomber juste avant la trame — ffprobe écrit 11,797883 pour une
+/// trame à 11,7978833 s, et y chercher retombait sur la trame clé d'avant,
+/// une seconde plus tôt.
+fn instants_des_trames_cles(csv: &str) -> Vec<u64> {
+    let mut base = None;
+    let mut pts_cles: Vec<i64> = Vec::new();
+    for ligne in csv.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match ligne.split_once(',') {
+            // Un paquet : on ne garde que les trames clés, datées.
+            Some((pts, flags)) => {
+                if flags.starts_with('K') {
+                    if let Ok(pts) = pts.trim().parse::<i64>() {
+                        pts_cles.push(pts);
+                    }
+                }
+            }
+            // Le flux : sa base de temps.
+            None => {
+                base = ligne
+                    .split_once('/')
+                    .and_then(|(n, d)| Some((n.trim().parse::<i128>().ok()?, d.trim().parse::<i128>().ok()?)))
+                    .filter(|(n, d)| *n > 0 && *d > 0)
+                    .or(base);
+            }
+        }
+    }
+    let Some((num, den)) = base else {
         return Vec::new();
     };
-    let mut instants: Vec<u64> = v["packets"]
-        .as_array()
+    let mut instants: Vec<u64> = pts_cles
         .into_iter()
-        .flatten()
-        .filter(|p| p["flags"].as_str().is_some_and(|f| f.starts_with('K')))
-        .filter_map(|p| p["pts"].as_i64())
         .filter(|pts| *pts >= 0)
         .filter_map(|pts| u64::try_from((i128::from(pts) * num * 1_000_000 + den - 1) / den).ok())
         .collect();
@@ -981,7 +1037,9 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
             && debit <= DEBIT_COPIE_MAX;
         let fils = fils_ffmpeg();
         let mut cmd = commande_ffmpeg(outils);
-        cmd.args(["-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+        // Rien d'autre que des fichiers : un fichier envoyé qui se présenterait
+        // comme une liste de lecture ne fait ouvrir ni réseau ni autre chemin.
+        cmd.args(["-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-i"])
             .arg(&chemin_source);
         match plan_son(&meta) {
             Son::Tout if copie => {
@@ -1039,6 +1097,8 @@ fn normaliser(outils: &Outils, dossier: &Path) -> Result<Meta, String> {
                     "-hide_banner",
                     "-loglevel",
                     "error",
+                    "-protocol_whitelist",
+                    "file",
                     "-ss",
                     a,
                     "-i",
@@ -1147,24 +1207,18 @@ mod tests {
         assert!(!est_video("archive.zip"));
     }
 
-    /// Les trames clés se lisent dans le JSON de ffprobe, triées, arrondies
+    /// Les trames clés se lisent dans le CSV de ffprobe, triées, arrondies
     /// vers le haut à la microseconde : 707873/60000 s = 11,7978833 s donne
-    /// 11 797 884 µs, jamais 11 797 883 (qui tomberait avant la trame).
+    /// 11 797 884 µs, jamais 11 797 883 (qui tomberait avant la trame). La
+    /// base de temps peut venir avant ou après les paquets.
     #[test]
     fn les_trames_cles_s_arrondissent_vers_le_haut() {
-        let v = serde_json::json!({
-            "packets": [
-                {"pts": 707873, "flags": "K__"},
-                {"pts": 708874, "flags": "___"},
-                {"pts": 0, "flags": "K_"},
-                {"flags": "K__"},
-                {"pts": -1024, "flags": "K__"}
-            ],
-            "streams": [{"time_base": "1/60000"}]
-        });
-        assert_eq!(instants_des_trames_cles(&v), [0, 11_797_884]);
+        let csv = "707873,K__\n708874,___\n0,K_\nN/A,K__\n-1024,K__\n1/60000\n";
+        assert_eq!(instants_des_trames_cles(csv), [0, 11_797_884]);
+        let base_d_abord = "1/60000\n707873,K__\n";
+        assert_eq!(instants_des_trames_cles(base_d_abord), [11_797_884]);
         // Sans base de temps lisible : aucune, donc pas de copie.
-        assert!(instants_des_trames_cles(&serde_json::json!({"packets": [{"pts": 0, "flags": "K"}]})).is_empty());
+        assert!(instants_des_trames_cles("0,K\n").is_empty());
     }
 
     #[test]

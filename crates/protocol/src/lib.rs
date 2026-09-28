@@ -998,7 +998,14 @@ pub const PORTE_SLUG_MAX: usize = 24;
 pub fn slug_valide(slug: &str) -> bool {
     (PORTE_SLUG_MIN..=PORTE_SLUG_MAX).contains(&slug.len())
         && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !SLUGS_RESERVES.contains(&slug)
 }
+
+/// Les noms que les routes du serveur prennent déjà : une porte ainsi nommée
+/// avait un lien court (`/diag`, `/upload`…) qui menait ailleurs que chez
+/// elle.
+const SLUGS_RESERVES: [&str; 9] =
+    ["upload", "clips", "tel", "diag", "diag-resume", "admin", "musique", "files", "porte"];
 
 /// Durée de vie maximale d'une porte : six heures, une soirée entière —
 /// une partie avec un invité a déjà duré cinq heures et demie. Une porte

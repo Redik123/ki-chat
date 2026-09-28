@@ -37,6 +37,13 @@ bytes = "1"
 # entier en mémoire par spectateur.
 tokio-util = { version = "0.7", features = ["io"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+# L'horloge de hyper (délai de lecture des en-têtes) : déjà compilé pour
+# axum-server, nommé ici pour régler son constructeur.
+hyper-util = { version = "0.1.18", features = ["server-auto", "tokio"] }
+
+[target.'cfg(unix)'.dependencies]
+# `kill` sur un groupe de processus : yt-dlp et ses enfants partent ensemble.
+libc = "0.2"
 
 [dev-dependencies]
 # Le client WebSocket des tests des portes web : la même bibliothèque

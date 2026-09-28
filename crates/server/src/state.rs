@@ -535,6 +535,9 @@ pub struct AppState {
     /// En mémoire seulement : un redémarrage lève les expulsions, comme
     /// les verrous vocaux.
     pub expulsions: Mutex<HashMap<UserId, Expulsion>>,
+    /// Les places des envois de fichiers lus en même temps : voir
+    /// `limites_http::ENVOIS_SIMULTANES`.
+    pub envois_http: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -588,6 +591,9 @@ impl AppState {
             portes: Default::default(),
             argon2: Arc::new(tokio::sync::Semaphore::new(ARGON2_SIMULTANES)),
             expulsions: Mutex::new(HashMap::new()),
+            envois_http: Arc::new(tokio::sync::Semaphore::new(
+                crate::limites_http::ENVOIS_SIMULTANES,
+            )),
         })
     }
 

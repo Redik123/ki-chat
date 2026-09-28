@@ -464,49 +464,11 @@ fn detecter_avec(data_dir: &str, yt_dlp_force: Option<String>) -> Option<Outils>
     })
 }
 
-/// Lance la commande, lit sa sortie standard, et la tue si elle dépasse le
-/// délai — un extracteur qui traîne ne bloque jamais le serveur.
+/// Lance la commande, lit sa sortie standard — bornée —, et l'arrête avec
+/// tout ce qu'elle a lancé si elle dépasse le délai : un extracteur qui
+/// traîne ne bloque jamais le serveur. Voir `processus::executer_borne`.
 pub(crate) fn executer_borne(cmd: &mut Command, delai: Duration) -> Result<Vec<u8>, String> {
-    let mut enfant = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("lancement impossible : {e}"))?;
-    let mut sortie = enfant.stdout.take().expect("stdout");
-    let mut erreur = enfant.stderr.take().expect("stderr");
-    // Lecture sur un fil à part : le tube doit être vidé pendant qu'on
-    // surveille le délai, sinon un enfant bavard se bloque dessus.
-    let lecteur = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = sortie.read_to_end(&mut buf);
-        buf
-    });
-    let lecteur_err = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = erreur.read_to_end(&mut buf);
-        buf
-    });
-    let debut = Instant::now();
-    let statut = loop {
-        match enfant.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if debut.elapsed() > delai => {
-                let _ = enfant.kill();
-                let _ = enfant.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => break None,
-        }
-    };
-    let sortie = lecteur.join().unwrap_or_default();
-    let erreur = lecteur_err.join().unwrap_or_default();
-    match statut {
-        Some(s) if s.success() => Ok(sortie),
-        Some(_) => Err(resume_erreur(&erreur)),
-        None => Err("délai dépassé".into()),
-    }
+    crate::processus::executer_borne(cmd, delai, resume_erreur)
 }
 
 /// FNV-1a sur 64 bits, en hexadécimal : l'identifiant d'une vignette.
@@ -768,9 +730,10 @@ impl Lecteur {
 struct Enfant(Child);
 
 impl Drop for Enfant {
+    /// Tout le groupe, pas le seul chargeur de yt-dlp : voir
+    /// `processus::arreter`. Tourne sur le fil du lecteur, qui peut attendre.
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        crate::processus::arreter(&mut self.0);
     }
 }
 
@@ -818,37 +781,57 @@ fn pomper(
     tx: &canal::SyncSender<Vec<f32>>,
     pret: &AtomicBool,
 ) -> Result<usize, String> {
-    let mut yt = Command::new(&outils.yt_dlp);
-    yt.args(outils.args_yt_dlp());
-    if let Some(c) = client.filter(|c| *c != "default") {
-        yt.args(["--extractor-args", &format!("youtube:player_client={c}")]);
-    }
-    yt.args(["-f", "bestaudio/best", "-o", "-", "--quiet", "--"])
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut yt = Enfant(yt.spawn().map_err(|e| format!("yt-dlp : {e}"))?);
+    let mut yt = {
+        let mut cmd = Command::new(&outils.yt_dlp);
+        crate::processus::preparer(&mut cmd);
+        cmd.args(outils.args_yt_dlp());
+        if let Some(c) = client.filter(|c| *c != "default") {
+            cmd.args(["--extractor-args", &format!("youtube:player_client={c}")]);
+        }
+        cmd.args(["-f", "bestaudio/best", "-o", "-", "--quiet", "--"])
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Enfant(cmd.spawn().map_err(|e| format!("yt-dlp : {e}"))?)
+    };
     let flux = yt.0.stdout.take().expect("stdout yt-dlp");
-    let mut yt_err = yt.0.stderr.take().expect("stderr yt-dlp");
-    let mut ff = Command::new(&outils.ffmpeg);
-    ff.args(["-loglevel", "error"]);
-    // Avancer dans la piste : le tube ne se rembobine pas, ffmpeg lit et
-    // jette jusqu'à l'instant voulu — yt-dlp télécharge bien plus vite que
-    // le temps réel, dix minutes passent en quelques secondes.
-    if depart_s > 0 {
-        ff.args(["-ss", &depart_s.to_string()]);
-    }
-    ff.args(["-i", "pipe:0", "-vn", "-f", "f32le", "-ar", "48000", "-ac", "2", "pipe:1"])
-        .stdin(Stdio::from(flux))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut ff = Enfant(ff.spawn().map_err(|e| format!("ffmpeg : {e}"))?);
+    let yt_err = yt.0.stderr.take().expect("stderr yt-dlp");
+    // Sa sortie d'erreur se vide à part, bornée : pleine, elle bloquait
+    // yt-dlp en pleine piste.
+    let erreurs = crate::processus::fil("yt-dlp-erreur", move || {
+        crate::processus::lire_borne(yt_err, 64 * 1024).0
+    })?;
+    // La commande de ffmpeg vit dans ce bloc et s'y éteint : gardée plus
+    // longtemps, elle retenait un bout du tube de yt-dlp — si ffmpeg mourait,
+    // yt-dlp ne voyait jamais le tube se fermer et téléchargeait jusqu'au
+    // bout pendant qu'on attendait sa sortie d'erreur.
+    let mut ff = {
+        let mut cmd = Command::new(&outils.ffmpeg);
+        crate::processus::preparer(&mut cmd);
+        cmd.args(["-loglevel", "error"]);
+        // Avancer dans la piste : le tube ne se rembobine pas, ffmpeg lit et
+        // jette jusqu'à l'instant voulu — yt-dlp télécharge bien plus vite
+        // que le temps réel, dix minutes passent en quelques secondes.
+        if depart_s > 0 {
+            cmd.args(["-ss", &depart_s.to_string()]);
+        }
+        // Rien d'autre que le tube : ffmpeg n'ouvre ni fichier ni réseau à
+        // la demande de ce qu'il lit.
+        cmd.args(["-protocol_whitelist", "pipe"]);
+        cmd.args(["-i", "pipe:0", "-vn", "-f", "f32le", "-ar", "48000", "-ac", "2", "pipe:1"])
+            .stdin(Stdio::from(flux))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Enfant(cmd.spawn().map_err(|e| format!("ffmpeg : {e}"))?)
+    };
     let pcm = ff.0.stdout.take().expect("stdout ffmpeg");
     let envoyes = pousser_blocs(pcm, tx, pret);
     if envoyes == 0 {
-        let mut err = Vec::new();
-        let _ = yt_err.read_to_end(&mut err);
+        // ffmpeg n'a rien produit : yt-dlp s'arrête (s'il n'est pas déjà
+        // parti sur son erreur) avant qu'on lise ce qu'il avait à dire.
+        crate::processus::arreter(&mut yt.0);
+        let err = erreurs.join().unwrap_or_default();
         return Err(resume_erreur(&err));
     }
     Ok(envoyes)
@@ -880,7 +863,7 @@ impl Emetteur {
         Ok(Self {
             opus,
             cipher: XChaCha20Poly1305::new(cle.into()),
-            compteur: rand::rng().random::<u64>() >> 1,
+            compteur: rand::rng().random::<u64>() >> 16,
             sortie: vec![0u8; 1400],
         })
     }
@@ -1353,6 +1336,17 @@ mod tests {
         );
         assert_eq!(resume_erreur(b""), "échec");
         assert!(resume_erreur("é".repeat(400).as_bytes()).chars().count() <= 160);
+    }
+
+    /// Le compteur du bot part sous 2⁵³ : la page d'une porte web le lit en
+    /// nombre JavaScript, et au-delà, deux trames voisines y deviennent
+    /// égales — les invités n'entendaient presque rien du bot.
+    #[test]
+    fn le_compteur_du_bot_tient_dans_un_nombre_javascript() {
+        for _ in 0..64 {
+            let e = Emetteur::new(&[7u8; 32]).expect("encodeur");
+            assert!(e.compteur < 1 << 48, "{}", e.compteur);
+        }
     }
 
     /// Une trame chiffrée porte l'en-tête voix du bot et tient dans un
