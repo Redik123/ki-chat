@@ -784,11 +784,14 @@ fn capture_worker(
 /// Ouvre la sortie en natif. `make_writer` reçoit la fréquence réelle du flux
 /// et rend la fonction qui fournit `n` échantillons mono — le même contrat
 /// que la sortie cpal, la fréquence n'étant connue qu'une fois le flux ouvert.
+/// `a_sec` compte les réveils qui trouvent la carte à court en pleine lecture
+/// (voir `render_worker`).
 pub fn open_output<F, W>(
     device_name: Option<&str>,
     make_writer: F,
     alive: Arc<AtomicBool>,
     robust: bool,
+    a_sec: Arc<AtomicU64>,
 ) -> anyhow::Result<(NativeStream, bool)>
 where
     F: FnOnce(u32) -> W + Send + 'static,
@@ -870,6 +873,7 @@ where
                 &mut write,
                 &mut scratch,
                 &alive,
+                &a_sec,
             );
         })
         .context("création du fil de lecture natif")?;
@@ -910,6 +914,13 @@ fn target_padding(rate: u32, robust: bool) -> u32 {
 /// siffler chez tout le monde. À l'arrêt, le mix est sondé toutes les 20 ms ;
 /// au premier échantillon non nul, l'amorce sondée est pré-chargée puis le
 /// flux repart — rien n'est perdu, au prix de ~20 ms de latence au réveil.
+///
+/// C'est aussi le seul endroit où se voit la carte son à court : un réveil
+/// qui trouve son tampon vide (`GetCurrentPadding` à 0) alors qu'on y avait
+/// mis du son, c'est un fil réveillé trop tard — la machine saturée, ou la
+/// carte USB qui réclame par à-coups — et un craquement. Compté dans
+/// `a_sec`. Le tampon de lecture d'un locuteur à sec est une autre histoire,
+/// celle du réseau (`jitter::Playout`).
 #[allow(clippy::too_many_arguments)]
 fn render_worker<W: FnMut(&mut [f32])>(
     open: OpenClient,
@@ -920,6 +931,7 @@ fn render_worker<W: FnMut(&mut [f32])>(
     write: &mut W,
     scratch: &mut Vec<f32>,
     alive: &AtomicBool,
+    a_sec: &AtomicU64,
 ) {
     /// Silence continu au-delà duquel la sortie est mise en veille.
     const IDLE_STOP: Duration = Duration::from_secs(5);
@@ -928,6 +940,9 @@ fn render_worker<W: FnMut(&mut [f32])>(
 
     let mut last_audio = Instant::now();
     let mut running = true;
+    // Le dernier bloc écrit portait-il du son ? Une carte vidée pendant un
+    // silence n'a rien fait entendre : seul le vide après du son compte.
+    let mut sonore = false;
     while !stop.load(Ordering::Relaxed) {
         unsafe {
             if running {
@@ -944,6 +959,9 @@ fn render_worker<W: FnMut(&mut [f32])>(
                         break;
                     }
                 };
+                if padding == 0 && sonore {
+                    a_sec.fetch_add(1, Ordering::Relaxed);
+                }
                 // Compléter jusqu'à la cible seulement : remplir tout le
                 // tampon transformerait la réserve anti-craquement en
                 // latence pure.
@@ -953,6 +971,7 @@ fn render_worker<W: FnMut(&mut [f32])>(
                 }
                 match fill_render(&open, &render, want, write, scratch) {
                     Ok(silent) => {
+                        sonore = !silent;
                         if !silent {
                             last_audio = Instant::now();
                         } else if last_audio.elapsed() > IDLE_STOP {
@@ -998,6 +1017,7 @@ fn render_worker<W: FnMut(&mut [f32])>(
                         break;
                     }
                     running = true;
+                    sonore = true;
                     last_audio = Instant::now();
                     tracing::debug!("sortie réveillée");
                 }

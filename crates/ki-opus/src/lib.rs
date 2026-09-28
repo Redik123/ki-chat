@@ -321,13 +321,16 @@ impl Dred {
         offset_samples: i32,
         pcm: &mut [f32],
     ) -> Result<usize> {
+        // libopus attend une taille de trame PAR VOIE, comme pour
+        // `decode_float` : `pcm.len()` en stéréo lui promettait deux fois la
+        // place du tampon, et il y aurait écrit au-delà.
         let n = unsafe {
             opus_decoder_dred_decode_float(
                 decoder.ptr,
                 self.state,
                 offset_samples,
                 pcm.as_mut_ptr(),
-                pcm.len() as c_int,
+                (pcm.len() / decoder.channels) as c_int,
             )
         };
         check(n).map(|n| n as usize)
@@ -340,5 +343,40 @@ impl Drop for Dred {
             opus_dred_free(self.state);
             opus_dred_decoder_destroy(self.dec);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un aller-retour mono puis stéréo : encodeur et décodeur comptent la
+    /// taille de trame par voie, comme libopus l'attend.
+    #[test]
+    fn aller_retour_mono_et_stereo() {
+        for (voies, n) in [(Channels::Mono, 1usize), (Channels::Stereo, 2)] {
+            let mut enc = Encoder::new(48_000, voies, Application::Voip).unwrap();
+            let mut dec = Decoder::new(48_000, voies).unwrap();
+            let pcm: Vec<f32> =
+                (0..960 * n).map(|i| ((i / n) as f32 * 0.05).sin() * 0.3).collect();
+            let mut paquet = [0u8; 1500];
+            let taille = enc.encode_float(&pcm, &mut paquet).unwrap();
+            let mut sortie = vec![0f32; 960 * n];
+            assert_eq!(dec.decode_float(&paquet[..taille], &mut sortie, false).unwrap(), 960);
+        }
+    }
+
+    /// La reconstruction DRED reste dans son tampon en stéréo : elle passait
+    /// `pcm.len()` comme taille de trame, soit deux fois la place réelle, et
+    /// libopus écrivait au-delà.
+    #[test]
+    fn dred_en_stereo_reste_dans_son_tampon() {
+        let mut dec = Decoder::new(48_000, Channels::Stereo).unwrap();
+        let dred = Dred::new().unwrap();
+        const TEMOIN: f32 = 12345.0;
+        let mut tampon = vec![TEMOIN; 960 * 2 * 2];
+        let (trame, reste) = tampon.split_at_mut(960 * 2);
+        assert_eq!(dred.decode_into(&mut dec, 960, trame).unwrap(), 960);
+        assert!(reste.iter().all(|&s| s == TEMOIN), "écrit au-delà du tampon");
     }
 }

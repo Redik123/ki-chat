@@ -9066,8 +9066,9 @@ impl KiApp {
                                         texte.push_str(&format!("{quoi} : {valeur}\n"));
                                     }
                                     texte.push_str(&format!(
-                                        "Trames incomplètes (audio) : {}\n",
-                                        voice.stats.underruns
+                                        "Trames incomplètes (audio) : {}\n\
+                                         Carte son à sec (audio) : {}\n",
+                                        voice.stats.underruns, voice.stats.sortie_a_sec
                                     ));
                                     // Le diagnostic voyage avec : celui qui reçoit
                                     // ce relevé n'a alors plus rien à demander.
@@ -9094,24 +9095,23 @@ impl KiApp {
                                 }
                                 // Les trous audio vivent dans le moteur, pas dans
                                 // l'interface, mais c'est le même relevé pour qui
-                                // le lit. Zéro est la seule bonne valeur.
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        RichText::new("Trames incomplètes (audio)")
-                                            .color(TEXT_DIM)
-                                            .size(11.5),
-                                    );
-                                    ui.label(
-                                        RichText::new(voice.stats.underruns.to_string())
-                                            .color(if voice.stats.underruns == 0 {
-                                                SPEAK
-                                            } else {
-                                                DANGER
-                                            })
-                                            .monospace()
-                                            .size(11.5),
-                                    );
-                                });
+                                // le lit. Zéro est la seule bonne valeur — pour
+                                // la voix arrivée trop tard comme pour la carte
+                                // son à court, deux causes distinctes.
+                                for (quoi, combien) in [
+                                    ("Trames incomplètes (audio)", voice.stats.underruns),
+                                    ("Carte son à sec (audio)", voice.stats.sortie_a_sec),
+                                ] {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(RichText::new(quoi).color(TEXT_DIM).size(11.5));
+                                        ui.label(
+                                            RichText::new(combien.to_string())
+                                                .color(if combien == 0 { SPEAK } else { DANGER })
+                                                .monospace()
+                                                .size(11.5),
+                                        );
+                                    });
+                                }
                             }
 
                         }
@@ -9468,8 +9468,8 @@ impl KiApp {
                                     .on_hover_text(
                                         "tampon de lecture trois fois plus profond : pour un PC \
                                          que le jeu sature ou une carte son USB fragile, quand \
-                                         le docteur compte des trames incomplètes (craquements, \
-                                         micro-coupures dans ce que tu entends).",
+                                         le docteur trouve la carte son à sec (craquements, \
+                                         micro-coupures dans tout ce que tu entends).",
                                     )
                                     .changed()
                                 {

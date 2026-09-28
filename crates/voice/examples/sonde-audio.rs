@@ -11,7 +11,7 @@ use std::sync::Arc;
 fn main() -> anyhow::Result<()> {
     let cfg = ki_voice::VoiceConfig::new(1, [0u8; 32]);
     // Aucun réseau : l'émission part dans le vide, la réception reste muette.
-    let send: ki_voice::DatagramSend = Arc::new(|_d: &[u8]| {});
+    let send: ki_voice::DatagramSend = Arc::new(|_d: &[u8]| true);
     let (_tx, rx) = std::sync::mpsc::channel();
 
     let engine = ki_voice::VoiceEngine::start(cfg, send, rx)?;
@@ -29,6 +29,13 @@ fn main() -> anyhow::Result<()> {
         "trames incomplètes (sous-alimentations) : {}{}",
         stats.underruns,
         if stats.underruns == 0 { "" } else { "  ← à signaler" }
+    );
+    // La carte son à court en pleine lecture : l'autre craquement, celui de
+    // la machine. Mesuré par le moteur natif seulement.
+    println!(
+        "carte son à sec : {}{}",
+        stats.sortie_a_sec,
+        if stats.sortie_a_sec == 0 { "" } else { "  ← à signaler" }
     );
     // Le docteur : ce qui s'interpose, ce que Windows autorise, et ce qu'il
     // faut essayer. C'est la partie qu'on se fait copier-coller quand

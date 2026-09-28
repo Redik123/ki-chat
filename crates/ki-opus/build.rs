@@ -7,7 +7,7 @@
 //! téléchargement.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // libopus 1.6.1 (14 janv. 2026) : dernière stable, poids neuronaux inclus
 // dans le tarball (rien d'autre à télécharger). Empreinte vérifiée contre le
@@ -17,20 +17,24 @@ use std::path::PathBuf;
 const OPUS_URL: &str = "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz";
 const OPUS_SHA256: &str = "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1";
 const OPUS_DIR: &str = "opus-1.6.1"; // nom du dossier dans le tarball
+/// La même, telle que l'écrit le fichier `package_version` des sources.
+const OPUS_VERSION: &str = "1.6.1";
+/// Posée une fois les sources extraites en entier (voir `extraire`).
+const MARQUE: &str = ".ki-extraction-complete";
 
 fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
     let src_dir = match std::env::var("KI_OPUS_SRC") {
-        Ok(dir) => PathBuf::from(dir),
+        Ok(dir) => {
+            let dir = PathBuf::from(dir);
+            verifier_version(&dir);
+            dir
+        }
         Err(_) => {
             let extracted = out.join(OPUS_DIR);
-            if !extracted.join("CMakeLists.txt").exists() {
-                let bytes = download_verified();
-                let gz = flate2::read::GzDecoder::new(&bytes[..]);
-                tar::Archive::new(gz)
-                    .unpack(&out)
-                    .expect("extraction du tarball opus");
+            if !extracted.join(MARQUE).exists() {
+                extraire(&out, &extracted);
             }
             extracted
         }
@@ -53,6 +57,38 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
     println!("cargo:rustc-link-lib=static=opus");
     println!("cargo:rerun-if-env-changed=KI_OPUS_SRC");
+}
+
+/// Des sources fournies à la main doivent être celles de la version épinglée :
+/// le format DRED change d'une version à l'autre, et un client compilé sur
+/// d'autres sources ne se comprendrait plus avec les autres, sans rien dire.
+fn verifier_version(dir: &Path) {
+    let attendu = format!("PACKAGE_VERSION=\"{OPUS_VERSION}\"");
+    let lu = std::fs::read_to_string(dir.join("package_version")).unwrap_or_default();
+    assert!(
+        lu.contains(&attendu),
+        "KI_OPUS_SRC ({}) ne contient pas les sources de libopus {OPUS_VERSION} \
+         (fichier package_version) : le format DRED en dépend",
+        dir.display()
+    );
+}
+
+/// Extrait le tarball dans un dossier à part, mis en place d'un seul
+/// renommage puis marqué. Extraire en place laissait, après un build
+/// interrompu, un arbre à moitié écrit que le test d'existence prenait pour
+/// complet : chaque build suivant échouait alors, jusqu'au `cargo clean`.
+fn extraire(out: &Path, extracted: &Path) {
+    let bytes = download_verified();
+    let partiel = out.join("extraction-partielle");
+    let _ = std::fs::remove_dir_all(&partiel);
+    let _ = std::fs::remove_dir_all(extracted);
+    let gz = flate2::read::GzDecoder::new(&bytes[..]);
+    tar::Archive::new(gz)
+        .unpack(&partiel)
+        .expect("extraction du tarball opus");
+    std::fs::rename(partiel.join(OPUS_DIR), extracted).expect("mise en place des sources opus");
+    std::fs::write(extracted.join(MARQUE), b"").expect("marque d'extraction complète");
+    let _ = std::fs::remove_dir_all(&partiel);
 }
 
 fn download_verified() -> Vec<u8> {

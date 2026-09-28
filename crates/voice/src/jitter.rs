@@ -57,6 +57,11 @@ const CONCEAL_MAX: u16 = 10;
 /// de resynchroniser. Un vrai duplicata n'arrive jamais en série continue.
 const BEHIND_RESYNC: u8 = 5;
 
+/// Silence après lequel des paquets en attente derrière un trou sont joués
+/// quand même : le temps qu'auraient mis à venir les `MAX_PENDING` paquets
+/// qui déclenchent d'ordinaire la dissimulation (voir `liberer_la_queue`).
+const QUEUE_EN_ATTENTE: Duration = Duration::from_millis(MAX_PENDING as u64 * FRAME_MS as u64);
+
 /// Audio décodé, prêt à sortir vers la carte son.
 ///
 /// **Séparé de l'état de décodage, et c'est tout l'intérêt.** Le rappel de
@@ -85,6 +90,18 @@ pub struct Playout {
     /// reproduire, ni prouver qu'un correctif l'a supprimé — ce qui rend P4
     /// invérifiable.
     starved: u64,
+    /// Tampon trouvé à sec depuis le dernier dépôt, pas encore jugé.
+    ///
+    /// Au moment où le tampon se vide, rien ne dit si c'est un trou ou la
+    /// fin d'une prise de parole : l'émetteur se tait sans prévenir (touche
+    /// relâchée, détection vocale retombée), et chaque fin de phrase vidait
+    /// le tampon comme une vraie famine. Une soirée en comptait des
+    /// centaines, et le docteur audio envoyait régler la sortie une machine
+    /// qui n'avait rien. C'est le paquet suivant qui tranche, au dépôt : s'il
+    /// arrive dans la foulée du précédent, la voix coulait encore et le trou
+    /// s'est entendu ; s'il arrive après un silence, c'était une fin de
+    /// phrase — la même frontière que la mesure de gigue (`TALKSPURT_MS`).
+    trous_en_suspens: u64,
 }
 
 impl Playout {
@@ -95,6 +112,7 @@ impl Playout {
             level: 0.0,
             prime_frames: 2,
             starved: 0,
+            trous_en_suspens: 0,
         }
     }
 
@@ -141,8 +159,9 @@ impl Playout {
         }
         if self.ready.is_empty() {
             // Amorcé, puis à sec : la trame entière part en silence. C'est le
-            // trou franc, celui qui s'entend.
-            self.starved += 1;
+            // trou franc, celui qui s'entend — si la voix n'était pas
+            // simplement finie, ce que dira le prochain dépôt.
+            self.trous_en_suspens += 1;
             self.primed = false;
             self.level *= 0.85;
             return false;
@@ -152,7 +171,7 @@ impl Playout {
         // muet. Moins net à l'oreille que le précédent, mais c'est le même
         // défaut — la carte a demandé plus que ce tampon ne portait.
         if n < out.len() {
-            self.starved += 1;
+            self.trous_en_suspens += 1;
         }
         let mut peak = 0f32;
         for o in out.iter_mut().take(n) {
@@ -282,9 +301,15 @@ impl Receiver {
         // la précédente. Compter cet écart comme de la gigue faisait bondir
         // l'estimation à plusieurs centaines de millisecondes sur un réseau
         // parfait, et le tampon retenait alors le début de chaque phrase.
+        //
+        // La même frontière juge les trous en suspens du tampon de lecture
+        // (voir `Playout::trous_en_suspens`) : le premier paquet d'une
+        // reprise de parole les efface au lieu de les compter.
+        let mut reprise_de_parole = true;
         if let Some(prev) = self.last_arrival {
             let delta_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
             if delta_ms < TALKSPURT_MS {
+                reprise_de_parole = false;
                 let deviation = (delta_ms - FRAME_MS).abs();
                 self.jitter_ms += (deviation - self.jitter_ms) / 8.0;
             } else if !self.pending.is_empty() {
@@ -330,20 +355,72 @@ impl Receiver {
         self.behind_run = 0;
         self.pending.insert(seq, payload.to_vec());
 
-        // Draine tout ce qui est décodable dans l'ordre. Tout ce bloc décode
-        // vers `self.decoded`, sans tenir le moindre verrou : c'est la partie
-        // coûteuse, et le rappel de sortie ne doit jamais l'attendre.
+        let (lost, recovered, delivered) = self.drainer(false);
+
+        // Profondeur de cette livraison — comptée sur les seuls paquets
+        // réellement reçus : les trames de dissimulation d'un trou réseau ne
+        // sont pas une rafale, et les compter épinglait le tampon au plafond
+        // pendant des minutes après une simple coupure de 2 s. Bornée au
+        // plafond utile de `prime_frames` (8), et oubli progressif : le
+        // tampon redescend quand le lien redevient régulier.
+        self.burst_frames = self.burst_frames.max(delivered.min(8));
+        if self.last_burst_decay.elapsed() > Duration::from_secs(5) {
+            self.burst_frames = self.burst_frames.saturating_sub(1);
+            self.last_burst_decay = now;
+        }
+
+        self.deposer(reprise_de_parole);
+        (lost, recovered)
+    }
+
+    /// Des paquets attendent derrière un trou.
+    pub fn a_une_queue(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Joue la queue d'une phrase restée coincée derrière un paquet perdu.
+    ///
+    /// Un trou n'est dissimulé que lorsque `MAX_PENDING` paquets l'ont
+    /// dépassé : c'est laisser sa chance au retardataire. Mais en fin de
+    /// phrase, ces paquets-là ne viennent jamais — l'émetteur s'est tu. Les
+    /// derniers mots restaient en attente jusqu'à la phrase suivante, qui les
+    /// jetait (ou les rejouait en tête, sous 200 ms). Passé le temps que ces
+    /// paquets auraient mis à venir, on dissimule le trou et l'on joue ce qui
+    /// attendait. À appeler régulièrement, hors du rappel de sortie : c'est
+    /// du décodage.
+    pub fn liberer_la_queue(&mut self) -> (u64, u64) {
+        let Some(dernier) = self.last_arrival else {
+            return (0, 0);
+        };
+        if self.pending.is_empty() || dernier.elapsed() < QUEUE_EN_ATTENTE {
+            return (0, 0);
+        }
+        let (lost, recovered, _) = self.drainer(true);
+        // Ce qui attendait suit un trou que la carte a pu entendre : la
+        // voix n'était pas finie, les trous en suspens se comptent.
+        self.deposer(false);
+        (lost, recovered)
+    }
+
+    /// Draine tout ce qui est décodable dans l'ordre, vers `self.decoded`,
+    /// sans tenir le moindre verrou : c'est la partie coûteuse, et le rappel
+    /// de sortie ne doit jamais l'attendre. `forcer` dissimule aussi les trous
+    /// que trop peu de paquets ont encore dépassés (voir `liberer_la_queue`).
+    /// Rend (trames perdues, trames récupérées, paquets livrés).
+    fn drainer(&mut self, forcer: bool) -> (u64, u64, usize) {
         self.decoded.clear();
         let mut lost = 0u64;
         let mut recovered = 0u64;
         let mut delivered = 0usize;
-        let mut next = self.next_seq.unwrap();
+        let Some(mut next) = self.next_seq else {
+            return (0, 0, 0);
+        };
         loop {
             if let Some(p) = self.pending.remove(&next) {
                 self.decode_into_ready(&p, false);
                 self.dred_carrier = None;
                 delivered += 1;
-            } else if self.pending.len() > MAX_PENDING {
+            } else if self.pending.len() > MAX_PENDING || (forcer && !self.pending.is_empty()) {
                 // Un trou plus profond que ce qu'on dissimule trame à trame ?
                 // On saute à son bord : ces trames sont perdues quoi qu'il
                 // arrive (l'écrêtage de latence les jetterait), autant ne pas
@@ -378,19 +455,13 @@ impl Receiver {
             next = next.wrapping_add(1);
         }
         self.next_seq = Some(next);
+        (lost, recovered, delivered)
+    }
 
-        // Profondeur de cette livraison — comptée sur les seuls paquets
-        // réellement reçus : les trames de dissimulation d'un trou réseau ne
-        // sont pas une rafale, et les compter épinglait le tampon au plafond
-        // pendant des minutes après une simple coupure de 2 s. Bornée au
-        // plafond utile de `prime_frames` (8), et oubli progressif : le
-        // tampon redescend quand le lien redevient régulier.
-        self.burst_frames = self.burst_frames.max(delivered.min(8));
-        if self.last_burst_decay.elapsed() > Duration::from_secs(5) {
-            self.burst_frames = self.burst_frames.saturating_sub(1);
-            self.last_burst_decay = now;
-        }
-
+    /// Dépose ce que `drainer` a décodé dans le tampon de lecture, et juge
+    /// les trous en suspens : `reprise_de_parole` les efface (la voix venait
+    /// de finir), sinon ils sont comptés.
+    fn deposer(&mut self, reprise_de_parole: bool) {
         // Anti-dérive de latence : au-delà de la cible adaptative, on rattrape
         // en sautant de l'audio ancien. L'écrêtage se fait **avant** le
         // verrou : un trou réseau de plusieurs secondes fait décoder jusqu'à
@@ -407,6 +478,13 @@ impl Receiver {
         {
             let mut playout = self.playout.lock().unwrap();
             playout.prime_frames = prime;
+            // Les trous constatés depuis le dépôt précédent sont jugés ici :
+            // la voix coulait encore (famine, comptée), ou elle venait de
+            // finir (rien à compter).
+            let trous = std::mem::take(&mut playout.trous_en_suspens);
+            if !reprise_de_parole {
+                playout.starved += trous;
+            }
             // Ce que le dépôt va faire déborder est retiré d'abord : la
             // section critique reste bornée par `cap`, sans réallocation.
             let over = (playout.ready.len() + self.decoded.len()).saturating_sub(cap);
@@ -415,7 +493,6 @@ impl Receiver {
             playout.ready.extend(self.decoded.iter().copied());
         }
         self.decoded.clear();
-        (lost, recovered)
     }
 
     /// Tente de resynthétiser la trame manquante `missing` depuis la
@@ -498,6 +575,76 @@ mod tests {
         }
         let mut out = [0f32; FRAME_SAMPLES];
         assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
+    }
+
+    /// Fait tourner la sortie jusqu'à trouver le tampon de lecture à sec.
+    fn vider(rx: &Receiver) {
+        let playout = rx.playout();
+        let mut p = playout.lock().unwrap();
+        let mut out = [0f32; FRAME_SAMPLES];
+        for _ in 0..20 {
+            out.fill(0.0);
+            p.mix_into(&mut out, 1.0);
+        }
+    }
+
+    /// Une fin de prise de parole vide le tampon : ce n'est pas une famine.
+    /// Le paquet suivant, arrivé après un silence, efface le trou en suspens
+    /// au lieu de le compter.
+    #[test]
+    fn une_fin_de_phrase_n_est_pas_une_famine() {
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        for seq in 0..4 {
+            rx.push(seq, &encoded_frame(&mut enc, 0.1));
+        }
+        vider(&rx);
+        // Une demi-seconde de silence, puis une nouvelle phrase.
+        rx.last_arrival = Instant::now().checked_sub(Duration::from_millis(500));
+        rx.push(4, &encoded_frame(&mut enc, 0.1));
+        assert_eq!(rx.playout().lock().unwrap().take_starvations(), 0);
+    }
+
+    /// Le même tampon à sec au milieu d'un flux qui coule encore — le paquet
+    /// suivant arrive dans la foulée du précédent — est un trou qui s'entend.
+    #[test]
+    fn un_trou_en_pleine_parole_est_une_famine() {
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        for seq in 0..4 {
+            rx.push(seq, &encoded_frame(&mut enc, 0.1));
+        }
+        vider(&rx);
+        // Jugé au dépôt suivant seulement : rien n'est compté avant.
+        assert_eq!(rx.playout().lock().unwrap().take_starvations(), 0);
+        rx.push(4, &encoded_frame(&mut enc, 0.1));
+        assert_eq!(rx.playout().lock().unwrap().take_starvations(), 1);
+    }
+
+    /// La fin d'une phrase coincée derrière un paquet perdu finit par être
+    /// jouée, même quand plus aucun paquet ne vient la pousser.
+    #[test]
+    fn la_fin_d_une_phrase_derriere_un_trou_est_jouee() {
+        let mut enc = new_encoder();
+        let mut rx = Receiver::new();
+        for seq in 0..3 {
+            rx.push(seq, &encoded_frame(&mut enc, 0.1));
+        }
+        // Le paquet 3 se perd ; 4 et 5 finissent la phrase, puis plus rien.
+        let _ = encoded_frame(&mut enc, 0.1);
+        rx.push(4, &encoded_frame(&mut enc, 0.1));
+        rx.push(5, &encoded_frame(&mut enc, 0.1));
+        assert!(rx.a_une_queue(), "4 et 5 attendent le retardataire");
+        let avant = rx.playout().lock().unwrap().ready.len();
+        // Trop tôt : le paquet 3 a encore sa chance.
+        assert_eq!(rx.liberer_la_queue(), (0, 0));
+        // Le temps qu'auraient mis à venir les paquets qui l'auraient dépassé.
+        rx.last_arrival = Instant::now().checked_sub(QUEUE_EN_ATTENTE);
+        let (perdues, _) = rx.liberer_la_queue();
+        assert_eq!(perdues, 1);
+        assert!(!rx.a_une_queue());
+        let apres = rx.playout().lock().unwrap().ready.len();
+        assert_eq!(apres - avant, 3 * FRAME_SAMPLES, "le trou dissimulé, puis 4 et 5");
     }
 
     #[test]

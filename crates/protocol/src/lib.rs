@@ -3633,6 +3633,15 @@ pub const VOICE_VERSION: u8 = 2;
 pub const VOICE_HEADER_LEN: usize = 19;
 /// Taille max d'un paquet : 20 ms d'Opus à 128 kbps + tag tient très large.
 pub const VOICE_MAX_PACKET: usize = 1400;
+/// Ce qu'un datagramme QUIC porte à coup sûr, en-têtes de ki-chat compris.
+///
+/// Au MTU initial de 1 200 octets — le plancher que QUIC garantit, avant que
+/// la découverte du chemin ne l'élargisse, ce qu'elle ne fait pas partout —
+/// quinn loge environ 1 160 octets par datagramme, ses propres en-têtes
+/// posés. Un paquet plus gros ne part pas : l'envoi échoue sans bruit, et
+/// 20 ms de son disparaissent à chaque pic d'un débit élevé. Les encodeurs
+/// taillent donc leurs trames pour tenir dessous, marge comprise.
+pub const DATAGRAMME_SUR: usize = 1100;
 
 pub struct VoicePacket<'a> {
     pub id: u64,

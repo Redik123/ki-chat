@@ -83,7 +83,13 @@ impl GameAudio {
                 // Le flux vit aussi longtemps que ce fil.
                 let _flux = flux;
                 let mut accum: Vec<f32> = Vec::with_capacity(TRAME * 2 * 4);
-                let mut sortie = vec![0u8; 1500];
+                // Taillée pour qu'un paquet — en-tête et tag compris — tienne
+                // dans un datagramme au MTU initial de QUIC : au-delà, il
+                // n'aurait pas quitté la machine.
+                let mut sortie = vec![
+                    0u8;
+                    ki_protocol::DATAGRAMME_SUR - ki_protocol::AUDIO_HEADER_LEN - 16
+                ];
                 while !stop_thread.load(Ordering::Relaxed) {
                     // L'instant (µs depuis l'origine) où finit ce qui attend
                     // dans `accum` : le dernier bloc reçu vient d'être capturé.

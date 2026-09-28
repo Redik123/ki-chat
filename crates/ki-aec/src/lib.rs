@@ -5,8 +5,19 @@
 //! temps de retard. Le débruitage n'y peut rien — l'écho EST de la voix.
 //! L'annulateur, lui, connaît ce qui vient d'être joué (le signal
 //! « lointain ») : un filtre adaptatif apprend le trajet acoustique
-//! haut-parleurs → pièce → micro et soustrait sa contribution de la capture,
-//! puis la suppression de résidu efface ce que le filtre a laissé.
+//! haut-parleurs → pièce → micro et soustrait sa contribution de la capture.
+//!
+//! Le filtre seul, sans l'étage « suppression de résidu » de Speex
+//! (`speex_preprocess`) qui le suivait jusqu'à la 0.1.51. Débruitage coupé
+//! — la chaîne du moteur a déjà le sien —, cet étage forçait un gain de 1
+//! sur toutes les bandes (`preprocess.c`, « If noise suppression is off,
+//! don't apply the gain ») : il ne supprimait rien. Et comme il travaille en
+//! recouvrement sur deux trames, il rendait la trame PRÉCÉDENTE : 20 ms de
+//! retard sur la voix de tout le monde, l'annulation étant active par
+//! défaut. Le rallumer pour de bon (débruitage sans plancher) garde ces
+//! 20 ms et mange la voix locale en double parole — 2,5 à 8,4 dB au banc,
+//! contre 1,6 aujourd'hui. L'écho non linéaire (haut-parleurs qui saturent)
+//! reste donc ce que le filtre linéaire ne sait pas enlever, comme avant.
 //!
 //! Contrat d'intégration : appeler [`Aec::process`] pour CHAQUE trame de
 //! capture, avec la trame de lecture de la même époque — y compris des
@@ -22,11 +33,6 @@ use std::os::raw::{c_int, c_void};
 struct SpeexEchoState {
     _opaque: [u8; 0],
 }
-#[repr(C)]
-struct SpeexPreprocessState {
-    _opaque: [u8; 0],
-}
-
 extern "C" {
     fn speex_echo_state_init(frame_size: c_int, filter_length: c_int) -> *mut SpeexEchoState;
     fn speex_echo_state_destroy(st: *mut SpeexEchoState);
@@ -37,32 +43,14 @@ extern "C" {
         out: *mut i16,
     );
     fn speex_echo_ctl(st: *mut SpeexEchoState, request: c_int, ptr: *mut c_void) -> c_int;
-
-    fn speex_preprocess_state_init(
-        frame_size: c_int,
-        sampling_rate: c_int,
-    ) -> *mut SpeexPreprocessState;
-    fn speex_preprocess_state_destroy(st: *mut SpeexPreprocessState);
-    fn speex_preprocess_run(st: *mut SpeexPreprocessState, x: *mut i16) -> c_int;
-    fn speex_preprocess_ctl(
-        st: *mut SpeexPreprocessState,
-        request: c_int,
-        ptr: *mut c_void,
-    ) -> c_int;
 }
 
-// Les identifiants de contrôle, tels que speex_echo.h et speex_preprocess.h
-// les définissent.
+// L'identifiant de contrôle, tel que speex_echo.h le définit.
 const SPEEX_ECHO_SET_SAMPLING_RATE: c_int = 24;
-const SPEEX_PREPROCESS_SET_DENOISE: c_int = 0;
-const SPEEX_PREPROCESS_SET_AGC: c_int = 2;
-const SPEEX_PREPROCESS_SET_ECHO_STATE: c_int = 24;
 
-/// L'annulateur : filtre adaptatif + suppression de résidu, pour un flux
-/// mono à fréquence fixe.
+/// L'annulateur : un filtre adaptatif, pour un flux mono à fréquence fixe.
 pub struct Aec {
     echo: *mut SpeexEchoState,
-    residu: *mut SpeexPreprocessState,
     frame: usize,
     rec: Vec<i16>,
     play: Vec<i16>,
@@ -90,30 +78,8 @@ impl Aec {
                 SPEEX_ECHO_SET_SAMPLING_RATE,
                 &mut hz as *mut c_int as *mut c_void,
             );
-            let residu = speex_preprocess_state_init(frame as c_int, rate as c_int);
-            if residu.is_null() {
-                speex_echo_state_destroy(echo);
-                return None;
-            }
-            // La suppression de résidu seulement : le débruitage et le gain
-            // automatique de Speex restent éteints — la chaîne du moteur a
-            // déjà les siens, et deux débruiteurs en série mangent la voix.
-            let mut off: c_int = 0;
-            speex_preprocess_ctl(
-                residu,
-                SPEEX_PREPROCESS_SET_DENOISE,
-                &mut off as *mut c_int as *mut c_void,
-            );
-            let mut off2: c_int = 0;
-            speex_preprocess_ctl(
-                residu,
-                SPEEX_PREPROCESS_SET_AGC,
-                &mut off2 as *mut c_int as *mut c_void,
-            );
-            speex_preprocess_ctl(residu, SPEEX_PREPROCESS_SET_ECHO_STATE, echo as *mut c_void);
             Some(Self {
                 echo,
-                residu,
                 frame,
                 rec: vec![0; frame],
                 play: vec![0; frame],
@@ -141,7 +107,6 @@ impl Aec {
                 self.play.as_ptr(),
                 self.out.as_mut_ptr(),
             );
-            speex_preprocess_run(self.residu, self.out.as_mut_ptr());
         }
         for (dst, &src) in near.iter_mut().zip(self.out.iter()) {
             *dst = src as f32 / 32768.0;
@@ -152,7 +117,6 @@ impl Aec {
 impl Drop for Aec {
     fn drop(&mut self) {
         unsafe {
-            speex_preprocess_state_destroy(self.residu);
             speex_echo_state_destroy(self.echo);
         }
     }
@@ -238,5 +202,51 @@ mod tests {
             apres > avant * 0.7,
             "la voix a été mangée sans écho à enlever : {apres:.4} pour {avant:.4}"
         );
+    }
+
+    /// Corrélation normalisée : 1 pour deux signaux identiques, autour de 0
+    /// pour deux bruits indépendants — et 0 face au silence.
+    fn correlation(a: &[f32], b: &[f32]) -> f64 {
+        let (mut ab, mut aa, mut bb) = (0f64, 0f64, 0f64);
+        for (&x, &y) in a.iter().zip(b) {
+            ab += x as f64 * y as f64;
+            aa += x as f64 * x as f64;
+            bb += y as f64 * y as f64;
+        }
+        if aa == 0.0 || bb == 0.0 {
+            return 0.0;
+        }
+        ab / (aa * bb).sqrt()
+    }
+
+    /// Et sans retard : la trame rendue est celle qu'on vient de donner, pas
+    /// la précédente. L'étage de suppression de résidu rendait la trame
+    /// d'avant, à l'échantillon près — 20 ms de plus sur toute voix qui
+    /// partait, sans que les deux tests du dessus, qui ne mesurent que des
+    /// niveaux, puissent le voir.
+    #[test]
+    fn la_capture_ressort_sans_retard() {
+        let mut aec = Aec::new(FRAME, 4800, RATE).expect("création de l'annulateur");
+        let silence = vec![0f32; FRAME];
+        let mut noise = Noise(0x5EED_1234);
+        let mut precedente: Option<Vec<f32>> = None;
+        for n in 0..20 {
+            let entree = noise.frame();
+            let mut near = entree.clone();
+            aec.process(&mut near, &silence);
+            let avec_elle = correlation(&near, &entree);
+            assert!(
+                avec_elle > 0.95,
+                "trame {n} : la sortie ne ressemble pas à l'entrée ({avec_elle:.3})"
+            );
+            if let Some(avant) = &precedente {
+                let avec_l_autre = correlation(&near, avant);
+                assert!(
+                    avec_l_autre.abs() < 0.2,
+                    "trame {n} : la sortie ressemble à la trame d'avant ({avec_l_autre:.3})"
+                );
+            }
+            precedente = Some(entree);
+        }
     }
 }

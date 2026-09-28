@@ -39,7 +39,9 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use ki_opus as opus;
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ki_protocol::{parse_voice_packet, write_voice_header, VOICE_HEADER_LEN, VOICE_MAX_PACKET};
+use ki_protocol::{
+    parse_voice_packet, write_voice_header, DATAGRAMME_SUR, VOICE_HEADER_LEN, VOICE_MAX_PACKET,
+};
 
 use jitter::Receiver;
 use resample::CubicResampler;
@@ -122,7 +124,9 @@ pub fn journal_snapshot() -> Vec<(u64, String)> {
 
 /// Émetteur de datagrammes voix : le moteur est indépendant du transport
 /// (QUIC aujourd'hui, autre chose demain). L'appel ne doit jamais bloquer.
-pub type DatagramSend = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>;
+/// Il rend vrai si le datagramme est parti : une trame refusée par le
+/// transport n'est pas comptée comme envoyée.
+pub type DatagramSend = std::sync::Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
 /// Un robinet sur le son du moteur : reçoit des trames mono 48 kHz de
 /// 20 ms, sur un fil temps réel — il doit se contenter de les ranger.
@@ -501,9 +505,15 @@ pub struct VoiceStats {
     /// Pire gigue réseau mesurée parmi les locuteurs actifs, en ms.
     pub worst_jitter_ms: f32,
     /// Trames incomplètes parties vers la carte son depuis le démarrage du
-    /// moteur : chacune est un trou audible. Zéro est la seule bonne valeur ;
-    /// c'est la cible chiffrée de P4.
+    /// moteur : chacune est un trou audible dans la voix d'un locuteur, dont
+    /// les paquets sont arrivés trop tard alors qu'il parlait encore — les
+    /// fins de phrase n'en sont pas (voir `jitter::Playout`). Zéro est la
+    /// seule bonne valeur ; c'est la cible chiffrée de P4.
     pub underruns: u64,
+    /// Réveils du fil de rendu natif qui ont trouvé la carte son à court
+    /// pendant qu'elle jouait : le craquement vient de la machine, pas du
+    /// réseau. Toujours 0 sur le moteur de secours, qui ne le mesure pas.
+    pub sortie_a_sec: u64,
 }
 
 #[derive(Default)]
@@ -517,9 +527,12 @@ struct Counters {
     vad_prob_bits: std::sync::atomic::AtomicU32,
     played: AtomicU64,
     /// Trames incomplètes parties vers la carte son : la sortie a réclamé
-    /// des échantillons qu'aucun tampon de lecture n'avait. C'est la mesure
-    /// du craquement, ramassée par le rappel de sortie.
+    /// des échantillons qu'aucun tampon de lecture n'avait, en pleine parole.
+    /// C'est la mesure du trou dans la voix, ramassée par le rappel de sortie.
     underruns: AtomicU64,
+    /// La carte son trouvée à court par le fil de rendu natif (voir
+    /// `VoiceStats::sortie_a_sec`). Partagé avec ce fil, d'où l'`Arc`.
+    sortie_a_sec: Arc<AtomicU64>,
     /// Le moteur qui tient **réellement** le micro, d'après la dernière
     /// tentative d'ouverture (`docteur::Moteur`, rangé en code).
     ///
@@ -1062,6 +1075,7 @@ impl VoiceEngine {
             samples_played: self.shared.counters.played.load(Ordering::Relaxed),
             worst_jitter_ms,
             underruns: self.shared.counters.underruns.load(Ordering::Relaxed),
+            sortie_a_sec: self.shared.counters.sortie_a_sec.load(Ordering::Relaxed),
         }
     }
 
@@ -1103,6 +1117,7 @@ impl VoiceEngine {
             sortie_defauts: defauts_divergents(false),
             ouvertures_affamees: sh.counters.starved_opens.load(Ordering::Relaxed) as u32,
             trames_incompletes: sh.counters.underruns.load(Ordering::Relaxed),
+            sortie_a_sec: sh.counters.sortie_a_sec.load(Ordering::Relaxed),
             moteur: docteur::Moteur::depuis_code(sh.counters.input_engine.load(Ordering::Relaxed)),
             micro_communications: sh.counters.comms_capture.load(Ordering::Relaxed),
             attenuation_windows: attenuation_communications(),
@@ -1183,20 +1198,27 @@ fn is_shutdown(sh: &Shared) -> bool {
 
 fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<bytes::Bytes>) {
     let mut last_prune = Instant::now();
+    // Un locuteur au moins a des paquets en attente derrière un trou — peut-
+    // être la fin d'une phrase, que plus aucun paquet ne viendra pousser (voir
+    // `Receiver::liberer_la_queue`). On se réveille alors assez souvent pour
+    // la jouer à temps, et l'on y regarde à chaque tour, paquets des autres
+    // compris : un copain qui parle ne doit pas retenir la fin de phrase d'un
+    // autre.
+    let mut queue_en_attente = false;
     loop {
-        let dat = match incoming.recv_timeout(Duration::from_millis(200)) {
-            Ok(d) => d,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if is_shutdown(&sh) {
-                    return;
-                }
-                continue;
-            }
+        let delai = Duration::from_millis(if queue_en_attente { 20 } else { 200 });
+        let dat = match incoming.recv_timeout(delai) {
+            Ok(d) => Some(d),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
         if is_shutdown(&sh) {
             return;
         }
+        if queue_en_attente {
+            queue_en_attente = liberer_les_queues(&sh);
+        }
+        let Some(dat) = dat else { continue };
         let Some(pkt) = parse_voice_packet(&dat) else { continue };
         if pkt.payload.is_empty() {
             continue;
@@ -1224,6 +1246,7 @@ fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<bytes::Bytes>)
             r
         });
         let (lost, recovered) = rx.push(pkt.counter as u16, &plain);
+        queue_en_attente |= rx.a_une_queue();
         if lost > 0 {
             sh.counters.lost.fetch_add(lost, Ordering::Relaxed);
         }
@@ -1244,6 +1267,24 @@ fn recv_loop(sh: Arc<Shared>, incoming: std::sync::mpsc::Receiver<bytes::Bytes>)
             last_prune = Instant::now();
         }
     }
+}
+
+/// Joue les fins de phrase restées en attente derrière un trou, chez tous
+/// les locuteurs. Rend vrai s'il en reste à surveiller.
+fn liberer_les_queues(sh: &Shared) -> bool {
+    let mut receivers = sh.receivers.lock().unwrap();
+    let mut reste = false;
+    for rx in receivers.values_mut() {
+        let (lost, recovered) = rx.liberer_la_queue();
+        if lost > 0 {
+            sh.counters.lost.fetch_add(lost, Ordering::Relaxed);
+        }
+        if recovered > 0 {
+            sh.counters.recovered.fetch_add(recovered, Ordering::Relaxed);
+        }
+        reste |= rx.a_une_queue();
+    }
+    reste
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,8 +1388,10 @@ impl Sender {
         // trames qu'on ne pouvait plus envoyer — jetées plus bas, sans trou de
         // séquence, donc sans que le récepteur ne dissimule quoi que ce soit :
         // 20 ms de voix disparaissaient dans un silence que rien ne signalait.
+        // Et transmissible veut dire : qui tient dans un datagramme au MTU
+        // initial de QUIC (`DATAGRAMME_SUR`), pas seulement dans le tampon.
         const OVERHEAD: usize = VOICE_HEADER_LEN + 16;
-        let budget = VOICE_MAX_PACKET - OVERHEAD;
+        let budget = DATAGRAMME_SUR - OVERHEAD;
         // Toute sortie prématurée fait quand même avancer le compteur : une
         // trame escamotée sans trou de séquence ne serait pas dissimulée à
         // l'autre bout, et produirait une soudure audible plutôt qu'une perte
@@ -1381,8 +1424,9 @@ impl Sender {
         write_voice_header(&mut self.out, self.user_id, self.counter);
         self.out[VOICE_HEADER_LEN..total].copy_from_slice(&sealed);
         self.counter += 1;
-        (self.send)(&self.out[..total]);
-        sh.counters.sent.fetch_add(1, Ordering::Relaxed);
+        if (self.send)(&self.out[..total]) {
+            sh.counters.sent.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1421,8 +1465,8 @@ fn capture_loop(
     let mut agc = Agc::new();
     // Le réseau de détection de parole, chargé à la première trame qui en a
     // besoin (mode activation vocale, micro armé) : ~1 Mo de modèle qu'on
-    // ne paie pas en push-to-talk.
-    let mut silero: Option<silero::Silero> = None;
+    // ne paie pas en push-to-talk. En arrière-plan, comme DeepFilterNet.
+    let mut silero: EnFond<silero::Silero> = EnFond::Jamais;
     let mut vad_ouvert = false;
     let mut monitor: Option<Monitor> = None;
     // Activation vocale : on continue d'émettre un court instant après le
@@ -1449,6 +1493,13 @@ fn capture_loop(
     // de traitement ne la partage qu'avec un flux de la même catégorie.
     let mut comms = comms_pref;
     sh.counters.comms_capture.store(comms, Ordering::Relaxed);
+    // DeepFilterNet ne peut pas se charger sur un autre fil (voir `EnFond`) :
+    // si le mode est déjà choisi, il se charge ici, micro encore fermé. Le
+    // temps qu'il coûte retarde l'ouverture au lieu de jeter la voix que le
+    // micro aurait captée pendant ce temps.
+    if sh.noise_mode.load(Ordering::Relaxed) == NOISE_DEEP {
+        let _ = deep.get_or_init();
+    }
 
     // Boucle de surveillance : le périphérique peut disparaître à tout
     // moment (débranchement, casque sans fil qui s'endort). On le rouvre
@@ -1521,9 +1572,10 @@ fn capture_loop(
         let mut zero_since: Option<Instant> = None;
         // L'annulateur d'écho de CE flux : recréé à chaque réouverture — un
         // autre périphérique, c'est un autre trajet acoustique, le filtre
-        // repart de zéro et converge en une seconde ou deux. Double Option,
-        // comme LazyDeep : None = jamais tenté, Some(None) = refusé une fois
-        // pour toutes (on ne réessaie pas à chaque trame).
+        // repart de zéro et converge en une seconde ou deux. Double Option :
+        // None = jamais tenté, Some(None) = refusé une fois pour toutes (on
+        // ne réessaie pas à chaque trame). Sa création est instantanée, elle
+        // n'a pas besoin du chargement en arrière-plan des modèles.
         let mut aec: Option<Option<ki_aec::Aec>> = None;
         // Le lointain accumulé pendant que le micro était fermé date d'avant
         // lui : on n'en garde qu'une demi-queue de filtre, pour que le
@@ -1815,19 +1867,18 @@ fn capture_loop(
             // décider sinon.
             let neuronal = threshold > 0.0 && armed && sh.vad_neural.load(Ordering::Relaxed);
             let voix = if neuronal {
-                if silero.is_none() {
-                    silero = match silero::Silero::new() {
-                        Ok(s) => Some(s),
-                        Err(e) => {
-                            journal(format!(
-                                "détection de parole neuronale indisponible ({e}) — retour au seuil d'amplitude"
-                            ));
-                            sh.vad_neural.store(false, Ordering::Relaxed);
-                            None
-                        }
-                    };
-                }
-                match silero.as_mut() {
+                let vad = match silero.obtenir("silero", silero::Silero::new) {
+                    Ok(vad) => vad,
+                    Err(e) => {
+                        journal(format!(
+                            "détection de parole neuronale indisponible ({e}) — retour au seuil d'amplitude"
+                        ));
+                        sh.vad_neural.store(false, Ordering::Relaxed);
+                        None
+                    }
+                };
+                // Pas encore chargé : le seuil d'amplitude tient la place.
+                match vad {
                     Some(vad) => {
                         let _ = vad.traiter(&frame);
                         let p = vad.derniere();
@@ -2317,8 +2368,13 @@ fn soft_clip(x: f32) -> f32 {
 /// RNNoise, au prix de ~30 ms de lookahead et ~1 ms de CPU par bloc.
 struct DeepDenoiser {
     model: df::tract::DfTract,
+    /// Le modèle tel qu'au chargement : de quoi repartir d'un état propre
+    /// sans tout recharger (voir `process`).
+    vierge: df::tract::DfTract,
     inp: ndarray::Array2<f32>,
     out: ndarray::Array2<f32>,
+    /// Une sortie invalide a déjà été journalisée : une fois suffit.
+    invalide_signale: bool,
 }
 
 impl DeepDenoiser {
@@ -2330,9 +2386,11 @@ impl DeepDenoiser {
         let hop = model.hop_size;
         anyhow::ensure!(FRAME_SAMPLES.is_multiple_of(hop), "hop DeepFilterNet incompatible");
         Ok(Self {
+            vierge: model.clone(),
             model,
             inp: ndarray::Array2::zeros((1, hop)),
             out: ndarray::Array2::zeros((1, hop)),
+            invalide_signale: false,
         })
     }
 
@@ -2344,16 +2402,105 @@ impl DeepDenoiser {
                 .as_slice_mut()
                 .expect("layout contigu")
                 .copy_from_slice(block);
-            if self.model.process(self.inp.view(), self.out.view_mut()).is_ok() {
-                block.copy_from_slice(self.out.row(0).as_slice().expect("layout contigu"));
+            if self.model.process(self.inp.view(), self.out.view_mut()).is_err() {
+                continue;
+            }
+            let sortie = self.out.row(0);
+            let sortie = sortie.as_slice().expect("layout contigu");
+            if sortie.iter().all(|s| s.is_finite()) {
+                // Bornée : rien ne garantit qu'un masque neuronal reste sous
+                // la pleine échelle, et l'encodeur n'a pas à en juger.
+                for (s, &d) in block.iter_mut().zip(sortie) {
+                    *s = d.clamp(-1.0, 1.0);
+                }
+            } else {
+                // Un NaN dans la sortie d'un réseau récurrent est aussi dans
+                // son état : chaque bloc suivant en sortirait empoisonné, et
+                // la voix partirait en bruit — ou en silence, selon ce qu'en
+                // fait l'encodeur. Ce bloc passe tel qu'il est entré, et le
+                // modèle repart de son état de chargement.
+                self.model = self.vierge.clone();
+                if !self.invalide_signale {
+                    self.invalide_signale = true;
+                    journal("débruitage DeepFilterNet : sortie invalide, modèle réinitialisé".into());
+                }
             }
         }
     }
 }
 
+/// Un modèle neuronal chargé sur un fil à part, au premier besoin.
+///
+/// Le chargement (lecture du modèle, optimisation tract) prend de 160 à
+/// 500 ms. Fait sur le fil de capture, comme jusqu'à la 0.1.51, il bloquait
+/// la boucle pendant que le micro continuait de remplir sa file bornée : la
+/// voix de ce temps-là partait à la poubelle, à chaque activation du mode.
+/// Ici, la capture ne l'attend jamais — elle fait sans (le seuil
+/// d'amplitude) jusqu'à ce qu'il soit prêt. Un échec n'est tenté qu'une fois.
+///
+/// Pour Silero seulement : DeepFilterNet garde des `Rc` dans son état (tract
+/// n'en fait pas un type `Send`), il ne peut pas changer de fil. Lui est
+/// chargé avant l'ouverture du micro (voir `capture_loop`).
+enum EnFond<T> {
+    Jamais,
+    EnCours(std::sync::mpsc::Receiver<anyhow::Result<T>>),
+    Pret(T),
+    Echec,
+}
+
+impl<T: Send + 'static> EnFond<T> {
+    /// Le modèle, s'il est prêt. Le premier appel lance le chargement ; les
+    /// suivants rendent `Ok(None)` jusqu'à ce qu'il aboutisse. Un échec est
+    /// rendu une fois (`Err`), puis c'est `Ok(None)` pour de bon.
+    fn obtenir(
+        &mut self,
+        nom: &str,
+        charger: fn() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<&mut T>> {
+        if let EnFond::Jamais = self {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let lance = std::thread::Builder::new()
+                .name(format!("ki-{nom}"))
+                .spawn(move || {
+                    let _ = tx.send(charger());
+                });
+            match lance {
+                Ok(_) => *self = EnFond::EnCours(rx),
+                Err(e) => {
+                    *self = EnFond::Echec;
+                    return Err(anyhow::anyhow!("fil de chargement : {e}"));
+                }
+            }
+        }
+        if let EnFond::EnCours(rx) = self {
+            match rx.try_recv() {
+                Ok(Ok(modele)) => *self = EnFond::Pret(modele),
+                Ok(Err(e)) => {
+                    *self = EnFond::Echec;
+                    return Err(e);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(None),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    *self = EnFond::Echec;
+                    return Err(anyhow::anyhow!("le chargement s'est interrompu"));
+                }
+            }
+        }
+        match self {
+            EnFond::Pret(modele) => Ok(Some(modele)),
+            _ => Ok(None),
+        }
+    }
+}
+
 /// Chargement paresseux de DeepFilterNet : le modèle (~2 Mo, planification
-/// tract comprise) n'est chargé que si le mode est activé, hors du chemin
-/// temps réel critique. En cas d'échec, on n'essaie qu'une fois.
+/// tract comprise) n'est chargé que si le mode est activé. En cas d'échec,
+/// on n'essaie qu'une fois — RNNoise tient alors la place.
+///
+/// Sur le fil de capture, faute de pouvoir le déplacer (voir `EnFond`) :
+/// c'est pourquoi `capture_loop` l'appelle AVANT d'ouvrir le micro quand le
+/// mode est déjà choisi. Seule une bascule en pleine session le charge micro
+/// ouvert, et y laisse une fois une fraction de seconde de voix.
 #[derive(Default)]
 struct LazyDeep {
     state: Option<Option<Box<DeepDenoiser>>>,
@@ -2681,6 +2828,7 @@ fn open_output(
             move |rate| output_writer(sh_w, ticks_w, rate),
             alive.clone(),
             robust,
+            sh.counters.sortie_a_sec.clone(),
         ) {
             Ok((stream, fallback)) => {
                 return Ok((OutputStream::Native(stream), alive, ticks, fallback));
@@ -2995,7 +3143,7 @@ mod tests {
     /// peine de rejouer des nonces déjà employés sous la même clé.
     #[test]
     fn two_senders_never_start_from_the_same_counter() {
-        let noop: DatagramSend = Arc::new(|_: &[u8]| {});
+        let noop: DatagramSend = Arc::new(|_: &[u8]| true);
         let starts: Vec<u64> = (0..8)
             .map(|_| Sender::new(42, 32_000, noop.clone()).unwrap().counter)
             .collect();
@@ -3141,6 +3289,36 @@ mod tests {
         let mut frame = [0.01f32; FRAME_SAMPLES];
         gate.process(&mut frame, 0.0);
         assert_eq!(frame[0], 0.01);
+    }
+
+    /// Un NaN entré dans DeepFilterNet ne l'empoisonne pas pour la suite.
+    /// Il reste dans l'état du réseau : sans réinitialisation, chaque bloc
+    /// suivant ressortait NaN (vérifié : 20 sur 20). Le modèle repart donc de
+    /// son état de chargement, et débruite de nouveau dès les trames
+    /// suivantes — ne plus rien sortir d'invalide ne suffirait pas, laisser
+    /// passer le bruit tel quel le ferait aussi.
+    #[test]
+    fn deepfilternet_se_remet_d_une_sortie_invalide() {
+        let mut deep = DeepDenoiser::new().expect("chargement du modèle DeepFilterNet3");
+        let mut frame = [f32::NAN; FRAME_SAMPLES];
+        deep.process(&mut frame);
+        let mut x = 0x9E3779B9u32;
+        let (mut bruit, mut apres) = (0f32, 0f32);
+        for n in 0..10 {
+            let mut frame = [0f32; FRAME_SAMPLES];
+            for s in frame.iter_mut() {
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                *s = (x as f32 / u32::MAX as f32 - 0.5) * 0.2;
+            }
+            bruit = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+            deep.process(&mut frame);
+            assert!(
+                frame.iter().all(|s| s.is_finite() && s.abs() <= 1.0),
+                "trame {n} : sortie invalide après le NaN"
+            );
+            apres = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+        }
+        assert!(apres < bruit * 0.5, "le débruitage n'est pas revenu : {bruit} -> {apres}");
     }
 
     #[test]

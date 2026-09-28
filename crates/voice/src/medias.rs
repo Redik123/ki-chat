@@ -292,6 +292,9 @@ fn ouvrir(
             move |cadence| ecrivain(f, cadence),
             vivant.clone(),
             robuste,
+            // La carte à court se compte sur la sortie du vocal, celle dont
+            // le docteur parle ; la visionneuse ne fait que passer.
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         ) {
             Ok((flux, _repli)) => return Ok(Flux::Natif(flux)),
             Err(e) => tracing::warn!("sortie médias native : {e:#} — repli cpal"),

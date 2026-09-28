@@ -261,16 +261,15 @@ impl ControlWriter {
 /// Émetteur de datagrammes voix, tel que l'attend le moteur audio.
 /// Le même contrat que `ki_voice::DatagramSend`, redit ici pour que ce crate
 /// n'ait pas à dépendre du moteur.
-pub type DatagramSend = Arc<dyn Fn(&[u8]) + Send + Sync>;
+pub type DatagramSend = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
 /// Fabrique un émetteur de datagrammes voix (compatible avec le moteur
-/// audio) : l'appel ne bloque jamais, les erreurs sont ignorées (un
-/// datagramme perdu est un datagramme perdu).
+/// audio) : l'appel ne bloque jamais, et un datagramme refusé n'est pas
+/// réessayé (un datagramme perdu est un datagramme perdu) — il est seulement
+/// signalé, pour ne pas être compté comme envoyé.
 pub fn datagram_sender(conn: &quinn::Connection) -> DatagramSend {
     let conn = conn.clone();
-    Arc::new(move |pkt: &[u8]| {
-        let _ = conn.send_datagram(bytes::Bytes::copy_from_slice(pkt));
-    })
+    Arc::new(move |pkt: &[u8]| conn.send_datagram(bytes::Bytes::copy_from_slice(pkt)).is_ok())
 }
 
 /// Un émetteur lié à un **emplacement** de connexion plutôt qu'à une
@@ -291,9 +290,10 @@ pub fn datagram_sender(conn: &quinn::Connection) -> DatagramSend {
 /// dispute est la reconnexion, qui arrive une fois par heure au pire.
 pub fn datagram_sender_slot(slot: Arc<Mutex<Option<quinn::Connection>>>) -> DatagramSend {
     Arc::new(move |pkt: &[u8]| {
-        if let Some(conn) = slot.lock().unwrap().as_ref() {
-            let _ = conn.send_datagram(bytes::Bytes::copy_from_slice(pkt));
-        }
+        slot.lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|conn| conn.send_datagram(bytes::Bytes::copy_from_slice(pkt)).is_ok())
     })
 }
 

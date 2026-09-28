@@ -116,8 +116,12 @@ pub struct Diagnostic {
     /// erreur, mais rien n'en sort — l'appareil est éteint derrière un
     /// récepteur resté branché, ou un autre logiciel tient la voie.
     pub ouvertures_affamees: u32,
-    /// Trames incomplètes parties vers la carte son (voir `VoiceStats`).
+    /// Trames incomplètes parties vers la carte son (voir `VoiceStats`) :
+    /// la voix d'un locuteur arrivée trop tard, en pleine parole.
     pub trames_incompletes: u64,
+    /// La carte son trouvée à court en pleine lecture (voir `VoiceStats`) :
+    /// le fil de rendu réveillé trop tard.
+    pub sortie_a_sec: u64,
     /// Le moteur qui tient le micro : natif, secours (cpal), aucun, ou pas
     /// encore essayé.
     pub moteur: Moteur,
@@ -286,14 +290,29 @@ impl Diagnostic {
             // Pas encore essayé : rien à conseiller, le rapport le dit.
             Moteur::PasEncore | Moteur::Natif => {}
         }
-        if self.trames_incompletes > 0 {
+        // Deux symptômes qui s'entendent pareil — un craquement, une
+        // micro-coupure — mais n'ont ni la même cause ni le même remède. La
+        // sortie robuste ajoute 70 ms de latence : elle ne se conseille que
+        // sur la preuve que la carte son a manqué de données.
+        if self.sortie_a_sec > 0 {
             out.push(format!(
-                "{} trames incomplètes sont parties vers la carte son : autant de \
-                 craquements. Si cela arrive pendant une partie, c'est que la machine \
+                "La carte son s'est trouvée {} fois à court en pleine lecture : autant \
+                 de craquements. Si cela arrive pendant une partie, c'est que la machine \
                  est saturée ou la carte son USB fragile — coche « Sortie audio \
                  robuste » dans ⚙ Audio → Sortie (plus de marge, un peu plus de \
                  latence), et vérifie que le jeu tourne en fenêtré sans bordure plutôt \
                  qu'en plein écran exclusif.",
+                self.sortie_a_sec
+            ));
+        }
+        if self.trames_incompletes > 0 {
+            out.push(format!(
+                "{} trames incomplètes sont parties vers la carte son : la voix d'un \
+                 copain est arrivée trop tard, en pleine phrase — autant de \
+                 micro-coupures. C'est le réseau (le sien ou le tien, souvent le \
+                 Wi-Fi) ou une machine trop chargée pour décoder à temps. Si ça hache \
+                 souvent, fixe le tampon de gigue plus haut dans ⚙ Réseau & qualité \
+                 (60 ou 80 ms) : un peu plus de latence, plus de marge.",
                 self.trames_incompletes
             ));
         }
@@ -343,8 +362,8 @@ impl Diagnostic {
             etat(self.exclusif_sortie)
         ));
         out.push_str(&format!(
-            "ouvertures affamées : {} · trames incomplètes : {}\n",
-            self.ouvertures_affamees, self.trames_incompletes
+            "ouvertures affamées : {} · trames incomplètes : {} · carte son à sec : {}\n",
+            self.ouvertures_affamees, self.trames_incompletes, self.sortie_a_sec
         ));
         out.push_str(&format!(
             "catégorie du micro : {} · atténuation Windows : {}\n",
@@ -734,6 +753,7 @@ mod tests {
             sortie_defauts: None,
             ouvertures_affamees: 4,
             trames_incompletes: 12,
+            sortie_a_sec: 3,
             moteur: Moteur::Secours,
             micro_communications: false,
             attenuation_windows: None,
@@ -747,16 +767,34 @@ mod tests {
         assert!(conseils[3].contains("Valorant"));
         assert!(conseils[4].contains("contrôle exclusif"));
         assert!(conseils[5].contains("secours"));
-        assert!(conseils[6].contains("craquements"));
+        assert!(conseils[6].contains("craquements") && conseils[6].contains("Sortie audio robuste"));
+        assert!(conseils[7].contains("tampon de gigue"));
 
         // Le rapport se copie : il doit porter l'essentiel sans l'interface.
         let rapport = d.rapport();
+        assert!(rapport.contains("carte son à sec : 3"));
         assert!(rapport.contains("moteur : secours"));
         assert!(rapport.contains("VB-Audio"));
         assert!(rapport.contains("(défaut Windows)"));
         assert!(rapport.contains("défauts Windows différents (micro)"));
         assert!(rapport.contains("jamais réglé"));
         assert!(rapport.contains("SteelSeries Sonar"));
+    }
+
+    /// Des trous dans la voix reçue ne disent rien de la carte son : la
+    /// sortie robuste (+70 ms) ne se conseille pas sur eux. Elle l'était, sur
+    /// un compteur que chaque fin de phrase faisait monter.
+    #[test]
+    fn des_trous_dans_la_voix_ne_conseillent_pas_la_sortie_robuste() {
+        let d = Diagnostic {
+            moteur: Moteur::Natif,
+            trames_incompletes: 40,
+            ..Default::default()
+        };
+        let conseils = d.conseils();
+        assert_eq!(conseils.len(), 1);
+        assert!(conseils[0].contains("tampon de gigue"));
+        assert!(!conseils[0].contains("Sortie audio robuste"));
     }
 
     /// Deux défauts Windows différents : le conseil ne vaut qu'en « défaut

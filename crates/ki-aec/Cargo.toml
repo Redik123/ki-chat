@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 # Annulation d'écho acoustique : bindings maison vers l'annulateur MDF de
-# SpeexDSP (speex_echo) + la suppression de résidu (speex_preprocess).
+# SpeexDSP (speex_echo), sans la suppression de résidu (voir src/lib.rs).
 # Pourquoi SpeexDSP ? C'est le seul annulateur C portable, éprouvé et
 # autonome : l'AEC3 de WebRTC exige la moitié de Chromium, et il n'existe
 # pas d'équivalent Rust mûr. Le tarball officiel est téléchargé et vérifié
-# (SHA-256) par build.rs, puis six fichiers C sont compilés en direct —
+# (SHA-256) par build.rs, puis quatre fichiers C sont compilés en direct —
 # pas d'autotools, le header généré est fabriqué par build.rs.
 
 [build-dependencies]
