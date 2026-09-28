@@ -33,6 +33,64 @@ Ce document fait suite à [`AUDIT.md`](AUDIT.md) (version 0.1.3), dont le suivi 
 
 ---
 
+## État des corrections (branche `fix/audit-0.1.51`)
+
+Relu et vérifié le 28 septembre 2026, puis corrigé lot par lot, chaque lot
+dans son commit. ✅ corrigé ; ◐ corrigé en partie, le reste est une décision
+à prendre (en fin de section). Les numéros de ligne cités plus bas renvoient
+toujours au commit audité.
+
+| Constat | Commit | Ce qui a été fait |
+|---|---|---|
+| ✅ CLI-1 | `8d6e022` | Correctif publié avant l'audit (0.1.51). |
+| ✅ SRV-1 à SRV-10 | `2950dda` | Budgets par classe de message et par membre, sémaphore Argon2, essais réservés avant hachage, audit borné et après validation, fin des diffusions à tout changement de salon, plafonds de rôles, salons et invitations, `EditMessage` soumis à `SEND_MESSAGE`, code maître secret (tiré au hasard sans `KI_TOKEN`, valeurs d'exemple refusées). |
+| ✅ WEB-1 à WEB-6 | `4a2434c` | Authentification avant tout corps, plafonds de connexions et délai d'en-têtes, quotas d'envoi, lectures bornées, ffmpeg en liste blanche de protocoles et environnement vidé, compteurs d'invités décalés. |
+| ✅ MUS-1 à MUS-3 | `4a2434c`, `3cf57d7` | Groupes de processus arrêtés TERM puis KILL, dossier temporaire purgé, yt-dlp limité à trois, file bornée partout, état plafonné, fins de morceau détectées. |
+| ✅ CRY-1 | `050509b` | Le README ne promet plus de bout en bout ; le code est inchangé (le serveur détient les clés). |
+| ✅ CRY-2 | `2785a4d` | Compteur du son du jeu porté par le live. |
+| ✅ PRO-1 | `2785a4d` | Variantes inconnues tolérées, version de protocole annoncée, lignes illisibles journalisées. |
+| ✅ CLI-2 à CLI-7 | `5e82386` | Cible figée, connexion annulable, diffusion et visionnage arrêtés à toute sortie, lien d'envoi dans le salon d'origine, message non perdu, session vidée en entier ; l'expulsion n'est plus prise pour une coupure (M20). |
+| ✅ SEC-1 | `5e82386` | Manifeste signé (plateforme, version, SHA-256) exigé par le client ; release taguée sans clé = échec. |
+| ✅ SEC-2 | `050509b` | Signature dans un travail isolé (crate `crates/signer`, sans cache, environnement `release`), clé vérifiée contre celle du client, actions épinglées par empreinte. |
+| ✅ SEC-3 | `5e82386` | Budget global de pixels, canevas contrôlé avant décodage, deux décodages à la fois. |
+| ✅ AUD-1 | `35b49d2` | Étage `speex_preprocess` retiré plutôt que rallumé : il ne supprimait rien et retardait la voix de 20 ms ; le rallumer gardait ce retard et mangeait la voix en double parole. |
+| ✅ AUD-2 | `35b49d2` | Famine comptée seulement si la voix coulait encore ; carte son à court mesurée à part ; le docteur ne conseille la sortie robuste que sur elle. |
+| ✅ VID-1, VID-2 | `4fc89e5` | Rééchantillonneur borné (test de propriétés) ; capture morte détectée, diffusion conclue avec sa raison. |
+| ◐ OPS-1 | `050509b` | Essai du serveur sous dix clients virtuels avant l'image, chaîne Rust épinglée en CI. **Reste** : `latest` suit toujours `main` (voir décisions). |
+| ✅ OPS-2 | `050509b` | Compose sur le fork maintenu `nickfedor/watchtower`. |
+| ✅ OPS-3 | `050509b` | Permissions en lecture seule, écriture réservée à la publication, `persist-credentials: false`. |
+| ✅ OPS-4 | `050509b` | tini en PID 1, compose sans capacités ni gain de privilèges, mémoire, processus et journal bornés, unité systemd confinée. `read_only` non posé (yt-dlp et deno écrivent hors du volume). |
+| ◐ DOC-1 | `050509b` | Section licences du README exacte. **Reste** : le fichier `LICENSE` et les notices tierces (voir décisions). |
+
+**Mineurs.** Corrigés dans les mêmes lots, et dans `1d7cca3` pour le client :
+nom de fichier des clips, rapport de plantage limité au serveur du plantage
+et citations masquées, diagnostics sans titre de fenêtre ni PUUID, empreinte
+« même machine » non traçable, agents Riot sans redirection, mises à jour en
+HTTPS seul, client HTTP réutilisé, NVENC chargé depuis System32 ; côté audio,
+fin de phrase jouée, DeepFilterNet borné et réinitialisé sur NaN, DRED
+stéréo, trames tenues sous le MTU initial ; côté vidéo, trame clé servie sur
+image immobile, horodatage à la capture, FFI vérifiées, liste blanche de la
+visionneuse, clip inachevé effacé. Restent notamment : pré-roll de la
+détection vocale, verrous et allocations du rappel de sortie, démarrage des
+chaînes GPU et autres attentes sur le fil de l'interface, repeint en vocal,
+Échap et Entrée, suppressions sans confirmation, contrastes, IPv6.
+
+**Décisions à prendre.**
+- `KI_VERSION=0.1` dans la stack de production, pour ne déployer que les
+  versions publiées (OPS-1).
+- Le fichier `LICENSE` (MIT, déjà déclaré) et les notices tierces des
+  binaires et de l'image (DOC-1).
+- L'environnement `release` du dépôt : approbateurs, restriction aux tags
+  `v*`, secret déplacé (voir `deploy/SIGNATURE.md`).
+- Le rapport de plantage part sans l'option de partage : c'est un choix, que
+  le code dit désormais.
+- Riot : prévenir les joueurs que les endpoints ne sont pas publics, et
+  rendre les médailles facultatives.
+- Clips : la voix des copains gardée par défaut, sans avertir le salon.
+- Formatage (`cargo fmt`), découpage de `main.rs`, montée d'egui et d'ureq.
+
+---
+
 ## Synthèse
 
 ki-chat est un projet ambitieux. Pour un développeur seul, il est remarquablement soigné dans l'ensemble :
@@ -117,7 +175,7 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
 
 ## 2. Constats critiques
 
-### CLI-1 — Une mention suivie d'un caractère accentué fait planter tous les destinataires · *Reproduit*
+### ✅ CLI-1 — Une mention suivie d'un caractère accentué fait planter tous les destinataires · *Reproduit*
 
 > **Corrigé sur la branche `claude/ki-chat-audit-qqe0vv`** (`split_at_checked` dans `mention`, deux tests de non-régression). Il reste à le publier dans une release pour que les joueurs en profitent.
 
@@ -139,7 +197,7 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
   - un test avec des pseudos de longueurs variées et du texte accentué ;
   - `#![warn(clippy::string_slice)]` dans `client-gui`, `protocol` et `server`.
 
-### SRV-1 — `SetAvatar` sans photo : 23 octets reçus, jusqu'à 96 Kio renvoyés à chaque connecté · *Vérifié*
+### ✅ SRV-1 — `SetAvatar` sans photo : 23 octets reçus, jusqu'à 96 Kio renvoyés à chaque connecté · *Vérifié*
 
 - **Où :** `crates/server/src/quic.rs:2477-2515`. Le champ `avatar` vaut `IconChange::Keep` par défaut (`protocol/src/lib.rs:450-453`).
 - **Mécanisme :** `Keep` rend `Ok(())` sans rien écrire, puis déclenche `broadcast_all(Avatar{data})` avec la photo actuelle. La seule borne est le budget global (100 messages/s, rafale 200, `quic.rs:435`).
@@ -149,7 +207,7 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
   - Le phénomène recommence à chaque reconnexion.
 - **Correctif :** faire de `Keep` un no-op ; budget dédié (un changement toutes les 10 s) ; ne diffuser que l'empreinte (les clients savent déjà redemander une photo).
 
-### SRV-2 — Argon2 sans limite de concurrence : `ChangePassword` épuise la mémoire · *Vérifié (OOM probable selon la RAM)*
+### ✅ SRV-2 — Argon2 sans limite de concurrence : `ChangePassword` épuise la mémoire · *Vérifié (OOM probable selon la RAM)*
 
 - **Où :** `quic.rs:2535-2554` puis `accounts.rs:584-592`. `AdminResetPassword` a le même défaut (`quic.rs:2306-2339`). Aucun `Semaphore` dans `crates/server`.
 - **Mécanisme :**
@@ -168,13 +226,13 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
 
 ### 3.1 Serveur — plan de contrôle
 
-**SRV-3 — Un seul budget pour tout : les messages coûteux passent au même tarif qu'un `Ping`.** *Vérifié.*
+**✅ SRV-3 — Un seul budget pour tout : les messages coûteux passent au même tarif qu'un `Ping`.** *Vérifié.*
 - **`Search`** (`quic.rs:1981-2025`, puis `history.rs:814-981`) relit tous les journaux visibles et clone `etats`. Cent requêtes par seconde occupent des centaines de fils bloquants et affament les ouvriers tokio : la voix se hache pour tout le monde.
 - **`Musique::Ajouter`** lance un yt-dlp par message (MUS-2).
 - **Autres :** `StatsValorant` ; `History{1000}` ; `GameStatus`, `VoiceState` et `StreamStart`, rediffusés à tous jusqu'à 100 fois par seconde.
 - **Correctif :** trois classes de budget (léger, diffusion à environ 5/s, coûteux à un toutes les quelques secondes), une seule recherche en cours par membre, et un sémaphore global pour Argon2, yt-dlp et la recherche.
 
-**SRV-4 — Des commandes musique suffisent à vider le journal d'audit.** *Vérifié.*
+**✅ SRV-4 — Des commandes musique suffisent à vider le journal d'audit.** *Vérifié.*
 - **Mécanisme :**
   - `detail`, c'est-à-dire l'URL ou le nom de playlist, jusqu'à 160 Kio, est consigné **avant** sa validation (`quic.rs:1629-1642`, contre `1678`, `1703` et `1748`) ;
   - la rotation ne garde que 6 fichiers de 8 Mio (`audit.rs:27`, `34`).
@@ -184,7 +242,7 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
 - **Qui peut le faire :** les porteurs de « Contrôler la musique », ou tout membre si l'option « les membres ajoutent » est active.
 - **Correctif :** auditer après validation, tronquer `detail` à environ 200 caractères dans `Audit::record`, ne pas auditer Position ni Volume.
 
-**SRV-5 — Changer de salon vocal ou perdre l'accès n'arrête pas les streams.** *Vérifié par deux relecteurs.*
+**✅ SRV-5 — Changer de salon vocal ou perdre l'accès n'arrête pas les streams.** *Vérifié par deux relecteurs.*
 - **Mécanisme :**
   - `fin_de_streams` n'est appelée que par `LeaveVoice`, `StreamStop` et la déconnexion ;
   - trois autres chemins changent de salon vocal sans elle : un `JoinVoice` direct (`quic.rs:985`), `AdminVoiceMove` (`quic.rs:1959`) et `reconcile_memberships` (`state.rs:756-773`) ;
@@ -195,7 +253,7 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
   - un streamer déplacé diffuse toujours vers son ancien salon.
 - **Correctif :** une seule fonction « changer de salon vocal » qui recalcule les routes, les streams et les spectateurs, plus un test d'intégration.
 
-**SRV-6 — Des messages d'une seule ligne, sans plafond sur le nombre d'éléments, disparaissent en silence.** *Vérifié ; seuils estimés.*
+**✅ SRV-6 — Des messages d'une seule ligne, sans plafond sur le nombre d'éléments, disparaissent en silence.** *Vérifié ; seuils estimés.*
 - **Messages concernés :**
   - `Welcome` : le logo, tous les rôles, tous les salons ;
   - `Members` : tous les comptes ;
@@ -212,16 +270,16 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
   - plafonds, pagination ou fragmentation, suppression de compte ;
   - un test « pire cas » pour chaque message à liste. Le modèle existe déjà : `fit_within` pour l'historique.
 
-**SRV-7 — Le limiteur d'authentification ne voit pas les essais simultanés.** *Vérifié ; hérité de la 0.1.3.*
+**✅ SRV-7 — Le limiteur d'authentification ne voit pas les essais simultanés.** *Vérifié ; hérité de la 0.1.3.*
 - **Mécanisme :** le contrôle se fait en lecture seule (`throttle.rs:96-110`), et l'échec n'est compté qu'après l'Argon2 (`quic.rs:259-268`).
 - **Conséquence :** avec un sas de 32 connexions par IP, le débit de devinette est multiplié par 32, tout comme le nombre d'Argon2 lancés par IP.
 - **Correctif :** réserver l'essai avant le hachage, et le sémaphore de SRV-2.
 
-**SRV-8 — Le droit d'écrire se contourne.** *Vérifié.*
+**✅ SRV-8 — Le droit d'écrire se contourne.** *Vérifié.*
 - `EditMessage` (`quic.rs:1276-1327`) et `React` (`1193-1237`) n'exigent pas `SEND_MESSAGE`.
 - Un membre privé d'écriture peut donc réécrire ses anciens messages, jusqu'à 4 000 caractères, qui sont rediffusés au salon.
 
-**SRV-9 — `KI_TOKEN` a des valeurs par défaut dangereuses.** *Vérifié.*
+**✅ SRV-9 — `KI_TOKEN` a des valeurs par défaut dangereuses.** *Vérifié.*
 - **Défauts :**
   - variable absente : « changeme », avec un simple avertissement (`main.rs:82-87`) ;
   - variable vide : un code d'invitation vide est accepté (`accounts.rs:341`, `362`) ;
@@ -232,7 +290,7 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
   - il est comparé par `!=`, qui n'est pas à temps constant.
 - **Correctif :** refuser de démarrer si la valeur est absente, vide ou connue ; masquer le code dans l'audit ; utiliser `secret_eq`.
 
-**SRV-10 — Des E/S bloquantes restent sur la boucle asynchrone (reste de M28).** *Vérifié.*
+**✅ SRV-10 — Des E/S bloquantes restent sur la boucle asynchrone (reste de M28).** *Vérifié.*
 - **Où :**
   - gestion des rôles et des salons : `quic.rs:2583` à `2844`, dont `set_roles` et `remove_role`, qui réécrivent `users.json` ;
   - `DelierRiot` (`quic.rs:1373`, qui réécrit `fiches.json`, environ 1 Mo) ;
@@ -244,7 +302,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.2 Serveur — HTTP, fichiers, médias, porte web
 
-**WEB-1 — Le corps de la requête est lu avant l'authentification.** *Vérifié.*
+**✅ WEB-1 — Le corps de la requête est lu avant l'authentification.** *Vérifié.*
 - **Mécanisme :**
   - `files::upload` (`files.rs:117-130`) reçoit `body: Bytes` : axum lit jusqu'à 25 Mo avant que le handler ne regarde `x-ki-token` ;
   - même chose pour `/upload/partiel` (8 Mo, `medias.rs:413-422`) et `/diag` (256 Ko, `diag.rs:102-113`) ;
@@ -252,7 +310,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 - **Conséquence :** sans compte, des envois concurrents font monter la mémoire du serveur jusqu'à ce que le système le tue.
 - **Correctif :** authentifier sur les en-têtes, avec un middleware `from_fn` ou en extrayant `Request` puis `to_bytes` après le contrôle ; écrire les envois sur disque au fil de l'eau ; limiter la concurrence.
 
-**WEB-2 — Les écoutes HTTPS n'ont ni délai de lecture des en-têtes ni plafond de connexions.** *Probable : lu dans axum-server 0.8 et hyper 1.11, non reproduit.*
+**✅ WEB-2 — Les écoutes HTTPS n'ont ni délai de lecture des en-têtes ni plafond de connexions.** *Probable : lu dans axum-server 0.8 et hyper 1.11, non reproduit.*
 - **Mécanisme :**
   - le code est en `main.rs:346-348` et `435-437` ;
   - axum-server construit hyper sans horloge, ce qui désactive le délai de lecture des en-têtes ;
@@ -263,7 +321,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - la publication des liens de porte et l'écoute 443 aggravent l'exposition.
 - **Correctif :** `http_builder().http1().timer(TokioTimer::new()).header_read_timeout(10 s)` ; `max_buf_size` ; sémaphore de connexions global et par IP ; `TimeoutLayer`.
 
-**WEB-3 — Les quotas se contournent.** *Vérifié.*
+**✅ WEB-3 — Les quotas se contournent.** *Vérifié.*
 - **`upload-partiel/`** (`medias.rs:429-443`) :
   - les identifiants d'envoi sont choisis par le client, sans limite de nombre ;
   - le dossier n'entre dans aucun quota ;
@@ -272,13 +330,13 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 - **Conséquence :** un membre remplit le disque ; or un disque plein arrête l'écriture de l'historique et des comptes.
 - **Correctif :** quotas global et par membre ; version validée ; plafond global de `diag/` et purge par âge.
 
-**WEB-4 — Les sorties de ffmpeg et ffprobe sont lues sans limite.** *Vérifié ; ampleur probable.*
+**✅ WEB-4 — Les sorties de ffmpeg et ffprobe sont lues sans limite.** *Vérifié ; ampleur probable.*
 - **Où :** `executer_borne` (`musique.rs:476-489`), `export.rs:737-741` et `medias.rs:824-842`.
 - **Mécanisme :** `trames_cles` demande à ffprobe **tous** les paquets vidéo du fichier en JSON, puis charge le tout dans un `serde_json::Value`.
 - **Conséquence :** la taille de cette sortie dépend du fichier fourni par le membre ; un fichier inhabituel fait donc gonfler la mémoire de ki-server lui-même.
 - **Correctif :** lecture bornée, `-read_intervals` limité à la fenêtre utile, sortie CSV lue ligne à ligne.
 
-**WEB-5 — ffmpeg tourne avec tous les droits du serveur.** *Vérifié.*
+**✅ WEB-5 — ffmpeg tourne avec tous les droits du serveur.** *Vérifié.*
 - **Accès :**
   - même utilisateur que le serveur ;
   - lecture et écriture de tout `/data` : comptes, clé TLS, `diag.token` ;
@@ -296,7 +354,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   4. confinement du système de fichiers (Landlock) ou conteneur de transcodage séparé, sans les secrets ;
   5. ffmpeg stable et épinglé.
 
-**WEB-6 — Les invités de la porte web n'entendent ni le bot ni les autres invités.** *Probable : lecture croisée du serveur et du JS.*
+**✅ WEB-6 — Les invités de la porte web n'entendent ni le bot ni les autres invités.** *Probable : lecture croisée du serveur et du JS.*
 - **Mécanisme :**
   - les compteurs 64 bits du bot et des invités partent entre 0 et 2⁶³ (`porte.rs:487`, `musique.rs:883`) ;
   - la page les lit comme des nombres JavaScript, précis jusqu'à 2⁵³ seulement, et jette toute trame dont le numéro égale le précédent (`porte.js:1305-1315`, `1331`) ;
@@ -306,7 +364,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.3 Musique et yt-dlp
 
-**MUS-1 — Un yt-dlp tué laisse fuir `/tmp` et des zombies, et ses délais ne bornent rien.** *Mécanisme vérifié.*
+**✅ MUS-1 — Un yt-dlp tué laisse fuir `/tmp` et des zombies, et ses délais ne bornent rien.** *Mécanisme vérifié.*
 - **Contexte :**
   - l'image embarque `yt-dlp_linux`, un exécutable PyInstaller « onefile » ;
   - son chargeur extrait l'application dans `/tmp/_MEI…`, puis lance l'interpréteur en processus fils.
@@ -319,14 +377,14 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 - **Conséquence :** une soirée de morceaux sautés remplit la couche du conteneur, jusqu'au disque plein.
 - **Correctif :** `process_group(0)`, puis SIGTERM au groupe et SIGKILL différé (ou l'archive `yt-dlp_linux.zip`, qui n'extrait rien) ; `TMPDIR` dédié et purgé au démarrage ; `init: true`.
 
-**MUS-2 — Rien ne limite le nombre de yt-dlp simultanés, et `std::thread::spawn` peut abattre le serveur.** *Vérifié.*
+**✅ MUS-2 — Rien ne limite le nombre de yt-dlp simultanés, et `std::thread::spawn` peut abattre le serveur.** *Vérifié.*
 - **Mécanisme :**
   - chaque `Ajouter` lance un yt-dlp (environ 100 Mo), sans sémaphore ni budget par membre (`quic.rs:1774-1805`) ;
   - chaque Position ou Suivant démarre une nouvelle chaîne de lecture ;
   - les fils de lecture passent par `std::thread::spawn` (`musique.rs:480`, `485`), qui panique si le système refuse un fil. Avec `panic = "abort"`, tout le serveur tombe.
 - **Correctif :** sémaphore global (2 ou 3), budget par membre, `thread::Builder::spawn`, et les `rlimit` prévues par `PLAN-MUSIQUE.md:145`.
 
-**MUS-3 — La file de lecture n'a pas de limite, et l'état du bot peut se figer pour tout le monde.** *Vérifié.*
+**✅ MUS-3 — La file de lecture n'a pas de limite, et l'état du bot peut se figer pour tout le monde.** *Vérifié.*
 - **Mécanisme :**
   - `MAX_FILE_MUSIQUE` n'est appliqué que dans `AjouterPlusieurs` (`musique.rs:1010`), pas dans `Ajouter`, `AjouterPiste` ni `PlaylistCharger` ;
   - `PlaylistAjouterPiste` ne nettoie pas `source` (`quic.rs:1725-1734`) ;
@@ -338,7 +396,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.4 Chiffrement : ce que promet le README, ce que fait le code
 
-**CRY-1 — Le serveur détient les clés de la voix et des streams, et s'en sert.** *Vérifié par trois relecteurs.*
+**✅ CRY-1 — Le serveur détient les clés de la voix et des streams, et s'en sert.** *Vérifié par trois relecteurs.*
 - **Voix :**
   - la clé est tirée par le serveur (`state.rs:495`) et envoyée en hexadécimal dans `Welcome` (`quic.rs:352`) ;
   - c'est **la même clé pour tout le serveur et tous les salons**, privés compris, et elle n'est jamais renouvelée ;
@@ -358,7 +416,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - si l'on veut un vrai chiffrement de bout en bout pour les streams : des enveloppes X25519 par spectateur, déjà prévues dans `PLAN-STREAM.md` ;
   - pour la voix, c'est incompatible avec le bot et les invités web tels qu'ils sont conçus : c'est une décision à prendre.
 
-**CRY-2 — Son du jeu : le nonce est réutilisé et les spectateurs perdent le son.** *Vérifié par quatre relecteurs.*
+**✅ CRY-2 — Son du jeu : le nonce est réutilisé et les spectateurs perdent le son.** *Vérifié par quatre relecteurs.*
 - **Mécanisme :**
   - `game_audio_emit` repart de `AtomicU64::new(0)` à chaque appel (`client-gui/src/net.rs:311`) ;
   - décocher puis recocher « son du jeu » pendant un live recrée l'émetteur avec la même clé et le même `stream_id` (`main.rs:10484-10488`) : les nonces XChaCha20 se répètent, le même défaut que M15 ;
@@ -368,7 +426,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.5 Protocole et compatibilité
 
-**PRO-1 — Une variante ajoutée à un enum imbriqué rend le message illisible, et il est jeté sans trace.** *Vérifié ; latent.*
+**✅ PRO-1 — Une variante ajoutée à un enum imbriqué rend le message illisible, et il est jeté sans trace.** *Vérifié ; latent.*
 - **Mécanisme :**
   - seul `Medaille` porte `#[serde(other)]` (`protocol/src/lib.rs:2253`) ;
   - il manque notamment à `ChannelKind` (`lib.rs:1744`, présent dans `Welcome` et `ChannelsUpdated`) et à `JeuEtat` (`lib.rs:3037`, présent dans `Members`) ;
@@ -382,7 +440,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.6 Client — architecture et comportement
 
-**CLI-2 — La reprise automatique peut se reconnecter au mauvais serveur.** *Vérifié.*
+**✅ CLI-2 — La reprise automatique peut se reconnecter au mauvais serveur.** *Vérifié.*
 - **Mécanisme :**
   - `Reprise` (`main.rs:440-450`) ne retient ni le serveur ni l'adresse ;
   - `connect()` lit le formulaire du lanceur au moment de l'appel ;
@@ -391,12 +449,12 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 - **Variante :** en cliquant B pendant une tentative vers A, le nom et le logo de A s'écrivent dans la fiche de B, et l'empreinte TLS de A peut y être épinglée.
 - **Correctif :** capturer une `ServeurCible { id, adresse, pseudo }` au `connect`, et la faire porter par la reprise.
 
-**CLI-3 — « Annuler » pendant « Connexion… » fige l'interface jusqu'à 15 s.** *Vérifié.*
+**✅ CLI-3 — « Annuler » pendant « Connexion… » fige l'interface jusqu'à 15 s.** *Vérifié.*
 - **Mécanisme :** `NetHandle::quit()` (`net.rs:252`) fait un `join()` sans limite de temps, alors que le fil réseau ne lit ses ordres qu'après `QuicClient::connect` (`net.rs:565-583`).
 - **Même famille :** toute déconnexion volontaire bloque aussi l'interface jusqu'à 600 ms, plus l'arrêt du moteur audio.
 - **Correctif :** `select!` entre la connexion et les ordres ; `quit()` non bloquant ; arrêt du moteur audio sur un fil séparé.
 
-**CLI-4 — Se déconnecter ou être expulsé n'arrête ni la diffusion ni le visionnage.** *Vérifié.*
+**✅ CLI-4 — Se déconnecter ou être expulsé n'arrête ni la diffusion ni le visionnage.** *Vérifié.*
 - **Mécanisme :** l'arrêt n'existe que dans `connexion_perdue` (`main.rs:4021-4026`) ; `fermer_session` (`4094-4182`) n'y touche pas.
 - **Conséquences :**
   - la capture et NVENC tournent pour rien ;
@@ -404,7 +462,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - `demarrer_diffusion` refuse ensuite de redémarrer (`10277`).
 - **Correctif :** déplacer ces arrêts dans `fermer_session`.
 
-**CLI-5 — Le lien d'un fichier envoyé part dans le salon ouvert à la fin de l'envoi.** *Vérifié.*
+**✅ CLI-5 — Le lien d'un fichier envoyé part dans le salon ouvert à la fin de l'envoi.** *Vérifié.*
 - **Mécanisme :**
   - `ClientMsg::Chat` ne porte pas de salon (`protocol/src/lib.rs:151`) ;
   - le serveur publie donc dans `current_channel` (`quic.rs:1115`) ;
@@ -414,11 +472,11 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - après une reprise, le message part dans une connexion morte, et le bandeau s'efface comme si tout allait bien.
 - **Correctif :** finaliser côté serveur avec le salon d'origine (comme `/clips/fin`), ou ajouter le salon au message `Chat`.
 
-**CLI-6 — Un message tapé pendant une coupure est perdu (M9, toujours présent).**
+**✅ CLI-6 — Un message tapé pendant une coupure est perdu (M9, toujours présent).**
 - `send` puis `input.clear()` (`main.rs:7812-7816`) ; `NetHandle::send` ignore l'échec (`net.rs:236`).
 - **Correctif :** ne vider le champ qu'après succès, ou remettre le texte en cas d'échec.
 
-**CLI-7 — L'état de session n'existe pas en tant qu'objet.**
+**✅ CLI-7 — L'état de session n'existe pas en tant qu'objet.**
 - **Mécanisme :** `fermer_session` remet à zéro une soixantaine de champs à la main. Elle en oublie une vingtaine ajoutés depuis la 0.1.3 :
   - `reponse_a` ;
   - l'état musique ;
@@ -431,7 +489,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.7 Client — sécurité, mise à jour, vie privée
 
-**SEC-1 — La signature de mise à jour ne lie ni la version ni la plateforme.** *Vérifié.*
+**✅ SEC-1 — La signature de mise à jour ne lie ni la version ni la plateforme.** *Vérifié.*
 - **Mécanisme :**
   - seuls les octets de l'actif sont signés (`update.rs:269`, `366-397`, `464-479`) ;
   - la version vient de l'étiquette de release, qui n'est pas signée ;
@@ -445,7 +503,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - contrôler l'en-tête PE/Mach-O ;
   - activer les releases immuables.
 
-**SEC-2 — La CI signe tout ce qu'on lui présente.** *Probable : les réglages du dépôt ne sont pas visibles.*
+**✅ SEC-2 — La CI signe tout ce qu'on lui présente.** *Probable : les réglages du dépôt ne sont pas visibles.*
 - **Mécanisme :**
   - la signature a lieu pour chaque tag `v*` et chaque `workflow_dispatch`, sur n'importe quelle branche (`release.yml:17-19`) ;
   - le secret est un secret de dépôt, sans environnement protégé ;
@@ -458,7 +516,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - des actions épinglées par SHA ;
   - deux clés publiques gravées, pour pouvoir faire tourner la clé.
 
-**SEC-3 — Des aperçus animés peuvent réclamer plusieurs gigaoctets.** *Probable : les bornes sont vérifiées, l'impact dépend de la machine.*
+**✅ SEC-3 — Des aperçus animés peuvent réclamer plusieurs gigaoctets.** *Probable : les bornes sont vérifiées, l'impact dépend de la machine.*
 - **Mécanisme :**
   - une animation peut garder 48 Mpx, soit environ 192 Mo en RGBA, puis autant en mémoire vidéo ;
   - jusqu'à 40 aperçus sont en cache, décodés en parallèle ;
@@ -468,7 +526,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.8 Audio
 
-**AUD-1 — La suppression d'écho résiduel ne s'exécute jamais.** *Vérifié dans les sources de SpeexDSP 1.2.1.*
+**✅ AUD-1 — La suppression d'écho résiduel ne s'exécute jamais.** *Vérifié dans les sources de SpeexDSP 1.2.1.*
 - **Mécanisme :**
   - `ki-aec` coupe le débruitage Speex (`SET_DENOISE = 0`, `ki-aec/src/lib.rs:98-113`) pour « ne garder que la suppression de résidu » ;
   - or `speex_preprocess_run` force alors un gain de 1 sur toutes les bandes (`preprocess.c:932-937` : « If noise suppression is off, don't apply the gain »).
@@ -478,7 +536,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - le test `un_echo_pur_est_annule`, qui utilise un écho linéaire, ne peut pas le voir.
 - **Correctif :** `SET_DENOISE = 1` avec `SET_NOISE_SUPPRESS = 0` (plancher à 0 dB, donc pas de débruitage), en gardant `ECHO_SUPPRESS` et `ECHO_SUPPRESS_ACTIVE` ; un test avec un écho écrêté.
 
-**AUD-2 — Chaque fin de phrase compte comme une « trame incomplète » : le Docteur audio accuse la machine à tort.** *Vérifié.*
+**✅ AUD-2 — Chaque fin de phrase compte comme une « trame incomplète » : le Docteur audio accuse la machine à tort.** *Vérifié.*
 - **Mécanisme :**
   - `mix_into` compte une famine dès qu'un tampon amorcé est vide (`jitter.rs:142-149`) ;
   - en push-to-talk ou en détection vocale, chaque fin de prise de parole vide le tampon normalement ;
@@ -490,7 +548,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.9 Vidéo et médias
 
-**VID-1 — Le rééchantillonneur audio panique au-delà de 192 kHz.** *Vérifié.*
+**✅ VID-1 — Le rééchantillonneur audio panique au-delà de 192 kHz.** *Vérifié.*
 - **Où :** `crates/media/src/son.rs:58-80`.
 - **Mécanisme :**
   - après la boucle, `consomme = floor(position)` peut dépasser la longueur du tampon quand le pas (cadence ÷ 48 000) dépasse environ 4, et `drain(..consomme)` panique ;
@@ -501,7 +559,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - une vidéo que le serveur n'a pas normalisée.
 - **Correctif :** `consomme.min(len - 3)` avec une garde si `len < 4` ; cadence bornée entre 8 et 384 kHz ; tests de propriétés.
 
-**VID-2 — Sur le chemin processeur, un étage meurt et la diffusion reste « en cours ».** *Mécanisme vérifié jusque dans windows-capture 2.0.1.*
+**✅ VID-2 — Sur le chemin processeur, un étage meurt et la diffusion reste « en cours ».** *Mécanisme vérifié jusque dans windows-capture 2.0.1.*
 - **Mécanisme :**
   - une erreur dans `on_frame_arrived` arrête la capture sans appeler `on_closed` : le pipeline attend indéfiniment ;
   - à l'inverse, un échec définitif de l'encodeur fait sortir le pipeline pendant que la capture continue (`capture/wgc.rs:191-193`, `lib.rs:813-823`, `893-895`, `915-918`) ;
@@ -511,7 +569,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.10 CI, déploiement, chaîne d'approvisionnement
 
-**OPS-1 — Chaque push sur `main` part en production en cinq minutes, sans valider l'image.**
+**◐ OPS-1 — Chaque push sur `main` part en production en cinq minutes, sans valider l'image.**
 - **Chaîne :** `docker.yml` publie `latest` après clippy et les tests du serveur, puis Watchtower la tire toutes les 5 minutes.
 - **Ce qui manque :**
   - aucun démarrage de l'image en CI ;
@@ -521,12 +579,12 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
   - `latest` égal au dernier tag, ou un canal « bêta » séparé, et `KI_VERSION` épinglée en production ;
   - un job de fumée : `docker run`, healthcheck, 30 s de `ki-load`, puis vérifier que le journal ne contient aucune panique.
 
-**OPS-2 — Watchtower (`containrrr/watchtower`) est archivé depuis le 17 décembre 2025, et il tient la socket Docker.**
+**✅ OPS-2 — Watchtower (`containrrr/watchtower`) est archivé depuis le 17 décembre 2025, et il tient la socket Docker.**
 - **Risque :** la socket Docker équivaut à un accès root sur l'hôte, confié à un projet qui ne reçoit plus de correctifs.
 - **Compatibilité :** rien ne garantit qu'il suive les Docker Engine récents ; les mises à jour peuvent s'arrêter sans bruit.
 - **Correctif :** Portainer GitOps avec webhook (route 2, déjà documentée), ou un timer systemd qui lance `docker compose pull && up -d` sur un tag épinglé.
 
-**OPS-3 — La CI accorde des permissions trop larges.**
+**✅ OPS-3 — La CI accorde des permissions trop larges.**
 - **Mécanisme :**
   - `release.yml` donne `contents: write` à tous ses jobs, y compris le workflow `ci.yml` qu'il appelle ;
   - ce workflow compile plus de mille crates, installe `cargo-fuzz` et tourne en nightly ;
@@ -535,7 +593,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 - **Conséquence :** n'importe quel script de build d'une dépendance peut pousser dans le dépôt.
 - **Correctif :** `permissions: contents: read` par défaut ; `contents: write` réservé au job `publish` ; `persist-credentials: false`.
 
-**OPS-4 — Le conteneur n'a ni init ni durcissement.**
+**✅ OPS-4 — Le conteneur n'a ni init ni durcissement.**
 - **Ce qui manque au compose :**
   - `init: true`, ce qui cause les zombies de MUS-1 ;
   - `logging` avec `max-size`, alors que le journal peut être inondé sans authentification (porte web) ;
@@ -545,7 +603,7 @@ Deux majeurs de la 0.1.3 restent ouverts dans cette zone, **M20** (le motif d'ex
 
 ### 3.11 Licences et documentation
 
-**DOC-1 — Le dépôt n'a aucun fichier de licence, et aucune notice tierce n'accompagne les binaires.**
+**◐ DOC-1 — Le dépôt n'a aucun fichier de licence, et aucune notice tierce n'accompagne les binaires.**
 - **Licence du projet :**
   - le workspace se déclare MIT et le dépôt est public, mais le texte de la licence n'existe nulle part ;
   - la licence MIT exige que sa notice accompagne les copies : sans elle, les droits des tiers restent flous.
