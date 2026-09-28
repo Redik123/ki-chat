@@ -46,6 +46,8 @@ const AMORCE_BLOCS: usize = 10;
 const DEBIT_OPUS: i32 = 96_000;
 /// Résoudre une adresse (titre, durée) ne doit pas durer plus que ça.
 const DELAI_RESOLUTION: Duration = Duration::from_secs(40);
+/// Un morceau plus long que ça n'en est plus un : refusé à l'ajout.
+const DUREE_MAX_S: f64 = 6.0 * 3600.0;
 /// Sans un premier bloc de son au bout de ce délai, la piste est jetée.
 const DELAI_PREMIER_SON: Duration = Duration::from_secs(60);
 /// L'état est republié à cette cadence pendant la lecture, pour la
@@ -71,25 +73,97 @@ pub struct Outils {
 impl Outils {
     /// Les arguments communs à tout appel de yt-dlp — une seule vidéo,
     /// même si l'adresse porte une liste.
-    fn args_yt_dlp(&self) -> Vec<String> {
-        let mut args = self.args_yt_dlp_liste();
+    /// Les arguments communs, et la copie des cookies à garder en vie tant
+    /// que le yt-dlp tourne.
+    fn args_yt_dlp(&self) -> (Vec<String>, CopieCookies) {
+        let (mut args, copie) = self.args_yt_dlp_liste();
         args.insert(0, "--no-playlist".to_string());
-        args
+        (args, copie)
     }
 
     /// Les mêmes, pour une adresse de playlist.
-    fn args_yt_dlp_liste(&self) -> Vec<String> {
+    fn args_yt_dlp_liste(&self) -> (Vec<String>, CopieCookies) {
         let mut args = vec![
             "--no-warnings".to_string(),
             "--no-progress".to_string(),
             "--cache-dir".to_string(),
             self.cache.to_string_lossy().into_owned(),
         ];
+        let mut copie = CopieCookies(None);
         if let Some(c) = &self.cookies {
-            args.push("--cookies".to_string());
-            args.push(c.to_string_lossy().into_owned());
+            // Une copie par yt-dlp : chacun réécrit son fichier de cookies en
+            // partant, et plusieurs à la fois sur le même fichier le
+            // mélangeaient. L'original n'est plus que lu.
+            let privee = crate::processus::temporaire()
+                .join(format!("cookies-{:016x}.txt", rand::random::<u64>()));
+            match std::fs::copy(c, &privee) {
+                Ok(_) => {
+                    args.push("--cookies".to_string());
+                    args.push(privee.to_string_lossy().into_owned());
+                    copie.0 = Some(privee);
+                }
+                Err(e) => tracing::warn!("musique : cookies non copiés ({e}) — yt-dlp sans cookies"),
+            }
         }
-        args
+        (args, copie)
+    }
+}
+
+/// Les écritures des fichiers du bot (`file.json`, `playlists.json`), hors
+/// de sa boucle : elle est asynchrone et cadence la musique à 20 ms, et une
+/// écriture durable — deux `sync_all` — la tenait à chaque commande.
+///
+/// Deux écritures peuvent alors se croiser sur le pool bloquant : chacune
+/// porte un numéro tiré au moment où l'état a été pris, et une plus ancienne
+/// n'écrase jamais une plus récente du même fichier.
+#[derive(Default)]
+struct Ecritures {
+    suivante: AtomicU64,
+    ecrites: Arc<Mutex<HashMap<PathBuf, u64>>>,
+}
+
+impl Ecritures {
+    /// Le numéro d'un état, à tirer **pendant** qu'on le tient.
+    fn numeroter(&self) -> u64 {
+        self.suivante.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn ecrire_hors_boucle(&self, chemin: PathBuf, octets: Vec<u8>, generation: u64) {
+        let ecrites = Arc::clone(&self.ecrites);
+        let ecrire = move || {
+            let mut ecrites = ecrites.lock().unwrap();
+            if ecrites.get(&chemin).is_some_and(|g| *g >= generation) {
+                return;
+            }
+            if let Some(dossier) = chemin.parent() {
+                let _ = std::fs::create_dir_all(dossier);
+            }
+            match crate::store::write_atomic(&chemin, &octets) {
+                Ok(()) => {
+                    ecrites.insert(chemin, generation);
+                }
+                Err(e) => tracing::warn!("musique : {} non écrit : {e}", chemin.display()),
+            }
+        };
+        // Hors d'un moteur asynchrone (tests, arrêt), on écrit sur place.
+        match tokio::runtime::Handle::try_current() {
+            Ok(moteur) => {
+                moteur.spawn_blocking(ecrire);
+            }
+            Err(_) => ecrire(),
+        }
+    }
+}
+
+/// La copie des cookies d'un seul yt-dlp, effacée quand on la lâche — après
+/// lui : la garder en vie aussi longtemps que le processus.
+pub(crate) struct CopieCookies(Option<PathBuf>);
+
+impl Drop for CopieCookies {
+    fn drop(&mut self) {
+        if let Some(chemin) = &self.0 {
+            let _ = std::fs::remove_file(chemin);
+        }
     }
 }
 
@@ -164,6 +238,51 @@ struct Sauvegarde {
 const SOLITUDE_PAUSE: Duration = Duration::from_secs(5 * 60);
 const SOLITUDE_DEPART: Duration = Duration::from_secs(30 * 60);
 
+/// Une piste venue d'un client (résultat de recherche renvoyé tel quel),
+/// remise d'aplomb : on n'en croit que ce qui se vérifie. Une seule fonction
+/// pour la file et pour les playlists — l'ajout à une playlist gardait la
+/// `source` du client, n'importe quelle chaîne, et la rediffusait à tous.
+pub fn nettoyer_piste(piste: &mut Piste, qui: &str) {
+    piste.titre = ki_protocol::safe_display(&piste.titre, 160);
+    piste.artiste = ki_protocol::safe_display(&piste.artiste, 80);
+    piste.source = if piste.url.contains("soundcloud.com") {
+        "soundcloud"
+    } else {
+        "youtube"
+    }
+    .to_string();
+    piste.vignette = piste
+        .vignette
+        .take()
+        .filter(|v| v.starts_with("/musique/vignette/") && v.len() < 64);
+    piste.ajoute_par = Some(qui.to_string());
+}
+
+/// Relit un fichier d'état du bot. Absent : l'état par défaut. Illisible :
+/// mis de côté sous un autre nom avant de repartir de zéro — il était
+/// remplacé par du vide à la première écriture, sans copie, et des mois de
+/// playlists partaient avec.
+pub(crate) fn relire<T: serde::de::DeserializeOwned + Default>(chemin: &std::path::Path) -> T {
+    let Ok(texte) = std::fs::read_to_string(chemin) else {
+        return T::default();
+    };
+    match serde_json::from_str(&texte) {
+        Ok(v) => v,
+        Err(e) => {
+            let copie = chemin.with_extension(format!("illisible-{}.json", crate::state::now_millis()));
+            match std::fs::rename(chemin, &copie) {
+                Ok(()) => tracing::error!(
+                    "{} illisible ({e}) : mis de côté sous {}",
+                    chemin.display(),
+                    copie.display()
+                ),
+                Err(r) => tracing::error!("{} illisible ({e}), et pas mis de côté : {r}", chemin.display()),
+            }
+            T::default()
+        }
+    }
+}
+
 pub struct Musique {
     etat: Mutex<EtatMusique>,
     tx: tokio::sync::mpsc::UnboundedSender<Commande>,
@@ -176,7 +295,22 @@ pub struct Musique {
     /// Les playlists du groupe, par nom.
     playlists: Mutex<BTreeMap<String, Vec<Piste>>>,
     dossier: PathBuf,
+    /// Les résolutions et recherches yt-dlp en cours, tout le serveur
+    /// confondu : chacune lance un processus d'une centaine de mégaoctets,
+    /// et une rafale d'ajouts en lançait deux cents d'un coup.
+    pub ytdlp: Arc<tokio::sync::Semaphore>,
+    ecritures: Ecritures,
 }
+
+/// yt-dlp lancés en même temps pour résoudre ou chercher (la lecture en
+/// cours a le sien, à part).
+const YTDLP_SIMULTANES: usize = 3;
+
+/// Pistes de la file envoyées aux clients : l'état part à chaque commande
+/// et toutes les cinq secondes, à tout le monde. Une file entière de trois
+/// cents pistes aux titres longs dépassait `MAX_LINE`, l'état était jeté et
+/// la bannière se figeait. Le reste de la file est compté, pas transporté.
+const FILE_ENVOYEE_MAX: usize = 64;
 
 impl Musique {
     /// Cherche yt-dlp et ffmpeg (variables `KI_YTDLP` / `KI_FFMPEG`, sinon
@@ -185,14 +319,17 @@ impl Musique {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let outils = detecter(data_dir).map(Arc::new);
         let dossier = PathBuf::from(data_dir).join("musique");
-        let playlists: BTreeMap<String, Vec<Piste>> = std::fs::read_to_string(dossier.join("playlists.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
-        let sauve: Sauvegarde = std::fs::read_to_string(dossier.join("file.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        let mut playlists: BTreeMap<String, Vec<Piste>> = relire(&dossier.join("playlists.json"));
+        // Relues bornées : un fichier écrit par une version d'avant les
+        // bornes, ou à la main, ne rouvre pas le débordement.
+        while playlists.len() > ki_protocol::MAX_PLAYLISTS {
+            playlists.pop_last();
+        }
+        for pistes in playlists.values_mut() {
+            pistes.truncate(ki_protocol::MAX_PISTES_PLAYLIST);
+        }
+        let mut sauve: Sauvegarde = relire(&dossier.join("file.json"));
+        sauve.file.truncate(ki_protocol::MAX_FILE_MUSIQUE);
         // La file d'avant le redémarrage attend, en pause, que quelqu'un
         // relance ; le salon aussi, si le bot en avait un.
         let etat = EtatMusique {
@@ -214,17 +351,17 @@ impl Musique {
             vignettes: Mutex::new(Vignettes::default()),
             playlists: Mutex::new(playlists),
             dossier,
+            ytdlp: Arc::new(tokio::sync::Semaphore::new(YTDLP_SIMULTANES)),
+            ecritures: Ecritures::default(),
         }
     }
 
     fn sauver_playlists(&self) {
         let playlists = self.playlists.lock().unwrap();
-        if let Ok(json) = serde_json::to_vec_pretty(&*playlists) {
-            let _ = std::fs::create_dir_all(&self.dossier);
-            if let Err(e) = crate::store::write_atomic(&self.dossier.join("playlists.json"), &json) {
-                tracing::warn!("musique : playlists non écrites : {e}");
-            }
-        }
+        let generation = self.ecritures.numeroter();
+        let Ok(json) = serde_json::to_vec_pretty(&*playlists) else { return };
+        drop(playlists);
+        self.ecritures.ecrire_hors_boucle(self.dossier.join("playlists.json"), json, generation);
     }
 
     /// La file telle qu'elle est, pour la retrouver au redémarrage.
@@ -235,10 +372,10 @@ impl Musique {
             file.insert(0, p.clone());
         }
         let sauve = Sauvegarde { salon: e.salon, file, volume: e.volume };
+        let generation = self.ecritures.numeroter();
         drop(e);
         if let Ok(json) = serde_json::to_vec_pretty(&sauve) {
-            let _ = std::fs::create_dir_all(&self.dossier);
-            let _ = crate::store::write_atomic(&self.dossier.join("file.json"), &json);
+            self.ecritures.ecrire_hors_boucle(self.dossier.join("file.json"), json, generation);
         }
     }
 
@@ -304,6 +441,12 @@ impl Musique {
 
     pub fn etat(&self) -> EtatMusique {
         let mut e = self.etat.lock().unwrap().clone();
+        // Le début de la file seulement, et sa longueur : voir
+        // `FILE_ENVOYEE_MAX`.
+        if e.file.len() > FILE_ENVOYEE_MAX {
+            e.file_totale = e.file.len() as u32;
+            e.file.truncate(FILE_ENVOYEE_MAX);
+        }
         e.playlists = self
             .playlists
             .lock()
@@ -523,7 +666,8 @@ pub fn est_liste(url: &str) -> bool {
 pub fn chercher(outils: &Outils, texte: &str, source: &str) -> Result<Vec<Piste>, String> {
     let (prefixe, nom_source) = if source == "soundcloud" { ("scsearch10:", "soundcloud") } else { ("ytsearch10:", "youtube") };
     let mut cmd = Command::new(&outils.yt_dlp);
-    cmd.args(outils.args_yt_dlp())
+    let (args, _cookies) = outils.args_yt_dlp();
+    cmd.args(args)
         .args(["-j", "--flat-playlist", "--skip-download", "--"])
         .arg(format!("{prefixe}{texte}"));
     let sortie = executer_borne(&mut cmd, DELAI_RESOLUTION)?;
@@ -535,7 +679,8 @@ pub fn chercher(outils: &Outils, texte: &str, source: &str) -> Result<Vec<Piste>
 pub fn resoudre_liste(outils: &Outils, url: &str) -> Result<Vec<Piste>, String> {
     let source = if url.contains("soundcloud.com") { "soundcloud" } else { "youtube" };
     let mut cmd = Command::new(&outils.yt_dlp);
-    cmd.args(outils.args_yt_dlp_liste())
+    let (args, _cookies) = outils.args_yt_dlp_liste();
+    cmd.args(args)
         .args(["-j", "--flat-playlist", "--skip-download", "--playlist-end"])
         .arg(ki_protocol::MAX_PISTES_PLAYLIST.to_string())
         .arg("--")
@@ -617,12 +762,22 @@ fn resume_erreur(stderr: &[u8]) -> String {
 /// rien télécharger. Bloquant : à appeler hors de la boucle asynchrone.
 pub fn resoudre(outils: &Outils, url: &str) -> Result<Piste, String> {
     let mut cmd = Command::new(&outils.yt_dlp);
-    cmd.args(outils.args_yt_dlp())
+    let (args, _cookies) = outils.args_yt_dlp();
+    cmd.args(args)
         .args(["--dump-single-json", "--skip-download", "--"])
         .arg(url);
     let sortie = executer_borne(&mut cmd, DELAI_RESOLUTION)?;
     let v: serde_json::Value =
         serde_json::from_slice(&sortie).map_err(|_| "réponse illisible".to_string())?;
+    // Un direct ne finit jamais : il tiendrait la file indéfiniment, et le
+    // délai de chaque requête de la chaîne avec. Une vidéo démesurée non
+    // plus — au-delà de six heures, ce n'est plus un morceau.
+    if v["is_live"].as_bool() == Some(true) {
+        return Err("les directs ne passent pas dans le bot".into());
+    }
+    if v["duration"].as_f64().is_some_and(|d| d > DUREE_MAX_S) {
+        return Err("morceau trop long (six heures au plus)".into());
+    }
     let titre = v["title"].as_str().unwrap_or(url).to_string();
     let artiste = ["artist", "uploader", "channel", "creator"]
         .iter()
@@ -781,10 +936,13 @@ fn pomper(
     tx: &canal::SyncSender<Vec<f32>>,
     pret: &AtomicBool,
 ) -> Result<usize, String> {
+    // La copie des cookies vit plus longtemps que yt-dlp : déclarée avant
+    // lui, elle tombe après lui.
+    let (mut args_yt, _cookies) = outils.args_yt_dlp();
     let mut yt = {
         let mut cmd = Command::new(&outils.yt_dlp);
         crate::processus::preparer(&mut cmd);
-        cmd.args(outils.args_yt_dlp());
+        cmd.args(std::mem::take(&mut args_yt));
         if let Some(c) = client.filter(|c| *c != "default") {
             cmd.args(["--extractor-args", &format!("youtube:player_client={c}")]);
         }
@@ -969,6 +1127,16 @@ fn appliquer(
             let demarrer = {
                 let mut e = state.musique.etat.lock().unwrap();
                 e.erreur = None;
+                // La borne vaut pour tous les ajouts, pas seulement pour les
+                // playlists : sans elle, la file grossissait jusqu'à ce que
+                // son état ne tienne plus dans une ligne — la bannière se
+                // figeait pour tout le monde, redémarrage compris.
+                if e.file.len() >= ki_protocol::MAX_FILE_MUSIQUE {
+                    e.erreur = Some("la file est pleine".into());
+                    drop(e);
+                    publier(state, false);
+                    return;
+                }
                 if maintenant {
                     e.file.insert(0, piste);
                     true
@@ -1116,10 +1284,17 @@ fn appliquer(
                 e.erreur = None;
                 if remplacer {
                     e.file = pistes;
+                    e.file.truncate(ki_protocol::MAX_FILE_MUSIQUE);
                     e.lecture = true;
                     true
                 } else {
-                    e.file.extend(pistes);
+                    // Charger trois fois une playlist de deux cents pistes
+                    // débordait la file : ce qui ne tient pas reste dehors.
+                    let place = ki_protocol::MAX_FILE_MUSIQUE.saturating_sub(e.file.len());
+                    if place < pistes.len() {
+                        e.erreur = Some("la file est pleine — une partie de la playlist n'y est pas".into());
+                    }
+                    e.file.extend(pistes.into_iter().take(place));
                     e.en_cours.is_none()
                 }
             };
@@ -1277,18 +1452,6 @@ fn pas(state: &Arc<AppState>, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur
         (e.lecture, e.salon, e.volume)
     };
     let Some(l) = lecteur.as_mut() else { return };
-    if l.fini.load(Ordering::Relaxed) && l.rx.try_recv().is_err() {
-        // Terminée (ou ratée) et vidée : la suivante.
-        let erreur = l.erreur.lock().unwrap().clone();
-        if let Some(e) = &erreur {
-            tracing::warn!("musique : piste abandonnée : {e}");
-            state.musique.compteurs.echecs.fetch_add(1, Ordering::Relaxed);
-        } else {
-            state.musique.compteurs.pistes_jouees.fetch_add(1, Ordering::Relaxed);
-        }
-        suivante(state, outils, lecteur, erreur);
-        return;
-    }
     if !l.mesure && l.pret.load(Ordering::Relaxed) {
         l.mesure = true;
         state.musique.compteurs.premier_son_total_ms.fetch_add(l.demarre.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -1303,6 +1466,10 @@ fn pas(state: &Arc<AppState>, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur
     if !lecture {
         return;
     }
+    // Un seul prélèvement par échéance, et ce qui est prélevé est joué. La
+    // fin de piste se constatait par un `try_recv` à part, qui consommait
+    // — et jetait — un bloc à chaque échéance : la dernière seconde passait
+    // un bloc sur deux, et une pause près de la fin la vidait sans la jouer.
     match l.rx.try_recv() {
         Ok(pcm) if pcm.is_empty() => {}
         Ok(mut pcm) => {
@@ -1317,8 +1484,18 @@ fn pas(state: &Arc<AppState>, outils: &Arc<Outils>, lecteur: &mut Option<Lecteur
             }
             l.position_ms += 20;
         }
-        Err(TryRecvError::Empty) => {}
-        Err(TryRecvError::Disconnected) => {}
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) if l.fini.load(Ordering::Relaxed) => {
+            // Terminée (ou ratée) et vidée : la suivante.
+            let erreur = l.erreur.lock().unwrap().clone();
+            if let Some(e) = &erreur {
+                tracing::warn!("musique : piste abandonnée : {e}");
+                state.musique.compteurs.echecs.fetch_add(1, Ordering::Relaxed);
+            } else {
+                state.musique.compteurs.pistes_jouees.fetch_add(1, Ordering::Relaxed);
+            }
+            suivante(state, outils, lecteur, erreur);
+        }
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
     }
 }
 
@@ -1336,6 +1513,45 @@ mod tests {
         );
         assert_eq!(resume_erreur(b""), "échec");
         assert!(resume_erreur("é".repeat(400).as_bytes()).chars().count() <= 160);
+    }
+
+    /// Une file pleine de pistes aux champs les plus longs — titres en
+    /// caractères de quatre octets, adresses au maximum — et cinquante
+    /// playlists : l'état envoyé tient toujours dans une ligne, et dit la
+    /// longueur réelle de la file.
+    #[test]
+    fn l_etat_du_bot_tient_toujours_dans_une_ligne() {
+        let dir = std::env::temp_dir().join(format!("ki-musique-etat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = Musique::new(dir.to_str().unwrap());
+        let piste = Piste {
+            source: "soundcloud".into(),
+            url: format!("https://soundcloud.com/{}", "a".repeat(276)),
+            titre: "🎧".repeat(160),
+            artiste: "🎧".repeat(80),
+            duree_s: u32::MAX,
+            vignette: Some(format!("/musique/vignette/{}.jpg", "f".repeat(40))),
+            ajoute_par: Some("🎧".repeat(32)),
+        };
+        {
+            let mut e = m.etat.lock().unwrap();
+            e.file = vec![piste.clone(); ki_protocol::MAX_FILE_MUSIQUE];
+            e.en_cours = Some(piste.clone());
+            e.erreur = Some("🎧".repeat(200));
+        }
+        {
+            let mut playlists = m.playlists.lock().unwrap();
+            for n in 0..ki_protocol::MAX_PLAYLISTS {
+                playlists.insert(format!("{n:02}{}", "🎧".repeat(38)), vec![piste.clone()]);
+            }
+        }
+        let etat = m.etat();
+        assert_eq!(etat.file.len(), FILE_ENVOYEE_MAX);
+        assert_eq!(etat.file_totale as usize, ki_protocol::MAX_FILE_MUSIQUE);
+        let ligne = crate::state::encode(&ki_protocol::ServerMsg::MusiqueEtat { etat });
+        assert!(ligne.is_some(), "l'état du bot dépasse MAX_LINE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Le compteur du bot part sous 2⁵³ : la page d'une porte web le lit en

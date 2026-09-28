@@ -1773,9 +1773,29 @@ fn handle_msg(
                 C::PlaylistAjouterPiste { nom, piste } => format!("{nom} ← {}", piste.url),
                 _ => String::new(),
             };
-            // Chercher n'est pas une action sur le bot : pas d'audit, mais
-            // le budget du chat, pour ne pas faire tourner yt-dlp en rafale.
-            if !matches!(commande, C::Chercher { .. }) {
+            // Consigné **après** les contrôles qu'on peut faire ici, et jamais
+            // pour la recherche, la position ni le volume : l'adresse ou le
+            // nom de playlist, jusqu'à 160 Kio, entraient au journal avant
+            // d'être validés, et trois cents gestes anodins suffisaient à en
+            // faire tourner — donc effacer — toutes les archives.
+            let nom_valide = |nom: &str| {
+                !nom.trim().is_empty()
+                    && nom.chars().count() <= ki_protocol::MAX_NOM_PLAYLIST
+                    && !nom.chars().any(char::is_control)
+            };
+            let valide = match &commande {
+                C::Ajouter { url, .. } => ki_protocol::url_musique_valide(url),
+                C::AjouterPiste { piste, .. } => ki_protocol::url_musique_valide(&piste.url),
+                C::PlaylistAjouterPiste { nom, piste } => {
+                    nom_valide(nom) && ki_protocol::url_musique_valide(&piste.url)
+                }
+                C::PlaylistEnregistrer { nom }
+                | C::PlaylistCharger { nom, .. }
+                | C::PlaylistSupprimer { nom } => nom_valide(nom),
+                _ => true,
+            };
+            let anodin = matches!(commande, C::Chercher { .. } | C::Position { .. } | C::Volume { .. });
+            if valide && !anodin {
                 state.audit.record(&format!("musique.{quoi}"), username, "", &detail);
             }
             match commande {
@@ -1796,17 +1816,29 @@ fn handle_msg(
                         let _ = tx.send(ServerMsg::Error { message: "doucement sur la recherche".into() });
                         return;
                     }
+                    // Un yt-dlp de plus seulement s'il reste un jeton : ils
+                    // sont plafonnés pour tout le serveur.
+                    let Ok(permis) = state.musique.ytdlp.clone().try_acquire_owned() else {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "le bot est occupé — réessaie dans un instant".into(),
+                        });
+                        return;
+                    };
                     let Some(outils) = state.musique.outils() else { return };
                     let (state, tx) = (state.clone(), tx.clone());
-                    tokio::task::spawn_blocking(move || match crate::musique::chercher(&outils, &texte, &source) {
-                        Ok(mut pistes) => {
-                            for p in &mut pistes {
-                                state.musique.localiser_vignette(p);
+                    tokio::task::spawn_blocking(move || {
+                        let trouvees = crate::musique::chercher(&outils, &texte, &source);
+                        drop(permis);
+                        match trouvees {
+                            Ok(mut pistes) => {
+                                for p in &mut pistes {
+                                    state.musique.localiser_vignette(p);
+                                }
+                                let _ = tx.send(ServerMsg::MusiqueResultats { texte, pistes });
                             }
-                            let _ = tx.send(ServerMsg::MusiqueResultats { texte, pistes });
-                        }
-                        Err(e) => {
-                            let _ = tx.send(ServerMsg::Error { message: format!("recherche impossible : {e}") });
+                            Err(e) => {
+                                let _ = tx.send(ServerMsg::Error { message: format!("recherche impossible : {e}") });
+                            }
                         }
                     });
                 }
@@ -1826,11 +1858,7 @@ fn handle_msg(
                         };
                         state.musique.commander(crate::musique::Commande::Rejoindre { salon });
                     }
-                    piste.titre = ki_protocol::safe_display(&piste.titre, 160);
-                    piste.artiste = ki_protocol::safe_display(&piste.artiste, 80);
-                    piste.source = if piste.url.contains("soundcloud.com") { "soundcloud" } else { "youtube" }.to_string();
-                    piste.vignette = piste.vignette.filter(|v| v.starts_with("/musique/vignette/") && v.len() < 64);
-                    piste.ajoute_par = Some(username.to_string());
+                    crate::musique::nettoyer_piste(&mut piste, username);
                     state.musique.commander(crate::musique::Commande::Ajouter { piste, maintenant });
                 }
                 C::Deplacer { de, vers } => state.musique.commander(crate::musique::Commande::Deplacer(de, vers)),
@@ -1865,10 +1893,7 @@ fn handle_msg(
                         let _ = tx.send(ServerMsg::Error { message: "adresse refusée".into() });
                         return;
                     }
-                    piste.titre = ki_protocol::safe_display(&piste.titre, 160);
-                    piste.artiste = ki_protocol::safe_display(&piste.artiste, 80);
-                    piste.vignette = piste.vignette.filter(|v| v.starts_with("/musique/vignette/") && v.len() < 64);
-                    piste.ajoute_par = Some(username.to_string());
+                    crate::musique::nettoyer_piste(&mut piste, username);
                     state.musique.commander(crate::musique::Commande::PlaylistAjouterPiste(nom.trim().to_string(), piste))
                 }
                 C::Rejoindre => {
@@ -1901,6 +1926,23 @@ fn handle_msg(
                             .musique
                             .commander(crate::musique::Commande::Rejoindre { salon });
                     }
+                    // Chaque ajout lance un yt-dlp : le budget du chat, comme
+                    // la recherche, et un jeton du plafond commun. Sans eux,
+                    // une rafale d'ajouts en lançait deux cents d'un coup.
+                    let admis = {
+                        let mut users = state.users.lock().unwrap();
+                        users.get_mut(&user_id).is_some_and(|u| u.chat_budget.take())
+                    };
+                    if !admis {
+                        let _ = tx.send(ServerMsg::Error { message: "doucement sur les ajouts".into() });
+                        return;
+                    }
+                    let Ok(permis) = state.musique.ytdlp.clone().try_acquire_owned() else {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "le bot est occupé — réessaie dans un instant".into(),
+                        });
+                        return;
+                    };
                     // Résoudre l'adresse prend quelques secondes de yt-dlp :
                     // hors de la boucle, puis la piste part en file. Une
                     // playlist arrive entière, dans l'ordre.
@@ -1910,20 +1952,26 @@ fn handle_msg(
                     let state = state.clone();
                     let qui = username.to_string();
                     if crate::musique::est_liste(&url) {
-                        tokio::task::spawn_blocking(move || match crate::musique::resoudre_liste(&outils, &url) {
-                            Ok(mut pistes) => {
-                                for p in &mut pistes {
-                                    p.ajoute_par = Some(qui.clone());
-                                    state.musique.localiser_vignette(p);
+                        tokio::task::spawn_blocking(move || {
+                            let liste = crate::musique::resoudre_liste(&outils, &url);
+                            drop(permis);
+                            match liste {
+                                Ok(mut pistes) => {
+                                    for p in &mut pistes {
+                                        p.ajoute_par = Some(qui.clone());
+                                        state.musique.localiser_vignette(p);
+                                    }
+                                    state.musique.commander(crate::musique::Commande::AjouterPlusieurs(pistes, maintenant));
                                 }
-                                state.musique.commander(crate::musique::Commande::AjouterPlusieurs(pistes, maintenant));
+                                Err(e) => state.musique.commander(crate::musique::Commande::Erreur(format!("playlist illisible : {e}"))),
                             }
-                            Err(e) => state.musique.commander(crate::musique::Commande::Erreur(format!("playlist illisible : {e}"))),
                         });
                         return;
                     }
                     tokio::task::spawn_blocking(move || {
-                        match crate::musique::resoudre(&outils, &url) {
+                        let resolue = crate::musique::resoudre(&outils, &url);
+                        drop(permis);
+                        match resolue {
                             Ok(mut piste) => {
                                 piste.ajoute_par = Some(qui);
                                 state.musique.localiser_vignette(&mut piste);

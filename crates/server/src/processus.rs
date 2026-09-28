@@ -75,6 +75,12 @@ pub fn init() {
     let _ = TEMPORAIRE.set(dossier);
 }
 
+/// Le dossier temporaire des outils — celui du système tant que [`init`]
+/// n'a pas tourné.
+pub fn temporaire() -> PathBuf {
+    TEMPORAIRE.get().cloned().unwrap_or_else(std::env::temp_dir)
+}
+
 /// Jette les dossiers et fichiers temporaires des outils plus vieux que
 /// `age_min`. Un outil qui tourne encore garde le sien : il n'a pas cet âge.
 pub fn purger(age_min: Duration) -> usize {

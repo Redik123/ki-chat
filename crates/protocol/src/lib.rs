@@ -27,6 +27,11 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Pour ne pas écrire un compteur nul.
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
 pub mod perm {
     pub const VIEW_CHANNEL: u64 = 1 << 0;
     pub const SEND_MESSAGE: u64 = 1 << 1;
@@ -3483,8 +3488,15 @@ pub struct EtatMusique {
     pub en_cours: Option<Piste>,
     #[serde(default)]
     pub position_ms: u64,
+    /// Le début de la file : le serveur n'en envoie qu'une partie (voir
+    /// [`EtatMusique::file_totale`]).
     #[serde(default)]
     pub file: Vec<Piste>,
+    /// La longueur réelle de la file, quand `file` n'en porte que le début.
+    /// Zéro d'un serveur antérieur : la file est alors tout entière dans
+    /// `file`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub file_totale: u32,
     /// Volume global du bot, 0–100.
     #[serde(default)]
     pub volume: u8,

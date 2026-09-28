@@ -118,6 +118,18 @@ pub fn mettre_a_jour(data_dir: &str, agent: &ureq::Agent) -> Result<Option<PathB
         std::fs::set_permissions(&partiel, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
     }
+    // Essayé **avant** de prendre la place de l'ancien. Il la prenait
+    // d'abord, puis on constatait qu'il ne se lançait pas — « l'ancien
+    // reste », disait le journal, alors qu'il venait d'être écrasé.
+    let essai = crate::processus::executer_borne(
+        std::process::Command::new(&partiel).arg("--version"),
+        Duration::from_secs(20),
+        |_| "ne se lance pas".to_string(),
+    );
+    if let Err(e) = essai {
+        let _ = std::fs::remove_file(&partiel);
+        return Err(format!("le binaire téléchargé {e} — l'ancien reste en place"));
+    }
     std::fs::rename(&partiel, &cible).map_err(|e| e.to_string())?;
     Ok(Some(cible))
 }
@@ -142,12 +154,17 @@ pub async fn boucle(state: Arc<AppState>) {
         .await;
         match resultat {
             Ok(Ok(Some(chemin))) => {
-                if state.musique.remplacer_yt_dlp(&chemin) {
+                // `remplacer_yt_dlp` lance le binaire pour lire sa version :
+                // jusqu'à vingt secondes, sur le pool bloquant — pas sur un
+                // ouvrier de la boucle, qui relaie la voix.
+                let s = state.clone();
+                let c = chemin.clone();
+                let remplace =
+                    tokio::task::spawn_blocking(move || s.musique.remplacer_yt_dlp(&c)).await;
+                if matches!(remplace, Ok(true)) {
                     tracing::info!("musique : yt-dlp mis à jour dans {}", chemin.display());
                 } else {
-                    tracing::warn!(
-                        "musique : le yt-dlp téléchargé ne se lance pas — l'ancien reste"
-                    );
+                    tracing::warn!("musique : le yt-dlp mis à jour ne se lance pas");
                 }
             }
             Ok(Ok(None)) => tracing::debug!("musique : yt-dlp à jour"),
