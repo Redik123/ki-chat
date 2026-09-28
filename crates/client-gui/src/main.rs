@@ -437,6 +437,14 @@ struct ChannelDraft {
 /// renumérote, un jeu qui sature le lien montant — renvoyait tout le monde à
 /// l'écran de connexion, en pleine partie, à retrouver son salon vocal à la
 /// main. Trente fois, chaque fois.
+/// Le lien d'un fichier dont l'envoi est fini, en attente d'être posté :
+/// le serveur qui l'a reçu, le salon d'où il est parti, l'adresse.
+struct LienPret {
+    base: String,
+    salon: Option<ChannelId>,
+    url: String,
+}
+
 struct Reprise {
     /// Tentatives déjà faites. C'est elle qui espace les suivantes.
     essais: u32,
@@ -447,6 +455,11 @@ struct Reprise {
     /// guère mieux que de ne pas se reconnecter.
     salon: Option<ChannelId>,
     vocal: Option<ChannelId>,
+    /// Le serveur perdu, par son adresse. Les numéros de salon ci-dessus
+    /// n'ont de sens que chez lui : sans ce repère, choisir un autre
+    /// serveur pendant le décompte y reconnectait, et y faisait entrer dans
+    /// le salon vocal portant le même numéro, micro armé.
+    adresse: String,
 }
 
 impl Reprise {
@@ -644,7 +657,16 @@ struct KiApp {
     /// mis à jour à chaque `Welcome`. Un fil qui aurait copié le jeton à
     /// son départ parlerait avec celui d'une session finie après une
     /// reconnexion, et le serveur lui répondrait « jeton invalide ».
-    jeton_http: std::sync::Arc<std::sync::Mutex<String>>,
+    jeton_http: std::sync::Arc<std::sync::Mutex<net::JetonHttp>>,
+    /// Les liens de fichiers envoyés, prêts à partir : le fil d'envoi les
+    /// dépose, l'interface les poste par la connexion **du moment**, dans
+    /// le salon d'où ils ont été envoyés (voir `envoyer_liens_prets`).
+    liens_prets: std::sync::Arc<std::sync::Mutex<Vec<LienPret>>>,
+    /// Le dernier message envoyé et pas encore revenu du serveur, avec
+    /// l'instant de l'envoi. Le champ se vidait à l'envoi quoi qu'il arrive :
+    /// tapé pendant une coupure pas encore détectée, un message partait dans
+    /// le tampon d'une connexion morte et se perdait sans un mot.
+    chat_en_attente: Option<(String, std::time::Instant)>,
     channels: Vec<ChannelInfo>,
     /// Tous les rôles du serveur, pour les couleurs et les badges.
     roles: Vec<ki_protocol::RoleInfo>,
@@ -1260,6 +1282,8 @@ impl KiApp {
             roles: Vec::new(),
             voice_token: 0,
             jeton_http: Default::default(),
+            liens_prets: Default::default(),
+            chat_en_attente: None,
             channels: Vec::new(),
             current: None,
             voice_channel: None,
@@ -2943,7 +2967,8 @@ impl KiApp {
         let nom_journal = p.nom.clone();
         std::thread::spawn(move || {
             let debut = std::time::Instant::now();
-            let token_hex = move || jeton.lock().unwrap().clone();
+            let base_jeton = base.clone();
+            let token_hex = move || jeton.lock().unwrap().pour(&base_jeton);
             let resultat = (|| -> Result<String, String> {
                 let taille = std::fs::metadata(&chemin).map_err(|e| e.to_string())?.len();
                 if taille == 0 {
@@ -4021,14 +4046,9 @@ impl KiApp {
     fn connexion_perdue(&mut self, error: Option<String>) {
         // Le partage d'écran ne survit pas à la connexion — le serveur a de
         // toute façon démonté le stream de son côté. Capture et visionnage
-        // s'arrêtent localement, sans messages : il n'y a plus personne pour
-        // les recevoir.
-        if let Some(g) = self.go_live.take() {
-            g.arreter();
-        }
-        self.go_live_attente = None;
-        self.go_live_tex = None;
-        self.fermer_regard(false);
+        // s'arrêtent dans `fermer_session`, par où passent toutes les
+        // sorties, marqueur de plantage levé compris.
+        //
         // On ne reprend qu'une connexion qui a **déjà fonctionné**. Un
         // premier essai qui échoue, c'est une adresse mal tapée ou un serveur
         // qu'on n'a jamais eu : réessayer en boucle n'y changerait rien et
@@ -4043,9 +4063,9 @@ impl KiApp {
         // Relevés **avant** le nettoyage, qui les efface. Et repris de la
         // reprise en cours s'il y en a une : à la deuxième tentative, l'état
         // courant est déjà vide.
-        let (salon, vocal) = match &self.reprise {
-            Some(r) => (r.salon, r.vocal),
-            None => (self.current, self.voice_channel),
+        let (salon, vocal, adresse) = match &self.reprise {
+            Some(r) => (r.salon, r.vocal, r.adresse.clone()),
+            None => (self.current, self.voice_channel, self.url.trim().to_string()),
         };
         self.fermer_session(error);
         if essais > Reprise::MAX {
@@ -4064,12 +4084,19 @@ impl KiApp {
             quand: std::time::Instant::now() + Reprise::attente(essais, alea()),
             salon,
             vocal,
+            adresse,
         });
     }
 
-    /// Relance la connexion quand son tour est venu.
+    /// Relance la connexion quand son tour est venu — vers le serveur perdu,
+    /// et vers lui seul. Si le formulaire désigne désormais un autre serveur,
+    /// la reprise n'a plus d'objet : elle tombe.
     fn tick_reprise(&mut self, ctx: &egui::Context) {
         let Some(r) = &self.reprise else { return };
+        if r.adresse != self.url.trim() {
+            self.reprise = None;
+            return;
+        }
         if self.connecting || std::time::Instant::now() < r.quand {
             return;
         }
@@ -4101,6 +4128,18 @@ impl KiApp {
         // déconnecter » pendant une coupure nous y ramènerait tout seul.
         // `connexion_perdue` la réarme après coup, elle seule.
         self.reprise = None;
+        // La diffusion et le visionnage finissent avec la session, par
+        // n'importe quelle sortie. Ils ne s'arrêtaient qu'à une coupure
+        // subie : se déconnecter ou être expulsé laissait la capture et
+        // l'encodeur tourner pour rien pendant les parties, la fenêtre de
+        // visionnage figée — et le marqueur de plantage posé, si bien qu'au
+        // lancement suivant ki-chat annonçait une fin brutale et passait
+        // l'encodeur en logiciel. Avant `quit` : le serveur apprend encore
+        // l'arrêt, s'il écoute.
+        if self.go_live.is_some() || self.go_live_attente.is_some() {
+            self.arreter_diffusion();
+        }
+        self.fermer_regard(false);
         if let Some(mut conn) = self.conn.take() {
             conn.quit();
         }
@@ -4114,7 +4153,7 @@ impl KiApp {
         self.my_rank = 0;
         self.roles.clear();
         self.voice_token = 0;
-        self.jeton_http.lock().unwrap().clear();
+        *self.jeton_http.lock().unwrap() = net::JetonHttp::default();
         self.server_fingerprint.clear();
 
         // --- Salons, présence, conversation ---
@@ -4177,12 +4216,45 @@ impl KiApp {
         self.retour_present = None;
         *self.upload_status.lock().unwrap() = None;
 
+        // Un message envoyé juste avant que la session tombe, et jamais
+        // revenu du serveur : il est sans doute resté dans le tampon de la
+        // connexion morte. Il revient dans le champ plutôt que de se perdre
+        // en silence. (Au-delà de vingt secondes sans écho, c'est un refus du
+        // serveur, déjà dit, pas une coupure.)
+        if let Some((texte, quand)) = self.chat_en_attente.take() {
+            if quand.elapsed() < std::time::Duration::from_secs(20) && self.input.trim().is_empty() {
+                self.input = texte;
+                ki_voice::journal("message non confirmé par le serveur : rendu au champ de saisie".into());
+            }
+        }
+
+        // --- Ce qui s'était ajouté depuis, et que cette liste oubliait ---
+        // La réponse en préparation citait un message de ce serveur.
+        self.reponse_a = None;
+        // La fiche VALORANT ouverte, les fiches et l'état du bot : ceux d'un
+        // serveur. Le suivant renvoie les siens.
+        self.fiche = None;
+        self.stats.clear();
+        self.stats_recu = false;
+        self.musique = ki_protocol::EtatMusique::default();
+        // Le partage d'un clip visait un salon de ce serveur : sur le
+        // suivant, ce numéro désignerait un autre salon.
+        self.clips_partage = None;
+        // Les tableaux et diagnostics d'administration : ceux de ce serveur.
+        self.tableau_admin = Default::default();
+        self.reseau_admin = Default::default();
+        *self.diag_admin.lock().unwrap() = None;
+        self.diag_versions.lock().unwrap().clear();
+
         self.armed = false;
         self.transmitting = false;
         self.loopback = false;
         self.show_settings = false;
-        self.show_admin = false;
-        self.show_account = false;
+        // Les deux fermetures complètes, pas seulement les drapeaux : les
+        // mots de passe tapés pour ce serveur restaient pré-remplis sur le
+        // suivant, et son tableau de bord s'y affichait.
+        self.close_admin();
+        self.close_account();
         self.error = error;
     }
 
@@ -4500,7 +4572,18 @@ impl KiApp {
 
     /// Bascule sur un serveur : ses identifiants remplissent le formulaire.
     fn select_server(&mut self, id: u64) {
+        // Pendant une connexion, la cible ne change pas : le `Welcome` qui
+        // arrive écrirait nom, logo et empreinte du premier serveur dans la
+        // fiche du second.
+        if self.connecting {
+            return;
+        }
         let Some(server) = self.book.iter().find(|s| s.id == id) else { return };
+        // Un autre serveur que celui qu'on essayait de retrouver : la reprise
+        // ne le concerne pas.
+        if self.reprise.as_ref().is_some_and(|r| r.adresse != server.address) {
+            self.reprise = None;
+        }
         self.selected = Some(id);
         self.url = server.address.clone();
         self.username = server.username.clone();
@@ -4721,6 +4804,17 @@ impl KiApp {
                         had_error.or_else(|| Some("déconnecté du serveur".into())),
                     );
                 }
+                // Expulsé, banni, mot de passe réinitialisé : une sortie
+                // voulue par le serveur, pas une coupure. La prendre pour une
+                // coupure, c'était se reconnecter dans la seconde et
+                // retourner dans son salon vocal — une expulsion ne durait
+                // qu'une seconde.
+                net::Event::Congedie(message) => {
+                    ki_voice::journal(format!("session close par le serveur : {message}"));
+                    self.disconnect(Some(message));
+                    // La reprise au lancement suivant non plus.
+                    self.session_auto = None;
+                }
                 net::Event::Msg(msg) => self.handle_server_msg(msg),
                 net::Event::Fingerprint(fp) => {
                     // Première connexion à ce serveur : on retient son
@@ -4803,7 +4897,8 @@ impl KiApp {
                 self.my_rank = rank;
                 self.roles = roles;
                 self.voice_token = voice_token;
-                *self.jeton_http.lock().unwrap() = format!("{voice_token:x}");
+                *self.jeton_http.lock().unwrap() =
+                    net::JetonHttp { base: self.http_base(), jeton: format!("{voice_token:x}") };
                 self.channels = channels;
                 // L'identité du serveur arrive **dès** le Welcome. L'ignorer
                 // ici laissait nom et logo invisibles jusqu'à ce qu'un admin
@@ -4858,6 +4953,12 @@ impl KiApp {
                 reply_to,
                 channel,
             } => {
+                // Notre message est revenu : il est bien parti.
+                if Some(user_id) == self.my_id
+                    && self.chat_en_attente.as_ref().is_some_and(|(t, _)| *t == text)
+                {
+                    self.chat_en_attente = None;
+                }
                 // Le serveur ne l'envoie qu'aux lecteurs du salon, mais un
                 // changement de salon peut le croiser en route : écrit dans
                 // A juste avant que le serveur traite notre `Join` vers B, il
@@ -5175,7 +5276,21 @@ impl KiApp {
                         g.arreter();
                     }
                     self.go_live_tex = None;
+                    // Un arrêt en bon ordre : le marqueur de plantage tombe,
+                    // sans quoi le lancement suivant croyait à une fin
+                    // brutale et passait l'encodeur en logiciel.
+                    secours::lever_diffusion();
                 }
+            }
+            // Le serveur nous retire d'un public (changement de salon,
+            // déplacement, accès perdu) : la fenêtre se ferme au lieu de
+            // rester figée sur la dernière image.
+            ServerMsg::WatchDenied { stream_id, reason }
+                if self.regard.as_ref().map(|r| r.stream_id) == Some(stream_id) =>
+            {
+                ki_voice::journal(format!("visionnage interrompu (stream {stream_id}) : {reason}"));
+                self.fermer_regard(false);
+                self.info = Some(format!("visionnage interrompu : {reason}"));
             }
             ServerMsg::WatchAccepted { stream_id, stream_key, meta } => {
                 ki_voice::journal(format!("visionnage accepté (stream {stream_id})"));
@@ -5624,6 +5739,31 @@ impl KiApp {
 
     /// Sélection d'un fichier puis upload, dans un thread (le dialogue
     /// natif et l'envoi ne doivent pas bloquer l'UI).
+    /// Poste les liens des envois finis, un à la fois au rythme du chat, par
+    /// la connexion en cours. Le fil d'envoi les postait lui-même, par la
+    /// connexion de son départ : après une reprise, dans une connexion
+    /// morte — perdus, le bandeau s'effaçant comme si tout allait bien.
+    fn envoyer_liens_prets(&mut self) {
+        if !self.welcomed || self.dernier_envoi.is_some_and(|t| t.elapsed() < CADENCE_CHAT) {
+            return;
+        }
+        let pret = {
+            let mut prets = self.liens_prets.lock().unwrap();
+            if prets.is_empty() {
+                return;
+            }
+            prets.remove(0)
+        };
+        if pret.base != self.http_base() {
+            // Fini sur un serveur qu'on a quitté depuis : son lien ne
+            // désigne rien ici, et ses numéros de salon non plus.
+            self.info = Some("un envoi a fini sur un autre serveur — son lien n'est pas partagé ici".into());
+            return;
+        }
+        self.dernier_envoi = Some(std::time::Instant::now());
+        self.send(ClientMsg::Chat { text: pret.url, reply_to: None, salon: pret.salon });
+    }
+
     fn start_upload(&self) {
         self.televerser(Vec::new());
     }
@@ -5632,17 +5772,23 @@ impl KiApp {
     /// sans fichier, le dialogue natif en demande un. C'est le même chemin
     /// pour le trombone et pour un fichier lâché sur la fenêtre.
     fn televerser(&self, fichiers: Vec<std::path::PathBuf>) {
-        let Some(conn) = &self.conn else { return };
-        let sender = conn.sender();
+        if self.conn.is_none() {
+            return;
+        }
         let base = self.http_base();
         let agent = self.http_agent();
         let jeton = self.jeton_http.clone();
         let status = self.upload_status.clone();
+        // Le salon d'où l'on envoie : c'est là que le lien partira, même si
+        // l'on en a changé pendant les minutes de l'envoi.
+        let salon = self.current;
+        let prets = self.liens_prets.clone();
         std::thread::spawn(move || {
             // Relu à chaque requête : un gros fichier part par morceaux
             // pendant des minutes, et une reconnexion entre-temps change
             // le jeton.
-            let token_hex = move || jeton.lock().unwrap().clone();
+            let base_jeton = base.clone();
+            let token_hex = move || jeton.lock().unwrap().pour(&base_jeton);
             let fichiers: Vec<std::path::PathBuf> = if fichiers.is_empty() {
                 match rfd::FileDialog::new().pick_file() {
                     Some(p) => vec![p],
@@ -5727,7 +5873,9 @@ impl KiApp {
                 })();
                 match result {
                     Ok(url) => {
-                        let _ = sender.send(net::Cmd::Send(ClientMsg::Chat { text: url, reply_to: None }));
+                        // Posté par l'interface, par la connexion du moment
+                        // (voir `envoyer_liens_prets`).
+                        prets.lock().unwrap().push(LienPret { base: base.clone(), salon, url });
                         *status.lock().unwrap() = None;
                     }
                     Err(e) => {
@@ -7827,7 +7975,13 @@ impl KiApp {
                     None => {
                         let reply_to =
                             self.reponse_a.take().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
-                        self.send(ClientMsg::Chat { text, reply_to });
+                        // Gardé jusqu'à ce que le serveur le renvoie : voir
+                        // `chat_en_attente`. Tel que le serveur le nettoiera,
+                        // pour le reconnaître à son retour.
+                        self.chat_en_attente = ki_protocol::clean_chat(&text)
+                            .ok()
+                            .map(|t| (t, std::time::Instant::now()));
+                        self.send(ClientMsg::Chat { text, reply_to, salon: None });
                         self.dernier_envoi = Some(std::time::Instant::now());
                     }
                 }
@@ -10526,6 +10680,8 @@ impl KiApp {
                 ki_voice::journal(format!("diffusion interrompue au changement de réglages : {e:#}"));
                 self.info = Some(format!("diffusion interrompue : {e:#}"));
                 self.go_live_tex = None;
+                // Arrêtée proprement, même en échec : le marqueur tombe.
+                secours::lever_diffusion();
                 self.send(ClientMsg::StreamStop);
             }
         }
@@ -14726,6 +14882,7 @@ impl eframe::App for KiApp {
         self.veille.actualiser(self.voice_channel.is_some());
 
         self.poll_events();
+        self.envoyer_liens_prets();
         // Après les messages reçus : c'est eux qui programment les `Lu`.
         self.tick_lus(ctx);
         self.check_connect_timeout();

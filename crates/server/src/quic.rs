@@ -1262,13 +1262,24 @@ fn handle_msg(
         ClientMsg::Unwatch { stream_id } => {
             state.streams.unwatch(stream_id, user_id);
         }
-        ClientMsg::Chat { text, reply_to } => {
+        ClientMsg::Chat { text, reply_to, salon } => {
             if !require(state, user_id, tx, ki_protocol::perm::SEND_MESSAGE) {
                 return;
             }
-            let Some(channel) = current_channel(state, user_id) else {
+            // Le salon nommé, s'il l'est — aux mêmes conditions qu'une
+            // entrée : textuel et visible, sinon il n'existe pas.
+            let channel = match salon {
+                Some(c) => (state.channel_is(c, ki_protocol::ChannelKind::Text) && state.can_view(user_id, c))
+                    .then_some(c),
+                None => current_channel(state, user_id),
+            };
+            let Some(channel) = channel else {
                 let _ = tx.send(ServerMsg::Error {
-                    message: "rejoins un salon d'abord".into(),
+                    message: if salon.is_some() {
+                        "salon textuel inconnu".into()
+                    } else {
+                        "rejoins un salon d'abord".into()
+                    },
                 });
                 return;
             };

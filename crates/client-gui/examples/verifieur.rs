@@ -23,7 +23,7 @@
 //! depuis son propre fichier source. Lui en passer une autre reviendrait à
 //! vérifier autre chose que ce que le client vérifiera.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 
 /// La clé gravée dans `update.rs`, extraite à la compilation.
 ///
@@ -57,7 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("signature illisible (ni 128 caractères hexadécimaux, ni 64 octets)".into()),
     };
 
-    match cle.verify(&data, &Signature::from_bytes(&sig)) {
+    // `verify_strict`, comme le client : la même règle des deux côtés.
+    match cle.verify_strict(&data, &Signature::from_bytes(&sig)) {
         Ok(()) => {
             println!("signature VALIDE pour {fichier} ({} octets)", data.len());
             Ok(())

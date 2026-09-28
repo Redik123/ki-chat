@@ -141,14 +141,26 @@ jobs:
         env:
           SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
+          # Sur un tag, pas de signature = pas de release : tout client depuis
+          # la 0.1.12 refuserait l'actif, et depuis la 0.1.52 aussi une
+          # release sans manifeste. Seul un essai manuel peut s'en passer.
           if (-not $env:SIGNING_KEY) {
-            Write-Warning "RELEASE_SIGNING_KEY absent : release NON SIGNEE (deploy/SIGNATURE.md)"
+            if ("${{ github.ref }}".StartsWith("refs/tags/")) {
+              Write-Error "RELEASE_SIGNING_KEY absent : une release taguee doit etre signee (deploy/SIGNATURE.md)"
+              exit 1
+            }
+            Write-Warning "RELEASE_SIGNING_KEY absent : essai NON SIGNE (deploy/SIGNATURE.md)"
             exit 0
           }
           $exe = "target\$env:TARGET\release\ki-chat.exe"
-          cargo run --release --locked --target $env:TARGET -p ki-client-gui --example signer -- $exe "$exe.sig"
+          # La signature de l'exécutable seul, pour les clients d'avant 0.1.52,
+          # et le manifeste signé (plateforme, version, empreinte) pour les
+          # suivants.
+          cargo run --release --locked --target $env:TARGET -p ki-client-gui --example signer -- $exe "$exe.sig" --manifeste windows ${{ steps.version.outputs.version }} "$exe.manifeste"
           if ($LASTEXITCODE -ne 0) { Write-Error "signature impossible"; exit 1 }
-          if (-not (Test-Path "$exe.sig")) { Write-Error "signature non produite"; exit 1 }
+          foreach ($f in @("$exe.sig", "$exe.manifeste", "$exe.manifeste.sig")) {
+            if (-not (Test-Path $f)) { Write-Error "$f non produit"; exit 1 }
+          }
 
       - name: Déposer les artefacts
         uses: actions/upload-artifact@v7
@@ -157,6 +169,8 @@ jobs:
           path: |
             target/x86_64-pc-windows-msvc/release/ki-chat.exe
             target/x86_64-pc-windows-msvc/release/ki-chat.exe.sig
+            target/x86_64-pc-windows-msvc/release/ki-chat.exe.manifeste
+            target/x86_64-pc-windows-msvc/release/ki-chat.exe.manifeste.sig
             installer/Output/ki-chat-setup.exe
 
   # ---------------------------------------------------------------------
@@ -236,12 +250,21 @@ jobs:
           SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [[ -z "$SIGNING_KEY" ]]; then
-            echo "::warning::RELEASE_SIGNING_KEY absent : release macOS NON SIGNÉE (deploy/SIGNATURE.md)"
+            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+              echo "::error::RELEASE_SIGNING_KEY absent : une release taguée doit être signée (deploy/SIGNATURE.md)"
+              exit 1
+            fi
+            echo "::warning::RELEASE_SIGNING_KEY absent : essai macOS NON SIGNÉ (deploy/SIGNATURE.md)"
             exit 0
           fi
           archive=installer/Output/ki-chat-macos.tar.gz
-          cargo run --release --locked --target aarch64-apple-darwin -p ki-client-gui --example signer -- "$archive" "$archive.sig"
+          # Comme sous Windows : la signature de l'archive seule, et le
+          # manifeste signé qui la lie à sa plateforme et à sa version.
+          cargo run --release --locked --target aarch64-apple-darwin -p ki-client-gui --example signer -- \
+            "$archive" "$archive.sig" --manifeste macos "${{ steps.version.outputs.version }}" "$archive.manifeste"
           test -s "$archive.sig"
+          test -s "$archive.manifeste"
+          test -s "$archive.manifeste.sig"
 
       - name: Déposer les artefacts
         uses: actions/upload-artifact@v7
@@ -250,6 +273,8 @@ jobs:
           path: |
             installer/Output/ki-chat-macos.tar.gz
             installer/Output/ki-chat-macos.tar.gz.sig
+            installer/Output/ki-chat-macos.tar.gz.manifeste
+            installer/Output/ki-chat-macos.tar.gz.manifeste.sig
             installer/Output/ki-chat-macos.pkg
 
   # ---------------------------------------------------------------------
@@ -273,11 +298,14 @@ jobs:
         run: |
           tag="${{ github.ref_name }}"
           # Les noms sont ceux que les clients cherchent — `ki-chat.exe`,
-          # `ki-chat-macos.tar.gz` — et leurs signatures à côté. Une
-          # signature absente (secret non posé) n'empêche pas de publier.
+          # `ki-chat-macos.tar.gz` — et à côté, leurs signatures et leurs
+          # manifestes signés (0.1.52 et suivants ne se mettent à jour
+          # qu'avec eux).
           files=$(find artefacts -type f \( -name 'ki-chat.exe' -o -name 'ki-chat.exe.sig' \
+            -o -name 'ki-chat.exe.manifeste' -o -name 'ki-chat.exe.manifeste.sig' \
             -o -name 'ki-chat-setup.exe' -o -name 'ki-chat-macos.tar.gz' \
-            -o -name 'ki-chat-macos.tar.gz.sig' -o -name 'ki-chat-macos.pkg' \))
+            -o -name 'ki-chat-macos.tar.gz.sig' -o -name 'ki-chat-macos.tar.gz.manifeste' \
+            -o -name 'ki-chat-macos.tar.gz.manifeste.sig' -o -name 'ki-chat-macos.pkg' \))
           echo "$files"
           # Le tag peut avoir été poussé après une release créée à la main.
           if gh release view "$tag" >/dev/null 2>&1; then

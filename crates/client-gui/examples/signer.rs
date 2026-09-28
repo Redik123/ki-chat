@@ -28,12 +28,19 @@ use ed25519_dalek::{Signer, SigningKey};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [entree, sortie] = args.as_slice() else {
-        eprintln!(
-            "usage : SIGNING_KEY=<hex 64> signer <fichier> <fichier.sig>\n\
-             la clé privée passe par l'environnement, jamais par la ligne de commande"
-        );
-        std::process::exit(2);
+    let (entree, sortie, manifeste) = match args.as_slice() {
+        [entree, sortie] => (entree, sortie, None),
+        [entree, sortie, drapeau, plateforme, version, dest] if drapeau == "--manifeste" => {
+            (entree, sortie, Some((plateforme, version, dest)))
+        }
+        _ => {
+            eprintln!(
+                "usage : SIGNING_KEY=<hex 64> signer <fichier> <fichier.sig> \
+                 [--manifeste <plateforme> <version> <fichier.manifeste>]\n\
+                 la clé privée passe par l'environnement, jamais par la ligne de commande"
+            );
+            std::process::exit(2);
+        }
     };
 
     let hex = std::env::var("SIGNING_KEY")
@@ -56,6 +63,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fichier.write_all(to_hex(&signature.to_bytes()).as_bytes())?;
     fichier.sync_all()?;
     println!("signature écrite : {sortie}");
+
+    // Le manifeste : ce que la signature des seuls octets ne disait pas —
+    // pour quelle plateforme, et quelle version. Sans lui, qui pouvait
+    // publier une release resservait une ancienne version signée sous une
+    // étiquette neuve, ou l'archive macOS renommée en ki-chat.exe : l'une et
+    // l'autre passaient la vérification. La première ligne sépare les
+    // domaines : une signature de manifeste ne vaut jamais pour un binaire,
+    // ni l'inverse.
+    if let Some((plateforme, version, dest)) = manifeste {
+        use sha2::Digest as _;
+        let empreinte = to_hex(&sha2::Sha256::digest(&data));
+        let texte = format!(
+            "ki-chat-maj 1\nplateforme {plateforme}\nversion {version}\nsha256 {empreinte}\n"
+        );
+        std::fs::write(dest, texte.as_bytes())?;
+        let signature = cle.sign(texte.as_bytes());
+        let dest_sig = format!("{dest}.sig");
+        std::fs::write(&dest_sig, to_hex(&signature.to_bytes()).as_bytes())?;
+        println!("manifeste écrit : {dest} (et {dest_sig})");
+    }
     Ok(())
 }
 

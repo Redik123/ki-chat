@@ -13,6 +13,29 @@ use ki_protocol::{ClientMsg, MediaHeader, ServerMsg, StreamMeta};
 use ki_voice::{VoiceConfig, VoiceEngine};
 use tokio::sync::mpsc as tokio_mpsc;
 
+/// Le jeton de session HTTP (`x-ki-token`) et l'adresse du serveur qui l'a
+/// délivré. Les fils d'envoi le relisent à chaque requête — une reconnexion
+/// en tire un nouveau —, mais ne le prennent que pour **leur** serveur :
+/// changer de serveur en plein envoi faisait partir le jeton du second
+/// vers le premier.
+#[derive(Default, Clone)]
+pub struct JetonHttp {
+    pub base: String,
+    pub jeton: String,
+}
+
+impl JetonHttp {
+    /// Le jeton, s'il a été délivré par le serveur `base` ; vide sinon — la
+    /// requête sera refusée, et c'est ce qu'il faut.
+    pub fn pour(&self, base: &str) -> String {
+        if self.base == base {
+            self.jeton.clone()
+        } else {
+            String::new()
+        }
+    }
+}
+
 // Un message du serveur est bien plus gros qu'une erreur ou une empreinte ;
 // le mettre en boîte coûterait une allocation par message pour rien.
 #[allow(clippy::large_enum_variant)]
@@ -20,6 +43,10 @@ pub enum Event {
     Msg(ServerMsg),
     ConnectFailed(String),
     Disconnected,
+    /// Le serveur a mis fin à la session en disant pourquoi (expulsion,
+    /// bannissement, mot de passe réinitialisé) : pas de reconnexion
+    /// automatique, et ce message à montrer.
+    Congedie(String),
     /// Empreinte du certificat présentée par le serveur, à retenir.
     Fingerprint(String),
 }
@@ -235,10 +262,6 @@ pub struct NetHandle {
 impl NetHandle {
     pub fn send(&self, msg: ClientMsg) {
         let _ = self.cmd_tx.send(Cmd::Send(msg));
-    }
-
-    pub fn sender(&self) -> tokio_mpsc::UnboundedSender<Cmd> {
-        self.cmd_tx.clone()
     }
 
     /// Ferme la connexion **et attend** que ce soit fait.
@@ -530,6 +553,10 @@ pub fn connect(
             rt.block_on(run(
                 url, creds, prefs, cmd_rx, event_tx, link, video_feed, audio_feed, ctx,
             ));
+            // Sans attendre une résolution DNS abandonnée en route : la
+            // fermeture ordinaire du moteur attendrait qu'elle finisse, et
+            // `quit` avec elle.
+            rt.shutdown_background();
         }
     });
 
@@ -570,11 +597,28 @@ async fn run(
     };
 
     let known = (!creds.fingerprint.is_empty()).then_some(creds.fingerprint.as_str());
-    let mut client = match QuicClient::connect(&url, known).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit(Event::ConnectFailed(format!("{e:#}")));
-            return;
+    // Les ordres restent écoutés pendant la poignée de main. Ils ne l'étaient
+    // qu'après : « Annuler » pendant « Connexion… » vers un serveur
+    // injoignable attendait la fin de la poignée de main — quinze secondes
+    // d'interface figée, puisque `quit` attend ce fil. Un message posté
+    // entre-temps attend son tour ; un abandon part tout de suite, sans rien
+    // à défaire : l'emplacement de connexion n'est pas encore posé.
+    let mut en_attente: Vec<ClientMsg> = Vec::new();
+    let connexion = QuicClient::connect(&url, known);
+    tokio::pin!(connexion);
+    let mut client = loop {
+        tokio::select! {
+            resultat = &mut connexion => match resultat {
+                Ok(c) => break c,
+                Err(e) => {
+                    emit(Event::ConnectFailed(format!("{e:#}")));
+                    return;
+                }
+            },
+            cmd = cmd_rx.recv() => match cmd {
+                Some(Cmd::Send(msg)) => en_attente.push(msg),
+                Some(Cmd::Quit) | None => return,
+            },
         }
     };
     // Première connexion : l'empreinte est retenue pour les suivantes.
@@ -591,6 +635,13 @@ async fn run(
     }
     let (mut writer, mut reader) = client.split();
     *conn_slot.lock().unwrap() = Some(writer.conn.clone());
+    // Ce qui a été posté pendant la poignée de main part maintenant, derrière
+    // l'authentification.
+    for msg in en_attente {
+        if writer.send_msg(&msg).await.is_err() {
+            break;
+        }
+    }
 
     // Datagrammes entrants : le son du jeu vers le lecteur du spectateur,
     // la voix vers le moteur audio (via l'aiguillage).
@@ -753,11 +804,45 @@ async fn run(
                     emit(Event::Msg(msg));
                 }
                 None => {
+                    // Le serveur a-t-il dit pourquoi il raccroche ? Une
+                    // expulsion, un bannissement, un mot de passe
+                    // réinitialisé ne sont pas des coupures : on ne s'y
+                    // reconnecte pas tout seul.
+                    let conge = ki_client_quic::fermeture(&writer.conn)
+                        .and_then(|(code, motif)| motif_de_conge(code, &motif));
                     cleanup();
-                    emit(Event::Disconnected);
+                    emit(match conge {
+                        Some(message) => Event::Congedie(message),
+                        None => Event::Disconnected,
+                    });
                     return;
                 }
             },
         }
+    }
+}
+
+/// Le message d'une fin de session décidée par le serveur, d'après son code
+/// de fermeture ; `None` pour une fermeture ordinaire.
+fn motif_de_conge(code: u64, motif: &str) -> Option<String> {
+    let avec = |debut: &str| {
+        if motif.is_empty() {
+            debut.to_string()
+        } else {
+            format!("{debut} : {motif}")
+        }
+    };
+    if code == u64::from(ki_protocol::FERMETURE_EXPULSE) {
+        Some(format!(
+            "{} — tu pourras revenir dans {} min",
+            avec("tu as été expulsé"),
+            ki_protocol::EXPULSION_S / 60
+        ))
+    } else if code == u64::from(ki_protocol::FERMETURE_BANNI) {
+        Some(avec("ton compte a été banni"))
+    } else if code == u64::from(ki_protocol::FERMETURE_MOT_DE_PASSE) {
+        Some("ton mot de passe a été réinitialisé par un modérateur — reconnecte-toi avec le nouveau".into())
+    } else {
+        None
     }
 }

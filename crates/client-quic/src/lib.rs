@@ -95,7 +95,14 @@ impl QuicClient {
     /// déjà. `None` = première connexion : on accepte et l'on rend
     /// l'empreinte rencontrée, à conserver pour la prochaine fois.
     pub async fn connect(addr: &str, expected: Option<&str>) -> anyhow::Result<Self> {
-        let (host, sockaddr) = resolve(addr)?;
+        // La résolution DNS bloque : sur le pool bloquant, pour que qui
+        // attend cette connexion puisse l'abandonner pendant ce temps-là —
+        // un appel bloquant au milieu d'une fonction asynchrone ne se laisse
+        // interrompre par rien.
+        let a = addr.to_string();
+        let (host, sockaddr) = tokio::task::spawn_blocking(move || resolve(&a))
+            .await
+            .context("résolution DNS")??;
         let seen = Arc::new(std::sync::Mutex::new(None));
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -293,6 +300,20 @@ pub fn datagram_sender_slot(slot: Arc<Mutex<Option<quinn::Connection>>>) -> Data
 pub struct ControlReader {
     pub conn: quinn::Connection,
     lines: BufReader<quinn::RecvStream>,
+}
+
+/// Pourquoi le serveur a raccroché, s'il l'a dit : le code de fermeture
+/// applicatif (`ki_protocol::FERMETURE_*`, 0 pour une fin ordinaire) et le
+/// motif, lu sans exiger d'UTF-8 entier — quinn tronque un motif trop long.
+/// `None` : la connexion vit encore, ou s'est perdue sans fermeture annoncée.
+pub fn fermeture(conn: &quinn::Connection) -> Option<(u64, String)> {
+    match conn.close_reason()? {
+        quinn::ConnectionError::ApplicationClosed(f) => Some((
+            f.error_code.into_inner(),
+            String::from_utf8_lossy(&f.reason).trim().to_string(),
+        )),
+        _ => None,
+    }
 }
 
 /// Lignes illisibles dont on garde la trace, pour tout le processus : de

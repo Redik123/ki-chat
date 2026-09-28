@@ -40,14 +40,15 @@ use crate::visionneuse::{mmss, Lecture};
 #[derive(Clone)]
 pub struct Reseau {
     pub base: String,
-    pub jeton: Arc<Mutex<String>>,
+    pub jeton: Arc<Mutex<crate::net::JetonHttp>>,
     pub agent: ureq::Agent,
 }
 
 impl Reseau {
-    /// Le jeton du moment, en hexadécimal.
+    /// Le jeton du moment, en hexadécimal — celui de **ce** serveur, jamais
+    /// celui d'un autre auquel on se serait connecté entre-temps.
     pub fn token_hex(&self) -> String {
-        self.jeton.lock().unwrap().clone()
+        self.jeton.lock().unwrap().pour(&self.base)
     }
 }
 
@@ -2467,7 +2468,10 @@ mod tests {
         let mut p = projet_d_essai();
         p.reseau = Some(Reseau {
             base: "https://ts:8080".into(),
-            jeton: Arc::new(Mutex::new("ab".into())),
+            jeton: Arc::new(Mutex::new(crate::net::JetonHttp {
+                base: "https://ts:8080".into(),
+                jeton: "ab".into(),
+            })),
             agent: ureq::Agent::new(),
         });
         // Un chemin sans fiche sur le disque : ce que le fil a noté.

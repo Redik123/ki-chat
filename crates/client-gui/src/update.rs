@@ -31,25 +31,29 @@ use eframe::egui;
 
 /// Dépôt qui publie les releases.
 const REPO: &str = "Redik123/ki-chat";
-/// Nom de l'actif attaché à chaque release, et de sa signature détachée,
-/// publiée à côté. Un par plateforme : le client ne regarde que le sien.
+/// Nom de l'actif attaché à chaque release, et sa plateforme telle que son
+/// manifeste la nomme. Un par plateforme : le client ne regarde que le sien.
+/// À côté de l'actif, la release publie `<actif>.manifeste` et sa signature
+/// `<actif>.manifeste.sig` (voir [`verifier_manifeste`]) ; la signature
+/// détachée de l'actif seul (`<actif>.sig`) reste publiée pour les clients
+/// antérieurs à 0.1.52, qui ne connaissent qu'elle.
 #[cfg(windows)]
 const ASSET: &str = "ki-chat.exe";
 #[cfg(windows)]
-const SIGNATURE_ASSET: &str = "ki-chat.exe.sig";
+const PLATEFORME: &str = "windows";
 /// macOS : l'application entière, archivée. Un exécutable nu ne suffirait
 /// pas — l'icône, l'identité et la demande d'accès au micro vivent dans le
 /// paquet `.app`, et c'est lui que le Finder et le Dock connaissent.
 #[cfg(target_os = "macos")]
 const ASSET: &str = "ki-chat-macos.tar.gz";
 #[cfg(target_os = "macos")]
-const SIGNATURE_ASSET: &str = "ki-chat-macos.tar.gz.sig";
+const PLATEFORME: &str = "macos";
 /// Pas de release publiée pour les autres systèmes : la vérification
 /// conclut « pas d'actif pour moi » et se tait, comme sans réseau.
 #[cfg(not(any(windows, target_os = "macos")))]
 const ASSET: &str = "ki-chat-linux";
 #[cfg(not(any(windows, target_os = "macos")))]
-const SIGNATURE_ASSET: &str = "ki-chat-linux.sig";
+const PLATEFORME: &str = "linux";
 
 /// Clé publique Ed25519 des releases, en hexadécimal (32 octets, 64
 /// caractères). Vide = vérification pas encore activée.
@@ -109,9 +113,10 @@ pub struct Release {
     pub notes: String,
     /// Téléchargement direct de l'exécutable.
     url: String,
-    /// Téléchargement de la signature détachée. `None` = la release n'en
-    /// publie pas.
-    signature_url: Option<String>,
+    /// Le manifeste signé de l'actif, et sa signature. `None` = la release
+    /// n'en publie pas : la mise à jour est alors refusée.
+    manifeste_url: Option<String>,
+    manifeste_sig_url: Option<String>,
     /// Taille annoncée, pour la barre de progression.
     size: u64,
 }
@@ -282,21 +287,25 @@ fn fetch_latest() -> anyhow::Result<Option<Release>> {
     // redirection en clair suffirait sinon à substituer le binaire.
     anyhow::ensure!(url.starts_with("https://"), "lien de téléchargement non chiffré");
 
-    // La signature est un actif comme un autre, publié à côté de l'exécutable.
-    let signature_url = body["assets"]
-        .as_array()
-        .and_then(|assets| {
-            assets.iter().find(|a| a["name"].as_str() == Some(SIGNATURE_ASSET))
-        })
-        .and_then(|a| a["browser_download_url"].as_str())
-        .filter(|u| u.starts_with("https://"))
-        .map(str::to_string);
+    // Le manifeste et sa signature sont des actifs comme les autres,
+    // publiés à côté de l'exécutable.
+    let lien_de = |nom: &str| {
+        body["assets"]
+            .as_array()
+            .and_then(|assets| assets.iter().find(|a| a["name"].as_str() == Some(nom)))
+            .and_then(|a| a["browser_download_url"].as_str())
+            .filter(|u| u.starts_with("https://"))
+            .map(str::to_string)
+    };
+    let manifeste_url = lien_de(&format!("{ASSET}.manifeste"));
+    let manifeste_sig_url = lien_de(&format!("{ASSET}.manifeste.sig"));
 
     Ok(Some(Release {
         version,
         notes: body["body"].as_str().unwrap_or_default().trim().to_string(),
         url,
-        signature_url,
+        manifeste_url,
+        manifeste_sig_url,
         size: asset["size"].as_u64().unwrap_or(0),
     }))
 }
@@ -372,27 +381,78 @@ fn verify(staged: &Path, release: &Release) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let url = release
-        .signature_url
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("la release ne publie pas de signature"))?;
-    let mut signature = Vec::new();
-    ureq::get(url)
-        .set("User-Agent", AGENT)
-        .timeout(TIMEOUT)
-        .call()?
-        .into_reader()
-        // Une signature Ed25519 fait 64 octets ; on lit un peu plus pour
-        // pouvoir distinguer « trop long » de « exactement bon ».
-        .take(256)
-        .read_to_end(&mut signature)?;
-    let signature = parse_signature(&signature)?;
-
+    let (Some(url_manifeste), Some(url_sig)) = (&release.manifeste_url, &release.manifeste_sig_url) else {
+        anyhow::bail!("la release ne publie pas de manifeste signé — mise à jour refusée");
+    };
+    let lire = |url: &str, max: u64| -> anyhow::Result<Vec<u8>> {
+        let mut octets = Vec::new();
+        ureq::get(url)
+            .set("User-Agent", AGENT)
+            .timeout(TIMEOUT)
+            .call()?
+            .into_reader()
+            .take(max)
+            .read_to_end(&mut octets)?;
+        Ok(octets)
+    };
+    // Un manifeste tient en quelques lignes ; une signature Ed25519 fait 64
+    // octets — on lit un peu plus pour distinguer « trop long » de « bon ».
+    let manifeste = lire(url_manifeste, 4096)?;
+    let signature = parse_signature(&lire(url_sig, 256)?)?;
     let binaire = std::fs::read(staged)?;
-    pubkey
-        .verify_strict(&binaire, &signature)
-        .map_err(|_| anyhow::anyhow!("signature invalide — mise à jour refusée"))?;
-    tracing::info!("mise à jour {} : signature vérifiée", release.version);
+    verifier_manifeste(&pubkey, &manifeste, &signature, &release.version, &binaire)?;
+    tracing::info!("mise à jour {} : manifeste et signature vérifiés", release.version);
+    Ok(())
+}
+
+/// Vérifie qu'un actif téléchargé est bien celui que le manifeste signé
+/// annonce, **pour cette plateforme et cette version**.
+///
+/// La signature des seuls octets de l'actif ne liait ni l'un ni l'autre : qui
+/// pouvait publier une release — exactement la menace que la signature vise
+/// (deploy/SIGNATURE.md) — pouvait resservir une ancienne version signée sous
+/// une étiquette neuve, et rouvrir ses failles ; ou renommer l'archive macOS
+/// signée en ki-chat.exe : chaque client Windows la vérifiait avec succès,
+/// puis remplaçait son exécutable par une archive. Le manifeste lie la
+/// plateforme, la version et l'empreinte de l'actif sous une même signature.
+fn verifier_manifeste(
+    cle: &ed25519_dalek::VerifyingKey,
+    manifeste: &[u8],
+    signature: &ed25519_dalek::Signature,
+    version_attendue: &str,
+    actif: &[u8],
+) -> anyhow::Result<()> {
+    cle.verify_strict(manifeste, signature)
+        .map_err(|_| anyhow::anyhow!("signature du manifeste invalide — mise à jour refusée"))?;
+    let texte = std::str::from_utf8(manifeste).map_err(|_| anyhow::anyhow!("manifeste illisible"))?;
+    let mut lignes = texte.lines();
+    anyhow::ensure!(lignes.next() == Some("ki-chat-maj 1"), "manifeste d'un format inconnu");
+    let champ = |nom: &str| {
+        texte
+            .lines()
+            .find_map(|l| l.strip_prefix(nom).and_then(|reste| reste.strip_prefix(' ')))
+            .map(str::trim)
+    };
+    anyhow::ensure!(
+        champ("plateforme") == Some(PLATEFORME),
+        "cette mise à jour est pour une autre plateforme — refusée"
+    );
+    anyhow::ensure!(
+        champ("version") == Some(version_attendue),
+        "le manifeste annonce une autre version que la release — refusée"
+    );
+    use sha2::Digest as _;
+    let empreinte: String = sha2::Sha256::digest(actif).iter().map(|b| format!("{b:02x}")).collect();
+    anyhow::ensure!(
+        champ("sha256") == Some(empreinte.as_str()),
+        "le fichier téléchargé n'est pas celui du manifeste — refusé"
+    );
+    // Et le fichier a bien la forme attendue : un exécutable Windows, une
+    // archive gzip. Trois octets de plus contre une erreur de publication.
+    #[cfg(windows)]
+    anyhow::ensure!(actif.starts_with(b"MZ"), "le fichier téléchargé n'est pas un exécutable Windows");
+    #[cfg(target_os = "macos")]
+    anyhow::ensure!(actif.starts_with(&[0x1f, 0x8b]), "le fichier téléchargé n'est pas une archive");
     Ok(())
 }
 
@@ -596,8 +656,56 @@ fn parts(version: &str) -> [u32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{newer, parse_signature};
+    use super::{newer, parse_signature, verifier_manifeste, PLATEFORME};
     use ed25519_dalek::{Signer, SigningKey};
+
+    /// Le manifeste tel que l'écrit le signeur (`examples/signer.rs`).
+    fn manifeste(plateforme: &str, version: &str, actif: &[u8]) -> Vec<u8> {
+        use sha2::Digest as _;
+        let empreinte: String = sha2::Sha256::digest(actif).iter().map(|b| format!("{b:02x}")).collect();
+        format!("ki-chat-maj 1\nplateforme {plateforme}\nversion {version}\nsha256 {empreinte}\n").into_bytes()
+    }
+
+    /// L'actif que la plateforme de ce test attend, en-tête compris.
+    fn actif() -> Vec<u8> {
+        if cfg!(windows) {
+            b"MZ\x90\x00 un executable imaginaire".to_vec()
+        } else {
+            b"\x1f\x8b\x08 une archive imaginaire".to_vec()
+        }
+    }
+
+    /// Ce que le manifeste lie : la plateforme, la version et l'empreinte.
+    /// Une ancienne version resservie sous une étiquette neuve, l'actif d'une
+    /// autre plateforme, un fichier substitué : tout est refusé.
+    #[test]
+    fn le_manifeste_lie_plateforme_version_et_empreinte() {
+        let cle = cle();
+        let publique = cle.verifying_key();
+        let actif = actif();
+        let bon = manifeste(PLATEFORME, "0.1.60", &actif);
+        let sig = cle.sign(&bon);
+        assert!(verifier_manifeste(&publique, &bon, &sig, "0.1.60", &actif).is_ok());
+        // Une ancienne version signée, sous l'étiquette d'une neuve.
+        let ancien = manifeste(PLATEFORME, "0.1.30", &actif);
+        let sig_ancien = cle.sign(&ancien);
+        assert!(verifier_manifeste(&publique, &ancien, &sig_ancien, "0.1.60", &actif).is_err());
+        // L'actif d'une autre plateforme.
+        let ailleurs = manifeste("autre", "0.1.60", &actif);
+        let sig_ailleurs = cle.sign(&ailleurs);
+        assert!(verifier_manifeste(&publique, &ailleurs, &sig_ailleurs, "0.1.60", &actif).is_err());
+        // Un fichier substitué après coup.
+        let mut autre = actif.clone();
+        autre.push(0);
+        assert!(verifier_manifeste(&publique, &bon, &sig, "0.1.60", &autre).is_err());
+        // Un manifeste retouché : la signature ne tient plus.
+        let mut retouche = bon.clone();
+        retouche[20] ^= 1;
+        assert!(verifier_manifeste(&publique, &retouche, &sig, "0.1.60", &actif).is_err());
+        // Et la signature d'un binaire ne vaut pas pour un manifeste.
+        let sig_binaire = cle.sign(&actif);
+        assert!(verifier_manifeste(&publique, &bon, &sig_binaire, "0.1.60", &actif).is_err());
+    }
 
     /// Une clé de test, fixe : un test qui tire au sort n'échoue qu'une fois
     /// sur mille et personne ne sait pourquoi.

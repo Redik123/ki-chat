@@ -633,7 +633,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("! commande inconnue");
             continue;
         } else {
-            ClientMsg::Chat { reply_to: None, text: line }
+            ClientMsg::Chat { reply_to: None, text: line, salon: None }
         };
         if writer.send_msg(&msg).await.is_err() {
             break;

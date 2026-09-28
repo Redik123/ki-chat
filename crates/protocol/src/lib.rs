@@ -161,6 +161,14 @@ pub enum ClientMsg {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<MsgRef>,
+        /// Le salon voulu, quand ce n'est pas forcément celui qu'on lit : le
+        /// lien d'un fichier dont l'envoi a duré des minutes part dans le
+        /// salon d'où il a été envoyé — il partait dans celui qu'on lisait à
+        /// la fin, un salon privé pouvant fuir ainsi vers #général. `None` :
+        /// le salon courant, comme avant ; un serveur antérieur ignore ce
+        /// champ.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        salon: Option<ChannelId>,
     },
     /// Poser (`on`) ou retirer sa réaction sur un message du salon courant.
     React { message: MsgRef, emoji: String, on: bool },

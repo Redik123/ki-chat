@@ -61,6 +61,9 @@ base64 = "0.22"
 # et ne remonte pas par `?`. On ne prend rien d'autre — ni signature, ni
 # génération de clés : ce binaire ne fait que vérifier.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# L'empreinte de l'actif que le manifeste de mise à jour annonce : déjà dans
+# l'arbre (ed25519-dalek s'en sert).
+sha2 = "0.10"
 # Le trait `HasWindowHandle`, que `eframe::Frame` et `CreationContext`
 # implémentent : c'est par lui qu'on obtient le HWND de la fenêtre
 # principale (réduction dans la zone de notification, sonde zone_probe).

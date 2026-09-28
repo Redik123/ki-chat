@@ -36,7 +36,19 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// Une animation ne dépasse pas ça, toutes images confondues : au-delà, on
 /// n'en garde que la première — un GIF de 1080p sur trente secondes serait
 /// un gigaoctet de textures.
-const MAX_PIXELS_ANIMATION: u64 = 48_000_000;
+///
+/// Seize millions de pixels (64 Mo en RGBA), et non quarante-huit : un GIF
+/// de 181 octets — six sous-images d'un pixel sur un canevas de 4000×2000 —
+/// en réclamait 192 Mo, et quarante liens vers lui dans un seul message,
+/// 7,7 Go chez chaque membre qui ouvrait le salon.
+const MAX_PIXELS_ANIMATION: u64 = 16_000_000;
+/// Ce que tous les aperçus montés peuvent peser ensemble, en pixels (256 Mo
+/// en RGBA) : au-delà, les plus anciens sont évincés. Le plafond en nombre
+/// d'aperçus ne disait rien de leur poids.
+const BUDGET_PIXELS: u64 = 64_000_000;
+/// Décodages simultanés, tous aperçus confondus : chacun tient ses images
+/// en mémoire le temps du décodage.
+const DECODAGES_MAX: usize = 2;
 const MAX_IMAGES_ANIMATION: usize = 400;
 /// Une fiche de vidéo qui n'est pas prête se redemande à ce rythme.
 const RELANCE_META: Duration = Duration::from_secs(3);
@@ -187,6 +199,26 @@ impl Previews {
             .then(|| url.replacen("http://", "https://", 1))
     }
 
+    /// Tient le budget en pixels de tout ce qui est monté ([`BUDGET_PIXELS`])
+    /// : au-delà, les aperçus les plus anciens redeviennent « trop lourds ».
+    /// Ils restent au cache, sans image : les en retirer relancerait leur
+    /// téléchargement à chaque image tant qu'ils sont visibles.
+    fn tenir_le_budget(&mut self) {
+        let mut total: u64 = self.cache.values().map(poids).sum();
+        for url in &self.order {
+            if total <= BUDGET_PIXELS {
+                break;
+            }
+            if let Some(apercu) = self.cache.get_mut(url) {
+                let p = poids(apercu);
+                if p > 0 {
+                    *apercu = Preview::Failed;
+                    total -= p;
+                }
+            }
+        }
+    }
+
     /// Monte en textures les images arrivées depuis le dernier rendu.
     ///
     /// Ne fait plus que téléverser vers le GPU : le décodage a eu lieu sur le
@@ -226,6 +258,7 @@ impl Previews {
                 None => Preview::Failed,
             };
             self.cache.insert(url, state);
+            self.tenir_le_budget();
         }
         let metas = std::mem::take(&mut *self.incoming_metas.lock().unwrap());
         for (url, meta) in metas {
@@ -368,11 +401,55 @@ fn fetch(
         })();
         // Le décodage a lieu ICI, et plus dans `mount()` : ce fil a fini son
         // téléchargement et ne fait plus rien, là où le fil de l'interface a
-        // une image à peindre dans les seize millisecondes.
-        let image = octets.ok().and_then(|bytes| decoder(&bytes));
+        // une image à peindre dans les seize millisecondes. Deux à la fois
+        // au plus : quarante fils décodant ensemble tenaient chacun leurs
+        // images en mémoire.
+        let image = octets.ok().and_then(|bytes| {
+            let _place = Decodage::attendre();
+            decoder(&bytes)
+        });
         slot.lock().unwrap().push((url, image));
         ctx.request_repaint();
     });
+}
+
+/// Ce qu'un aperçu monté pèse, en pixels de texture.
+fn poids(apercu: &Preview) -> u64 {
+    let pixels = |t: &egui::TextureHandle| {
+        let [w, h] = t.size();
+        (w * h) as u64
+    };
+    match apercu {
+        Preview::Ready(t) => pixels(t),
+        Preview::Anime(a) => a.images.iter().map(|(t, _)| pixels(t)).sum(),
+        Preview::Loading | Preview::Failed => 0,
+    }
+}
+
+/// Les places de décodage : voir [`DECODAGES_MAX`].
+static DECODAGES: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+
+/// Une place de décodage, rendue en tombant.
+struct Decodage;
+
+impl Decodage {
+    fn attendre() -> Self {
+        let (places, libre) = &DECODAGES;
+        let mut prises = places.lock().unwrap();
+        while *prises >= DECODAGES_MAX {
+            prises = libre.wait(prises).unwrap();
+        }
+        *prises += 1;
+        Decodage
+    }
+}
+
+impl Drop for Decodage {
+    fn drop(&mut self) {
+        let (places, libre) = &DECODAGES;
+        *places.lock().unwrap() -= 1;
+        libre.notify_one();
+    }
 }
 
 fn limites() -> image::Limits {
@@ -427,15 +504,27 @@ fn decoder_animation(
     format: image::ImageFormat,
 ) -> Option<Vec<(egui::ColorImage, f32)>> {
     use image::AnimationDecoder as _;
+    // Le canevas avant tout décodage : chaque image d'une animation en a la
+    // taille. Au-delà de la borne d'une animation entière, on n'en décode
+    // aucune — l'aperçu fixe prend le relais, avec ses propres limites. Le
+    // WebP n'applique aucune limite d'allocation à ses images : ce contrôle
+    // est le seul qui tienne pour lui.
+    let canevas_trop_grand = |(w, h): (u32, u32)| u64::from(w) * u64::from(h) > MAX_PIXELS_ANIMATION;
     let cursor = std::io::Cursor::new(bytes);
     let frames = match format {
         image::ImageFormat::Gif => {
             let mut d = image::codecs::gif::GifDecoder::new(cursor).ok()?;
+            if canevas_trop_grand(image::ImageDecoder::dimensions(&d)) {
+                return None;
+            }
             image::ImageDecoder::set_limits(&mut d, limites()).ok()?;
             d.into_frames()
         }
         image::ImageFormat::WebP => {
             let mut d = image::codecs::webp::WebPDecoder::new(cursor).ok()?;
+            if canevas_trop_grand(image::ImageDecoder::dimensions(&d)) {
+                return None;
+            }
             image::ImageDecoder::set_limits(&mut d, limites()).ok()?;
             if !d.has_animation() {
                 return None;
@@ -476,6 +565,44 @@ fn decoder_animation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un GIF de quelques centaines d'octets : un grand canevas, des
+    /// sous-images d'un pixel. Chacune se décode à la taille du canevas.
+    fn gif_piege(w: u16, h: u16, sous_images: usize) -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(b"GIF89a");
+        g.extend_from_slice(&w.to_le_bytes());
+        g.extend_from_slice(&h.to_le_bytes());
+        g.extend_from_slice(&[0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+        for i in 0..sous_images {
+            g.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00, 10, 0, 0, 0]);
+            g.push(0x2C);
+            g.extend_from_slice(&(i as u16).to_le_bytes());
+            g.extend_from_slice(&0u16.to_le_bytes());
+            g.extend_from_slice(&1u16.to_le_bytes());
+            g.extend_from_slice(&1u16.to_le_bytes());
+            g.push(0);
+            g.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+        }
+        g.push(0x3B);
+        g
+    }
+
+    /// Le GIF de 181 octets qui réclamait 192 Mo : il ne passe plus en
+    /// animation, et ce qui en reste tient dans la borne d'une animation.
+    #[test]
+    fn un_gif_piege_ne_reclame_plus_des_centaines_de_mo() {
+        let octets = gif_piege(4000, 2000, 7);
+        assert!(octets.len() < 400, "{} octets", octets.len());
+        let pixels = match decoder(&octets) {
+            Some(Decodee::Animee(images)) => images.iter().map(|(i, _)| (i.size[0] * i.size[1]) as u64).sum(),
+            Some(Decodee::Fixe(i)) => (i.size[0] * i.size[1]) as u64,
+            None => 0,
+        };
+        assert!(pixels <= MAX_PIXELS_ANIMATION, "{pixels} pixels décodés");
+        // Un canevas modeste reste une vraie animation.
+        assert!(matches!(decoder(&gif_piege(64, 64, 3)), Some(Decodee::Animee(_))));
+    }
 
     #[test]
     fn image_extensions_are_recognised() {
