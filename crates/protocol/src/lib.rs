@@ -1442,6 +1442,22 @@ pub const MAX_THUMBNAIL_PX: u32 = 256;
 /// légitime : une vignette en base64 dans son enveloppe JSON.
 pub const MAX_LINE: usize = 160 * 1024;
 
+/// Codes de fermeture de la connexion QUIC (« application close ») : ce que
+/// le serveur dit en raccrochant. Un client qui les connaît sait qu'il ne
+/// doit **pas** se reconnecter tout seul ; les autres codes (0) valent pour
+/// une fermeture ordinaire. Le motif voyage dans la fermeture elle-même, en
+/// UTF-8 : un message déposé juste avant de raccrocher ne partait jamais.
+pub const FERMETURE_EXPULSE: u32 = 0x4b10;
+/// Compte banni : le motif accompagne la fermeture.
+pub const FERMETURE_BANNI: u32 = 0x4b11;
+/// Mot de passe réinitialisé par un modérateur : la session ouverte avec
+/// l'ancien est close, et se reconnecter avec lui échouerait.
+pub const FERMETURE_MOT_DE_PASSE: u32 = 0x4b12;
+
+/// Le temps qu'une expulsion tient le compte dehors, en secondes : le
+/// serveur refuse la reconnexion jusque-là, et le client le dit.
+pub const EXPULSION_S: u64 = 5 * 60;
+
 /// Le budget du message de la page du groupe ([`ServerMsg::StatsValorant`]),
 /// sous [`MAX_LINE`] avec la marge que `history.rs` s'accorde déjà : une
 /// ligne qui dépasse ferme la connexion des deux côtés, et trente fiches
@@ -1477,9 +1493,37 @@ const MAX_BLANK_LINES: usize = 3;
 fn is_dangerous(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(c,
-            '\u{200e}' | '\u{200f}'
+            // U+061C, la marque de lettre arabe, est une commande
+            // bidirectionnelle comme les autres : elle manquait.
+            '\u{061c}'
+            | '\u{200e}' | '\u{200f}'
             | '\u{202a}'..='\u{202e}'
             | '\u{2066}'..='\u{2069}')
+}
+
+/// Un caractère qui n'a rien à faire dans un **nom** — pseudo de compte ou
+/// nom d'invité : commande bidirectionnelle, caractère invisible ou de mise
+/// en forme, espace d'un autre genre que l'espace ordinaire.
+///
+/// Un message les tolère (un émoji composé a besoin du liant U+200D) ; un
+/// nom, non : il s'affiche partout, et ces caractères n'y servent qu'à se
+/// faire passer pour quelqu'un d'autre — « Redik » et « Re​dik », un espace
+/// de largeur nulle au milieu, s'affichent pareil. Les homoglyphes (un « е »
+/// cyrillique pour un « e ») ne sont pas couverts : il faudrait une table de
+/// confusion entière.
+pub fn caractere_de_nom_refuse(c: char) -> bool {
+    is_dangerous(c)
+        || (c.is_whitespace() && c != ' ')
+        || matches!(c,
+            '\u{00ad}' | '\u{034f}' | '\u{115f}' | '\u{1160}'
+            | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{2800}' | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e007f}' | '\u{e0100}'..='\u{e01ef}')
 }
 
 /// Valide et nettoie un message de chat avant de l'accepter.

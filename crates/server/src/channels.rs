@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 /// Longueur maximale d'un nom de salon. Il occupe une ligne de la barre
 /// latérale de tout le monde : au-delà, il ne repousse pas seulement le sien.
 const MAX_NAME: usize = 32;
+/// Salons au plus, portes web comprises. Tous partent dans le `Welcome` de
+/// chaque connexion : voir `roles::MAX_ROLES`, même raison.
+pub(crate) const MAX_SALONS: usize = 100;
 
 /// Plancher de `next_id` : les six salons d'origine vont jusqu'à 103, et
 /// leurs journaux existent déjà sur les serveurs en service.
@@ -198,7 +201,11 @@ impl Channels {
         expire_le: Option<u64>,
     ) -> Result<ChannelInfo, String> {
         let name = clean_name(name)?;
+        let allowed_roles = normalize_roles(allowed_roles)?;
         let mut inner = self.inner.lock().unwrap();
+        if inner.channels.len() >= MAX_SALONS {
+            return Err(format!("trop de salons ({MAX_SALONS} au plus)"));
+        }
         let id = inner.next_id;
         // Incrémenté avant toute chose : même si la sauvegarde échoue plus
         // bas, ce numéro est brûlé pour la durée du processus.
@@ -209,7 +216,7 @@ impl Channels {
             name,
             kind,
             position,
-            allowed_roles: normalize_roles(allowed_roles),
+            allowed_roles,
             expire_le,
         });
         compact_positions(&mut inner.channels);
@@ -231,6 +238,7 @@ impl Channels {
     /// conversation qu'on croyait perdue.
     pub fn edit(&self, channel: ChannelInfo) -> Result<(), String> {
         let name = clean_name(&channel.name)?;
+        let allowed_roles = normalize_roles(channel.allowed_roles)?;
         let mut inner = self.inner.lock().unwrap();
         let Some(existing) = inner.channels.iter_mut().find(|c| c.id == channel.id) else {
             return Err("salon inconnu".into());
@@ -239,7 +247,7 @@ impl Channels {
             return Err("la nature d'un salon ne se change pas".into());
         }
         existing.name = name;
-        existing.allowed_roles = normalize_roles(channel.allowed_roles);
+        existing.allowed_roles = allowed_roles;
 
         // Déplacement à la place demandée, et pas seulement « avec ce
         // numéro » : une position déjà occupée serait tranchée par
@@ -499,13 +507,25 @@ fn renumber(channels: &mut [StoredChannel]) {
 /// Doublons retirés. `Some(liste vide)` est conservé tel quel : il veut dire
 /// « personne, sauf ceux qui gèrent les salons », ce qui est un réglage
 /// délibéré et non l'absence de restriction.
-fn normalize_roles(roles: Option<Vec<RoleId>>) -> Option<Vec<RoleId>> {
-    roles.map(|mut roles| {
-        roles.sort_unstable();
-        roles.dedup();
-        roles
-    })
+fn normalize_roles(roles: Option<Vec<RoleId>>) -> Result<Option<Vec<RoleId>>, String> {
+    let Some(mut roles) = roles else {
+        return Ok(None);
+    };
+    roles.sort_unstable();
+    roles.dedup();
+    // Borné : la liste part dans le `Welcome` avec le salon, et des milliers
+    // d'identifiants le faisaient déborder à eux seuls. Refusé plutôt que
+    // tronqué : couper la liste retirerait l'accès à des rôles sans le dire.
+    if roles.len() > MAX_ROLES_PAR_SALON {
+        return Err(format!(
+            "trop de rôles sur un même salon ({MAX_ROLES_PAR_SALON} au plus)"
+        ));
+    }
+    Ok(Some(roles))
 }
+
+/// Rôles admis au plus sur un salon restreint.
+pub(crate) const MAX_ROLES_PAR_SALON: usize = 10;
 
 /// Nom acceptable pour la barre latérale de tout le monde, ou la raison du
 /// refus.

@@ -45,6 +45,16 @@ const MAX_ENTRIES: usize = 4096;
 /// attende le délai maximal : les gratuits, puis les doublements de 2 s
 /// jusqu'à 60 s (2 × 2⁵ = 64 s, plafonné).
 const ECART_ECHECS: u32 = FREE_ATTEMPTS + 6;
+/// Essais **en cours** tolérés d'une même adresse. Un échec ne se compte
+/// qu'une fois le hachage fini : sans ce plafond, trente-deux connexions
+/// lancées ensemble passaient toutes le contrôle avant que la première ait
+/// échoué — trente-deux fois le débit de devinette, et autant d'Argon2.
+/// Assez large pour une salle entière derrière une même box qui se
+/// reconnecte d'un coup : les autres réessaient une seconde plus tard.
+const EN_VOL_PAR_ADRESSE: u32 = 8;
+/// Et d'un même compte, toutes adresses confondues : un vrai titulaire n'a
+/// qu'un client à la fois.
+const EN_VOL_PAR_COMPTE: u32 = 2;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Key {
@@ -55,6 +65,74 @@ enum Key {
 struct Record {
     failures: u32,
     last: Instant,
+    /// Essais réservés dont le hachage n'est pas fini.
+    en_vol: u32,
+}
+
+/// Pourquoi un essai est refusé avant tout hachage.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refus {
+    /// Trop d'échecs récents : attendre ce temps-là.
+    Attendre(Duration),
+    /// Trop d'essais déjà en cours depuis cette adresse ou sur ce compte.
+    TropEnCours,
+}
+
+impl Refus {
+    /// Ce qu'on en dit au client.
+    pub fn message(&self) -> String {
+        match self {
+            Refus::Attendre(wait) => format!(
+                "trop de tentatives — réessaie dans {} s",
+                wait.as_secs().max(1)
+            ),
+            Refus::TropEnCours => {
+                "trop de connexions en cours depuis ton adresse — réessaie dans un instant".into()
+            }
+        }
+    }
+}
+
+/// Un essai réservé : il compte parmi les « en cours » jusqu'à son verdict.
+/// Tombé sans verdict — erreur, délai dépassé —, il rend sa place sans
+/// compter ni comme échec ni comme réussite.
+pub struct Essai<'a> {
+    throttle: &'a Throttle,
+    ip: IpAddr,
+    compte: String,
+    rendu: bool,
+}
+
+impl Essai<'_> {
+    /// Le mot de passe était bon : l'ardoise est effacée.
+    pub fn reussi(mut self) {
+        self.rendre();
+        self.throttle.record_success(self.ip, &self.compte);
+    }
+
+    /// Le mot de passe était faux : le prochain essai sera plus lent.
+    pub fn echoue(mut self) {
+        self.rendre();
+        self.throttle.record_failure(self.ip, &self.compte);
+    }
+
+    fn rendre(&mut self) {
+        if std::mem::replace(&mut self.rendu, true) {
+            return;
+        }
+        let mut records = self.throttle.records.lock().unwrap();
+        for key in [Key::Address(self.ip), Key::Account(self.compte.clone())] {
+            if let Some(record) = records.get_mut(&key) {
+                record.en_vol = record.en_vol.saturating_sub(1);
+            }
+        }
+    }
+}
+
+impl Drop for Essai<'_> {
+    fn drop(&mut self) {
+        self.rendre();
+    }
 }
 
 #[derive(Default)]
@@ -67,6 +145,55 @@ impl Throttle {
     /// restant à patienter.
     pub fn check(&self, ip: IpAddr, username: &str) -> Result<(), Duration> {
         self.check_at(ip, username, Instant::now())
+    }
+
+    /// Contrôle **et réserve** l'essai d'un seul geste, sous le même verrou.
+    ///
+    /// Le contrôle seul ne faisait que lire : l'échec n'était compté qu'après
+    /// le hachage, si bien que des essais lancés ensemble passaient tous le
+    /// contrôle avant que le premier ait échoué. Ici l'essai compte parmi
+    /// les « en cours » dès qu'il est admis, et le plafond de ceux-ci borne
+    /// la concurrence par adresse comme par compte.
+    pub fn reserver(&self, ip: IpAddr, username: &str) -> Result<Essai<'_>, Refus> {
+        self.reserver_at(ip, username, Instant::now())
+    }
+
+    fn reserver_at(&self, ip: IpAddr, username: &str, now: Instant) -> Result<Essai<'_>, Refus> {
+        let mut records = self.records.lock().unwrap();
+        let keys = [Key::Address(ip), Key::Account(username.to_string())];
+        let wait = keys
+            .iter()
+            .filter_map(|key| records.get(key).map(|record| remaining(record, now)))
+            .max()
+            .unwrap_or(Duration::ZERO);
+        if !wait.is_zero() {
+            return Err(Refus::Attendre(wait));
+        }
+        let en_vol = |key: &Key| records.get(key).map_or(0, |r| r.en_vol);
+        if en_vol(&keys[0]) >= EN_VOL_PAR_ADRESSE || en_vol(&keys[1]) >= EN_VOL_PAR_COMPTE {
+            return Err(Refus::TropEnCours);
+        }
+        if records.len() >= MAX_ENTRIES {
+            records.retain(|_, record| {
+                record.en_vol > 0 || now.duration_since(record.last) < FORGET_AFTER
+            });
+        }
+        for key in keys {
+            records
+                .entry(key)
+                .or_insert(Record {
+                    failures: 0,
+                    last: now,
+                    en_vol: 0,
+                })
+                .en_vol += 1;
+        }
+        Ok(Essai {
+            throttle: self,
+            ip,
+            compte: username.to_string(),
+            rendu: false,
+        })
     }
 
     /// Enregistre un échec : le prochain essai sera plus lent.
@@ -86,11 +213,20 @@ impl Throttle {
         }
     }
 
-    /// Efface l'ardoise après une authentification réussie.
+    /// Efface l'ardoise après une authentification réussie. Une ligne qui a
+    /// encore des essais en cours reste, remise à zéro : l'effacer perdrait
+    /// leur compte, et le plafond de concurrence avec.
     pub fn record_success(&self, ip: IpAddr, username: &str) {
         let mut records = self.records.lock().unwrap();
-        records.remove(&Key::Address(ip));
-        records.remove(&Key::Account(username.to_string()));
+        for key in [Key::Address(ip), Key::Account(username.to_string())] {
+            match records.get_mut(&key) {
+                Some(record) if record.en_vol > 0 => record.failures = 0,
+                Some(_) => {
+                    records.remove(&key);
+                }
+                None => {}
+            }
+        }
     }
 
     fn check_at(&self, ip: IpAddr, username: &str, now: Instant) -> Result<(), Duration> {
@@ -112,12 +248,15 @@ impl Throttle {
     fn record_failure_at(&self, ip: IpAddr, username: &str, now: Instant) {
         let mut records = self.records.lock().unwrap();
         if records.len() >= MAX_ENTRIES {
-            records.retain(|_, record| now.duration_since(record.last) < FORGET_AFTER);
+            records.retain(|_, record| {
+                record.en_vol > 0 || now.duration_since(record.last) < FORGET_AFTER
+            });
         }
         for key in [Key::Address(ip), Key::Account(username.to_string())] {
             let record = records.entry(key).or_insert(Record {
                 failures: 0,
                 last: now,
+                en_vol: 0,
             });
             // Une ardoise oubliée repart de zéro.
             if now.duration_since(record.last) >= FORGET_AFTER {
@@ -258,6 +397,71 @@ mod tests {
         assert!(throttle.check_at(OTHER_IP, "redik", start).is_err());
         // Mais un autre compte depuis cette machine n'a rien à se reprocher.
         assert!(throttle.check_at(OTHER_IP, "alice", start).is_ok());
+    }
+
+    /// Des essais lancés ensemble ne passent plus tous le contrôle : au-delà
+    /// du plafond d'essais en cours, l'adresse attend que les premiers aient
+    /// rendu leur verdict.
+    #[test]
+    fn des_essais_simultanes_sont_plafonnes_par_adresse() {
+        let throttle = Throttle::default();
+        let now = Instant::now();
+        let essais: Vec<_> = (0..EN_VOL_PAR_ADRESSE)
+            .map(|n| throttle.reserver_at(IP, &format!("compte{n}"), now).unwrap())
+            .collect();
+        assert_eq!(
+            throttle.reserver_at(IP, "encore", now).err(),
+            Some(Refus::TropEnCours)
+        );
+        // Une autre adresse n'en pâtit pas.
+        assert!(throttle.reserver_at(OTHER_IP, "encore", now).is_ok());
+        // Un verdict rend la place.
+        let mut essais = essais.into_iter();
+        essais.next().unwrap().echoue();
+        assert!(throttle.reserver_at(IP, "encore", now).is_ok());
+    }
+
+    /// Sur un même compte, depuis des adresses différentes : deux en cours.
+    #[test]
+    fn des_essais_simultanes_sont_plafonnes_par_compte() {
+        let throttle = Throttle::default();
+        let now = Instant::now();
+        let a = throttle.reserver_at(IP, "redik", now).unwrap();
+        let _b = throttle.reserver_at(OTHER_IP, "redik", now).unwrap();
+        let troisieme = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
+        assert_eq!(
+            throttle.reserver_at(troisieme, "redik", now).err(),
+            Some(Refus::TropEnCours)
+        );
+        // Un essai qui tombe sans verdict rend aussi sa place.
+        drop(a);
+        assert!(throttle.reserver_at(troisieme, "redik", now).is_ok());
+    }
+
+    /// Les échecs des essais réservés comptent comme les autres : passé les
+    /// essais gratuits, l'adresse attend.
+    #[test]
+    fn les_echecs_des_essais_reserves_ralentissent_la_suite() {
+        let throttle = Throttle::default();
+        let now = Instant::now();
+        for _ in 0..FREE_ATTEMPTS + 1 {
+            throttle.reserver_at(IP, "redik", now).unwrap().echoue();
+        }
+        assert!(matches!(
+            throttle.reserver(IP, "redik").err(),
+            Some(Refus::Attendre(_))
+        ));
+        // Une réussite efface l'ardoise sans perdre les essais encore en
+        // cours sur la même adresse.
+        let throttle = Throttle::default();
+        let en_cours = throttle.reserver_at(IP, "alice", now).unwrap();
+        throttle.reserver_at(IP, "redik", now).unwrap().reussi();
+        let records = throttle.records.lock().unwrap();
+        assert_eq!(records.get(&Key::Address(IP)).map(|r| r.en_vol), Some(1));
+        drop(records);
+        drop(en_cours);
+        let records = throttle.records.lock().unwrap();
+        assert_eq!(records.get(&Key::Address(IP)).map(|r| r.en_vol), Some(0));
     }
 
     #[test]

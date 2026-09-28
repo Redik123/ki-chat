@@ -37,6 +37,14 @@ struct Inner {
     recent: VecDeque<AuditRecord>,
 }
 
+/// Ce que le fil d'écriture reçoit.
+enum Ordre {
+    Ecrire(AuditRecord),
+    /// Répondre quand tout ce qui précède est écrit : voir
+    /// [`Audit::attendre_ecritures`].
+    Barriere(Sender<()>),
+}
+
 /// Journal d'audit.
 ///
 /// L'écriture part sur un fil dédié. Elle était synchrone, sous mutex,
@@ -48,7 +56,7 @@ pub struct Audit {
     inner: Mutex<Inner>,
     /// `Option` pour pouvoir être lâché au `Drop` : c'est la fermeture du
     /// canal qui dit au fil d'écriture de finir sa file et de s'arrêter.
-    writes: Option<Sender<AuditRecord>>,
+    writes: Option<Sender<Ordre>>,
     writer: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -100,7 +108,7 @@ impl Audit {
             action: action.to_string(),
             actor: actor.to_string(),
             target: target.to_string(),
-            detail: detail.to_string(),
+            detail: tronquer(detail, DETAIL_MAX),
         };
         {
             let mut inner = self.inner.lock().unwrap();
@@ -110,14 +118,66 @@ impl Audit {
             inner.recent.push_back(rec.clone());
         }
         if let Some(writes) = &self.writes {
-            let _ = writes.send(rec);
+            let _ = writes.send(Ordre::Ecrire(rec));
         }
     }
 
-    /// Les `limit` dernières entrées, de la plus récente à la plus ancienne.
+    /// Attend que tout ce qui a été consigné jusqu'ici soit dans le fichier,
+    /// au plus `au_plus`. Pour l'arrêt sur signal : le `Drop`, qui vide la
+    /// file, ne court jamais quand le processus quitte par `exit` — la
+    /// dernière action d'un modérateur avant un redéploiement se perdait.
+    pub fn attendre_ecritures(&self, au_plus: std::time::Duration) {
+        let (fait, attente) = std::sync::mpsc::channel();
+        if let Some(writes) = &self.writes {
+            let _ = writes.send(Ordre::Barriere(fait));
+        }
+        let _ = attente.recv_timeout(au_plus);
+    }
+
+    /// Les `limit` dernières entrées, de la plus récente à la plus ancienne —
+    /// autant qu'il en tient dans une ligne de contrôle. Cinq cents entrées
+    /// au détail long ne tenaient pas dans `MAX_LINE` : la réponse était
+    /// jetée en silence, et le panneau du journal restait vide.
     pub fn recent(&self, limit: usize) -> Vec<AuditRecord> {
         let inner = self.inner.lock().unwrap();
-        inner.recent.iter().rev().take(limit).cloned().collect()
+        let mut place = REPONSE_MAX;
+        inner
+            .recent
+            .iter()
+            .rev()
+            .take(limit)
+            .take_while(|r| {
+                // Une borne haute de ce que l'entrée pèse en JSON : chaque
+                // caractère au pire échappé, plus l'enveloppe.
+                let poids = 2 * (r.action.len() + r.actor.len() + r.target.len() + r.detail.len()) + 96;
+                match place.checked_sub(poids) {
+                    Some(reste) => {
+                        place = reste;
+                        true
+                    }
+                    None => false,
+                }
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// Caractères gardés du détail d'une entrée. Le détail recopiait tel quel ce
+/// que l'action portait — une adresse de morceau, un nom de playlist, jusqu'à
+/// 160 Kio : trois cents messages suffisaient alors à faire tourner, donc à
+/// effacer, tout le journal, juste après le geste qu'on voulait cacher.
+const DETAIL_MAX: usize = 300;
+
+/// Ce que la réponse au panneau peut peser, en laissant de la marge à
+/// l'enveloppe du message sous `MAX_LINE`.
+const REPONSE_MAX: usize = ki_protocol::MAX_LINE - 16 * 1024;
+
+/// `texte` ramené à `max` caractères, avec une ellipse s'il a été coupé.
+fn tronquer(texte: &str, max: usize) -> String {
+    match texte.char_indices().nth(max) {
+        Some((coupe, _)) => format!("{}…", &texte[..coupe]),
+        None => texte.to_string(),
     }
 }
 
@@ -136,8 +196,16 @@ impl Drop for Audit {
 
 /// Le fil d'écriture : sérialise, écrit, et fait tourner le fichier quand il
 /// a trop grossi.
-fn writer_loop(mut file: File, path: PathBuf, mut ecrit: u64, rx: Receiver<AuditRecord>) {
-    while let Ok(rec) = rx.recv() {
+fn writer_loop(mut file: File, path: PathBuf, mut ecrit: u64, rx: Receiver<Ordre>) {
+    while let Ok(ordre) = rx.recv() {
+        let rec = match ordre {
+            Ordre::Ecrire(rec) => rec,
+            // Tout ce qui précède la barrière est écrit : on le dit.
+            Ordre::Barriere(fait) => {
+                let _ = fait.send(());
+                continue;
+            }
+        };
         let line = match serde_json::to_string(&rec) {
             Ok(l) => l,
             Err(e) => {
@@ -329,6 +397,37 @@ mod tests {
             "seules les archives sont visées"
         );
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Un détail démesuré — une adresse de morceau de 160 Kio — ne passe
+    /// plus tel quel : il est coupé, sans couper un caractère en deux.
+    #[test]
+    fn un_detail_demesure_est_tronque() {
+        let dir = scratch("tronque");
+        let audit = Audit::open(dir.to_str().unwrap()).unwrap();
+        audit.record("musique.ajouter", "kevin", "", &"é".repeat(160 * 1024));
+        let detail = audit.recent(1).remove(0).detail;
+        assert_eq!(detail.chars().count(), DETAIL_MAX + 1);
+        assert!(detail.ends_with('…'));
+        drop(audit);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Cinq cents entrées au détail maximal tiennent toujours dans une ligne
+    /// de contrôle : le panneau du journal ne peut plus rester vide.
+    #[test]
+    fn la_reponse_au_panneau_tient_dans_une_ligne() {
+        let dir = scratch("ligne");
+        let audit = Audit::open(dir.to_str().unwrap()).unwrap();
+        for _ in 0..MEM_CAP {
+            audit.record("musique.ajouter", "kevin", "marie", &"\"é".repeat(400));
+        }
+        let records = audit.recent(MEM_CAP);
+        assert!(!records.is_empty());
+        let ligne = crate::state::encode(&ki_protocol::ServerMsg::AuditLog { records });
+        assert!(ligne.is_some(), "la réponse doit tenir sous MAX_LINE");
+        drop(audit);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

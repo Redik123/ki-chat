@@ -870,14 +870,18 @@ impl Streams {
     }
 
     /// Ce compte quitte la scène (salon ou serveur) : plus spectateur de
-    /// rien. Sa propre diffusion se règle par `stop_by_user`, à part.
-    pub fn drop_viewer_everywhere(&self, user: UserId) {
+    /// rien. Sa propre diffusion se règle par `stop_by_user`, à part. Rend
+    /// les diffusions qu'il regardait, pour qu'on puisse le lui dire.
+    pub fn drop_viewer_everywhere(&self, user: UserId) -> Vec<u32> {
         let mut inner = self.inner.lock().unwrap();
-        for live in inner.by_id.values_mut() {
+        let mut quittees = Vec::new();
+        for (stream_id, live) in inner.by_id.iter_mut() {
             if let Some(v) = live.viewers.remove(&user) {
                 v.task.abort();
+                quittees.push(*stream_id);
             }
         }
+        quittees
     }
 
     /// Un spectateur demande à regarder. Vérifie qu'il partage le salon vocal

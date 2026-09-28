@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
@@ -190,6 +191,46 @@ fn hash_password(password: &str) -> Result<String, String> {
 pub struct Accounts {
     path: PathBuf,
     inner: Mutex<AccountsFile>,
+    /// Numéro de la dernière version des comptes partie vers le disque, tiré
+    /// **sous** le verrou des comptes : il suit donc l'ordre des changements.
+    generation: AtomicU64,
+    /// Numéro de la dernière version réellement écrite. Tenu à part du
+    /// verrou des comptes, et c'est tout l'intérêt : voir [`Self::sauver`].
+    ecrite: Mutex<u64>,
+}
+
+/// Les valeurs de `KI_TOKEN` que les gabarits du dépôt proposent : un serveur
+/// qui en garde une a un code maître que n'importe qui peut lire sur GitHub.
+const CODES_MAITRES_CONNUS: [&str; 3] = ["changeme", "change_moi", "change_moi_vraiment"];
+
+/// Le code maître peut-il créer des comptes ? Ni vide — un code vide
+/// accepté, c'est une inscription ouverte à tous —, ni resté à la valeur
+/// d'un gabarit. Le serveur démarre quand même : un serveur éteint par une
+/// mise à jour est pire qu'un code maître inopérant, et les invitations des
+/// admins continuent de fonctionner.
+pub fn code_maitre_utilisable(maitre: &str) -> bool {
+    let maitre = maitre.trim();
+    !maitre.is_empty()
+        && !CODES_MAITRES_CONNUS
+            .iter()
+            .any(|connu| connu.eq_ignore_ascii_case(maitre))
+}
+
+/// `code` est-il le code maître ? Comparé à temps constant, et jamais vrai
+/// quand le code maître n'est pas utilisable.
+fn est_code_maitre(code: &str, maitre: &str) -> bool {
+    code_maitre_utilisable(maitre) && crate::state::secret_eq(code, maitre)
+}
+
+/// Un code d'invitation tel que le journal d'audit le montre : le début,
+/// qui suffit à le retrouver dans la liste des invitations, jamais assez
+/// pour s'en servir. Le journal se lit avec la seule permission
+/// VIEW_AUDIT_LOG, qu'on peut donner à tout le monde.
+pub fn masquer_code(code: &str) -> String {
+    let n = code.chars().count();
+    let garde = (n / 2).min(6);
+    let debut: String = code.chars().take(garde).collect();
+    format!("{debut}…")
 }
 
 impl Accounts {
@@ -220,20 +261,38 @@ impl Accounts {
                 user.roles = vec![ROLE_OWNER];
             }
         }
+        // Le prochain identifiant ne doit jamais retomber sur un compte
+        // existant : un fichier restauré à la main, ou recollé d'une
+        // sauvegarde, peut porter un `next_id` en retard sur ses comptes. Un
+        // identifiant recyclé hériterait des messages de l'ancien titulaire —
+        // les modifier, les supprimer.
+        let plus_haut = inner.users.values().map(|u| u.id).max().unwrap_or(0);
+        let recale = inner.next_id <= plus_haut;
+        if recale {
+            tracing::warn!(
+                "users.json : next_id {} en retard sur le compte {plus_haut} — recalé",
+                inner.next_id
+            );
+            inner.next_id = plus_haut + 1;
+        }
         let store = Self {
             path,
             inner: Mutex::new(inner),
+            generation: AtomicU64::new(0),
+            ecrite: Mutex::new(0),
         };
-        if !migrated.is_empty() {
-            tracing::info!(
-                "rôle Propriétaire attribué à {} compte(s) admin",
-                migrated.len()
-            );
+        if !migrated.is_empty() || recale {
+            if !migrated.is_empty() {
+                tracing::info!(
+                    "rôle Propriétaire attribué à {} compte(s) admin",
+                    migrated.len()
+                );
+            }
             // Une migration qui ne s'écrit pas se rejouerait à chaque
             // démarrage — sans dommage, mais sans jamais aboutir non plus.
             // Autant s'arrêter et le dire.
             store
-                .save(&store.inner.lock().unwrap())
+                .sauver(store.inner.lock().unwrap())
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(store)
@@ -256,6 +315,11 @@ impl Accounts {
         server_invite: &str,
     ) -> Result<AuthOk, String> {
         // --- Phase 1, sous verrou : lecture seule (et levée d'un ban échu) ---
+        //
+        // Un bannissement **en cours** n'est pas regardé ici, mais après le
+        // mot de passe (plus bas) : le refuser d'emblée, c'était livrer son
+        // motif et sa durée à quiconque tapait le pseudo, sans rien savoir
+        // du mot de passe.
         let existing = {
             let mut inner = self.inner.lock().unwrap();
             let now = crate::state::now_millis();
@@ -264,14 +328,8 @@ impl Accounts {
                 // tentative de connexion : pas de tâche de fond à faire tourner
                 // pour ça, et la levée est constatée au seul moment où elle
                 // change quelque chose.
-                let expired = match &user.ban {
-                    Some(ban) if !ban.active(now) => true,
-                    Some(ban) => return Err(ban.message(now)),
-                    // `banned` sans `ban` : compte bloqué par une version
-                    // antérieure, sans motif ni durée. Définitif.
-                    None if user.banned => return Err("compte bloqué par un admin".into()),
-                    None => false,
-                };
+                let expired = user.ban.as_ref().is_some_and(|ban| !ban.active(now));
+                let hash = user.hash.clone();
                 if expired {
                     if let Some(user) = inner.users.get_mut(username) {
                         user.ban = None;
@@ -282,12 +340,12 @@ impl Accounts {
                     // refuser la connexion parce que le disque est plein
                     // enfermerait dehors quelqu'un dont le bannissement est
                     // justement terminé.
-                    if let Err(e) = self.save(&inner) {
+                    if let Err(e) = self.sauver(inner) {
                         tracing::error!("levée de bannissement non persistée : {e}");
                     }
                     tracing::info!("bannissement de {username} expiré");
                 }
-                Some(inner.users[username].hash.clone())
+                Some(hash)
             } else {
                 None
             }
@@ -332,13 +390,23 @@ impl Accounts {
         let Some(code) = invite else {
             return Err("compte inconnu — code d'invitation requis pour en créer un".into());
         };
+        // Un pseudo se choisit une fois pour toutes, et tout le monde le lit :
+        // rien d'invisible ni de mise en forme dedans. « Redik » et « Re​dik »
+        // (un espace de largeur nulle au milieu) s'affichent pareil — le
+        // second ne sert qu'à se faire passer pour le premier. Vérifié à la
+        // création seulement : un compte existant garde son nom.
+        if username.chars().any(ki_protocol::caractere_de_nom_refuse) {
+            return Err(
+                "pseudo refusé : il contient un caractère invisible ou de mise en forme".into(),
+            );
+        }
         // --- Phase 2 : l'invitation est validée une première fois sous verrou,
         // avant de hacher. Sans ce contrôle préalable, présenter un code bidon
         // suffirait à faire calculer un Argon2 au serveur, gratuitement. ---
         {
             let inner = self.inner.lock().unwrap();
             let now = crate::state::now_millis();
-            if code != server_invite {
+            if !est_code_maitre(code, server_invite) {
                 match inner.invites.iter().find(|i| i.code == code) {
                     Some(i) if i.usable(now) => {}
                     Some(_) => return Err("code d'invitation expiré ou révoqué".into()),
@@ -359,7 +427,8 @@ impl Accounts {
         if inner.users.contains_key(username) {
             return Err("ce compte vient d'être créé — reconnecte-toi".into());
         }
-        let one_shot = if code == server_invite {
+        let maitre = est_code_maitre(code, server_invite);
+        let one_shot = if maitre {
             None
         } else {
             match inner.invites.iter().position(|i| i.code == code) {
@@ -405,12 +474,19 @@ impl Accounts {
         // Propagé : un compte qui n'atteint pas le disque disparaît au
         // redémarrage, mot de passe compris. Mieux vaut refuser la création
         // que promettre un compte fantôme.
-        self.save(&inner)?;
+        self.sauver(inner)?;
         tracing::info!("nouveau compte : {username} (id {id}, propriétaire: {admin})");
         Ok(AuthOk {
             id,
             roles,
-            created_with: Some(code.to_string()),
+            // Ce que le journal d'audit en dira, que les modérateurs lisent :
+            // jamais le code maître lui-même, et d'un lien, assez pour le
+            // reconnaître dans la liste des invitations, pas pour s'en servir.
+            created_with: Some(if maitre {
+                "code maître".to_string()
+            } else {
+                masquer_code(code)
+            }),
         })
     }
 
@@ -498,10 +574,13 @@ impl Accounts {
             label: label.to_string(),
             created_by: by.to_string(),
             created_at: now,
-            expires_at: (ttl_secs > 0).then(|| now + ttl_secs.saturating_mul(1000)),
+            // Saturé des deux côtés : une durée démesurée donnait un instant
+            // qui débordait — donc une invitation expirée dès sa création en
+            // release, et une panique en debug.
+            expires_at: (ttl_secs > 0).then(|| now.saturating_add(ttl_secs.saturating_mul(1000))),
             revoked: false,
         });
-        self.save(&inner)?;
+        self.sauver(inner)?;
         Ok(code)
     }
 
@@ -515,7 +594,7 @@ impl Accounts {
             return Err("code déjà révoqué".into());
         }
         invite.revoked = true;
-        self.save(&inner)?;
+        self.sauver(inner)?;
         Ok(())
     }
 
@@ -538,7 +617,7 @@ impl Accounts {
             return Err("compte inconnu".into());
         };
         user.hash = hash;
-        self.save(&inner)?;
+        self.sauver(inner)?;
         tracing::info!("mot de passe de {target} réinitialisé par {requester}");
         Ok(())
     }
@@ -600,7 +679,7 @@ impl Accounts {
             return Err("le mot de passe a changé entre-temps — recommence avec le nouveau".into());
         }
         user.hash = hash;
-        self.save(&inner)?;
+        self.sauver(inner)?;
         tracing::info!("{username} a changé son mot de passe");
         Ok(())
     }
@@ -627,13 +706,13 @@ impl Accounts {
             return Err("compte inconnu".into());
         };
         user.ban = Some(Ban {
-            until: (duration_secs > 0).then(|| now + duration_secs.saturating_mul(1000)),
+            until: (duration_secs > 0).then(|| now.saturating_add(duration_secs.saturating_mul(1000))),
             reason: reason.to_string(),
             by: requester.to_string(),
             at: now,
         });
         user.banned = true;
-        self.save(&inner)?;
+        self.sauver(inner)?;
         tracing::info!("{target} banni par {requester} ({duration_secs} s) : {reason}");
         Ok(())
     }
@@ -649,7 +728,7 @@ impl Accounts {
         }
         user.ban = None;
         user.banned = false;
-        self.save(&inner)?;
+        self.sauver(inner)?;
         tracing::info!("{target} débanni par {requester}");
         Ok(())
     }
@@ -681,7 +760,7 @@ impl Accounts {
         // retour à une version antérieure retrouve ses administrateurs.
         user.admin = user.roles.contains(&ROLE_OWNER);
         let count = user.roles.len();
-        self.save(&inner)?;
+        self.sauver(inner)?;
         tracing::info!("rôles de {username} redéfinis ({count})");
         Ok(())
     }
@@ -704,7 +783,7 @@ impl Accounts {
             }
         }
         if touched > 0 {
-            self.save(&inner)?;
+            self.sauver(inner)?;
             tracing::info!("rôle {role} retiré de {touched} compte(s)");
         }
         Ok(touched)
@@ -771,7 +850,7 @@ impl Accounts {
         if let Some(d) = deafened {
             user.voice_deafened = d;
         }
-        self.save(&inner)?;
+        self.sauver(inner)?;
         Ok(())
     }
 
@@ -781,23 +860,55 @@ impl Accounts {
             return Err("compte inconnu".into());
         };
         user.avatar = avatar;
-        self.save(&inner)?;
+        self.sauver(inner)?;
         Ok(())
     }
 
     /// Écrit `users.json`. Renvoie l'échec — voir `Roles::save` : un
     /// bannissement que le disque a refusé tenait jusqu'au redémarrage puis
     /// disparaissait, l'interface ayant confirmé.
-    fn save(&self, inner: &AccountsFile) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(inner)
+    ///
+    /// **Prend le verrou des comptes et le rend avant de toucher au disque.**
+    /// L'écriture durable — `sync_all` du fichier puis du dossier — se tenait
+    /// verrou en main, photos de profil comprises ; or `roster()` et
+    /// `member_of` reprennent ce verrou depuis les ouvriers de la boucle
+    /// asynchrone, à chaque entrée en vocal. Une rafale de changements de
+    /// photo figeait ainsi le serveur entier sur le disque. Ne reste sous le
+    /// verrou que la sérialisation, en mémoire.
+    ///
+    /// Deux sauvegardes peuvent alors se croiser hors du verrou : le numéro
+    /// de génération, tiré sous le verrou, dit laquelle est la plus récente,
+    /// et une version plus ancienne n'écrase jamais une plus récente déjà
+    /// sur le disque — elle s'efface, puisque la plus récente la contient.
+    fn sauver(&self, inner: MutexGuard<'_, AccountsFile>) -> Result<(), String> {
+        let (generation, json) = self.instantane(inner)?;
+        self.ecrire(generation, &json)
+    }
+
+    /// Premier temps de [`Self::sauver`], verrou tenu : le numéro et le JSON.
+    fn instantane(&self, inner: MutexGuard<'_, AccountsFile>) -> Result<(u64, String), String> {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let json = serde_json::to_string_pretty(&*inner)
             .map_err(|e| format!("sérialisation des comptes impossible : {e}"))?;
+        Ok((generation, json))
+    }
+
+    /// Second temps, verrou des comptes rendu : l'écriture, sauf si une
+    /// version plus récente est déjà sur le disque.
+    fn ecrire(&self, generation: u64, json: &str) -> Result<(), String> {
+        let mut ecrite = self.ecrite.lock().unwrap();
+        if *ecrite >= generation {
+            return Ok(());
+        }
         // Écriture atomique : une coupure pendant la sauvegarde laissait
         // sinon `users.json` à zéro octet, et le serveur refusait de
         // redémarrer — tous les comptes avec.
         crate::store::write_atomic(&self.path, json.as_bytes()).map_err(|e| {
             tracing::error!("sauvegarde des comptes impossible : {e}");
             format!("sauvegarde impossible : {e}")
-        })
+        })?;
+        *ecrite = generation;
+        Ok(())
     }
 }
 
@@ -916,9 +1027,15 @@ mod tests {
         let ami = accounts
             .authenticate("ami", "amipass", Some(&code), "inv")
             .unwrap();
-        // Le code consommé remonte à l'appelant : c'est ce qui permet de
-        // consigner « ce compte est né de ce lien ».
-        assert_eq!(ami.created_with.as_deref(), Some(code.as_str()));
+        // Le code consommé remonte à l'appelant, **masqué** : de quoi
+        // consigner « ce compte est né de ce lien » dans un journal que les
+        // modérateurs lisent, sans leur donner de quoi créer un compte.
+        let trace = ami.created_with.expect("création tracée");
+        assert_eq!(trace, masquer_code(&code));
+        assert!(!trace.contains(&code));
+        assert!(code.starts_with(trace.trim_end_matches('…')));
+        // Le code maître, lui, n'apparaît jamais : seulement son nom.
+        assert_eq!(root.created_with.as_deref(), Some("code maître"));
         assert!(accounts
             .authenticate("autre", "autrepass", Some(&code), "inv")
             .is_err());
@@ -1021,7 +1138,7 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .until = Some(1);
-            accounts.save(&inner).unwrap();
+            accounts.sauver(inner).unwrap();
         }
         assert!(accounts.authenticate("ami", "amipass", None, "inv").is_ok());
         let listed = accounts.list(&roles);
@@ -1251,6 +1368,111 @@ mod tests {
         assert!(accounts.roles_of("ami").is_empty());
         assert_eq!(accounts.roles_of("root"), vec![ROLE_OWNER]);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn magasin(nom: &str) -> (PathBuf, Accounts) {
+        let dir = std::env::temp_dir().join(format!("ki-acc-{nom}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
+        (dir, accounts)
+    }
+
+    /// Un code maître vide, ou resté à la valeur d'un gabarit du dépôt, ne
+    /// crée aucun compte : n'importe qui pourrait le lire sur GitHub.
+    #[test]
+    fn un_code_maitre_vide_ou_connu_ne_cree_rien() {
+        let (dir, accounts) = magasin("maitre");
+        for maitre in ["", "   ", "changeme", "CHANGE_MOI", "change_moi_vraiment"] {
+            assert!(!code_maitre_utilisable(maitre), "{maitre:?}");
+            assert!(
+                accounts
+                    .authenticate("intrus", "motdepasse", Some(maitre), maitre)
+                    .is_err(),
+                "le code {maitre:?} ne doit rien créer"
+            );
+        }
+        assert!(code_maitre_utilisable("un-vrai-secret"));
+        assert!(accounts
+            .authenticate("ami", "motdepasse", Some("un-vrai-secret"), "un-vrai-secret")
+            .is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Le motif d'un bannissement n'est pas pour qui tape seulement le
+    /// pseudo : un mauvais mot de passe reçoit la réponse de tout le monde.
+    #[test]
+    fn un_bannissement_ne_se_dit_qu_apres_le_mot_de_passe() {
+        let (dir, accounts) = magasin("ban-mdp");
+        accounts.authenticate("root", "rootpass", Some("inv"), "inv").unwrap();
+        accounts.authenticate("ami", "amipass", Some("inv"), "inv").unwrap();
+        accounts.ban("root", "ami", "triche au loup-garou", 0).unwrap();
+        let faux = accounts.authenticate("ami", "pas-le-bon", None, "inv").unwrap_err();
+        assert!(!faux.contains("triche"), "{faux}");
+        assert!(faux.contains("mot de passe"), "{faux}");
+        let bon = accounts.authenticate("ami", "amipass", None, "inv").unwrap_err();
+        assert!(bon.contains("triche"), "{bon}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Un pseudo à caractère invisible est refusé à la création ; un pseudo
+    /// ordinaire avec accents et espace passe.
+    #[test]
+    fn un_pseudo_invisible_est_refuse_a_la_creation() {
+        let (dir, accounts) = magasin("pseudo");
+        for trompeur in ["Re\u{200b}dik", "Redik\u{202e}", "Re\u{00a0}dik", "Redik\u{fe0f}"] {
+            assert!(
+                accounts
+                    .authenticate(trompeur, "motdepasse", Some("inv"), "inv")
+                    .is_err(),
+                "{trompeur:?} ne doit pas être créé"
+            );
+        }
+        assert!(accounts
+            .authenticate("Zoé la Vraie", "motdepasse", Some("inv"), "inv")
+            .is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Un `next_id` en retard sur les comptes — fichier restauré à la main —
+    /// est recalé au chargement : un identifiant n'est jamais recyclé.
+    #[test]
+    fn un_next_id_en_retard_est_recale() {
+        let (dir, accounts) = magasin("next-id");
+        accounts.authenticate("un", "motdepasse", Some("inv"), "inv").unwrap();
+        let deux = accounts.authenticate("deux", "motdepasse", Some("inv"), "inv").unwrap();
+        {
+            let mut inner = accounts.inner.lock().unwrap();
+            inner.next_id = 1;
+            accounts.sauver(inner).unwrap();
+        }
+        drop(accounts);
+        let accounts = Accounts::open(dir.to_str().unwrap()).unwrap();
+        let trois = accounts.authenticate("trois", "motdepasse", Some("inv"), "inv").unwrap();
+        assert!(trois.id > deux.id, "{} doit dépasser {}", trois.id, deux.id);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Deux sauvegardes qui se croisent hors du verrou : la plus ancienne
+    /// n'écrase jamais la plus récente.
+    #[test]
+    fn une_sauvegarde_ancienne_n_ecrase_pas_une_recente() {
+        let (dir, accounts) = magasin("generation");
+        accounts.authenticate("un", "motdepasse", Some("inv"), "inv").unwrap();
+        // La version « ancienne » : prise, pas encore écrite — son fil a été
+        // devancé une fois le verrou rendu.
+        let (ancienne, json) = accounts.instantane(accounts.inner.lock().unwrap()).unwrap();
+        // Une plus récente passe devant et arrive sur le disque.
+        accounts.authenticate("deux", "motdepasse", Some("inv"), "inv").unwrap();
+        // L'ancienne arrive enfin : elle est écartée.
+        accounts.ecrire(ancienne, &json).unwrap();
+        drop(accounts);
+        let relu = Accounts::open(dir.to_str().unwrap()).unwrap();
+        assert!(
+            relu.authenticate("deux", "motdepasse", None, "inv").is_ok(),
+            "le compte créé par la version récente doit avoir survécu"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

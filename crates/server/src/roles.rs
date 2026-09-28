@@ -25,6 +25,11 @@ use ki_protocol::{perm, Perms, RoleId, RoleInfo, ROLE_EVERYONE, ROLE_OWNER};
 /// Un nom de rôle tient dans une étiquette à côté d'un pseudo : au-delà, il
 /// ne s'affiche plus, il déborde.
 const MAX_ROLE_NAME: usize = 32;
+/// Rôles au plus, système compris. Tous partent dans le `Welcome` de chaque
+/// connexion : sans plafond, quelques centaines de rôles lui faisaient
+/// dépasser `MAX_LINE`, il était jeté en silence, et plus personne ne
+/// pouvait se connecter.
+pub(crate) const MAX_ROLES: usize = 50;
 
 /// Plafond de rang d'un rôle ordinaire. Le propriétaire occupe `u16::MAX` et
 /// doit y rester seul : à rang égal on n'agit pas sur l'autre, mais un rôle
@@ -228,6 +233,9 @@ impl Roles {
     ) -> Result<RoleInfo, String> {
         let name = clean_name(name)?;
         let mut inner = self.inner.lock().unwrap();
+        if inner.roles.len() >= MAX_ROLES {
+            return Err(format!("trop de rôles ({MAX_ROLES} au plus)"));
+        }
         let role = RoleInfo {
             id: inner.next_id,
             name,

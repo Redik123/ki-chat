@@ -79,12 +79,34 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let token = std::env::var("KI_TOKEN").unwrap_or_else(|_| {
-        tracing::warn!(
-            "KI_TOKEN non défini — code d'invitation par défaut 'changeme' (dev uniquement)"
-        );
-        "changeme".into()
-    });
+    // Le code maître crée des comptes : jamais une valeur connue. Absent, il
+    // est tiré au hasard à chaque démarrage et écrit au journal — de quoi
+    // créer le premier compte d'un serveur de test, sans laisser à personne
+    // un « changeme » que le dépôt publie. Vide ou resté à la valeur d'un
+    // gabarit, il est ignoré (voir `accounts::code_maitre_utilisable`) : le
+    // serveur démarre, les invitations des admins marchent, et le journal
+    // dit quoi faire.
+    let token = match std::env::var("KI_TOKEN") {
+        Ok(token) => {
+            if !accounts::code_maitre_utilisable(&token) {
+                tracing::error!(
+                    "KI_TOKEN est vide ou garde la valeur d'un gabarit : le code maître ne crée \
+                     aucun compte. Donne-lui une valeur secrète ; en attendant, les invitations \
+                     des admins restent le seul moyen d'entrer."
+                );
+            }
+            token
+        }
+        Err(_) => {
+            use rand::Rng;
+            let hasard: u64 = rand::rng().random();
+            let token = format!("ki-{hasard:016x}");
+            tracing::warn!(
+                "KI_TOKEN non défini — code maître de cette session (change à chaque démarrage) : {token}"
+            );
+            token
+        }
+    };
     let http_port: u16 = env_port("KI_HTTP_PORT", 8080);
     let udp_port: u16 = env_port("KI_UDP_PORT", 9987);
     let data_dir = std::env::var("KI_DATA_DIR").unwrap_or_else(|_| "data".into());
@@ -475,6 +497,7 @@ async fn quitter(state: &Arc<AppState>, code: i32) -> ! {
     let s = state.clone();
     let ecrit = tokio::task::spawn_blocking(move || {
         s.history.attendre_ecritures(std::time::Duration::from_secs(3));
+        s.audit.attendre_ecritures(std::time::Duration::from_secs(1));
         s.lus.ecrire_si_sale();
     });
     if tokio::time::timeout(std::time::Duration::from_secs(5), ecrit).await.is_err() {

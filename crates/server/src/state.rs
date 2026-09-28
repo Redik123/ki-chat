@@ -81,7 +81,18 @@ pub struct Outbox {
     /// refermait une connexion déjà fermée — le tout sous le verrou des
     /// connectés, qui est sur le chemin de tout.
     closing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Octets déposés et pas encore écrits sur le flux : la tâche d'écriture
+    /// les rend au fur et à mesure (voir [`Outbox::ecrit`]).
+    octets: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+
+/// Octets en attente tolérés dans une file d'envoi.
+///
+/// La file était bornée en **lignes** seulement : 512 lignes pouvant chacune
+/// peser 160 Kio, un client qui ne lisait plus retenait jusqu'à 80 Mio chez
+/// le serveur avant d'être coupé. Seize mégaoctets, c'est la liste des
+/// membres, l'historique d'un salon et une fournée de photos, plusieurs fois.
+pub const OUTBOX_OCTETS_MAX: usize = 16 * 1024 * 1024;
 
 impl Outbox {
     pub fn new(tx: tokio::sync::mpsc::Sender<Line>, conn: quinn::Connection) -> Self {
@@ -89,6 +100,24 @@ impl Outbox {
             tx,
             conn,
             closing: Default::default(),
+            octets: Default::default(),
+        }
+    }
+
+    /// Le compteur des octets en attente, pour la tâche d'écriture, qui les
+    /// rend à mesure qu'elle les verse sur le flux. Le compteur seul, et pas
+    /// une copie de la file : une copie gardée par la tâche d'écriture
+    /// tiendrait la file ouverte pour toujours.
+    pub fn compteur_octets(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        self.octets.clone()
+    }
+
+    /// Le client ne suit plus : la connexion est fermée, une seule fois.
+    fn saturee(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.closing.swap(true, Ordering::Relaxed) {
+            tracing::warn!("file d'envoi saturée : le client ne suit plus, connexion fermée");
+            self.conn.close(0u32.into(), b"file saturee");
         }
     }
 
@@ -110,19 +139,24 @@ impl Outbox {
     /// diffusions : une sérialisation, N dépôts, et le contenu n'est partagé
     /// que par un compteur de références.
     pub fn send_line(&self, line: &Line) -> Result<(), ()> {
+        use std::sync::atomic::Ordering;
+        let n = line.len();
+        if self.octets.fetch_add(n, Ordering::Relaxed) + n > OUTBOX_OCTETS_MAX {
+            self.octets.fetch_sub(n, Ordering::Relaxed);
+            self.saturee();
+            return Err(());
+        }
         match self.tx.try_send(line.clone()) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                use std::sync::atomic::Ordering;
-                if !self.closing.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        "file d'envoi saturée : le client ne suit plus, connexion fermée"
-                    );
-                    self.conn.close(0u32.into(), b"file saturee");
-                }
+                self.octets.fetch_sub(n, Ordering::Relaxed);
+                self.saturee();
                 Err(())
             }
-            Err(TrySendError::Closed(_)) => Err(()),
+            Err(TrySendError::Closed(_)) => {
+                self.octets.fetch_sub(n, Ordering::Relaxed);
+                Err(())
+            }
         }
     }
 }
@@ -232,7 +266,37 @@ pub struct ConnectedUser {
     /// enverrait ; l'émetteur est prévenu plutôt que de croire avoir
     /// appelé. Un client récent l'annonce dès l'image qui suit `NonLus`.
     pub pokes_ok: Option<bool>,
+    /// Les changements de mot de passe : chacun coûte un Argon2id, même
+    /// avec un ancien mot de passe faux. Un essai toutes les cinq secondes.
+    pub mdp_budget: TokenBucket,
+    /// Les changements de photo : chacun réécrit `users.json` et renvoie
+    /// la vignette, jusqu'à 96 Kio, à chaque connecté. Un toutes les dix
+    /// secondes, trois d'affilée au plus.
+    pub photo_budget: TokenBucket,
+    /// Une recherche de ce membre est-elle en cours ? Chacune relit les
+    /// journaux de tous ses salons : une à la fois.
+    pub recherche_en_cours: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Une expulsion encore fraîche : le compte ne rentre pas avant l'échéance.
+///
+/// Sans ce délai, « Expulser » ne faisait rien : le client prenait la
+/// coupure pour une panne de réseau, se reconnectait dans la seconde et
+/// retournait dans son salon vocal.
+pub struct Expulsion {
+    pub jusqu_a: Instant,
+    /// Ce que le compte lit s'il tente de revenir avant l'échéance.
+    pub message: String,
+}
+
+/// Le temps qu'une expulsion tient le compte dehors.
+pub const DUREE_EXPULSION: std::time::Duration =
+    std::time::Duration::from_secs(ki_protocol::EXPULSION_S);
+
+/// Hachages Argon2id simultanés, tout le serveur confondu. Chacun réserve
+/// 19 Mio : sans plafond, deux cents changements de mot de passe envoyés
+/// d'un coup en réclamaient 3,8 Gio, et le noyau tuait le serveur.
+pub const ARGON2_SIMULTANES: usize = 4;
 
 /// Seau à jetons : autorise une rafale courte, puis un débit soutenu.
 ///
@@ -465,6 +529,12 @@ pub struct AppState {
     /// compte, qui attend derrière et qui est entré. **En mémoire
     /// seulement** — une porte ne survit pas au redémarrage.
     pub portes: crate::porte::Portes,
+    /// Les jetons des hachages Argon2id : voir [`ARGON2_SIMULTANES`].
+    pub argon2: Arc<tokio::sync::Semaphore>,
+    /// Les comptes expulsés il y a peu, tenus dehors jusqu'à l'échéance.
+    /// En mémoire seulement : un redémarrage lève les expulsions, comme
+    /// les verrous vocaux.
+    pub expulsions: Mutex<HashMap<UserId, Expulsion>>,
 }
 
 impl AppState {
@@ -516,7 +586,38 @@ impl AppState {
             lus: crate::lus::Lus::open(data_dir),
             pokes: Default::default(),
             portes: Default::default(),
+            argon2: Arc::new(tokio::sync::Semaphore::new(ARGON2_SIMULTANES)),
+            expulsions: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Tient ce compte dehors pendant [`DUREE_EXPULSION`].
+    pub fn expulser_pour_un_temps(&self, user_id: UserId, par: &str, motif: &str) {
+        let message = if motif.is_empty() {
+            format!("tu as été expulsé par {par}")
+        } else {
+            format!("tu as été expulsé par {par} : {motif}")
+        };
+        let mut expulsions = self.expulsions.lock().unwrap();
+        let now = Instant::now();
+        expulsions.retain(|_, e| e.jusqu_a > now);
+        expulsions.insert(
+            user_id,
+            Expulsion {
+                jusqu_a: now + DUREE_EXPULSION,
+                message,
+            },
+        );
+    }
+
+    /// Le refus à opposer à ce compte s'il est encore sous le coup d'une
+    /// expulsion, avec le temps qui reste.
+    pub fn expulsion_en_cours(&self, user_id: UserId) -> Option<String> {
+        let expulsions = self.expulsions.lock().unwrap();
+        let e = expulsions.get(&user_id)?;
+        let reste = e.jusqu_a.checked_duration_since(Instant::now())?;
+        let minutes = reste.as_secs().div_ceil(60).max(1);
+        Some(format!("{} — tu pourras revenir dans {minutes} min", e.message))
     }
 
     /// Crée un salon et, s'il est textuel, ouvre son journal **avant** de
@@ -736,6 +837,9 @@ impl AppState {
     pub fn reconcile_memberships(&self) {
         let ids: Vec<UserId> = { self.users.lock().unwrap().keys().copied().collect() };
         let mut voice_changed = false;
+        // Ceux qu'on sort d'un salon vocal : leurs diffusions, et celles
+        // qu'ils regardaient, s'arrêtent avec — après la boucle, hors verrou.
+        let mut sortis_du_vocal = Vec::new();
         for id in ids {
             let (channel, voice) = {
                 let users = self.users.lock().unwrap();
@@ -765,8 +869,12 @@ impl AppState {
                         u.speaking = false;
                     }
                     voice_changed = true;
+                    sortis_du_vocal.push(id);
                 }
             }
+        }
+        for id in sortis_du_vocal {
+            self.fin_de_streams(id);
         }
         if voice_changed {
             self.rebuild_voice_routes();
@@ -946,10 +1054,33 @@ impl AppState {
     }
 
     /// Termine la diffusion éventuelle de ce compte et le retire de tous les
-    /// publics. Les trois sorties passent ici — arrêt volontaire, sortie du
-    /// vocal, déconnexion — une seule vérité de démontage.
+    /// publics. Toutes les sorties de salon vocal passent ici — sortie
+    /// volontaire, changement de salon, déplacement par un modérateur,
+    /// accès retiré, déconnexion — une seule vérité de démontage : une
+    /// diffusion appartient à un salon, et on ne regarde que celles du sien.
+    ///
+    /// Le changement de salon et le déplacement n'y passaient pas : un membre
+    /// retiré d'un salon privé gardait l'image et le son du jeu, et un
+    /// streamer déplacé diffusait toujours vers son ancien salon.
     pub fn fin_de_streams(&self, user_id: UserId) {
-        self.streams.drop_viewer_everywhere(user_id);
+        // Le spectateur retiré l'apprend : sans ça, sa fenêtre restait figée
+        // sur la dernière image, sans explication.
+        for stream_id in self.streams.drop_viewer_everywhere(user_id) {
+            self.send_to(
+                user_id,
+                &ServerMsg::WatchDenied {
+                    stream_id,
+                    reason: "tu n'es plus dans le salon de cette diffusion".into(),
+                },
+            );
+        }
+        self.arreter_diffusion(user_id);
+    }
+
+    /// Termine la diffusion de ce compte, s'il en a une — et rien d'autre.
+    /// L'arrêt volontaire d'une diffusion passait par [`Self::fin_de_streams`]
+    /// et coupait du même coup les diffusions que l'on regardait.
+    pub fn arreter_diffusion(&self, user_id: UserId) {
         if let Some(stream_id) = self.streams.stop_by_user(user_id) {
             {
                 let mut users = self.users.lock().unwrap();
@@ -1183,7 +1314,7 @@ impl AppState {
     /// Nettoyage complet à la déconnexion d'un client (ferme aussi sa
     /// connexion QUIC — utile pour kick/ban).
     pub fn disconnect(&self, user_id: UserId) {
-        self.remove_session(user_id, None);
+        self.remove_session(user_id, None, 0, "bye");
     }
 
     /// Comme `disconnect`, mais seulement si la session enregistrée est bien
@@ -1193,10 +1324,22 @@ impl AppState {
     /// s'achevant la session qui vient de la remplacer : on se reconnecte,
     /// et l'ancienne connexion nous éjecte une seconde plus tard.
     pub fn disconnect_session(&self, user_id: UserId, voice_token: u64) {
-        self.remove_session(user_id, Some(voice_token));
+        self.remove_session(user_id, Some(voice_token), 0, "bye");
     }
 
-    fn remove_session(&self, user_id: UserId, only_if_token: Option<u64>) {
+    /// Met fin à la session en disant pourquoi, **dans la fermeture QUIC
+    /// elle-même** : `code` est l'un des `ki_protocol::FERMETURE_*`, et
+    /// `motif` le texte que le client montrera.
+    ///
+    /// Le motif partait auparavant dans la file d'envoi, et la connexion se
+    /// fermait dans la foulée : la ligne n'était jamais écrite. Le client ne
+    /// voyait qu'une coupure, se reconnectait dans la seconde — et une
+    /// expulsion ne durait qu'une seconde.
+    pub fn congedier(&self, user_id: UserId, code: u32, motif: &str) {
+        self.remove_session(user_id, None, code, motif);
+    }
+
+    fn remove_session(&self, user_id: UserId, only_if_token: Option<u64>, code: u32, motif: &str) {
         // La fiche est prise **avant** tout verrouillage, et pour deux
         // raisons. D'abord parce qu'une fois la personne retirée de la table
         // des connectés, on ne saurait plus reconstruire ses rôles ni sa
@@ -1213,7 +1356,10 @@ impl AppState {
                 Some(u) if only_if_token.is_none_or(|t| u.voice_token == t) => {
                     salon_lu = u.channel;
                     let u = users.remove(&user_id).expect("présent à l'instant");
-                    u.conn.close(0u32.into(), b"bye");
+                    // quinn tronque au besoin un motif trop long pour tenir
+                    // dans un paquet : le client le relit sans exiger d'UTF-8
+                    // entier.
+                    u.conn.close(code.into(), motif.as_bytes());
                 }
                 // Personne, ou une session plus récente : rien à faire.
                 _ => return,
@@ -1260,6 +1406,57 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le `Welcome` le plus lourd que les plafonds permettent — tous les
+    /// rôles, tous les salons, aux noms les plus longs en caractères de
+    /// quatre octets, le logo le plus gros — tient dans une ligne. Sans ça,
+    /// il était jeté en silence et plus personne ne se connectait.
+    #[test]
+    fn le_welcome_le_plus_lourd_tient_dans_une_ligne() {
+        let nom = "🎧".repeat(32);
+        let roles = (0..crate::roles::MAX_ROLES as u32)
+            .map(|id| ki_protocol::RoleInfo {
+                id,
+                name: nom.clone(),
+                color: Some(0xffffff),
+                rank: u16::MAX - 1,
+                perms: u64::MAX,
+                system: false,
+            })
+            .collect();
+        let channels = (0..crate::channels::MAX_SALONS as u32)
+            .map(|id| ChannelInfo {
+                id: u32::MAX - id,
+                name: nom.clone(),
+                kind: ki_protocol::ChannelKind::Voice,
+                position: id,
+                locked: true,
+                allowed_roles: Some((0..10).map(|r| u32::MAX - r).collect()),
+                expire_le: Some(u64::MAX),
+            })
+            .collect();
+        let welcome = ServerMsg::Welcome {
+            user_id: UserId::MAX,
+            voice_token: u64::MAX,
+            udp_port: u16::MAX,
+            voice_key: "f".repeat(64),
+            is_admin: true,
+            perms: u64::MAX,
+            rank: u16::MAX,
+            roles,
+            channels,
+            server: ki_protocol::ServerInfo {
+                name: "🎧".repeat(ki_protocol::MAX_SERVER_NAME),
+                icon: Some("A".repeat(ki_protocol::MAX_SERVER_ICON)),
+                fil_valorant: Some(u32::MAX),
+                musique_membres_ajoutent: true,
+                adresse_web: "https://".to_string() + &"x".repeat(ki_protocol::MAX_ADRESSE_WEB),
+            },
+            portes: true,
+            medailles: true,
+        };
+        assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");
+    }
 
     fn voix(id: UserId, channel: Option<ChannelId>, muet: bool, sourd: bool) -> Voix<u8> {
         Voix {

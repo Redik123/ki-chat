@@ -25,6 +25,17 @@ use std::path::Path;
 /// `TEMP` : `rename` entre volumes différents n'est pas atomique, et sous
 /// Windows il échoue purement et simplement.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    ecrire(path, bytes, false)
+}
+
+/// Comme [`write_atomic`], pour un secret : sous Unix, le fichier naît en
+/// 0600 — lisible de son seul propriétaire —, et non en 0644 le temps qu'on
+/// en restreigne les droits.
+pub fn write_atomic_prive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    ecrire(path, bytes, true)
+}
+
+fn ecrire(path: &Path, bytes: &[u8], prive: bool) -> std::io::Result<()> {
     // Le temporaire porte un suffixe unique. Un nom fixe dérivé de la cible
     // était partagé par deux écritures concurrentes du même fichier : chacune
     // le tronquait et y écrivait, et le premier renommage publiait un mélange
@@ -36,7 +47,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // le disque avant le renommage. Sans ça, une coupure de courant juste
     // après le `rename` publierait un fichier au contenu jamais écrit.
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if prive {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = prive;
+        let mut f = options.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }

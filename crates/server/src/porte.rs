@@ -1528,7 +1528,12 @@ pub fn offrir(state: &AppState, acteur_nom: &str, invite_id: UserId) -> Result<S
     };
     let label = format!("porte {} — {}", fiche.slug, fiche.nom);
     let code = state.accounts.create_invite(acteur_nom, Some(1), &label, INVITATION_TTL_SECS)?;
-    state.audit.record("invite.create", acteur_nom, "", &format!("{code} — 1 usage(s) « {label} »"));
+    state.audit.record(
+        "invite.create",
+        acteur_nom,
+        "",
+        &format!("{} — 1 usage(s) « {label} »", crate::accounts::masquer_code(&code)),
+    );
     tracing::info!("invitation {code} offerte à {} par {acteur_nom}", fiche.nom);
     let serveur = adresse_quic(state, &fiche.hote_public);
     state.poster_systeme(
