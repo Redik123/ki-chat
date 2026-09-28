@@ -2466,12 +2466,16 @@ impl KiApp {
             }
             None => {}
         }
+        let fatal = self.enregistreur.as_ref().is_some_and(|e| e.fatal);
         if let Some(err) = self.enregistreur.as_mut().and_then(|e| e.erreur.take()) {
+            if fatal {
+                ki_video::journal(format!("clips : arrêt de l'enregistreur — {err}"));
+            }
             self.info = Some(format!("enregistreur de clips : {err}"));
         }
-        // Le logiciel à 1080p60 en jeu : non. L'enregistreur l'a dit, on l'arrête.
-        if self.enregistreur.as_ref().is_some_and(|e| e.fatal) {
-            ki_video::journal("clips : arrêt — encodeur logiciel à une qualité qu'il ne tient pas en jeu");
+        // Le logiciel à 1080p60 en jeu, ou un enregistrement qui retombe en
+        // panne : non. L'enregistreur l'a dit, on l'arrête.
+        if fatal {
             self.arreter_clips();
         }
     }
@@ -10905,6 +10909,18 @@ impl KiApp {
             ki_voice::journal("la fenêtre diffusée a été fermée : diffusion arrêtée".into());
             self.arreter_diffusion();
             self.info = Some("la fenêtre diffusée a été fermée : diffusion arrêtée".into());
+        } else if self.go_live.as_ref().is_some_and(|g| g.boucle.en_panne()) {
+            // La capture ou l'encodeur a lâché, source toujours ouverte : plus
+            // rien ne part. On conclut comme pour une fenêtre fermée, avec la
+            // raison que le fil vidéo a laissée — l'arrêt l'emporterait.
+            let raison = self
+                .go_live
+                .as_ref()
+                .and_then(|g| g.stats.prendre_avis())
+                .unwrap_or_else(|| "la capture ou l'encodeur a lâché".into());
+            ki_voice::journal(format!("diffusion arrêtée : {raison}"));
+            self.arreter_diffusion();
+            self.info = Some(format!("diffusion arrêtée : {raison}"));
         }
         if let Some(g) = &self.go_live {
             let frame = g.apercu.lock().unwrap().take();

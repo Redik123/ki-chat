@@ -194,7 +194,7 @@ impl GraphicsCaptureApiHandler for ScreenGrab {
         }
         self.flags.stats.captured.fetch_add(1, Ordering::Relaxed);
 
-        match self.flags.tx.try_send(CapturedFrame { width: w, height: h, bgra: owned }) {
+        match self.flags.tx.try_send(CapturedFrame { width: w, height: h, bgra: owned, instant: now }) {
             Ok(()) => {}
             Err(TrySendError::Full(f)) => {
                 // Pipeline occupé : on saute la trame, et l'on garde son

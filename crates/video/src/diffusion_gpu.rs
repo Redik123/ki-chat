@@ -128,6 +128,15 @@ impl DiffusionGpu {
         self.fermee.load(Ordering::Relaxed)
     }
 
+    /// Le fil s'est arrêté sans qu'on le lui demande, source toujours
+    /// ouverte : la carte et le chemin du processeur ont renoncé l'un après
+    /// l'autre (voir `StreamerLoop::en_panne`).
+    pub(crate) fn en_panne(&self) -> bool {
+        !self.arret.load(Ordering::Relaxed)
+            && !self.fermee.load(Ordering::Relaxed)
+            && self.fil.as_ref().is_some_and(|f| f.is_finished())
+    }
+
     pub(crate) fn arreter(mut self) {
         self.fermer();
     }
@@ -181,7 +190,13 @@ fn boucle(p: Parts, pret: mpsc::Sender<anyhow::Result<()>>) {
             std::thread::sleep(prochaine - maintenant);
             continue;
         }
-        match chaine.une_image(&p, &horloge) {
+        let tour = chaine.une_image(&p, &horloge).and_then(|nouvelle| {
+            if !nouvelle {
+                chaine.trame_cle_sur_image_immobile(&p)?;
+            }
+            Ok(nouvelle)
+        });
+        match tour {
             Ok(true) => {
                 // Les échéances passées pendant qu'on travaillait : autant
                 // d'images que la capture n'a pas pu donner. C'est ce que le
@@ -477,6 +492,9 @@ struct Chaine {
     idr: bool,
     /// Le dernier horodatage émis : les suivants montent toujours.
     dernier_pts: Option<u64>,
+    /// Quand la capture a livré sa dernière image (voir
+    /// `trame_cle_sur_image_immobile`).
+    derniere_image: Option<Instant>,
 }
 
 impl Chaine {
@@ -521,6 +539,7 @@ impl Chaine {
             appareil,
             idr: true,
             dernier_pts: None,
+            derniere_image: None,
         })
     }
 
@@ -541,6 +560,45 @@ impl Chaine {
 
     /// Prend l'image arrivée, la convertit pour chaque qualité et l'encode.
     /// `false` : rien de neuf depuis la dernière.
+    /// L'écran ne bouge plus — la capture ne livre rien — et une trame clé
+    /// est attendue (un spectateur qui arrive) : elle part de la dernière
+    /// image convertie, toujours dans la texture de l'encodeur. Elle
+    /// attendait le premier mouvement, et le spectateur voyait du noir
+    /// jusque-là.
+    fn trame_cle_sur_image_immobile(&mut self, p: &Parts) -> anyhow::Result<()> {
+        const IMMOBILE: Duration = Duration::from_millis(150);
+        let immobile = self.derniere_image.is_some_and(|t| t.elapsed() >= IMMOBILE);
+        let haute = !p.qualites.as_ref().is_some_and(|q| q.haute_suspendue());
+        if !immobile || !haute || !(p.force_idr.load(Ordering::Relaxed) || self.idr) {
+            return Ok(());
+        }
+        p.force_idr.store(false, Ordering::Relaxed);
+        self.idr = false;
+        let t1 = Instant::now();
+        let Some(paquet) = self.haute.nvenc.encoder_texture(true)? else {
+            p.force_idr.store(true, Ordering::Relaxed);
+            return Ok(());
+        };
+        let stats = &p.stats;
+        stats.encode_ms.record(t1.elapsed().as_secs_f32() * 1000.0);
+        stats.encoded.fetch_add(1, Ordering::Relaxed);
+        stats.encoded_bytes.fetch_add(paquet.data.len() as u64, Ordering::Relaxed);
+        if paquet.idr {
+            stats.keyframes.fetch_add(1, Ordering::Relaxed);
+        }
+        let pts_us = (p.origine.elapsed().as_micros() as u64).max(self.dernier_pts.map_or(0, |d| d + 1));
+        self.dernier_pts = Some(pts_us);
+        (p.emit)(EncodedFrame {
+            data: paquet.data,
+            idr: paquet.idr,
+            pts_us,
+            width: self.haute.taille.0 as u16,
+            height: self.haute.taille.1 as u16,
+            basse: false,
+        });
+        Ok(())
+    }
+
     fn une_image(&mut self, p: &Parts, horloge: &Horloge) -> anyhow::Result<bool> {
         let Some(image) = self.capture.prendre()? else { return Ok(false) };
         let contenu = image.ContentSize().context("taille de l'image")?;
@@ -557,6 +615,7 @@ impl Chaine {
         }
         let stats = &p.stats;
         stats.captured.fetch_add(1, Ordering::Relaxed);
+        self.derniere_image = Some(Instant::now());
         let compose = image.SystemRelativeTime().map(|t| t.Duration).unwrap_or(0);
         let mut pts_us = horloge.pts_us(compose, p.origine);
         if let Some(d) = self.dernier_pts {

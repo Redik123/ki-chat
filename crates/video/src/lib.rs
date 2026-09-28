@@ -307,9 +307,10 @@ pub fn creer_encodeur(
 /// tout le travail (conversion, encodage, décodage) sur UN thread pipeline
 /// dédié — jamais sur le thread réseau ni sur l'UI.
 pub struct LocalLoop {
-    control: capture::Control,
+    /// `None` une fois arrêtées : l'arrêt passe aussi par `Drop`.
+    control: Option<capture::Control>,
     stop: Arc<AtomicBool>,
-    worker: std::thread::JoinHandle<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl LocalLoop {
@@ -342,15 +343,31 @@ impl LocalLoop {
                 .context("thread pipeline vidéo")?
         };
 
-        Ok(Self { control, stop, worker })
+        Ok(Self { control: Some(control), stop, worker: Some(worker) })
     }
 
-    pub fn stop(self) {
+    pub fn stop(mut self) {
+        self.arreter();
+    }
+
+    fn arreter(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Err(e) = self.control.stop() {
-            tracing::warn!("arrêt de la capture : {e}");
+        if let Some(control) = self.control.take() {
+            if let Err(e) = control.stop() {
+                tracing::warn!("arrêt de la capture : {e}");
+            }
         }
-        let _ = self.worker.join();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Lâchée sans `stop()` — un démontage qui la laisse tomber —, la boucle
+/// s'arrête quand même : sa capture et son fil survivaient à la poignée.
+impl Drop for LocalLoop {
+    fn drop(&mut self) {
+        self.arreter();
     }
 }
 
@@ -572,7 +589,8 @@ pub type FrameEmit = Arc<dyn Fn(EncodedFrame) + Send + Sync>;
 /// exactement ce que reçoivent ses spectateurs, artefacts compris.
 pub struct StreamerLoop {
     force_idr: Arc<AtomicBool>,
-    boucle: Boucle,
+    /// `None` une fois arrêtée : l'arrêt passe aussi par `Drop`.
+    boucle: Option<Boucle>,
 }
 
 enum Boucle {
@@ -655,7 +673,7 @@ impl StreamerLoop {
                 origine,
                 qualites.clone(),
             ) {
-                Ok(carte) => return Ok(Self { force_idr, boucle: Boucle::Carte(carte) }),
+                Ok(carte) => return Ok(Self { force_idr, boucle: Some(Boucle::Carte(carte)) }),
                 Err(e) => journal(format!("diffusion : pas de chaîne sur la carte ({e:#}) — chemin du processeur")),
             }
         }
@@ -676,6 +694,7 @@ impl StreamerLoop {
             },
         )?;
         let stop = Arc::new(AtomicBool::new(false));
+        let sante = SanteCapture { arretee: control.halt_handle(), fermee: closed.clone() };
         let worker = {
             let (stop, force_idr) = (stop.clone(), force_idr.clone());
             std::thread::Builder::new()
@@ -683,12 +702,12 @@ impl StreamerLoop {
                 .spawn(move || {
                     streamer_pipeline(
                         stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr,
-                        origine, qualites,
+                        origine, qualites, sante,
                     )
                 })
                 .context("thread streamer vidéo")?
         };
-        Ok(Self { force_idr, boucle: Boucle::Processeur { control, stop, closed, worker } })
+        Ok(Self { force_idr, boucle: Some(Boucle::Processeur { control, stop, closed, worker }) })
     }
 
     /// La prochaine trame encodée sera une trame clé (IDR) — pour un
@@ -702,23 +721,60 @@ impl StreamerLoop {
     pub fn source_closed(&self) -> bool {
         match &self.boucle {
             #[cfg(windows)]
-            Boucle::Carte(carte) => carte.source_fermee(),
-            Boucle::Processeur { closed, .. } => closed.load(Ordering::Relaxed),
+            Some(Boucle::Carte(carte)) => carte.source_fermee(),
+            Some(Boucle::Processeur { closed, .. }) => closed.load(Ordering::Relaxed),
+            None => false,
         }
     }
 
-    pub fn stop(self) {
-        match self.boucle {
+    /// La diffusion s'est arrêtée d'elle-même, sans que la source se ferme :
+    /// la capture est morte (carte graphique réinitialisée, le plus souvent)
+    /// ou l'encodeur a tout refusé. Plus rien ne part, et rien ne repartira
+    /// — à l'appelant de conclure, comme pour une source fermée, mais sans
+    /// dire qu'une fenêtre s'est fermée. L'avis posé dans les statistiques
+    /// dit pourquoi, quand le fil a pu le dire.
+    ///
+    /// C'était l'image figée chez tous les spectateurs et « 0 i/s » chez le
+    /// streamer, sans un mot : une erreur de lecture d'image arrête la
+    /// capture sans passer par `on_closed`, et le pipeline attendait des
+    /// images qui ne viendraient plus.
+    pub fn en_panne(&self) -> bool {
+        match &self.boucle {
             #[cfg(windows)]
-            Boucle::Carte(carte) => carte.arreter(),
-            Boucle::Processeur { control, stop, worker, .. } => {
+            Some(Boucle::Carte(carte)) => carte.en_panne(),
+            Some(Boucle::Processeur { control, closed, worker, .. }) => {
+                !closed.load(Ordering::Relaxed) && (control.is_finished() || worker.is_finished())
+            }
+            None => false,
+        }
+    }
+
+    pub fn stop(mut self) {
+        self.arreter();
+    }
+
+    fn arreter(&mut self) {
+        match self.boucle.take() {
+            #[cfg(windows)]
+            Some(Boucle::Carte(carte)) => carte.arreter(),
+            Some(Boucle::Processeur { control, stop, worker, .. }) => {
                 stop.store(true, Ordering::Relaxed);
                 if let Err(e) = control.stop() {
                     tracing::warn!("arrêt de la capture : {e}");
                 }
                 let _ = worker.join();
             }
+            None => {}
         }
+    }
+}
+
+/// Lâchée sans `stop()`, la boucle s'arrête quand même : la capture et le
+/// fil du chemin du processeur survivaient à la poignée, et continuaient
+/// d'encoder et d'émettre une diffusion que plus rien ne tenait.
+impl Drop for StreamerLoop {
+    fn drop(&mut self) {
+        self.arreter();
     }
 }
 
@@ -748,15 +804,27 @@ fn diffuser_par_le_processeur(
             stats: stats.clone(),
             tx: frame_tx,
             recycle: recycle_rx,
-            closed,
+            closed: closed.clone(),
             interval: Duration::ZERO,
         },
     )?;
-    streamer_pipeline(stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr, origine, qualites);
+    let sante = SanteCapture { arretee: control.halt_handle(), fermee: closed };
+    streamer_pipeline(
+        stats, preview, emit, config, frame_rx, recycle_tx, stop, force_idr, origine, qualites, sante,
+    );
     if let Err(e) = control.stop() {
         tracing::warn!("arrêt de la capture : {e}");
     }
     Ok(())
+}
+
+/// Ce que le pipeline sait de la capture qui le nourrit.
+struct SanteCapture {
+    /// Levé par la capture quand elle s'arrête — sur demande, à la
+    /// fermeture de la source, ou sur une erreur de lecture d'image.
+    arretee: Arc<AtomicBool>,
+    /// Levé quand la source s'est fermée (fenêtre diffusée fermée).
+    fermee: Arc<AtomicBool>,
 }
 
 /// Le pipeline streamer : mêmes étages que le labo, plus l'émission.
@@ -772,6 +840,7 @@ fn streamer_pipeline(
     force_idr: Arc<AtomicBool>,
     origine: Instant,
     qualites: Option<Arc<Qualites>>,
+    sante: SanteCapture,
 ) {
     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
     // La qualité basse : son encodeur, sa réduction, ses réglages en
@@ -783,6 +852,9 @@ fn streamer_pipeline(
     let mut basse_params: Option<(u32, u32, u32, u32)> = None;
     let mut basse_pts: Option<u64> = None;
     let mut basse_hs = false;
+    // Échecs d'encodage consécutifs de la qualité basse : au troisième, elle
+    // est abandonnée pour cette capture (voir plus bas).
+    let mut basse_echecs: u32 = 0;
     let basse_stats = StageStats::default();
     // L'encodeur voulu, et les refus de NVENC en cours de route : au second
     // (un par chemin d'entrée), on passe au logiciel et on le dit — plutôt
@@ -809,25 +881,69 @@ fn streamer_pipeline(
     // La base des horodatages : l'instant zéro du stream, le même que celui
     // du son du jeu — c'est lui qui porte la synchronisation image/son.
     let depart = origine;
+    // Le dernier horodatage émis : les suivants montent toujours (une trame
+    // clé resservie d'une image immobile est datée de maintenant, l'image
+    // neuve qui la suit, de sa capture).
+    let mut dernier_pts: Option<u64> = None;
+    // La capture arrêtée sans qu'on l'ait demandé, vue une première fois.
+    // Une fenêtre qui se ferme lève l'arrêt un instant avant de se dire
+    // fermée : on attend le tour suivant pour conclure.
+    let mut arret_vu = false;
 
     loop {
         let frame = match frames.recv_timeout(Duration::from_millis(200)) {
-            Ok(f) => f,
+            Ok(f) => Some(f),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if stop.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Relaxed) || sante.fermee.load(Ordering::Relaxed) {
                     return;
                 }
-                continue;
+                // Plus d'image à attendre : la capture s'est arrêtée seule.
+                // Son canal ne se ferme pas pour autant (la poignée de la
+                // capture le garde), d'où ce regard à chaque attente vaine.
+                if sante.arretee.load(Ordering::Relaxed) {
+                    if arret_vu {
+                        journal("diffusion : la capture de l'écran s'est arrêtée seule");
+                        stats.poser_avis(
+                            "la capture de l'écran s'est arrêtée (carte graphique réinitialisée ?) : \
+                             diffusion interrompue"
+                                .into(),
+                        );
+                        return;
+                    }
+                    arret_vu = true;
+                    continue;
+                }
+                // Rien ne bouge à l'écran : la capture ne livre aucune image,
+                // et une trame clé demandée — un spectateur qui arrive — ne
+                // partait qu'au premier mouvement. D'ici là, il voyait du
+                // noir. Elle part donc de la dernière image convertie.
+                if force_idr.load(Ordering::Relaxed) && encoder.is_some() && yuv.is_some() {
+                    None
+                } else {
+                    continue;
+                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let pts_us = depart.elapsed().as_micros() as u64;
+        // Daté de sa capture, et non du moment où le pipeline s'en saisit :
+        // l'image qui attendait dans la file partait avec une trame de
+        // retard sur le son du jeu, lui daté à la capture.
+        let capture_us = match &frame {
+            Some(f) => f.instant.saturating_duration_since(depart).as_micros() as u64,
+            None => depart.elapsed().as_micros() as u64,
+        };
+        let pts_us = capture_us.max(dernier_pts.map_or(0, |d| d + 1));
+        dernier_pts = Some(pts_us);
 
-        // I420 exige des dimensions paires : rognées, comme au labo.
-        let (w, h) = (frame.width & !1, frame.height & !1);
+        // I420 exige des dimensions paires : rognées, comme au labo. Sans
+        // image neuve, celles de la dernière.
+        let (w, h) = match &frame {
+            Some(f) => (f.width & !1, f.height & !1),
+            None => dims,
+        };
         if (w, h) != dims {
             dims = (w, h);
             sortie = scale::target_dims(w, h, config.max_height);
@@ -847,25 +963,31 @@ fn streamer_pipeline(
         let (ow, oh) = sortie;
 
         // 1. Conversion BGRA -> I420, puis réduction si l'image émise est
-        //    plus petite que la source.
+        //    plus petite que la source. Sans image neuve, la dernière
+        //    convertie est toujours là.
         let t0 = Instant::now();
-        let src_w = frame.width as usize;
-        let tight;
-        let bgra: &[u8] = if (frame.width, frame.height) == (w, h) {
-            &frame.bgra
-        } else {
-            tight = crop_bgra(&frame.bgra, src_w, w as usize, h as usize);
-            &tight
-        };
-        yuv_buf.read_bgra8(BgraSliceU8::new(bgra, (w as usize, h as usize)));
-        let _ = recycle.send(frame.bgra);
+        let neuve = frame.is_some();
+        if let Some(frame) = frame {
+            let src_w = frame.width as usize;
+            let tight;
+            let bgra: &[u8] = if (frame.width, frame.height) == (w, h) {
+                &frame.bgra
+            } else {
+                tight = crop_bgra(&frame.bgra, src_w, w as usize, h as usize);
+                &tight
+            };
+            yuv_buf.read_bgra8(BgraSliceU8::new(bgra, (w as usize, h as usize)));
+            let _ = recycle.send(frame.bgra);
+        }
         let reduit: Option<&scale::I420> = if (ow, oh) != (w, h) {
             Some(scaler.scale(yuv_buf, ow as usize, oh as usize))
         } else {
             None
         };
-        stats.convert_ms.record(t0.elapsed().as_secs_f32() * 1000.0);
-        stats.converted.fetch_add(1, Ordering::Relaxed);
+        if neuve {
+            stats.convert_ms.record(t0.elapsed().as_secs_f32() * 1000.0);
+            stats.converted.fetch_add(1, Ordering::Relaxed);
+        }
 
         // 2. Encodage — trame clé exigée si un spectateur l'attend.
         let enc = match encoder.as_mut() {
@@ -1042,6 +1164,7 @@ fn streamer_pipeline(
         let force = q.prendre_idr_basse();
         match enc.encode(petite, force) {
             Ok(Some(p)) => {
+                basse_echecs = 0;
                 stats.basse_ms.record(t3.elapsed().as_secs_f32() * 1000.0);
                 stats.basse_encoded.fetch_add(1, Ordering::Relaxed);
                 stats.basse_bytes.fetch_add(p.data.len() as u64, Ordering::Relaxed);
@@ -1061,9 +1184,21 @@ fn streamer_pipeline(
             }
             Err(e) => {
                 // Recréé à l'image suivante ; son premier paquet est une
-                // trame clé.
-                journal(format!("diffusion : qualité basse, encodage raté ({e:#}) — encodeur recréé"));
+                // trame clé. Pas indéfiniment : un encodeur qui s'ouvre puis
+                // refuse chaque image était recréé à la cadence de la
+                // qualité basse — jusqu'à trente sessions NVENC par seconde,
+                // autant de lignes au journal. Au troisième échec d'affilée,
+                // elle s'arrête pour cette capture ; la haute continue.
                 basse_enc = None;
+                basse_echecs += 1;
+                if basse_echecs >= 3 {
+                    journal(format!("diffusion : qualité basse abandonnée ({e:#}), trois échecs d'affilée"));
+                    basse_hs = true;
+                    basse_params = None;
+                    stats.set_basse_dims(0, 0);
+                } else {
+                    journal(format!("diffusion : qualité basse, encodage raté ({e:#}) — encodeur recréé"));
+                }
             }
         }
     }
@@ -1216,5 +1351,140 @@ mod tests {
         let mut spectateur = ViewerDecoder::new().unwrap();
         let images = trames.iter().filter(|(_, d)| spectateur.decode(d).is_some()).count();
         assert!(images * 10 >= trames.len() * 9, "{images} images décodées sur {} trames", trames.len());
+    }
+
+    /// Lance le pipeline sur une capture simulée : son canal d'images reste
+    /// ouvert (comme quand la poignée de la vraie capture le garde), et
+    /// l'appelant lève les drapeaux de santé. Rend le fil et les
+    /// statistiques.
+    fn pipeline_sur_capture_simulee(
+        arretee: bool,
+        fermee: bool,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        Arc<StageStats>,
+        std::sync::mpsc::SyncSender<capture::CapturedFrame>,
+    ) {
+        let stats = Arc::new(StageStats::default());
+        let (tx, rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
+        let (recycle_tx, _recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let sante = SanteCapture {
+            arretee: Arc::new(AtomicBool::new(arretee)),
+            fermee: Arc::new(AtomicBool::new(fermee)),
+        };
+        let fil = {
+            let stats = stats.clone();
+            std::thread::spawn(move || {
+                streamer_pipeline(
+                    stats,
+                    Arc::new(|_| {}),
+                    Arc::new(|_: EncodedFrame| {}),
+                    StreamConfig { preview: false, ..StreamConfig::default() },
+                    rx,
+                    recycle_tx,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(false)),
+                    Instant::now(),
+                    None,
+                    sante,
+                )
+            })
+        };
+        (fil, stats, tx)
+    }
+
+    fn fini_sous(fil: &std::thread::JoinHandle<()>, delai: Duration) -> bool {
+        let debut = Instant::now();
+        while !fil.is_finished() && debut.elapsed() < delai {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        fil.is_finished()
+    }
+
+    /// Une capture qui s'arrête seule (erreur de lecture d'image, carte
+    /// graphique réinitialisée) ne ferme pas son canal : le pipeline
+    /// attendait des images pour toujours, stream « en cours » et image figée
+    /// chez les spectateurs. Il sort désormais, et laisse un avis qui dit
+    /// pourquoi.
+    #[test]
+    fn une_capture_arretee_seule_arrete_le_pipeline_et_le_dit() {
+        let (fil, stats, _garde) = pipeline_sur_capture_simulee(true, false);
+        assert!(fini_sous(&fil, Duration::from_secs(3)), "le pipeline attend encore");
+        let avis = stats.prendre_avis().expect("un avis pour l'interface");
+        assert!(avis.contains("capture"), "{avis}");
+    }
+
+    /// Sur une image immobile, la capture ne livre plus rien : une trame clé
+    /// demandée (un spectateur qui arrive) part quand même, de la dernière
+    /// image convertie, au lieu d'attendre le premier mouvement.
+    #[test]
+    fn une_trame_cle_demandee_part_meme_sur_une_image_immobile() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<capture::CapturedFrame>(1);
+        let (recycle_tx, _recycle_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let trames = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let emit: FrameEmit = {
+            let t = trames.clone();
+            Arc::new(move |f: EncodedFrame| t.lock().unwrap().push(f.idr))
+        };
+        let force_idr = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let sante = SanteCapture {
+            arretee: Arc::new(AtomicBool::new(false)),
+            fermee: Arc::new(AtomicBool::new(false)),
+        };
+        let fil = {
+            let (force_idr, stop) = (force_idr.clone(), stop.clone());
+            std::thread::spawn(move || {
+                streamer_pipeline(
+                    Arc::new(StageStats::default()),
+                    Arc::new(|_| {}),
+                    emit,
+                    StreamConfig {
+                        preview: false,
+                        encoder: EncoderChoice::Logiciel,
+                        ..StreamConfig::default()
+                    },
+                    rx,
+                    recycle_tx,
+                    stop,
+                    force_idr,
+                    Instant::now(),
+                    None,
+                    sante,
+                )
+            })
+        };
+        let attendre = |n: usize| {
+            let debut = Instant::now();
+            while trames.lock().unwrap().len() < n && debut.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            trames.lock().unwrap().len() >= n
+        };
+        // Une seule image, puis plus rien : l'écran ne bouge plus.
+        tx.send(capture::CapturedFrame {
+            width: 64,
+            height: 64,
+            bgra: vec![128; 64 * 64 * 4],
+            instant: Instant::now(),
+        })
+        .unwrap();
+        assert!(attendre(1), "la première image n'est pas partie");
+        let avant = trames.lock().unwrap().len();
+        force_idr.store(true, Ordering::Relaxed);
+        assert!(attendre(avant + 1), "la trame clé demandée n'est pas partie");
+        assert_eq!(trames.lock().unwrap().last(), Some(&true), "ce n'est pas une trame clé");
+        stop.store(true, Ordering::Relaxed);
+        fil.join().unwrap();
+    }
+
+    /// Une fenêtre fermée arrête aussi le pipeline, mais sans avis de
+    /// panne : l'interface le dit à sa façon (« la fenêtre diffusée a été
+    /// fermée »).
+    #[test]
+    fn une_source_fermee_arrete_le_pipeline_sans_avis_de_panne() {
+        let (fil, stats, _garde) = pipeline_sur_capture_simulee(true, true);
+        assert!(fini_sous(&fil, Duration::from_secs(3)), "le pipeline attend encore");
+        assert!(stats.prendre_avis().is_none());
     }
 }

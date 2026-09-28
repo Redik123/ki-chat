@@ -694,6 +694,12 @@ impl Boucle {
         matches!(self, Boucle::Carte(c) if c.en_panne())
     }
 
+    /// Le chemin du processeur s'est arrêté seul (voir
+    /// `StreamerLoop::en_panne`) : il n'y a pas plus bas où descendre.
+    fn processeur_en_panne(&self) -> bool {
+        matches!(self, Boucle::Processeur(p) if p.en_panne())
+    }
+
     fn arreter(self) {
         match self {
             Boucle::Carte(c) => c.arreter(),
@@ -716,6 +722,9 @@ pub struct Enregistreur {
     /// Une fenêtre que la capture a refusée, et quand : l'automatique ne
     /// la redemande qu'une minute plus tard, pas toutes les dix secondes.
     source_refusee: Option<(CaptureSource, Instant)>,
+    /// La dernière relance après une panne du chemin du processeur : une
+    /// seconde panne dans la minute arrête l'enregistreur.
+    relance_apres_panne: Option<Instant>,
     son_systeme: Option<ki_voice::jeu::SonSysteme>,
     robinet_micro: Option<ki_voice::Robinet>,
     robinet_copains: Option<ki_voice::Robinet>,
@@ -764,6 +773,7 @@ impl Enregistreur {
             source: source.clone(),
             carte_refusee: false,
             source_refusee: None,
+            relance_apres_panne: None,
             son_systeme: None,
             robinet_micro: None,
             robinet_copains: None,
@@ -972,6 +982,28 @@ impl Enregistreur {
             let source = self.source.clone();
             self.relancer(source);
         }
+        // Le chemin du processeur est tombé à son tour — capture perdue avec
+        // la carte graphique, encodeur qui refuse tout. Une relance, un
+        // pilote redémarré se reprend ; une seconde panne dans la minute
+        // arrête l'enregistreur, et le dit, plutôt que de filmer du vide.
+        if self.boucle.as_ref().is_some_and(Boucle::processeur_en_panne) {
+            let raison = self
+                .stats
+                .prendre_avis()
+                .unwrap_or_else(|| "la capture ou l'encodeur a lâché".into());
+            if self.relance_apres_panne.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                if let Some(b) = self.boucle.take() {
+                    b.arreter();
+                }
+                self.erreur = Some(format!("l'enregistrement retombe en panne ({raison})"));
+                self.fatal = true;
+            } else {
+                ki_video::journal(format!("clips : l'enregistrement est tombé en panne ({raison}) — relance"));
+                self.relance_apres_panne = Some(Instant::now());
+                let source = self.source.clone();
+                self.relancer(source);
+            }
+        }
         // Toutes les dix secondes, en automatique : le jeu est-il arrivé ?
         if self.reglages.source == Source::Auto && self.verif_source.elapsed() > Duration::from_secs(10) {
             self.verif_source = Instant::now();
@@ -1122,7 +1154,11 @@ fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Res
         pistes.push(mix);
     }
     pistes.extend(sources);
+    // Déclaré avant l'écrivain pour tomber après lui : le fichier est fermé
+    // quand on l'efface.
+    let mut inacheve = Inacheve(None);
     let mut e = ki_media::ecrire(chemin, &format, pistes.len()).map_err(|e| format!("{e:#}"))?;
+    inacheve.0 = Some(chemin);
     let duree_image = 1_000_000 / u64::from(fps.max(1));
     // Entrelacé par le temps : le son de chaque piste suit les images.
     let mut curseurs = vec![0usize; pistes.len()];
@@ -1168,6 +1204,7 @@ fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Res
         }
     }
     e.terminer().map_err(|e| format!("{e:#}"))?;
+    inacheve.0 = None;
     let derniere = inst.images.last().ok_or("aucune image")?;
     let duree_s = (derniere.pts_us - t0 + duree_image) as f32 / 1_000_000.0;
     let taille = std::fs::metadata(chemin).map(|m| m.len()).unwrap_or(0);
@@ -1179,6 +1216,25 @@ fn ecrire_clip(inst: Instantane, chemin: &Path, fps: u32, debit_bps: u32) -> Res
         taille / (1024 * 1024)
     ));
     Ok(Clip { chemin: chemin.to_path_buf(), duree_s, taille, pistes: noms })
+}
+
+/// Efface le fichier d'un clip dont l'écriture n'est pas allée au bout —
+/// disque plein, encodeur qui refuse une trame. Il restait dans la galerie,
+/// illisible, et pesait sur le disque comme un vrai.
+struct Inacheve<'a>(Option<&'a Path>);
+
+impl Drop for Inacheve<'_> {
+    fn drop(&mut self) {
+        if let Some(chemin) = self.0 {
+            match std::fs::remove_file(chemin) {
+                Ok(()) => ki_video::journal(format!("clips : {} inachevé, effacé", chemin.display())),
+                Err(e) => ki_video::journal(format!(
+                    "clips : {} inachevé, impossible à effacer ({e})",
+                    chemin.display()
+                )),
+            }
+        }
+    }
 }
 
 /// Écrêtage doux : plusieurs voix fortes qui se superposent ne saturent
@@ -1391,6 +1447,25 @@ pub fn cadence_ui(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un clip dont l'écriture a échoué ne reste pas sur le disque ; un clip
+    /// achevé, si.
+    #[test]
+    fn un_clip_inacheve_est_efface() {
+        let dossier = std::env::temp_dir().join(format!("ki-clips-inacheve-{}", std::process::id()));
+        std::fs::create_dir_all(&dossier).unwrap();
+        let rate = dossier.join("rate.mp4");
+        let fini = dossier.join("fini.mp4");
+        std::fs::write(&rate, b"moitie").unwrap();
+        std::fs::write(&fini, b"entier").unwrap();
+        drop(Inacheve(Some(&rate)));
+        let mut acheve = Inacheve(Some(&fini));
+        acheve.0 = None;
+        drop(acheve);
+        assert!(!rate.exists(), "le clip raté est resté");
+        assert!(fini.exists(), "le clip achevé a disparu");
+        let _ = std::fs::remove_dir_all(&dossier);
+    }
 
     fn image(pts_us: u64, idr: bool) -> EncodedFrame {
         EncodedFrame { data: vec![0u8; 100], idr, pts_us, width: 16, height: 16, basse: false }

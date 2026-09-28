@@ -65,6 +65,9 @@ pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
     pub bgra: Vec<u8>,
+    /// L'instant où la capture l'a reçue du compositeur : c'est lui qui
+    /// date l'image, pas celui où le pipeline s'en saisit.
+    pub instant: std::time::Instant,
 }
 
 /// Tout ce que le thread de capture reçoit à sa création.

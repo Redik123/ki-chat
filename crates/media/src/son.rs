@@ -61,17 +61,24 @@ impl Reechantillonneur {
             return;
         }
         self.attente.extend_from_slice(mono);
-        // Il faut un point après celui de droite : on s'arrête deux
-        // échantillons avant la fin.
-        while self.position + 2.0 < (self.attente.len() - 1) as f64 {
+        // Il faut un point après celui de droite : on s'arrête trois
+        // échantillons avant la fin. Écrit sans soustraction : `len() - 1`
+        // débordait sur une attente vide.
+        while self.position + 3.0 < self.attente.len() as f64 {
             let i = self.position.floor() as usize;
             let t = (self.position - i as f64) as f32;
             let a = &self.attente;
             sortie.push(cubique(a[i], a[i + 1], a[i + 2], a[i + 3], t));
             self.position += self.pas;
         }
-        // On garde les trois derniers points consommés pour la suite.
-        let consomme = self.position.floor() as usize;
+        // On garde les trois derniers points consommés pour la suite. Au-delà
+        // de 192 kHz, le pas dépasse quatre échantillons et la position finit
+        // plus loin que la fin de l'attente : tout drainer jusqu'à elle
+        // débordait (panique, donc ki-chat fermé, vocal compris). On garde
+        // alors au moins trois points ; la position reste relative à eux et
+        // repart d'autant dans le bloc suivant.
+        let consomme =
+            (self.position.floor() as usize).min(self.attente.len().saturating_sub(3));
         if consomme > 0 {
             self.attente.drain(..consomme);
             self.position -= consomme as f64;
@@ -127,6 +134,46 @@ mod tests {
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0, f32::max);
         assert!(saut_max < 0.06, "saut {saut_max}");
+    }
+
+    /// Toutes les cadences qu'un fichier peut annoncer, des blocs de toutes
+    /// les tailles (vides compris) : jamais de panique, et la longueur de
+    /// sortie suit le rapport des cadences. Au-delà de 144 kHz, l'ancienne
+    /// version paniquait selon la taille des blocs ; à 352,8 kHz, dès le
+    /// premier.
+    #[test]
+    fn aucune_cadence_ni_taille_de_bloc_ne_fait_paniquer() {
+        let mut graine = 0x2545_F491u32;
+        let mut hasard = move |borne: u32| {
+            graine ^= graine << 13;
+            graine ^= graine >> 17;
+            graine ^= graine << 5;
+            graine % borne
+        };
+        for cadence in [8_000, 44_100, 96_000, 144_000, 150_000, 176_400, 192_000, 352_800, 384_000]
+        {
+            let mut r = Reechantillonneur::new(cadence);
+            let mut out = Vec::new();
+            let mut entres = 0usize;
+            for n in 0..400 {
+                // Des blocs de 10 ms, de 4096, au hasard, et parfois vides.
+                let taille = match n % 4 {
+                    0 => cadence as usize / 100,
+                    1 => 4096,
+                    2 => 0,
+                    _ => hasard(5000) as usize,
+                };
+                let bloc: Vec<f32> = (0..taille).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+                entres += taille;
+                r.pousser(&bloc, &mut out);
+            }
+            let attendu = entres as f64 * 48_000.0 / cadence as f64;
+            assert!(
+                (out.len() as f64 - attendu).abs() < 4.0,
+                "{cadence} Hz : {} échantillons pour {attendu:.0} attendus",
+                out.len()
+            );
+        }
     }
 
     #[test]

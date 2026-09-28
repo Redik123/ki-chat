@@ -661,6 +661,16 @@ impl Nvenc {
     }
 }
 
+/// Le plan tient-il `lignes` lignes de `largeur` octets au pas `pas` ?
+fn plan_suffisant(plan: &[u8], pas: usize, largeur: usize, lignes: usize) -> bool {
+    lignes == 0
+        || (pas >= largeur
+            && (lignes - 1)
+                .checked_mul(pas)
+                .and_then(|n| n.checked_add(largeur))
+                .is_some_and(|n| n <= plan.len()))
+}
+
 impl VideoEncoder for Nvenc {
     fn nom(&self) -> &'static str {
         "NVENC"
@@ -697,6 +707,21 @@ impl VideoEncoder for Nvenc {
             } else {
                 // Trois plans dans le tampon verrouillé : le luma au pitch
                 // donné, les chromas à la moitié.
+                //
+                // Les copies qui suivent sont brutes, et leurs sources viennent
+                // d'un trait sûr (`YUVSource`) : rien n'oblige une
+                // implémentation à rendre des plans aussi longs que ses pas
+                // l'annoncent. Vérifié ici, avant le verrou — sinon, une
+                // lecture hors des plans depuis du code sûr.
+                let (ys, us, vs) = src.strides();
+                let (y, u, v) = (src.y(), src.u(), src.v());
+                let (cw, ch) = (w / 2, h / 2);
+                if !plan_suffisant(y, ys, w, h)
+                    || !plan_suffisant(u, us, cw, ch)
+                    || !plan_suffisant(v, vs, cw, ch)
+                {
+                    bail!("NVENC : plans d'image plus courts que leurs pas ne l'annoncent");
+                }
                 let verrouiller = fl.nvEncLockInputBuffer.context("nvEncLockInputBuffer absent")?;
                 let mut li: ffi::NV_ENC_LOCK_INPUT_BUFFER = std::mem::zeroed();
                 li.version = ffi::NV_ENC_LOCK_INPUT_BUFFER_VER;
@@ -704,12 +729,16 @@ impl VideoEncoder for Nvenc {
                 self.verif(verrouiller(self.session, &mut li), "verrou du tampon d'entrée")?;
                 let pitch = li.pitch as usize;
                 let dst = li.bufferDataPtr as *mut u8;
-                let (ys, us, vs) = src.strides();
-                let (y, u, v) = (src.y(), src.u(), src.v());
+                if pitch < w || dst.is_null() {
+                    let deverrouiller =
+                        fl.nvEncUnlockInputBuffer.context("nvEncUnlockInputBuffer absent")?;
+                    deverrouiller(self.session, self.entree);
+                    bail!("NVENC : tampon d'entrée au pas {pitch} pour {w} de large");
+                }
                 for r in 0..h {
                     std::ptr::copy_nonoverlapping(y.as_ptr().add(r * ys), dst.add(r * pitch), w);
                 }
-                let (cw, ch, cp) = (w / 2, h / 2, pitch / 2);
+                let cp = pitch / 2;
                 let base_u = dst.add(pitch * h);
                 let base_v = base_u.add(cp * ch);
                 for r in 0..ch {
@@ -898,6 +927,17 @@ pub fn sonde() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un plan trop court pour ses pas est refusé avant les copies brutes.
+    #[test]
+    fn un_plan_trop_court_pour_ses_pas_est_refuse() {
+        assert!(plan_suffisant(&[0; 10], 5, 5, 2));
+        assert!(plan_suffisant(&[0; 9], 5, 4, 2));
+        assert!(!plan_suffisant(&[0; 9], 5, 5, 2), "un octet manque à la dernière ligne");
+        assert!(!plan_suffisant(&[0; 20], 3, 5, 2), "un pas plus court que la ligne");
+        assert!(!plan_suffisant(&[0; 20], usize::MAX, 5, 3), "un pas qui déborde");
+        assert!(plan_suffisant(&[], 0, 0, 0));
+    }
 
     /// L'inventaire se relève partout — sans carte, sans pilote — et dit
     /// alors pourquoi NVENC manque, au lieu de manquer en silence.

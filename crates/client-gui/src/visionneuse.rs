@@ -195,6 +195,32 @@ impl Drop for Lecture {
     }
 }
 
+/// Le fichier est-il bien d'un des conteneurs que la visionneuse lit, à en
+/// croire ses premiers octets et non son nom ?
+///
+/// Media Foundation choisit son analyseur d'après le contenu : un fichier
+/// nommé `.mp4` venu du serveur — que celui-ci n'a pas forcément normalisé —
+/// pouvait faire travailler n'importe lequel des analyseurs de Windows (ASF,
+/// MPEG-2, ADTS…), autant de surfaces d'attaque pour un contenu que
+/// quelqu'un d'autre a choisi. Seuls passent ceux que la visionneuse
+/// annonce : ISO-BMFF (MP4, MOV, M4V), EBML (WebM, MKV), RIFF AVI.
+fn conteneur_video_attendu(chemin: &std::path::Path) -> bool {
+    use std::io::Read as _;
+    let mut tete = [0u8; 12];
+    let lu = std::fs::File::open(chemin).and_then(|mut f| f.read_exact(&mut tete));
+    lu.is_ok() && entete_video_attendue(&tete)
+}
+
+fn entete_video_attendue(tete: &[u8; 12]) -> bool {
+    // ISO-BMFF : une première boîte « ftyp » ; les MOV anciens ouvrent
+    // parfois sur une autre boîte de QuickTime.
+    let boite = &tete[4..8];
+    let iso = [b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip"].iter().any(|b| boite == *b);
+    let ebml = tete[..4] == [0x1A, 0x45, 0xDF, 0xA3];
+    let avi = &tete[..4] == b"RIFF" && &tete[8..12] == b"AVI ";
+    iso || ebml || avi
+}
+
 /// Avance de son gardée devant la carte : 300 ms.
 const AVANCE_SON: usize = 48_000 * 3 / 10;
 /// Une image en retard de plus que ça sur l'horloge est sautée.
@@ -210,6 +236,12 @@ fn fil_lecture(
 ) {
     file.vider();
     file.set_pause(true);
+    if !conteneur_video_attendu(&chemin) {
+        *partage.erreur.lock().unwrap() =
+            Some("format de fichier inattendu : ni MP4, ni MOV, ni WebM/MKV, ni AVI".into());
+        ctx.request_repaint();
+        return;
+    }
     // Des pistes à mêler qu'on n'arrive pas à ouvrir (un clip réécrit, une
     // fiche fausse) : le son tel quel plutôt que rien.
     let ouvert = ki_media::ouvrir_avec_pistes(&chemin, &pistes).or_else(|e| {
@@ -1081,6 +1113,25 @@ pub fn mmss(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Les conteneurs que la visionneuse annonce passent ; le reste de ce
+    /// que Media Foundation saurait analyser, non.
+    #[test]
+    fn seuls_les_conteneurs_annonces_passent() {
+        let tete = |octets: &[u8]| {
+            let mut t = [0u8; 12];
+            t[..octets.len()].copy_from_slice(octets);
+            t
+        };
+        assert!(entete_video_attendue(&tete(b"\0\0\0\x20ftypisom")));
+        assert!(entete_video_attendue(&tete(b"\0\0\0\x14ftypqt  ")));
+        assert!(entete_video_attendue(&tete(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F])));
+        assert!(entete_video_attendue(&tete(b"RIFF\0\0\0\0AVI ")));
+        // ASF (WMV), WAV, MP3 : Windows les lirait, la visionneuse n'en veut pas.
+        assert!(!entete_video_attendue(&tete(&[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11])));
+        assert!(!entete_video_attendue(&tete(b"RIFF\0\0\0\0WAVE")));
+        assert!(!entete_video_attendue(&tete(b"ID3\x04\0\0\0\0\0\0")));
+    }
 
     #[test]
     fn les_temps_s_ecrivent_en_minutes_et_secondes() {

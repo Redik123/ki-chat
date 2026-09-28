@@ -27,6 +27,14 @@ impl Control {
     pub fn stop(self) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
+
+    pub fn halt_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        Default::default()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        false
+    }
 }
 
 /// Refuse, en expliquant. Le message remonte tel quel dans l'interface.

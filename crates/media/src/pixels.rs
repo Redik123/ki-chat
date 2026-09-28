@@ -48,7 +48,12 @@ pub fn nv12_vers_rgba(
                 let r = debut + i;
                 let ly = &y[r * pas_y..r * pas_y + largeur];
                 let ruv = (r / 2).min(hauteur.div_ceil(2) - 1);
-                let luv = &uv[ruv * pas_uv..ruv * pas_uv + (largeur.div_ceil(2) * 2).min(pas_uv)];
+                // Bornée au plan : avec un pas impair et une ouverture
+                // décalée, la dernière paire de la ligne tombait au-delà
+                // (panique). Ce qui manque prend la chrominance neutre.
+                let debut_uv = (ruv * pas_uv).min(uv.len());
+                let fin_uv = (debut_uv + (largeur.div_ceil(2) * 2).min(pas_uv)).min(uv.len());
+                let luv = &uv[debut_uv..fin_uv];
                 convertir_ligne(ly, luv, ligne, coefs);
             }
         });
@@ -74,6 +79,19 @@ fn convertir_ligne(ly: &[u8], luv: &[u8], sortie: &mut [u8], coefs: (i32, i32, i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un pas impair, et un plan de chrominance qui s'arrête au ras de la
+    /// dernière ligne : rien ne déborde, la paire manquante est neutre.
+    #[test]
+    fn un_pas_impair_ne_deborde_pas() {
+        let (largeur, hauteur, pas) = (5usize, 3usize, 5usize);
+        let plan_y = vec![128u8; pas * hauteur];
+        // Deux lignes de chroma, la dernière tronquée d'un octet.
+        let plan_uv = vec![128u8; pas * 2 - 1];
+        let mut out = Vec::new();
+        nv12_vers_rgba(&plan_y, pas, &plan_uv, pas, largeur, hauteur, &mut out);
+        assert_eq!(out.len(), largeur * hauteur * 4);
+    }
 
     fn pixel(y: u8, u: u8, v: u8, hd: bool) -> [u8; 4] {
         let (l, h) = if hd { (2, 720) } else { (2, 2) };

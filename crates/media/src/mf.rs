@@ -353,7 +353,10 @@ fn format_audio(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatAu
     let t = unsafe { reader.GetCurrentMediaType(index) }.context("format audio")?;
     let cadence = unsafe { t.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND) }.context("cadence")?;
     let canaux = unsafe { t.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS) }.context("voies")? as usize;
-    if cadence == 0 || canaux == 0 {
+    // Bornée à ce qu'un fichier audio réel annonce (8 à 384 kHz) : le
+    // rééchantillonneur tient au-delà, mais une cadence farfelue ne dit
+    // qu'une chose, que le fichier ment.
+    if !(8_000..=384_000).contains(&cadence) || canaux == 0 {
         bail!("format audio aberrant : {cadence} Hz, {canaux} voies");
     }
     Ok(FormatAudio {
@@ -441,11 +444,20 @@ impl LecteurMf {
                 )
             }
             .context("verrou du tampon 2D")?;
-            let resultat = if pas <= 0 || scan0.is_null() {
-                Err(anyhow::anyhow!("tampon d'image renversé ou vide"))
-            } else {
-                let octets = unsafe { std::slice::from_raw_parts(scan0, longueur as usize) };
-                convertir(v, octets, pas as usize, &mut rgba)
+            // La longueur se compte depuis le début du tampon, et la première
+            // ligne peut commencer plus loin : ce qui est lisible à partir
+            // d'elle, c'est la longueur moins ce décalage. Prendre la
+            // longueur entière depuis la première ligne lisait au-delà du
+            // tampon.
+            let lisible = (scan0 as usize)
+                .checked_sub(debut as usize)
+                .and_then(|decalage| (longueur as usize).checked_sub(decalage));
+            let resultat = match lisible {
+                Some(lisible) if pas > 0 && !scan0.is_null() && !debut.is_null() => {
+                    let octets = unsafe { std::slice::from_raw_parts(scan0, lisible) };
+                    convertir(v, octets, pas as usize, &mut rgba)
+                }
+                _ => Err(anyhow::anyhow!("tampon d'image renversé, vide ou incohérent")),
             };
             unsafe {
                 let _ = b2.Unlock2D();
