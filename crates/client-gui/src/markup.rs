@@ -245,16 +245,22 @@ fn entoure<'a>(reste: &'a str, marque: &str) -> Option<&'a str> {
 fn mention<'a>(apres_arobase: &'a str, membres: &[&str]) -> Option<&'a str> {
     let mut meilleur: Option<&'a str> = None;
     for membre in membres {
-        if membre.is_empty() || apres_arobase.len() < membre.len() {
+        if membre.is_empty() {
             continue;
         }
-        let debut = &apres_arobase[..membre.len()];
+        // `split_at_checked` et non `[..n]` : la longueur du pseudo, en
+        // octets, peut tomber au milieu d'un caractère du message. Face à
+        // « kevin » (5 octets), « @bob ça va » se coupait dans le « ç », et
+        // la panique — `panic = "abort"` — fermait ki-chat chez tous ceux
+        // qui recevaient le message. Trop court ou coupé : pas ce pseudo.
+        let Some((debut, suite)) = apres_arobase.split_at_checked(membre.len()) else {
+            continue;
+        };
         if !debut.eq_ignore_ascii_case(membre) {
             continue;
         }
         // La mention doit se terminer sur une frontière : `@marie` ne
         // s'accroche pas au milieu de `@mariette`.
-        let suite = &apres_arobase[membre.len()..];
         let fin_nette = suite
             .chars()
             .next()
@@ -428,6 +434,26 @@ mod tests {
         assert_eq!(blocs[1], Bloc::Ligne(vec![Fragment::Texte("deux")]));
     }
 
+    /// Remet bout à bout ce que `decouper` a découpé, marques comprises.
+    fn recomposer(blocs: &[Bloc<'_>]) -> String {
+        blocs
+            .iter()
+            .map(|b| match b {
+                Bloc::Code(c) => (*c).to_string(),
+                Bloc::Ligne(f) => f
+                    .iter()
+                    .map(|f| match f {
+                        Fragment::Texte(t) | Fragment::Lien(t) => (*t).to_string(),
+                        Fragment::Code(t) => format!("`{t}`"),
+                        Fragment::Gras(t) => format!("**{t}**"),
+                        Fragment::Italique(t) => format!("*{t}*"),
+                        Fragment::Mention { pseudo, .. } => format!("@{pseudo}"),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Le texte vient de quelqu'un d'autre : accents, émojis, et tout ce qui
     /// fait plus d'un octet. On ne doit jamais couper au milieu.
     #[test]
@@ -442,23 +468,47 @@ mod tests {
             let blocs = decouper(brut, &["élodie"], None);
             // La reconstruction rend l'original : rien n'est perdu ni
             // dupliqué, donc aucune frontière n'a été franchie de travers.
-            let plat: String = blocs
-                .iter()
-                .map(|b| match b {
-                    Bloc::Code(c) => (*c).to_string(),
-                    Bloc::Ligne(f) => f
-                        .iter()
-                        .map(|f| match f {
-                            Fragment::Texte(t) | Fragment::Lien(t) => (*t).to_string(),
-                            Fragment::Code(t) => format!("`{t}`"),
-                            Fragment::Gras(t) => format!("**{t}**"),
-                            Fragment::Italique(t) => format!("*{t}*"),
-                            Fragment::Mention { pseudo, .. } => format!("@{pseudo}"),
-                        })
-                        .collect(),
-                })
-                .collect();
-            assert_eq!(plat, brut, "« {brut} » n'est pas rendu à l'identique");
+            assert_eq!(recomposer(&blocs), brut, "« {brut} » n'est pas rendu à l'identique");
+        }
+    }
+
+    /// La panique de la 0.1.51 : chaque pseudo du salon était essayé en
+    /// coupant le texte à sa longueur en octets, et « kevin » coupait
+    /// « @bob ça va » dans le « ç ». ki-chat se fermait chez tous ceux qui
+    /// recevaient le message — `me_mentionne` tourne dès la réception.
+    #[test]
+    fn un_pseudo_ne_coupe_jamais_le_message_dans_un_caractere() {
+        let membres = ["bob", "kevin", "Zoé"];
+        assert_eq!(
+            lignes("@bob ça va", &membres)[0],
+            vec![Fragment::Mention { pseudo: "bob", moi: false }, Fragment::Texte(" ça va")]
+        );
+        assert_eq!(
+            lignes("salut @Zoé", &membres)[0][1],
+            Fragment::Mention { pseudo: "Zoé", moi: false }
+        );
+        assert!(me_mentionne("@bob ça va", &membres, "bob"));
+        assert!(!me_mentionne("@bob ça va", &membres, "kevin"));
+        assert!(me_mentionne("salut @Zoé", &membres, "Zoé"));
+    }
+
+    /// Des pseudos de toutes les longueurs, de 1 à 12 octets : derrière chaque
+    /// arobase, l'une d'elles tombe forcément au milieu d'un caractère.
+    #[test]
+    fn aucune_longueur_de_pseudo_ne_coupe_un_caractere() {
+        let pseudos: Vec<String> = (1..=12).map(|n| "k".repeat(n)).collect();
+        let mut membres: Vec<&str> = pseudos.iter().map(String::as_str).collect();
+        membres.extend(["élodie", "Zoé"]);
+        for brut in [
+            "@élodie, ça va ?",
+            "salut @Zoé",
+            "jean@société.fr",
+            "@🎧🎤 micro coupé",
+            "@ é @é @",
+        ] {
+            let blocs = decouper(brut, &membres, Some("moi"));
+            assert_eq!(recomposer(&blocs), brut, "« {brut} » n'est pas rendu à l'identique");
+            assert!(!me_mentionne(brut, &membres, "moi"));
         }
     }
 }

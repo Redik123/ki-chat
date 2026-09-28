@@ -119,6 +119,8 @@ Un serveur de chat privé façon Discord pour une trentaine de joueurs, avec cha
 
 ### CLI-1 — Une mention suivie d'un caractère accentué fait planter tous les destinataires · *Reproduit*
 
+> **Corrigé sur la branche `claude/ki-chat-audit-qqe0vv`** (`split_at_checked` dans `mention`, deux tests de non-régression). Il reste à le publier dans une release pour que les joueurs en profitent.
+
 - **Où :** `crates/client-gui/src/markup.rs:251`, dans `&apres_arobase[..membre.len()]`.
   - `decouper` y passe tout le reste de la ligne (`markup.rs:198`).
   - Le code est appelé par `me_nomme` (`main.rs:3789`) à la réception de `ServerMsg::Chat` (`main.rs:4835`) et de `ServerMsg::Nouveau` (`main.rs:4902`), puis à l'affichage (`main.rs:14086`).
