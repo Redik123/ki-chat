@@ -47,7 +47,7 @@ Serveur de chat privé façon Discord, 100 % Rust, taillé pour le jeu entre ami
 - **Intégration VALORANT** : Statut en jeu en direct (partie en cours, score, carte, taille d'escouade) lu en lecture seule sur le client Riot local ; fiches de joueurs qui s'accumulent (soixante matchs, cent points de RR) avec courbe de progression, ADR, KAST, premiers sangs, clutchs, agents et cartes ; page du groupe en onglets avec records, classement triable, fil des matchs joués ensemble, duos et heures de jeu ; boutique de skins du jour et **fil de jeu automatique** annonçant les victoires dans le salon textuel.
 - **Bot musique de groupe** : Membre virtuel pilotable par une bannière épurée au-dessus du chat. Recherche YouTube/SoundCloud sans publicité, streaming Opus direct par le serveur (aucun fichier temporaire sur disque ni chez le client), playlists partagées, mise en pause automatique en salon vide et reprise après redémarrage.
 - **Soundboard** : Des sons à la touche (un clic, ou les touches 1 à 9), entendus par tout le salon vocal — mixés à la voix, ou seuls micro fermé, sans rien de plus dans le protocole. Chacun dépose ses .wav ou .mp3 (30 s au plus) dans son dossier `sons\soundboard`.
-- **Souveraineté & Respect de la vie privée** : Chiffrement intégral de bout en bout en transit (QUIC TLS 1.3 + XChaCha20-Poly1305 pour la voix et la vidéo), mots de passe hachés en Argon2id, secrets protégés par le coffre natif du système (DPAPI Windows / Trousseau macOS). Zéro pistage, zéro télémétrie commerciale.
+- **Souveraineté & Respect de la vie privée** : Tout est chiffré en transit (QUIC TLS 1.3), et la voix et la vidéo le sont une seconde fois en XChaCha20-Poly1305 ; **ce n'est pas du bout en bout** : le serveur distribue ces clés et les détient (il en a besoin pour le bot musique et la voix des invités web). La confidentialité d'un salon privé repose donc sur le serveur, qui est le vôtre. Mots de passe hachés en Argon2id, secrets protégés par le coffre natif du système (DPAPI Windows / Trousseau macOS). Zéro pistage, zéro télémétrie commerciale.
 
 ---
 
@@ -134,7 +134,7 @@ Le protocole repose sur **QUIC** (HTTP/3 sous-jacent avec TLS 1.3) :
 
 | Variable | Valeur par défaut | Description |
 | :--- | :--- | :--- |
-| `KI_TOKEN` | `changeme` | Code d'invitation maître pour la création du premier compte (propriétaire) |
+| `KI_TOKEN` | *(tiré au hasard, écrit dans le journal)* | Code d'invitation maître pour la création du premier compte (propriétaire). Les valeurs d'exemple connues (`changeme`, `change_moi`…) ne créent aucun compte |
 | `KI_UDP_PORT` | `9987` | Port QUIC (contrôle, vocal, vidéo) |
 | `KI_HTTP_PORT` | `8080` | Port HTTPS (fichiers, diagnostics) |
 | `KI_DATA_DIR` | `./data` | Répertoire de persistance sur disque |
@@ -189,7 +189,7 @@ curl -k -H "x-ki-admin: $(cat data/diag.token)" https://ton-serveur:8080/diag
 - **Windows Graphics Capture (WGC)** : Capture matérielle au niveau de l'OS sans accrochage Direct3D ni injection de DLL dans les processus de jeu.
 - **NVENC sans SDK tiers** : Chargement dynamique direct de `nvEncodeAPI64.dll` présent dans les pilotes NVIDIA modernes (API 12.0+) ; repli transparent sur l'encodeur logiciel openh264 en cas de matériel non supporté.
 - **Boucle WASAPI « tout sauf ki-chat »** : La capture audio du stream intercepte les sons de tous les processus Windows à l'exception de l'exécutable de ki-chat lui-même. Les spectateurs entendent le jeu et la musique du diffuseur, mais n'entendent jamais leur propre écho en retour.
-- **Chiffrement de bout en bout** : Chaque flux vidéo est chiffré par le diffuseur en XChaCha20-Poly1305 avec une clé éphémère distribuée aux seuls spectateurs autorisés. Le serveur SFU relaie les trames sans avoir la capacité de les déchiffrer.
+- **Chiffrement des trames** : Chaque flux vidéo est chiffré par le diffuseur en XChaCha20-Poly1305 avec une clé tirée pour la diffusion. Cette clé passe par le serveur, qui la remet aux seuls spectateurs autorisés : il pourrait donc déchiffrer, et le relais ne tient qu'à ce qu'il est le vôtre — ce n'est pas du bout en bout.
 
 ### Clips : les 30 dernières secondes à la touche
 
@@ -298,7 +298,7 @@ Pour valider le comportement du serveur sans mobiliser 30 personnes réelles :
 
 ```bash
 # Simuler 30 clients virtuels avec connexions réelles, authentification et voix chiffrée
-cargo run --release -p ki-load -- 127.0.0.1 --clients 30 --invite changeme --secondes 60 --muets 20
+cargo run --release -p ki-load -- 127.0.0.1 --clients 30 --invite "$KI_TOKEN" --secondes 60 --muets 20
 
 # Benchmarks des chemins critiques audio et protocole
 cargo bench -p ki-voice
@@ -335,7 +335,14 @@ cargo run -p ki-client-gui
 ## Coûts réels
 
 **Licences logicielles : 0 €**  
-L'intégralité du code et des dépendances utilisées (Rust, libopus, egui, Quinn, Media Foundation) est libre et gratuite (MIT / Apache-2.0 / BSD).
+Tout ce qui sert à construire et à faire tourner ki-chat est libre et gratuit — mais pas sous une seule licence :
+
+- **ki-chat lui-même** se déclare sous licence MIT (`license = "MIT"` dans `Cargo.toml`).
+- **Ses dépendances Rust** sont sous MIT, Apache-2.0, BSD, ISC, Zlib et apparentées ; la liste admise est tenue par [`deny.toml`](deny.toml), que la CI vérifie à chaque poussée.
+- **Les bibliothèques C compilées dedans** : libopus et SpeexDSP (BSD), openh264 (BSD, compilé depuis ses sources — la licence de brevets H.264 de Cisco ne couvre que les binaires que Cisco distribue lui-même).
+- **L'image Docker du serveur** embarque un ffmpeg sous **GPL** (build « gpl » de BtbN), yt-dlp (Unlicense) et deno (MIT) : la redistribuer, c'est redistribuer ce ffmpeg, avec les obligations de la GPL (ses sources sont celles de BtbN/FFmpeg-Builds).
+
+Les binaires publiés n'embarquent pas encore les notices des bibliothèques tierces.
 
 **Budget d'hébergement pour un groupe de ~30 joueurs** :
 - **VPS 2 vCPU / 4 Go de RAM** (Hetzner, OVHcloud, Scaleway) : **~5 à 8 € / mois**. Le serveur agissant en tant que relais SFU sans décompresser la voix ni réencoder la vidéo à la volée, la charge processeur reste minime.

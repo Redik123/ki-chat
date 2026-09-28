@@ -29,12 +29,13 @@ unmaintained = "workspace"
 yanked = "deny"
 ignore = [
     # tract-nnef 0.19 : débordement d'entier en lisant un modèle NNEF
-    # forgé. Le seul modèle que tract lit chez nous est celui de
-    # DeepFilterNet, embarqué dans l'exécutable à la compilation — jamais
-    # un fichier venu de l'extérieur. Le correctif est dans tract 0.21+,
-    # que deep_filter 0.5.6 ne prend pas ; à lever le jour où deep_filter
-    # suit.
-    { id = "RUSTSEC-2026-0217", reason = "modèle embarqué, jamais lu depuis l'extérieur" },
+    # forgé. Tract lit chez nous deux modèles, tous deux embarqués dans
+    # l'exécutable à la compilation — celui de DeepFilterNet et celui de
+    # Silero (détection de parole, `include_bytes!` dans voice/silero.rs) —
+    # jamais un fichier venu de l'extérieur. Le correctif est dans
+    # tract 0.21+, que deep_filter 0.5.6 ne prend pas ; à lever le jour où
+    # deep_filter suit, et à revoir si un modèle venait un jour d'ailleurs.
+    { id = "RUSTSEC-2026-0217", reason = "modèles (DeepFilterNet, Silero) embarqués, jamais lus depuis l'extérieur" },
 ]
 
 [licenses]
@@ -48,9 +49,7 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "MPL-2.0",
     "CC0-1.0",
-    "OpenSSL",
     "BSL-1.0",
     # Les polices embarquées par egui (Ubuntu, Noto, Emoji).
     "OFL-1.1",

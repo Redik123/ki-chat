@@ -2,7 +2,7 @@
 //! qu'il tient.
 //!
 //! ```text
-//! ki-load <serveur> --clients 30 --invite changeme [--secondes 60]
+//! ki-load <serveur> --clients 30 --invite CODE [--secondes 60]
 //!         [--salon 101] [--muets 0] [--prefixe charge]
 //! ```
 //!
@@ -102,7 +102,12 @@ fn options() -> anyhow::Result<Options> {
     Ok(Options {
         serveur,
         clients,
-        invite: valeur("--invite").unwrap_or_else(|| "changeme".into()),
+        // Le code du serveur visé : `--invite`, ou KI_TOKEN s'il est posé.
+        // Plus de « changeme » par défaut : le serveur refuse désormais les
+        // codes d'exemple connus comme code maître.
+        invite: valeur("--invite")
+            .or_else(|| std::env::var("KI_TOKEN").ok().filter(|t| !t.is_empty()))
+            .ok_or_else(|| anyhow::anyhow!("--invite CODE (ou KI_TOKEN) : le code d'invitation du serveur"))?,
         secondes: nombre("--secondes", 60)?,
         salon: nombre("--salon", 101)? as u32,
         muets,

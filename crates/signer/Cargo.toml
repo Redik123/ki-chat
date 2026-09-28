@@ -1,0 +1,22 @@
+[package]
+name = "ki-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Le signeur des releases, dans son propre crate : le travail de la CI qui
+# signe — le seul à voir la clé privée — ne compile que lui, une poignée de
+# crates de cryptographie, et non les mille de l'application avec leurs
+# scripts de build. Même `Cargo.lock` que le client, donc exactement la même
+# version d'ed25519-dalek que le code qui vérifie.
+
+[[bin]]
+name = "ki-signer"
+path = "src/main.rs"
+
+[dependencies]
+# Les mêmes fonctionnalités que côté client : une divergence entre signeur et
+# vérifieur ne se verrait qu'en production, sur les machines des autres.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+sha2 = "0.10"

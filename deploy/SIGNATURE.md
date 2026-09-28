@@ -24,6 +24,33 @@ pas vérifier, et le dit. Les installations plus anciennes (0.1.11 et avant) ne
 portent pas la clé : elles continuent d'installer sans vérifier, jusqu'à ce
 qu'elles passent en 0.1.12.
 
+À partir de 0.1.52, chaque actif est aussi accompagné d'un **manifeste signé**
+(`ki-chat.exe.manifeste` et sa `.sig`) : plateforme, version et empreinte
+SHA-256. Un client 0.1.52 ne se met à jour qu'avec lui — une ancienne version
+signée resservie sous une étiquette neuve, ou l'archive macOS renommée en
+`ki-chat.exe`, passaient la vérification de la seule signature.
+
+## Où la signature a lieu
+
+Dans son propre travail de `release.yml` (`signature`), sur un coureur Linux
+qui ne compile que le signeur — le crate `crates/signer`, une poignée de
+crates de cryptographie, même `Cargo.lock` que le client qui vérifie — sans
+cache. Les travaux qui compilent l'application (un millier de crates, leurs
+scripts de build, un cache restauré) ne voient plus la clé. Le signeur refuse
+de signer si la clé privée ne correspond pas à la clé publique gravée dans le
+client (`--cle-attendue`) : une release que personne ne pourrait installer ne
+sort pas.
+
+Ce travail tourne dans l'**environnement `release`**. À régler une fois, dans
+*Settings* → *Environments* → `release` (GitHub le crée au premier passage) :
+
+- **Required reviewers** : toi. Chaque signature attend alors ton accord —
+  un jeton d'action volé ne suffit plus à signer.
+- **Deployment branches and tags** : *Selected*, règle `v*` sur les tags.
+  Un `workflow_dispatch` sur une branche quelconque ne signe plus rien.
+- Déplace le secret `RELEASE_SIGNING_KEY` des secrets du dépôt vers ceux de
+  l'environnement : seul ce travail peut alors le lire.
+
 > **La clé privée ne se retrouve pas.** Perdue, il faudrait graver une nouvelle
 > clé publique dans le client — donc publier une version que les installations
 > existantes refuseraient de vérifier, et qu'elles n'installeraient donc
@@ -64,7 +91,7 @@ la main. En local :
 
 ```powershell
 $env:SIGNING_KEY = (Get-Content "$env:USERPROFILE\ki-release.key" -Raw).Trim()
-cargo run -p ki-client-gui --example signer -- Cargo.toml "$env:TEMP\essai.sig"
+cargo run -p ki-signer -- Cargo.toml "$env:TEMP\essai.sig"
 ```
 
 Relève la ligne `clé publique : …` et colle-la dans
@@ -82,8 +109,9 @@ problème.
 
 ## Ce qui se passe ensuite
 
-- Chaque release porte `ki-chat.exe` **et** `ki-chat.exe.sig`.
-- Le client télécharge les deux, vérifie, et n'installe que si ça correspond.
+- Chaque release porte `ki-chat.exe`, `ki-chat.exe.sig`, et le manifeste
+  signé `ki-chat.exe.manifeste` (+ `.sig`) ; de même pour l'archive macOS.
+- Le client télécharge le tout, vérifie, et n'installe que si ça correspond.
 - Une signature absente ou fausse fait échouer la mise à jour avec un message
   explicite, sans rien remplacer.
 

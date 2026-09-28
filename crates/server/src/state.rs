@@ -482,9 +482,12 @@ pub type RouteTable = Routes<quinn::Connection>;
 pub struct AppState {
     /// Code d'invitation (création de comptes).
     pub token: String,
-    /// Clé de chiffrement voix, régénérée à chaque démarrage du serveur.
-    /// Le serveur ne s'en sert jamais pour déchiffrer : il la distribue
-    /// seulement aux clients authentifiés via Welcome.
+    /// Clé de chiffrement voix, régénérée à chaque démarrage du serveur, et
+    /// distribuée aux clients authentifiés via Welcome — la même pour tous
+    /// les salons, privés compris. Le serveur la détient et s'en sert : il
+    /// chiffre la voix du bot et des invités web, et déchiffre celle des
+    /// salons où écoute un invité. Ce n'est donc pas du bout en bout : la
+    /// confidentialité d'un salon repose sur le routage du serveur.
     pub voice_key: [u8; 32],
     pub channels: crate::channels::Channels,
     pub roles: crate::roles::Roles,

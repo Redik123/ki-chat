@@ -6,9 +6,14 @@
 # Les deux doivent donc coïncider, sans quoi un client à jour se croirait
 # indéfiniment en retard — d'où le contrôle qui ouvre chaque compilation.
 #
-# Trois travaux : `windows` et `macos` compilent et déposent leurs artefacts ;
-# `publish` attend les deux et crée la release d'un seul geste — deux
-# travaux qui créeraient chacun la release se marcheraient dessus.
+# Quatre travaux : `windows` et `macos` compilent et déposent leurs artefacts,
+# NON signés ; `signature` signe, à part ; `publish` attend tout le monde et
+# crée la release d'un seul geste — deux travaux qui créeraient chacun la
+# release se marcheraient dessus.
+#
+# Les actions sont épinglées par empreinte de commit, pas par étiquette : une
+# étiquette se déplace, et elle déplacerait avec elle du code qui tourne à
+# côté de la clé de signature. Dependabot propose les nouvelles empreintes.
 
 name: release
 
@@ -18,8 +23,11 @@ on:
   # Permet de vérifier que la chaîne complète compile sans rien publier.
   workflow_dispatch:
 
+# Lecture seule par défaut : seul `publish` écrit, et seulement la release.
+# Les travaux de compilation exécutent les scripts de build d'un millier de
+# crates ; aucun n'a à pouvoir pousser dans le dépôt.
 permissions:
-  contents: write
+  contents: read
 
 env:
   # Cible explicite : les scripts de compilation restent liés dynamiquement,
@@ -29,10 +37,14 @@ env:
   # `force` de son côté, celui d'ici l'emporte.
   CMAKE: cmake
   CARGO_TERM_COLOR: always
+  # La chaîne Rust, épinglée : clippy tourne en `-D warnings`, et une
+  # nouvelle version de Rust ne doit pas pouvoir bloquer une release d'un
+  # jour à l'autre. Même version que ci.yml ; on la monte exprès.
+  RUST_TOOLCHAIN: "1.98.0"
 
 jobs:
   # Le filet, avant tout le reste. `needs: ci` en dessous fait que rien n'est
-  # compilé, empaqueté ni publié tant que clippy et les 132 tests ne sont pas
+  # compilé, empaqueté ni publié tant que clippy et les tests ne sont pas
   # au vert : jusqu'ici, une release ne prouvait que la compilation.
   ci:
     uses: ./.github/workflows/ci.yml
@@ -40,9 +52,13 @@ jobs:
   windows:
     needs: ci
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Établir la version
         id: version
@@ -71,11 +87,15 @@ jobs:
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      # Le cache reste : l'empoisonner supposerait d'avoir déjà compromis un
+      # travail de `main`, c'est-à-dire le code lui-même. Et la clé privée
+      # n'est plus ici (voir `signature`).
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # La liaison statique de la bibliothèque C est déclarée dans
       # .cargo/config.toml : local et CI produisent le même binaire.
@@ -118,59 +138,12 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer\ki-chat.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Signature Ed25519 de l'exécutable publié.
-      #
-      # L'application remplace son propre exécutable : sans signature, la seule
-      # garantie d'intégrité est TLS jusqu'à GitHub, et quiconque obtient le
-      # droit de publier une release exécute du code arbitraire chez tout le
-      # monde. La clé publique correspondante se grave dans le client, qui
-      # refuse alors d'installer ce qu'il ne peut pas vérifier.
-      #
-      # Le signeur est un exemple du crate client (`examples/signer.rs`), donc
-      # il utilise exactement la même version d'ed25519-dalek que le code qui
-      # vérifie : une divergence entre signer et vérifier ne se verrait qu'en
-      # production, sur les machines des autres.
-      #
-      # Sans le secret, l'étape ne signe pas et le DIT — elle n'échoue pas.
-      # Tant que la clé publique n'est pas gravée côté client, une release non
-      # signée reste installable, et faire échouer la publication ici
-      # empêcherait justement de livrer la version qui active tout cela.
-      # Voir deploy/SIGNATURE.md.
-      - name: Signer l'exécutable
-        shell: pwsh
-        env:
-          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-        run: |
-          # Sur un tag, pas de signature = pas de release : tout client depuis
-          # la 0.1.12 refuserait l'actif, et depuis la 0.1.52 aussi une
-          # release sans manifeste. Seul un essai manuel peut s'en passer.
-          if (-not $env:SIGNING_KEY) {
-            if ("${{ github.ref }}".StartsWith("refs/tags/")) {
-              Write-Error "RELEASE_SIGNING_KEY absent : une release taguee doit etre signee (deploy/SIGNATURE.md)"
-              exit 1
-            }
-            Write-Warning "RELEASE_SIGNING_KEY absent : essai NON SIGNE (deploy/SIGNATURE.md)"
-            exit 0
-          }
-          $exe = "target\$env:TARGET\release\ki-chat.exe"
-          # La signature de l'exécutable seul, pour les clients d'avant 0.1.52,
-          # et le manifeste signé (plateforme, version, empreinte) pour les
-          # suivants.
-          cargo run --release --locked --target $env:TARGET -p ki-client-gui --example signer -- $exe "$exe.sig" --manifeste windows ${{ steps.version.outputs.version }} "$exe.manifeste"
-          if ($LASTEXITCODE -ne 0) { Write-Error "signature impossible"; exit 1 }
-          foreach ($f in @("$exe.sig", "$exe.manifeste", "$exe.manifeste.sig")) {
-            if (-not (Test-Path $f)) { Write-Error "$f non produit"; exit 1 }
-          }
-
       - name: Déposer les artefacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ki-chat-windows
           path: |
             target/x86_64-pc-windows-msvc/release/ki-chat.exe
-            target/x86_64-pc-windows-msvc/release/ki-chat.exe.sig
-            target/x86_64-pc-windows-msvc/release/ki-chat.exe.manifeste
-            target/x86_64-pc-windows-msvc/release/ki-chat.exe.manifeste.sig
             installer/Output/ki-chat-setup.exe
 
   # ---------------------------------------------------------------------
@@ -196,7 +169,9 @@ jobs:
       NASM: nasm
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Établir la version
         id: version
@@ -218,11 +193,12 @@ jobs:
       - name: Installer nasm
         run: brew install nasm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Compiler (puces Apple)
         run: cargo build --release --locked --target aarch64-apple-darwin -p ki-client-gui
@@ -241,53 +217,119 @@ jobs:
       - name: Construire le paquet, l'archive et l'assistant
         run: installer/macos/build-app.sh target/ki-chat-universal
 
-      # Même signature Ed25519 que sous Windows, sur l'archive entière : c'est
-      # elle que le client télécharge et vérifie avant de déballer quoi que
-      # ce soit. Même signeur, même clé, même règle : sans le secret, on
-      # prévient et on ne signe pas (deploy/SIGNATURE.md).
-      - name: Signer l'archive
+      - name: Déposer les artefacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ki-chat-macos
+          path: |
+            installer/Output/ki-chat-macos.tar.gz
+            installer/Output/ki-chat-macos.pkg
+
+  # ---------------------------------------------------------------------
+  # La signature, seule avec la clé.
+  #
+  # L'application remplace son propre exécutable : sans signature, quiconque
+  # obtient le droit de publier une release exécute du code arbitraire chez
+  # tout le monde. La clé publique est gravée dans le client, qui refuse
+  # d'installer ce qu'il ne peut pas vérifier (deploy/SIGNATURE.md).
+  #
+  # Jusqu'à la 0.1.51, la signature se faisait dans les travaux de
+  # compilation : la clé privée y côtoyait les scripts de build d'un millier
+  # de crates et un cache restauré. Ici, rien d'autre ne tourne que le
+  # signeur (`crates/signer`, une poignée de crates de cryptographie, même
+  # Cargo.lock que le client qui vérifie) — pas de cache non plus.
+  #
+  # L'environnement `release` permet d'exiger une approbation et de limiter
+  # la signature aux tags, dans les réglages du dépôt (deploy/SIGNATURE.md).
+  # ---------------------------------------------------------------------
+  signature:
+    needs: [windows, macos]
+    # Même si macOS a lâché — mais jamais sans Windows.
+    if: always() && needs.windows.result == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: artefacts
+
+      - name: Signer
         env:
           SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          VERSION: ${{ needs.windows.outputs.version }}
         run: |
+          # Sur un tag, pas de signature = pas de release : tout client depuis
+          # la 0.1.12 refuserait l'actif, et depuis la 0.1.52 aussi une
+          # release sans manifeste. Seul un essai manuel peut s'en passer.
           if [[ -z "$SIGNING_KEY" ]]; then
             if [[ "${{ github.ref }}" == refs/tags/* ]]; then
               echo "::error::RELEASE_SIGNING_KEY absent : une release taguée doit être signée (deploy/SIGNATURE.md)"
               exit 1
             fi
-            echo "::warning::RELEASE_SIGNING_KEY absent : essai macOS NON SIGNÉ (deploy/SIGNATURE.md)"
+            echo "::warning::RELEASE_SIGNING_KEY absent : essai NON SIGNÉ (deploy/SIGNATURE.md)"
             exit 0
           fi
-          archive=installer/Output/ki-chat-macos.tar.gz
-          # Comme sous Windows : la signature de l'archive seule, et le
-          # manifeste signé qui la lie à sa plateforme et à sa version.
-          cargo run --release --locked --target aarch64-apple-darwin -p ki-client-gui --example signer -- \
-            "$archive" "$archive.sig" --manifeste macos "${{ steps.version.outputs.version }}" "$archive.manifeste"
-          test -s "$archive.sig"
-          test -s "$archive.manifeste"
-          test -s "$archive.manifeste.sig"
+          # La clé publique que portent les clients : signer avec une autre
+          # privée publierait une release que tout le monde refuserait.
+          attendue=$(grep -A1 'const RELEASE_PUBKEY_HEX' crates/client-gui/src/update.rs | grep -o '[0-9a-f]\{64\}')
+          if [[ -z "$attendue" ]]; then
+            echo "::error::clé publique introuvable dans crates/client-gui/src/update.rs"
+            exit 1
+          fi
+          cargo build --release --locked -p ki-signer
+          signeur=target/release/ki-signer
+          mkdir -p signatures
+          # La signature de l'actif seul, pour les clients d'avant 0.1.52, et
+          # le manifeste signé (plateforme, version, empreinte) pour les
+          # suivants.
+          exe=$(find artefacts -type f -name ki-chat.exe | head -1)
+          if [[ -z "$exe" ]]; then
+            echo "::error::ki-chat.exe introuvable dans les artefacts"
+            exit 1
+          fi
+          "$signeur" "$exe" signatures/ki-chat.exe.sig \
+            --manifeste windows "$VERSION" signatures/ki-chat.exe.manifeste --cle-attendue "$attendue"
+          archive=$(find artefacts -type f -name ki-chat-macos.tar.gz | head -1)
+          if [[ -n "$archive" ]]; then
+            "$signeur" "$archive" signatures/ki-chat-macos.tar.gz.sig \
+              --manifeste macos "$VERSION" signatures/ki-chat-macos.tar.gz.manifeste --cle-attendue "$attendue"
+          else
+            echo "::warning::pas d'archive macOS à signer : la release sortira sans elle"
+          fi
+          for f in signatures/*; do test -s "$f"; done
+          ls -l signatures
 
-      - name: Déposer les artefacts
-        uses: actions/upload-artifact@v7
+      - name: Déposer les signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ki-chat-macos
-          path: |
-            installer/Output/ki-chat-macos.tar.gz
-            installer/Output/ki-chat-macos.tar.gz.sig
-            installer/Output/ki-chat-macos.tar.gz.manifeste
-            installer/Output/ki-chat-macos.tar.gz.manifeste.sig
-            installer/Output/ki-chat-macos.pkg
+          name: ki-chat-signatures
+          path: signatures/
+          # Un essai manuel sans clé n'en produit pas.
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------
   # La release elle-même, une fois que tout le monde a livré.
   # ---------------------------------------------------------------------
   publish:
-    needs: [windows, macos]
-    # `always()` : publier même si macOS a lâché — mais jamais sans Windows.
-    if: always() && startsWith(github.ref, 'refs/tags/') && needs.windows.result == 'success'
+    needs: [windows, macos, signature]
+    # `always()` : publier même si macOS a lâché — mais jamais sans Windows,
+    # ni sans signatures.
+    if: always() && startsWith(github.ref, 'refs/tags/') && needs.windows.result == 'success' && needs.signature.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: artefacts
 
@@ -307,6 +349,13 @@ jobs:
             -o -name 'ki-chat-macos.tar.gz.sig' -o -name 'ki-chat-macos.tar.gz.manifeste' \
             -o -name 'ki-chat-macos.tar.gz.manifeste.sig' -o -name 'ki-chat-macos.pkg' \))
           echo "$files"
+          # Pas de release Windows sans sa signature et son manifeste.
+          for requis in ki-chat.exe ki-chat.exe.sig ki-chat.exe.manifeste ki-chat.exe.manifeste.sig; do
+            if ! echo "$files" | grep -q "/$requis\$"; then
+              echo "::error::$requis manque : release non publiée"
+              exit 1
+            fi
+          done
           # Le tag peut avoir été poussé après une release créée à la main.
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" $files --clobber

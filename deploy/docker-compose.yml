@@ -12,6 +12,24 @@ services:
     image: ghcr.io/redik123/ki-chat-server:${KI_VERSION:-latest}
     container_name: ki-chat
     restart: unless-stopped
+    # Aucun privilège : le serveur écoute sur des ports non privilégiés, en
+    # utilisateur 10001, et rien de ce qu'il lance (ffmpeg, yt-dlp, deno) n'a
+    # à en regagner.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Des bornes : un yt-dlp qui s'emballe ou une conversion vidéo énorme ne
+    # doivent pas emporter l'hôte avec eux. 4 Go tiennent une trentaine de
+    # connectés et une vidéo de 512 Mo à normaliser ; à ajuster à la machine.
+    mem_limit: ${KI_MEM_LIMIT:-4g}
+    pids_limit: 512
+    # Le journal de Docker, borné : des connexions refusées en rafale (une
+    # porte web martelée) l'auraient fait grossir jusqu'à remplir le disque.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
     environment:
       # Code d'invitation : il suffit à créer un compte sur ton serveur.
@@ -81,8 +99,14 @@ services:
   # la socket Docker, ce qui équivaut à un accès root sur l'hôte. Si tu
   # préfères déclencher les mises à jour toi-même, supprime ce service — les
   # deux autres routes du guide ne demandent pas la socket.
+  #
+  # Le fork maintenu (nicholas-fedor/watchtower) : l'original,
+  # containrrr/watchtower, est archivé depuis décembre 2025 — plus aucun
+  # correctif pour un conteneur qui tient la socket Docker, et il ne parle
+  # plus aux Docker Engine 29 (« client version 1.25 is too old »). Mêmes
+  # variables, même étiquette.
   watchtower:
-    image: containrrr/watchtower:latest
+    image: nickfedor/watchtower:latest
     container_name: ki-chat-watchtower
     restart: unless-stopped
     environment:

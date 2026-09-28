@@ -3,6 +3,11 @@
 # Deux écosystèmes : les crates Rust (Cargo.lock) et les actions des
 # workflows. Une fois par semaine, groupées, pour que la boîte de réception
 # ne se remplisse pas d'une PR par crate — l'arbre en compte plus de mille.
+#
+# Groupées par famille et non plus en un seul lot : une seule mise à jour
+# incompatible bloquait toutes les autres. Les actions, épinglées par
+# empreinte de commit dans les workflows, reçoivent ici leurs nouvelles
+# empreintes (le commentaire de version suit).
 # Les alertes de sécurité, elles, ne passent pas par ce fichier : GitHub les
 # lève de lui-même sur un dépôt public dès que Dependabot est activé.
 version: 2
@@ -13,6 +18,13 @@ updates:
       interval: weekly
       day: monday
     groups:
+      # Ce qui fait l'interface et la vidéo (egui/eframe, wgpu, windows).
+      interface:
+        patterns: ["egui*", "eframe", "epaint*", "emath", "ecolor", "wgpu*", "windows*", "winit", "image", "rfd", "tray-icon"]
+      # Le réseau et la cryptographie : quinn, rustls, TLS, axum, tokio.
+      reseau:
+        patterns: ["quinn*", "rustls*", "tokio*", "axum*", "hyper*", "tower*", "ureq", "chacha20poly1305", "ed25519*", "argon2", "sha2", "rcgen"]
+      # Le reste, ensemble.
       rust:
         patterns: ["*"]
     # Les versions majeures cassent : on les regarde à la main.

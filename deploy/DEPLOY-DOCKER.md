@@ -254,6 +254,25 @@ aux mises à jour.
 précise ; `latest` suit `main`. Les tags `v*` publient aussi `0.1` et
 `sha-<commit>`, de quoi revenir en arrière sans reconstruire quoi que ce soit.
 
+**Ce que `latest` veut dire.** Avec `latest`, **chaque poussée sur `main`**
+part en production quelques minutes plus tard, release ou pas. Le filet de
+`ci.yml` passe avant (clippy, tests, et un essai du serveur démarré sous dix
+clients virtuels), mais un serveur de production mérite souvent mieux :
+`KI_VERSION=0.1` ne suit que les **versions publiées** (l'étiquette `0.1`
+n'avance qu'aux tags), et `main` redevient un endroit où l'on peut pousser
+sans déployer.
+
+**Watchtower.** Le compose tire `nickfedor/watchtower`, le fork maintenu :
+l'original (`containrrr/watchtower`) est archivé depuis décembre 2025, et
+il ne parle plus aux Docker Engine 29. Une stack déjà en place avec l'ancien
+continue de tourner tant que Docker ne bouge pas ; il suffit de changer
+l'image du service `watchtower` et de redéployer.
+
+**Bornes du conteneur.** Aucune capacité Linux, pas de gain de privilèges,
+512 processus, et `KI_MEM_LIMIT` (4 Go par défaut) de mémoire : de quoi tenir
+une trentaine de connectés et la normalisation d'une vidéo de 512 Mo. Le
+journal de Docker est borné à 5 × 10 Mo.
+
 ## Les données
 
 Tout vit dans le volume `/data` : comptes (hachages Argon2id), historique des

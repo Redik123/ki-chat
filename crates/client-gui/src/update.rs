@@ -659,7 +659,7 @@ mod tests {
     use super::{newer, parse_signature, verifier_manifeste, PLATEFORME};
     use ed25519_dalek::{Signer, SigningKey};
 
-    /// Le manifeste tel que l'écrit le signeur (`examples/signer.rs`).
+    /// Le manifeste tel que l'écrit le signeur (`crates/signer`).
     fn manifeste(plateforme: &str, version: &str, actif: &[u8]) -> Vec<u8> {
         use sha2::Digest as _;
         let empreinte: String = sha2::Sha256::digest(actif).iter().map(|b| format!("{b:02x}")).collect();
@@ -716,7 +716,7 @@ mod tests {
     /// Le contrat qui compte : ce que signe la chaîne de publication, le
     /// client l'accepte — et rien d'autre.
     ///
-    /// Le vérificateur et le signeur (`examples/signer.rs`) partagent la même
+    /// Le vérificateur et le signeur (`crates/signer`) partagent la même
     /// version d'`ed25519-dalek`, dans le même `Cargo.lock` ; ce test le
     /// vérifie sur les deux formats de signature que le signeur peut produire.
     #[test]

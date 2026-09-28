@@ -2929,6 +2929,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ki-signer"
+version = "0.1.51"
+dependencies = [
+ "ed25519-dalek",
+ "sha2",
+]
+
+[[package]]
 name = "ki-video"
 version = "0.1.51"
 dependencies = [

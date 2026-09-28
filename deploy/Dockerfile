@@ -90,10 +90,11 @@ LABEL org.opencontainers.image.source=https://github.com/Redik123/ki-chat \
       org.opencontainers.image.licenses=MIT
 
 # curl ne sert qu'au HEALTHCHECK ; useradd, à ne pas tourner en root ;
-# DejaVu Sans Bold, c'est la police du titre des exports de clips (drawtext).
+# DejaVu Sans Bold, c'est la police du titre des exports de clips (drawtext) ;
+# tini, le PID 1 (voir ENTRYPOINT).
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl fonts-dejavu-core; \
+    apt-get install -y --no-install-recommends curl fonts-dejavu-core tini; \
     rm -rf /var/lib/apt/lists/*; \
     useradd --system --uid 10001 --shell /usr/sbin/nologin kichat; \
     mkdir -p /data; \
@@ -123,4 +124,9 @@ EXPOSE 8080/tcp 9987/udp
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -fsSk "https://127.0.0.1:${KI_HTTP_PORT}/" || exit 1
 
-ENTRYPOINT ["ki-server"]
+# tini en PID 1 : il ramasse les processus orphelins — un yt-dlp ou un
+# ffmpeg dont le parent direct est mort restait sinon à l'état de zombie
+# jusqu'au redémarrage du conteneur — et relaie SIGTERM au serveur, qui
+# s'arrête alors proprement (journal d'audit vidé, comptes écrits). Sans
+# lui, c'est le serveur qui était le PID 1, sans personne pour ramasser.
+ENTRYPOINT ["/usr/bin/tini", "--", "ki-server"]

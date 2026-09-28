@@ -6,8 +6,13 @@ Description=ki-chat server (chat + relais vocal)
 After=network.target
 
 [Service]
-# Change le code d'invitation ici (ou via un fichier EnvironmentFile).
-Environment=KI_TOKEN=CHANGE_MOI
+# Le code d'invitation ne s'écrit pas ici : ce fichier est lisible par tous
+# les comptes de la machine (`systemctl cat`). Il vit dans un fichier réservé
+# à root, par exemple :
+#   printf 'KI_TOKEN=%s\n' "$(openssl rand -hex 16)" > /etc/ki-chat/secrets.env
+#   chmod 600 /etc/ki-chat/secrets.env
+# Sans lui, le serveur tire un code aléatoire et l'écrit dans son journal.
+EnvironmentFile=-/etc/ki-chat/secrets.env
 Environment=KI_HTTP_PORT=8080
 Environment=KI_UDP_PORT=9987
 Environment=KI_DATA_DIR=/opt/ki-chat/data
@@ -16,6 +21,23 @@ WorkingDirectory=/opt/ki-chat
 User=kichat
 Restart=on-failure
 RestartSec=3
+
+# Confinement : le serveur n'écrit que dans ses données, n'a aucun privilège
+# à regagner, et ne voit ni /home ni les périphériques. Ce qu'il lance
+# (ffmpeg, yt-dlp, deno) hérite de tout cela.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ki-chat/data
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+TasksMax=512
 
 [Install]
 WantedBy=multi-user.target

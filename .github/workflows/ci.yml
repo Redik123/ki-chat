@@ -31,8 +31,23 @@ on:
         type: boolean
         default: false
 
+# Lecture seule : ce workflow compile un millier de crates et exécute leurs
+# scripts de build ; aucun n'a à pouvoir écrire dans le dépôt. Un appelant ne
+# peut pas lui en donner plus qu'il n'a lui-même.
+#
+# Les actions sont épinglées par empreinte de commit, pas par étiquette : une
+# étiquette se déplace, et le code qu'elle désigne avec elle. Dependabot
+# propose les nouvelles empreintes.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # La chaîne Rust, épinglée : clippy tourne en `-D warnings`, et une
+  # nouvelle version de Rust ne doit pas pouvoir mettre le filet au rouge —
+  # et bloquer le déploiement du serveur — d'un jour à l'autre. On la monte
+  # exprès, en même temps que release.yml.
+  RUST_TOOLCHAIN: "1.98.0"
   # `.cargo/config.toml` pointe vers le cmake d'une machine précise (celui de
   # Visual Studio 2026). Sans `force` de son côté, celui d'ici l'emporte —
   # c'est exactement ce que ce fichier prévoit pour l'intégration continue.
@@ -69,10 +84,13 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
       # nasm : sans lui, openh264 (partage d'écran) compile quand même mais
@@ -86,7 +104,7 @@ jobs:
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # libopus et openh264 sont compilés depuis leurs sources par nos
           # propres crates de build : sans cache, chaque exécution repart de
@@ -125,16 +143,19 @@ jobs:
       NASM: nasm
 
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
       - name: Installer nasm
         run: brew install nasm
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
 
@@ -155,8 +176,10 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           arguments: --all-features
@@ -175,13 +198,17 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # libFuzzer réclame nightly (-Zsanitizer) ; le reste du dépôt n'en
       # dépend pas.
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/protocol/fuzz
           # cargo-fuzz lui-même vit dans ~/.cargo/bin, que le cache garde.
@@ -207,7 +234,7 @@ jobs:
       # le garde, c'est lui qui permet de rejouer le plantage en local.
       - name: Conserver les entrées fautives
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-artefacts
           path: crates/protocol/fuzz/artifacts
@@ -227,13 +254,16 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `-p ki-server` et ses dépendances : ni la GUI (eframe réclamerait
       # tout X11), ni le moteur audio, ni la vidéo. Le serveur n'en dépend
@@ -243,3 +273,46 @@ jobs:
 
       - name: Tests serveur
         run: cargo test -p ki-server -p ki-protocol --locked
+
+      # Le serveur tel qu'il part : démarré pour de vrai, dix clients virtuels
+      # (ki-load : vraies connexions QUIC, comptes créés, voix chiffrée)
+      # pendant vingt secondes, puis son journal relu. Un serveur qui ne
+      # démarre pas, qui panique sous charge ou qui refuse ses clients
+      # s'arrête ici — avant l'image, donc avant la production, où chaque
+      # poussée sur main part d'elle-même.
+      - name: Fumée — le serveur démarré, sous charge
+        run: |
+          cargo build -p ki-server -p ki-load --locked
+          dossier="$RUNNER_TEMP/fumee"
+          mkdir -p "$dossier"
+          export KI_TOKEN="ki-fumee-$(openssl rand -hex 8)"
+          export KI_DATA_DIR="$dossier/data"
+          ./target/debug/ki-server > "$dossier/serveur.log" 2>&1 &
+          serveur=$!
+          # Arrêté quoi qu'il arrive, échec compris.
+          trap 'kill "$serveur" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            grep -q "ki-chat en écoute" "$dossier/serveur.log" && break
+            if ! kill -0 "$serveur" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if ! grep -q "ki-chat en écoute" "$dossier/serveur.log"; then
+            echo "::error::le serveur n'a pas démarré"
+            cat "$dossier/serveur.log"
+            exit 1
+          fi
+          timeout 120 ./target/debug/ki-load 127.0.0.1:9987 --clients 10 --invite "$KI_TOKEN" \
+            --secondes 20 > "$dossier/charge.log" 2>&1 || true
+          kill "$serveur" 2>/dev/null || true
+          wait "$serveur" 2>/dev/null || true
+          cat "$dossier/charge.log"
+          if grep -qi "panicked" "$dossier/serveur.log"; then
+            echo "::error::le serveur a paniqué sous charge"
+            cat "$dossier/serveur.log"
+            exit 1
+          fi
+          if ! grep -Eq "connectés +10 / 10 \(0 échecs\)" "$dossier/charge.log"; then
+            echo "::error::des clients n'ont pas pu se connecter"
+            tail -50 "$dossier/serveur.log"
+            exit 1
+          fi
