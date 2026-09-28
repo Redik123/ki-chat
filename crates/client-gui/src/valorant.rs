@@ -109,9 +109,12 @@ pub(crate) struct Client {
 
 impl Client {
     pub(crate) fn new(lf: &Lockfile) -> Self {
+        // Aucune redirection suivie : elle emporterait le mot de passe du
+        // client Riot ailleurs que sur la boucle locale.
         let agent = ureq::AgentBuilder::new()
             .tls_config(ki_client_quic::local_tls_config())
             .timeout(Duration::from_secs(3))
+            .redirects(0)
             .build();
         let auth = format!(
             "Basic {}",
@@ -125,7 +128,8 @@ impl Client {
             .agent
             .get(&format!("{}{chemin}", self.base))
             .set("Authorization", &self.auth)
-            .call()?;
+            .call()
+            .map_err(|e| anyhow::anyhow!("client Riot : {}", sans_adresse(&e)))?;
         Ok(reponse.into_json()?)
     }
 }
@@ -200,7 +204,14 @@ impl Acces {
             puuid: session.puuid,
             riot_id,
             region,
-            agent: ureq::AgentBuilder::new().timeout(TIMEOUT_PD).build(),
+            // Ni redirection ni HTTP en clair : ureq garde les en-têtes d'une
+            // requête sur une redirection, et le jeton d'accès et
+            // `X-Riot-Entitlements-JWT` seraient partis là où elle mène.
+            agent: ureq::AgentBuilder::new()
+                .timeout(TIMEOUT_PD)
+                .redirects(0)
+                .https_only(true)
+                .build(),
             acces,
             droit,
             version,
@@ -238,7 +249,20 @@ impl Acces {
 fn erreur_pd(e: ureq::Error) -> anyhow::Error {
     match e {
         ureq::Error::Status(code, _) => anyhow::anyhow!("refusé par Riot (HTTP {code})"),
-        e => anyhow::anyhow!("serveurs de VALORANT injoignables : {e}"),
+        e => anyhow::anyhow!("serveurs de VALORANT injoignables : {}", sans_adresse(&e)),
+    }
+}
+
+/// Une erreur de ureq, sans l'adresse qu'il y met en tête : les chemins des
+/// serveurs de jeu portent le PUUID du joueur, et ces erreurs finissent au
+/// journal — donc dans le diagnostic partagé.
+fn sans_adresse(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, _) => format!("HTTP {code}"),
+        ureq::Error::Transport(t) => match t.message() {
+            Some(m) => format!("{} ({m})", t.kind()),
+            None => t.kind().to_string(),
+        },
     }
 }
 

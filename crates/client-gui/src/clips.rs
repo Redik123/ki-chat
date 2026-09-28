@@ -232,7 +232,11 @@ pub fn resoudre_source(source: &Source) -> (CaptureSource, String) {
         Source::Auto => {
             for f in ki_video::list_windows() {
                 if let Some(nom) = crate::jeux::reconnaitre(&f.process) {
-                    return (CaptureSource::Window(f.title), nom.to_string());
+                    // Passé au même tamis qu'un titre de fenêtre : le nom
+                    // d'un jeu finit dans celui du fichier, et « Hunt:
+                    // Showdown » y ouvrait, sur NTFS, un flux de données
+                    // alternatif au lieu d'un fichier.
+                    return (CaptureSource::Window(f.title), nom_sur(nom));
                 }
             }
             (CaptureSource::Monitor(0), "Écran".into())

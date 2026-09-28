@@ -2812,7 +2812,6 @@ dependencies = [
  "ki-protocol",
  "ki-video",
  "ki-voice",
- "libc",
  "png",
  "qrcode",
  "raw-window-handle",

@@ -44,16 +44,20 @@ pub enum Forme {
 /// se découper à la forme de ses ronds, et savoir qui est au premier plan.
 #[cfg(windows)]
 mod win {
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows::Win32::Graphics::Gdi::{
         CombineRgn, CreateEllipticRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, HGDIOBJ,
         SetWindowRgn, RGN_OR,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
-        SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        GetWindowThreadProcessId, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
 
     fn fenetre(titre: &str) -> Option<HWND> {
@@ -134,19 +138,41 @@ mod win {
         }
     }
 
-    /// Le titre de la fenêtre au premier plan, et si elle est elle-même
-    /// « toujours au-dessus ».
-    pub fn premier_plan() -> (String, bool) {
+    /// La fenêtre au premier plan : son titre, le nom de l'exécutable qui la
+    /// tient, et si elle est elle-même « toujours au-dessus ».
+    pub fn premier_plan() -> (String, String, bool) {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.is_invalid() {
-                return (String::new(), false);
+                return (String::new(), String::new(), false);
             }
             let mut tampon = [0u16; 128];
             let n = GetWindowTextW(hwnd, &mut tampon).max(0) as usize;
             let titre = String::from_utf16_lossy(&tampon[..n.min(128)]);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            (titre, ex & WS_EX_TOPMOST.0 != 0)
+            (titre, executable(pid).unwrap_or_default(), ex & WS_EX_TOPMOST.0 != 0)
+        }
+    }
+
+    /// Le nom de fichier de l'exécutable d'un processus (`VALORANT-Win64-
+    /// Shipping.exe`), sans son chemin.
+    fn executable(pid: u32) -> Option<String> {
+        unsafe {
+            let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut tampon = [0u16; 1024];
+            let mut taille = tampon.len() as u32;
+            let lu = QueryFullProcessImageNameW(
+                p,
+                PROCESS_NAME_WIN32,
+                PWSTR(tampon.as_mut_ptr()),
+                &mut taille,
+            );
+            let _ = CloseHandle(p);
+            lu.ok()?;
+            let chemin = String::from_utf16_lossy(&tampon[..taille as usize]);
+            std::path::Path::new(&chemin).file_name().map(|n| n.to_string_lossy().into_owned())
         }
     }
 }
@@ -159,8 +185,8 @@ mod win {
     pub fn decouper(_titre: &str, _taille: (f32, f32), _formes: &[super::Forme]) -> bool {
         false
     }
-    pub fn premier_plan() -> (String, bool) {
-        (String::new(), false)
+    pub fn premier_plan() -> (String, String, bool) {
+        (String::new(), String::new(), false)
     }
 }
 
@@ -219,7 +245,7 @@ pub struct Overlay {
     sonde: Instant,
     /// Dernière ré-affirmation du « toujours au-dessus ».
     reaffirme: Instant,
-    /// La dernière fenêtre vue au premier plan (titre, toujours au-dessus),
+    /// La dernière fenêtre vue au premier plan (exécutable, toujours au-dessus),
     /// pour ne la consigner qu'au changement.
     devant: (String, bool),
     /// La découpe appliquée à la fenêtre, pour ne la refaire qu'au
@@ -310,11 +336,17 @@ impl Overlay {
             self.sonde = now;
             // Qui est devant, et se met-il lui-même au-dessus ? Consigné au
             // changement : c'est la réponse à « l'overlay ne se voit pas ».
-            let devant = win::premier_plan();
-            if devant != self.devant && devant.0 != TITRE {
+            //
+            // Consigné par le nom de son exécutable, pas par son titre : le
+            // journal part dans le diagnostic partagé, et le titre d'une
+            // fenêtre dit ce qu'on y fait — le document, l'onglet, la
+            // conversation. Le programme suffit à répondre.
+            let (titre, executable, dessus) = win::premier_plan();
+            let devant = (executable, dessus);
+            if devant != self.devant && titre != TITRE {
                 ki_voice::journal(format!(
-                    "overlay : au premier plan « {} » (toujours au-dessus : {})",
-                    devant.0,
+                    "overlay : au premier plan {} (toujours au-dessus : {})",
+                    if devant.0.is_empty() { "un programme inconnu".to_string() } else { format!("« {} »", devant.0) },
                     if devant.1 { "oui" } else { "non" }
                 ));
                 self.devant = devant;

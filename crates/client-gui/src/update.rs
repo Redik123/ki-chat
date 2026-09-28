@@ -258,10 +258,20 @@ pub fn relaunch_if_requested(reduit: bool) {
     }
 }
 
+/// Le client HTTP des mises à jour : HTTPS seulement. GitHub redirige les
+/// actifs vers son stockage — ces redirections sont suivies — mais une
+/// redirection vers du clair ne le serait plus : ce qui remplace
+/// l'exécutable ne passe pas en clair, même avant la vérification.
+fn agent_https() -> ureq::AgentBuilder {
+    ureq::AgentBuilder::new().https_only(true)
+}
+
 /// Interroge GitHub. `Ok(None)` = on est déjà à jour.
 fn fetch_latest() -> anyhow::Result<Option<Release>> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let body: serde_json::Value = ureq::get(&url)
+    let body: serde_json::Value = agent_https()
+        .build()
+        .get(&url)
         .set("User-Agent", AGENT)
         .set("Accept", "application/vnd.github+json")
         .timeout(TIMEOUT)
@@ -320,7 +330,7 @@ fn download(release: &Release, state: &Arc<Mutex<Status>>) -> anyhow::Result<Pat
     // en dix secondes sur une ligne ordinaire. Mais un délai il en faut un —
     // il n'y en avait aucun, et un serveur qui accepte la connexion puis cesse
     // d'envoyer laissait le fil de mise à jour attendre pour toujours.
-    let response = ureq::AgentBuilder::new()
+    let response = agent_https()
         .timeout_connect(TIMEOUT)
         .timeout_read(DOWNLOAD_TIMEOUT)
         .build()
@@ -386,7 +396,9 @@ fn verify(staged: &Path, release: &Release) -> anyhow::Result<()> {
     };
     let lire = |url: &str, max: u64| -> anyhow::Result<Vec<u8>> {
         let mut octets = Vec::new();
-        ureq::get(url)
+        agent_https()
+            .build()
+            .get(url)
             .set("User-Agent", AGENT)
             .timeout(TIMEOUT)
             .call()?

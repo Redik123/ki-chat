@@ -138,54 +138,79 @@ impl Reglages {
     }
 
     /// Ce qu'on annonce au salon — les dimensions viendront des trames.
-    pub fn meta(&self) -> StreamMeta {
+    /// `cle` : celle du stream, qui entre dans l'empreinte de la machine.
+    pub fn meta(&self, cle: &[u8]) -> StreamMeta {
         StreamMeta {
             width: 0,
             height: 0,
             fps: self.fps.min(255) as u8,
             kbps: self.kbps,
-            machine: empreinte_machine(),
+            machine: empreinte_machine(cle),
         }
     }
 }
 
-/// L'empreinte de cette machine et de ce compte Windows, telle qu'elle
-/// voyage dans les métadonnées d'un stream : deux ki-chat lancés ici (un
-/// qui diffuse, un qui regarde — le cas du test) se reconnaissent, et le
+/// L'empreinte de cette machine et de ce compte, pour un stream, telle
+/// qu'elle voyage dans ses métadonnées : deux ki-chat lancés ici (un qui
+/// diffuse, un qui regarde — le cas du test) se reconnaissent, et le
 /// spectateur coupe le son du jeu chez lui au lieu de le renvoyer en boucle
-/// dans la capture du streamer. FNV-1a, comme les vignettes.
-pub fn empreinte_machine() -> u64 {
-    let nom = nom_machine();
-    let compte = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_default();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in nom.bytes().chain([0u8]).chain(compte.bytes()) {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h.max(1)
+/// dans la capture du streamer.
+///
+/// Un secret tiré une fois et gardé dans le dossier de ki-chat — le même
+/// pour deux instances du même compte —, haché avec la clé du stream.
+/// Jusqu'à la 0.1.51, c'était le hachage (FNV) du nom de la machine et du
+/// compte Windows : le même d'un stream à l'autre, remis à chaque
+/// spectateur — un identifiant stable, qu'un dictionnaire de noms de
+/// machine inversait. Le secret ne quitte pas la machine, et SHA-256 ne se
+/// remonte pas : d'un stream à l'autre, rien ne relie deux empreintes.
+pub fn empreinte_machine(cle_du_stream: &[u8]) -> u64 {
+    empreinte_avec(&secret_machine(), cle_du_stream)
 }
 
-/// Le nom de la machine, tel que le système le donne.
-#[cfg(windows)]
-fn nom_machine() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
+fn empreinte_avec(secret: &[u8], cle_du_stream: &[u8]) -> u64 {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    h.update(b"ki-chat meme machine 1\0");
+    h.update(secret);
+    h.update(cle_du_stream);
+    let condense = h.finalize();
+    let mut octets = [0u8; 8];
+    octets.copy_from_slice(&condense[..8]);
+    u64::from_le_bytes(octets).max(1)
 }
 
-/// Unix n'exporte pas le nom d'hôte dans l'environnement d'une application
-/// graphique : on le demande à la libc.
-#[cfg(unix)]
-fn nom_machine() -> String {
-    let mut tampon = [0u8; 256];
-    // SAFETY : le tampon est le nôtre, sa longueur est passée avec lui, et
-    // gethostname n'écrit jamais au-delà.
-    let rc = unsafe { libc::gethostname(tampon.as_mut_ptr().cast(), tampon.len()) };
-    if rc != 0 {
-        return String::new();
-    }
-    let fin = tampon.iter().position(|&b| b == 0).unwrap_or(tampon.len());
-    String::from_utf8_lossy(&tampon[..fin]).into_owned()
+/// Le secret de cette machine et de ce compte, lu ou tiré au premier usage.
+/// Sans dossier où l'écrire, un secret de session : la reconnaissance entre
+/// deux instances ne marche plus, rien d'autre ne change.
+fn secret_machine() -> Vec<u8> {
+    static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SECRET
+        .get_or_init(|| {
+            let chemin = eframe::storage_dir("ki-chat").map(|d| d.join("machine.secret"));
+            if let Some(Ok(lu)) = chemin.as_ref().map(std::fs::read) {
+                if lu.len() == 32 {
+                    return lu;
+                }
+            }
+            use chacha20poly1305::aead::rand_core::RngCore as _;
+            let mut neuf = vec![0u8; 32];
+            chacha20poly1305::aead::OsRng.fill_bytes(&mut neuf);
+            if let Some(chemin) = chemin {
+                if let Some(dossier) = chemin.parent() {
+                    let _ = std::fs::create_dir_all(dossier);
+                }
+                let _ = std::fs::write(&chemin, &neuf);
+                // Deux instances lancées ensemble : celle qui a écrit la
+                // dernière fait foi, pour les deux.
+                if let Ok(relu) = std::fs::read(&chemin) {
+                    if relu.len() == 32 {
+                        return relu;
+                    }
+                }
+            }
+            neuf
+        })
+        .clone()
 }
 
 /// Écrans et fenêtres capturables, relevés à l'ouverture du sélecteur et
@@ -1342,8 +1367,21 @@ mod tests {
         // Un stockage vide donne les défauts.
         let defaut = Reglages::load(|_, d| d.to_string());
         assert_eq!(defaut, Reglages::default());
-        assert_eq!(defaut.meta().fps, 30);
+        assert_eq!(defaut.meta(&[0; 32]).fps, 30);
         assert_eq!(defaut.config().bitrate_bps, 6_000_000);
+    }
+
+    /// Deux instances d'ici se reconnaissent pour un même stream ; d'un
+    /// stream à l'autre, l'empreinte change, et une autre machine ne la
+    /// retrouve pas.
+    #[test]
+    fn l_empreinte_ne_suit_pas_la_machine_d_un_stream_a_l_autre() {
+        let (ici, ailleurs) = ([7u8; 32], [9u8; 32]);
+        let (cle_a, cle_b) = ([1u8; 32], [2u8; 32]);
+        assert_eq!(empreinte_avec(&ici, &cle_a), empreinte_avec(&ici, &cle_a));
+        assert_ne!(empreinte_avec(&ici, &cle_a), empreinte_avec(&ici, &cle_b));
+        assert_ne!(empreinte_avec(&ici, &cle_a), empreinte_avec(&ailleurs, &cle_a));
+        assert_ne!(empreinte_avec(&ici, &cle_a), 0);
     }
 
     /// La cadence se mesure sur la dernière seconde, et une boucle

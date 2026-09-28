@@ -24,9 +24,11 @@
 //!
 //! S'y ajoute un **rapport de plantage** dédié (`ki-chat.crash`) : chaque
 //! panic et chaque raté graphique y laissent leur trace, à part du journal
-//! courant. C'est ce fichier que le diagnostic partagé (opt-in) embarque au
-//! premier envoi de la session suivante — le journal, lui, mélange le
-//! plantage au tout-venant et se fait réécrire à chaque démarrage.
+//! courant. C'est ce fichier qui part au serveur à la connexion suivante —
+//! **option de partage cochée ou non**, décision de l'admin du groupe (voir
+//! `envoyer_crash` dans main.rs) — et au seul serveur où le plantage a eu
+//! lieu. Le journal, lui, mélange le plantage au tout-venant et se fait
+//! réécrire à chaque démarrage.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -158,29 +160,64 @@ pub fn clips_interrompus() -> bool {
     present
 }
 
+/// Le serveur de la session en cours : un plantage en porte l'adresse, et
+/// son rapport ne part qu'à ce serveur-là (voir `rapport_a_envoyer`).
+static SERVEUR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Appelé à l'accueil d'un serveur (son adresse) et à la fin de la session
+/// (`None`).
+pub fn serveur_courant(adresse: Option<&str>) {
+    if let Ok(mut s) = SERVEUR.lock() {
+        *s = adresse.map(str::to_owned);
+    }
+}
+
+/// Préfixe de la ligne qui dit, dans le rapport, où le plantage a eu lieu.
+const LIGNE_SERVEUR: &str = "serveur : ";
+
 /// Consigne un plantage dans le rapport dédié, en plus du journal. Appelé
 /// par le panic hook et par `main` quand la boucle graphique meurt : ce sont
 /// les deux seules plumes de ce fichier, il ne contient donc que du
-/// technique — jamais un message, jamais de l'audio.
+/// technique — jamais un message, jamais de l'audio (les citations d'un
+/// message de panique sont masquées, voir `masquer_citations`).
 pub fn consigner_crash(quoi: &str) {
     let Some(chemin) = chemin_crash() else { return };
     if let Some(dossier) = chemin.parent() {
         let _ = std::fs::create_dir_all(dossier);
     }
-    consigner_dans(&chemin, quoi);
+    // `try_lock` : on peut être en train de mourir n'importe où.
+    let serveur = SERVEUR.try_lock().ok().and_then(|s| s.clone()).unwrap_or_default();
+    consigner_dans(&chemin, &serveur, quoi);
 }
 
 /// L'écriture elle-même, sur un chemin fourni — testable sans le dossier
 /// d'eframe. Chaque échec est avalé : on est déjà en train de mourir, la
 /// dernière chose à faire est d'échouer plus fort.
-fn consigner_dans(chemin: &Path, quoi: &str) {
+fn consigner_dans(chemin: &Path, serveur: &str, quoi: &str) {
     borner_rapport(chemin);
     let quand = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
     if let Ok(mut f) =
         std::fs::OpenOptions::new().create(true).append(true).open(chemin)
     {
-        let _ = writeln!(f, "==== CRASH {quand} ====\n{quoi}");
+        let _ = writeln!(f, "==== CRASH {quand} ====\n{LIGNE_SERVEUR}{serveur}\n{quoi}");
     }
+}
+
+/// Masque ce que le message d'une panique cite entre accents graves : la
+/// bibliothèque standard y recopie la chaîne en cause (« byte index 5 is
+/// not a char boundary … of `@toto é…` ») — le texte d'un message, qui n'a
+/// rien à faire dans un rapport envoyé au serveur. Le reste (l'emplacement,
+/// la pile) suffit à corriger.
+fn masquer_citations(texte: &str) -> String {
+    let mut sortie = String::with_capacity(texte.len());
+    for (i, morceau) in texte.split('`').enumerate() {
+        if i % 2 == 0 {
+            sortie.push_str(morceau);
+        } else {
+            sortie.push_str(&format!("`[{} caractères masqués]`", morceau.chars().count()));
+        }
+    }
+    sortie
 }
 
 /// Ramène le rapport à sa moitié de borne quand il enfle : les plantages
@@ -196,15 +233,27 @@ fn borner_rapport(chemin: &Path) {
     let _ = std::fs::write(chemin, &tout[garde..]);
 }
 
-/// Le rapport de plantage à joindre au diagnostic partagé, ou `None` s'il
-/// n'y a rien de neuf : pas de fichier, ou un horodatage de modification
-/// déjà égal à `deja_envoye` — chaque plantage ne voyage qu'une fois.
+/// Le rapport de plantage à envoyer à `serveur`, ou `None` s'il n'y a rien
+/// de neuf : pas de fichier, ou un horodatage de modification déjà égal à
+/// `deja_envoye` — chaque plantage ne voyage qu'une fois.
+///
+/// Seulement au serveur où le dernier plantage a eu lieu : il partait au
+/// premier serveur rejoint ensuite, quel qu'il soit, et racontait à son admin
+/// la session passée sur un autre. Ailleurs, le rapport attend sans être
+/// consommé. Les plantages d'autres serveurs qui le précèdent sont écartés ;
+/// ceux sans serveur (hors session, ou d'une version d'avant) partent.
 /// Rend (horodatage à mémoriser, fin du rapport bornée à l'envoi).
-pub fn rapport_a_envoyer(deja_envoye: &str) -> Option<(String, String)> {
-    rapport_dans(&chemin_crash()?, deja_envoye)
+pub fn rapport_a_envoyer(deja_envoye: &str, serveur: &str) -> Option<(String, String)> {
+    rapport_dans(&chemin_crash()?, deja_envoye, serveur)
 }
 
-fn rapport_dans(chemin: &Path, deja_envoye: &str) -> Option<(String, String)> {
+/// Le serveur d'un plantage consigné : `None` sans ligne `serveur`, et
+/// `Some("")` pour un plantage hors session.
+fn serveur_du(entree: &str) -> Option<&str> {
+    entree.lines().nth(1)?.strip_prefix(LIGNE_SERVEUR).map(str::trim)
+}
+
+fn rapport_dans(chemin: &Path, deja_envoye: &str, serveur: &str) -> Option<(String, String)> {
     let tampon = std::fs::metadata(chemin)
         .ok()?
         .modified()
@@ -220,7 +269,30 @@ fn rapport_dans(chemin: &Path, deja_envoye: &str) -> Option<(String, String)> {
     // coupe au milieu de n'importe quoi, un caractère abîmé ne doit pas
     // faire taire tout le rapport.
     let octets = std::fs::read(chemin).ok()?;
-    let texte = String::from_utf8_lossy(&octets);
+    let brut = String::from_utf8_lossy(&octets);
+    // Les plantages consignés, chacun avec son en-tête ; ce qui précède le
+    // premier (une borne d'archivage coupée net) compte pour un sans serveur.
+    let mut entrees: Vec<&str> = Vec::new();
+    let mut reste: &str = &brut;
+    loop {
+        // La recherche repart après le premier caractère — entier : la
+        // borne d'archivage coupe n'importe où, et un rapport peut commencer
+        // au milieu d'un caractère devenu « � » (trois octets).
+        let depart = reste.chars().next().map_or(reste.len(), char::len_utf8);
+        match reste[depart..].find("==== CRASH ") {
+            Some(i) => {
+                entrees.push(&reste[..depart + i]);
+                reste = &reste[depart + i..];
+            }
+            None => break,
+        }
+    }
+    entrees.push(reste);
+    let pour_ici = |e: &&str| serveur_du(e).is_none_or(|s| s.is_empty() || s == serveur);
+    if !entrees.last().is_some_and(pour_ici) {
+        return None;
+    }
+    let texte: String = entrees.into_iter().filter(pour_ici).collect();
     let vise = texte.len().saturating_sub(RAPPORT_ENVOI_MAX);
     // Découpe à une frontière de caractère : on envoie du texte, pas un
     // début d'UTF-8 tronqué.
@@ -426,9 +498,9 @@ fn installer_panic_hook(fichier: Arc<File>) {
         // toujours ça de plus qu'un fichier vide.
         let pile = std::backtrace::Backtrace::force_capture();
         let _ = writeln!(&*fichier, "==== PANIC {quand} ====\n{info}\n{pile}");
-        // Le rapport dédié reçoit la même histoire : c'est lui que le
-        // diagnostic partagé embarquera au prochain démarrage.
-        consigner_crash(&format!("panic : {info}\n{pile}"));
+        // Le rapport dédié reçoit la même histoire, citations masquées :
+        // c'est lui qui part au serveur à la connexion suivante.
+        consigner_crash(&format!("panic : {}\n{pile}", masquer_citations(&info.to_string())));
         precedent(info);
     }));
 }
@@ -509,26 +581,76 @@ mod tests {
         let _ = std::fs::remove_file(&chemin);
 
         // Pas de fichier : rien à envoyer, rien à faire.
-        assert!(rapport_dans(&chemin, "").is_none());
+        assert!(rapport_dans(&chemin, "", "a:9987").is_none());
 
         // Un plantage énorme : seule la fin part, bornée.
         let long = format!("{}la vraie fin", "x".repeat(2 * RAPPORT_ENVOI_MAX));
         std::fs::write(&chemin, &long).expect("écriture");
-        let (tampon, texte) = rapport_dans(&chemin, "").expect("un rapport à envoyer");
+        let (tampon, texte) = rapport_dans(&chemin, "", "a:9987").expect("un rapport à envoyer");
         assert!(texte.len() <= RAPPORT_ENVOI_MAX);
         assert!(texte.ends_with("la vraie fin"));
 
         // Déjà envoyé : le même horodatage ne repart pas.
-        assert!(rapport_dans(&chemin, &tampon).is_none());
+        assert!(rapport_dans(&chemin, &tampon, "a:9987").is_none());
 
         // Un nouveau plantage rajeunit le fichier : il repartira. (La pause
         // évite qu'une horloge de fichier grossière ne rende les deux
         // écritures indistinguables.)
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&chemin, "nouveau plantage").expect("écriture");
-        assert!(rapport_dans(&chemin, &tampon).is_some());
+        assert!(rapport_dans(&chemin, &tampon, "a:9987").is_some());
 
         let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    /// Un plantage ne se raconte qu'au serveur où il a eu lieu : ailleurs,
+    /// le rapport attend sans être consommé ; chez lui, il part sans les
+    /// plantages d'autres serveurs qui le précèdent.
+    #[test]
+    fn le_rapport_ne_part_qu_au_serveur_du_plantage() {
+        let dossier =
+            std::env::temp_dir().join(format!("ki-secours-serveur-{}", std::process::id()));
+        std::fs::create_dir_all(&dossier).expect("dossier de test");
+        let chemin = dossier.join("ki-chat.crash");
+        let _ = std::fs::remove_file(&chemin);
+
+        consigner_dans(&chemin, "b:9987", "plantage chez B");
+        consigner_dans(&chemin, "", "plantage hors session");
+        consigner_dans(&chemin, "a:9987", "plantage chez A");
+        assert!(rapport_dans(&chemin, "", "b:9987").is_none(), "B n'a pas à savoir");
+        let (_, texte) = rapport_dans(&chemin, "", "a:9987").expect("A le reçoit");
+        assert!(texte.contains("plantage chez A") && texte.contains("hors session"));
+        assert!(!texte.contains("chez B"));
+
+        let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    /// Un rapport que la borne a coupé au milieu d'un caractère se lit quand
+    /// même, sans paniquer.
+    #[test]
+    fn un_rapport_coupe_au_milieu_d_un_caractere_se_lit() {
+        let dossier =
+            std::env::temp_dir().join(format!("ki-secours-coupe-{}", std::process::id()));
+        std::fs::create_dir_all(&dossier).expect("dossier de test");
+        let chemin = dossier.join("ki-chat.crash");
+        let mut octets = "é".as_bytes()[1..].to_vec();
+        octets.extend_from_slice("é\n==== CRASH 2026 ====\nserveur : a:9987\nla fin\n".as_bytes());
+        std::fs::write(&chemin, octets).expect("écriture");
+        let (_, texte) = rapport_dans(&chemin, "", "a:9987").expect("un rapport à envoyer");
+        assert!(texte.ends_with("la fin\n"));
+        let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    /// Ce que la bibliothèque standard cite d'une chaîne en cause ne quitte
+    /// pas la machine ; l'emplacement, si.
+    #[test]
+    fn les_citations_d_une_panique_sont_masquees() {
+        let masque = masquer_citations(
+            "byte index 7 is not a char boundary; it is inside 'é' of `@toto é secret` at src/main.rs:12",
+        );
+        assert!(!masque.contains("secret"));
+        assert!(masque.contains("src/main.rs:12"));
+        assert!(masque.contains("[14 caractères masqués]"));
     }
 
     #[test]
@@ -539,15 +661,15 @@ mod tests {
         let chemin = dossier.join("ki-chat.crash");
         let _ = std::fs::remove_file(&chemin);
 
-        consigner_dans(&chemin, "premier");
-        consigner_dans(&chemin, "second");
+        consigner_dans(&chemin, "", "premier");
+        consigner_dans(&chemin, "", "second");
         let texte = std::fs::read_to_string(&chemin).expect("lecture");
         assert!(texte.contains("premier") && texte.contains("second"));
         assert_eq!(texte.matches("==== CRASH ").count(), 2);
 
         // Un rapport au-delà de la borne est ramené à sa fin avant l'ajout.
         std::fs::write(&chemin, vec![b'x'; RAPPORT_MAX as usize + 1]).expect("écriture");
-        consigner_dans(&chemin, "après la borne");
+        consigner_dans(&chemin, "", "après la borne");
         assert!(std::fs::metadata(&chemin).expect("meta").len() < RAPPORT_MAX);
         assert!(std::fs::read_to_string(&chemin).expect("lecture").contains("après la borne"));
 

@@ -186,8 +186,8 @@ fn main() -> eframe::Result {
         // le démarrage n'est pas un hoquet, on rend la main.
         Err(e) => {
             tracing::error!("boucle graphique terminée en erreur : {e}");
-            // Dans le rapport de plantage aussi : le diagnostic partagé
-            // l'embarquera au prochain démarrage, si le joueur a opté.
+            // Dans le rapport de plantage aussi : il part au serveur à la
+            // connexion suivante (voir `envoyer_crash`).
             secours::consigner_crash(&format!("boucle graphique terminée en erreur : {e}"));
             match secours::decision_relance(relances, depart.elapsed()) {
                 Some(essais) => secours::relancer(essais, zone::repartir_reduit()),
@@ -772,6 +772,9 @@ struct KiApp {
     /// Empreinte du certificat du serveur courant, pour épingler le HTTPS
     /// du partage de fichiers sur la même identité que le QUIC.
     server_fingerprint: String,
+    /// Le client HTTP épinglé, et l'empreinte pour laquelle il l'est (voir
+    /// `http_agent`).
+    agent_http: std::cell::RefCell<Option<(String, ureq::Agent)>>,
     /// Adresse d'un serveur dont l'identité vient de changer. Tant qu'elle est
     /// posée, l'écran de connexion propose d'accepter la nouvelle — c'est la
     /// seule façon de se reconnecter à un serveur réinstallé.
@@ -1325,6 +1328,7 @@ impl KiApp {
             history_more: false,
             history_pending: false,
             server_fingerprint: String::new(),
+            agent_http: std::cell::RefCell::new(None),
             identity_alarm: None,
             voice_intent: None,
             voice_intent_until: std::time::Instant::now(),
@@ -1865,12 +1869,27 @@ impl KiApp {
     ///
     /// Le certificat étant celui du QUIC, la même empreinte fait foi : une
     /// seule identité à vérifier, et rien qui parte vers un imposteur.
+    ///
+    /// Gardé tant que l'empreinte ne change pas : il était reconstruit à chaque
+    /// image (les aperçus le reprennent à chaque passage), et chaque agent neuf
+    /// arrivait avec un réservoir de connexions vide — une poignée de main TLS
+    /// par requête au lieu d'une connexion réutilisée. `https_only` : tout ce
+    /// qu'il sert est en HTTPS, une redirection vers du clair n'est pas suivie.
     fn http_agent(&self) -> ureq::Agent {
+        let mut cache = self.agent_http.borrow_mut();
+        if let Some((empreinte, agent)) = cache.as_ref() {
+            if *empreinte == self.server_fingerprint {
+                return agent.clone();
+            }
+        }
         let expected =
             (!self.server_fingerprint.is_empty()).then_some(self.server_fingerprint.as_str());
-        ureq::AgentBuilder::new()
+        let agent = ureq::AgentBuilder::new()
             .tls_config(ki_client_quic::pinned_tls_config(expected))
-            .build()
+            .https_only(true)
+            .build();
+        *cache = Some((self.server_fingerprint.clone(), agent.clone()));
+        agent
     }
 
     /// La fiche VALORANT d'un membre, telle que le serveur la garde :
@@ -4132,6 +4151,7 @@ impl KiApp {
         // déconnecter » pendant une coupure nous y ramènerait tout seul.
         // `connexion_perdue` la réarme après coup, elle seule.
         self.reprise = None;
+        secours::serveur_courant(None);
         // La diffusion et le visionnage finissent avec la session, par
         // n'importe quelle sortie. Ils ne s'arrêtaient qu'à une coupure
         // subie : se déconnecter ou être expulsé laissait la capture et
@@ -4856,6 +4876,8 @@ impl KiApp {
                 ..
             } => {
                 self.welcomed = true;
+                // Un plantage d'ici se racontera à ce serveur, et à lui seul.
+                secours::serveur_courant(Some(&self.url));
                 // Un serveur qui parle un protocole plus récent que nous :
                 // ce qu'il envoie de neuf ne se lira pas ici. Le dire, plutôt
                 // que de laisser des morceaux manquer sans explication.
@@ -5298,7 +5320,9 @@ impl KiApp {
             }
             ServerMsg::WatchAccepted { stream_id, stream_key, meta } => {
                 ki_voice::journal(format!("visionnage accepté (stream {stream_id})"));
-                let meme_machine = meta.machine != 0 && meta.machine == partage::empreinte_machine();
+                let cle = ki_protocol::hex_decode(&stream_key).unwrap_or_default();
+                let meme_machine =
+                    meta.machine != 0 && meta.machine == partage::empreinte_machine(&cle);
                 self.regard_accepte(stream_id, &stream_key, meme_machine);
             }
             ServerMsg::WatchDenied { reason, .. } => {
@@ -5637,7 +5661,8 @@ impl KiApp {
         // (panic, pile, erreur de rendu) : jamais un message, jamais de
         // l'audio.
         if self.diag_last_sent_ts == 0 {
-            if let Some((tampon, rapport)) = secours::rapport_a_envoyer(&self.diag_crash_envoye)
+            if let Some((tampon, rapport)) =
+                secours::rapport_a_envoyer(&self.diag_crash_envoye, &self.url)
             {
                 lot.push_str(&format!(
                     "{{\"type\":\"crash\",\"t\":{now_ms},\"rapport\":{}}}\n",
@@ -5674,7 +5699,8 @@ impl KiApp {
     /// de l'audio. Une fois par session, et un même plantage ne voyage
     /// qu'une fois (horodatage mémorisé).
     fn envoyer_crash(&mut self) {
-        let Some((tampon, rapport)) = secours::rapport_a_envoyer(&self.diag_crash_envoye)
+        let Some((tampon, rapport)) =
+            secours::rapport_a_envoyer(&self.diag_crash_envoye, &self.url)
         else {
             return;
         };
@@ -10466,7 +10492,7 @@ impl KiApp {
             r.source, r.max_height, r.fps, r.kbps, r.encodeur, r.cursor, r.preview
         ));
         self.send(ClientMsg::StreamStart {
-            meta: self.diffusion.meta(),
+            meta: self.diffusion.meta(&key),
             stream_key: ki_protocol::hex_encode(&key),
             couches: true,
         });
@@ -10477,7 +10503,7 @@ impl KiApp {
         let Some(key) = self.go_live_attente.take() else { return };
         let Some(conn) = &self.conn else { return };
         let force_idr = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let cadence = std::sync::Arc::new(std::sync::Mutex::new(self.diffusion.meta()));
+        let cadence = std::sync::Arc::new(std::sync::Mutex::new(self.diffusion.meta(&key)));
         let stats = std::sync::Arc::new(ki_video::StageStats::default());
         // Les deux qualités : la basse, que le serveur demandera pour les
         // connexions lentes, et la haute, suspendue quand plus personne ne
@@ -10671,7 +10697,7 @@ impl KiApp {
                 // Cadence et débit changent tout de suite ; les dimensions,
                 // la couche réseau les annoncera d'elle-même à la première
                 // trame si elles bougent.
-                let mut meta = effectifs.meta();
+                let mut meta = effectifs.meta(&g.key);
                 let (w, h) = g.stats.dims();
                 meta.width = w as u16;
                 meta.height = h as u16;

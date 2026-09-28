@@ -32,7 +32,9 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC}
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 
 use crate::nvenc_ffi as ffi;
 use crate::{Paquet, VideoEncoder};
@@ -60,8 +62,16 @@ fn api() -> anyhow::Result<&'static Api> {
 
 fn charger() -> Result<Api, String> {
     unsafe {
-        let module = LoadLibraryW(windows::core::w!("nvEncodeAPI64.dll"))
-            .map_err(|_| "nvEncodeAPI64.dll introuvable — pas de pilote NVIDIA".to_string())?;
+        // Dans System32 seulement, où le pilote NVIDIA l'installe : chargée
+        // par son seul nom, elle suivait l'ordre de recherche des DLL, et une
+        // copie posée à côté de l'exécutable (ou dans le dossier courant)
+        // passait avant celle du pilote.
+        let module = LoadLibraryExW(
+            windows::core::w!("nvEncodeAPI64.dll"),
+            None,
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+        .map_err(|_| "nvEncodeAPI64.dll introuvable — pas de pilote NVIDIA".to_string())?;
         let version_max: ffi::PfnGetMaxSupportedVersion = std::mem::transmute(
             GetProcAddress(module, windows::core::s!("NvEncodeAPIGetMaxSupportedVersion"))
                 .ok_or("point d'entrée NvEncodeAPIGetMaxSupportedVersion absent")?,

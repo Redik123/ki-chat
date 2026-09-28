@@ -94,12 +94,6 @@ security-framework = "3"
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tray-icon = { version = "0.25", default-features = false }
 
-# Le nom de la machine (empreinte « même machine » du son du jeu), que la
-# libc donne — Unix ne l'exporte pas dans l'environnement d'une application
-# graphique.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # Coffre à secrets natif : DPAPI protège les mots de passe mémorisés avec
 # une clé dérivée de la session Windows. Déjà tiré par eframe.
 [target.'cfg(windows)'.dependencies]
