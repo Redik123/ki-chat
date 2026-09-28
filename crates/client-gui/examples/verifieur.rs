@@ -7,10 +7,14 @@
 //!
 //! # Pourquoi cet outil existe
 //!
-//! Le pendant de `signer`, et pour la même raison : c'est un **exemple de ce
-//! crate**, donc il partage le même `ed25519-dalek` et le même `Cargo.lock`
-//! que le code qui vérifie au démarrage. Une divergence entre le vérifieur
-//! d'ici et celui de là ne se verrait pas.
+//! Le pendant du signeur (`crates/signer`), et pour la même raison : c'est un
+//! **exemple de ce crate**, donc il partage le même `ed25519-dalek` et le même
+//! `Cargo.lock` que le code qui vérifie au démarrage. Une divergence entre le
+//! vérifieur d'ici et celui de là ne se verrait pas.
+//!
+//! Il vérifie aussi un manifeste de mise à jour (`ki-chat.exe.manifeste` et
+//! sa `.sig`) : c'est un fichier signé comme un autre. Reste à comparer son
+//! empreinte `sha256` à celle de l'actif.
 //!
 //! Il répond à une question qu'on ne peut pas poser autrement : la chaîne de
 //! publication a-t-elle vraiment signé ce qu'elle a vraiment publié ? Le
