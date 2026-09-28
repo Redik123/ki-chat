@@ -1417,20 +1417,44 @@ pub fn lister(dossier: &Path) -> Vec<ClipInfo> {
     clips
 }
 
-/// Ouvre l'Explorateur sur le clip.
+/// Ouvre l'Explorateur sur le clip, sélectionné.
 pub fn montrer_dans_le_dossier(chemin: &Path) {
     #[cfg(windows)]
     {
+        // Passé tel quel (`raw_arg`) : `arg` entoure de guillemets tout
+        // argument qui contient une espace — et un nom de clip en a toujours
+        // (« 2026-09-28 18h00m00 Écran.mp4 »). Explorer recevait alors
+        // `"/select,C:\…"`, ne reconnaissait plus `/select` et ouvrait son
+        // dossier par défaut : « Voir dans le dossier » ne menait nulle part.
+        use std::os::windows::process::CommandExt as _;
         let _ = std::process::Command::new("explorer.exe")
-            .arg(format!("/select,{}", chemin.display()))
+            .raw_arg(argument_select(chemin))
             .spawn();
     }
     #[cfg(not(windows))]
     {
-        if let Some(d) = chemin.parent() {
-            let _ = std::process::Command::new("open").arg(d).spawn();
-        }
+        // Le Finder sait sélectionner, lui aussi.
+        let _ = std::process::Command::new("open").arg("-R").arg(chemin).spawn();
     }
+}
+
+/// L'argument de sélection d'Explorer : les guillemets autour du seul
+/// chemin, après la virgule — la seule forme qu'il comprenne. Chemin rendu
+/// absolu (mais sans le préfixe `\\?\` de `canonicalize`, qu'Explorer ne
+/// suit pas) et en barres obliques inverses.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn argument_select(chemin: &Path) -> String {
+    let absolu = std::path::absolute(chemin).unwrap_or_else(|_| chemin.to_path_buf());
+    format!("/select,\"{}\"", absolu.display().to_string().replace('/', "\\"))
+}
+
+/// Ouvre l'Explorateur dans un dossier (créé au besoin).
+pub fn ouvrir_le_dossier(dossier: &Path) {
+    let _ = std::fs::create_dir_all(dossier);
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer.exe").arg(dossier).spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("open").arg(dossier).spawn();
 }
 
 /// « 45 Mo », « 1,2 Go ».
@@ -1451,6 +1475,15 @@ pub fn cadence_ui(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Explorer ne comprend la sélection qu'avec les guillemets autour du
+    /// seul chemin, et un nom de clip a toujours des espaces.
+    #[cfg(windows)]
+    #[test]
+    fn la_selection_dans_l_explorateur_survit_aux_espaces() {
+        let arg = argument_select(Path::new("C:/Clips/2026-09-28 18h00m00 Écran.mp4"));
+        assert_eq!(arg, "/select,\"C:\\Clips\\2026-09-28 18h00m00 Écran.mp4\"");
+    }
 
     /// Un clip dont l'écriture a échoué ne reste pas sur le disque ; un clip
     /// achevé, si.

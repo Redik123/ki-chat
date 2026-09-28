@@ -2756,10 +2756,7 @@ impl KiApp {
             2 => self.arreter_clips(),
             3 => self.sauver_clip(),
             4 => self.rafraichir_clips(),
-            5 => {
-                let d = self.clips_reglages.dossier_effectif();
-                clips::montrer_dans_le_dossier(&d.join(""));
-            }
+            5 => clips::ouvrir_le_dossier(&self.clips_reglages.dossier_effectif()),
             _ => {}
         }
         if let Some(p) = montrer {
