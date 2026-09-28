@@ -2027,7 +2027,7 @@ impl KiApp {
                 None => {
                     ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(12.5));
                     if !etat.file.is_empty() {
-                        ui.label(RichText::new(format!("{} en file", etat.file.len())).color(TEXT_FAINT).size(11.0));
+                        ui.label(RichText::new(format!("{} en file", etat.longueur_file())).color(TEXT_FAINT).size(11.0));
                     }
                 }
             }
@@ -2105,7 +2105,7 @@ impl KiApp {
             {
                 let ui = &mut cols[1];
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("File d'attente · {}", etat.file.len())).strong().size(13.0));
+                    ui.label(RichText::new(format!("File d'attente · {}", etat.longueur_file())).strong().size(13.0));
                     if peut && !etat.file.is_empty() && ui.small_button("vider").clicked() {
                         self.commander_musique(C::Vider);
                     }
@@ -2114,7 +2114,7 @@ impl KiApp {
                     if etat.file.is_empty() {
                         ui.label(RichText::new("vide — cherche un morceau à droite").color(TEXT_FAINT).size(11.5));
                     }
-                    let n = etat.file.len();
+                    let n = etat.longueur_file();
                     for (i, p) in etat.file.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT).size(11.0));
@@ -2136,6 +2136,11 @@ impl KiApp {
                                 });
                             });
                         });
+                    }
+                    // Le serveur n'envoie que le début d'une longue file.
+                    let reste = n.saturating_sub(etat.file.len());
+                    if reste > 0 {
+                        ui.label(RichText::new(format!("… et {reste} autre(s)")).color(TEXT_FAINT).size(11.0));
                     }
                 });
             }
@@ -2285,7 +2290,7 @@ impl KiApp {
                             ui.label(RichText::new("rien en ce moment").color(TEXT_DIM));
                         }
                     }
-                    ui.label(RichText::new(format!("{} en file · volume global {} %", etat.file.len(), etat.volume)).color(TEXT_DIM).size(12.0));
+                    ui.label(RichText::new(format!("{} en file · volume global {} %", etat.longueur_file(), etat.volume)).color(TEXT_DIM).size(12.0));
                     ui.add_space(8.0);
                     ui.label(RichText::new("Qui le pilote").strong());
                     ui.label(RichText::new(if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }).color(TEXT_DIM).size(12.0));
@@ -4749,9 +4754,22 @@ impl KiApp {
                 server,
                 portes,
                 medailles,
+                protocole,
                 ..
             } => {
                 self.welcomed = true;
+                // Un serveur qui parle un protocole plus récent que nous :
+                // ce qu'il envoie de neuf ne se lira pas ici. Le dire, plutôt
+                // que de laisser des morceaux manquer sans explication.
+                if protocole > ki_protocol::PROTOCOLE {
+                    ki_voice::journal(format!(
+                        "serveur au protocole {protocole}, ki-chat au protocole {} : mise à jour conseillée",
+                        ki_protocol::PROTOCOLE
+                    ));
+                    self.info = Some(
+                        "ce serveur est plus récent que ton ki-chat — installe la dernière version".into(),
+                    );
+                }
                 // Le serveur dit lui-même s'il sert les portes web : un
                 // serveur antérieur ne pose pas le champ, et le panneau
                 // reste caché — rien de nouveau ne lui part.
@@ -10347,6 +10365,7 @@ impl KiApp {
         ) {
             Ok(boucle) => {
                 let avec_son = reglages.son;
+                let seq_audio = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 self.go_live = Some(partage::GoLive {
                     boucle,
                     stats,
@@ -10358,6 +10377,7 @@ impl KiApp {
                     cadence,
                     reglages,
                     key,
+                    seq_audio: seq_audio.clone(),
                     audio: None,
                     origine,
                     qualites,
@@ -10368,7 +10388,7 @@ impl KiApp {
                 secours::marquer_diffusion(&format!("{:?}", self.diffusion.encodeur));
                 self.info = Some("tu diffuses ton écran".into());
                 if avec_son {
-                    let audio = self.demarrer_son_du_jeu(stream_id, key, origine);
+                    let audio = self.demarrer_son_du_jeu(stream_id, key, seq_audio, origine);
                     if let Some(g) = &mut self.go_live {
                         g.audio = audio;
                     }
@@ -10389,9 +10409,10 @@ impl KiApp {
         &mut self,
         stream_id: u32,
         key: [u8; 32],
+        seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
         origine: std::time::Instant,
     ) -> Option<ki_voice::jeu::GameAudio> {
-        let emit = self.conn.as_ref()?.game_audio_emit(stream_id, key);
+        let emit = self.conn.as_ref()?.game_audio_emit(stream_id, key, seq);
         match ki_voice::jeu::GameAudio::start(96_000, emit, origine) {
             Ok(a) => Some(a),
             Err(e) => {
@@ -10484,7 +10505,10 @@ impl KiApp {
                 if !effectifs.son {
                     g.audio = None;
                 } else if g.audio.is_none() {
-                    g.audio = self.demarrer_son_du_jeu(g.stream_id, g.key, g.origine);
+                    // La séquence de la diffusion, pas une neuve : voir
+                    // `GoLive::seq_audio`.
+                    g.audio =
+                        self.demarrer_son_du_jeu(g.stream_id, g.key, g.seq_audio.clone(), g.origine);
                 }
                 // Cadence et débit changent tout de suite ; les dimensions,
                 // la couche réseau les annoncera d'elle-même à la première
@@ -13160,7 +13184,9 @@ fn channel_row(
         // dans un haut-parleur.
         let symbol = match kind {
             _ if temporaire => Icon::User,
-            ChannelKind::Text => Icon::Hash,
+            // Un salon d'une nature inconnue n'est pas listé ; s'il l'était,
+            // un « # » ne promettrait rien de faux.
+            ChannelKind::Text | ChannelKind::Inconnu => Icon::Hash,
             ChannelKind::Voice => Icon::Volume,
         };
         icons::draw(painter, icon, symbol, if temporaire { theme::INVITE } else { fg });

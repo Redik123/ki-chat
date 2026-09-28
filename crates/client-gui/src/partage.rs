@@ -432,6 +432,12 @@ pub struct GoLive {
     pub reglages: Reglages,
     /// La clé du stream, pour (re)démarrer le son du jeu en cours de route.
     pub key: [u8; 32],
+    /// La séquence du son du jeu, née avec la clé et qui ne recule jamais :
+    /// c'est elle qui fait le nonce. L'émetteur la recréait à zéro à chaque
+    /// fois qu'on recochait « son du jeu » — même clé, même stream, donc les
+    /// mêmes nonces —, et les spectateurs, qui jettent toute séquence déjà
+    /// vue, perdaient le son aussi longtemps qu'il avait déjà duré.
+    pub seq_audio: Arc<std::sync::atomic::AtomicU64>,
     /// Le son du jeu, tant qu'il est diffusé — indépendant de la vidéo.
     pub audio: Option<ki_voice::jeu::GameAudio>,
     /// L'instant zéro des horodatages, commun à l'image et au son, et qui
@@ -464,6 +470,7 @@ impl GoLive {
             force_idr,
             cadence,
             key,
+            seq_audio,
             audio,
             origine,
             qualites,
@@ -491,6 +498,7 @@ impl GoLive {
             cadence,
             reglages: reglages.clone(),
             key,
+            seq_audio,
             audio,
             origine,
             qualites,

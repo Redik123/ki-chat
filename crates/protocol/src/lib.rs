@@ -134,6 +134,10 @@ pub enum ClientMsg {
         password: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invite: Option<String>,
+        /// La version du protocole que parle le client ([`PROTOCOLE`]) ; 0
+        /// pour un client antérieur.
+        #[serde(default)]
+        protocole: u32,
     },
     /// Ouvrir un salon textuel (ce qu'on lit et où l'on écrit).
     Join { channel: ChannelId },
@@ -569,6 +573,11 @@ pub enum ServerMsg {
         /// serveur antérieur prendrait pour un message invalide.
         #[serde(default)]
         medailles: bool,
+        /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
+        /// pour un serveur antérieur. Plus haute que celle du client : le
+        /// client est en retard, et le dit.
+        #[serde(default)]
+        protocole: u32,
     },
     /// L'identité du serveur vient de changer : poussée à tout le monde.
     ServerInfo { server: ServerInfo },
@@ -1454,6 +1463,11 @@ pub const MAX_THUMBNAIL_PX: u32 = 256;
 /// légitime : une vignette en base64 dans son enveloppe JSON.
 pub const MAX_LINE: usize = 160 * 1024;
 
+/// La version du protocole, échangée dans `Auth` et `Welcome`. Elle monte
+/// quand un message change d'une façon qu'un pair plus ancien ne lirait pas.
+/// 1 : la première numérotée (0.1.52).
+pub const PROTOCOLE: u32 = 1;
+
 /// Codes de fermeture de la connexion QUIC (« application close ») : ce que
 /// le serveur dit en raccrochant. Un client qui les connaît sait qu'il ne
 /// doit **pas** se reconnecter tout seul ; les autres codes (0) valent pour
@@ -1556,18 +1570,27 @@ pub fn clean_chat(text: &str) -> Result<String, String> {
 /// Ramène les enfilades de lignes vides à `MAX_BLANK_LINES` : sans ça, un
 /// message de trois caractères peut occuper tout l'écran de chacun.
 fn collapse_blank_lines(text: &str) -> String {
+    // Ligne par ligne : une ligne faite d'espaces compte comme vide. Compter
+    // les seuls sauts de ligne laissait passer « \n \n \n… » à l'infini —
+    // l'espace entre deux sauts remettait le compte à zéro.
     let mut out = String::with_capacity(text.len());
-    let mut run = 0usize;
-    for c in text.chars() {
-        if c == '\n' {
-            run += 1;
-            if run > MAX_BLANK_LINES {
+    let mut blanches = 0usize;
+    let mut premiere = true;
+    for ligne in text.split('\n') {
+        let blanche = ligne.trim().is_empty();
+        if blanche {
+            blanches += 1;
+            if blanches >= MAX_BLANK_LINES {
                 continue;
             }
         } else {
-            run = 0;
+            blanches = 0;
         }
-        out.push(c);
+        if !premiere {
+            out.push('\n');
+        }
+        premiere = false;
+        out.push_str(if blanche { "" } else { ligne });
     }
     out
 }
@@ -1647,6 +1670,10 @@ pub fn check_png(bytes: &[u8]) -> Result<(), String> {
     let mut pos = 8;
     let mut first = true;
     let mut closed = false;
+    // L'ordre que la norme impose, et que la doc ci-dessus promettait sans
+    // le vérifier : un seul IHDR, les IDAT d'un seul tenant, rien que IEND
+    // après eux, et un IEND vide.
+    let mut idat_vus = false;
     while pos < bytes.len() {
         // Un bloc : longueur (4) + type (4) + données + CRC (4).
         if pos + 8 > bytes.len() {
@@ -1669,20 +1696,31 @@ pub fn check_png(bytes: &[u8]) -> Result<(), String> {
             check_dimensions(&bytes[pos + 8..pos + 16])?;
             first = false;
         } else if kind == b"IEND" {
-            // Rien ne doit suivre la fin de l'image.
+            // Rien ne doit suivre la fin de l'image, et elle ne porte rien.
             if end != bytes.len() {
                 return Err("données ajoutées après la fin de l'image".into());
+            }
+            if len != 0 {
+                return Err("fin d'image PNG malformée".into());
             }
             closed = true;
         } else if !PIXEL_CHUNKS.iter().any(|allowed| kind == *allowed) {
             let name = String::from_utf8_lossy(kind).to_string();
             return Err(format!("bloc « {name} » interdit dans une vignette"));
+        } else if kind == b"IHDR" {
+            return Err("en-tête PNG répété".into());
+        } else if kind == b"IDAT" {
+            idat_vus = true;
+        } else if idat_vus {
+            // PLTE ou tRNS après les données : la norme les veut avant, et
+            // les IDAT d'un seul tenant — après eux, seul IEND peut venir.
+            return Err("bloc PNG hors de sa place".into());
         }
 
         pos = end;
     }
 
-    if !closed {
+    if !closed || !idat_vus {
         return Err("image PNG incomplète".into());
     }
     Ok(())
@@ -1803,6 +1841,13 @@ pub enum ChannelKind {
     #[default]
     Text,
     Voice,
+    /// Une nature qu'une version plus récente du serveur connaît et pas
+    /// celle-ci. Le serveur se déploie avant les clients : sans cette
+    /// variante, le premier salon d'un genre nouveau rendait `Welcome`
+    /// illisible, jeté en silence — et plus personne n'entrait. Un tel salon
+    /// n'est simplement pas montré ; le serveur n'en crée jamais.
+    #[serde(other)]
+    Inconnu,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2013,6 +2058,16 @@ pub fn clean_emoji(s: &str) -> Option<String> {
         return None;
     }
     if s.chars().any(|c| c.is_control() || c.is_whitespace() || c.is_ascii()) {
+        return None;
+    }
+    // Ni commande bidirectionnelle ni caractère invisible : une « réaction »
+    // U+202E retournait la ligne qui l'affichait, un U+200B n'était rien.
+    // Le liant U+200D et le sélecteur U+FE0F restent : les émojis composés
+    // (👨‍👩‍👧, ❤️) en sont faits.
+    if s.chars().any(|c| {
+        is_dangerous(c)
+            || matches!(c, '\u{200b}' | '\u{200c}' | '\u{2060}'..='\u{2064}' | '\u{feff}' | '\u{00ad}')
+    }) {
         return None;
     }
     Some(s.to_string())
@@ -3100,6 +3155,11 @@ pub enum JeuEtat {
     PreGame,
     /// En partie.
     EnJeu,
+    /// Un état qu'une version plus récente connaît et pas celle-ci : voir
+    /// [`ChannelKind::Inconnu`]. Sans lui, un seul membre à jour rendait la
+    /// liste des membres illisible chez tous les autres.
+    #[serde(other)]
+    Inconnu,
 }
 
 /// Longueur admise pour la file et la carte : ce sont des identifiants
@@ -3200,6 +3260,7 @@ impl JeuStatut {
                 };
                 format!("{file}{ou}{score}{party}")
             }
+            JeuEtat::Inconnu => format!("Valorant{party}"),
         }
     }
 }
@@ -3506,6 +3567,14 @@ pub struct EtatMusique {
     pub compteurs: CompteursMusique,
     #[serde(default)]
     pub playlists: Vec<ResumePlaylist>,
+}
+
+impl EtatMusique {
+    /// La longueur réelle de la file, même quand `file` n'en porte que le
+    /// début.
+    pub fn longueur_file(&self) -> usize {
+        (self.file_totale as usize).max(self.file.len())
+    }
 }
 
 /// Une adresse que le bot accepte : YouTube ou SoundCloud, en HTTPS,
@@ -5221,6 +5290,83 @@ mod tests {
         out.extend(chunk(b"IDAT", &[0x78, 0x9c, 0x00]));
         out.extend(chunk(b"IEND", &[]));
         out
+    }
+
+    /// La structure que la doc de `check_png` promet : un seul IHDR, des IDAT
+    /// d'un seul tenant, rien que IEND après eux, un IEND vide.
+    #[test]
+    fn un_png_a_la_structure_desordonnee_est_refuse() {
+        let entete = || {
+            let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            out.extend(ihdr(64, 64));
+            out
+        };
+        let idat = chunk(b"IDAT", &[0x78, 0x9c, 0x00]);
+        // Un IEND qui porte des octets.
+        let mut iend_plein = entete();
+        iend_plein.extend(&idat);
+        iend_plein.extend(chunk(b"IEND", b"cache"));
+        assert!(check_png(&iend_plein).is_err());
+        // Un second IHDR.
+        let mut deux_entetes = entete();
+        deux_entetes.extend(ihdr(8, 8));
+        deux_entetes.extend(&idat);
+        deux_entetes.extend(chunk(b"IEND", &[]));
+        assert!(check_png(&deux_entetes).is_err());
+        // Une palette après les données, et des données en deux morceaux.
+        let mut dispersees = entete();
+        dispersees.extend(&idat);
+        dispersees.extend(chunk(b"tRNS", &[0]));
+        dispersees.extend(&idat);
+        dispersees.extend(chunk(b"IEND", &[]));
+        assert!(check_png(&dispersees).is_err());
+        // Aucune donnée d'image.
+        let mut sans_donnees = entete();
+        sans_donnees.extend(chunk(b"IEND", &[]));
+        assert!(check_png(&sans_donnees).is_err());
+        // Plusieurs IDAT à la suite restent permis.
+        let mut plusieurs = entete();
+        plusieurs.extend(&idat);
+        plusieurs.extend(&idat);
+        plusieurs.extend(chunk(b"IEND", &[]));
+        assert!(check_png(&plusieurs).is_ok());
+    }
+
+    /// Une nature de salon ou un état de jeu qu'une version plus récente
+    /// introduirait ne rend plus le message entier illisible.
+    #[test]
+    fn une_variante_inconnue_ne_rend_pas_le_message_illisible() {
+        let salon: ChannelInfo =
+            serde_json::from_str(r#"{"id":7,"name":"scène","kind":"stage"}"#).unwrap();
+        assert_eq!(salon.kind, ChannelKind::Inconnu);
+        let jeu: JeuStatut = serde_json::from_str(r#"{"etat":"replay"}"#).unwrap();
+        assert_eq!(jeu.etat, JeuEtat::Inconnu);
+        // Et un client ou un serveur antérieur, sans numéro de protocole,
+        // se lit comme la version 0.
+        let auth: ClientMsg =
+            serde_json::from_str(r#"{"type":"auth","username":"a","password":"b"}"#).unwrap();
+        assert!(matches!(auth, ClientMsg::Auth { protocole: 0, .. }));
+    }
+
+    /// Une ligne d'espaces compte comme vide : les sauts de ligne séparés par
+    /// des espaces ne passent plus la borne.
+    #[test]
+    fn les_lignes_d_espaces_comptent_comme_vides() {
+        let net = clean_chat(&format!("a{}b", "\n \n".repeat(50))).unwrap();
+        assert_eq!(net.matches('\n').count(), MAX_BLANK_LINES);
+        assert_eq!(clean_chat("a\n\n\n\n\n\nb").unwrap(), "a\n\n\nb");
+        assert_eq!(clean_chat("un\ndeux").unwrap(), "un\ndeux");
+    }
+
+    /// Une réaction invisible ou qui retourne le texte est refusée ; les
+    /// émojis composés passent.
+    #[test]
+    fn une_reaction_invisible_ou_retournee_est_refusee() {
+        assert_eq!(clean_emoji("\u{202e}"), None);
+        assert_eq!(clean_emoji("\u{200b}"), None);
+        assert_eq!(clean_emoji("👍\u{200b}"), None);
+        assert!(clean_emoji("❤️").is_some());
+        assert!(clean_emoji("🏳\u{fe0f}\u{200d}🌈").is_some());
     }
 
     #[test]

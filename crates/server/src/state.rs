@@ -1463,6 +1463,7 @@ mod tests {
             },
             portes: true,
             medailles: true,
+            protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");
     }

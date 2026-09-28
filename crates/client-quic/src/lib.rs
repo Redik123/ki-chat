@@ -195,7 +195,7 @@ impl QuicClient {
         loop {
             match read_line(&mut self.lines).await {
                 Some(line) => {
-                    if let Ok(msg) = serde_json::from_str::<ServerMsg>(&line) {
+                    if let Some(msg) = lire_message(&line) {
                         return Some(msg);
                     }
                 }
@@ -295,12 +295,38 @@ pub struct ControlReader {
     lines: BufReader<quinn::RecvStream>,
 }
 
+/// Lignes illisibles dont on garde la trace, pour tout le processus : de
+/// quoi comprendre ce qu'un serveur plus récent envoie, pas de quoi noyer
+/// le journal.
+static ILLISIBLES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const ILLISIBLES_NOTES: u32 = 20;
+
+/// Une ligne du serveur, lue — ou jetée, mais plus en silence : un `Welcome`
+/// qu'une version plus récente rendait illisible disparaissait sans trace,
+/// et l'on ne voyait que « le serveur n'a pas répondu ».
+fn lire_message(line: &str) -> Option<ServerMsg> {
+    match serde_json::from_str::<ServerMsg>(line) {
+        Ok(msg) => Some(msg),
+        Err(e) => {
+            use std::sync::atomic::Ordering;
+            if ILLISIBLES.fetch_add(1, Ordering::Relaxed) < ILLISIBLES_NOTES {
+                let genre = serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|v| v["type"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| "?".into());
+                tracing::warn!("message du serveur ignoré (type « {genre} ») : {e}");
+            }
+            None
+        }
+    }
+}
+
 impl ControlReader {
     pub async fn next_msg(&mut self) -> Option<ServerMsg> {
         loop {
             match read_line(&mut self.lines).await {
                 Some(line) => {
-                    if let Ok(msg) = serde_json::from_str::<ServerMsg>(&line) {
+                    if let Some(msg) = lire_message(&line) {
                         return Some(msg);
                     }
                 }

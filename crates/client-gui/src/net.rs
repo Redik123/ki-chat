@@ -305,10 +305,18 @@ impl NetHandle {
     /// AAD, domaine de nonce 2) et part en datagramme — jamais bloquant, et
     /// un paquet que la connexion ne peut pas prendre est simplement perdu,
     /// comme la voix.
-    pub fn game_audio_emit(&self, stream_id: u32, key: [u8; 32]) -> ki_voice::jeu::PaquetAudio {
+    ///
+    /// `seq` appartient à la diffusion, pas à l'émetteur : un émetteur
+    /// recréé (case « son du jeu » décochée puis recochée) reprend là où le
+    /// précédent s'était arrêté — un nonce ne sert jamais deux fois.
+    pub fn game_audio_emit(
+        &self,
+        stream_id: u32,
+        key: [u8; 32],
+        seq: Arc<AtomicU64>,
+    ) -> ki_voice::jeu::PaquetAudio {
         let conn_slot = self.link.conn.clone();
         let cipher = XChaCha20Poly1305::new(&key.into());
-        let seq = AtomicU64::new(0);
         Arc::new(move |opus: &[u8], pts_us: u64| {
             let s = seq.fetch_add(1, AtomOrd::Relaxed);
             let mut head = [0u8; ki_protocol::AUDIO_HEADER_LEN];
@@ -575,6 +583,7 @@ async fn run(
         username: creds.username,
         password: creds.password,
         invite: creds.invite,
+        protocole: ki_protocol::PROTOCOLE,
     };
     if client.send_msg(&auth).await.is_err() {
         emit(Event::ConnectFailed("échec de l'authentification".into()));

@@ -170,6 +170,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         username,
         password,
         invite,
+        protocole,
     }) = serde_json::from_str::<ClientMsg>(&first)
     else {
         send_direct(
@@ -401,8 +402,10 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         portes: true,
         // Et avant d'envoyer ses médailles VALORANT.
         medailles: true,
+        // Sa version du protocole : un client en retard le dira.
+        protocole: ki_protocol::PROTOCOLE,
     });
-    tracing::info!("connexion : {username} (id {user_id})");
+    tracing::info!("connexion : {username} (id {user_id}, protocole {protocole})");
     // La liste du serveur vient de changer, pour tout le monde.
     state.broadcast_all(&ServerMsg::UserJoined {
         user_id,
@@ -3064,6 +3067,13 @@ fn handle_msg(
             allowed_roles,
         } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_CHANNELS) {
+                return;
+            }
+            // Une nature que ce serveur ne connaît pas n'est pas un salon.
+            if kind == ki_protocol::ChannelKind::Inconnu {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "nature de salon inconnue".into(),
+                });
                 return;
             }
             // Journal ouvert avant l'annonce, comme pour le salon d'une

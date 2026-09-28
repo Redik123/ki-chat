@@ -857,6 +857,8 @@ fn rang_d_etat(j: &JeuStatut) -> u8 {
         JeuEtat::PreGame => 1,
         JeuEtat::Menus if !j.file.is_empty() => 2,
         JeuEtat::Menus => 3,
+        // Un état d'une version plus récente : en dernier, faute de savoir.
+        JeuEtat::Inconnu => 4,
     }
 }
 
@@ -908,6 +910,7 @@ fn etat_en_direct(j: &JeuStatut) -> (String, Option<(String, Color32)>) {
         JeuEtat::PreGame => (format!("{file} · sélection des agents{party}"), None),
         JeuEtat::Menus if file.is_empty() => (format!("au menu{party}"), None),
         JeuEtat::Menus => (format!("en file {file}{party}"), None),
+        JeuEtat::Inconnu => (format!("en ligne{party}"), None),
     }
 }
 

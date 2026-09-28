@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
             username: username.clone(),
             password: password.clone(),
             invite,
+            protocole: ki_protocol::PROTOCOLE,
         })
         .await?;
 
@@ -211,7 +212,9 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         println!("expulsé par un admin : {reason}");
                     }
-                    std::process::exit(0);
+                    // Une sortie qui n'est pas un succès : un script qui
+                    // enchaîne la commande doit pouvoir le voir.
+                    std::process::exit(2);
                 }
                 ServerMsg::AdminInfo { users, invites } => {
                     println!("* comptes :");
@@ -346,12 +349,29 @@ async fn main() -> anyhow::Result<()> {
                 ServerMsg::PorteInvitation { .. } => {}
             }
         }
-        println!("connexion fermée par le serveur");
-        std::process::exit(0);
+        // Le motif, quand le serveur en a donné un en raccrochant
+        // (expulsion, bannissement : `ki_protocol::FERMETURE_*`).
+        match reader.conn.close_reason() {
+            Some(raison) => println!("connexion fermée par le serveur : {raison}"),
+            None => println!("connexion fermée par le serveur"),
+        }
+        // Fermée avant même le Welcome : un refus (mot de passe, bannissement,
+        // invitation) — pas un succès, et le code de sortie le dit.
+        std::process::exit(if welcome_tx.is_some() { 1 } else { 0 });
     });
 
-    // Démarrage du moteur audio dès réception du Welcome.
-    let (user_id, voice_key) = welcome_rx.await?;
+    // Démarrage du moteur audio dès réception du Welcome — attendu vingt
+    // secondes au plus : un serveur qui ne répond rien ne fige plus la
+    // commande indéfiniment.
+    let (user_id, voice_key) =
+        match tokio::time::timeout(std::time::Duration::from_secs(20), welcome_rx).await {
+            Ok(Ok(welcome)) => welcome,
+            Ok(Err(_)) => anyhow::bail!("connexion fermée avant l'accueil du serveur"),
+            Err(_) => {
+                eprintln!("! le serveur n'a pas répondu à l'authentification en vingt secondes");
+                std::process::exit(1);
+            }
+        };
     let mut cfg = VoiceConfig::new(user_id, voice_key);
     cfg.tone = tone;
     cfg.no_playback = deaf;
@@ -517,18 +537,30 @@ async fn main() -> anyhow::Result<()> {
             // `/lock <id salon vocal> <mot de passe> [minutes]`
             let mut parts = rest.trim().splitn(3, ' ');
             let channel = parts.next().and_then(|c| c.parse().ok());
-            match channel {
-                Some(channel) => ClientMsg::AdminSetVoicePassword {
+            // Le mot de passe est obligatoire : sans lui, le serveur lit
+            // « aucun verrou », et `/lock 5` **déverrouillait** le salon.
+            // Déverrouiller, c'est `/unlock`.
+            let password = parts.next().filter(|p| !p.is_empty()).map(str::to_string);
+            match (channel, password) {
+                (Some(channel), Some(password)) => ClientMsg::AdminSetVoicePassword {
                     channel,
-                    password: parts.next().map(str::to_string),
+                    password: Some(password),
                     ttl_secs: parts
                         .next()
                         .and_then(|m| m.parse::<u32>().ok())
                         .unwrap_or(60)
                         .saturating_mul(60),
                 },
-                None => {
-                    eprintln!("! usage : /lock <id> <mot de passe> [minutes]");
+                _ => {
+                    eprintln!("! usage : /lock <id> <mot de passe> [minutes] — /unlock <id> pour déverrouiller");
+                    continue;
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("/unlock ") {
+            match rest.trim().parse() {
+                Ok(channel) => ClientMsg::AdminSetVoicePassword { channel, password: None, ttl_secs: 0 },
+                Err(_) => {
+                    eprintln!("! usage : /unlock <id>");
                     continue;
                 }
             }
