@@ -9,6 +9,7 @@
 //! indépendant du reste du client.
 
 pub mod docteur;
+pub mod dynamique;
 pub mod effects;
 // `jitter` et `resample` sont l'intérieur du moteur, et le resteraient
 // volontiers — mais un banc criterion est un crate EXTÉRIEUR : il ne voit que
@@ -194,6 +195,10 @@ pub struct VoiceConfig {
     /// Porte de bruit : en-dessous de ce niveau, le micro est atténué
     /// progressivement (0.0 = désactivée).
     pub gate_threshold: f32,
+    /// Compression de sa voix à l'émission (`dynamique::COMPRESSION_*`).
+    pub compression: u8,
+    /// Adoucir les cris des autres : un compresseur par personne entendue.
+    pub adoucir_cris: bool,
     /// Taille de tampon de gigue imposée en trames (0 = adaptatif).
     pub jitter_frames: usize,
     /// Mode test : émet une sinusoïde 440 Hz au lieu du micro.
@@ -230,6 +235,8 @@ impl VoiceConfig {
             agc: true,
             agc_target: 0.30,
             gate_threshold: 0.0,
+            compression: dynamique::COMPRESSION_DOUCE,
+            adoucir_cris: true,
             jitter_frames: 0,
             tone: false,
             no_playback: false,
@@ -514,6 +521,13 @@ pub struct VoiceStats {
     /// pendant qu'elle jouait : le craquement vient de la machine, pas du
     /// réseau. Toujours 0 sur le moteur de secours, qui ne le mesure pas.
     pub sortie_a_sec: u64,
+    /// Trames où le micro arrivait déjà écrêté, avant tout traitement : le
+    /// niveau du micro (Windows, casque) est trop haut, et aucun réglage de
+    /// ki-chat ne rend ce que la carte son a coupé.
+    pub saturations: u64,
+    /// Le micro a saturé dans les deux dernières secondes (l'interface
+    /// l'affiche à côté du vumètre).
+    pub micro_sature: bool,
 }
 
 #[derive(Default)]
@@ -533,6 +547,11 @@ struct Counters {
     /// La carte son trouvée à court par le fil de rendu natif (voir
     /// `VoiceStats::sortie_a_sec`). Partagé avec ce fil, d'où l'`Arc`.
     sortie_a_sec: Arc<AtomicU64>,
+    /// Trames arrivées écrêtées du micro (voir `VoiceStats::saturations`).
+    saturations: AtomicU64,
+    /// Quand, en ms depuis `Shared::depart`, le micro a saturé pour la
+    /// dernière fois (0 : jamais).
+    derniere_saturation_ms: AtomicU64,
     /// Le moteur qui tient **réellement** le micro, d'après la dernière
     /// tentative d'ouverture (`docteur::Moteur`, rangé en code).
     ///
@@ -591,6 +610,12 @@ struct Shared {
     agc_target: AtomicU32,
     /// Porte de bruit (bits f32, 0.0 = désactivée).
     gate_threshold: AtomicU32,
+    /// Compression à l'émission (`dynamique::COMPRESSION_*`).
+    compression: std::sync::atomic::AtomicU8,
+    /// Un compresseur par personne entendue (sauf le bot musique).
+    adoucir_cris: AtomicBool,
+    /// L'origine des horodatages du moteur (dernière saturation du micro).
+    depart: Instant,
     /// Maintien VAD en ms.
     vad_hangover_ms: AtomicU32,
     vad_neural: AtomicBool,
@@ -712,6 +737,9 @@ impl VoiceEngine {
             agc: AtomicBool::new(cfg.agc),
             agc_target: AtomicU32::new(cfg.agc_target.to_bits()),
             gate_threshold: AtomicU32::new(cfg.gate_threshold.to_bits()),
+            compression: std::sync::atomic::AtomicU8::new(cfg.compression),
+            adoucir_cris: AtomicBool::new(cfg.adoucir_cris),
+            depart: Instant::now(),
             vad_hangover_ms: AtomicU32::new(cfg.vad_hangover_ms),
             vad_neural: AtomicBool::new(cfg.vad_neural),
             vad_sens: AtomicU32::new(cfg.vad_sensitivity.to_bits()),
@@ -864,6 +892,16 @@ impl VoiceEngine {
     /// Porte de bruit (0.0 = désactivée), à chaud.
     pub fn set_gate_threshold(&self, threshold: f32) {
         store_f32(&self.shared.gate_threshold, threshold.clamp(0.0, 0.5));
+    }
+
+    /// Compression de sa voix (`dynamique::COMPRESSION_*`), à chaud.
+    pub fn set_compression(&self, niveau: u8) {
+        self.shared.compression.store(niveau.min(dynamique::COMPRESSION_FORTE), Ordering::Relaxed);
+    }
+
+    /// Adoucir les cris des autres, à chaud.
+    pub fn set_adoucir_cris(&self, on: bool) {
+        self.shared.adoucir_cris.store(on, Ordering::Relaxed);
     }
 
     /// Maintien d'émission VAD en ms, à chaud.
@@ -1076,6 +1114,12 @@ impl VoiceEngine {
             worst_jitter_ms,
             underruns: self.shared.counters.underruns.load(Ordering::Relaxed),
             sortie_a_sec: self.shared.counters.sortie_a_sec.load(Ordering::Relaxed),
+            saturations: self.shared.counters.saturations.load(Ordering::Relaxed),
+            micro_sature: {
+                let derniere = self.shared.counters.derniere_saturation_ms.load(Ordering::Relaxed);
+                derniere != 0
+                    && (self.shared.depart.elapsed().as_millis() as u64).saturating_sub(derniere) < 2_000
+            },
         }
     }
 
@@ -1118,6 +1162,7 @@ impl VoiceEngine {
             ouvertures_affamees: sh.counters.starved_opens.load(Ordering::Relaxed) as u32,
             trames_incompletes: sh.counters.underruns.load(Ordering::Relaxed),
             sortie_a_sec: sh.counters.sortie_a_sec.load(Ordering::Relaxed),
+            saturations_micro: sh.counters.saturations.load(Ordering::Relaxed),
             moteur: docteur::Moteur::depuis_code(sh.counters.input_engine.load(Ordering::Relaxed)),
             micro_communications: sh.counters.comms_capture.load(Ordering::Relaxed),
             attenuation_windows: attenuation_communications(),
@@ -1463,6 +1508,11 @@ fn capture_loop(
     let mut deep = LazyDeep::default();
     let mut gate = NoiseGate::new();
     let mut agc = Agc::new();
+    // La dynamique de fin de chaîne : le compresseur du réglage (reconstruit
+    // quand il change), et le limiteur, toujours là.
+    let mut compresseur: Option<dynamique::Compresseur> = None;
+    let mut compression_en_place = u8::MAX;
+    let mut limiteur = dynamique::Limiteur::new();
     // Le réseau de détection de parole, chargé à la première trame qui en a
     // besoin (mode activation vocale, micro armé) : ~1 Mo de modèle qu'on
     // ne paie pas en push-to-talk. En arrière-plan, comme DeepFilterNet.
@@ -1782,6 +1832,15 @@ fn capture_loop(
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
 
+            // Le micro tel que la carte son le livre : écrêté ici, c'est
+            // que son niveau est trop haut à la source — rien plus loin ne
+            // rendra ce qui a été coupé. Compté, et daté pour l'interface.
+            if dynamique::trame_saturee(&frame) {
+                sh.counters.saturations.fetch_add(1, Ordering::Relaxed);
+                let depuis = (sh.depart.elapsed().as_millis() as u64).max(1);
+                sh.counters.derniere_saturation_ms.store(depuis, Ordering::Relaxed);
+            }
+
             // 0. Annulation d'écho : soustrait ce que la sortie vient de
             // jouer (l'écho des haut-parleurs revenu dans le micro), AVANT
             // tout le reste — le filtre veut la capture telle quelle, et la
@@ -1825,11 +1884,13 @@ fn capture_loop(
                 sh.aec_far.lock().unwrap().clear();
             }
 
-            // 1. Gain d'entrée.
+            // 1. Gain d'entrée. Sans écrêtage ici : au-delà de 100 %, une
+            // voix forte était coupée net à la pleine échelle — c'est le
+            // limiteur de fin de chaîne qui borne, en douceur.
             let gain = load_f32(&sh.input_gain);
             if (gain - 1.0).abs() > 0.001 {
                 for s in frame.iter_mut() {
-                    *s = (*s * gain).clamp(-1.0, 1.0);
+                    *s *= gain;
                 }
             }
             // 2. Débruitage — en continu (même micro coupé) pour que le
@@ -1849,7 +1910,20 @@ fn capture_loop(
             if sh.agc.load(Ordering::Relaxed) {
                 agc.process(&mut frame, load_f32(&sh.agc_target));
             }
-            // 5. Vumètre : niveau après toute la chaîne (= ce qui part).
+            // 5. Dynamique : la compression choisie contient les éclats de
+            // voix, puis le limiteur garantit qu'aucun échantillon ne passe
+            // la pleine échelle — ni un cri, ni l'attaque d'une phrase forte
+            // que le gain automatique n'a pas encore rattrapée.
+            let niveau = sh.compression.load(Ordering::Relaxed);
+            if niveau != compression_en_place {
+                compresseur = dynamique::Compresseur::emission(niveau);
+                compression_en_place = niveau;
+            }
+            if let Some(c) = compresseur.as_mut() {
+                c.traiter_trame(&mut frame);
+            }
+            limiteur.traiter_trame(&mut frame);
+            // 6. Vumètre : niveau après toute la chaîne (= ce qui part).
             let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
             sh.counters.mic_peak_bits.store(peak.to_bits(), Ordering::Relaxed);
             // Le robinet de l'enregistreur de clips, s'il est branché : la
@@ -1858,7 +1932,7 @@ fn capture_loop(
                 r(&frame);
             }
 
-            // 6. Décision d'émission : armé + activation vocale éventuelle.
+            // 7. Décision d'émission : armé + activation vocale éventuelle.
             let armed = sh.transmitting.load(Ordering::Relaxed);
             let threshold = load_f32(&sh.vad_threshold);
             // Activation vocale : par le réseau de neurones si demandé (et
@@ -1931,7 +2005,7 @@ fn capture_loop(
                 sender.apply_dred(sh.dred.load(Ordering::Relaxed));
                 sender.send_frame(&sh, &frame);
             }
-            // 7. Retour local (« s'écouter ») : la trame passe par un VRAI
+            // 8. Retour local (« s'écouter ») : la trame passe par un VRAI
             // aller-retour Opus (encodage + décodage au débit courant) —
             // tu entends exactement ce que les autres entendent, artéfacts
             // du codec compris. Tampon borné à ~250 ms (anti-dérive).
@@ -2292,9 +2366,15 @@ impl NoiseGate {
 /// pendant les silences le gain reflue vers le neutre au lieu de rester
 /// gonflé (le premier mot n'écrête plus) ; et la remontée est d'autant plus
 /// vive que le gain est loin du compte — après un cri, une phrase douce
-/// retrouve son niveau en quelques trames, pas en une demi-seconde. Le tout
-/// écrêté doux : une attaque sur-amplifiée sature en douceur le temps que
-/// l'attaque du gain la rattrape, au lieu de craquer.
+/// retrouve son niveau en quelques trames, pas en une demi-seconde.
+///
+/// Le gain glisse d'un bout à l'autre de la trame au lieu de sauter d'une
+/// trame à la suivante : ces marches de 20 ms s'entendaient comme un grain.
+/// Et il n'écrête plus lui-même : une attaque sur-amplifiée (une phrase forte
+/// après une douce, le gain encore haut) passait par un écrêtage doux jusqu'à
+/// ce que le gain redescende — 60 à 80 ms de saturation à chaque éclat. Le
+/// compresseur et le limiteur de fin de chaîne (`dynamique`) la prennent
+/// désormais, à l'échantillon près.
 struct Agc {
     gain: f32,
     /// Plancher de bruit estimé (crête des moments les plus calmes).
@@ -2310,12 +2390,15 @@ impl Agc {
     /// vrai silence l'écrasait à zéro et le premier bruit venu redevenait
     /// « de la voix ».
     const FLOOR_MIN: f32 = Self::GATE / 3.0;
+    /// Crête qu'aucune trame ne dépasse à la sortie du gain automatique.
+    const CRETE_MAX: f32 = 0.9;
 
     fn new() -> Self {
         Self { gain: 1.0, floor: Self::FLOOR_MIN }
     }
 
     fn process(&mut self, frame: &mut [f32], target: f32) {
+        let mut avant = self.gain;
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
         // Plancher : tombe immédiatement sur une trame calme, remonte
         // lentement (~2 % par trame) — il s'établit en une seconde ou deux,
@@ -2342,9 +2425,21 @@ impl Agc {
             // Bruit ou silence : retour progressif au neutre.
             self.gain += (1.0 - self.gain) * 0.005;
         }
-        if (self.gain - 1.0).abs() > 0.001 {
-            for s in frame.iter_mut() {
-                *s = soft_clip(*s * self.gain);
+        // Attaque instantanée contre la saturation : la trame entière est là,
+        // sa crête est connue avant d'appliquer quoi que ce soit. Le gain n'y
+        // dépasse jamais ce qui la porterait au-delà de 90 % de la pleine
+        // échelle — la phrase forte qui suit une douce n'arrive plus
+        // multipliée par le gain d'avant.
+        if peak > 0.0 {
+            let plafond = Self::CRETE_MAX / peak;
+            self.gain = self.gain.min(plafond);
+            avant = avant.min(plafond);
+        }
+        if (avant - 1.0).abs() > 0.001 || (self.gain - 1.0).abs() > 0.001 {
+            let n = frame.len().max(1) as f32;
+            let pas = (self.gain - avant) / n;
+            for (i, s) in frame.iter_mut().enumerate() {
+                *s *= avant + pas * (i as f32 + 1.0);
             }
         }
     }
@@ -2408,10 +2503,12 @@ impl DeepDenoiser {
             let sortie = self.out.row(0);
             let sortie = sortie.as_slice().expect("layout contigu");
             if sortie.iter().all(|s| s.is_finite()) {
-                // Bornée : rien ne garantit qu'un masque neuronal reste sous
-                // la pleine échelle, et l'encodeur n'a pas à en juger.
+                // Bornée, par sécurité, loin au-dessus de la pleine échelle :
+                // le gain d'entrée peut y porter la voix, et c'est le limiteur
+                // de fin de chaîne qui la ramène, en douceur — écrêter ici
+                // couperait net ce qu'il sait arrondir.
                 for (s, &d) in block.iter_mut().zip(sortie) {
-                    *s = d.clamp(-1.0, 1.0);
+                    *s = d.clamp(-4.0, 4.0);
                 }
             } else {
                 // Un NaN dans la sortie d'un réseau récurrent est aussi dans
@@ -2906,6 +3003,8 @@ fn output_writer(
     // Tampons de travail alloués une fois : ce chemin est temps réel.
     let mut gauche: Vec<f32> = Vec::new();
     let mut droite: Vec<f32> = Vec::new();
+    // Le retour local (« s'écouter ») a pris son avance (voir plus bas).
+    let mut retour_amorce = false;
     move |out: &mut [f32]| {
         let frames = out.len() / 2;
         ticks_cb.fetch_add(1, Ordering::Relaxed);
@@ -2921,13 +3020,18 @@ fn output_writer(
                 // des échantillons — jamais derrière un décodage.
                 let volumes = sh_cb.volumes.lock().unwrap();
                 let playouts = sh_cb.playouts.lock().unwrap();
+                // Adoucir les cris : un compresseur par voix — jamais sur le
+                // bot musique, dont un compresseur de voix écraserait la
+                // musique.
+                let adoucir = sh_cb.adoucir_cris.load(Ordering::Relaxed);
                 for (id, playout) in playouts.iter() {
                     let gain = volumes.get(id).copied().unwrap_or(1.0);
+                    let adoucir = adoucir && *id != ki_protocol::MUSIQUE_ID;
                     // Le verrou est déjà tenu pour mixer : on relève les
                     // trous dans la foulée, sans second verrouillage sur le
                     // chemin temps réel.
                     let mut p = playout.lock().unwrap();
-                    any |= p.mix_into(&mut mix, gain);
+                    any |= p.mix_into(&mut mix, gain, adoucir);
                     trous += p.take_starvations();
                 }
             }
@@ -2939,13 +3043,26 @@ fn output_writer(
                 }
             }
             // Retour local : test micro (« s'écouter ») et son de test.
+            //
+            // Amorcé comme une voix reçue : deux trames d'avance avant de
+            // jouer, et de nouveau après un trou. Il se jouait au fil de
+            // l'eau, et quand la sortie réclamait sa trame juste avant que
+            // la capture ne livre la sienne, la trame partait à moitié
+            // vide : « s'écouter » craquait, alors que la voix émise était
+            // propre — le test trompait sur ce que les autres entendent.
             {
                 let mut loopback = sh_cb.loopback_buf.lock().unwrap();
-                if !loopback.is_empty() {
+                if !retour_amorce && loopback.len() >= 2 * FRAME_SAMPLES {
+                    retour_amorce = true;
+                }
+                if retour_amorce {
                     for o in mix.iter_mut() {
                         match loopback.pop_front() {
                             Some(s) => *o += s,
-                            None => break,
+                            None => {
+                                retour_amorce = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -3357,6 +3474,49 @@ mod tests {
         // Le signal décodé doit exister et rester borné.
         let peak = out.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.05 && peak <= 1.0, "aller-retour codec suspect : {peak}");
+    }
+
+    /// « Quand je parle trop fort, ça part en couille » : une phrase douce
+    /// fait monter le gain automatique, puis une phrase forte arrive. Ses
+    /// premières trames repartaient multipliées par le gain d'avant, puis
+    /// écrêtées pendant 60 à 80 ms. Gain automatique, compression douce et
+    /// limiteur les tiennent désormais sous la pleine échelle, sans plateau
+    /// d'écrêtage.
+    #[test]
+    fn une_phrase_forte_apres_une_douce_ne_sature_plus() {
+        let mut agc = Agc::new();
+        let mut comp = dynamique::Compresseur::emission(dynamique::COMPRESSION_DOUCE).unwrap();
+        let mut lim = dynamique::Limiteur::new();
+        let mut phase = 0f32;
+        let mut trame = |amplitude: f32| {
+            let mut f = [0f32; FRAME_SAMPLES];
+            for s in f.iter_mut() {
+                phase += 2.0 * std::f32::consts::PI * 220.0 / SAMPLE_RATE as f32;
+                *s = amplitude * phase.sin();
+            }
+            f
+        };
+        let mut chaine = |f: &mut [f32; FRAME_SAMPLES]| {
+            agc.process(f, 0.30);
+            comp.traiter_trame(f);
+            lim.traiter_trame(f);
+        };
+        // Une seconde de voix douce : le gain monte.
+        for _ in 0..50 {
+            let mut f = trame(0.04);
+            chaine(&mut f);
+        }
+        // Puis on parle fort.
+        let (mut crete, mut colles, mut total) = (0f32, 0usize, 0usize);
+        for _ in 0..10 {
+            let mut f = trame(0.8);
+            chaine(&mut f);
+            crete = f.iter().fold(crete, |m, s| m.max(s.abs()));
+            colles += f.iter().filter(|s| s.abs() > 0.88).count();
+            total += f.len();
+        }
+        assert!(crete <= dynamique::Limiteur::PLAFOND + 1e-6, "crête {crete}");
+        assert!(colles * 100 < total, "{colles} échantillons collés au plafond sur {total}");
     }
 
     #[test]

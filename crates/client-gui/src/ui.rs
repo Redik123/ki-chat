@@ -524,6 +524,189 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
     closed
 }
 
+// ---------------------------------------------------------------------
+// Réglages : sections, lignes, choix segmentés, interrupteurs
+// ---------------------------------------------------------------------
+
+/// Largeur de la colonne des libellés d'une ligne de réglage.
+const LIBELLE_W: f32 = 150.0;
+/// En-dessous de cette largeur, le libellé passe au-dessus du contrôle.
+const LIGNE_ETROITE: f32 = 430.0;
+
+/// Une section de réglages : une surface à peine relevée, son titre, une
+/// phrase qui dit à quoi elle sert, puis ses lignes.
+pub fn section(
+    ui: &mut Ui,
+    icon: Icon,
+    titre: &str,
+    sous_titre: Option<&str>,
+    add: impl FnOnce(&mut Ui),
+) {
+    egui::Frame::NONE
+        .fill(theme::BG_RAISED)
+        .stroke(Stroke::new(1.0_f32, theme::BORDER_SOFT))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                icons::draw(ui.painter(), rect, icon, theme::ACCENT);
+                ui.add_space(2.0);
+                ui.label(RichText::new(titre).color(theme::TEXT).size(15.0).strong());
+            });
+            if let Some(s) = sous_titre {
+                ui.add_space(2.0);
+                ui.label(RichText::new(s).color(theme::TEXT_FAINT).size(11.5));
+            }
+            ui.add_space(12.0);
+            add(ui);
+        });
+    ui.add_space(12.0);
+}
+
+/// Une ligne de réglage : le libellé sur sa colonne, le contrôle à droite —
+/// ou le libellé au-dessus quand la fenêtre est étroite. Ce que `add`
+/// ajoute s'empile dans la colonne du contrôle (une explication sous un
+/// curseur, par exemple).
+pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
+    let texte = RichText::new(libelle).color(theme::TEXT_DIM).size(12.5);
+    if ui.available_width() < LIGNE_ETROITE {
+        ui.label(texte);
+        ui.add_space(3.0);
+        add(ui);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(LIBELLE_W, 24.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(LIBELLE_W);
+                    ui.label(texte);
+                },
+            );
+            ui.vertical(|ui| add(ui));
+        });
+    }
+    ui.add_space(10.0);
+}
+
+/// Explication sous un contrôle, dans la colonne de la ligne.
+pub fn precision(ui: &mut Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT_FAINT).size(11.5)).wrap());
+}
+
+/// Choix exclusif en pastilles jointes (« Aucune · Douce · Forte ») :
+/// toutes les options se voient d'un coup, sans liste à dérouler. Rend vrai
+/// quand la valeur a changé.
+pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &str)]) -> bool {
+    let font = FontId::proportional(12.5);
+    let textes: Vec<_> = choix
+        .iter()
+        .map(|(_, l)| ui.fonts(|f| f.layout_no_wrap((*l).to_owned(), font.clone(), theme::TEXT)))
+        .collect();
+    let pad = 12.0;
+    let tailles: Vec<f32> = textes.iter().map(|g| g.size().x + 2.0 * pad).collect();
+    let n = choix.len().max(1) as f32;
+    let egales = tailles.iter().fold(0.0, |m: f32, t| m.max(*t)) * n;
+    let dispo = ui.available_width();
+    // Des parts égales quand elles tiennent — étirées jusqu'à la colonne,
+    // dans une limite raisonnable —, chacune à sa taille sinon.
+    let largeurs: Vec<f32> = if egales + 6.0 <= dispo {
+        let totale = dispo.min(380.0).max(egales + 6.0);
+        vec![(totale - 6.0) / n; choix.len()]
+    } else {
+        tailles
+    };
+    let largeur = largeurs.iter().sum::<f32>() + 6.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(largeur, 30.0), Sense::hover());
+    let mut change = false;
+    if !ui.is_rect_visible(rect) {
+        return false;
+    }
+    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::BG_DEEP);
+    let mut x = rect.left() + 3.0;
+    for (i, ((v, _), galley)) in choix.iter().zip(textes).enumerate() {
+        let seg = Rect::from_min_size(
+            egui::pos2(x, rect.top() + 3.0),
+            Vec2::new(largeurs[i], rect.height() - 6.0),
+        );
+        x += largeurs[i];
+        let reponse = ui.interact(seg, ui.id().with(("segmente", i)), Sense::click());
+        let actif = *valeur == *v;
+        if reponse.clicked() && !actif {
+            *valeur = *v;
+            change = true;
+        }
+        let actif = *valeur == *v;
+        let painter = ui.painter();
+        if actif {
+            painter.rect(
+                seg,
+                CornerRadius::same(7),
+                theme::BG_ACTIVE,
+                Stroke::new(1.0_f32, theme::alpha(theme::ACCENT, 90)),
+                StrokeKind::Inside,
+            );
+        } else if reponse.hovered() {
+            painter.rect_filled(seg, CornerRadius::same(7), theme::BG_HOVER);
+        }
+        let couleur = if actif { theme::TEXT } else { theme::TEXT_DIM };
+        painter.galley(
+            seg.center() - galley.size() / 2.0,
+            galley,
+            couleur,
+        );
+    }
+    change
+}
+
+/// Interrupteur : plus lisible qu'une case à cocher pour un réglage qui
+/// s'allume ou s'éteint. Le libellé suit à droite. Rend la réponse, `changed`
+/// quand on l'a basculé.
+pub fn interrupteur(ui: &mut Ui, on: &mut bool, libelle: &str) -> Response {
+    let taille = Vec2::new(36.0, 20.0);
+    let reponse = ui
+        .horizontal(|ui| {
+            let (rect, mut r) = ui.allocate_exact_size(taille, Sense::click());
+            let texte = ui.add(
+                egui::Label::new(RichText::new(libelle).color(theme::TEXT).size(13.0))
+                    .sense(Sense::click()),
+            );
+            if r.clicked() || texte.clicked() {
+                *on = !*on;
+                r.mark_changed();
+            }
+            if ui.is_rect_visible(rect) {
+                let t = ui.ctx().animate_bool_responsive(r.id, *on);
+                let rayon = rect.height() / 2.0;
+                let fond = theme::mix(theme::BG_DEEP, theme::ACCENT, t);
+                let bord = if r.hovered() || texte.hovered() {
+                    theme::BORDER_STRONG
+                } else {
+                    theme::BORDER
+                };
+                ui.painter().rect(
+                    rect,
+                    CornerRadius::same(rayon as u8),
+                    fond,
+                    Stroke::new(1.0_f32, theme::mix(bord, theme::ACCENT, t)),
+                    StrokeKind::Inside,
+                );
+                let x = egui::lerp((rect.left() + rayon)..=(rect.right() - rayon), t);
+                let bouton = if *on { theme::BG_DEEP } else { theme::TEXT_DIM };
+                ui.painter().circle_filled(egui::pos2(x, rect.center().y), rayon - 4.0, bouton);
+            }
+            r
+        })
+        .inner;
+    reponse.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, libelle)
+    });
+    reponse
+}
+
 /// Carte : surface en relief pour regrouper des contrôles.
 pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     let response = egui::Frame::NONE

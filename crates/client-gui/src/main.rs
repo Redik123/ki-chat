@@ -22,6 +22,7 @@ mod photos;
 mod porte_ui;
 mod boutique;
 mod ptt;
+mod reglages_audio;
 mod raccourci;
 mod rangs;
 mod secours;
@@ -1168,6 +1169,13 @@ struct KiApp {
     aec_on: bool,
     agc_target: f32,
     gate_threshold: f32,
+    /// Compression de sa voix à l'émission (`ki_voice::dynamique::COMPRESSION_*`).
+    compression: u8,
+    /// Dernière saturation du micro vue par l'onglet Audio : l'alerte reste
+    /// affichée un moment après, au lieu de clignoter entre deux phrases.
+    alerte_saturation: Option<std::time::Instant>,
+    /// Un compresseur par personne entendue : celui qui hurle redescend.
+    adoucir_cris: bool,
     jitter_frames: usize,
     ptt_release_ms: u32,
     loopback: bool,
@@ -1522,6 +1530,12 @@ impl KiApp {
             aec_on: get("aec", "on") != "off",
             agc_target: get("agc_target", "0.30").parse().unwrap_or(0.30),
             gate_threshold: get("gate_threshold", "0").parse().unwrap_or(0.0),
+            compression: get("compression", "1")
+                .parse()
+                .unwrap_or(ki_voice::dynamique::COMPRESSION_DOUCE)
+                .min(ki_voice::dynamique::COMPRESSION_FORTE),
+            adoucir_cris: get("adoucir_cris", "on") != "off",
+            alerte_saturation: None,
             jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
             ptt_release_ms: get("ptt_release_ms", "100").parse().unwrap_or(100),
             loopback: false,
@@ -1729,6 +1743,8 @@ impl KiApp {
             engine.set_aec(self.aec_on);
             engine.set_agc_target(self.agc_target);
             engine.set_gate_threshold(self.gate_threshold);
+            engine.set_compression(self.compression);
+            engine.set_adoucir_cris(self.adoucir_cris);
             engine.set_jitter_frames(self.jitter_frames);
             engine.set_dred(match self.dred_mode {
                 0 => 0,
@@ -1771,6 +1787,8 @@ impl KiApp {
             aec: self.aec_on,
             agc_target: self.agc_target,
             gate_threshold: self.gate_threshold,
+            compression: self.compression,
+            adoucir_cris: self.adoucir_cris,
             jitter_frames: self.jitter_frames,
             dred: match self.dred_mode {
                 0 => 0,
@@ -8750,7 +8768,7 @@ impl KiApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(460.0)
+            .default_width(520.0)
             .default_height(roomy)
             .min_width(340.0)
             .min_height(260.0)
@@ -8771,148 +8789,7 @@ impl KiApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if onglet == Onglet::Audio {
-                            // --- Périphériques ---
-                            ui::group_title(ui, Icon::Headphones, "Périphériques");
-                            // Le remède logiciel au « il faut débrancher/rebrancher
-                            // le casque » : certains pilotes (Razer…) laissent un
-                            // flux zombie après le passage d'un jeu.
-                            if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
-                                {
-                                    if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                                        engine.reset_audio_devices();
-                                        self.info = Some(
-                                            "micro et sortie rouverts — comme un \
-                                             débranchement/rebranchement du casque"
-                                                .into(),
-                                        );
-                                    }
-                                }
-                            }
-                            ui::hint(
-                                ui,
-                                "si le son part en vrille quand un jeu se lance ou se ferme, \
-                                 ce bouton rouvre tout sans toucher au câble",
-                            );
-                            ui.add_space(6.0);
-                            let device_combo = |ui: &mut egui::Ui,
-                                                id: &str,
-                                                label: &str,
-                                                devices: &[String],
-                                                sel: &mut Option<String>|
-                             -> bool {
-                                let mut changed = false;
-                                ui::field_label(ui, label);
-                                egui::ComboBox::from_id_salt(id)
-                                    .width(ui.available_width() - 8.0)
-                                    .selected_text(
-                                        RichText::new(
-                                            sel.clone().unwrap_or_else(|| "(défaut système)".into()),
-                                        )
-                                        .color(TEXT),
-                                    )
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_label(sel.is_none(), "(défaut système)")
-                                            .clicked()
-                                        {
-                                            changed |= sel.is_some();
-                                            *sel = None;
-                                        }
-                                        for d in devices {
-                                            let active = sel.as_deref() == Some(d.as_str());
-                                            if ui.selectable_label(active, d).clicked() && !active {
-                                                *sel = Some(d.clone());
-                                                changed = true;
-                                            }
-                                        }
-                                    });
-                                ui.add_space(8.0);
-                                changed
-                            };
-                            restart |= device_combo(
-                                ui,
-                                "input_dev",
-                                "Micro",
-                                &self.input_devices.clone(),
-                                &mut self.pref_input,
-                            );
-                            restart |= device_combo(
-                                ui,
-                                "output_dev",
-                                "Sortie",
-                                &self.output_devices.clone(),
-                                &mut self.pref_output,
-                            );
-                            // Le piège du « ça marche sur Discord » : les deux
-                            // logiciels ne suivent pas le même défaut Windows.
-                            ui::hint(
-                                ui,
-                                "« défaut système » suit le périphérique par défaut de \
-                                 Windows — pas celui de communication, que suit Discord. \
-                                 Choisis ton casque ici pour que ki-chat le prenne quoi que \
-                                 Windows désigne.",
-                            );
-                            ui.add_space(4.0);
-                            if ui::button(ui, Icon::Refresh, "Actualiser la liste").clicked() {
-                                let (inputs, outputs) = ki_voice::list_devices();
-                                self.input_devices = inputs;
-                                self.output_devices = outputs;
-                            }
-                            if cfg!(windows) {
-                                ui.add_space(8.0);
-                                if ui
-                                    .checkbox(
-                                        &mut self.native_audio,
-                                        "Moteur audio natif (recommandé)",
-                                    )
-                                    .on_hover_text(
-                                        "parle à Windows sans intermédiaire : survit aux jeux \
-                                         qui changent le format audio, et rouvre vite un \
-                                         périphérique qui change. En « défaut système », suit \
-                                         le périphérique par défaut de Windows — pas celui de \
-                                         communication, que suit Discord. Décoche si le son se \
-                                         comporte moins bien qu'avant.",
-                                    )
-                                    .changed()
-                                {
-                                    restart = true;
-                                }
-                                if self.native_audio
-                                    && ui
-                                        .checkbox(
-                                            &mut self.raw_mic,
-                                            "Micro brut (ignorer les effets du casque)",
-                                        )
-                                        .on_hover_text(
-                                            "court-circuite les traitements tiers (Sonar, \
-                                             Nahimic, Synapse…) sur le micro. À essayer si le \
-                                             micro bugue quand un jeu se lance.",
-                                        )
-                                        .changed()
-                                {
-                                    restart = true;
-                                }
-                                if self.native_audio
-                                    && ui
-                                        .checkbox(
-                                            &mut self.comms_mic,
-                                            "Partager le micro avec la voix du jeu",
-                                        )
-                                        .on_hover_text(
-                                            "ouvre le micro dans la voie « communications » de \
-                                             Windows, celle des voix intégrées des jeux — \
-                                             nécessaire quand elles affament le micro (le \
-                                             moteur le propose au besoin ; cette case le rend \
-                                             permanent). Revers : Windows peut baisser le \
-                                             volume des autres sons pendant le vocal → Panneau \
-                                             son → Communication → « Ne rien faire ».",
-                                        )
-                                        .changed()
-                                {
-                                    restart = true;
-                                }
-                            }
-
+                            self.onglet_audio(ui, voice, &mut apply, &mut restart);
                         }
                         if onglet == Onglet::Aide {
                             // --- Journal audio ---
@@ -9138,369 +9015,6 @@ impl KiApp {
                                                 .size(11.5),
                                         );
                                     });
-                                }
-                            }
-
-                        }
-                        if onglet == Onglet::Audio {
-                            // --- Micro ---
-                            ui.add_space(12.0);
-                            ui::hairline(ui);
-                            ui.add_space(10.0);
-                            ui::group_title(ui, Icon::Mic, "Micro");
-
-                            // Vumètre en direct, avec repère du seuil d'activation.
-                            let above = self.mode == MicMode::Vad && mic_peak >= self.vad_threshold;
-                            let meter_color = if !engine_up {
-                                theme::BG_ACTIVE
-                            } else if above || (self.mode != MicMode::Vad && mic_peak > 0.01) {
-                                SPEAK
-                            } else {
-                                TEXT_DIM
-                            };
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("niveau").color(TEXT_DIM).size(12.5));
-                                // En détection neuronale, le repère n'est pas
-                                // un niveau : il est sur la jauge de parole.
-                                let threshold = (self.mode == MicMode::Vad && !self.vad_neural)
-                                    .then(|| (self.vad_threshold * 3.0).min(1.0));
-                                ui::meter_with_threshold(
-                                    ui,
-                                    (mic_peak * 3.0).min(1.0),
-                                    threshold,
-                                    Vec2::new(ui.available_width().min(230.0), 9.0),
-                                    meter_color,
-                                );
-                                if !engine_up {
-                                    ui.label(RichText::new("vocal inactif").color(WARN).size(11.0));
-                                }
-                            });
-                            // La jauge de parole du réseau de neurones, avec
-                            // la sensibilité en repère : on voit ce qu'il
-                            // pense de ce qu'il entend.
-                            if self.mode == MicMode::Vad && self.vad_neural {
-                                let prob = stats.vad_prob;
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new("parole").color(TEXT_DIM).size(12.5));
-                                    ui::meter_with_threshold(
-                                        ui,
-                                        prob,
-                                        Some(self.vad_sens),
-                                        Vec2::new(ui.available_width().min(230.0), 9.0),
-                                        if engine_up && prob >= self.vad_sens { SPEAK } else { TEXT_DIM },
-                                    );
-                                });
-                            }
-                            ui.add_space(8.0);
-
-                            // Calibration automatique des seuils sur le niveau ambiant.
-                            match self.calibrating {
-                                None => {
-                                    if engine_up
-                                    && ui::button(ui, Icon::Target, "Calibrer les seuils (5 s)")
-                                        .on_hover_text(
-                                            "reste silencieux — laisse le bruit ambiant ou l'autre \
-                                             voix de la pièce parler : je règle la porte de bruit \
-                                             juste au-dessus de ce niveau",
-                                        )
-                                        .clicked()
-                                {
-                                    self.start_calibration();
-                                }
-                                }
-                                Some((start, peak)) => {
-                                    let progress = (start.elapsed().as_secs_f32() / 5.0).min(1.0);
-                                    ui.horizontal(|ui| {
-                                        ui::meter(ui, progress, Vec2::new(180.0, 9.0), ACCENT);
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "chut… ambiance {:.1} %",
-                                                peak * 100.0
-                                            ))
-                                            .color(TEXT_DIM)
-                                            .size(12.0),
-                                        );
-                                        if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
-                                            self.calibrating = None;
-                                            self.apply_audio_settings();
-                                        }
-                                    });
-                                }
-                            }
-                            ui.add_space(8.0);
-
-                            if ui
-                                .checkbox(&mut self.aec_on, "Annulation d'écho")
-                                .on_hover_text(
-                                    "soustrait du micro ce que tes haut-parleurs jouent : \
-                                     les autres ne s'entendent plus revenir. Indispensable \
-                                     sans casque, sans effet notable avec.",
-                                )
-                                .changed()
-                            {
-                                apply = true;
-                            }
-                            if ui
-                                .checkbox(&mut self.agc, "Gain automatique (AGC)")
-                                .on_hover_text(
-                                    "normalise ta voix tout seul : fini les réglages manuels",
-                                )
-                                .changed()
-                            {
-                                apply = true;
-                            }
-                            if self.agc {
-                                let mut target_pct = self.agc_target * 100.0;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut target_pct, 15.0..=50.0)
-                                            .text("niveau cible")
-                                            .suffix(" %")
-                                            .integer(),
-                                    )
-                                    .changed()
-                                {
-                                    self.agc_target = target_pct / 100.0;
-                                    apply = true;
-                                }
-                            }
-                            let mut gain_pct = self.input_gain * 100.0;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut gain_pct, 0.0..=200.0)
-                                        .text(if self.agc {
-                                            "pré-ampli"
-                                        } else {
-                                            "gain d'entrée"
-                                        })
-                                        .suffix(" %")
-                                        .integer(),
-                                )
-                                .changed()
-                            {
-                                self.input_gain = gain_pct / 100.0;
-                                apply = true;
-                            }
-
-                            if self.mode == MicMode::Vad {
-                                // Le réseau de neurones décide de ce qui est
-                                // une voix ; le seuil d'amplitude ne sert
-                                // qu'en repli, et ne s'affiche qu'alors.
-                                if !self.vad_neural {
-                                    let mut thr_pct = self.vad_threshold * 100.0;
-                                    if ui
-                                        .add(
-                                            egui::Slider::new(&mut thr_pct, 0.5..=25.0)
-                                                .text("seuil d'activation")
-                                                .suffix(" %"),
-                                        )
-                                        .changed()
-                                    {
-                                        self.vad_threshold = thr_pct / 100.0;
-                                        apply = true;
-                                    }
-                                }
-                                if ui
-                                    .checkbox(&mut self.vad_neural, "Détection de parole neuronale (Silero)")
-                                    .on_hover_text(
-                                        "un réseau de neurones entraîné sur des milliers d'heures de \
-                                         parole ouvre le micro — un clavier, une respiration ou un \
-                                         souffle ne sont plus pris pour une voix. 0,1 ms par bloc.",
-                                    )
-                                    .changed()
-                                {
-                                    apply = true;
-                                }
-                                if self.vad_neural {
-                                    let mut sens_pct = self.vad_sens * 100.0;
-                                    if ui
-                                        .add(
-                                            egui::Slider::new(&mut sens_pct, 20.0..=90.0)
-                                                .text("sensibilité")
-                                                .suffix(" %")
-                                                .integer(),
-                                        )
-                                        .on_hover_text(
-                                            "probabilité de parole qui ouvre le micro : plus bas, \
-                                             plus réactif ; plus haut, plus strict",
-                                        )
-                                        .changed()
-                                    {
-                                        self.vad_sens = sens_pct / 100.0;
-                                        apply = true;
-                                    }
-                                }
-                                let mut hang = self.vad_hangover_ms as f32;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut hang, 100.0..=1000.0)
-                                            .text("maintien après la voix")
-                                            .suffix(" ms")
-                                            .step_by(50.0),
-                                    )
-                                    .changed()
-                                {
-                                    self.vad_hangover_ms = hang as u32;
-                                    apply = true;
-                                }
-                                ui::hint(
-                                ui,
-                                "parle : la jauge doit dépasser le repère orange quand ta voix passe",
-                            );
-                            }
-                            if self.mode == MicMode::Ptt {
-                                let mut rel = self.ptt_release_ms as f32;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut rel, 0.0..=500.0)
-                                            .text("relâchement du push-to-talk")
-                                            .suffix(" ms")
-                                            .step_by(25.0),
-                                    )
-                                    .changed()
-                                {
-                                    self.ptt_release_ms = rel as u32;
-                                }
-                            }
-
-                            // --- Raccourcis globaux à bascule ---
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("raccourcis globaux").color(TEXT_DIM).size(12.5));
-                            ui::hint(
-                                ui,
-                                "ils marchent même en jeu, fenêtre au second plan — une pression \
-                                 bascule, en vocal seulement",
-                            );
-                            let ptt_key = (self.mode == MicMode::Ptt).then_some(self.ptt_key);
-                            for (intitule, salt, choix) in [
-                                ("couper / rétablir le micro", "hotkey_micro", &mut self.hotkey_micro),
-                                ("se rendre sourd / retrouver l'écoute", "hotkey_sourd", &mut self.hotkey_sourd),
-                            ] {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(intitule).color(TEXT_DIM).size(12.5));
-                                    let actuel = choix.map(|k| k.label()).unwrap_or("aucune");
-                                    egui::ComboBox::from_id_salt(salt)
-                                        .width(130.0)
-                                        .selected_text(RichText::new(actuel).color(TEXT))
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(choix, None, "aucune");
-                                            for key in PttKey::ALL {
-                                                ui.selectable_value(choix, Some(key), key.label());
-                                            }
-                                        });
-                                    if choix.is_some() && *choix == ptt_key {
-                                        ui.label(
-                                            RichText::new("⚠ c'est la touche du push-to-talk")
-                                                .color(WARN)
-                                                .size(11.5),
-                                        );
-                                    }
-                                });
-                            }
-
-                            // --- Suppression de bruit ---
-                            ui.add_space(12.0);
-                            ui::hairline(ui);
-                            ui.add_space(10.0);
-                            ui::group_title(ui, Icon::Volume, "Suppression de bruit");
-                            let noise_label = |m: u8| match m {
-                                ki_voice::NOISE_OFF => "Désactivée",
-                                ki_voice::NOISE_DEEP => "DeepFilterNet3 (studio, +30 ms)",
-                                _ => "RNNoise (léger)",
-                            };
-                            egui::ComboBox::from_id_salt("noise_mode")
-                                .width(270.0)
-                                .selected_text(RichText::new(noise_label(self.noise_mode)).color(TEXT))
-                                .show_ui(ui, |ui| {
-                                    for mode in [
-                                        ki_voice::NOISE_OFF,
-                                        ki_voice::NOISE_RNNOISE,
-                                        ki_voice::NOISE_DEEP,
-                                    ] {
-                                        if ui
-                                            .selectable_label(
-                                                self.noise_mode == mode,
-                                                noise_label(mode),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.noise_mode = mode;
-                                            apply = true;
-                                        }
-                                    }
-                                });
-                            if self.noise_mode == ki_voice::NOISE_DEEP {
-                                ui::hint(
-                                    ui,
-                                    "réseau de neurones DeepFilterNet3 : supprime clavier, ventilo, \
-                                 fond sonore — qualité Krisp/Discord, 100 % local",
-                                );
-                            }
-                            ui.add_space(6.0);
-                            let mut gate_pct = self.gate_threshold * 100.0;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut gate_pct, 0.0..=10.0)
-                                        .text("porte de bruit")
-                                        .suffix(" %"),
-                                )
-                                .on_hover_text("0 % = désactivée ; coupe tout résidu sous ce niveau")
-                                .changed()
-                            {
-                                self.gate_threshold = gate_pct / 100.0;
-                                apply = true;
-                            }
-                            if ui
-                                .checkbox(&mut self.loopback, "S'écouter — aller-retour codec complet")
-                                .on_hover_text(
-                                    "tu entends EXACTEMENT ce que les autres entendent : \
-                                 filtres + encodage/décodage Opus au débit courant",
-                                )
-                                .changed()
-                            {
-                                apply = true;
-                            }
-
-                            // --- Sortie ---
-                            ui.add_space(12.0);
-                            ui::hairline(ui);
-                            ui.add_space(10.0);
-                            ui::group_title(ui, Icon::Headphones, "Sortie");
-                            let mut out_pct = self.output_gain * 100.0;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut out_pct, 0.0..=200.0)
-                                        .text("volume")
-                                        .suffix(" %")
-                                        .integer(),
-                                )
-                                .changed()
-                            {
-                                self.output_gain = out_pct / 100.0;
-                                apply = true;
-                            }
-                            ui.add_space(6.0);
-                            if ui::button(ui, Icon::Play, "Jouer un son de test").clicked() {
-                                if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                                    engine.play_test_tone();
-                                }
-                            }
-                            if self.native_audio {
-                                ui.add_space(6.0);
-                                if ui
-                                    .checkbox(
-                                        &mut self.robust_output,
-                                        "Sortie audio robuste (plus de marge, +70 ms de latence)",
-                                    )
-                                    .on_hover_text(
-                                        "tampon de lecture trois fois plus profond : pour un PC \
-                                         que le jeu sature ou une carte son USB fragile, quand \
-                                         le docteur trouve la carte son à sec (craquements, \
-                                         micro-coupures dans tout ce que tu entends).",
-                                    )
-                                    .changed()
-                                {
-                                    restart = true;
                                 }
                             }
 
@@ -15078,6 +14592,11 @@ impl eframe::App for KiApp {
         self.valo.save(storage);
         storage.set_string("agc_target", format!("{}", self.agc_target));
         storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
+        storage.set_string("compression", format!("{}", self.compression));
+        storage.set_string(
+            "adoucir_cris",
+            if self.adoucir_cris { "on" } else { "off" }.into(),
+        );
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
         storage.set_string("ptt_release_ms", format!("{}", self.ptt_release_ms));
         storage.set_string("noise_mode", format!("{}", self.noise_mode));

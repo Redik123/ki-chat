@@ -97,7 +97,7 @@ fn mixage(c: &mut Criterion) {
                         for _ in 0..salve {
                             sortie.fill(0.0);
                             for g in &gens {
-                                black_box(g.playout.lock().unwrap().mix_into(&mut sortie, 1.0));
+                                black_box(g.playout.lock().unwrap().mix_into(&mut sortie, 1.0, false));
                             }
                             black_box(&sortie);
                         }

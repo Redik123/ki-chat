@@ -102,6 +102,10 @@ pub struct Playout {
     /// s'est entendu ; s'il arrive après un silence, c'était une fin de
     /// phrase — la même frontière que la mesure de gigue (`TALKSPURT_MS`).
     trous_en_suspens: u64,
+    /// Le compresseur de cette voix, quand l'écoute « adoucit les cris » :
+    /// un par personne, pour que celui qui hurle redescende sans que les
+    /// autres ne bougent.
+    compresseur: crate::dynamique::Compresseur,
 }
 
 impl Playout {
@@ -113,6 +117,7 @@ impl Playout {
             prime_frames: 2,
             starved: 0,
             trous_en_suspens: 0,
+            compresseur: crate::dynamique::Compresseur::ecoute(),
         }
     }
 
@@ -148,7 +153,9 @@ impl Playout {
     /// `prime_frames` trames ne sont pas accumulées (absorption du jitter),
     /// et se re-tamponne après une famine. Un gain de 0 consomme quand même
     /// le tampon (l'utilisateur est « muet » sans dériver en latence).
-    pub fn mix_into(&mut self, out: &mut [f32], gain: f32) -> bool {
+    /// `adoucir` passe la voix par son compresseur avant le volume choisi
+    /// pour elle : les cris redescendent, le réglage de volume reste le sien.
+    pub fn mix_into(&mut self, out: &mut [f32], gain: f32, adoucir: bool) -> bool {
         if !self.primed {
             if self.ready.len() >= self.prime_frames * FRAME_SAMPLES {
                 self.primed = true;
@@ -175,7 +182,11 @@ impl Playout {
         }
         let mut peak = 0f32;
         for o in out.iter_mut().take(n) {
-            let s = self.ready.pop_front().unwrap() * gain;
+            let mut s = self.ready.pop_front().unwrap();
+            if adoucir {
+                s = self.compresseur.traiter(s);
+            }
+            let s = s * gain;
             peak = peak.max(s.abs());
             *o += s;
         }
@@ -574,7 +585,7 @@ mod tests {
             assert_eq!(lost, 0);
         }
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0, false));
     }
 
     /// Fait tourner la sortie jusqu'à trouver le tampon de lecture à sec.
@@ -584,7 +595,7 @@ mod tests {
         let mut out = [0f32; FRAME_SAMPLES];
         for _ in 0..20 {
             out.fill(0.0);
-            p.mix_into(&mut out, 1.0);
+            p.mix_into(&mut out, 1.0, false);
         }
     }
 
@@ -663,7 +674,7 @@ mod tests {
         // La trame manquante a été reconstruite via le FEC du paquet suivant.
         assert_eq!(recovered, 1);
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0, false));
     }
 
     #[test]
@@ -708,7 +719,7 @@ mod tests {
         assert_eq!(lost, 4);
         assert_eq!(recovered, 4, "le DRED n'a pas tout reconstruit : {recovered}/4");
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0, false));
     }
 
     /// Le rappel de sortie tient sa poignée de tampon **avant** que le fil
@@ -729,7 +740,7 @@ mod tests {
 
         // Et consommer par cette poignée retire bien du tampon partagé.
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(playout.lock().unwrap().mix_into(&mut out, 1.0));
+        assert!(playout.lock().unwrap().mix_into(&mut out, 1.0, false));
         assert_eq!(playout.lock().unwrap().ready.len(), 3 * FRAME_SAMPLES);
     }
 
@@ -793,7 +804,7 @@ mod tests {
         let mut out = [0f32; FRAME_SAMPLES];
         let mut mixed = false;
         for _ in 0..4 {
-            mixed |= rx.playout().lock().unwrap().mix_into(&mut out, 1.0);
+            mixed |= rx.playout().lock().unwrap().mix_into(&mut out, 1.0, false);
         }
         assert!(mixed, "l'émetteur reparti juste derrière est resté muet");
     }
@@ -831,6 +842,6 @@ mod tests {
         assert_eq!(lost, 0);
         rx.push(3, &frames[3]);
         let mut out = [0f32; FRAME_SAMPLES];
-        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0));
+        assert!(rx.playout().lock().unwrap().mix_into(&mut out, 1.0, false));
     }
 }

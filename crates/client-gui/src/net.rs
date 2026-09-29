@@ -100,6 +100,10 @@ pub struct VoicePrefs {
     pub agc_target: f32,
     /// Porte de bruit (0.0 = désactivée).
     pub gate_threshold: f32,
+    /// Compression de sa voix (`ki_voice::dynamique::COMPRESSION_*`).
+    pub compression: u8,
+    /// Adoucir les cris des autres.
+    pub adoucir_cris: bool,
     /// Tampon de gigue imposé en trames (0 = adaptatif).
     pub jitter_frames: usize,
     /// Redondance neuronale DRED (0 = désactivée, sinon valeur du CTL).
@@ -507,6 +511,8 @@ fn start_engine(
     cfg.aec = prefs.aec;
     cfg.agc_target = prefs.agc_target;
     cfg.gate_threshold = prefs.gate_threshold;
+    cfg.compression = prefs.compression;
+    cfg.adoucir_cris = prefs.adoucir_cris;
     cfg.jitter_frames = prefs.jitter_frames;
     cfg.medias = Some(prefs.medias.clone());
     // L'émetteur suit l'**emplacement** de connexion, pas une connexion :

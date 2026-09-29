@@ -122,6 +122,9 @@ pub struct Diagnostic {
     /// La carte son trouvée à court en pleine lecture (voir `VoiceStats`) :
     /// le fil de rendu réveillé trop tard.
     pub sortie_a_sec: u64,
+    /// Trames arrivées écrêtées du micro, avant tout traitement (voir
+    /// `VoiceStats::saturations`).
+    pub saturations_micro: u64,
     /// Le moteur qui tient le micro : natif, secours (cpal), aucun, ou pas
     /// encore essayé.
     pub moteur: Moteur,
@@ -290,6 +293,21 @@ impl Diagnostic {
             // Pas encore essayé : rien à conseiller, le rapport le dit.
             Moteur::PasEncore | Moteur::Natif => {}
         }
+        // Un micro qui sature à la source : ce que la carte son a coupé ne
+        // se rattrape pas, ni par la compression, ni par le gain. Seul le
+        // niveau du micro, dans Windows ou sur le casque, y peut quelque
+        // chose.
+        if self.saturations_micro > 0 {
+            out.push(format!(
+                "Ton micro est arrivé saturé {} fois, avant tout traitement : quand tu \
+                 parles fort, la carte son coupe le haut de ta voix et ça grésille chez \
+                 les autres. Baisse son niveau dans Windows (Paramètres → Son → Entrée → \
+                 Volume, ou le bouton de ⚙ Audio → Micro), ou sa molette sur le casque, \
+                 jusqu'à ce que l'alerte ne revienne plus quand tu parles fort ; le gain \
+                 automatique remontera le reste.",
+                self.saturations_micro
+            ));
+        }
         // Deux symptômes qui s'entendent pareil — un craquement, une
         // micro-coupure — mais n'ont ni la même cause ni le même remède. La
         // sortie robuste ajoute 70 ms de latence : elle ne se conseille que
@@ -362,8 +380,9 @@ impl Diagnostic {
             etat(self.exclusif_sortie)
         ));
         out.push_str(&format!(
-            "ouvertures affamées : {} · trames incomplètes : {} · carte son à sec : {}\n",
-            self.ouvertures_affamees, self.trames_incompletes, self.sortie_a_sec
+            "ouvertures affamées : {} · trames incomplètes : {} · carte son à sec : {} \
+             · micro saturé : {}\n",
+            self.ouvertures_affamees, self.trames_incompletes, self.sortie_a_sec, self.saturations_micro
         ));
         out.push_str(&format!(
             "catégorie du micro : {} · atténuation Windows : {}\n",
@@ -754,6 +773,7 @@ mod tests {
             ouvertures_affamees: 4,
             trames_incompletes: 12,
             sortie_a_sec: 3,
+            saturations_micro: 0,
             moteur: Moteur::Secours,
             micro_communications: false,
             attenuation_windows: None,
