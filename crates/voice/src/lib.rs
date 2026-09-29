@@ -8,6 +8,7 @@
 //! Tout est en threads std : aucun runtime async requis, le moteur est
 //! indépendant du reste du client.
 
+pub mod changeur;
 pub mod docteur;
 pub mod dynamique;
 pub mod egaliseur;
@@ -215,6 +216,10 @@ pub struct VoiceConfig {
     /// personnalisé, chaleur, plafond du limiteur. Par défaut, exactement la
     /// chaîne d'avant.
     pub studio: dynamique::ReglagesStudio,
+    /// Le changeur de voix (`None` : coupé), et où part la voix changée
+    /// (`changeur::VERS_*`).
+    pub changeur: Option<changeur::ReglagesChangeur>,
+    pub changeur_vers: u8,
     /// Le micro pour les jeux : la sortie (un câble virtuel, VB-Cable) où
     /// part la voix traitée, pour qu'un jeu la prenne comme micro. `None` :
     /// désactivé.
@@ -262,6 +267,8 @@ impl VoiceConfig {
             egaliseur: Vec::new(),
             egaliseur_micro: Vec::new(),
             studio: dynamique::ReglagesStudio::default(),
+            changeur: None,
+            changeur_vers: changeur::VERS_TOUT,
             micro_jeux: None,
             jitter_frames: 0,
             tone: false,
@@ -710,6 +717,10 @@ struct Shared {
     /// capture).
     egaliseur_micro: Mutex<Vec<egaliseur::Bande>>,
     egaliseur_micro_gen: AtomicU64,
+    /// Le changeur de voix, sa génération, et où part la voix changée.
+    changeur: Mutex<Option<changeur::ReglagesChangeur>>,
+    changeur_gen: AtomicU64,
+    changeur_vers: std::sync::atomic::AtomicU8,
     /// La chaîne studio de sa voix, et sa génération (relue par la capture
     /// quand elle bouge).
     studio: Mutex<dynamique::ReglagesStudio>,
@@ -848,6 +859,9 @@ impl VoiceEngine {
             egaliseur_gen: AtomicU64::new(1),
             egaliseur_micro: Mutex::new(cfg.egaliseur_micro.clone()),
             egaliseur_micro_gen: AtomicU64::new(1),
+            changeur: Mutex::new(cfg.changeur),
+            changeur_gen: AtomicU64::new(1),
+            changeur_vers: std::sync::atomic::AtomicU8::new(cfg.changeur_vers),
             studio: Mutex::new(cfg.studio),
             studio_gen: AtomicU64::new(1),
             analyse: Mutex::new(std::collections::VecDeque::new()),
@@ -1010,6 +1024,17 @@ impl VoiceEngine {
     /// Compression de sa voix (`dynamique::COMPRESSION_*`), à chaud.
     pub fn set_compression(&self, niveau: u8) {
         self.shared.compression.store(niveau.min(dynamique::COMPRESSION_PERSO), Ordering::Relaxed);
+    }
+
+    /// Le changeur de voix (`None` : coupé) et où part la voix changée, à
+    /// chaud.
+    pub fn set_changeur(&self, reglages: Option<changeur::ReglagesChangeur>, vers: u8) {
+        self.shared.changeur_vers.store(vers.min(changeur::VERS_KICHAT), Ordering::Relaxed);
+        let mut actuels = self.shared.changeur.lock().unwrap();
+        if *actuels != reglages {
+            *actuels = reglages;
+            self.shared.changeur_gen.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// La chaîne studio de sa voix, à chaud.
@@ -1683,6 +1708,9 @@ fn capture_loop(
     let mut denoiser = Denoiser::new();
     let mut deep = LazyDeep::default();
     let mut agc = Agc::new();
+    // Le changeur de voix, refait quand l'interface le change.
+    let mut changeur_voix = (*sh.changeur.lock().unwrap()).map(changeur::Changeur::new);
+    let mut changeur_gen = sh.changeur_gen.load(Ordering::Relaxed);
     // La chaîne studio : relue quand l'interface la change.
     let mut studio = *sh.studio.lock().unwrap();
     let mut studio_gen = sh.studio_gen.load(Ordering::Relaxed);
@@ -2179,19 +2207,47 @@ fn capture_loop(
             compteurs.deesser_bits.store(red_deesser.to_bits(), Ordering::Relaxed);
             let red_comp = compresseur.as_mut().map_or(0.0, |c| c.reduction_db());
             compteurs.compresseur_bits.store(red_comp.to_bits(), Ordering::Relaxed);
+            // Le changeur de voix, sur une copie : la vraie voix reste pour
+            // la détection de parole et le vumètre — une voix de robot
+            // n'ouvrirait plus le micro en mode « à la voix ».
+            let gen = sh.changeur_gen.load(Ordering::Relaxed);
+            if gen != changeur_gen {
+                changeur_gen = gen;
+                let reglages = *sh.changeur.lock().unwrap();
+                match (reglages, changeur_voix.as_mut()) {
+                    (Some(r), Some(c)) => c.regler(r),
+                    (Some(r), None) => changeur_voix = Some(changeur::Changeur::new(r)),
+                    (None, _) => changeur_voix = None,
+                }
+            }
+            let changee = changeur_voix.as_mut().map(|c| {
+                let mut copie = frame;
+                c.traiter_trame(&mut copie);
+                copie
+            });
+            let vers = sh.changeur_vers.load(Ordering::Relaxed);
             // Le micro pour les jeux : la voix traitée, telle qu'elle part —
             // sans le soundboard, mêlé plus loin, qui n'a rien à faire dans
             // le vocal d'un jeu. Rien n'est déposé sans sortie qui le lise.
             if sh.micro_jeux_actif.load(Ordering::Relaxed) {
-                pousser_borne(&sh.micro_jeux_buf, &frame, MICRO_JEUX_MAX);
+                let pour_jeux = match &changee {
+                    Some(c) if vers != changeur::VERS_KICHAT => c,
+                    _ => &frame,
+                };
+                pousser_borne(&sh.micro_jeux_buf, pour_jeux, MICRO_JEUX_MAX);
             }
+            // Ce qui part vers ki-chat.
+            let mut envoi = match changee {
+                Some(c) if vers != changeur::VERS_JEUX => c,
+                _ => frame,
+            };
             // 6. Vumètre : niveau après toute la chaîne (= ce qui part).
             let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
             sh.counters.mic_peak_bits.store(peak.to_bits(), Ordering::Relaxed);
             // Le robinet de l'enregistreur de clips, s'il est branché : la
             // voix telle qu'elle partirait, armée ou non. Verrou bref.
             if let Some(r) = sh.robinet_micro.lock().unwrap().as_ref() {
-                r(&frame);
+                r(&envoi);
             }
 
             // 7. Décision d'émission : armé + activation vocale éventuelle.
@@ -2255,9 +2311,9 @@ fn capture_loop(
                     false
                 } else {
                     if !micro {
-                        frame.fill(0.0);
+                        envoi.fill(0.0);
                     }
-                    for s in frame.iter_mut() {
+                    for s in envoi.iter_mut() {
                         match b.pop_front() {
                             Some(v) => *s = soft_clip(*s + v),
                             None => break,
@@ -2271,7 +2327,7 @@ fn capture_loop(
             if send {
                 sender.apply_bitrate(sh.bitrate.load(Ordering::Relaxed));
                 sender.apply_dred(sh.dred.load(Ordering::Relaxed));
-                sender.send_frame(&sh, &frame);
+                sender.send_frame(&sh, &envoi);
             }
             // 8. Retour local (« s'écouter ») : la trame passe par un VRAI
             // aller-retour Opus (encodage + décodage au débit courant) —
@@ -2281,8 +2337,11 @@ fn capture_loop(
                 let mon = monitor.get_or_insert_with(|| {
                     Monitor::new(sh.bitrate.load(Ordering::Relaxed))
                 });
+                // Le changeur s'entend dès qu'il est allumé, même réservé
+                // aux jeux : c'est ici qu'on essaie son personnage.
+                let ecoute = changee.unwrap_or(envoi);
                 let mut heard = [0f32; FRAME_SAMPLES];
-                mon.process(&frame, sh.bitrate.load(Ordering::Relaxed), &mut heard);
+                mon.process(&ecoute, sh.bitrate.load(Ordering::Relaxed), &mut heard);
                 const LOOPBACK_CAP: usize = SAMPLE_RATE as usize / 4;
                 let mut buf = sh.loopback_buf.lock().unwrap();
                 buf.extend(heard.iter());

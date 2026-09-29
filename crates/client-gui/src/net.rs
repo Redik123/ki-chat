@@ -113,6 +113,9 @@ pub struct VoicePrefs {
     pub egaliseur_micro: Vec<ki_voice::egaliseur::Bande>,
     /// La chaîne studio de sa voix.
     pub studio: ki_voice::dynamique::ReglagesStudio,
+    /// Le changeur de voix (`None` : coupé), et où part la voix changée.
+    pub changeur: Option<ki_voice::changeur::ReglagesChangeur>,
+    pub changeur_vers: u8,
     /// Le câble virtuel où envoyer la voix pour les jeux (`None` : non).
     pub micro_jeux: Option<String>,
     /// Tampon de gigue imposé en trames (0 = adaptatif).
@@ -529,6 +532,8 @@ fn start_engine(
     cfg.egaliseur = prefs.egaliseur.clone();
     cfg.egaliseur_micro = prefs.egaliseur_micro.clone();
     cfg.studio = prefs.studio;
+    cfg.changeur = prefs.changeur;
+    cfg.changeur_vers = prefs.changeur_vers;
     cfg.micro_jeux = prefs.micro_jeux.clone();
     cfg.jitter_frames = prefs.jitter_frames;
     cfg.medias = Some(prefs.medias.clone());

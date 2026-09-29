@@ -498,12 +498,13 @@ pub struct Watcher {
     release_ms: Arc<AtomicU32>,
     /// Touche enfoncée, ou relâchée depuis moins que le maintien.
     active: Arc<AtomicBool>,
-    /// Les raccourcis à bascule — couper le micro, se rendre sourd — : leur
+    /// Les raccourcis à bascule — couper le micro, se rendre sourd, allumer
+    /// le changeur de voix — : leur
     /// touche (ou [`AUCUNE`]) et le nombre de pressions vues, que
     /// l'interface compare à ce qu'elle a déjà traité. Un compteur plutôt
     /// qu'un drapeau : deux pressions entre deux images ne s'annulent pas
     /// l'une l'autre par accident, elles se voient.
-    bascules: Arc<[(AtomicU8, AtomicU32); 2]>,
+    bascules: Arc<[(AtomicU8, AtomicU32); BASCULES]>,
     /// Le raccourci de l'enregistreur de clips (une combinaison), ce qu'un
     /// appui déclenche, et le mode « appuie sur ta combinaison » avec ce
     /// qu'il a vu.
@@ -526,17 +527,18 @@ pub struct Watcher {
 pub enum Bascule {
     Micro = 0,
     Sourd = 1,
+    Changeur = 2,
 }
+
+/// Le nombre de raccourcis à bascule.
+const BASCULES: usize = 3;
 
 impl Watcher {
     pub fn start(ctx: egui::Context) -> Self {
         let key = Arc::new(AtomicU8::new(AUCUNE));
         let release_ms = Arc::new(AtomicU32::new(0));
         let active = Arc::new(AtomicBool::new(false));
-        let bascules = Arc::new([
-            (AtomicU8::new(AUCUNE), AtomicU32::new(0)),
-            (AtomicU8::new(AUCUNE), AtomicU32::new(0)),
-        ]);
+        let bascules = Arc::new(std::array::from_fn(|_| (AtomicU8::new(AUCUNE), AtomicU32::new(0))));
         let stop = Arc::new(AtomicBool::new(false));
         let raccourci = Arc::new(Mutex::new(None));
         let action = Arc::new(Mutex::new(None));
@@ -758,7 +760,7 @@ fn boucle(
     key: Arc<AtomicU8>,
     release_ms: Arc<AtomicU32>,
     active: Arc<AtomicBool>,
-    bascules: Arc<[(AtomicU8, AtomicU32); 2]>,
+    bascules: Arc<[(AtomicU8, AtomicU32); BASCULES]>,
     combo: Combo,
     stop: Arc<AtomicBool>,
 ) {
@@ -770,17 +772,14 @@ fn boucle(
     let mut dernier_appui: Option<Instant> = None;
     // Les bascules réagissent au front : une touche tenue enfoncée ne
     // bascule qu'une fois.
-    let mut enfoncees_avant = [false; 2];
+    let mut enfoncees_avant = [false; BASCULES];
     let mut combo_avant = false;
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(PERIODE);
 
         let index = key.load(Ordering::Relaxed);
-        let indices_bascules = [
-            bascules[0].0.load(Ordering::Relaxed),
-            bascules[1].0.load(Ordering::Relaxed),
-        ];
+        let indices_bascules: [u8; BASCULES] = std::array::from_fn(|i| bascules[i].0.load(Ordering::Relaxed));
         // La combinaison de l'enregistreur : au sondage seulement si
         // Windows ne la tient pas déjà (voir `raccourci`).
         let raccourci = (*combo.raccourci.lock().unwrap())
@@ -795,7 +794,7 @@ fn boucle(
             && !en_capture
         {
             dernier_appui = None;
-            enfoncees_avant = [false; 2];
+            enfoncees_avant = [false; BASCULES];
             combo_avant = false;
             if active.swap(false, Ordering::Relaxed) {
                 ctx.request_repaint();

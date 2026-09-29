@@ -383,6 +383,9 @@ impl KiApp {
             },
         );
 
+        // --- Changeur de voix ---------------------------------------------
+        self.changeur_ui(ui, apply);
+
         // --- Casque ---------------------------------------------------
         ui::section(
             ui,

@@ -26,6 +26,7 @@ mod reglages_audio;
 mod reglages_casque;
 mod egaliseur_ui;
 mod studio_ui;
+mod changeur_ui;
 mod raccourci;
 mod rangs;
 mod secours;
@@ -1208,6 +1209,14 @@ struct KiApp {
     /// Ses profils de voix, et le nom tapé pour le prochain.
     profils_voix: Vec<studio_ui::ProfilVoix>,
     profil_nom: String,
+    /// Le changeur de voix : allumé ou non, ses réglages, où part la voix
+    /// changée (`ki_voice::changeur::VERS_*`), son raccourci et les
+    /// pressions déjà traitées.
+    changeur_actif: bool,
+    changeur: ki_voice::changeur::ReglagesChangeur,
+    changeur_vers: u8,
+    hotkey_changeur: Option<PttKey>,
+    hotkey_changeur_vues: u32,
     /// Le calibrage des gains du micro en cours (page Casque), et son
     /// dernier verdict, affiché un moment.
     calibrage_micro: Option<reglages_casque::Calibrage>,
@@ -1590,6 +1599,11 @@ impl KiApp {
             studio: studio_ui::lire_studio(&get("studio", "")),
             profils_voix: studio_ui::lire_profils(&get("profils_voix", "[]")),
             profil_nom: String::new(),
+            changeur_actif: get("changeur_actif", "off") == "on",
+            changeur: changeur_ui::lire_changeur(&get("changeur", "")),
+            changeur_vers: get("changeur_vers", "0").parse::<u8>().unwrap_or(0).min(ki_voice::changeur::VERS_KICHAT),
+            hotkey_changeur: PttKey::from_id(&get("hotkey_changeur", "")),
+            hotkey_changeur_vues: 0,
             calibrage_micro: None,
             calibrage_verdict: None,
             materiel_suivi: None,
@@ -1810,6 +1824,7 @@ impl KiApp {
             engine.set_egaliseur(&ecoute);
             engine.set_egaliseur_micro(&voix);
             engine.set_studio(self.studio);
+            engine.set_changeur(self.changeur_actif.then_some(self.changeur), self.changeur_vers);
             engine.set_jitter_frames(self.jitter_frames);
             engine.set_dred(match self.dred_mode {
                 0 => 0,
@@ -1859,6 +1874,8 @@ impl KiApp {
             egaliseur: self.egaliseur.clone(),
             egaliseur_micro: self.egaliseur_micro.clone(),
             studio: self.studio,
+            changeur: self.changeur_actif.then_some(self.changeur),
+            changeur_vers: self.changeur_vers,
             micro_jeux: self.micro_jeux_resolu(),
             jitter_frames: self.jitter_frames,
             dred: match self.dred_mode {
@@ -14492,10 +14509,30 @@ impl eframe::App for KiApp {
         // sens et sont simplement consommées.
         ptt.watch_bascule(ptt::Bascule::Micro, self.hotkey_micro);
         ptt.watch_bascule(ptt::Bascule::Sourd, self.hotkey_sourd);
+        // Le changeur de voix, lui, bascule partout — il sert aussi en jeu,
+        // hors vocal, par le micro pour les jeux.
+        ptt.watch_bascule(ptt::Bascule::Changeur, self.hotkey_changeur);
         // Le raccourci de l'enregistreur de clips, tenu tant qu'il tourne.
         // L'appui, lui, agit sans passer par ici : voir `brancher_declencheur`.
         ptt.watch_raccourci(self.enregistreur.as_ref().map(|_| self.clips_reglages.raccourci));
         let pressions = (ptt.pressions(ptt::Bascule::Micro), ptt.pressions(ptt::Bascule::Sourd));
+        let pressions_changeur = ptt.pressions(ptt::Bascule::Changeur);
+        if pressions_changeur != self.hotkey_changeur_vues {
+            let bascule = pressions_changeur.wrapping_sub(self.hotkey_changeur_vues) % 2 == 1;
+            self.hotkey_changeur_vues = pressions_changeur;
+            if bascule {
+                self.changeur_actif = !self.changeur_actif;
+                self.apply_audio_settings();
+                self.info = Some(if self.changeur_actif {
+                    let nom = changeur_ui::personnage_de(&self.changeur)
+                        .map(|i| ki_voice::changeur::PERSONNAGES[i].0)
+                        .unwrap_or("réglage perso");
+                    format!("changeur de voix allumé : {nom}")
+                } else {
+                    "changeur de voix coupé".into()
+                });
+            }
+        }
         if pressions != self.hotkey_vues {
             let (micro, sourd) = (
                 pressions.0.wrapping_sub(self.hotkey_vues.0) % 2 == 1,
@@ -14695,6 +14732,10 @@ impl eframe::App for KiApp {
         storage.set_string("mode_studio", if self.mode_studio { "on" } else { "off" }.into());
         storage.set_string("studio", studio_ui::ecrire_studio(&self.studio));
         storage.set_string("profils_voix", studio_ui::ecrire_profils(&self.profils_voix));
+        storage.set_string("changeur_actif", if self.changeur_actif { "on" } else { "off" }.into());
+        storage.set_string("changeur", changeur_ui::ecrire_changeur(&self.changeur));
+        storage.set_string("changeur_vers", format!("{}", self.changeur_vers));
+        storage.set_string("hotkey_changeur", self.hotkey_changeur.map(|k| k.id()).unwrap_or("").into());
         storage.set_string("micro_jeux", if self.micro_jeux { "on" } else { "off" }.into());
         storage.set_string("micro_jeux_sortie", self.micro_jeux_sortie.clone().unwrap_or_default());
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
