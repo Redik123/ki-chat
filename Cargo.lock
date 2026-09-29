@@ -2815,6 +2815,7 @@ dependencies = [
  "png",
  "qrcode",
  "raw-window-handle",
+ "realfft",
  "rfd",
  "security-framework",
  "serde",

@@ -206,12 +206,11 @@ pub struct VoiceConfig {
     pub retour_voix: bool,
     /// Volume de ce retour (1.0 = le micro tel quel).
     pub retour_voix_gain: f32,
-    /// L'égaliseur des voix reçues : gains en dB des bandes de
-    /// `egaliseur::BANDES`.
-    pub egaliseur: [f32; 5],
+    /// L'égaliseur des voix reçues : ses bandes (vide : à plat).
+    pub egaliseur: Vec<egaliseur::Bande>,
     /// L'égaliseur de sa propre voix, sur ce qui part (ki-chat et le micro
-    /// pour les jeux) : gains en dB des mêmes bandes.
-    pub egaliseur_micro: [f32; 5],
+    /// pour les jeux).
+    pub egaliseur_micro: Vec<egaliseur::Bande>,
     /// Le micro pour les jeux : la sortie (un câble virtuel, VB-Cable) où
     /// part la voix traitée, pour qu'un jeu la prenne comme micro. `None` :
     /// désactivé.
@@ -256,8 +255,8 @@ impl VoiceConfig {
             adoucir_cris: true,
             retour_voix: false,
             retour_voix_gain: 0.5,
-            egaliseur: [0.0; 5],
-            egaliseur_micro: [0.0; 5],
+            egaliseur: Vec::new(),
+            egaliseur_micro: Vec::new(),
             micro_jeux: None,
             jitter_frames: 0,
             tone: false,
@@ -266,6 +265,14 @@ impl VoiceConfig {
         }
     }
 }
+
+/// Ce que la page Casque peut regarder en spectre : rien, sa voix telle
+/// qu'elle part (après son égaliseur), ou les voix reçues (après le leur).
+pub const ANALYSE_AUCUNE: u8 = 0;
+pub const ANALYSE_MICRO: u8 = 1;
+pub const ANALYSE_VOIX: u8 = 2;
+/// La file d'analyse : un peu plus que la fenêtre du spectre (4 096).
+const ANALYSE_MAX: usize = 8_192;
 
 /// Valeur DRED « activé » à passer à set_dred : ~1 s de passé re-transmis
 /// dans chaque paquet (unités du CTL opus).
@@ -682,12 +689,17 @@ struct Shared {
     retour_voix_buf: Mutex<std::collections::VecDeque<f32>>,
     /// L'égaliseur des voix reçues (gains en dB) et sa génération : le
     /// rappel de sortie ne reprend le verrou que quand elle a bougé.
-    egaliseur: Mutex<[f32; 5]>,
+    egaliseur: Mutex<Vec<egaliseur::Bande>>,
     egaliseur_gen: AtomicU64,
     /// L'égaliseur de sa propre voix, et sa génération (même principe, côté
     /// capture).
-    egaliseur_micro: Mutex<[f32; 5]>,
+    egaliseur_micro: Mutex<Vec<egaliseur::Bande>>,
     egaliseur_micro_gen: AtomicU64,
+    /// De quoi dessiner le spectre de la page Casque : les derniers
+    /// échantillons de la source choisie (`ANALYSE_*`), déposés seulement
+    /// quand l'interface les regarde.
+    analyse: Mutex<std::collections::VecDeque<f32>>,
+    analyse_source: std::sync::atomic::AtomicU8,
     /// Le micro pour les jeux : la voix traitée en attente du câble virtuel
     /// (48 kHz mono), et le drapeau posé tant que sa sortie est ouverte —
     /// sans lectrice, la capture n'y dépose rien.
@@ -813,10 +825,12 @@ impl VoiceEngine {
             retour_voix: AtomicBool::new(cfg.retour_voix),
             retour_voix_gain: AtomicU32::new(cfg.retour_voix_gain.clamp(0.0, 2.0).to_bits()),
             retour_voix_buf: Mutex::new(std::collections::VecDeque::new()),
-            egaliseur: Mutex::new(cfg.egaliseur),
+            egaliseur: Mutex::new(cfg.egaliseur.clone()),
             egaliseur_gen: AtomicU64::new(1),
-            egaliseur_micro: Mutex::new(cfg.egaliseur_micro),
+            egaliseur_micro: Mutex::new(cfg.egaliseur_micro.clone()),
             egaliseur_micro_gen: AtomicU64::new(1),
+            analyse: Mutex::new(std::collections::VecDeque::new()),
+            analyse_source: std::sync::atomic::AtomicU8::new(ANALYSE_AUCUNE),
             micro_jeux_buf: Mutex::new(std::collections::VecDeque::new()),
             micro_jeux_actif: AtomicBool::new(false),
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
@@ -991,20 +1005,35 @@ impl VoiceEngine {
         }
     }
 
-    /// L'égaliseur des voix reçues (gains en dB par bande), à chaud.
-    pub fn set_egaliseur(&self, gains: [f32; 5]) {
-        let mut actuels = self.shared.egaliseur.lock().unwrap();
-        if *actuels != gains {
-            *actuels = gains;
+    /// L'égaliseur des voix reçues, à chaud.
+    pub fn set_egaliseur(&self, bandes: &[egaliseur::Bande]) {
+        let mut actuelles = self.shared.egaliseur.lock().unwrap();
+        if actuelles.as_slice() != bandes {
+            *actuelles = bandes.to_vec();
             self.shared.egaliseur_gen.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// L'égaliseur de sa propre voix (gains en dB par bande), à chaud.
-    pub fn set_egaliseur_micro(&self, gains: [f32; 5]) {
-        let mut actuels = self.shared.egaliseur_micro.lock().unwrap();
-        if *actuels != gains {
-            *actuels = gains;
+    /// Ce que l'interface veut voir en spectre (`ANALYSE_*`) ; la file
+    /// repart vide à chaque changement.
+    pub fn set_analyse(&self, source: u8) {
+        if self.shared.analyse_source.swap(source, Ordering::Relaxed) != source {
+            self.shared.analyse.lock().unwrap().clear();
+        }
+    }
+
+    /// Les `n` derniers échantillons de la source d'analyse (moins s'il n'y
+    /// en a pas encore autant).
+    pub fn analyse(&self, n: usize) -> Vec<f32> {
+        let file = self.shared.analyse.lock().unwrap();
+        file.iter().skip(file.len().saturating_sub(n)).copied().collect()
+    }
+
+    /// L'égaliseur de sa propre voix, à chaud.
+    pub fn set_egaliseur_micro(&self, bandes: &[egaliseur::Bande]) {
+        let mut actuelles = self.shared.egaliseur_micro.lock().unwrap();
+        if actuelles.as_slice() != bandes {
+            *actuelles = bandes.to_vec();
             self.shared.egaliseur_micro_gen.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1628,7 +1657,7 @@ fn capture_loop(
     let mut compression_en_place = u8::MAX;
     let mut limiteur = dynamique::Limiteur::new();
     // L'égaliseur de sa voix, refait quand l'interface change ses gains.
-    let mut egaliseur_micro = egaliseur::Egaliseur::new(*sh.egaliseur_micro.lock().unwrap());
+    let mut egaliseur_micro = egaliseur::Egaliseur::new(&sh.egaliseur_micro.lock().unwrap());
     let mut egaliseur_micro_gen = sh.egaliseur_micro_gen.load(Ordering::Relaxed);
     // Le réseau de détection de parole, chargé à la première trame qui en a
     // besoin (mode activation vocale, micro armé) : ~1 Mo de modèle qu'on
@@ -2048,9 +2077,12 @@ fn capture_loop(
             let gen = sh.egaliseur_micro_gen.load(Ordering::Relaxed);
             if gen != egaliseur_micro_gen {
                 egaliseur_micro_gen = gen;
-                egaliseur_micro.regler(*sh.egaliseur_micro.lock().unwrap());
+                egaliseur_micro.regler(&sh.egaliseur_micro.lock().unwrap());
             }
             egaliseur_micro.traiter_trame(&mut frame);
+            if sh.analyse_source.load(Ordering::Relaxed) == ANALYSE_MICRO {
+                pousser_borne(&sh.analyse, &frame, ANALYSE_MAX);
+            }
             // 4. Gain automatique : normalise le niveau de la voix.
             if sh.agc.load(Ordering::Relaxed) {
                 agc.process(&mut frame, load_f32(&sh.agc_target));
@@ -3311,7 +3343,7 @@ fn output_writer(
     // Le retour de sa voix (sidetone), lu au rythme de la carte son.
     let mut retour = RetourVoix::new(out_rate);
     // L'égaliseur des voix, refait quand l'interface change ses gains.
-    let mut egaliseur = egaliseur::Egaliseur::new(*sh_cb.egaliseur.lock().unwrap());
+    let mut egaliseur = egaliseur::Egaliseur::new(&sh_cb.egaliseur.lock().unwrap());
     let mut egaliseur_gen = sh_cb.egaliseur_gen.load(Ordering::Relaxed);
     move |out: &mut [f32]| {
         let frames = out.len() / 2;
@@ -3358,10 +3390,13 @@ fn output_writer(
             let gen = sh_cb.egaliseur_gen.load(Ordering::Relaxed);
             if gen != egaliseur_gen {
                 egaliseur_gen = gen;
-                egaliseur.regler(*sh_cb.egaliseur.lock().unwrap());
+                egaliseur.regler(&sh_cb.egaliseur.lock().unwrap());
             }
             if any {
                 egaliseur.traiter_trame(&mut mix);
+                if sh_cb.analyse_source.load(Ordering::Relaxed) == ANALYSE_VOIX {
+                    pousser_borne(&sh_cb.analyse, &mix, ANALYSE_MAX);
+                }
             } else {
                 egaliseur.reinitialiser();
             }

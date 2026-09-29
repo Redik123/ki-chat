@@ -10,13 +10,14 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
-use ki_voice::egaliseur::{BANDES, GAIN_MAX_DB, PREREGLAGES};
+use ki_voice::egaliseur::{Bande, Prereglage, PREREGLAGES_ECOUTE, PREREGLAGES_VOIX};
 use ki_voice::materiel::{scinder_nom, EtatMateriel, Gain, Materiel, Ordre};
 
 use crate::icons::Icon;
 use crate::reglages_audio::curseur;
 use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
 use crate::ui::{self, Tone};
+use crate::egaliseur_ui;
 use crate::{KiApp, VoiceSnapshot};
 
 /// Le temps qu'on laisse parler fort pendant le calibrage.
@@ -39,19 +40,6 @@ pub(crate) struct Calibrage {
     debut: Instant,
     crete: f32,
     saturations: u64,
-}
-
-/// L'égaliseur tel qu'il est rangé dans les préférences : « -3,-2,0,3,2 ».
-pub(crate) fn lire_egaliseur(texte: &str) -> [f32; 5] {
-    let mut gains = [0.0; 5];
-    for (g, v) in gains.iter_mut().zip(texte.split(',')) {
-        *g = v.trim().parse::<f32>().unwrap_or(0.0).clamp(-GAIN_MAX_DB, GAIN_MAX_DB);
-    }
-    gains
-}
-
-pub(crate) fn ecrire_egaliseur(gains: &[f32; 5]) -> String {
-    gains.iter().map(|g| format!("{g}")).collect::<Vec<_>>().join(",")
 }
 
 fn en_db(x: f32) -> f32 {
@@ -120,14 +108,6 @@ pub(crate) fn cable_virtuel(sorties: &[String]) -> Option<String> {
         .or_else(|| cables.iter().find(|s| !s.to_lowercase().contains("16 ch")))
         .or_else(|| cables.first())
         .map(|s| (*s).clone())
-}
-
-fn frequence(hz: f32) -> String {
-    if hz >= 1000.0 {
-        format!("{} kHz", hz / 1000.0)
-    } else {
-        format!("{hz} Hz")
-    }
 }
 
 impl KiApp {
@@ -470,37 +450,67 @@ impl KiApp {
             ui,
             Icon::Sliders,
             "Égaliseur",
-            Some("Ta voix telle qu'elle part, ou les voix que tu entends."),
+            Some("Ta voix telle qu'elle part, ou les voix que tu entends — réglées comme en studio."),
             |ui| {
                 ui::ligne(ui, "Pour", |ui| {
-                    ui::segmente(
+                    if ui::segmente(
                         ui,
                         &mut self.egaliseur_vue,
                         &[(VUE_TA_VOIX, "Ta voix"), (VUE_LES_AUTRES, "Ce que tu entends")],
-                    );
+                    ) {
+                        self.eq_editeur.selection = None;
+                        if self.eq_editeur.comparer {
+                            self.eq_editeur.comparer = false;
+                            *apply = true;
+                        }
+                    }
                     ui::precision(
                         ui,
                         if self.egaliseur_vue == VUE_TA_VOIX {
                             "Ce que les autres entendent de toi, dans ki-chat comme dans les \
-                             jeux. Un micro à perche collé à la bouche gonfle les graves — la \
-                             voix « dans une cave » : « Moins de basses » les retire. Écoute le \
-                             résultat avec « M'écouter » (onglet Audio)."
+                             jeux. Derrière la courbe, ta voix en direct : parle, et regarde où \
+                             elle gonfle. « Micro-casque » coupe sous la voix — le grondement, \
+                             l'effet de proximité — sans toucher à son corps : la « cave » sans \
+                             le « nez bouché ». Écoute-toi avec « M'écouter » (onglet Audio), et \
+                             « Comparer » pour entendre la différence."
                         } else {
                             "Les voix que tu entends dans ki-chat — ni les jeux, ni tes \
-                             notifications."
+                             notifications. Derrière la courbe, les voix reçues en direct."
                         },
                     );
                 });
-                let gains = if self.egaliseur_vue == VUE_TA_VOIX {
-                    &mut self.egaliseur_micro
+                // Le spectre : sa voix telle qu'elle part, ou les voix reçues.
+                let ta_voix = self.egaliseur_vue == VUE_TA_VOIX;
+                self.analyse_voulue = if ta_voix { ki_voice::ANALYSE_MICRO } else { ki_voice::ANALYSE_VOIX };
+                let echantillons = self
+                    .link
+                    .engine
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|e| e.analyse(egaliseur_ui::FENETRE))
+                    .unwrap_or_default();
+                let dt = ui.input(|i| i.stable_dt);
+                self.eq_editeur.analyseur.nourrir(&echantillons, dt);
+                let (bandes, prereglages): (&mut Vec<Bande>, &[Prereglage]) = if ta_voix {
+                    (&mut self.egaliseur_micro, &PREREGLAGES_VOIX)
                 } else {
-                    &mut self.egaliseur
+                    (&mut self.egaliseur, &PREREGLAGES_ECOUTE)
                 };
-                if bandes_ui(ui, gains) {
+                if egaliseur_ui::editeur(ui, bandes, &mut self.eq_editeur, prereglages) {
                     *apply = true;
                 }
             },
         );
+    }
+
+    /// Les égaliseurs tels que le moteur doit les jouer : (écoute, sa voix).
+    /// « Comparer » coupe celui que la page montre, le temps de l'écoute.
+    pub(crate) fn egaliseurs_effectifs(&self) -> (Vec<Bande>, Vec<Bande>) {
+        let compare = self.eq_editeur.comparer;
+        let ecoute = if compare && self.egaliseur_vue == VUE_LES_AUTRES { Vec::new() } else { self.egaliseur.clone() };
+        let voix = if compare && self.egaliseur_vue == VUE_TA_VOIX { Vec::new() } else { self.egaliseur_micro.clone() };
+        (ecoute, voix)
     }
 
     /// La carte du haut : le casque dessiné, son nom, où il est branché.
@@ -691,58 +701,6 @@ impl KiApp {
 pub(crate) const VUE_TA_VOIX: u8 = 0;
 pub(crate) const VUE_LES_AUTRES: u8 = 1;
 
-/// Un égaliseur : ses préréglages en pastilles, puis ses cinq bandes en
-/// curseurs verticaux. Rend vrai quand un gain a changé.
-fn bandes_ui(ui: &mut egui::Ui, gains: &mut [f32; 5]) -> bool {
-    let mut change = false;
-    ui::ligne(ui, "Préréglage", |ui| {
-        let mut choix = PREREGLAGES.iter().position(|(_, g)| g == gains).unwrap_or(usize::MAX);
-        let options: Vec<(usize, &str)> =
-            PREREGLAGES.iter().enumerate().map(|(i, (nom, _))| (i, *nom)).collect();
-        if ui::segmente(ui, &mut choix, &options) {
-            if let Some((_, g)) = PREREGLAGES.get(choix) {
-                *gains = *g;
-                change = true;
-            }
-        }
-        if choix == usize::MAX {
-            ui::precision(ui, "Réglage personnel.");
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        for (i, (nom, hz)) in BANDES.iter().enumerate() {
-            ui.allocate_ui_with_layout(
-                Vec2::new(68.0, 180.0),
-                egui::Layout::top_down(egui::Align::Center),
-                |ui| {
-                    let g = gains[i];
-                    ui.label(
-                        RichText::new(format!("{g:+.1}"))
-                            .color(if g.abs() < 0.05 { TEXT_FAINT } else { ACCENT })
-                            .size(11.5),
-                    );
-                    ui.spacing_mut().slider_width = 110.0;
-                    let r = ui.add(
-                        egui::Slider::new(&mut gains[i], -GAIN_MAX_DB..=GAIN_MAX_DB)
-                            .vertical()
-                            .step_by(0.5)
-                            .show_value(false),
-                    );
-                    change |= r.changed();
-                    if r.double_clicked() {
-                        gains[i] = 0.0;
-                        change = true;
-                    }
-                    ui.label(RichText::new(*nom).color(TEXT_DIM).size(11.5));
-                    ui.label(RichText::new(frequence(*hz)).color(TEXT_FAINT).size(10.5));
-                },
-            );
-        }
-    });
-    ui::precision(ui, "Double-clic sur une bande pour la remettre à zéro.");
-    change
-}
-
 /// Le casque dessiné : arceau, oreillettes, perche du micro. Les oreillettes
 /// s'allument avec les voix qu'on entend, la capsule du micro avec la sienne
 /// — verte quand on parle, rouge quand la carte sature, barrée quand on est
@@ -924,11 +882,4 @@ mod tests {
         assert!(!est_cable("Casque (Realtek USB Audio)"));
     }
 
-    #[test]
-    fn l_egaliseur_fait_l_aller_retour_des_preferences() {
-        let g = [-3.0, -2.0, 0.0, 3.5, 2.0];
-        assert_eq!(lire_egaliseur(&ecrire_egaliseur(&g)), g);
-        assert_eq!(lire_egaliseur(""), [0.0; 5]);
-        assert_eq!(lire_egaliseur("99,x"), [GAIN_MAX_DB, 0.0, 0.0, 0.0, 0.0]);
-    }
 }

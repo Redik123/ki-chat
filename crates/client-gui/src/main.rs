@@ -24,6 +24,7 @@ mod boutique;
 mod ptt;
 mod reglages_audio;
 mod reglages_casque;
+mod egaliseur_ui;
 mod raccourci;
 mod rangs;
 mod secours;
@@ -1186,12 +1187,18 @@ struct KiApp {
     /// Le retour de sa voix dans le casque (sidetone), et son volume.
     retour_voix: bool,
     retour_voix_volume: f32,
-    /// L'égaliseur des voix reçues, en dB par bande.
-    egaliseur: [f32; 5],
+    /// L'égaliseur des voix reçues : ses bandes.
+    egaliseur: Vec<ki_voice::egaliseur::Bande>,
     /// L'égaliseur de sa propre voix, sur ce qui part.
-    egaliseur_micro: [f32; 5],
+    egaliseur_micro: Vec<ki_voice::egaliseur::Bande>,
     /// Lequel des deux la page Casque montre (`reglages_casque::VUE_*`).
     egaliseur_vue: u8,
+    /// L'éditeur d'égaliseur (bande choisie, comparaison, spectre).
+    eq_editeur: egaliseur_ui::EditeurEq,
+    /// Le spectre que la page veut voir cette image, et celui que le moteur
+    /// dépose (`ki_voice::ANALYSE_*`).
+    analyse_voulue: u8,
+    analyse_actuelle: u8,
     /// Le calibrage des gains du micro en cours (page Casque), et son
     /// dernier verdict, affiché un moment.
     calibrage_micro: Option<reglages_casque::Calibrage>,
@@ -1564,9 +1571,12 @@ impl KiApp {
             casque_nom: get("casque_nom", ""),
             retour_voix: get("retour_voix", "off") == "on",
             retour_voix_volume: get("retour_voix_volume", "0.5").parse().unwrap_or(0.5),
-            egaliseur: reglages_casque::lire_egaliseur(&get("egaliseur", "")),
-            egaliseur_micro: reglages_casque::lire_egaliseur(&get("egaliseur_micro", "")),
+            egaliseur: ki_voice::egaliseur::lire(&get("egaliseur", "")),
+            egaliseur_micro: ki_voice::egaliseur::lire(&get("egaliseur_micro", "")),
             egaliseur_vue: reglages_casque::VUE_TA_VOIX,
+            eq_editeur: egaliseur_ui::EditeurEq::new(),
+            analyse_voulue: ki_voice::ANALYSE_AUCUNE,
+            analyse_actuelle: ki_voice::ANALYSE_AUCUNE,
             calibrage_micro: None,
             calibrage_verdict: None,
             materiel_suivi: None,
@@ -1783,8 +1793,9 @@ impl KiApp {
             engine.set_compression(self.compression);
             engine.set_adoucir_cris(self.adoucir_cris);
             engine.set_retour_voix(self.retour_voix, self.retour_voix_volume);
-            engine.set_egaliseur(self.egaliseur);
-            engine.set_egaliseur_micro(self.egaliseur_micro);
+            let (ecoute, voix) = self.egaliseurs_effectifs();
+            engine.set_egaliseur(&ecoute);
+            engine.set_egaliseur_micro(&voix);
             engine.set_jitter_frames(self.jitter_frames);
             engine.set_dred(match self.dred_mode {
                 0 => 0,
@@ -1831,8 +1842,8 @@ impl KiApp {
             adoucir_cris: self.adoucir_cris,
             retour_voix: self.retour_voix,
             retour_voix_gain: self.retour_voix_volume,
-            egaliseur: self.egaliseur,
-            egaliseur_micro: self.egaliseur_micro,
+            egaliseur: self.egaliseur.clone(),
+            egaliseur_micro: self.egaliseur_micro.clone(),
             micro_jeux: self.micro_jeux_resolu(),
             jitter_frames: self.jitter_frames,
             dred: match self.dred_mode {
@@ -6478,8 +6489,17 @@ impl KiApp {
         self.atelier_window(ctx);
         self.overlay_en_jeu(ctx, voice);
 
+        // Le spectre de l'égaliseur : la page le demande à chaque image où
+        // elle se montre ; le moteur n'en dépose que tant qu'on le regarde.
+        self.analyse_voulue = ki_voice::ANALYSE_AUCUNE;
         if self.show_settings {
             self.settings_window(ctx, voice);
+        }
+        if self.analyse_voulue != self.analyse_actuelle {
+            if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
+                engine.set_analyse(self.analyse_voulue);
+            }
+            self.analyse_actuelle = self.analyse_voulue;
         }
         self.menu_message_ui(ctx);
         if self.show_admin {
@@ -9560,6 +9580,12 @@ impl KiApp {
         self.show_settings = false;
         self.info = None;
         self.calibrage_micro = None;
+        if self.eq_editeur.comparer {
+            // Fermer la fenêtre en pleine comparaison ne doit pas laisser
+            // l'égaliseur coupé.
+            self.eq_editeur.comparer = false;
+            self.apply_audio_settings();
+        }
         if self.calibrating.take().is_some() || self.loopback {
             self.loopback = false;
             self.apply_audio_settings();
@@ -14649,8 +14675,8 @@ impl eframe::App for KiApp {
         storage.set_string("casque_nom", self.casque_nom.clone());
         storage.set_string("retour_voix", if self.retour_voix { "on" } else { "off" }.into());
         storage.set_string("retour_voix_volume", format!("{}", self.retour_voix_volume));
-        storage.set_string("egaliseur", reglages_casque::ecrire_egaliseur(&self.egaliseur));
-        storage.set_string("egaliseur_micro", reglages_casque::ecrire_egaliseur(&self.egaliseur_micro));
+        storage.set_string("egaliseur", ki_voice::egaliseur::ecrire(&self.egaliseur));
+        storage.set_string("egaliseur_micro", ki_voice::egaliseur::ecrire(&self.egaliseur_micro));
         storage.set_string("micro_jeux", if self.micro_jeux { "on" } else { "off" }.into());
         storage.set_string("micro_jeux_sortie", self.micro_jeux_sortie.clone().unwrap_or_default());
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
