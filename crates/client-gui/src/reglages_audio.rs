@@ -601,7 +601,7 @@ fn combo_peripherique(
 
 /// Un curseur à la largeur de la colonne. `pas` : `Some(1.0)` pour des
 /// entiers. Rend vrai au changement.
-fn curseur(
+pub(crate) fn curseur(
     ui: &mut egui::Ui,
     valeur: &mut f32,
     plage: RangeInclusive<f32>,

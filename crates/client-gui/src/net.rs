@@ -104,6 +104,11 @@ pub struct VoicePrefs {
     pub compression: u8,
     /// Adoucir les cris des autres.
     pub adoucir_cris: bool,
+    /// Retour de sa voix dans le casque, et son volume.
+    pub retour_voix: bool,
+    pub retour_voix_gain: f32,
+    /// L'égaliseur des voix reçues (dB par bande).
+    pub egaliseur: [f32; 5],
     /// Tampon de gigue imposé en trames (0 = adaptatif).
     pub jitter_frames: usize,
     /// Redondance neuronale DRED (0 = désactivée, sinon valeur du CTL).
@@ -513,6 +518,9 @@ fn start_engine(
     cfg.gate_threshold = prefs.gate_threshold;
     cfg.compression = prefs.compression;
     cfg.adoucir_cris = prefs.adoucir_cris;
+    cfg.retour_voix = prefs.retour_voix;
+    cfg.retour_voix_gain = prefs.retour_voix_gain;
+    cfg.egaliseur = prefs.egaliseur;
     cfg.jitter_frames = prefs.jitter_frames;
     cfg.medias = Some(prefs.medias.clone());
     // L'émetteur suit l'**emplacement** de connexion, pas une connexion :

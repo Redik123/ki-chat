@@ -23,6 +23,7 @@ mod porte_ui;
 mod boutique;
 mod ptt;
 mod reglages_audio;
+mod reglages_casque;
 mod raccourci;
 mod rangs;
 mod secours;
@@ -225,6 +226,7 @@ enum AdminTab {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Onglet {
     Audio,
+    Casque,
     Reseau,
     Diffusion,
     Overlay,
@@ -235,8 +237,9 @@ enum Onglet {
 }
 
 impl Onglet {
-    const TOUS: [Onglet; 8] = [
+    const TOUS: [Onglet; 9] = [
         Onglet::Audio,
+        Onglet::Casque,
         Onglet::Reseau,
         Onglet::Diffusion,
         Onglet::Overlay,
@@ -249,6 +252,7 @@ impl Onglet {
     fn label(self) -> &'static str {
         match self {
             Onglet::Audio => "Audio",
+            Onglet::Casque => "Casque",
             Onglet::Reseau => "Réseau & qualité",
             Onglet::Diffusion => "Diffusion d'écran",
             Onglet::Overlay => "Overlay en jeu",
@@ -264,6 +268,7 @@ impl Onglet {
     fn cle(self) -> &'static str {
         match self {
             Onglet::Audio => "audio",
+            Onglet::Casque => "casque",
             Onglet::Reseau => "reseau",
             Onglet::Diffusion => "diffusion",
             Onglet::Overlay => "overlay",
@@ -1176,6 +1181,19 @@ struct KiApp {
     alerte_saturation: Option<std::time::Instant>,
     /// Un compresseur par personne entendue : celui qui hurle redescend.
     adoucir_cris: bool,
+    /// Le nom du casque, tapé sur la page Casque (vide : celui de Windows).
+    casque_nom: String,
+    /// Le retour de sa voix dans le casque (sidetone), et son volume.
+    retour_voix: bool,
+    retour_voix_volume: f32,
+    /// L'égaliseur des voix reçues, en dB par bande.
+    egaliseur: [f32; 5],
+    /// Le calibrage des gains du micro en cours (page Casque), et son
+    /// dernier verdict, affiché un moment.
+    calibrage_micro: Option<reglages_casque::Calibrage>,
+    calibrage_verdict: Option<(std::time::Instant, String)>,
+    /// Les périphériques que suit le fil du matériel (dernier ordre donné).
+    materiel_suivi: Option<(Option<String>, Option<String>)>,
     jitter_frames: usize,
     ptt_release_ms: u32,
     loopback: bool,
@@ -1535,6 +1553,13 @@ impl KiApp {
                 .unwrap_or(ki_voice::dynamique::COMPRESSION_DOUCE)
                 .min(ki_voice::dynamique::COMPRESSION_FORTE),
             adoucir_cris: get("adoucir_cris", "on") != "off",
+            casque_nom: get("casque_nom", ""),
+            retour_voix: get("retour_voix", "off") == "on",
+            retour_voix_volume: get("retour_voix_volume", "0.5").parse().unwrap_or(0.5),
+            egaliseur: reglages_casque::lire_egaliseur(&get("egaliseur", "")),
+            calibrage_micro: None,
+            calibrage_verdict: None,
+            materiel_suivi: None,
             alerte_saturation: None,
             jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
             ptt_release_ms: get("ptt_release_ms", "100").parse().unwrap_or(100),
@@ -1745,6 +1770,8 @@ impl KiApp {
             engine.set_gate_threshold(self.gate_threshold);
             engine.set_compression(self.compression);
             engine.set_adoucir_cris(self.adoucir_cris);
+            engine.set_retour_voix(self.retour_voix, self.retour_voix_volume);
+            engine.set_egaliseur(self.egaliseur);
             engine.set_jitter_frames(self.jitter_frames);
             engine.set_dred(match self.dred_mode {
                 0 => 0,
@@ -1789,6 +1816,9 @@ impl KiApp {
             gate_threshold: self.gate_threshold,
             compression: self.compression,
             adoucir_cris: self.adoucir_cris,
+            retour_voix: self.retour_voix,
+            retour_voix_gain: self.retour_voix_volume,
+            egaliseur: self.egaliseur,
             jitter_frames: self.jitter_frames,
             dred: match self.dred_mode {
                 0 => 0,
@@ -8791,6 +8821,9 @@ impl KiApp {
                         if onglet == Onglet::Audio {
                             self.onglet_audio(ui, voice, &mut apply, &mut restart);
                         }
+                        if onglet == Onglet::Casque {
+                            self.onglet_casque(ui, voice, &mut apply);
+                        }
                         if onglet == Onglet::Aide {
                             // --- Journal audio ---
                             // Ce que l'audio a vécu (ouvertures, pertes, replis,
@@ -9511,6 +9544,7 @@ impl KiApp {
     fn close_settings(&mut self) {
         self.show_settings = false;
         self.info = None;
+        self.calibrage_micro = None;
         if self.calibrating.take().is_some() || self.loopback {
             self.loopback = false;
             self.apply_audio_settings();
@@ -14597,6 +14631,10 @@ impl eframe::App for KiApp {
             "adoucir_cris",
             if self.adoucir_cris { "on" } else { "off" }.into(),
         );
+        storage.set_string("casque_nom", self.casque_nom.clone());
+        storage.set_string("retour_voix", if self.retour_voix { "on" } else { "off" }.into());
+        storage.set_string("retour_voix_volume", format!("{}", self.retour_voix_volume));
+        storage.set_string("egaliseur", reglages_casque::ecrire_egaliseur(&self.egaliseur));
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
         storage.set_string("ptt_release_ms", format!("{}", self.ptt_release_ms));
         storage.set_string("noise_mode", format!("{}", self.noise_mode));

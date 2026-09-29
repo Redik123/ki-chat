@@ -134,7 +134,7 @@ fn ensure_com() {
     DONE.with(|_| {});
 }
 
-fn enumerator() -> anyhow::Result<IMMDeviceEnumerator> {
+pub(crate) fn enumerator() -> anyhow::Result<IMMDeviceEnumerator> {
     ensure_com();
     unsafe {
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -248,7 +248,7 @@ pub fn ensure_notifications() {
 
 /// Nom convivial d'un point de terminaison (le même que celui de cpal, les
 /// réglages enregistrés restent donc valables d'un moteur à l'autre).
-fn friendly_name(device: &IMMDevice) -> anyhow::Result<String> {
+pub(crate) fn friendly_name(device: &IMMDevice) -> anyhow::Result<String> {
     unsafe {
         let store = device
             .OpenPropertyStore(STGM_READ)
@@ -308,7 +308,7 @@ fn active_devices(
 /// cinq secondes de silence et se réveille à la voix, l'atténuation suivait.
 /// Le joueur qui destine un autre périphérique aux appels le choisit dans
 /// les réglages.
-fn pick(
+pub(crate) fn pick(
     enu: &IMMDeviceEnumerator,
     name: Option<&str>,
     input: bool,

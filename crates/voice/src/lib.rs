@@ -10,6 +10,7 @@
 
 pub mod docteur;
 pub mod dynamique;
+pub mod egaliseur;
 pub mod effects;
 // `jitter` et `resample` sont l'intérieur du moteur, et le resteraient
 // volontiers — mais un banc criterion est un crate EXTÉRIEUR : il ne voit que
@@ -20,6 +21,7 @@ pub mod effects;
 // rééchantillonnage reviendrait à parier — c'est précisément ce que les bancs
 // existent pour empêcher.
 pub mod jitter;
+pub mod materiel;
 pub mod medias;
 pub mod resample;
 /// Détection de parole neuronale (Silero VAD, par tract).
@@ -199,6 +201,14 @@ pub struct VoiceConfig {
     pub compression: u8,
     /// Adoucir les cris des autres : un compresseur par personne entendue.
     pub adoucir_cris: bool,
+    /// Retour de sa voix dans le casque (« sidetone ») : le micro brut,
+    /// joué au plus court, pour s'entendre parler sous un casque fermé.
+    pub retour_voix: bool,
+    /// Volume de ce retour (1.0 = le micro tel quel).
+    pub retour_voix_gain: f32,
+    /// L'égaliseur des voix reçues : gains en dB des bandes de
+    /// `egaliseur::BANDES`.
+    pub egaliseur: [f32; 5],
     /// Taille de tampon de gigue imposée en trames (0 = adaptatif).
     pub jitter_frames: usize,
     /// Mode test : émet une sinusoïde 440 Hz au lieu du micro.
@@ -237,6 +247,9 @@ impl VoiceConfig {
             gate_threshold: 0.0,
             compression: dynamique::COMPRESSION_DOUCE,
             adoucir_cris: true,
+            retour_voix: false,
+            retour_voix_gain: 0.5,
+            egaliseur: [0.0; 5],
             jitter_frames: 0,
             tone: false,
             no_playback: false,
@@ -528,6 +541,11 @@ pub struct VoiceStats {
     /// Le micro a saturé dans les deux dernières secondes (l'interface
     /// l'affiche à côté du vumètre).
     pub micro_sature: bool,
+    /// Crête du micro **brut**, tel que la carte son le livre, sur la
+    /// dernière trame : avant le gain, le débruitage et le gain automatique.
+    /// C'est la marge restante avant la saturation — ce que règlent les gains
+    /// de la carte son (page Casque).
+    pub crete_brute: f32,
 }
 
 #[derive(Default)]
@@ -552,6 +570,15 @@ struct Counters {
     /// Quand, en ms depuis `Shared::depart`, le micro a saturé pour la
     /// dernière fois (0 : jamais).
     derniere_saturation_ms: AtomicU64,
+    /// Crête brute de la dernière trame (bits f32, voir
+    /// `VoiceStats::crete_brute`).
+    crete_brute_bits: std::sync::atomic::AtomicU32,
+    /// La plus haute crête brute depuis la dernière lecture de
+    /// `VoiceEngine::crete_brute_max` — le calibrage des gains ne doit rater
+    /// aucune trame, même quand l'interface ne dessine pas à 50 images/s.
+    /// Une crête est positive : l'ordre de ses bits est celui des valeurs, et
+    /// `fetch_max` sur les bits suffit.
+    crete_brute_max_bits: std::sync::atomic::AtomicU32,
     /// Le moteur qui tient **réellement** le micro, d'après la dernière
     /// tentative d'ouverture (`docteur::Moteur`, rangé en code).
     ///
@@ -631,6 +658,20 @@ struct Shared {
     loopback: AtomicBool,
     /// Échantillons locaux à mixer dans la sortie (test micro / son de test).
     loopback_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// Retour de sa voix dans le casque (« sidetone »), et son volume (bits
+    /// f32). Rien à voir avec « M'écouter » : pas de codec, pas de trame
+    /// d'avance, le micro brut au plus court — pour s'entendre parler sous un
+    /// casque fermé, pas pour juger ce que les autres entendent.
+    retour_voix: AtomicBool,
+    retour_voix_gain: AtomicU32,
+    /// Le micro brut en attente du rappel de sortie, à 48 kHz. Déposé par
+    /// blocs de capture (~10 ms), tiré par blocs de rendu : quelques
+    /// millisecondes d'encours, jamais plus (voir `output_writer`).
+    retour_voix_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// L'égaliseur des voix reçues (gains en dB) et sa génération : le
+    /// rappel de sortie ne reprend le verrou que quand elle a bougé.
+    egaliseur: Mutex<[f32; 5]>,
+    egaliseur_gen: AtomicU64,
     /// Effets sonores en attente de lecture. File séparée du loopback :
     /// celui-ci est vidé dès qu'on coupe le retour local, et le fil de
     /// capture le rogne à 250 ms tant qu'il est actif — une notification
@@ -748,6 +789,11 @@ impl VoiceEngine {
             dred: AtomicI32::new(0),
             loopback: AtomicBool::new(false),
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
+            retour_voix: AtomicBool::new(cfg.retour_voix),
+            retour_voix_gain: AtomicU32::new(cfg.retour_voix_gain.clamp(0.0, 2.0).to_bits()),
+            retour_voix_buf: Mutex::new(std::collections::VecDeque::new()),
+            egaliseur: Mutex::new(cfg.egaliseur),
+            egaliseur_gen: AtomicU64::new(1),
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
             soundboard_buf: Mutex::new(std::collections::VecDeque::new()),
@@ -902,6 +948,31 @@ impl VoiceEngine {
     /// Adoucir les cris des autres, à chaud.
     pub fn set_adoucir_cris(&self, on: bool) {
         self.shared.adoucir_cris.store(on, Ordering::Relaxed);
+    }
+
+    /// Le retour de sa voix dans le casque, et son volume, à chaud.
+    pub fn set_retour_voix(&self, on: bool, gain: f32) {
+        store_f32(&self.shared.retour_voix_gain, gain.clamp(0.0, 2.0));
+        // À chaque bascule, un tampon vide : pas de reste d'avant au rallumage.
+        if self.shared.retour_voix.swap(on, Ordering::Relaxed) != on {
+            self.shared.retour_voix_buf.lock().unwrap().clear();
+        }
+    }
+
+    /// L'égaliseur des voix reçues (gains en dB par bande), à chaud.
+    pub fn set_egaliseur(&self, gains: [f32; 5]) {
+        let mut actuels = self.shared.egaliseur.lock().unwrap();
+        if *actuels != gains {
+            *actuels = gains;
+            self.shared.egaliseur_gen.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// La plus haute crête du micro brut depuis le dernier appel, remise à
+    /// zéro : le calibrage des gains de la carte son la relève à chaque image
+    /// et garde le maximum, sans rater les trames tombées entre deux.
+    pub fn crete_brute_max(&self) -> f32 {
+        f32::from_bits(self.shared.counters.crete_brute_max_bits.swap(0, Ordering::Relaxed))
     }
 
     /// Maintien d'émission VAD en ms, à chaud.
@@ -1120,6 +1191,7 @@ impl VoiceEngine {
                 derniere != 0
                     && (self.shared.depart.elapsed().as_millis() as u64).saturating_sub(derniere) < 2_000
             },
+            crete_brute: f32::from_bits(self.shared.counters.crete_brute_bits.load(Ordering::Relaxed)),
         }
     }
 
@@ -1824,6 +1896,14 @@ fn capture_loop(
             drop(stream);
             continue 'device;
         }
+        // Le retour de sa voix : le micro brut, au bloc près, sans attendre
+        // la trame de 20 ms — la latence fait tout un bon retour. À 48 kHz
+        // (le moteur natif fait convertir Windows), le bloc part tel quel ; à
+        // une autre fréquence, c'est la trame rééchantillonnée qui s'y colle.
+        let retour = sh.retour_voix.load(Ordering::Relaxed);
+        if retour && in_rate == SAMPLE_RATE {
+            pousser_retour(&sh, &chunk);
+        }
         resampler.push(&chunk);
         // Le tampon repart aussitôt au rappel de capture, qui le reprendra au
         // lieu d'en allouer un : c'est ce qui rend le chemin temps réel muet
@@ -1831,6 +1911,15 @@ fn capture_loop(
         chunks.recycle(chunk);
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
+            if retour && in_rate != SAMPLE_RATE {
+                pousser_retour(&sh, &frame);
+            }
+
+            // La marge du micro brut, avant tout traitement : ce que règlent
+            // les gains de la carte son (page Casque, et son calibrage).
+            let crete_brute = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+            sh.counters.crete_brute_bits.store(crete_brute.to_bits(), Ordering::Relaxed);
+            sh.counters.crete_brute_max_bits.fetch_max(crete_brute.to_bits(), Ordering::Relaxed);
 
             // Le micro tel que la carte son le livre : écrêté ici, c'est
             // que son niveau est trop haut à la source — rien plus loin ne
@@ -3032,6 +3121,11 @@ fn output_writer(
     let mut droite: Vec<f32> = Vec::new();
     // Le retour local (« s'écouter ») a pris son avance (voir plus bas).
     let mut retour_amorce = false;
+    // Le retour de sa voix (sidetone), lu au rythme de la carte son.
+    let mut retour = RetourVoix::new(out_rate);
+    // L'égaliseur des voix, refait quand l'interface change ses gains.
+    let mut egaliseur = egaliseur::Egaliseur::new(*sh_cb.egaliseur.lock().unwrap());
+    let mut egaliseur_gen = sh_cb.egaliseur_gen.load(Ordering::Relaxed);
     move |out: &mut [f32]| {
         let frames = out.len() / 2;
         ticks_cb.fetch_add(1, Ordering::Relaxed);
@@ -3068,6 +3162,21 @@ fn output_writer(
                 if let Some(r) = sh_cb.robinet_copains.lock().unwrap().as_ref() {
                     r(&mix);
                 }
+            }
+            // L'égaliseur, sur les voix seules : ni « M'écouter » (ce qu'on
+            // s'entend dire doit rester ce que les autres entendent), ni les
+            // effets. Sans voix, la trame reste à zéro strict — la veille de
+            // la sortie en dépend, et des filtres qui s'éteignent n'y arrivent
+            // jamais — et les filtres repartent de zéro.
+            let gen = sh_cb.egaliseur_gen.load(Ordering::Relaxed);
+            if gen != egaliseur_gen {
+                egaliseur_gen = gen;
+                egaliseur.regler(*sh_cb.egaliseur.lock().unwrap());
+            }
+            if any {
+                egaliseur.traiter_trame(&mut mix);
+            } else {
+                egaliseur.reinitialiser();
             }
             // Retour local : test micro (« s'écouter ») et son de test.
             //
@@ -3174,6 +3283,82 @@ fn output_writer(
             paire[0] = gauche[i];
             paire[1] = droite[i];
         }
+        // Le retour de sa voix, ajouté en tout dernier, au rythme de la carte
+        // son : ni trame de 20 ms ni rééchantillonneur du mix entre le micro
+        // et l'oreille — tout l'écart avec « M'écouter ». Hors du signal
+        // « lointain » de l'annulateur d'écho, qui n'a rien à en apprendre :
+        // ce retour ne se joue qu'au casque.
+        if sh_cb.retour_voix.load(Ordering::Relaxed) {
+            let gain = load_f32(&sh_cb.retour_voix_gain);
+            let mut buf = sh_cb.retour_voix_buf.lock().unwrap();
+            retour.jouer(&mut buf, paires, gain);
+        } else {
+            retour = RetourVoix::new(out_rate);
+        }
+    }
+}
+
+/// Encours maximal du retour de voix : au-delà, les plus vieux échantillons
+/// partent. Le retour ne doit jamais accumuler de latence, quitte à sauter
+/// quelques millisecondes quand micro et sortie dérivent l'un de l'autre.
+const RETOUR_MAX: usize = SAMPLE_RATE as usize * 40 / 1000;
+/// Ce qu'il faut d'avance avant de jouer : un bloc de capture, pour ne pas
+/// tomber à sec à chaque rappel quand les deux horloges se croisent.
+const RETOUR_AMORCE: usize = SAMPLE_RATE as usize * 10 / 1000;
+
+/// Dépose du micro brut (48 kHz) pour le retour de voix, encours borné.
+fn pousser_retour(sh: &Shared, bloc: &[f32]) {
+    let mut buf = sh.retour_voix_buf.lock().unwrap();
+    buf.extend(bloc.iter().copied());
+    let exces = buf.len().saturating_sub(RETOUR_MAX);
+    if exces > 0 {
+        buf.drain(..exces);
+    }
+}
+
+/// La lecture du retour de voix côté sortie : le micro brut à 48 kHz, lu à
+/// la fréquence de la carte son (interpolation linéaire — c'est un retour de
+/// voix, pas de la musique), réamorcé après chaque famine.
+struct RetourVoix {
+    /// Pas de lecture, en échantillons 48 kHz par échantillon de sortie.
+    pas: f64,
+    /// Position fractionnaire dans le tampon.
+    position: f64,
+    amorce: bool,
+}
+
+impl RetourVoix {
+    fn new(out_rate: u32) -> Self {
+        Self { pas: SAMPLE_RATE as f64 / out_rate.max(1) as f64, position: 0.0, amorce: false }
+    }
+
+    /// Ajoute le retour à des paires stéréo, au milieu, puis rend au tampon
+    /// ce qui a été lu.
+    fn jouer(&mut self, buf: &mut std::collections::VecDeque<f32>, paires: &mut [[f32; 2]], gain: f32) {
+        if !self.amorce {
+            if buf.len() < RETOUR_AMORCE {
+                return;
+            }
+            self.amorce = true;
+            self.position = 0.0;
+        }
+        for paire in paires.iter_mut() {
+            let i = self.position as usize;
+            if i + 1 >= buf.len() {
+                // À sec : on attendra la prochaine avance plutôt que de
+                // hacher chaque rappel.
+                self.amorce = false;
+                break;
+            }
+            let frac = (self.position - i as f64) as f32;
+            let s = (buf[i] + (buf[i + 1] - buf[i]) * frac) * gain;
+            paire[0] = (paire[0] + s).clamp(-1.0, 1.0);
+            paire[1] = (paire[1] + s).clamp(-1.0, 1.0);
+            self.position += self.pas;
+        }
+        let lus = (self.position as usize).min(buf.len());
+        buf.drain(..lus);
+        self.position -= lus as f64;
     }
 }
 
@@ -3544,6 +3729,32 @@ mod tests {
         }
         assert!(crete <= dynamique::Limiteur::PLAFOND + 1e-6, "crête {crete}");
         assert!(colles * 100 < total, "{colles} échantillons collés au plafond sur {total}");
+    }
+
+    /// Le retour de voix attend son avance, rejoue le micro au milieu et au
+    /// volume demandé, rend au tampon ce qu'il a lu, et s'arrête net à sec
+    /// plutôt que d'inventer.
+    #[test]
+    fn le_retour_de_voix_rejoue_le_micro() {
+        let mut r = RetourVoix::new(SAMPLE_RATE);
+        let mut buf = std::collections::VecDeque::new();
+        let mut paires = [[0f32; 2]; 480];
+        // Pas encore assez d'avance : rien.
+        buf.extend(std::iter::repeat_n(0.5f32, RETOUR_AMORCE - 1));
+        r.jouer(&mut buf, &mut paires, 1.0);
+        assert!(paires.iter().all(|p| *p == [0.0, 0.0]));
+        // Assez : le micro revient, au volume demandé, des deux côtés.
+        buf.extend(std::iter::repeat_n(0.5f32, 1000));
+        r.jouer(&mut buf, &mut paires, 0.5);
+        assert!(paires.iter().all(|p| (p[0] - 0.25).abs() < 1e-6 && p[0] == p[1]));
+        assert_eq!(buf.len(), RETOUR_AMORCE - 1 + 1000 - 480);
+        // Presque à sec : il joue ce qu'il a, puis se tait et se réamorcera.
+        buf.truncate(100);
+        let mut paires = [[0f32; 2]; 480];
+        r.jouer(&mut buf, &mut paires, 1.0);
+        let joues = paires.iter().filter(|p| p[0] != 0.0).count();
+        assert!((90..100).contains(&joues), "{joues} échantillons joués");
+        assert!(!r.amorce);
     }
 
     /// « M'écouter » marchait « un peu trop » : les autres entendaient aussi,
