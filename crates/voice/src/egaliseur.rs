@@ -177,6 +177,16 @@ impl Egaliseur {
             }
             *s = x;
         }
+        // Après un silence strict (la porte de bruit du micro en livre), la
+        // queue des filtres s'éteint vers des nombres si petits que le
+        // processeur les calcule cent fois plus lentement : on les remet à
+        // zéro bien avant.
+        for f in self.filtres.iter_mut() {
+            if f.z1.abs() < 1e-15 && f.z2.abs() < 1e-15 {
+                f.z1 = 0.0;
+                f.z2 = 0.0;
+            }
+        }
     }
 }
 
@@ -221,6 +231,25 @@ mod tests {
             let g_loin = gain_a(&mut Egaliseur::new(gains), loin);
             assert!(g_loin.abs() < 3.0, "{nom} déborde : {g_loin:.1} dB à {loin} Hz");
         }
+    }
+
+    /// Après un silence strict (la porte de bruit du micro en livre), les
+    /// filtres retombent à zéro exact au lieu de s'éteindre sans fin vers
+    /// des nombres minuscules, que le processeur calcule très lentement.
+    #[test]
+    fn apres_un_silence_les_filtres_retombent_a_zero() {
+        let mut e = Egaliseur::new([-6.0, -3.0, 0.0, 3.0, 2.0]);
+        let mut voix: Vec<f32> = (0..960).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        e.traiter_trame(&mut voix);
+        // Un silence neuf à chaque trame : la sortie ne doit pas repartir en
+        // entrée, elle ferait boucle.
+        let mut derniere = [0f32; 960];
+        for _ in 0..50 {
+            derniere = [0f32; 960];
+            e.traiter_trame(&mut derniere);
+        }
+        assert!(e.filtres.iter().all(|f| f.z1 == 0.0 && f.z2 == 0.0));
+        assert!(derniere.iter().all(|s| *s == 0.0));
     }
 
     /// Les gains sont bornés : un réglage aberrant ne fait pas exploser le son.

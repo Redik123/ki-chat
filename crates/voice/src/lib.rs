@@ -209,6 +209,9 @@ pub struct VoiceConfig {
     /// L'égaliseur des voix reçues : gains en dB des bandes de
     /// `egaliseur::BANDES`.
     pub egaliseur: [f32; 5],
+    /// L'égaliseur de sa propre voix, sur ce qui part (ki-chat et le micro
+    /// pour les jeux) : gains en dB des mêmes bandes.
+    pub egaliseur_micro: [f32; 5],
     /// Le micro pour les jeux : la sortie (un câble virtuel, VB-Cable) où
     /// part la voix traitée, pour qu'un jeu la prenne comme micro. `None` :
     /// désactivé.
@@ -254,6 +257,7 @@ impl VoiceConfig {
             retour_voix: false,
             retour_voix_gain: 0.5,
             egaliseur: [0.0; 5],
+            egaliseur_micro: [0.0; 5],
             micro_jeux: None,
             jitter_frames: 0,
             tone: false,
@@ -680,6 +684,10 @@ struct Shared {
     /// rappel de sortie ne reprend le verrou que quand elle a bougé.
     egaliseur: Mutex<[f32; 5]>,
     egaliseur_gen: AtomicU64,
+    /// L'égaliseur de sa propre voix, et sa génération (même principe, côté
+    /// capture).
+    egaliseur_micro: Mutex<[f32; 5]>,
+    egaliseur_micro_gen: AtomicU64,
     /// Le micro pour les jeux : la voix traitée en attente du câble virtuel
     /// (48 kHz mono), et le drapeau posé tant que sa sortie est ouverte —
     /// sans lectrice, la capture n'y dépose rien.
@@ -807,6 +815,8 @@ impl VoiceEngine {
             retour_voix_buf: Mutex::new(std::collections::VecDeque::new()),
             egaliseur: Mutex::new(cfg.egaliseur),
             egaliseur_gen: AtomicU64::new(1),
+            egaliseur_micro: Mutex::new(cfg.egaliseur_micro),
+            egaliseur_micro_gen: AtomicU64::new(1),
             micro_jeux_buf: Mutex::new(std::collections::VecDeque::new()),
             micro_jeux_actif: AtomicBool::new(false),
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
@@ -987,6 +997,15 @@ impl VoiceEngine {
         if *actuels != gains {
             *actuels = gains;
             self.shared.egaliseur_gen.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// L'égaliseur de sa propre voix (gains en dB par bande), à chaud.
+    pub fn set_egaliseur_micro(&self, gains: [f32; 5]) {
+        let mut actuels = self.shared.egaliseur_micro.lock().unwrap();
+        if *actuels != gains {
+            *actuels = gains;
+            self.shared.egaliseur_micro_gen.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1608,6 +1627,9 @@ fn capture_loop(
     let mut compresseur: Option<dynamique::Compresseur> = None;
     let mut compression_en_place = u8::MAX;
     let mut limiteur = dynamique::Limiteur::new();
+    // L'égaliseur de sa voix, refait quand l'interface change ses gains.
+    let mut egaliseur_micro = egaliseur::Egaliseur::new(*sh.egaliseur_micro.lock().unwrap());
+    let mut egaliseur_micro_gen = sh.egaliseur_micro_gen.load(Ordering::Relaxed);
     // Le réseau de détection de parole, chargé à la première trame qui en a
     // besoin (mode activation vocale, micro armé) : ~1 Mo de modèle qu'on
     // ne paie pas en push-to-talk. En arrière-plan, comme DeepFilterNet.
@@ -2018,6 +2040,17 @@ fn capture_loop(
             }
             // 3. Porte de bruit : coupe le résidu sous le seuil choisi.
             gate.process(&mut frame, load_f32(&sh.gate_threshold));
+            // L'égaliseur de sa voix : après le débruitage (qui travaille
+            // mieux sur le son brut), avant le gain automatique et la
+            // compression, qui règlent le niveau de la voix corrigée. Un
+            // micro à perche collé à la bouche gonfle les graves : c'est ici
+            // qu'on les retire, pour ki-chat comme pour le micro des jeux.
+            let gen = sh.egaliseur_micro_gen.load(Ordering::Relaxed);
+            if gen != egaliseur_micro_gen {
+                egaliseur_micro_gen = gen;
+                egaliseur_micro.regler(*sh.egaliseur_micro.lock().unwrap());
+            }
+            egaliseur_micro.traiter_trame(&mut frame);
             // 4. Gain automatique : normalise le niveau de la voix.
             if sh.agc.load(Ordering::Relaxed) {
                 agc.process(&mut frame, load_f32(&sh.agc_target));

@@ -109,6 +109,8 @@ pub struct VoicePrefs {
     pub retour_voix_gain: f32,
     /// L'égaliseur des voix reçues (dB par bande).
     pub egaliseur: [f32; 5],
+    /// L'égaliseur de sa propre voix (dB par bande).
+    pub egaliseur_micro: [f32; 5],
     /// Le câble virtuel où envoyer la voix pour les jeux (`None` : non).
     pub micro_jeux: Option<String>,
     /// Tampon de gigue imposé en trames (0 = adaptatif).
@@ -523,6 +525,7 @@ fn start_engine(
     cfg.retour_voix = prefs.retour_voix;
     cfg.retour_voix_gain = prefs.retour_voix_gain;
     cfg.egaliseur = prefs.egaliseur;
+    cfg.egaliseur_micro = prefs.egaliseur_micro;
     cfg.micro_jeux = prefs.micro_jeux.clone();
     cfg.jitter_frames = prefs.jitter_frames;
     cfg.medias = Some(prefs.medias.clone());

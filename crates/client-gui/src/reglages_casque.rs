@@ -465,63 +465,40 @@ impl KiApp {
             },
         );
 
-        // --- Égaliseur ------------------------------------------------
+        // --- Égaliseurs -----------------------------------------------
         ui::section(
             ui,
             Icon::Sliders,
             "Égaliseur",
-            Some("Sur les voix que tu entends dans ki-chat — pas sur les jeux, ni sur tes notifications."),
+            Some("Ta voix telle qu'elle part, ou les voix que tu entends."),
             |ui| {
-                ui::ligne(ui, "Préréglage", |ui| {
-                    let mut choix = PREREGLAGES
-                        .iter()
-                        .position(|(_, g)| *g == self.egaliseur)
-                        .unwrap_or(usize::MAX);
-                    let options: Vec<(usize, &str)> =
-                        PREREGLAGES.iter().enumerate().map(|(i, (nom, _))| (i, *nom)).collect();
-                    if ui::segmente(ui, &mut choix, &options) {
-                        if let Some((_, gains)) = PREREGLAGES.get(choix) {
-                            self.egaliseur = *gains;
-                            *apply = true;
-                        }
-                    }
-                    if choix == usize::MAX {
-                        ui::precision(ui, "Réglage personnel.");
-                    }
+                ui::ligne(ui, "Pour", |ui| {
+                    ui::segmente(
+                        ui,
+                        &mut self.egaliseur_vue,
+                        &[(VUE_TA_VOIX, "Ta voix"), (VUE_LES_AUTRES, "Ce que tu entends")],
+                    );
+                    ui::precision(
+                        ui,
+                        if self.egaliseur_vue == VUE_TA_VOIX {
+                            "Ce que les autres entendent de toi, dans ki-chat comme dans les \
+                             jeux. Un micro à perche collé à la bouche gonfle les graves — la \
+                             voix « dans une cave » : « Moins de basses » les retire. Écoute le \
+                             résultat avec « M'écouter » (onglet Audio)."
+                        } else {
+                            "Les voix que tu entends dans ki-chat — ni les jeux, ni tes \
+                             notifications."
+                        },
+                    );
                 });
-                ui.horizontal_wrapped(|ui| {
-                    for (i, (nom, hz)) in BANDES.iter().enumerate() {
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(68.0, 180.0),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                let g = self.egaliseur[i];
-                                ui.label(
-                                    RichText::new(format!("{g:+.1}"))
-                                        .color(if g.abs() < 0.05 { TEXT_FAINT } else { ACCENT })
-                                        .size(11.5),
-                                );
-                                ui.spacing_mut().slider_width = 110.0;
-                                let r = ui.add(
-                                    egui::Slider::new(&mut self.egaliseur[i], -GAIN_MAX_DB..=GAIN_MAX_DB)
-                                        .vertical()
-                                        .step_by(0.5)
-                                        .show_value(false),
-                                );
-                                if r.changed() {
-                                    *apply = true;
-                                }
-                                if r.double_clicked() {
-                                    self.egaliseur[i] = 0.0;
-                                    *apply = true;
-                                }
-                                ui.label(RichText::new(*nom).color(TEXT_DIM).size(11.5));
-                                ui.label(RichText::new(frequence(*hz)).color(TEXT_FAINT).size(10.5));
-                            },
-                        );
-                    }
-                });
-                ui::precision(ui, "Double-clic sur une bande pour la remettre à zéro.");
+                let gains = if self.egaliseur_vue == VUE_TA_VOIX {
+                    &mut self.egaliseur_micro
+                } else {
+                    &mut self.egaliseur
+                };
+                if bandes_ui(ui, gains) {
+                    *apply = true;
+                }
             },
         );
     }
@@ -708,6 +685,62 @@ impl KiApp {
             }
         }
     }
+}
+
+/// Les deux égaliseurs de la page : celui de sa voix, celui des voix reçues.
+pub(crate) const VUE_TA_VOIX: u8 = 0;
+pub(crate) const VUE_LES_AUTRES: u8 = 1;
+
+/// Un égaliseur : ses préréglages en pastilles, puis ses cinq bandes en
+/// curseurs verticaux. Rend vrai quand un gain a changé.
+fn bandes_ui(ui: &mut egui::Ui, gains: &mut [f32; 5]) -> bool {
+    let mut change = false;
+    ui::ligne(ui, "Préréglage", |ui| {
+        let mut choix = PREREGLAGES.iter().position(|(_, g)| g == gains).unwrap_or(usize::MAX);
+        let options: Vec<(usize, &str)> =
+            PREREGLAGES.iter().enumerate().map(|(i, (nom, _))| (i, *nom)).collect();
+        if ui::segmente(ui, &mut choix, &options) {
+            if let Some((_, g)) = PREREGLAGES.get(choix) {
+                *gains = *g;
+                change = true;
+            }
+        }
+        if choix == usize::MAX {
+            ui::precision(ui, "Réglage personnel.");
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        for (i, (nom, hz)) in BANDES.iter().enumerate() {
+            ui.allocate_ui_with_layout(
+                Vec2::new(68.0, 180.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    let g = gains[i];
+                    ui.label(
+                        RichText::new(format!("{g:+.1}"))
+                            .color(if g.abs() < 0.05 { TEXT_FAINT } else { ACCENT })
+                            .size(11.5),
+                    );
+                    ui.spacing_mut().slider_width = 110.0;
+                    let r = ui.add(
+                        egui::Slider::new(&mut gains[i], -GAIN_MAX_DB..=GAIN_MAX_DB)
+                            .vertical()
+                            .step_by(0.5)
+                            .show_value(false),
+                    );
+                    change |= r.changed();
+                    if r.double_clicked() {
+                        gains[i] = 0.0;
+                        change = true;
+                    }
+                    ui.label(RichText::new(*nom).color(TEXT_DIM).size(11.5));
+                    ui.label(RichText::new(frequence(*hz)).color(TEXT_FAINT).size(10.5));
+                },
+            );
+        }
+    });
+    ui::precision(ui, "Double-clic sur une bande pour la remettre à zéro.");
+    change
 }
 
 /// Le casque dessiné : arceau, oreillettes, perche du micro. Les oreillettes
