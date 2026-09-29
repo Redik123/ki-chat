@@ -620,7 +620,10 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
         tailles
     };
     let largeur = largeurs.iter().sum::<f32>() + 6.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(largeur, 30.0), Sense::hover());
+    // Les segments tirent leur identité de celle de la piste, unique à chaque
+    // contrôle : dérivée de l'Ui parent, elle était la même pour deux choix
+    // segmentés d'une même section, et egui signalait le conflit en rouge.
+    let (rect, piste) = ui.allocate_exact_size(Vec2::new(largeur, 30.0), Sense::hover());
     let mut change = false;
     if !ui.is_rect_visible(rect) {
         return false;
@@ -633,7 +636,7 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
             Vec2::new(largeurs[i], rect.height() - 6.0),
         );
         x += largeurs[i];
-        let reponse = ui.interact(seg, ui.id().with(("segmente", i)), Sense::click());
+        let reponse = ui.interact(seg, piste.id.with(i), Sense::click());
         let actif = *valeur == *v;
         if reponse.clicked() && !actif {
             *valeur = *v;
