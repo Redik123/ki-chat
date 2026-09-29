@@ -94,7 +94,9 @@ impl ProAudio {
             Ok(h) if !h.is_invalid() => Self(Some(h)),
             _ => {
                 journal_if_new(format!(
-                    "priorité audio refusée par Windows ({quoi}) — le service MMCSS                      est peut-être arrêté ; le son fonctionne, mais reste sensible                      à une machine chargée"
+                    "priorité audio refusée par Windows ({quoi}) — le service MMCSS \
+                     est peut-être arrêté ; le son fonctionne, mais reste sensible \
+                     à une machine chargée"
                 ));
                 Self(None)
             }

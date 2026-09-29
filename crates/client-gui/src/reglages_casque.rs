@@ -277,7 +277,8 @@ impl KiApp {
             Icon::Send,
             "Micro pour les jeux",
             Some(
-                "Ta voix traitée par ki-chat — débruitage, gain, compression — comme micro                  dans Valorant ou n'importe quel jeu, qui n'en fait rien de tout ça.",
+                "Ta voix traitée par ki-chat — débruitage, gain, compression — comme micro \
+                 dans Valorant ou n'importe quel jeu, qui n'en fait rien de tout ça.",
             ),
             |ui| {
                 if !cfg!(windows) {
@@ -289,7 +290,8 @@ impl KiApp {
                     ui::banner(
                         ui,
                         Tone::Info,
-                        "Il faut un câble audio virtuel : VB-Cable, gratuit. Installe-le (Windows                          demande de redémarrer), puis clique sur Actualiser.",
+                        "Il faut un câble audio virtuel : VB-Cable, gratuit. Installe-le (Windows \
+                         demande de redémarrer), puis clique sur Actualiser.",
                         false,
                     );
                     ui.add_space(6.0);
@@ -325,7 +327,8 @@ impl KiApp {
                     }
                     ui::precision(
                         ui,
-                        "ki-chat doit rester ouvert et connecté — réduit dans la barre des                          tâches, ça suffit. Environ 100 ms de retard, comme un vocal en ligne.",
+                        "ki-chat doit rester ouvert et connecté — réduit dans la barre des \
+                         tâches, ça suffit. Environ 100 ms de retard, comme un vocal en ligne.",
                     );
                 });
                 if !self.micro_jeux {
@@ -374,7 +377,10 @@ impl KiApp {
                     );
                     ui::precision(
                         ui,
-                        "Valorant : Paramètres → Audio → Chat vocal → Périphérique d'entrée.                          Laisse le volume d'entrée du jeu à 100 % : ki-chat règle déjà le                          niveau. Et jamais ce câble comme micro de ki-chat ni comme micro                          par défaut de Windows : ta voix tournerait en rond.",
+                        "Valorant : Paramètres → Audio → Chat vocal → Périphérique d'entrée. \
+                         Laisse le volume d'entrée du jeu à 100 % : ki-chat règle déjà le \
+                         niveau. Et jamais ce câble comme micro de ki-chat ni comme micro \
+                         par défaut de Windows : ta voix tournerait en rond.",
                     );
                 });
             },
