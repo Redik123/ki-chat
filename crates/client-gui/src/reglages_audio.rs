@@ -130,10 +130,18 @@ impl KiApp {
                     if ui::interrupteur(ui, &mut self.loopback, "M'écouter").changed() {
                         *apply = true;
                     }
+                    if self.loopback {
+                        ui.label(
+                            RichText::new("les autres ne t'entendent pas pendant l'essai")
+                                .color(WARN)
+                                .size(11.5),
+                        );
+                    }
                     ui::precision(
                         ui,
                         "Tu t'entends comme les autres t'entendent : traitement et codec \
-                         compris.",
+                         compris. L'essai est privé — rien ne part vers le salon tant qu'il \
+                         tourne.",
                     );
                 });
             },

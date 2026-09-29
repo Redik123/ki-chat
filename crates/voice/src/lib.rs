@@ -1976,7 +1976,13 @@ fn capture_loop(
             }
             let hangover =
                 Duration::from_millis(sh.vad_hangover_ms.load(Ordering::Relaxed) as u64);
-            let micro = armed && (threshold <= 0.0 || last_voice.elapsed() < hangover);
+            let micro = micro_ouvert(
+                armed,
+                sh.loopback.load(Ordering::Relaxed),
+                threshold,
+                last_voice.elapsed(),
+                hangover,
+            );
             // Le soundboard : ce qui en attend part vers le salon, mixé à
             // la voix — ou seul, micro fermé : un micro que l'on n'a pas
             // ouvert ne part pas avec le son. Écrêté en douceur avec la
@@ -2660,6 +2666,27 @@ impl Denoiser {
             }
         }
     }
+}
+
+/// Le micro part-il vers les autres pour cette trame ?
+///
+/// Armé (push-to-talk tenu, mode ouvert, ou activation vocale), et — en
+/// activation vocale — une voix entendue depuis moins que le maintien.
+///
+/// Et jamais pendant « M'écouter » : c'est un essai privé. Le retour sort
+/// des oreillettes, et le micro le reprend — d'autant plus qu'il est
+/// amplifié : les autres entendaient chaque phrase revenir en écho, et
+/// l'écho se reprenait lui-même dans le retour, en cascade. L'annulateur
+/// d'écho n'y peut rien : cet écho-là tombe toujours pendant qu'on parle,
+/// le seul moment où il n'apprend pas.
+fn micro_ouvert(
+    arme: bool,
+    essai_prive: bool,
+    seuil: f32,
+    depuis_la_voix: Duration,
+    maintien: Duration,
+) -> bool {
+    arme && !essai_prive && (seuil <= 0.0 || depuis_la_voix < maintien)
 }
 
 /// Mode test : sinusoïde 440 Hz, cadencée à 20 ms, sans matériel audio.
@@ -3517,6 +3544,24 @@ mod tests {
         }
         assert!(crete <= dynamique::Limiteur::PLAFOND + 1e-6, "crête {crete}");
         assert!(colles * 100 < total, "{colles} échantillons collés au plafond sur {total}");
+    }
+
+    /// « M'écouter » marchait « un peu trop » : les autres entendaient aussi,
+    /// le retour repris par le micro. Pendant l'essai, rien ne part.
+    #[test]
+    fn m_ecouter_reste_prive() {
+        let court = Duration::from_millis(10);
+        let maintien = Duration::from_millis(300);
+        // Micro ouvert ou push-to-talk tenu : la voix part…
+        assert!(micro_ouvert(true, false, 0.0, court, maintien));
+        // … sauf pendant l'essai.
+        assert!(!micro_ouvert(true, true, 0.0, court, maintien));
+        // Activation vocale : pareil, et le maintien joue comme avant.
+        assert!(micro_ouvert(true, false, 0.02, court, maintien));
+        assert!(!micro_ouvert(true, true, 0.02, court, maintien));
+        assert!(!micro_ouvert(true, false, 0.02, Duration::from_secs(1), maintien));
+        // Désarmé : rien, évidemment.
+        assert!(!micro_ouvert(false, false, 0.0, court, maintien));
     }
 
     #[test]
