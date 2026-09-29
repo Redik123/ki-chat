@@ -93,37 +93,60 @@ pub(crate) fn ecrire_profils(profils: &[ProfilVoix]) -> String {
     serde_json::to_string(profils).unwrap_or_default()
 }
 
-/// Un réglage d'un bloc : son nom sur une colonne, le contrôle à côté.
-fn parametre(ui: &mut egui::Ui, nom: &str, add: impl FnOnce(&mut egui::Ui)) {
+/// La colonne des noms de réglages.
+const LARGEUR_NOM: f32 = 110.0;
+
+/// Un réglage d'un bloc : son nom sur une colonne, le contrôle à côté. Ce
+/// qu'il fait s'affiche au survol du nom — et dessous, quand les
+/// explications sont montrées.
+fn parametre(ui: &mut egui::Ui, nom: &str, aide: &str, montrer: bool, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
-            Vec2::new(110.0, 20.0),
+            Vec2::new(LARGEUR_NOM, 20.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.set_min_width(110.0);
-                ui.label(RichText::new(nom).color(TEXT_DIM).size(12.0));
+                ui.set_min_width(LARGEUR_NOM);
+                ui.label(RichText::new(nom).color(TEXT_DIM).size(12.0)).on_hover_text(aide);
             },
         );
         add(ui);
     });
+    if montrer {
+        explication(ui, aide);
+    }
+}
+
+/// Une explication, dans la colonne des contrôles.
+fn explication(ui: &mut egui::Ui, texte: &str) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(LARGEUR_NOM + ui.spacing().item_spacing.x);
+        ui.vertical(|ui| {
+            ui.add(egui::Label::new(RichText::new(texte).color(TEXT_FAINT).size(11.0)).wrap());
+        });
+    });
+    ui.add_space(4.0);
 }
 
 /// L'aiguille d'un bloc : une jauge et sa valeur.
 fn aiguille(ui: &mut egui::Ui, niveau: f32, couleur: egui::Color32, texte: &str) {
     ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(Vec2::new(110.0, 14.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.set_min_width(110.0);
+        ui.allocate_ui_with_layout(Vec2::new(LARGEUR_NOM, 14.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_width(LARGEUR_NOM);
         });
         ui::meter(ui, niveau, Vec2::new(160.0, 6.0), couleur);
         ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.0));
     });
 }
 
-/// Le titre d'un bloc, et l'interrupteur qui l'allume quand il en a un.
-fn titre_bloc(ui: &mut egui::Ui, numero: usize, titre: &str) {
-    ui.add_space(6.0);
-    ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(13.0).strong());
-    ui.add_space(2.0);
+/// Le titre d'un bloc, et ce qu'il fait quand les explications sont montrées.
+fn titre_bloc(ui: &mut egui::Ui, numero: usize, titre: &str, description: &str, montrer: bool) {
+    ui.add_space(8.0);
+    ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(13.0).strong())
+        .on_hover_text(description);
+    if montrer {
+        ui.add(egui::Label::new(RichText::new(description).color(TEXT_DIM).size(11.5)).wrap());
+    }
+    ui.add_space(4.0);
 }
 
 impl KiApp {
@@ -162,6 +185,12 @@ impl KiApp {
                  aiguille. Tout s'entend aussitôt avec « M'écouter » (onglet Audio).",
             ),
             |ui| {
+                ui::ligne(ui, "Aide", |ui| {
+                    ui::interrupteur(ui, &mut self.explications, "Expliquer chaque réglage");
+                    ui::precision(ui, "Masque les explications une fois connues : le survol d'un nom les rappelle.");
+                });
+                let montrer = self.explications;
+
                 // --- Profils ---
                 ui::ligne(ui, "Profil", |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -206,7 +235,7 @@ impl KiApp {
                         let nom = self.profil_nom.trim().to_string();
                         if ui
                             .add_enabled(!nom.is_empty(), egui::Button::new("Enregistrer"))
-                            .on_hover_text("toute la chaîne, égaliseur compris ; un profil du même nom est remplacé")
+                            .on_hover_text("un profil du même nom est remplacé")
                             .clicked()
                         {
                             let profil = self.profil_actuel(&nom);
@@ -217,12 +246,26 @@ impl KiApp {
                             self.profil_nom.clear();
                         }
                     });
+                    if montrer {
+                        ui::precision(
+                            ui,
+                            "Toute ta chaîne — égaliseur compris — sous un nom, pour la retrouver \
+                             d'un clic : une pour jouer, une pour streamer, une pour le soir…",
+                        );
+                    }
                 });
 
                 // --- 1. Porte de bruit ---
-                titre_bloc(ui, 1, "Porte de bruit");
+                titre_bloc(
+                    ui,
+                    1,
+                    "Porte de bruit",
+                    "Coupe (ou baisse) le son quand tu ne parles pas : le clavier, le ventilateur, \
+                     ta respiration entre deux phrases ne partent plus.",
+                    montrer,
+                );
                 let mut porte_on = self.gate_threshold > 0.0;
-                parametre(ui, "Active", |ui| {
+                parametre(ui, "Active", "Allume ou coupe la porte.", false, |ui| {
                     if ui::interrupteur(ui, &mut porte_on, "coupe le fond entre tes phrases").changed() {
                         self.gate_threshold = if porte_on { 0.01 } else { 0.0 };
                         *apply = true;
@@ -230,25 +273,61 @@ impl KiApp {
                 });
                 if porte_on {
                     let mut seuil = 20.0 * self.gate_threshold.max(1e-4).log10();
-                    parametre(ui, "Seuil", |ui| {
-                        if curseur(ui, &mut seuil, -80.0..=-20.0, " dBFS", Some(1.0)) {
-                            self.gate_threshold = 10f32.powf(seuil / 20.0);
-                            *apply = true;
-                        }
-                    });
+                    parametre(
+                        ui,
+                        "Seuil",
+                        "Le niveau à partir duquel ta voix ouvre la porte. Parle normalement : \
+                         l'aiguille doit dire « ouverte » ; tais-toi : « fermée ». Trop haut, elle \
+                         mange tes débuts de mots ; trop bas, elle laisse passer le clavier.",
+                        montrer,
+                        |ui| {
+                            if curseur(ui, &mut seuil, -80.0..=-20.0, " dBFS", Some(1.0)) {
+                                self.gate_threshold = 10f32.powf(seuil / 20.0);
+                                *apply = true;
+                            }
+                        },
+                    );
                     let p = &mut self.studio.porte;
-                    parametre(ui, "Profondeur", |ui| {
-                        *apply |= curseur(ui, &mut p.profondeur_db, -80.0..=0.0, " dB", Some(1.0));
-                    });
-                    parametre(ui, "Attaque", |ui| {
-                        *apply |= curseur(ui, &mut p.attaque_ms, 0.5..=50.0, " ms", Some(0.5));
-                    });
-                    parametre(ui, "Maintien", |ui| {
-                        *apply |= curseur(ui, &mut p.maintien_ms, 0.0..=1000.0, " ms", Some(10.0));
-                    });
-                    parametre(ui, "Relâchement", |ui| {
-                        *apply |= curseur(ui, &mut p.relachement_ms, 10.0..=1000.0, " ms", Some(10.0));
-                    });
+                    parametre(
+                        ui,
+                        "Profondeur",
+                        "Ce qu'il reste du son quand elle est fermée. -80 dB : silence total ; \
+                         -15 dB : le fond reste, juste plus bas — plus naturel.",
+                        montrer,
+                        |ui| {
+                            *apply |= curseur(ui, &mut p.profondeur_db, -80.0..=0.0, " dB", Some(1.0));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Attaque",
+                        "Le temps pour s'ouvrir quand tu parles. 1 à 2 ms : aucun début de mot \
+                         n'est mangé.",
+                        montrer,
+                        |ui| {
+                            *apply |= curseur(ui, &mut p.attaque_ms, 0.5..=50.0, " ms", Some(0.5));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Maintien",
+                        "Combien de temps elle reste ouverte après ta dernière syllabe : ni les \
+                         fins de mots, ni les petites pauses ne sont coupées.",
+                        montrer,
+                        |ui| {
+                            *apply |= curseur(ui, &mut p.maintien_ms, 0.0..=1000.0, " ms", Some(10.0));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Relâchement",
+                        "Le temps pour se refermer ensuite. Long : un fondu doux ; court : une \
+                         coupure nette.",
+                        montrer,
+                        |ui| {
+                            *apply |= curseur(ui, &mut p.relachement_ms, 10.0..=1000.0, " ms", Some(10.0));
+                        },
+                    );
                     let g = stats.porte_gain.clamp(0.0, 1.0);
                     let (couleur, texte) = if !actif {
                         (TEXT_FAINT, "vocal inactif")
@@ -261,30 +340,61 @@ impl KiApp {
                 }
 
                 // --- 2. Égaliseur ---
-                titre_bloc(ui, 2, "Égaliseur");
-                ui.label(
-                    RichText::new("La courbe, plus haut — onglet « Ta voix ».").color(TEXT_FAINT).size(11.5),
+                titre_bloc(
+                    ui,
+                    2,
+                    "Égaliseur",
+                    "Change le timbre de ta voix — plus ou moins de graves, de médiums, \
+                     d'aigus. Sa courbe est plus haut, onglet « Ta voix ».",
+                    true,
                 );
 
                 // --- 3. Gain automatique ---
-                titre_bloc(ui, 3, "Gain automatique");
-                parametre(ui, "Actif", |ui| {
-                    *apply |= ui::interrupteur(ui, &mut self.agc, "ramène ta voix à un niveau constant").changed();
-                });
+                titre_bloc(
+                    ui,
+                    3,
+                    "Gain automatique",
+                    "Ramène ta voix à un niveau constant : tu parles doucement, il monte ; tu \
+                     cries, il baisse.",
+                    montrer,
+                );
+                parametre(
+                    ui,
+                    "Actif",
+                    "Coupé, ta voix garde les écarts de niveau naturels de ton micro.",
+                    montrer,
+                    |ui| {
+                        *apply |=
+                            ui::interrupteur(ui, &mut self.agc, "ramène ta voix à un niveau constant").changed();
+                    },
+                );
                 if self.agc {
                     let mut pct = self.agc_target * 100.0;
-                    parametre(ui, "Niveau visé", |ui| {
-                        if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
-                            self.agc_target = pct / 100.0;
-                            *apply = true;
-                        }
-                    });
+                    parametre(
+                        ui,
+                        "Niveau visé",
+                        "Le niveau que ta voix vise. Plus haut : plus forte chez les autres.",
+                        montrer,
+                        |ui| {
+                            if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
+                                self.agc_target = pct / 100.0;
+                                *apply = true;
+                            }
+                        },
+                    );
                 }
 
                 // --- 4. De-esser ---
-                titre_bloc(ui, 4, "De-esser");
+                titre_bloc(
+                    ui,
+                    4,
+                    "De-esser",
+                    "Calme les « s », « ch » et « z » qui sifflent dans les oreilles des autres, \
+                     sans ternir le reste de ta voix.",
+                    montrer,
+                );
                 let mut deesser_on = self.studio.deesser.is_some();
-                parametre(ui, "Actif", |ui| {
+                parametre(ui, "Actif", "Allume ou coupe le de-esser.", false, |ui| {
                     if ui::interrupteur(ui, &mut deesser_on, "calme les « s » et « ch » qui sifflent").changed() {
                         self.studio.deesser = deesser_on.then(ReglagesDeesser::default);
                         *apply = true;
@@ -292,64 +402,140 @@ impl KiApp {
                 });
                 if let Some(d) = self.studio.deesser.as_mut() {
                     let mut khz = d.frequence / 1000.0;
-                    parametre(ui, "Fréquence", |ui| {
-                        if curseur(ui, &mut khz, 3.0..=10.0, " kHz", Some(0.1)) {
-                            d.frequence = khz * 1000.0;
-                            *apply = true;
-                        }
-                    });
-                    parametre(ui, "Seuil", |ui| {
-                        *apply |= curseur(ui, &mut d.seuil_db, -50.0..=0.0, " dB", Some(1.0));
-                    });
-                    parametre(ui, "Réduction max", |ui| {
-                        *apply |= curseur(ui, &mut d.reduction_max_db, 1.0..=20.0, " dB", Some(1.0));
-                    });
+                    parametre(
+                        ui,
+                        "Fréquence",
+                        "Où se trouvent tes sifflantes : entre 5 et 8 kHz d'habitude. Monte-la si \
+                         tes « s » sont très aigus, descends-la pour les « ch ».",
+                        montrer,
+                        |ui| {
+                            if curseur(ui, &mut khz, 3.0..=10.0, " kHz", Some(0.1)) {
+                                d.frequence = khz * 1000.0;
+                                *apply = true;
+                            }
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Seuil",
+                        "À partir de quel niveau de sifflante il agit. Plus bas : il agit plus \
+                         souvent.",
+                        montrer,
+                        |ui| {
+                            *apply |= curseur(ui, &mut d.seuil_db, -50.0..=0.0, " dB", Some(1.0));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Réduction max",
+                        "De combien, au plus, il baisse une sifflante. Trop : tu zozotes.",
+                        montrer,
+                        |ui| {
+                            *apply |= curseur(ui, &mut d.reduction_max_db, 1.0..=20.0, " dB", Some(1.0));
+                        },
+                    );
                     let r = -stats.reduction_deesser_db.min(0.0);
                     aiguille(ui, (r / 20.0).min(1.0), WARN, &format!("−{r:.1} dB"));
                 }
 
                 // --- 5. Compresseur ---
-                titre_bloc(ui, 5, "Compresseur");
-                parametre(ui, "Mode", |ui| {
-                    *apply |= ui::segmente(
-                        ui,
-                        &mut self.compression,
-                        &[
-                            (COMPRESSION_AUCUNE, "Aucun"),
-                            (COMPRESSION_DOUCE, "Doux"),
-                            (COMPRESSION_FORTE, "Fort"),
-                            (COMPRESSION_PERSO, "Perso"),
-                        ],
-                    );
-                });
+                titre_bloc(
+                    ui,
+                    5,
+                    "Compresseur",
+                    "Rapproche les passages forts des passages faibles : ta voix reste lisible, et \
+                     ne claque pas dans les oreilles des autres quand tu t'emportes.",
+                    montrer,
+                );
+                parametre(
+                    ui,
+                    "Mode",
+                    "Doux : seulement les éclats. Fort : toute la voix tenue. Perso : tes \
+                     réglages, ci-dessous.",
+                    montrer,
+                    |ui| {
+                        *apply |= ui::segmente(
+                            ui,
+                            &mut self.compression,
+                            &[
+                                (COMPRESSION_AUCUNE, "Aucun"),
+                                (COMPRESSION_DOUCE, "Doux"),
+                                (COMPRESSION_FORTE, "Fort"),
+                                (COMPRESSION_PERSO, "Perso"),
+                            ],
+                        );
+                    },
+                );
                 if self.compression != COMPRESSION_AUCUNE {
                     // Doux et Fort se montrent tels qu'ils sont ; toucher à un
                     // réglage passe en « Perso », à partir de ces valeurs.
                     let mut r = ReglagesCompresseur::du_niveau(self.compression).unwrap_or(self.studio.compresseur);
                     let avant = r;
-                    parametre(ui, "Seuil", |ui| {
-                        curseur(ui, &mut r.seuil_db, -60.0..=0.0, " dB", Some(0.5));
-                    });
-                    parametre(ui, "Ratio", |ui| {
-                        ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
-                        ui.add(
-                            egui::Slider::new(&mut r.ratio, 1.0..=20.0)
-                                .logarithmic(true)
-                                .custom_formatter(|v, _| format!("{v:.1}:1")),
-                        );
-                    });
-                    parametre(ui, "Attaque", |ui| {
-                        curseur(ui, &mut r.attaque_ms, 0.1..=100.0, " ms", Some(0.1));
-                    });
-                    parametre(ui, "Relâchement", |ui| {
-                        curseur(ui, &mut r.relachement_ms, 10.0..=1000.0, " ms", Some(5.0));
-                    });
-                    parametre(ui, "Genou", |ui| {
-                        curseur(ui, &mut r.genou_db, 0.0..=18.0, " dB", Some(0.5));
-                    });
-                    parametre(ui, "Rattrapage", |ui| {
-                        curseur(ui, &mut r.rattrapage_db, 0.0..=24.0, " dB", Some(0.5));
-                    });
+                    parametre(
+                        ui,
+                        "Seuil",
+                        "Au-dessus de ce niveau, il agit. Plus bas : il tient une plus grande part \
+                         de ta voix.",
+                        montrer,
+                        |ui| {
+                            curseur(ui, &mut r.seuil_db, -60.0..=0.0, " dB", Some(0.5));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Ratio",
+                        "Sa force : à 3:1, pour 3 dB de trop, 1 seul passe. À 10:1 et au-delà, ta \
+                         voix ne dépasse plus du tout le seuil.",
+                        montrer,
+                        |ui| {
+                            ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
+                            ui.add(
+                                egui::Slider::new(&mut r.ratio, 1.0..=20.0)
+                                    .logarithmic(true)
+                                    .custom_formatter(|v, _| format!("{v:.1}:1")),
+                            );
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Attaque",
+                        "Sa vitesse de réaction. 1 à 5 ms : il tient les cris ; 20 ms et plus : il \
+                         laisse passer le mordant des consonnes.",
+                        montrer,
+                        |ui| {
+                            curseur(ui, &mut r.attaque_ms, 0.1..=100.0, " ms", Some(0.1));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Relâchement",
+                        "Le temps pour relâcher après un éclat. Trop court, ça « pompe » ; trop \
+                         long, ta voix reste écrasée après un cri.",
+                        montrer,
+                        |ui| {
+                            curseur(ui, &mut r.relachement_ms, 10.0..=1000.0, " ms", Some(5.0));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Genou",
+                        "Adoucit l'entrée en compression : 0, d'un coup ; 6 et plus, en douceur — \
+                         plus naturel.",
+                        montrer,
+                        |ui| {
+                            curseur(ui, &mut r.genou_db, 0.0..=18.0, " dB", Some(0.5));
+                        },
+                    );
+                    parametre(
+                        ui,
+                        "Rattrapage",
+                        "Remonte toute ta voix après la compression, pour retrouver le volume \
+                         qu'elle a pris.",
+                        montrer,
+                        |ui| {
+                            curseur(ui, &mut r.rattrapage_db, 0.0..=24.0, " dB", Some(0.5));
+                        },
+                    );
                     if r != avant {
                         self.studio.compresseur = r.bornes();
                         self.compression = COMPRESSION_PERSO;
@@ -361,24 +547,45 @@ impl KiApp {
                 }
 
                 // --- 6. Chaleur ---
-                titre_bloc(ui, 6, "Chaleur");
+                titre_bloc(
+                    ui,
+                    6,
+                    "Chaleur",
+                    "Une saturation douce, façon lampe : la voix paraît plus pleine, plus « radio ».",
+                    montrer,
+                );
                 let mut chaleur = self.studio.chaleur * 100.0;
-                parametre(ui, "Saturation", |ui| {
-                    if curseur(ui, &mut chaleur, 0.0..=100.0, " %", Some(1.0)) {
-                        self.studio.chaleur = chaleur / 100.0;
-                        *apply = true;
-                    }
-                });
+                parametre(
+                    ui,
+                    "Saturation",
+                    "0 % : rien. 20 à 30 % : de la présence. Au-delà, ça commence à grésiller.",
+                    montrer,
+                    |ui| {
+                        if curseur(ui, &mut chaleur, 0.0..=100.0, " %", Some(1.0)) {
+                            self.studio.chaleur = chaleur / 100.0;
+                            *apply = true;
+                        }
+                    },
+                );
 
                 // --- 7. Limiteur ---
-                titre_bloc(ui, 7, "Limiteur");
-                parametre(ui, "Plafond", |ui| {
-                    *apply |= curseur(ui, &mut self.studio.plafond_db, -12.0..=0.0, " dBFS", Some(0.5));
-                });
-                ui.label(
-                    RichText::new("Toujours là : rien ne dépasse ce plafond, cri compris.")
-                        .color(TEXT_FAINT)
-                        .size(11.5),
+                titre_bloc(
+                    ui,
+                    7,
+                    "Limiteur",
+                    "Le mur que rien ne franchit, pas même un cri : la dernière sécurité avant \
+                     l'envoi. Toujours là.",
+                    montrer,
+                );
+                parametre(
+                    ui,
+                    "Plafond",
+                    "Le niveau maximum de ta voix. -1 dB est conseillé : de quoi laisser \
+                     respirer le codec.",
+                    montrer,
+                    |ui| {
+                        *apply |= curseur(ui, &mut self.studio.plafond_db, -12.0..=0.0, " dBFS", Some(0.5));
+                    },
                 );
             },
         );

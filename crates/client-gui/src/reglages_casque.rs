@@ -458,8 +458,9 @@ impl KiApp {
                         "Un casque fermé t'isole de ta propre voix : on parle plus fort sans \
                          s'en rendre compte. Ton micro revient ici, brut et au plus court, pour \
                          doser ta voix — au casque seulement : sur haut-parleurs, il \
-                         sifflerait. Pour entendre ce que reçoivent les autres, c'est « M'écouter » \
-                         (onglet Audio).",
+                         sifflerait. Changeur de voix allumé, c'est ta voix changée que tu \
+                         entends, avec un peu plus de retard. Pour entendre ce que reçoivent les \
+                         autres, c'est « M'écouter » (onglet Audio).",
                     );
                 });
             },

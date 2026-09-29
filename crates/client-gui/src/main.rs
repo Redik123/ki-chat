@@ -1203,6 +1203,8 @@ struct KiApp {
     analyse_actuelle: u8,
     /// La page Casque en mode studio (toute la chaîne) plutôt que simple.
     mode_studio: bool,
+    /// Le mode studio explique chaque réglage (masquable une fois connu).
+    explications: bool,
     /// La chaîne studio de sa voix (porte, de-esser, compresseur perso,
     /// chaleur, plafond).
     studio: ki_voice::dynamique::ReglagesStudio,
@@ -1596,6 +1598,7 @@ impl KiApp {
             analyse_voulue: ki_voice::ANALYSE_AUCUNE,
             analyse_actuelle: ki_voice::ANALYSE_AUCUNE,
             mode_studio: get("mode_studio", "off") == "on",
+            explications: get("explications", "on") != "off",
             studio: studio_ui::lire_studio(&get("studio", "")),
             profils_voix: studio_ui::lire_profils(&get("profils_voix", "[]")),
             profil_nom: String::new(),
@@ -14730,6 +14733,7 @@ impl eframe::App for KiApp {
         storage.set_string("egaliseur", ki_voice::egaliseur::ecrire(&self.egaliseur));
         storage.set_string("egaliseur_micro", ki_voice::egaliseur::ecrire(&self.egaliseur_micro));
         storage.set_string("mode_studio", if self.mode_studio { "on" } else { "off" }.into());
+        storage.set_string("explications", if self.explications { "on" } else { "off" }.into());
         storage.set_string("studio", studio_ui::ecrire_studio(&self.studio));
         storage.set_string("profils_voix", studio_ui::ecrire_profils(&self.profils_voix));
         storage.set_string("changeur_actif", if self.changeur_actif { "on" } else { "off" }.into());

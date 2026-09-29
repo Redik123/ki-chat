@@ -709,6 +709,10 @@ struct Shared {
     /// blocs de capture (~10 ms), tiré par blocs de rendu : quelques
     /// millisecondes d'encours, jamais plus (voir `output_writer`).
     retour_voix_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// Le retour est nourri par trames de 20 ms (la voix changée, ou un micro
+    /// rééchantillonné) plutôt que par blocs de capture : la sortie prend
+    /// alors deux trames d'avance, sans quoi elle tomberait à sec entre deux.
+    retour_par_trames: AtomicBool,
     /// L'égaliseur des voix reçues (gains en dB) et sa génération : le
     /// rappel de sortie ne reprend le verrou que quand elle a bougé.
     egaliseur: Mutex<Vec<egaliseur::Bande>>,
@@ -855,6 +859,7 @@ impl VoiceEngine {
             retour_voix: AtomicBool::new(cfg.retour_voix),
             retour_voix_gain: AtomicU32::new(cfg.retour_voix_gain.clamp(0.0, 2.0).to_bits()),
             retour_voix_buf: Mutex::new(std::collections::VecDeque::new()),
+            retour_par_trames: AtomicBool::new(false),
             egaliseur: Mutex::new(cfg.egaliseur.clone()),
             egaliseur_gen: AtomicU64::new(1),
             egaliseur_micro: Mutex::new(cfg.egaliseur_micro.clone()),
@@ -2040,9 +2045,19 @@ fn capture_loop(
         // la trame de 20 ms — la latence fait tout un bon retour. À 48 kHz
         // (le moteur natif fait convertir Windows), le bloc part tel quel ; à
         // une autre fréquence, c'est la trame rééchantillonnée qui s'y colle.
+        //
+        // Changeur allumé, c'est la voix changée qu'on s'entend dire — plus
+        // bas, trame par trame, avec son retard : on veut entendre son
+        // personnage, pas son micro brut.
         let retour = sh.retour_voix.load(Ordering::Relaxed);
-        if retour && in_rate == SAMPLE_RATE {
-            pousser_retour(&sh, &chunk);
+        let retour_brut = retour && changeur_voix.is_none();
+        let par_trames = retour && (changeur_voix.is_some() || in_rate != SAMPLE_RATE);
+        if sh.retour_par_trames.swap(par_trames, Ordering::Relaxed) != par_trames {
+            // La source change : rien de l'ancienne ne doit traîner.
+            sh.retour_voix_buf.lock().unwrap().clear();
+        }
+        if retour_brut && in_rate == SAMPLE_RATE {
+            pousser_retour(&sh, &chunk, false);
         }
         resampler.push(&chunk);
         // Le tampon repart aussitôt au rappel de capture, qui le reprendra au
@@ -2051,8 +2066,8 @@ fn capture_loop(
         chunks.recycle(chunk);
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
-            if retour && in_rate != SAMPLE_RATE {
-                pousser_retour(&sh, &frame);
+            if retour_brut && in_rate != SAMPLE_RATE {
+                pousser_retour(&sh, &frame, true);
             }
 
             // La marge du micro brut, avant tout traitement : ce que règlent
@@ -2226,6 +2241,11 @@ fn capture_loop(
                 copie
             });
             let vers = sh.changeur_vers.load(Ordering::Relaxed);
+            if retour {
+                if let Some(c) = &changee {
+                    pousser_retour(&sh, c, true);
+                }
+            }
             // Le micro pour les jeux : la voix traitée, telle qu'elle part —
             // sans le soundboard, mêlé plus loin, qui n'a rien à faire dans
             // le vocal d'un jeu. Rien n'est déposé sans sortie qui le lise.
@@ -3450,6 +3470,7 @@ fn output_writer(
     let mut retour_amorce = false;
     // Le retour de sa voix (sidetone), lu au rythme de la carte son.
     let mut retour = RetourVoix::new(out_rate);
+    let mut retour_par_trames = false;
     // L'égaliseur des voix, refait quand l'interface change ses gains.
     let mut egaliseur = egaliseur::Egaliseur::new(&sh_cb.egaliseur.lock().unwrap());
     let mut egaliseur_gen = sh_cb.egaliseur_gen.load(Ordering::Relaxed);
@@ -3619,11 +3640,18 @@ fn output_writer(
         // « lointain » de l'annulateur d'écho, qui n'a rien à en apprendre :
         // ce retour ne se joue qu'au casque.
         if sh_cb.retour_voix.load(Ordering::Relaxed) {
+            let par_trames = sh_cb.retour_par_trames.load(Ordering::Relaxed);
+            if par_trames != retour_par_trames {
+                retour_par_trames = par_trames;
+                let avance = if par_trames { 2 * FRAME_SAMPLES } else { RETOUR_AMORCE };
+                retour = RetourVoix::avec_avance(out_rate, avance);
+            }
             let gain = load_f32(&sh_cb.retour_voix_gain);
             let mut buf = sh_cb.retour_voix_buf.lock().unwrap();
             retour.jouer(&mut buf, paires, gain);
         } else {
             retour = RetourVoix::new(out_rate);
+            retour_par_trames = false;
         }
     }
 }
@@ -3647,9 +3675,11 @@ fn pousser_borne(file: &Mutex<std::collections::VecDeque<f32>>, bloc: &[f32], ma
     }
 }
 
-/// Dépose du micro brut (48 kHz) pour le retour de voix.
-fn pousser_retour(sh: &Shared, bloc: &[f32]) {
-    pousser_borne(&sh.retour_voix_buf, bloc, RETOUR_MAX);
+/// Dépose de la voix (48 kHz) pour le retour. Par trames, l'encours doit
+/// en tenir plus d'une : deux d'avance, deux de marge.
+fn pousser_retour(sh: &Shared, bloc: &[f32], par_trames: bool) {
+    let max = if par_trames { 4 * FRAME_SAMPLES } else { RETOUR_MAX };
+    pousser_borne(&sh.retour_voix_buf, bloc, max);
 }
 
 /// La lecture d'une file de voix 48 kHz côté sortie — le retour de voix, le
@@ -4141,6 +4171,29 @@ mod tests {
             lecteur.jouer(&mut file.lock().unwrap(), &mut paires, 1.0);
         }
         assert!(file.lock().unwrap().len() <= MICRO_JEUX_MAX);
+    }
+
+    /// Changeur allumé, le retour dans le casque joue la voix changée, qui
+    /// arrive par trames de 20 ms : avec ses deux trames d'avance et son
+    /// encours de quatre, il coule sans trou et ne s'allonge pas.
+    #[test]
+    fn le_retour_de_la_voix_changee_coule_sans_trou() {
+        let file = Mutex::new(std::collections::VecDeque::new());
+        let mut lecteur = RetourVoix::avec_avance(SAMPLE_RATE, 2 * FRAME_SAMPLES);
+        let trame = [0.5f32; FRAME_SAMPLES];
+        let mut trous = 0;
+        for pas in 0..400 {
+            if pas % 2 == 0 {
+                pousser_borne(&file, &trame, 4 * FRAME_SAMPLES);
+            }
+            let mut paires = [[0f32; 2]; FRAME_SAMPLES / 2];
+            lecteur.jouer(&mut file.lock().unwrap(), &mut paires, 1.0);
+            if pas > 4 && paires.iter().any(|p| p[0] == 0.0) {
+                trous += 1;
+            }
+            assert!(file.lock().unwrap().len() <= 4 * FRAME_SAMPLES);
+        }
+        assert_eq!(trous, 0, "des trous dans le retour de la voix changée");
     }
 
     /// « M'écouter » marchait « un peu trop » : les autres entendaient aussi,

@@ -155,44 +155,78 @@ impl KiApp {
                     RichText::new("Toucher un réglage fait ton propre personnage.").color(TEXT_FAINT).size(11.5),
                 );
                 ui.add_space(4.0);
+                let montrer = self.explications;
                 let avant = self.changeur;
                 let r = &mut self.changeur;
+                let aide = |ui: &mut egui::Ui, texte: &str| {
+                    if montrer {
+                        ui::precision(ui, texte);
+                    }
+                };
                 ui::ligne(ui, "Hauteur", |ui| {
                     curseur(ui, &mut r.hauteur, -12.0..=12.0, " demi-tons", Some(0.5));
-                    ui::precision(ui, "Plus grave à gauche, plus aiguë à droite. 12 : une octave.");
+                    aide(
+                        ui,
+                        "Monte ou descend ta voix, en demi-tons. -12 : une octave plus grave, voix de \
+                         géant ; +12 : une octave plus aiguë, voix d'enfant. Entre -5 et +5 : la \
+                         voix de quelqu'un d'autre.",
+                    );
                 });
                 ui::ligne(ui, "Couche grave", |ui| {
                     pourcent(ui, &mut r.sous_octave);
-                    ui::precision(ui, "Une deuxième voix, une octave plus bas : la carrure d'un monstre.");
+                    aide(
+                        ui,
+                        "Ajoute une deuxième voix une octave plus bas, mélangée à la tienne : la \
+                         carrure d'un monstre ou d'un démon.",
+                    );
                 });
                 ui::ligne(ui, "Distorsion", |ui| {
                     pourcent(ui, &mut r.distorsion);
+                    aide(ui, "Sature ta voix : rauque à petite dose, grésillante et agressive à fond.");
                 });
                 ui::ligne(ui, "Robot", |ui| {
                     pourcent(ui, &mut r.robot);
                     if r.robot > 0.005 {
                         curseur(ui, &mut r.robot_hz, 10.0..=300.0, " Hz", Some(1.0));
                     }
+                    aide(
+                        ui,
+                        "Module ta voix par une note : une voix de machine. La fréquence change le \
+                         robot — grave et grondant vers 30 Hz, métallique vers 150 Hz.",
+                    );
                 });
                 ui::ligne(ui, "Talkie", |ui| {
                     ui::interrupteur(ui, &mut r.talkie, "radio de poche");
+                    aide(
+                        ui,
+                        "Réduit ta voix à la bande d'une radio de poche : fine, nasillarde, lointaine.",
+                    );
                 });
                 ui::ligne(ui, "Sombre", |ui| {
                     let mut khz = r.sombre_hz / 1000.0;
                     if curseur(ui, &mut khz, 1.0..=20.0, " kHz", Some(0.5)) {
                         r.sombre_hz = khz * 1000.0;
                     }
-                    ui::precision(ui, "Coupe les aigus au-dessus ; 20 kHz : rien.");
+                    aide(
+                        ui,
+                        "Coupe les aigus au-dessus de cette fréquence : une voix étouffée, derrière \
+                         un mur ou un masque. 20 kHz : rien.",
+                    );
                 });
                 ui::ligne(ui, "Voile", |ui| {
                     pourcent(ui, &mut r.voile);
-                    ui::precision(ui, "Un chatoiement lent, la voix d'outre-tombe.");
+                    aide(ui, "Fait chatoyer ta voix, lentement (un flanger) : l'effet fantôme, d'outre-tombe.");
                 });
                 ui::ligne(ui, "Écho", |ui| {
                     pourcent(ui, &mut r.echo);
                     if r.echo > 0.005 {
                         curseur(ui, &mut r.echo_ms, 40.0..=900.0, " ms", Some(10.0));
                     }
+                    aide(
+                        ui,
+                        "Répète ta voix après un délai, en s'éteignant : une montagne, un hall \
+                         immense. Le délai règle l'écart entre les répétitions.",
+                    );
                 });
                 ui::ligne(ui, "Réverbération", |ui| {
                     pourcent(ui, &mut r.reverb);
@@ -202,6 +236,11 @@ impl KiApp {
                             r.reverb_taille = taille / 100.0;
                         }
                     }
+                    aide(
+                        ui,
+                        "Ajoute la résonance d'un lieu : une petite pièce à 20 %, une cathédrale ou \
+                         une grotte à fond. La taille règle la longueur de la résonance.",
+                    );
                 });
                 if *r != avant {
                     *r = r.bornes();
