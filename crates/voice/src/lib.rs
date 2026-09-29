@@ -209,6 +209,10 @@ pub struct VoiceConfig {
     /// L'égaliseur des voix reçues : gains en dB des bandes de
     /// `egaliseur::BANDES`.
     pub egaliseur: [f32; 5],
+    /// Le micro pour les jeux : la sortie (un câble virtuel, VB-Cable) où
+    /// part la voix traitée, pour qu'un jeu la prenne comme micro. `None` :
+    /// désactivé.
+    pub micro_jeux: Option<String>,
     /// Taille de tampon de gigue imposée en trames (0 = adaptatif).
     pub jitter_frames: usize,
     /// Mode test : émet une sinusoïde 440 Hz au lieu du micro.
@@ -250,6 +254,7 @@ impl VoiceConfig {
             retour_voix: false,
             retour_voix_gain: 0.5,
             egaliseur: [0.0; 5],
+            micro_jeux: None,
             jitter_frames: 0,
             tone: false,
             no_playback: false,
@@ -546,6 +551,9 @@ pub struct VoiceStats {
     /// C'est la marge restante avant la saturation — ce que règlent les gains
     /// de la carte son (page Casque).
     pub crete_brute: f32,
+    /// Le micro pour les jeux tourne : la sortie vers le câble virtuel est
+    /// ouverte et réclame la voix.
+    pub micro_jeux_actif: bool,
 }
 
 #[derive(Default)]
@@ -672,6 +680,11 @@ struct Shared {
     /// rappel de sortie ne reprend le verrou que quand elle a bougé.
     egaliseur: Mutex<[f32; 5]>,
     egaliseur_gen: AtomicU64,
+    /// Le micro pour les jeux : la voix traitée en attente du câble virtuel
+    /// (48 kHz mono), et le drapeau posé tant que sa sortie est ouverte —
+    /// sans lectrice, la capture n'y dépose rien.
+    micro_jeux_buf: Mutex<std::collections::VecDeque<f32>>,
+    micro_jeux_actif: AtomicBool,
     /// Effets sonores en attente de lecture. File séparée du loopback :
     /// celui-ci est vidé dès qu'on coupe le retour local, et le fil de
     /// capture le rogne à 250 ms tant qu'il est actif — une notification
@@ -794,6 +807,8 @@ impl VoiceEngine {
             retour_voix_buf: Mutex::new(std::collections::VecDeque::new()),
             egaliseur: Mutex::new(cfg.egaliseur),
             egaliseur_gen: AtomicU64::new(1),
+            micro_jeux_buf: Mutex::new(std::collections::VecDeque::new()),
+            micro_jeux_actif: AtomicBool::new(false),
             effects_buf: Mutex::new(std::collections::VecDeque::new()),
             effects_gain: AtomicU32::new(1.0f32.to_bits()),
             soundboard_buf: Mutex::new(std::collections::VecDeque::new()),
@@ -863,6 +878,13 @@ impl VoiceEngine {
                     tracing::error!("sortie audio : {e:#}");
                 }
             }));
+        }
+
+        // --- Micro pour les jeux : la voix traitée vers un câble virtuel ---
+        if let Some(cable) = cfg.micro_jeux.clone() {
+            let sh = shared.clone();
+            let native = cfg.native_audio;
+            threads.push(std::thread::spawn(move || boucle_micro_jeux(sh, cable, native)));
         }
 
         Ok(Self { shared, threads })
@@ -1192,6 +1214,7 @@ impl VoiceEngine {
                     && (self.shared.depart.elapsed().as_millis() as u64).saturating_sub(derniere) < 2_000
             },
             crete_brute: f32::from_bits(self.shared.counters.crete_brute_bits.load(Ordering::Relaxed)),
+            micro_jeux_actif: self.shared.micro_jeux_actif.load(Ordering::Relaxed),
         }
     }
 
@@ -2012,6 +2035,12 @@ fn capture_loop(
                 c.traiter_trame(&mut frame);
             }
             limiteur.traiter_trame(&mut frame);
+            // Le micro pour les jeux : la voix traitée, telle qu'elle part —
+            // sans le soundboard, mêlé plus loin, qui n'a rien à faire dans
+            // le vocal d'un jeu. Rien n'est déposé sans sortie qui le lise.
+            if sh.micro_jeux_actif.load(Ordering::Relaxed) {
+                pousser_borne(&sh.micro_jeux_buf, &frame, MICRO_JEUX_MAX);
+            }
             // 6. Vumètre : niveau après toute la chaîne (= ce qui part).
             let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
             sh.counters.mic_peak_bits.store(peak.to_bits(), Ordering::Relaxed);
@@ -3012,6 +3041,131 @@ fn playback_loop(
     Ok(())
 }
 
+/// Encours maximal de la voix vers les jeux : au-delà, les plus vieux
+/// échantillons partent. Les horloges du micro et du câble virtuel ne battent
+/// pas pareil ; sans borne, le retard grandirait sans fin.
+const MICRO_JEUX_MAX: usize = SAMPLE_RATE as usize * 120 / 1000;
+/// L'avance avant de jouer : la capture dépose par trames de 20 ms, la sortie
+/// tire par dizaines de millisecondes — deux trames d'avance absorbent le
+/// décalage sans hacher.
+const MICRO_JEUX_AVANCE: usize = 2 * FRAME_SAMPLES;
+
+/// Le micro pour les jeux : la voix traitée (débruitage, gain automatique,
+/// compression, limiteur) envoyée dans un câble virtuel — VB-Cable — qu'un
+/// jeu prend pour micro. Valorant n'a pas de réduction de bruit ; ki-chat si.
+///
+/// Surveillé comme la sortie casque, en plus simple : un câble perdu (pilote
+/// désinstallé, périphérique désactivé) est réessayé toutes les 3 s. Et
+/// **jamais de repli** : un câble introuvable n'ouvre rien — retomber sur la
+/// sortie par défaut enverrait sa propre voix dans son casque.
+fn boucle_micro_jeux(sh: Arc<Shared>, cable: String, native: bool) {
+    let mut deja_dit = false;
+    'cable: while !is_shutdown(&sh) {
+        let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (flux, vivant) = match ouvrir_micro_jeux(&sh, &cable, native, ticks.clone()) {
+            Ok(parts) => parts,
+            Err(e) => {
+                if !deja_dit {
+                    tracing::warn!("micro pour les jeux : {e:#}");
+                    journal(format!("micro pour les jeux indisponible : {e:#} — nouvelles tentatives"));
+                    deja_dit = true;
+                }
+                sleep_unless_shutdown(&sh, Duration::from_secs(3));
+                continue 'cable;
+            }
+        };
+        deja_dit = false;
+        sh.micro_jeux_buf.lock().unwrap().clear();
+        sh.micro_jeux_actif.store(true, Ordering::Relaxed);
+        journal(format!("micro pour les jeux : la voix part vers « {cable} »"));
+        let mut vu = ticks.load(Ordering::Relaxed);
+        let mut immobile = 0u32;
+        while !is_shutdown(&sh) {
+            std::thread::sleep(Duration::from_millis(500));
+            let maintenant = ticks.load(Ordering::Relaxed);
+            immobile = if maintenant == vu { immobile + 1 } else { 0 };
+            vu = maintenant;
+            if !vivant.load(Ordering::Relaxed) || immobile >= 4 {
+                journal(format!("micro pour les jeux : « {cable} » ne répond plus — réouverture"));
+                sh.micro_jeux_actif.store(false, Ordering::Relaxed);
+                drop(flux);
+                sleep_unless_shutdown(&sh, Duration::from_secs(1));
+                continue 'cable;
+            }
+        }
+        drop(flux);
+        break;
+    }
+    sh.micro_jeux_actif.store(false, Ordering::Relaxed);
+}
+
+/// Ouvre la sortie vers le câble virtuel, sans repli (voir
+/// `boucle_micro_jeux`). Rend le flux et son drapeau de vie.
+fn ouvrir_micro_jeux(
+    sh: &Arc<Shared>,
+    cable: &str,
+    native: bool,
+    ticks: Arc<std::sync::atomic::AtomicU64>,
+) -> anyhow::Result<(OutputStream, Arc<AtomicBool>)> {
+    #[cfg(windows)]
+    if native {
+        let alive = Arc::new(AtomicBool::new(true));
+        let (sh_w, ticks_w) = (sh.clone(), ticks.clone());
+        match wasapi::open_output(
+            Some(cable),
+            move |rate| writer_micro_jeux(sh_w, ticks_w, rate),
+            alive.clone(),
+            false,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ) {
+            // Un repli a ouvert la sortie par défaut : refermée aussitôt, et
+            // sans avoir rien joué — la file reste vide tant que le drapeau
+            // d'activité n'est pas posé.
+            Ok((_, true)) => anyhow::bail!("« {cable} » introuvable"),
+            Ok((flux, false)) => return Ok((OutputStream::Native(flux), alive)),
+            Err(e) => {
+                tracing::warn!("micro pour les jeux natif indisponible : {e:#} — repli sur cpal");
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = native;
+    let host = cpal::default_host();
+    let (device, repli) = pick_device(&host, Some(cable), false);
+    anyhow::ensure!(!repli, "« {cable} » introuvable");
+    let device = device.context("aucune sortie")?;
+    let supported = device.default_output_config().context("configuration du câble")?;
+    let rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    let alive = Arc::new(AtomicBool::new(true));
+    let stream = build_output_stream(
+        &device,
+        &supported,
+        channels,
+        writer_micro_jeux(sh.clone(), ticks, rate),
+        alive.clone(),
+    )?;
+    stream.play()?;
+    Ok((OutputStream::Cpal(stream), alive))
+}
+
+/// Le fournisseur de la sortie du câble : la voix traitée, au milieu des deux
+/// canaux, et rien d'autre.
+fn writer_micro_jeux(
+    sh: Arc<Shared>,
+    ticks: Arc<std::sync::atomic::AtomicU64>,
+    rate: u32,
+) -> impl FnMut(&mut [f32]) + Send + 'static {
+    let mut lecteur = RetourVoix::avec_avance(rate, MICRO_JEUX_AVANCE);
+    move |out: &mut [f32]| {
+        ticks.fetch_add(1, Ordering::Relaxed);
+        out.fill(0.0);
+        let (paires, _) = out.as_chunks_mut::<2>();
+        let mut buf = sh.micro_jeux_buf.lock().unwrap();
+        lecteur.jouer(&mut buf, paires, 1.0);
+    }
+}
+
 /// Ouvre la sortie audio. Rend le flux, le drapeau de vie posé par le
 /// rappel d'erreur, et un compteur d'appels du rappel de données.
 /// Le dernier membre dit qu'on tourne sur un périphérique de repli.
@@ -3306,37 +3460,50 @@ const RETOUR_MAX: usize = SAMPLE_RATE as usize * 40 / 1000;
 /// tomber à sec à chaque rappel quand les deux horloges se croisent.
 const RETOUR_AMORCE: usize = SAMPLE_RATE as usize * 10 / 1000;
 
-/// Dépose du micro brut (48 kHz) pour le retour de voix, encours borné.
-fn pousser_retour(sh: &Shared, bloc: &[f32]) {
-    let mut buf = sh.retour_voix_buf.lock().unwrap();
+/// Dépose de l'audio 48 kHz dans une file lue par une sortie, encours borné
+/// à `max` : au-delà, les plus vieux échantillons partent.
+fn pousser_borne(file: &Mutex<std::collections::VecDeque<f32>>, bloc: &[f32], max: usize) {
+    let mut buf = file.lock().unwrap();
     buf.extend(bloc.iter().copied());
-    let exces = buf.len().saturating_sub(RETOUR_MAX);
+    let exces = buf.len().saturating_sub(max);
     if exces > 0 {
         buf.drain(..exces);
     }
 }
 
-/// La lecture du retour de voix côté sortie : le micro brut à 48 kHz, lu à
-/// la fréquence de la carte son (interpolation linéaire — c'est un retour de
-/// voix, pas de la musique), réamorcé après chaque famine.
+/// Dépose du micro brut (48 kHz) pour le retour de voix.
+fn pousser_retour(sh: &Shared, bloc: &[f32]) {
+    pousser_borne(&sh.retour_voix_buf, bloc, RETOUR_MAX);
+}
+
+/// La lecture d'une file de voix 48 kHz côté sortie — le retour de voix, le
+/// micro pour les jeux : lue à la fréquence de la carte son (interpolation
+/// linéaire — c'est de la voix, pas de la musique), réamorcée après chaque
+/// famine.
 struct RetourVoix {
     /// Pas de lecture, en échantillons 48 kHz par échantillon de sortie.
     pas: f64,
     /// Position fractionnaire dans le tampon.
     position: f64,
     amorce: bool,
+    /// L'avance à prendre avant de jouer (et après une famine).
+    avance: usize,
 }
 
 impl RetourVoix {
     fn new(out_rate: u32) -> Self {
-        Self { pas: SAMPLE_RATE as f64 / out_rate.max(1) as f64, position: 0.0, amorce: false }
+        Self::avec_avance(out_rate, RETOUR_AMORCE)
+    }
+
+    fn avec_avance(out_rate: u32, avance: usize) -> Self {
+        Self { pas: SAMPLE_RATE as f64 / out_rate.max(1) as f64, position: 0.0, amorce: false, avance }
     }
 
     /// Ajoute le retour à des paires stéréo, au milieu, puis rend au tampon
     /// ce qui a été lu.
     fn jouer(&mut self, buf: &mut std::collections::VecDeque<f32>, paires: &mut [[f32; 2]], gain: f32) {
         if !self.amorce {
-            if buf.len() < RETOUR_AMORCE {
+            if buf.len() < self.avance {
                 return;
             }
             self.amorce = true;
@@ -3755,6 +3922,37 @@ mod tests {
         let joues = paires.iter().filter(|p| p[0] != 0.0).count();
         assert!((90..100).contains(&joues), "{joues} échantillons joués");
         assert!(!r.amorce);
+    }
+
+    /// Le micro pour les jeux : la capture dépose par trames de 20 ms, le
+    /// câble tire par blocs de 10 ms. Deux trames d'avance : pas un trou une
+    /// fois amorcé — et si le micro bat un peu plus vite que le câble,
+    /// l'encours plafonne au lieu de grandir.
+    #[test]
+    fn le_micro_pour_les_jeux_coule_sans_trou() {
+        let file = Mutex::new(std::collections::VecDeque::new());
+        let mut lecteur = RetourVoix::avec_avance(SAMPLE_RATE, MICRO_JEUX_AVANCE);
+        let trame = [0.5f32; FRAME_SAMPLES];
+        let mut trous = 0;
+        for pas in 0..400 {
+            if pas % 2 == 0 {
+                pousser_borne(&file, &trame, MICRO_JEUX_MAX);
+            }
+            let mut paires = [[0f32; 2]; FRAME_SAMPLES / 2];
+            lecteur.jouer(&mut file.lock().unwrap(), &mut paires, 1.0);
+            if pas > 4 && paires.iter().any(|p| p[0] == 0.0) {
+                trous += 1;
+            }
+        }
+        assert_eq!(trous, 0, "des trous dans la voix envoyée au jeu");
+        // Un micro plus rapide que le câble : une trame de trop à chaque tour.
+        for _ in 0..200 {
+            pousser_borne(&file, &trame, MICRO_JEUX_MAX);
+            pousser_borne(&file, &trame, MICRO_JEUX_MAX);
+            let mut paires = [[0f32; 2]; FRAME_SAMPLES];
+            lecteur.jouer(&mut file.lock().unwrap(), &mut paires, 1.0);
+        }
+        assert!(file.lock().unwrap().len() <= MICRO_JEUX_MAX);
     }
 
     /// « M'écouter » marchait « un peu trop » : les autres entendaient aussi,

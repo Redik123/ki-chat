@@ -1194,6 +1194,10 @@ struct KiApp {
     calibrage_verdict: Option<(std::time::Instant, String)>,
     /// Les périphériques que suit le fil du matériel (dernier ordre donné).
     materiel_suivi: Option<(Option<String>, Option<String>)>,
+    /// Le micro pour les jeux : la voix traitée envoyée dans un câble
+    /// virtuel, et le câble choisi (`None` : détecté d'office).
+    micro_jeux: bool,
+    micro_jeux_sortie: Option<String>,
     jitter_frames: usize,
     ptt_release_ms: u32,
     loopback: bool,
@@ -1560,6 +1564,8 @@ impl KiApp {
             calibrage_micro: None,
             calibrage_verdict: None,
             materiel_suivi: None,
+            micro_jeux: get("micro_jeux", "off") == "on",
+            micro_jeux_sortie: Some(get("micro_jeux_sortie", "")).filter(|s| !s.is_empty()),
             alerte_saturation: None,
             jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
             ptt_release_ms: get("ptt_release_ms", "100").parse().unwrap_or(100),
@@ -1819,6 +1825,7 @@ impl KiApp {
             retour_voix: self.retour_voix,
             retour_voix_gain: self.retour_voix_volume,
             egaliseur: self.egaliseur,
+            micro_jeux: self.micro_jeux_resolu(),
             jitter_frames: self.jitter_frames,
             dred: match self.dred_mode {
                 0 => 0,
@@ -8822,7 +8829,7 @@ impl KiApp {
                             self.onglet_audio(ui, voice, &mut apply, &mut restart);
                         }
                         if onglet == Onglet::Casque {
-                            self.onglet_casque(ui, voice, &mut apply);
+                            self.onglet_casque(ui, voice, &mut apply, &mut restart);
                         }
                         if onglet == Onglet::Aide {
                             // --- Journal audio ---
@@ -14635,6 +14642,8 @@ impl eframe::App for KiApp {
         storage.set_string("retour_voix", if self.retour_voix { "on" } else { "off" }.into());
         storage.set_string("retour_voix_volume", format!("{}", self.retour_voix_volume));
         storage.set_string("egaliseur", reglages_casque::ecrire_egaliseur(&self.egaliseur));
+        storage.set_string("micro_jeux", if self.micro_jeux { "on" } else { "off" }.into());
+        storage.set_string("micro_jeux_sortie", self.micro_jeux_sortie.clone().unwrap_or_default());
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
         storage.set_string("ptt_release_ms", format!("{}", self.ptt_release_ms));
         storage.set_string("noise_mode", format!("{}", self.noise_mode));

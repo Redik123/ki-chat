@@ -96,6 +96,32 @@ fn gains_pour(
     }
 }
 
+/// Une sortie de câble audio virtuel, d'après son nom Windows : VB-Cable
+/// (« CABLE Input », ou ce que porte le pilote « VB-Audio Virtual Cable »).
+fn est_cable(nom: &str) -> bool {
+    let n = nom.to_lowercase();
+    n.contains("cable input") || n.contains("cable in ") || n.contains("vb-audio virtual cable")
+}
+
+/// L'entrée d'un câble virtuel : ce que le jeu prend pour micro — et que
+/// ki-chat ne doit surtout pas prendre pour le sien.
+fn est_entree_de_cable(nom: &str) -> bool {
+    let n = nom.to_lowercase();
+    n.contains("cable output") || n.contains("vb-audio virtual cable")
+}
+
+/// Le câble à prendre d'office : « CABLE Input » s'il porte ce nom, sinon la
+/// sortie du pilote VB-Cable en stéréo plutôt que sa variante 16 canaux.
+pub(crate) fn cable_virtuel(sorties: &[String]) -> Option<String> {
+    let cables: Vec<&String> = sorties.iter().filter(|s| est_cable(s)).collect();
+    cables
+        .iter()
+        .find(|s| s.to_lowercase().contains("cable input"))
+        .or_else(|| cables.iter().find(|s| !s.to_lowercase().contains("16 ch")))
+        .or_else(|| cables.first())
+        .map(|s| (*s).clone())
+}
+
 fn frequence(hz: f32) -> String {
     if hz >= 1000.0 {
         format!("{} kHz", hz / 1000.0)
@@ -105,8 +131,41 @@ fn frequence(hz: f32) -> String {
 }
 
 impl KiApp {
-    /// Le contenu de l'onglet. `apply` : un réglage du moteur a changé.
-    pub(crate) fn onglet_casque(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot, apply: &mut bool) {
+    /// La sortie où envoyer la voix pour les jeux, telle que le moteur la
+    /// recevra : `None` quand l'envoi est coupé, sans câble, ou quand le micro
+    /// de ki-chat est lui-même l'entrée d'un câble — la voix bouclerait sur
+    /// elle-même.
+    pub(crate) fn micro_jeux_resolu(&self) -> Option<String> {
+        if !self.micro_jeux || self.pref_input.as_deref().is_some_and(est_entree_de_cable) {
+            return None;
+        }
+        // La liste des sorties n'est relevée qu'à l'ouverture des réglages :
+        // au lancement de ki-chat, elle est vide, et le micro pour les jeux ne
+        // retrouvait pas son câble à la connexion. On la lit alors ici — à la
+        // connexion et aux redémarrages du moteur seulement.
+        let releve;
+        let sorties = if self.output_devices.is_empty() {
+            releve = ki_voice::list_devices().1;
+            &releve
+        } else {
+            &self.output_devices
+        };
+        self.micro_jeux_sortie
+            .clone()
+            .filter(|s| sorties.contains(s))
+            .or_else(|| cable_virtuel(sorties))
+    }
+
+    /// Le contenu de l'onglet. `apply` : un réglage du moteur a changé ;
+    /// `restart` : il faut relancer le moteur (le micro pour les jeux ouvre
+    /// sa sortie au démarrage).
+    pub(crate) fn onglet_casque(
+        &mut self,
+        ui: &mut egui::Ui,
+        voice: &VoiceSnapshot,
+        apply: &mut bool,
+        restart: &mut bool,
+    ) {
         let materiel = Materiel::global();
         let suivi = (self.pref_input.clone(), self.pref_output.clone());
         if self.materiel_suivi.as_ref() != Some(&suivi) {
@@ -212,6 +271,115 @@ impl KiApp {
             },
         );
 
+        // --- Micro pour les jeux ---------------------------------------
+        ui::section(
+            ui,
+            Icon::Send,
+            "Micro pour les jeux",
+            Some(
+                "Ta voix traitée par ki-chat — débruitage, gain, compression — comme micro                  dans Valorant ou n'importe quel jeu, qui n'en fait rien de tout ça.",
+            ),
+            |ui| {
+                if !cfg!(windows) {
+                    ui::precision(ui, "Windows seulement pour l'instant.");
+                    return;
+                }
+                let cables: Vec<String> = self.output_devices.iter().filter(|d| est_cable(d)).cloned().collect();
+                if cables.is_empty() {
+                    ui::banner(
+                        ui,
+                        Tone::Info,
+                        "Il faut un câble audio virtuel : VB-Cable, gratuit. Installe-le (Windows                          demande de redémarrer), puis clique sur Actualiser.",
+                        false,
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui::button(ui, Icon::Download, "Télécharger VB-Cable").clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab("https://vb-audio.com/Cable/"));
+                        }
+                        if ui::button(ui, Icon::Refresh, "Actualiser").clicked() {
+                            let (entrees, sorties) = ki_voice::list_devices();
+                            self.input_devices = entrees;
+                            self.output_devices = sorties;
+                        }
+                    });
+                    return;
+                }
+                let boucle = self.pref_input.as_deref().is_some_and(est_entree_de_cable);
+                ui::ligne(ui, "Envoi", |ui| {
+                    if ui::interrupteur(ui, &mut self.micro_jeux, "Envoyer ma voix aux jeux").changed() {
+                        *restart = true;
+                    }
+                    if self.micro_jeux {
+                        let (couleur, texte) = if boucle {
+                            (DANGER, "coupé : le micro de ki-chat est le câble lui-même")
+                        } else if !engine_up {
+                            (TEXT_FAINT, "actif dès que tu es connecté à un serveur")
+                        } else if voice.stats.micro_jeux_actif {
+                            (SPEAK, "ta voix part dans le câble")
+                        } else {
+                            (WARN, "ouverture du câble…")
+                        };
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| ui::status_dot(ui, couleur, texte, 10.0));
+                    }
+                    ui::precision(
+                        ui,
+                        "ki-chat doit rester ouvert et connecté — réduit dans la barre des                          tâches, ça suffit. Environ 100 ms de retard, comme un vocal en ligne.",
+                    );
+                });
+                if !self.micro_jeux {
+                    return;
+                }
+                ui::ligne(ui, "Câble", |ui| {
+                    let auto = cable_virtuel(&self.output_devices).unwrap_or_default();
+                    let actuel = self
+                        .micro_jeux_sortie
+                        .clone()
+                        .unwrap_or_else(|| format!("Automatique ({auto})"));
+                    let largeur = (ui.available_width() - 10.0).clamp(160.0, 340.0);
+                    egui::ComboBox::from_id_salt("micro_jeux_cable")
+                        .width(largeur)
+                        .selected_text(RichText::new(actuel).color(TEXT))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(self.micro_jeux_sortie.is_none(), format!("Automatique ({auto})"))
+                                .clicked()
+                                && self.micro_jeux_sortie.is_some()
+                            {
+                                self.micro_jeux_sortie = None;
+                                *restart = true;
+                            }
+                            for c in &cables {
+                                let choisi = self.micro_jeux_sortie.as_deref() == Some(c.as_str());
+                                if ui.selectable_label(choisi, c).clicked() && !choisi {
+                                    self.micro_jeux_sortie = Some(c.clone());
+                                    *restart = true;
+                                }
+                            }
+                        });
+                });
+                ui::ligne(ui, "Dans le jeu", |ui| {
+                    let entree = self
+                        .input_devices
+                        .iter()
+                        .find(|e| e.to_lowercase().contains("cable output"))
+                        .or_else(|| self.input_devices.iter().find(|e| est_entree_de_cable(e)))
+                        .cloned()
+                        .unwrap_or_else(|| "CABLE Output (VB-Audio Virtual Cable)".into());
+                    ui.label(
+                        RichText::new(format!("Prends « {entree} » comme micro."))
+                            .color(TEXT)
+                            .size(12.5),
+                    );
+                    ui::precision(
+                        ui,
+                        "Valorant : Paramètres → Audio → Chat vocal → Périphérique d'entrée.                          Laisse le volume d'entrée du jeu à 100 % : ki-chat règle déjà le                          niveau. Et jamais ce câble comme micro de ki-chat ni comme micro                          par défaut de Windows : ta voix tournerait en rond.",
+                    );
+                });
+            },
+        );
+
         // --- Casque ---------------------------------------------------
         ui::section(
             ui,
@@ -273,7 +441,7 @@ impl KiApp {
                         }
                         if !engine_up {
                             ui.label(
-                                RichText::new("actif dès que tu es dans un salon vocal")
+                                RichText::new("actif dès que tu es connecté à un serveur")
                                     .color(WARN)
                                     .size(11.5),
                             );
@@ -443,7 +611,7 @@ impl KiApp {
                              actuel : {total_db:+.0} dB."
                         )
                     } else {
-                        "Rejoins un salon vocal : c'est là que ton micro s'ouvre.".to_string()
+                        "Connecte-toi à un serveur : c'est là que ton micro s'ouvre.".to_string()
                     },
                 );
             }
@@ -684,6 +852,37 @@ mod tests {
     fn un_micro_bien_regle_ne_bouge_pas() {
         let crete = 10f32.powf(-6.5 / 20.0);
         assert!(gains_pour(crete, false, (0.0, -17.25, 12.0), Some(&ampli_drion()), 0.0).is_none());
+    }
+
+    /// Les sorties du PC de drion : un Windows français nomme la sortie de
+    /// VB-Cable « Haut-parleurs », à côté de sa variante 16 canaux.
+    #[test]
+    fn le_cable_virtuel_se_trouve_tout_seul() {
+        let noms = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let chez_drion = noms(&[
+            "C27G4Z (NVIDIA High Definition Audio)",
+            "CABLE In 16 Ch (VB-Audio Virtual Cable)",
+            "Casque (Realtek USB Audio)",
+            "Haut-parleurs (JBL Quantum Stream Talk)",
+            "Haut-parleurs (Steam Streaming Speakers)",
+            "Haut-parleurs (VB-Audio Virtual Cable)",
+            "Realtek Digital Output (Realtek USB Audio)",
+        ]);
+        assert_eq!(cable_virtuel(&chez_drion).as_deref(), Some("Haut-parleurs (VB-Audio Virtual Cable)"));
+        // Un Windows anglais : le nom d'origine.
+        let anglais = noms(&["Speakers (Realtek)", "CABLE Input (VB-Audio Virtual Cable)"]);
+        assert_eq!(cable_virtuel(&anglais).as_deref(), Some("CABLE Input (VB-Audio Virtual Cable)"));
+        // Pas de câble : rien, et surtout pas le casque.
+        assert_eq!(cable_virtuel(&noms(&["Casque (Realtek USB Audio)"])), None);
+    }
+
+    /// L'entrée du câble ne doit jamais devenir le micro de ki-chat : la voix
+    /// bouclerait.
+    #[test]
+    fn l_entree_du_cable_se_reconnait() {
+        assert!(est_entree_de_cable("CABLE Output (VB-Audio Virtual Cable)"));
+        assert!(!est_entree_de_cable("Microphone (Realtek USB Audio)"));
+        assert!(!est_cable("Casque (Realtek USB Audio)"));
     }
 
     #[test]
