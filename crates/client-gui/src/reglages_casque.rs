@@ -166,7 +166,7 @@ impl KiApp {
         // Deux façons de régler : l'essentiel, ou toute la chaîne. Les deux
         // règlent les mêmes choses — ce qu'on fait en studio reste actif en
         // simple, seulement plus affiché.
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui::segmente(ui, &mut self.mode_studio, &[(false, "Simple"), (true, "Studio")]);
             ui.label(
                 RichText::new(if self.mode_studio {
@@ -649,7 +649,7 @@ impl KiApp {
                     ui.add_space(6.0);
                     for (icone, nom) in [(Icon::Headphones, &etat.sortie_nom), (Icon::Mic, &etat.entree_nom)] {
                         if let Some(nom) = nom {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui::glyph(ui, icone, 14.0, TEXT_DIM);
                                 let (point, carte) = scinder_nom(nom);
                                 ui.label(RichText::new(point).color(TEXT).size(12.5));

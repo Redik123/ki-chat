@@ -502,22 +502,23 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, tone.icon(), color);
                 ui.add_space(2.0);
+                // Le texte passe à la ligne dans la largeur qui reste : posé
+                // tel quel dans la rangée, un bandeau long élargissait toute
+                // la page au-delà de l'écran.
+                let text_width = (ui.available_width() - if closable { 26.0 } else { 0.0 }).max(40.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(text_width, 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.add(egui::Label::new(RichText::new(text).color(color).size(13.0)).wrap());
+                    },
+                );
                 if closable {
-                    let text_width = (ui.available_width() - 26.0).max(40.0);
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(text_width, 0.0),
-                        egui::Layout::top_down(egui::Align::LEFT),
-                        |ui| {
-                            ui.label(RichText::new(text).color(color).size(13.0));
-                        },
-                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_button_ex(ui, Icon::Close, 22.0, "Masquer", None).clicked() {
                             closed = true;
                         }
                     });
-                } else {
-                    ui.label(RichText::new(text).color(color).size(13.0));
                 }
             });
         });
