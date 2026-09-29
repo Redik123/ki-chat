@@ -33,6 +33,9 @@ const RECUL_SATURE_DB: f32 = -10.0;
 const TOLERANCE_DB: f32 = 1.5;
 /// Combien de temps le verdict du calibrage reste affiché.
 const VERDICT: Duration = Duration::from_secs(40);
+/// Au-delà, les gains de la carte font saturer un micro-casque ordinaire à
+/// la moindre voix forte.
+const GAIN_TROP_DB: f32 = 20.0;
 
 /// Un calibrage en cours : depuis quand, la plus haute crête brute relevée,
 /// et le compteur de saturations au départ.
@@ -242,7 +245,14 @@ impl KiApp {
                     if curseur(ui, &mut pct, 0.0..=100.0, " %", Some(1.0)) {
                         materiel.ordonner(Ordre::NiveauMicro(pct / 100.0));
                     }
-                    ui::precision(ui, &format!("{:+.1} dB — le volume du micro dans Windows.", niveau.db));
+                    ui::precision(
+                        ui,
+                        &format!(
+                            "{:+.1} dB — le volume du micro dans Windows. Il règle ta marge avant \
+                             la saturation, pas ton volume chez les autres.",
+                            niveau.db
+                        ),
+                    );
                 });
                 for g in &etat.amplis {
                     ui::ligne(ui, "Amplification", |ui| {
@@ -262,8 +272,52 @@ impl KiApp {
                     });
                 }
                 let total = niveau.db + etat.amplis.iter().map(|g| g.db).sum::<f32>();
+                // Le piège : monter ces gains pour « parler plus fort ». Vu
+                // chez drion le 29/09 : +32 dB, une voix « caverneuse » et pas
+                // plus forte pour autant.
+                if total > GAIN_TROP_DB {
+                    ui::banner(
+                        ui,
+                        Tone::Warn,
+                        &format!(
+                            "{total:+.0} dB de gain en tout, c'est beaucoup pour un micro-casque : ta \
+                             voix sature dès que tu hausses le ton, et le fond de la pièce monte avec \
+                             elle — la voix « de cave ». Et ça ne te rend pas plus fort chez les \
+                             autres : le gain automatique te ramène toujours au même niveau. Clique \
+                             « Régler mon micro », puis règle « Ton volume » juste en dessous."
+                        ),
+                        false,
+                    );
+                    ui.add_space(8.0);
+                }
                 ui::ligne(ui, "Calibrer", |ui| {
                     self.calibrage_ui(ui, voice, total);
+                });
+                // Le vrai bouton du volume chez les autres.
+                ui::ligne(ui, "Ton volume", |ui| {
+                    if self.agc {
+                        let mut pct = self.agc_target * 100.0;
+                        if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
+                            self.agc_target = pct / 100.0;
+                            *apply = true;
+                        }
+                        ui::precision(
+                            ui,
+                            "Ce que les autres entendent de toi. Pour être plus fort, c'est ici — \
+                             pas dans les gains de la carte, que le gain automatique compense.",
+                        );
+                    } else {
+                        let mut pct = self.input_gain * 100.0;
+                        if curseur(ui, &mut pct, 0.0..=200.0, " %", Some(1.0)) {
+                            self.input_gain = pct / 100.0;
+                            *apply = true;
+                        }
+                        ui::precision(
+                            ui,
+                            "Le gain automatique est coupé : ton volume chez les autres suit ce \
+                             gain, et ceux de la carte.",
+                        );
+                    }
                 });
             },
         );

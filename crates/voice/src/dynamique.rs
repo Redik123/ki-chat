@@ -148,8 +148,14 @@ impl Compresseur {
     }
 
     /// Le compresseur d'une voix qu'on entend (« adoucir les cris »).
+    ///
+    /// Au-dessus du niveau d'une voix normale : le gain automatique de chacun
+    /// vise des crêtes vers -10 dBFS, et le seuil d'avant (-12, genou dès -15)
+    /// tassait donc TOUTES les voix de 1 à 2 dB, avec son relâchement — de quoi
+    /// épaissir une voix déjà chargée en graves. Seuls les vrais éclats
+    /// passent désormais le genou (-10 dBFS).
     pub fn ecoute() -> Self {
-        Self::new(-12.0, 4.0, 6.0, 3.0, 200.0)
+        Self::new(-8.0, 4.0, 4.0, 3.0, 150.0)
     }
 
     /// Réduction de gain (linéaire, ≤ 1) pour un niveau d'enveloppe donné.
@@ -646,6 +652,20 @@ mod tests {
         // Les choix simples sont les mêmes compresseurs qu'avant.
         assert_eq!(ReglagesCompresseur::du_niveau(COMPRESSION_PERSO), None);
         assert!(Compresseur::emission(COMPRESSION_FORTE).is_some());
+    }
+
+    /// « Adoucir les cris » ne touche plus aux voix normales — celles que le
+    /// gain automatique de chacun pose vers -10 dBFS —, seulement aux éclats.
+    #[test]
+    fn adoucir_les_cris_laisse_les_voix_normales() {
+        let mut c = Compresseur::ecoute();
+        let mut normale = sinus(0.3, 48_000); // -10,5 dBFS
+        c.traiter_trame(&mut normale);
+        assert!(db(crete(&normale[24_000..]) / 0.3).abs() < 0.3, "voix normale tassée");
+        let mut c = Compresseur::ecoute();
+        let mut cri = sinus(0.8, 48_000); // -2 dBFS
+        c.traiter_trame(&mut cri);
+        assert!(db(crete(&cri[24_000..]) / 0.8) < -3.0, "cri pas adouci");
     }
 
     #[test]
