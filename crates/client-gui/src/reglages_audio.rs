@@ -16,7 +16,7 @@ use crate::ptt::PttKey;
 use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, WARN};
 use crate::ui::{self, Tone};
 use crate::{KiApp, MicMode, VoiceSnapshot};
-use ki_voice::dynamique::{COMPRESSION_AUCUNE, COMPRESSION_DOUCE, COMPRESSION_FORTE};
+use ki_voice::dynamique::{COMPRESSION_AUCUNE, COMPRESSION_DOUCE, COMPRESSION_FORTE, COMPRESSION_PERSO};
 
 /// Combien de temps l'alerte de saturation reste affichée après la dernière
 /// trame saturée : assez pour la lire, et qu'elle ne clignote pas entre deux
@@ -338,6 +338,7 @@ impl KiApp {
                             (COMPRESSION_AUCUNE, "Aucune"),
                             (COMPRESSION_DOUCE, "Douce"),
                             (COMPRESSION_FORTE, "Forte"),
+                            (COMPRESSION_PERSO, "Perso"),
                         ],
                     ) {
                         *apply = true;
@@ -347,6 +348,9 @@ impl KiApp {
                         match self.compression {
                             COMPRESSION_FORTE => {
                                 "Tient toute ta voix : pour qui parle fort ou crie souvent."
+                            }
+                            COMPRESSION_PERSO => {
+                                "Réglée au chiffre près dans l'onglet Casque, mode studio."
                             }
                             COMPRESSION_AUCUNE => {
                                 "Ta voix garde toute sa dynamique ; le limiteur empêche quand \

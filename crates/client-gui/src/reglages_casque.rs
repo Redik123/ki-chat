@@ -160,6 +160,23 @@ impl KiApp {
         self.avancer_calibrage(voice, &etat);
         let engine_up = voice.engine_up;
 
+        // Deux façons de régler : l'essentiel, ou toute la chaîne. Les deux
+        // règlent les mêmes choses — ce qu'on fait en studio reste actif en
+        // simple, seulement plus affiché.
+        ui.horizontal(|ui| {
+            ui::segmente(ui, &mut self.mode_studio, &[(false, "Simple"), (true, "Studio")]);
+            ui.label(
+                RichText::new(if self.mode_studio {
+                    "toute la chaîne de ta voix, réglage par réglage"
+                } else {
+                    "l'essentiel, en préréglages"
+                })
+                .color(TEXT_FAINT)
+                .size(11.5),
+            );
+        });
+        ui.add_space(10.0);
+
         self.carte_casque(ui, voice, &etat);
 
         // --- Micro ----------------------------------------------------
@@ -466,7 +483,12 @@ impl KiApp {
                     }
                     ui::precision(
                         ui,
-                        if self.egaliseur_vue == VUE_TA_VOIX {
+                        if self.egaliseur_vue == VUE_TA_VOIX && !self.mode_studio {
+                            "Ce que les autres entendent de toi, dans ki-chat comme dans les \
+                             jeux. « Micro-casque » coupe sous la voix — le grondement, l'effet \
+                             de proximité — sans toucher à son corps : la « cave » sans le « nez \
+                             bouché ». Écoute-toi avec « M'écouter » (onglet Audio)."
+                        } else if self.egaliseur_vue == VUE_TA_VOIX {
                             "Ce que les autres entendent de toi, dans ki-chat comme dans les \
                              jeux. Derrière la courbe, ta voix en direct : parle, et regarde où \
                              elle gonfle. « Micro-casque » coupe sous la voix — le grondement, \
@@ -479,8 +501,34 @@ impl KiApp {
                         },
                     );
                 });
-                // Le spectre : sa voix telle qu'elle part, ou les voix reçues.
                 let ta_voix = self.egaliseur_vue == VUE_TA_VOIX;
+                let (bandes, prereglages): (&mut Vec<Bande>, &[Prereglage]) = if ta_voix {
+                    (&mut self.egaliseur_micro, &PREREGLAGES_VOIX)
+                } else {
+                    (&mut self.egaliseur, &PREREGLAGES_ECOUTE)
+                };
+                if !self.mode_studio {
+                    // Le mode simple : les préréglages, en pastilles.
+                    ui::ligne(ui, "Préréglage", |ui| {
+                        let mut choix = prereglages
+                            .iter()
+                            .position(|(_, fabrique)| fabrique() == *bandes)
+                            .unwrap_or(usize::MAX);
+                        let options: Vec<(usize, &str)> =
+                            prereglages.iter().enumerate().map(|(i, (nom, _))| (i, *nom)).collect();
+                        if ui::segmente(ui, &mut choix, &options) {
+                            if let Some((_, fabrique)) = prereglages.get(choix) {
+                                *bandes = fabrique();
+                                *apply = true;
+                            }
+                        }
+                        if choix == usize::MAX {
+                            ui::precision(ui, "Réglage personnel — il se modifie en mode studio.");
+                        }
+                    });
+                    return;
+                }
+                // Le spectre : sa voix telle qu'elle part, ou les voix reçues.
                 self.analyse_voulue = if ta_voix { ki_voice::ANALYSE_MICRO } else { ki_voice::ANALYSE_VOIX };
                 let echantillons = self
                     .link
@@ -492,16 +540,16 @@ impl KiApp {
                     .unwrap_or_default();
                 let dt = ui.input(|i| i.stable_dt);
                 self.eq_editeur.analyseur.nourrir(&echantillons, dt);
-                let (bandes, prereglages): (&mut Vec<Bande>, &[Prereglage]) = if ta_voix {
-                    (&mut self.egaliseur_micro, &PREREGLAGES_VOIX)
-                } else {
-                    (&mut self.egaliseur, &PREREGLAGES_ECOUTE)
-                };
                 if egaliseur_ui::editeur(ui, bandes, &mut self.eq_editeur, prereglages) {
                     *apply = true;
                 }
             },
         );
+
+        // --- La chaîne studio ------------------------------------------
+        if self.mode_studio {
+            self.chaine_studio_ui(ui, voice, apply);
+        }
     }
 
     /// Les égaliseurs tels que le moteur doit les jouer : (écoute, sa voix).

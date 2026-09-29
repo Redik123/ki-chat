@@ -48,6 +48,65 @@ pub struct Compresseur {
     attaque: f32,
     relachement: f32,
     enveloppe: f32,
+    /// Le gain de rattrapage (linéaire) : ce que la compression a retiré,
+    /// rendu à toute la voix.
+    rattrapage: f32,
+    /// Le plus petit gain appliqué depuis le dernier relevé (l'aiguille de
+    /// réduction de la page Casque).
+    pire: f32,
+}
+
+/// Les réglages d'un compresseur, tels que la page Casque les montre.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReglagesCompresseur {
+    pub seuil_db: f32,
+    pub ratio: f32,
+    pub genou_db: f32,
+    pub attaque_ms: f32,
+    pub relachement_ms: f32,
+    pub rattrapage_db: f32,
+}
+
+impl ReglagesCompresseur {
+    /// Les réglages derrière les choix simples (`COMPRESSION_*`) ; `None`
+    /// pour aucune compression — et pour la personnalisée, qui a les siens.
+    pub fn du_niveau(niveau: u8) -> Option<Self> {
+        let r = |seuil_db, ratio, attaque_ms, relachement_ms| Self {
+            seuil_db,
+            ratio,
+            genou_db: 6.0,
+            attaque_ms,
+            relachement_ms,
+            rattrapage_db: 0.0,
+        };
+        match niveau {
+            // Douce : ne touche qu'aux éclats, la voix ordinaire passe telle
+            // quelle.
+            COMPRESSION_DOUCE => Some(r(-14.0, 3.0, 5.0, 120.0)),
+            // Forte : pour qui crie souvent — la voix entière est tenue.
+            COMPRESSION_FORTE => Some(r(-20.0, 6.0, 3.0, 150.0)),
+            _ => None,
+        }
+    }
+
+    /// Ramenés dans des plages qui ne cassent rien.
+    pub fn bornes(self) -> Self {
+        let ok = |v: f32, min: f32, max: f32, defaut: f32| if v.is_finite() { v.clamp(min, max) } else { defaut };
+        Self {
+            seuil_db: ok(self.seuil_db, -60.0, 0.0, -14.0),
+            ratio: ok(self.ratio, 1.0, 20.0, 3.0),
+            genou_db: ok(self.genou_db, 0.0, 18.0, 6.0),
+            attaque_ms: ok(self.attaque_ms, 0.1, 200.0, 5.0),
+            relachement_ms: ok(self.relachement_ms, 10.0, 2000.0, 120.0),
+            rattrapage_db: ok(self.rattrapage_db, 0.0, 24.0, 0.0),
+        }
+    }
+}
+
+impl Default for ReglagesCompresseur {
+    fn default() -> Self {
+        Self::du_niveau(COMPRESSION_DOUCE).unwrap()
+    }
 }
 
 impl Compresseur {
@@ -60,20 +119,32 @@ impl Compresseur {
             attaque: coefficient(attaque_ms),
             relachement: coefficient(relachement_ms),
             enveloppe: 0.0,
+            rattrapage: 1.0,
+            pire: 1.0,
         }
     }
 
+    /// Un compresseur réglé au chiffre près (page Casque, mode studio).
+    pub fn depuis(r: &ReglagesCompresseur) -> Self {
+        let r = r.bornes();
+        let mut c = Self::new(r.seuil_db, r.ratio, r.genou_db, r.attaque_ms, r.relachement_ms);
+        c.rattrapage = (r.rattrapage_db * DB_VERS_LN).exp();
+        c
+    }
+
     /// Le compresseur d'une voix qu'on émet, selon le réglage choisi
-    /// (`COMPRESSION_*`) ; `None` pour aucune compression.
+    /// (`COMPRESSION_*`) ; `None` pour aucune compression — la
+    /// personnalisée se construit par [`Compresseur::depuis`], avec ses
+    /// réglages.
     pub fn emission(niveau: u8) -> Option<Self> {
-        match niveau {
-            // Douce : ne touche qu'aux éclats, la voix ordinaire passe telle
-            // quelle.
-            COMPRESSION_DOUCE => Some(Self::new(-14.0, 3.0, 6.0, 5.0, 120.0)),
-            // Forte : pour qui crie souvent — la voix entière est tenue.
-            COMPRESSION_FORTE => Some(Self::new(-20.0, 6.0, 6.0, 3.0, 150.0)),
-            _ => None,
-        }
+        ReglagesCompresseur::du_niveau(niveau).map(|r| Self::depuis(&r))
+    }
+
+    /// La plus forte réduction appliquée depuis le dernier relevé, en dB
+    /// (0 : rien), remise à zéro.
+    pub fn reduction_db(&mut self) -> f32 {
+        let pire = std::mem::replace(&mut self.pire, 1.0);
+        pire.max(1e-6).ln() * LN_VERS_DB
     }
 
     /// Le compresseur d'une voix qu'on entend (« adoucir les cris »).
@@ -103,7 +174,11 @@ impl Compresseur {
         let a = x.abs();
         let coef = if a > self.enveloppe { self.attaque } else { self.relachement };
         self.enveloppe += (a - self.enveloppe) * coef;
-        x * self.gain_pour(self.enveloppe)
+        let g = self.gain_pour(self.enveloppe);
+        if g < self.pire {
+            self.pire = g;
+        }
+        x * g * self.rattrapage
     }
 
     pub fn traiter_trame(&mut self, trame: &mut [f32]) {
@@ -134,6 +209,12 @@ impl Limiteur {
 
     pub fn new() -> Self {
         Self { plafond: Self::PLAFOND, relachement: coefficient(60.0), gain: 1.0 }
+    }
+
+    /// Un plafond choisi, en dBFS (de -12 à 0).
+    pub fn avec_plafond(plafond_db: f32) -> Self {
+        let db = if plafond_db.is_finite() { plafond_db.clamp(-12.0, 0.0) } else { -1.0 };
+        Self { plafond: (db * DB_VERS_LN).exp(), ..Self::new() }
     }
 
     #[inline]
@@ -167,6 +248,279 @@ pub const COMPRESSION_AUCUNE: u8 = 0;
 pub const COMPRESSION_DOUCE: u8 = 1;
 /// Compression forte : toute la voix tenue.
 pub const COMPRESSION_FORTE: u8 = 2;
+/// Compression réglée au chiffre près (page Casque, mode studio).
+pub const COMPRESSION_PERSO: u8 = 3;
+
+/// Les réglages de la porte de bruit — le seuil vit à part (le réglage
+/// simple de l'onglet Audio, en niveau linéaire).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReglagesPorte {
+    /// Ce que la porte laisse passer une fois fermée : -80 coupe net, -10
+    /// ne fait que baisser le fond.
+    pub profondeur_db: f32,
+    pub attaque_ms: f32,
+    /// Combien de temps elle reste ouverte après la dernière syllabe.
+    pub maintien_ms: f32,
+    pub relachement_ms: f32,
+}
+
+impl Default for ReglagesPorte {
+    /// Le comportement de l'ancienne porte : ouverture immédiate, fermeture
+    /// complète en quelques centaines de millisecondes.
+    fn default() -> Self {
+        Self { profondeur_db: -80.0, attaque_ms: 2.0, maintien_ms: 150.0, relachement_ms: 150.0 }
+    }
+}
+
+/// Porte de bruit, à l'échantillon près : s'ouvre dès que la voix passe le
+/// seuil, reste ouverte le temps du maintien, puis redescend jusqu'à sa
+/// profondeur. Une hystérésis de 4 dB l'empêche de battre sur une voix qui
+/// oscille autour du seuil.
+#[derive(Clone, Debug)]
+pub struct Porte {
+    reglages: ReglagesPorte,
+    plancher: f32,
+    attaque: f32,
+    relachement: f32,
+    retombee_detecteur: f32,
+    maintien: u32,
+    maintien_restant: u32,
+    detecteur: f32,
+    ouverte: bool,
+    gain: f32,
+}
+
+impl Porte {
+    pub fn new(reglages: ReglagesPorte) -> Self {
+        let mut p = Self {
+            reglages,
+            plancher: 0.0,
+            attaque: 0.0,
+            relachement: 0.0,
+            retombee_detecteur: coefficient(20.0),
+            maintien: 0,
+            maintien_restant: 0,
+            detecteur: 0.0,
+            ouverte: false,
+            gain: 1.0,
+        };
+        p.regler(reglages);
+        p
+    }
+
+    pub fn regler(&mut self, r: ReglagesPorte) {
+        let ok = |v: f32, min: f32, max: f32| if v.is_finite() { v.clamp(min, max) } else { min };
+        self.reglages = r;
+        self.plancher = (ok(r.profondeur_db, -80.0, 0.0) * DB_VERS_LN).exp();
+        self.attaque = coefficient(ok(r.attaque_ms, 0.1, 100.0));
+        self.relachement = coefficient(ok(r.relachement_ms, 5.0, 2000.0));
+        self.maintien = (ok(r.maintien_ms, 0.0, 2000.0) / 1000.0 * SAMPLE_RATE as f32) as u32;
+    }
+
+    pub fn reglages(&self) -> ReglagesPorte {
+        self.reglages
+    }
+
+    /// Le gain qu'elle applique en ce moment (1 : ouverte).
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    /// `seuil` en niveau linéaire ; 0 désactive la porte.
+    pub fn traiter_trame(&mut self, trame: &mut [f32], seuil: f32) {
+        if seuil <= 0.0 {
+            self.gain = 1.0;
+            self.ouverte = true;
+            return;
+        }
+        let fermeture = seuil * 0.631; // -4 dB
+        for s in trame.iter_mut() {
+            let a = s.abs();
+            self.detecteur = if a > self.detecteur {
+                a
+            } else {
+                self.detecteur + (a - self.detecteur) * self.retombee_detecteur
+            };
+            if self.detecteur >= seuil || (self.ouverte && self.detecteur >= fermeture) {
+                self.ouverte = true;
+                self.maintien_restant = self.maintien;
+            } else if self.maintien_restant > 0 {
+                self.maintien_restant -= 1;
+            } else {
+                self.ouverte = false;
+            }
+            let cible = if self.ouverte || self.maintien_restant > 0 { 1.0 } else { self.plancher };
+            let coef = if cible > self.gain { self.attaque } else { self.relachement };
+            self.gain += (cible - self.gain) * coef;
+            *s *= self.gain;
+        }
+    }
+}
+
+/// Les réglages du de-esser.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReglagesDeesser {
+    /// Le centre de la bande des sifflantes (« s », « ch »).
+    pub frequence: f32,
+    /// Au-dessus, la bande est ramenée.
+    pub seuil_db: f32,
+    /// Jamais plus que cette réduction : la voix ne doit pas zozoter.
+    pub reduction_max_db: f32,
+}
+
+impl Default for ReglagesDeesser {
+    fn default() -> Self {
+        Self { frequence: 6_500.0, seuil_db: -30.0, reduction_max_db: 8.0 }
+    }
+}
+
+/// Un passe-bande du second ordre, 0 dB au centre.
+#[derive(Clone, Debug)]
+struct PasseBande {
+    b0: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl PasseBande {
+    fn new(frequence: f32, q: f32) -> Self {
+        let w0 = 2.0 * std::f32::consts::PI * frequence / SAMPLE_RATE as f32;
+        let (sin, cos) = w0.sin_cos();
+        let alpha = sin / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self { b0: alpha / a0, b2: -alpha / a0, a1: -2.0 * cos / a0, a2: (1.0 - alpha) / a0, z1: 0.0, z2: 0.0 }
+    }
+
+    #[inline]
+    fn traiter(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = -self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+/// De-esser à bande séparée : la bande des sifflantes est isolée, suivie, et
+/// **elle seule** est ramenée quand elle dépasse le seuil — le reste de la
+/// voix ne bouge pas. Sans sifflante, la sortie est l'entrée, au bit près
+/// ou presque (x − 0 · bande).
+#[derive(Clone, Debug)]
+pub struct Deesser {
+    reglages: ReglagesDeesser,
+    bande: PasseBande,
+    seuil: f32,
+    enveloppe: f32,
+    attaque: f32,
+    relachement: f32,
+    pire_db: f32,
+}
+
+impl Deesser {
+    pub fn new(r: ReglagesDeesser) -> Self {
+        let frequence = if r.frequence.is_finite() { r.frequence.clamp(2_000.0, 12_000.0) } else { 6_500.0 };
+        let seuil_db = if r.seuil_db.is_finite() { r.seuil_db.clamp(-60.0, 0.0) } else { -30.0 };
+        Self {
+            reglages: r,
+            bande: PasseBande::new(frequence, 1.2),
+            seuil: (seuil_db * DB_VERS_LN).exp(),
+            enveloppe: 0.0,
+            attaque: coefficient(1.0),
+            relachement: coefficient(60.0),
+            pire_db: 0.0,
+        }
+    }
+
+    pub fn reglages(&self) -> ReglagesDeesser {
+        self.reglages
+    }
+
+    /// La plus forte réduction depuis le dernier relevé, en dB (≤ 0).
+    pub fn reduction_db(&mut self) -> f32 {
+        std::mem::replace(&mut self.pire_db, 0.0)
+    }
+
+    pub fn traiter_trame(&mut self, trame: &mut [f32]) {
+        let max = if self.reglages.reduction_max_db.is_finite() {
+            self.reglages.reduction_max_db.clamp(0.0, 24.0)
+        } else {
+            8.0
+        };
+        for s in trame.iter_mut() {
+            let b = self.bande.traiter(*s);
+            let a = b.abs();
+            let coef = if a > self.enveloppe { self.attaque } else { self.relachement };
+            self.enveloppe += (a - self.enveloppe) * coef;
+            if self.enveloppe <= self.seuil {
+                continue;
+            }
+            // Ratio 4:1 sur la bande, borné à la réduction maximale.
+            let depassement = (self.enveloppe / self.seuil).ln() * LN_VERS_DB;
+            let reduction = (depassement * 0.75).min(max);
+            let g = (-reduction * DB_VERS_LN).exp();
+            *s -= (1.0 - g) * b;
+            if -reduction < self.pire_db {
+                self.pire_db = -reduction;
+            }
+        }
+    }
+}
+
+/// Chaleur, façon lampe : une saturation douce qui arrondit les crêtes et
+/// ajoute des harmoniques, sans toucher aux faibles niveaux (sa pente à
+/// l'origine vaut 1). `chaleur` de 0 (rien) à 1.
+#[derive(Clone, Debug)]
+pub struct Saturation {
+    chaleur: f32,
+    pousse: f32,
+}
+
+impl Saturation {
+    pub fn new(chaleur: f32) -> Self {
+        let chaleur = if chaleur.is_finite() { chaleur.clamp(0.0, 1.0) } else { 0.0 };
+        Self { chaleur, pousse: 1.0 + 3.0 * chaleur }
+    }
+
+    pub fn traiter_trame(&mut self, trame: &mut [f32]) {
+        if self.chaleur < 0.005 {
+            return;
+        }
+        for s in trame.iter_mut() {
+            let sature = (self.pousse * *s).tanh() / self.pousse;
+            *s += self.chaleur * (sature - *s);
+        }
+    }
+}
+
+/// Tout ce que le mode studio règle de la chaîne de sa voix, au-delà des
+/// choix simples (seuil de la porte, niveau de compression, égaliseur).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReglagesStudio {
+    pub porte: ReglagesPorte,
+    /// `None` : pas de de-esser.
+    pub deesser: Option<ReglagesDeesser>,
+    /// Le compresseur de la compression personnalisée (`COMPRESSION_PERSO`).
+    pub compresseur: ReglagesCompresseur,
+    /// La chaleur, de 0 à 1.
+    pub chaleur: f32,
+    /// Le plafond du limiteur, en dBFS.
+    pub plafond_db: f32,
+}
+
+impl Default for ReglagesStudio {
+    /// Exactement la chaîne d'avant le mode studio.
+    fn default() -> Self {
+        Self {
+            porte: ReglagesPorte::default(),
+            deesser: None,
+            compresseur: ReglagesCompresseur::default(),
+            chaleur: 0.0,
+            plafond_db: -1.0,
+        }
+    }
+}
 
 /// Le micro a-t-il saturé dans cette trame, **avant** tout traitement ?
 ///
@@ -190,6 +544,118 @@ mod tests {
 
     fn crete(x: &[f32]) -> f32 {
         x.iter().fold(0.0, |m, s| m.max(s.abs()))
+    }
+
+    fn sinus_a(frequence: f32, amplitude: f32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| amplitude * (i as f32 * 2.0 * std::f32::consts::PI * frequence / SAMPLE_RATE as f32).sin())
+            .collect()
+    }
+
+    fn db(x: f32) -> f32 {
+        20.0 * x.max(1e-9).log10()
+    }
+
+    /// La porte : transparente sur la voix, encore ouverte pendant son
+    /// maintien, puis fermée jusqu'à sa profondeur — et transparente sans
+    /// seuil.
+    #[test]
+    fn la_porte_s_ouvre_se_tient_et_se_ferme() {
+        let r = ReglagesPorte { profondeur_db: -40.0, attaque_ms: 2.0, maintien_ms: 100.0, relachement_ms: 50.0 };
+        let mut p = Porte::new(r);
+        let seuil = 0.05;
+        let mut voix = sinus(0.3, 4_800);
+        let entree = voix.clone();
+        p.traiter_trame(&mut voix, seuil);
+        assert!((crete(&voix[2_400..]) - crete(&entree[2_400..])).abs() < 0.01);
+        // 50 ms de fond : toujours ouverte (maintien de 100 ms).
+        let mut fond = sinus(0.01, 2_400);
+        p.traiter_trame(&mut fond, seuil);
+        assert!(p.gain() > 0.99, "fermée trop tôt : {}", p.gain());
+        // Une seconde de fond : fermée à -40 dB.
+        let mut fond = sinus(0.01, 48_000);
+        p.traiter_trame(&mut fond, seuil);
+        assert!((p.gain() - 0.01).abs() < 0.002, "gain {}", p.gain());
+        let mut x = sinus(0.01, 960);
+        let e = x.clone();
+        p.traiter_trame(&mut x, 0.0);
+        assert_eq!(x, e);
+    }
+
+    /// Une voix passée au-dessus du seuil puis retombée juste en dessous ne
+    /// fait pas battre la porte : l'hystérésis la tient ouverte.
+    #[test]
+    fn la_porte_ne_bat_pas_autour_du_seuil() {
+        let mut p = Porte::new(ReglagesPorte { maintien_ms: 0.0, ..Default::default() });
+        let seuil = 0.1;
+        let mut x = sinus(0.12, 960);
+        p.traiter_trame(&mut x, seuil);
+        let mut x = sinus(0.09, 9_600);
+        p.traiter_trame(&mut x, seuil);
+        assert!(p.gain() > 0.99, "gain {}", p.gain());
+    }
+
+    /// Le de-esser ramène une sifflante forte d'à peu près sa réduction
+    /// maximale, et laisse une voix grave du même niveau intacte.
+    #[test]
+    fn le_deesser_ne_calme_que_les_sifflantes() {
+        let r = ReglagesDeesser { frequence: 6_500.0, seuil_db: -30.0, reduction_max_db: 8.0 };
+        let mut d = Deesser::new(r);
+        let mut s = sinus_a(6_500.0, 0.3, 48_000);
+        d.traiter_trame(&mut s);
+        let sifflante = db(crete(&s[24_000..]) / 0.3);
+        assert!((-9.0..-6.0).contains(&sifflante), "sifflante à {sifflante:.1} dB");
+        assert!(d.reduction_db() < -6.0);
+        let mut d = Deesser::new(r);
+        let mut v = sinus(0.3, 48_000);
+        d.traiter_trame(&mut v);
+        let grave = db(crete(&v[24_000..]) / 0.3);
+        assert!(grave.abs() < 0.5, "voix grave à {grave:.1} dB");
+    }
+
+    /// La chaleur arrondit les crêtes et ne touche pas aux faibles niveaux ;
+    /// à zéro, elle ne fait rien du tout.
+    #[test]
+    fn la_chaleur_arrondit_les_cretes_sans_toucher_au_bas() {
+        let mut x = sinus(0.5, 4_800);
+        let e = x.clone();
+        Saturation::new(0.0).traiter_trame(&mut x);
+        assert_eq!(x, e);
+        let mut s = Saturation::new(1.0);
+        let mut fort = sinus(0.5, 4_800);
+        s.traiter_trame(&mut fort);
+        assert!(crete(&fort) < 0.45);
+        let mut faible = sinus(0.01, 4_800);
+        s.traiter_trame(&mut faible);
+        assert!((crete(&faible) - 0.01).abs() < 0.0005);
+    }
+
+    /// Le compresseur personnalisé rend par le rattrapage ce qu'il prend, et
+    /// son aiguille dit ce qu'il a retiré.
+    #[test]
+    fn le_compresseur_perso_rattrape_et_se_mesure() {
+        let r = ReglagesCompresseur { rattrapage_db: 6.0, ..Default::default() };
+        let mut c = Compresseur::depuis(&r);
+        let mut faible = sinus(0.05, 9_600);
+        c.traiter_trame(&mut faible);
+        assert!((crete(&faible[4_800..]) / 0.05 - 2.0).abs() < 0.05, "+6 dB de rattrapage");
+        assert!(c.reduction_db().abs() < 0.01);
+        let mut fort = sinus(0.9, 48_000);
+        c.traiter_trame(&mut fort);
+        assert!(c.reduction_db() < -5.0);
+        // Les choix simples sont les mêmes compresseurs qu'avant.
+        assert_eq!(ReglagesCompresseur::du_niveau(COMPRESSION_PERSO), None);
+        assert!(Compresseur::emission(COMPRESSION_FORTE).is_some());
+    }
+
+    #[test]
+    fn le_plafond_du_limiteur_se_regle() {
+        let mut l = Limiteur::avec_plafond(-6.0);
+        let mut s = sinus(0.9, 4_800);
+        l.traiter_trame(&mut s);
+        assert!(crete(&s) <= 0.502);
+        // Par défaut, rien ne change : -1 dBFS.
+        assert_eq!(ReglagesStudio::default().plafond_db, -1.0);
     }
 
     /// Une voix sous le seuil traverse sans une retouche.

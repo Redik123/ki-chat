@@ -1,0 +1,430 @@
+//! Le mode studio de la page Casque : la chaîne de sa voix, bloc par bloc,
+//! dans l'ordre où la voix la traverse — porte, égaliseur, gain
+//! automatique, de-esser, compresseur, chaleur, limiteur —, chacun avec ses
+//! réglages et son aiguille. Et des profils : toute la chaîne sous un nom.
+//!
+//! Le mode simple règle les mêmes choses, en moins de gestes : ce qu'on règle
+//! ici reste actif quand on y revient.
+
+use eframe::egui::{self, RichText, Vec2};
+use ki_voice::dynamique::{
+    ReglagesCompresseur, ReglagesDeesser, ReglagesPorte, ReglagesStudio, COMPRESSION_AUCUNE, COMPRESSION_DOUCE,
+    COMPRESSION_FORTE, COMPRESSION_PERSO,
+};
+
+use crate::icons::Icon;
+use crate::reglages_audio::curseur;
+use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::ui;
+use crate::{KiApp, VoiceSnapshot};
+
+/// Un profil : toute la chaîne de sa voix, sous un nom.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProfilVoix {
+    pub(crate) nom: String,
+    /// L'égaliseur de sa voix (`ki_voice::egaliseur::ecrire`).
+    pub(crate) egaliseur: String,
+    /// La chaîne studio ([`ecrire_studio`]).
+    pub(crate) studio: String,
+    pub(crate) compression: u8,
+    /// Le seuil de la porte, en niveau linéaire (0 : pas de porte).
+    pub(crate) porte: f32,
+    pub(crate) agc: bool,
+    pub(crate) agc_cible: f32,
+}
+
+/// La chaîne studio telle que les préférences la rangent.
+pub(crate) fn ecrire_studio(r: &ReglagesStudio) -> String {
+    let p = r.porte;
+    let c = r.compresseur;
+    let deesser = r
+        .deesser
+        .map(|d| format!("{},{},{}", d.frequence, d.seuil_db, d.reduction_max_db))
+        .unwrap_or_else(|| "-".into());
+    format!(
+        "porte={},{},{},{};deesser={deesser};comp={},{},{},{},{},{};chaleur={};plafond={}",
+        p.profondeur_db,
+        p.attaque_ms,
+        p.maintien_ms,
+        p.relachement_ms,
+        c.seuil_db,
+        c.ratio,
+        c.genou_db,
+        c.attaque_ms,
+        c.relachement_ms,
+        c.rattrapage_db,
+        r.chaleur,
+        r.plafond_db
+    )
+}
+
+/// L'inverse d'[`ecrire_studio`] ; ce qui manque ou ne se lit pas garde sa
+/// valeur par défaut — la chaîne d'avant le mode studio.
+pub(crate) fn lire_studio(texte: &str) -> ReglagesStudio {
+    let mut r = ReglagesStudio::default();
+    for champ in texte.split(';') {
+        let Some((cle, valeur)) = champ.split_once('=') else { continue };
+        let n: Vec<f32> = valeur.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        match (cle.trim(), n.as_slice()) {
+            ("porte", &[profondeur_db, attaque_ms, maintien_ms, relachement_ms]) => {
+                r.porte = ReglagesPorte { profondeur_db, attaque_ms, maintien_ms, relachement_ms };
+            }
+            ("deesser", &[frequence, seuil_db, reduction_max_db]) => {
+                r.deesser = Some(ReglagesDeesser { frequence, seuil_db, reduction_max_db });
+            }
+            ("deesser", []) => r.deesser = None,
+            ("comp", &[seuil_db, ratio, genou_db, attaque_ms, relachement_ms, rattrapage_db]) => {
+                r.compresseur =
+                    ReglagesCompresseur { seuil_db, ratio, genou_db, attaque_ms, relachement_ms, rattrapage_db }.bornes();
+            }
+            ("chaleur", &[c]) if c.is_finite() => r.chaleur = c.clamp(0.0, 1.0),
+            ("plafond", &[p]) if p.is_finite() => r.plafond_db = p.clamp(-12.0, 0.0),
+            _ => {}
+        }
+    }
+    r
+}
+
+pub(crate) fn lire_profils(texte: &str) -> Vec<ProfilVoix> {
+    serde_json::from_str(texte).unwrap_or_default()
+}
+
+pub(crate) fn ecrire_profils(profils: &[ProfilVoix]) -> String {
+    serde_json::to_string(profils).unwrap_or_default()
+}
+
+/// Un réglage d'un bloc : son nom sur une colonne, le contrôle à côté.
+fn parametre(ui: &mut egui::Ui, nom: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(110.0, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(110.0);
+                ui.label(RichText::new(nom).color(TEXT_DIM).size(12.0));
+            },
+        );
+        add(ui);
+    });
+}
+
+/// L'aiguille d'un bloc : une jauge et sa valeur.
+fn aiguille(ui: &mut egui::Ui, niveau: f32, couleur: egui::Color32, texte: &str) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(Vec2::new(110.0, 14.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_width(110.0);
+        });
+        ui::meter(ui, niveau, Vec2::new(160.0, 6.0), couleur);
+        ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.0));
+    });
+}
+
+/// Le titre d'un bloc, et l'interrupteur qui l'allume quand il en a un.
+fn titre_bloc(ui: &mut egui::Ui, numero: usize, titre: &str) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(13.0).strong());
+    ui.add_space(2.0);
+}
+
+impl KiApp {
+    /// La chaîne de sa voix, telle qu'elle se range dans un profil.
+    fn profil_actuel(&self, nom: &str) -> ProfilVoix {
+        ProfilVoix {
+            nom: nom.to_string(),
+            egaliseur: ki_voice::egaliseur::ecrire(&self.egaliseur_micro),
+            studio: ecrire_studio(&self.studio),
+            compression: self.compression,
+            porte: self.gate_threshold,
+            agc: self.agc,
+            agc_cible: self.agc_target,
+        }
+    }
+
+    fn appliquer_profil(&mut self, p: &ProfilVoix) {
+        self.egaliseur_micro = ki_voice::egaliseur::lire(&p.egaliseur);
+        self.studio = lire_studio(&p.studio);
+        self.compression = p.compression.min(COMPRESSION_PERSO);
+        self.gate_threshold = p.porte.clamp(0.0, 0.5);
+        self.agc = p.agc;
+        self.agc_target = p.agc_cible.clamp(0.15, 0.5);
+    }
+
+    /// La section « Chaîne de ta voix » du mode studio.
+    pub(crate) fn chaine_studio_ui(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot, apply: &mut bool) {
+        let stats = &voice.stats;
+        let actif = voice.engine_up;
+        ui::section(
+            ui,
+            Icon::Sliders,
+            "Chaîne de ta voix",
+            Some(
+                "Dans l'ordre où ta voix la traverse, chaque bloc avec ses réglages et son \
+                 aiguille. Tout s'entend aussitôt avec « M'écouter » (onglet Audio).",
+            ),
+            |ui| {
+                // --- Profils ---
+                ui::ligne(ui, "Profil", |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let actuel = self.profil_actuel("");
+                        let nom_actuel = self
+                            .profils_voix
+                            .iter()
+                            .find(|p| ProfilVoix { nom: String::new(), ..(*p).clone() } == actuel)
+                            .map(|p| p.nom.clone());
+                        egui::ComboBox::from_id_salt("profils_voix")
+                            .width(160.0)
+                            .selected_text(
+                                RichText::new(nom_actuel.clone().unwrap_or_else(|| "— non enregistré —".into()))
+                                    .color(TEXT),
+                            )
+                            .show_ui(ui, |ui| {
+                                let mut choisi = None;
+                                for (i, p) in self.profils_voix.iter().enumerate() {
+                                    if ui.selectable_label(nom_actuel.as_deref() == Some(p.nom.as_str()), &p.nom).clicked() {
+                                        choisi = Some(i);
+                                    }
+                                }
+                                if let Some(i) = choisi {
+                                    let p = self.profils_voix[i].clone();
+                                    self.appliquer_profil(&p);
+                                    *apply = true;
+                                }
+                            });
+                        if let Some(nom) = &nom_actuel {
+                            if ui::icon_button(ui, Icon::Trash, "Supprimer ce profil").clicked() {
+                                self.profils_voix.retain(|p| &p.nom != nom);
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.profil_nom)
+                                .hint_text("nom du profil")
+                                .desired_width(160.0),
+                        );
+                        let nom = self.profil_nom.trim().to_string();
+                        if ui
+                            .add_enabled(!nom.is_empty(), egui::Button::new("Enregistrer"))
+                            .on_hover_text("toute la chaîne, égaliseur compris ; un profil du même nom est remplacé")
+                            .clicked()
+                        {
+                            let profil = self.profil_actuel(&nom);
+                            match self.profils_voix.iter_mut().find(|p| p.nom == nom) {
+                                Some(p) => *p = profil,
+                                None => self.profils_voix.push(profil),
+                            }
+                            self.profil_nom.clear();
+                        }
+                    });
+                });
+
+                // --- 1. Porte de bruit ---
+                titre_bloc(ui, 1, "Porte de bruit");
+                let mut porte_on = self.gate_threshold > 0.0;
+                parametre(ui, "Active", |ui| {
+                    if ui::interrupteur(ui, &mut porte_on, "coupe le fond entre tes phrases").changed() {
+                        self.gate_threshold = if porte_on { 0.01 } else { 0.0 };
+                        *apply = true;
+                    }
+                });
+                if porte_on {
+                    let mut seuil = 20.0 * self.gate_threshold.max(1e-4).log10();
+                    parametre(ui, "Seuil", |ui| {
+                        if curseur(ui, &mut seuil, -80.0..=-20.0, " dBFS", Some(1.0)) {
+                            self.gate_threshold = 10f32.powf(seuil / 20.0);
+                            *apply = true;
+                        }
+                    });
+                    let p = &mut self.studio.porte;
+                    parametre(ui, "Profondeur", |ui| {
+                        *apply |= curseur(ui, &mut p.profondeur_db, -80.0..=0.0, " dB", Some(1.0));
+                    });
+                    parametre(ui, "Attaque", |ui| {
+                        *apply |= curseur(ui, &mut p.attaque_ms, 0.5..=50.0, " ms", Some(0.5));
+                    });
+                    parametre(ui, "Maintien", |ui| {
+                        *apply |= curseur(ui, &mut p.maintien_ms, 0.0..=1000.0, " ms", Some(10.0));
+                    });
+                    parametre(ui, "Relâchement", |ui| {
+                        *apply |= curseur(ui, &mut p.relachement_ms, 10.0..=1000.0, " ms", Some(10.0));
+                    });
+                    let g = stats.porte_gain.clamp(0.0, 1.0);
+                    let (couleur, texte) = if !actif {
+                        (TEXT_FAINT, "vocal inactif")
+                    } else if g > 0.9 {
+                        (SPEAK, "ouverte")
+                    } else {
+                        (TEXT_DIM, "fermée")
+                    };
+                    aiguille(ui, if actif { g } else { 0.0 }, couleur, texte);
+                }
+
+                // --- 2. Égaliseur ---
+                titre_bloc(ui, 2, "Égaliseur");
+                ui.label(
+                    RichText::new("La courbe, plus haut — onglet « Ta voix ».").color(TEXT_FAINT).size(11.5),
+                );
+
+                // --- 3. Gain automatique ---
+                titre_bloc(ui, 3, "Gain automatique");
+                parametre(ui, "Actif", |ui| {
+                    *apply |= ui::interrupteur(ui, &mut self.agc, "ramène ta voix à un niveau constant").changed();
+                });
+                if self.agc {
+                    let mut pct = self.agc_target * 100.0;
+                    parametre(ui, "Niveau visé", |ui| {
+                        if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
+                            self.agc_target = pct / 100.0;
+                            *apply = true;
+                        }
+                    });
+                }
+
+                // --- 4. De-esser ---
+                titre_bloc(ui, 4, "De-esser");
+                let mut deesser_on = self.studio.deesser.is_some();
+                parametre(ui, "Actif", |ui| {
+                    if ui::interrupteur(ui, &mut deesser_on, "calme les « s » et « ch » qui sifflent").changed() {
+                        self.studio.deesser = deesser_on.then(ReglagesDeesser::default);
+                        *apply = true;
+                    }
+                });
+                if let Some(d) = self.studio.deesser.as_mut() {
+                    let mut khz = d.frequence / 1000.0;
+                    parametre(ui, "Fréquence", |ui| {
+                        if curseur(ui, &mut khz, 3.0..=10.0, " kHz", Some(0.1)) {
+                            d.frequence = khz * 1000.0;
+                            *apply = true;
+                        }
+                    });
+                    parametre(ui, "Seuil", |ui| {
+                        *apply |= curseur(ui, &mut d.seuil_db, -50.0..=0.0, " dB", Some(1.0));
+                    });
+                    parametre(ui, "Réduction max", |ui| {
+                        *apply |= curseur(ui, &mut d.reduction_max_db, 1.0..=20.0, " dB", Some(1.0));
+                    });
+                    let r = -stats.reduction_deesser_db.min(0.0);
+                    aiguille(ui, (r / 20.0).min(1.0), WARN, &format!("−{r:.1} dB"));
+                }
+
+                // --- 5. Compresseur ---
+                titre_bloc(ui, 5, "Compresseur");
+                parametre(ui, "Mode", |ui| {
+                    *apply |= ui::segmente(
+                        ui,
+                        &mut self.compression,
+                        &[
+                            (COMPRESSION_AUCUNE, "Aucun"),
+                            (COMPRESSION_DOUCE, "Doux"),
+                            (COMPRESSION_FORTE, "Fort"),
+                            (COMPRESSION_PERSO, "Perso"),
+                        ],
+                    );
+                });
+                if self.compression != COMPRESSION_AUCUNE {
+                    // Doux et Fort se montrent tels qu'ils sont ; toucher à un
+                    // réglage passe en « Perso », à partir de ces valeurs.
+                    let mut r = ReglagesCompresseur::du_niveau(self.compression).unwrap_or(self.studio.compresseur);
+                    let avant = r;
+                    parametre(ui, "Seuil", |ui| {
+                        curseur(ui, &mut r.seuil_db, -60.0..=0.0, " dB", Some(0.5));
+                    });
+                    parametre(ui, "Ratio", |ui| {
+                        ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
+                        ui.add(
+                            egui::Slider::new(&mut r.ratio, 1.0..=20.0)
+                                .logarithmic(true)
+                                .custom_formatter(|v, _| format!("{v:.1}:1")),
+                        );
+                    });
+                    parametre(ui, "Attaque", |ui| {
+                        curseur(ui, &mut r.attaque_ms, 0.1..=100.0, " ms", Some(0.1));
+                    });
+                    parametre(ui, "Relâchement", |ui| {
+                        curseur(ui, &mut r.relachement_ms, 10.0..=1000.0, " ms", Some(5.0));
+                    });
+                    parametre(ui, "Genou", |ui| {
+                        curseur(ui, &mut r.genou_db, 0.0..=18.0, " dB", Some(0.5));
+                    });
+                    parametre(ui, "Rattrapage", |ui| {
+                        curseur(ui, &mut r.rattrapage_db, 0.0..=24.0, " dB", Some(0.5));
+                    });
+                    if r != avant {
+                        self.studio.compresseur = r.bornes();
+                        self.compression = COMPRESSION_PERSO;
+                        *apply = true;
+                    }
+                    let red = -stats.reduction_compresseur_db.min(0.0);
+                    let couleur = if red > 12.0 { DANGER } else if red > 6.0 { WARN } else { ACCENT };
+                    aiguille(ui, (red / 24.0).min(1.0), couleur, &format!("−{red:.1} dB"));
+                }
+
+                // --- 6. Chaleur ---
+                titre_bloc(ui, 6, "Chaleur");
+                let mut chaleur = self.studio.chaleur * 100.0;
+                parametre(ui, "Saturation", |ui| {
+                    if curseur(ui, &mut chaleur, 0.0..=100.0, " %", Some(1.0)) {
+                        self.studio.chaleur = chaleur / 100.0;
+                        *apply = true;
+                    }
+                });
+
+                // --- 7. Limiteur ---
+                titre_bloc(ui, 7, "Limiteur");
+                parametre(ui, "Plafond", |ui| {
+                    *apply |= curseur(ui, &mut self.studio.plafond_db, -12.0..=0.0, " dBFS", Some(0.5));
+                });
+                ui.label(
+                    RichText::new("Toujours là : rien ne dépasse ce plafond, cri compris.")
+                        .color(TEXT_FAINT)
+                        .size(11.5),
+                );
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn la_chaine_fait_l_aller_retour() {
+        let defaut = ReglagesStudio::default();
+        assert_eq!(lire_studio(&ecrire_studio(&defaut)), defaut);
+        let perso = ReglagesStudio {
+            porte: ReglagesPorte { profondeur_db: -20.0, attaque_ms: 1.5, maintien_ms: 300.0, relachement_ms: 80.0 },
+            deesser: Some(ReglagesDeesser { frequence: 7_200.0, seuil_db: -24.0, reduction_max_db: 6.0 }),
+            compresseur: ReglagesCompresseur {
+                seuil_db: -18.0,
+                ratio: 4.5,
+                genou_db: 3.0,
+                attaque_ms: 8.0,
+                relachement_ms: 200.0,
+                rattrapage_db: 4.0,
+            },
+            chaleur: 0.35,
+            plafond_db: -2.0,
+        };
+        assert_eq!(lire_studio(&ecrire_studio(&perso)), perso);
+        // Rien ou n'importe quoi : la chaîne d'avant.
+        assert_eq!(lire_studio(""), defaut);
+        assert_eq!(lire_studio("chaleur=abc;plafond=99"), ReglagesStudio { plafond_db: 0.0, ..defaut });
+    }
+
+    #[test]
+    fn les_profils_font_l_aller_retour() {
+        let p = ProfilVoix {
+            nom: "Stream".into(),
+            egaliseur: "ph:80:0:0.7071:1:1".into(),
+            studio: ecrire_studio(&ReglagesStudio::default()),
+            compression: COMPRESSION_PERSO,
+            porte: 0.01,
+            agc: true,
+            agc_cible: 0.3,
+        };
+        assert_eq!(lire_profils(&ecrire_profils(std::slice::from_ref(&p))), vec![p]);
+        assert!(lire_profils("pas du json").is_empty());
+    }
+}

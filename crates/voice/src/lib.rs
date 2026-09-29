@@ -211,6 +211,10 @@ pub struct VoiceConfig {
     /// L'égaliseur de sa propre voix, sur ce qui part (ki-chat et le micro
     /// pour les jeux).
     pub egaliseur_micro: Vec<egaliseur::Bande>,
+    /// La chaîne studio de sa voix : porte, de-esser, compresseur
+    /// personnalisé, chaleur, plafond du limiteur. Par défaut, exactement la
+    /// chaîne d'avant.
+    pub studio: dynamique::ReglagesStudio,
     /// Le micro pour les jeux : la sortie (un câble virtuel, VB-Cable) où
     /// part la voix traitée, pour qu'un jeu la prenne comme micro. `None` :
     /// désactivé.
@@ -257,6 +261,7 @@ impl VoiceConfig {
             retour_voix_gain: 0.5,
             egaliseur: Vec::new(),
             egaliseur_micro: Vec::new(),
+            studio: dynamique::ReglagesStudio::default(),
             micro_jeux: None,
             jitter_frames: 0,
             tone: false,
@@ -565,6 +570,12 @@ pub struct VoiceStats {
     /// Le micro pour les jeux tourne : la sortie vers le câble virtuel est
     /// ouverte et réclame la voix.
     pub micro_jeux_actif: bool,
+    /// Les aiguilles de la chaîne studio, sur la dernière trame : le gain de
+    /// la porte (1 : ouverte), la réduction du de-esser et celle du
+    /// compresseur, en dB (0 : rien, négatif : réduit).
+    pub porte_gain: f32,
+    pub reduction_deesser_db: f32,
+    pub reduction_compresseur_db: f32,
 }
 
 #[derive(Default)]
@@ -598,6 +609,10 @@ struct Counters {
     /// Une crête est positive : l'ordre de ses bits est celui des valeurs, et
     /// `fetch_max` sur les bits suffit.
     crete_brute_max_bits: std::sync::atomic::AtomicU32,
+    /// Les aiguilles de la chaîne studio (bits f32, voir `VoiceStats`).
+    porte_gain_bits: std::sync::atomic::AtomicU32,
+    deesser_bits: std::sync::atomic::AtomicU32,
+    compresseur_bits: std::sync::atomic::AtomicU32,
     /// Le moteur qui tient **réellement** le micro, d'après la dernière
     /// tentative d'ouverture (`docteur::Moteur`, rangé en code).
     ///
@@ -695,6 +710,10 @@ struct Shared {
     /// capture).
     egaliseur_micro: Mutex<Vec<egaliseur::Bande>>,
     egaliseur_micro_gen: AtomicU64,
+    /// La chaîne studio de sa voix, et sa génération (relue par la capture
+    /// quand elle bouge).
+    studio: Mutex<dynamique::ReglagesStudio>,
+    studio_gen: AtomicU64,
     /// De quoi dessiner le spectre de la page Casque : les derniers
     /// échantillons de la source choisie (`ANALYSE_*`), déposés seulement
     /// quand l'interface les regarde.
@@ -829,6 +848,8 @@ impl VoiceEngine {
             egaliseur_gen: AtomicU64::new(1),
             egaliseur_micro: Mutex::new(cfg.egaliseur_micro.clone()),
             egaliseur_micro_gen: AtomicU64::new(1),
+            studio: Mutex::new(cfg.studio),
+            studio_gen: AtomicU64::new(1),
             analyse: Mutex::new(std::collections::VecDeque::new()),
             analyse_source: std::sync::atomic::AtomicU8::new(ANALYSE_AUCUNE),
             micro_jeux_buf: Mutex::new(std::collections::VecDeque::new()),
@@ -988,7 +1009,16 @@ impl VoiceEngine {
 
     /// Compression de sa voix (`dynamique::COMPRESSION_*`), à chaud.
     pub fn set_compression(&self, niveau: u8) {
-        self.shared.compression.store(niveau.min(dynamique::COMPRESSION_FORTE), Ordering::Relaxed);
+        self.shared.compression.store(niveau.min(dynamique::COMPRESSION_PERSO), Ordering::Relaxed);
+    }
+
+    /// La chaîne studio de sa voix, à chaud.
+    pub fn set_studio(&self, reglages: dynamique::ReglagesStudio) {
+        let mut actuels = self.shared.studio.lock().unwrap();
+        if *actuels != reglages {
+            *actuels = reglages;
+            self.shared.studio_gen.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Adoucir les cris des autres, à chaud.
@@ -1263,6 +1293,9 @@ impl VoiceEngine {
             },
             crete_brute: f32::from_bits(self.shared.counters.crete_brute_bits.load(Ordering::Relaxed)),
             micro_jeux_actif: self.shared.micro_jeux_actif.load(Ordering::Relaxed),
+            porte_gain: f32::from_bits(self.shared.counters.porte_gain_bits.load(Ordering::Relaxed)),
+            reduction_deesser_db: f32::from_bits(self.shared.counters.deesser_bits.load(Ordering::Relaxed)),
+            reduction_compresseur_db: f32::from_bits(self.shared.counters.compresseur_bits.load(Ordering::Relaxed)),
         }
     }
 
@@ -1649,13 +1682,18 @@ fn capture_loop(
     let mut frame = [0f32; FRAME_SAMPLES];
     let mut denoiser = Denoiser::new();
     let mut deep = LazyDeep::default();
-    let mut gate = NoiseGate::new();
     let mut agc = Agc::new();
+    // La chaîne studio : relue quand l'interface la change.
+    let mut studio = *sh.studio.lock().unwrap();
+    let mut studio_gen = sh.studio_gen.load(Ordering::Relaxed);
+    let mut porte = dynamique::Porte::new(studio.porte);
+    let mut deesser = studio.deesser.map(dynamique::Deesser::new);
+    let mut saturation = dynamique::Saturation::new(studio.chaleur);
     // La dynamique de fin de chaîne : le compresseur du réglage (reconstruit
     // quand il change), et le limiteur, toujours là.
     let mut compresseur: Option<dynamique::Compresseur> = None;
     let mut compression_en_place = u8::MAX;
-    let mut limiteur = dynamique::Limiteur::new();
+    let mut limiteur = dynamique::Limiteur::avec_plafond(studio.plafond_db);
     // L'égaliseur de sa voix, refait quand l'interface change ses gains.
     let mut egaliseur_micro = egaliseur::Egaliseur::new(&sh.egaliseur_micro.lock().unwrap());
     let mut egaliseur_micro_gen = sh.egaliseur_micro_gen.load(Ordering::Relaxed);
@@ -2067,8 +2105,32 @@ fn capture_loop(
                 },
                 _ => {}
             }
-            // 3. Porte de bruit : coupe le résidu sous le seuil choisi.
-            gate.process(&mut frame, load_f32(&sh.gate_threshold));
+            // La chaîne studio a-t-elle changé ?
+            let gen = sh.studio_gen.load(Ordering::Relaxed);
+            if gen != studio_gen {
+                studio_gen = gen;
+                let nouveau = *sh.studio.lock().unwrap();
+                if nouveau.porte != studio.porte {
+                    porte.regler(nouveau.porte);
+                }
+                if nouveau.deesser != studio.deesser {
+                    deesser = nouveau.deesser.map(dynamique::Deesser::new);
+                }
+                if nouveau.chaleur != studio.chaleur {
+                    saturation = dynamique::Saturation::new(nouveau.chaleur);
+                }
+                if nouveau.plafond_db != studio.plafond_db {
+                    limiteur = dynamique::Limiteur::avec_plafond(nouveau.plafond_db);
+                }
+                if nouveau.compresseur != studio.compresseur {
+                    // Reconstruit au passage du compresseur, s'il est personnalisé.
+                    compression_en_place = u8::MAX;
+                }
+                studio = nouveau;
+            }
+            // 3. Porte de bruit : coupe (ou baisse, selon sa profondeur) le
+            // résidu sous le seuil choisi.
+            porte.traiter_trame(&mut frame, load_f32(&sh.gate_threshold));
             // L'égaliseur de sa voix : après le débruitage (qui travaille
             // mieux sur le son brut), avant le gain automatique et la
             // compression, qui règlent le niveau de la voix corrigée. Un
@@ -2087,19 +2149,36 @@ fn capture_loop(
             if sh.agc.load(Ordering::Relaxed) {
                 agc.process(&mut frame, load_f32(&sh.agc_target));
             }
+            // Le de-esser, sur une voix déjà mise à niveau : son seuil garde
+            // son sens qu'on parle doucement ou fort.
+            if let Some(d) = deesser.as_mut() {
+                d.traiter_trame(&mut frame);
+            }
             // 5. Dynamique : la compression choisie contient les éclats de
             // voix, puis le limiteur garantit qu'aucun échantillon ne passe
             // la pleine échelle — ni un cri, ni l'attaque d'une phrase forte
             // que le gain automatique n'a pas encore rattrapée.
             let niveau = sh.compression.load(Ordering::Relaxed);
             if niveau != compression_en_place {
-                compresseur = dynamique::Compresseur::emission(niveau);
+                compresseur = if niveau == dynamique::COMPRESSION_PERSO {
+                    Some(dynamique::Compresseur::depuis(&studio.compresseur))
+                } else {
+                    dynamique::Compresseur::emission(niveau)
+                };
                 compression_en_place = niveau;
             }
             if let Some(c) = compresseur.as_mut() {
                 c.traiter_trame(&mut frame);
             }
+            saturation.traiter_trame(&mut frame);
             limiteur.traiter_trame(&mut frame);
+            // Les aiguilles de la page Casque.
+            let compteurs = &sh.counters;
+            compteurs.porte_gain_bits.store(porte.gain().to_bits(), Ordering::Relaxed);
+            let red_deesser = deesser.as_mut().map_or(0.0, |d| d.reduction_db());
+            compteurs.deesser_bits.store(red_deesser.to_bits(), Ordering::Relaxed);
+            let red_comp = compresseur.as_mut().map_or(0.0, |c| c.reduction_db());
+            compteurs.compresseur_bits.store(red_comp.to_bits(), Ordering::Relaxed);
             // Le micro pour les jeux : la voix traitée, telle qu'elle part —
             // sans le soundboard, mêlé plus loin, qui n'a rien à faire dans
             // le vocal d'un jeu. Rien n'est déposé sans sortie qui le lise.
@@ -2509,36 +2588,6 @@ impl Monitor {
             .is_some();
         if !ok {
             out.copy_from_slice(frame);
-        }
-    }
-}
-
-/// Porte de bruit : atténue progressivement le signal sous le seuil.
-/// Ouverture rapide (ne mange pas les attaques), fermeture douce.
-struct NoiseGate {
-    env: f32,
-    gain: f32,
-}
-
-impl NoiseGate {
-    fn new() -> Self {
-        Self { env: 0.0, gain: 1.0 }
-    }
-
-    fn process(&mut self, frame: &mut [f32], threshold: f32) {
-        if threshold <= 0.0 {
-            self.gain = 1.0;
-            return;
-        }
-        let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
-        self.env = peak.max(self.env * 0.92);
-        let target = if self.env >= threshold { 1.0 } else { 0.0 };
-        let rate = if target > self.gain { 0.6 } else { 0.08 };
-        self.gain += (target - self.gain) * rate;
-        if self.gain < 0.999 {
-            for s in frame.iter_mut() {
-                *s *= self.gain;
-            }
         }
     }
 }
@@ -3829,9 +3878,12 @@ mod tests {
         assert!((0.2..=0.5).contains(&peak), "voix mal normalisée après bruit : {peak}");
     }
 
+    /// La porte de la chaîne, réglée par défaut, tient le contrat de
+    /// l'ancienne : fermée sur le fond, rouverte vite par la voix,
+    /// transparente sans seuil.
     #[test]
     fn noise_gate_closes_on_silence_opens_on_voice() {
-        let mut gate = NoiseGate::new();
+        let mut gate = PorteDeTest(dynamique::Porte::new(Default::default()));
         // Bruit résiduel faible : la porte doit se fermer.
         for _ in 0..100 {
             let mut frame = [0.01f32; FRAME_SAMPLES];
@@ -3849,10 +3901,19 @@ mod tests {
         gate.process(&mut frame, 0.05);
         assert!(frame[0].abs() > 0.25, "porte pas rouverte : {}", frame[0]);
         // Seuil à zéro = transparente.
-        let mut gate = NoiseGate::new();
+        let mut gate = PorteDeTest(dynamique::Porte::new(Default::default()));
         let mut frame = [0.01f32; FRAME_SAMPLES];
         gate.process(&mut frame, 0.0);
         assert_eq!(frame[0], 0.01);
+    }
+
+    /// L'ancienne porte avait `process(trame, seuil)` : même geste, pour que
+    /// son test garde sa lettre.
+    struct PorteDeTest(dynamique::Porte);
+    impl PorteDeTest {
+        fn process(&mut self, trame: &mut [f32], seuil: f32) {
+            self.0.traiter_trame(trame, seuil);
+        }
     }
 
     /// Un NaN entré dans DeepFilterNet ne l'empoisonne pas pour la suite.

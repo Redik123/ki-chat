@@ -25,6 +25,7 @@ mod ptt;
 mod reglages_audio;
 mod reglages_casque;
 mod egaliseur_ui;
+mod studio_ui;
 mod raccourci;
 mod rangs;
 mod secours;
@@ -1199,6 +1200,14 @@ struct KiApp {
     /// dépose (`ki_voice::ANALYSE_*`).
     analyse_voulue: u8,
     analyse_actuelle: u8,
+    /// La page Casque en mode studio (toute la chaîne) plutôt que simple.
+    mode_studio: bool,
+    /// La chaîne studio de sa voix (porte, de-esser, compresseur perso,
+    /// chaleur, plafond).
+    studio: ki_voice::dynamique::ReglagesStudio,
+    /// Ses profils de voix, et le nom tapé pour le prochain.
+    profils_voix: Vec<studio_ui::ProfilVoix>,
+    profil_nom: String,
     /// Le calibrage des gains du micro en cours (page Casque), et son
     /// dernier verdict, affiché un moment.
     calibrage_micro: Option<reglages_casque::Calibrage>,
@@ -1566,7 +1575,7 @@ impl KiApp {
             compression: get("compression", "1")
                 .parse()
                 .unwrap_or(ki_voice::dynamique::COMPRESSION_DOUCE)
-                .min(ki_voice::dynamique::COMPRESSION_FORTE),
+                .min(ki_voice::dynamique::COMPRESSION_PERSO),
             adoucir_cris: get("adoucir_cris", "on") != "off",
             casque_nom: get("casque_nom", ""),
             retour_voix: get("retour_voix", "off") == "on",
@@ -1577,6 +1586,10 @@ impl KiApp {
             eq_editeur: egaliseur_ui::EditeurEq::new(),
             analyse_voulue: ki_voice::ANALYSE_AUCUNE,
             analyse_actuelle: ki_voice::ANALYSE_AUCUNE,
+            mode_studio: get("mode_studio", "off") == "on",
+            studio: studio_ui::lire_studio(&get("studio", "")),
+            profils_voix: studio_ui::lire_profils(&get("profils_voix", "[]")),
+            profil_nom: String::new(),
             calibrage_micro: None,
             calibrage_verdict: None,
             materiel_suivi: None,
@@ -1796,6 +1809,7 @@ impl KiApp {
             let (ecoute, voix) = self.egaliseurs_effectifs();
             engine.set_egaliseur(&ecoute);
             engine.set_egaliseur_micro(&voix);
+            engine.set_studio(self.studio);
             engine.set_jitter_frames(self.jitter_frames);
             engine.set_dred(match self.dred_mode {
                 0 => 0,
@@ -1844,6 +1858,7 @@ impl KiApp {
             retour_voix_gain: self.retour_voix_volume,
             egaliseur: self.egaliseur.clone(),
             egaliseur_micro: self.egaliseur_micro.clone(),
+            studio: self.studio,
             micro_jeux: self.micro_jeux_resolu(),
             jitter_frames: self.jitter_frames,
             dred: match self.dred_mode {
@@ -14677,6 +14692,9 @@ impl eframe::App for KiApp {
         storage.set_string("retour_voix_volume", format!("{}", self.retour_voix_volume));
         storage.set_string("egaliseur", ki_voice::egaliseur::ecrire(&self.egaliseur));
         storage.set_string("egaliseur_micro", ki_voice::egaliseur::ecrire(&self.egaliseur_micro));
+        storage.set_string("mode_studio", if self.mode_studio { "on" } else { "off" }.into());
+        storage.set_string("studio", studio_ui::ecrire_studio(&self.studio));
+        storage.set_string("profils_voix", studio_ui::ecrire_profils(&self.profils_voix));
         storage.set_string("micro_jeux", if self.micro_jeux { "on" } else { "off" }.into());
         storage.set_string("micro_jeux_sortie", self.micro_jeux_sortie.clone().unwrap_or_default());
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
