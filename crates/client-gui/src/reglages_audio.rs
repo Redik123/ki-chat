@@ -17,6 +17,7 @@ use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, WARN};
 use crate::ui::{self, Tone};
 use crate::{KiApp, MicMode, VoiceSnapshot};
 use ki_voice::dynamique::{COMPRESSION_AUCUNE, COMPRESSION_DOUCE, COMPRESSION_FORTE, COMPRESSION_PERSO};
+use ki_voice::{EtatEssai, VersionEssai, ESSAI_SECONDES};
 
 /// Combien de temps l'alerte de saturation reste affichée après la dernière
 /// trame saturée : assez pour la lire, et qu'elle ne clignote pas entre deux
@@ -129,6 +130,12 @@ impl KiApp {
                 ui::ligne(ui, "Tester", |ui| {
                     if ui::interrupteur(ui, &mut self.loopback, "M'écouter").changed() {
                         *apply = true;
+                        if self.loopback {
+                            // Même tampon de lecture : l'un chasse l'autre.
+                            if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+                                e.arreter_essai();
+                            }
+                        }
                     }
                     if self.loopback {
                         ui.label(
@@ -139,10 +146,13 @@ impl KiApp {
                     }
                     ui::precision(
                         ui,
-                        "Tu t'entends comme les autres t'entendent : traitement et codec \
-                         compris. L'essai est privé — rien ne part vers le salon tant qu'il \
-                         tourne.",
+                        "En direct, traitement et codec compris — avec un peu de retard. Sous \
+                         un casque fermé, ta voix t'arrive aussi par les os du crâne : ce \
+                         retard la double et la fait paraître plus creuse qu'elle n'est. L'essai \
+                         est privé — rien ne part vers le salon tant qu'il tourne.",
                     );
+                    ui.add_space(8.0);
+                    self.essai_voix_ui(ui, engine_up);
                 });
             },
         );
@@ -537,6 +547,112 @@ impl KiApp {
         }
     }
 
+    /// « Enregistrer et réécouter » : quelques secondes de sa voix, rejouées
+    /// d'une traite — ce que les autres reçoivent, puis son micro brut au
+    /// même volume. Sans le retard de « M'écouter », on juge sa voix telle
+    /// qu'elle est.
+    pub(crate) fn essai_voix_ui(&mut self, ui: &mut egui::Ui, engine_up: bool) {
+        enum Geste {
+            Enregistrer,
+            Rejouer(VersionEssai),
+            Arreter,
+        }
+        let etat = if engine_up {
+            self.link.engine.lock().unwrap().as_ref().map(|e| e.essai())
+        } else {
+            None
+        };
+        let Some(etat) = etat else {
+            ui::precision(ui, "L'enregistrement d'essai se fait connecté à un serveur.");
+            return;
+        };
+        let mut geste = None;
+        match etat {
+            EtatEssai::Vide => {
+                if ui::button(ui, Icon::Mic, &format!("Enregistrer {ESSAI_SECONDES} s et réécouter"))
+                    .clicked()
+                {
+                    geste = Some(Geste::Enregistrer);
+                }
+            }
+            EtatEssai::Enregistre(avancement) => {
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
+                ui.horizontal(|ui| {
+                    ui::meter(ui, avancement, Vec2::new(150.0, 8.0), DANGER);
+                    let reste = ((1.0 - avancement) * ESSAI_SECONDES as f32).ceil().max(1.0);
+                    ui.label(
+                        RichText::new(format!("parle comme en partie… {reste:.0} s"))
+                            .color(TEXT_DIM)
+                            .size(12.0),
+                    );
+                    if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
+                        geste = Some(Geste::Arreter);
+                    }
+                });
+            }
+            EtatEssai::Pret { lecture, ecart_db } => {
+                if lecture.is_some() {
+                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (version, libelle) in [
+                        (VersionEssai::Envoyee, "Ce que les autres entendent"),
+                        (VersionEssai::Brute, "Ton micro brut"),
+                    ] {
+                        match lecture {
+                            Some((v, avancement)) if v == version => {
+                                if ui::button(ui, Icon::Pause, libelle).clicked() {
+                                    geste = Some(Geste::Arreter);
+                                }
+                                ui::meter(ui, avancement, Vec2::new(60.0, 6.0), ACCENT);
+                            }
+                            _ => {
+                                if ui::button(ui, Icon::Play, libelle).clicked() {
+                                    geste = Some(Geste::Rejouer(version));
+                                }
+                            }
+                        }
+                    }
+                    if ui::icon_button(ui, Icon::Repeat, "Recommencer l'enregistrement").clicked() {
+                        geste = Some(Geste::Enregistrer);
+                    }
+                });
+                volume_de_l_essai(ui, ecart_db);
+            }
+        }
+        ui::precision(
+            ui,
+            &format!(
+                "Parle {ESSAI_SECONDES} s comme en partie : ki-chat te rejoue ce que les autres \
+                 reçoivent, sans retard. Puis compare à ton micro brut, remis au même volume — \
+                 ce qui sonne creux dans le premier et pas dans le second vient des réglages. \
+                 Personne ne t'entend pendant l'enregistrement."
+            ),
+        );
+        match geste {
+            Some(Geste::Enregistrer) => {
+                if self.loopback {
+                    self.loopback = false;
+                    self.apply_audio_settings();
+                }
+                if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+                    e.enregistrer_essai();
+                }
+            }
+            Some(Geste::Rejouer(version)) => {
+                if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+                    e.rejouer_essai(version);
+                }
+            }
+            Some(Geste::Arreter) => {
+                if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+                    e.arreter_essai();
+                }
+            }
+            None => {}
+        }
+    }
+
     /// La calibration de la porte (et du seuil d'activation) sur le bruit de
     /// la pièce : le bouton, ou sa progression.
     fn calibration_ui(&mut self, ui: &mut egui::Ui, engine_up: bool) {
@@ -569,6 +685,48 @@ impl KiApp {
                 });
             }
         }
+    }
+}
+
+/// Le volume de sa voix dans l'essai, comparé à une voix réglée par défaut
+/// — ce que les autres entendent de lui à côté des autres —, et quoi faire.
+fn volume_de_l_essai(ui: &mut egui::Ui, ecart_db: f32) {
+    let (mot, couleur) = if ecart_db < -30.0 {
+        ("presque rien", DANGER)
+    } else if ecart_db < -12.0 {
+        ("très bas", DANGER)
+    } else if ecart_db < -5.0 {
+        ("un peu bas", WARN)
+    } else if ecart_db <= 4.0 {
+        ("bon", SPEAK)
+    } else {
+        ("fort", WARN)
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Le volume de ta voix chez les autres :").color(TEXT_DIM).size(12.0));
+        ui.label(RichText::new(mot).color(couleur).size(12.0).strong());
+        if (-30.0..=-5.0).contains(&ecart_db) || ecart_db > 4.0 {
+            ui.label(
+                RichText::new(format!("{ecart_db:+.0} dB par rapport à une voix réglée par défaut"))
+                    .color(TEXT_DIM)
+                    .size(12.0),
+            );
+        }
+    });
+    if ecart_db < -30.0 {
+        ui::precision(
+            ui,
+            "Ton micro n'a presque rien capté : vérifie qu'il est branché, et choisi dans \
+             « Périphérique » juste au-dessus.",
+        );
+    } else if ecart_db < -5.0 {
+        ui::precision(
+            ui,
+            "Monte « Ton volume » (page Casque, section Micro) — ou rallume le gain \
+             automatique : il te met au niveau des autres, quelle que soit ta carte son.",
+        );
+    } else if ecart_db > 4.0 {
+        ui::precision(ui, "Baisse « Ton volume » (page Casque, section Micro).");
     }
 }
 

@@ -9625,6 +9625,11 @@ impl KiApp {
             self.loopback = false;
             self.apply_audio_settings();
         }
+        // Un enregistrement d'essai laissé en route rendrait le micro muet
+        // pour le salon quelques secondes, sans rien à l'écran pour le dire.
+        if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+            e.arreter_essai();
+        }
     }
 
     /// Fenêtre de mise à jour : proposée, jamais imposée.

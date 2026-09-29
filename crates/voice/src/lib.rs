@@ -699,6 +699,10 @@ struct Shared {
     loopback: AtomicBool,
     /// Échantillons locaux à mixer dans la sortie (test micro / son de test).
     loopback_buf: Mutex<std::collections::VecDeque<f32>>,
+    /// « Enregistrer et réécouter » : les deux versions de l'essai.
+    essai: Mutex<Essai>,
+    /// Enregistrement d'essai en cours — lu à chaque trame sans verrou.
+    essai_actif: AtomicBool,
     /// Retour de sa voix dans le casque (« sidetone »), et son volume (bits
     /// f32). Rien à voir avec « M'écouter » : pas de codec, pas de trame
     /// d'avance, le micro brut au plus court — pour s'entendre parler sous un
@@ -856,6 +860,8 @@ impl VoiceEngine {
             dred: AtomicI32::new(0),
             loopback: AtomicBool::new(false),
             loopback_buf: Mutex::new(std::collections::VecDeque::new()),
+            essai: Mutex::new(Essai::default()),
+            essai_actif: AtomicBool::new(false),
             retour_voix: AtomicBool::new(cfg.retour_voix),
             retour_voix_gain: AtomicU32::new(cfg.retour_voix_gain.clamp(0.0, 2.0).to_bits()),
             retour_voix_buf: Mutex::new(std::collections::VecDeque::new()),
@@ -1175,10 +1181,75 @@ impl VoiceEngine {
     }
 
     pub fn set_loopback(&self, on: bool) {
-        self.shared.loopback.store(on, Ordering::Relaxed);
+        // Rappelé à chaque réglage appliqué : sans changement, rien à faire —
+        // surtout pas vider le tampon, qui rejoue peut-être un essai.
+        if self.shared.loopback.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        // Le tampon est commun : « M'écouter » prend la place d'un essai.
+        self.shared.essai.lock().unwrap().lecture = None;
         if !on {
             self.shared.loopback_buf.lock().unwrap().clear();
         }
+    }
+
+    /// Enregistre [`ESSAI_SECONDES`] de sa voix en deux versions à la fois
+    /// — le micro tel que la carte le livre, et ce qui part vers les autres
+    /// (toute la chaîne, puis un aller-retour par le codec) —, puis rejoue
+    /// d'office la seconde. Privé comme « M'écouter » : rien ne part vers le
+    /// salon pendant l'enregistrement.
+    pub fn enregistrer_essai(&self) {
+        self.shared.essai.lock().unwrap().commencer();
+        self.shared.loopback_buf.lock().unwrap().clear();
+        self.shared.essai_actif.store(true, Ordering::Relaxed);
+    }
+
+    /// Rejoue une version de l'essai enregistré, d'une traite : sans le
+    /// retard ni l'écho de « M'écouter », qui fait paraître sa voix plus
+    /// creuse qu'elle ne l'est.
+    pub fn rejouer_essai(&self, version: VersionEssai) {
+        if !self.shared.essai_actif.load(Ordering::Relaxed) {
+            rejouer_essai(&self.shared, version);
+        }
+    }
+
+    /// Arrête l'essai, qu'il enregistre ou qu'il joue.
+    pub fn arreter_essai(&self) {
+        let mut e = self.shared.essai.lock().unwrap();
+        if self.shared.essai_actif.swap(false, Ordering::Relaxed) {
+            // Un enregistrement interrompu ne vaut rien.
+            *e = Essai::default();
+        }
+        if e.lecture.take().is_some() {
+            self.shared.loopback_buf.lock().unwrap().clear();
+        }
+    }
+
+    /// Où en est l'essai.
+    pub fn essai(&self) -> EtatEssai {
+        let mut e = self.shared.essai.lock().unwrap();
+        if self.shared.essai_actif.load(Ordering::Relaxed) {
+            return EtatEssai::Enregistre(e.envoyee.len() as f32 / ESSAI_ECHANTILLONS as f32);
+        }
+        if e.envoyee.is_empty() {
+            return EtatEssai::Vide;
+        }
+        // Mesuré une fois, à la première demande : l'interface redemande à
+        // chaque image.
+        let ecart_db = match e.ecart_db {
+            Some(v) => v,
+            None => {
+                let v = ecart_au_defaut_db(&e.envoyee);
+                e.ecart_db = Some(v);
+                v
+            }
+        };
+        let reste = self.shared.loopback_buf.lock().unwrap().len();
+        let lecture = e
+            .lecture
+            .filter(|_| reste > 0)
+            .map(|v| (v, 1.0 - reste as f32 / e.envoyee.len().max(1) as f32));
+        EtatEssai::Pret { lecture, ecart_db }
     }
 
     /// Joue un effet sonore (PCM mono 48 kHz, cf. `effects::load_wav`).
@@ -1736,6 +1807,7 @@ fn capture_loop(
     let mut silero: EnFond<silero::Silero> = EnFond::Jamais;
     let mut vad_ouvert = false;
     let mut monitor: Option<Monitor> = None;
+    let mut moniteur_essai: Option<Monitor> = None;
     // Activation vocale : on continue d'émettre un court instant après le
     // dernier franchissement du seuil, pour ne pas hacher les fins de mots.
     // checked_sub : soustraire à un Instant trop proche du démarrage de la
@@ -2069,6 +2141,10 @@ fn capture_loop(
             if retour_brut && in_rate != SAMPLE_RATE {
                 pousser_retour(&sh, &frame, true);
             }
+            // L'essai « enregistrer et réécouter » : le micro tel que la
+            // carte le livre, gardé jusqu'à ce que la trame traitée le
+            // rejoigne plus bas.
+            let brute_essai = sh.essai_actif.load(Ordering::Relaxed).then_some(frame);
 
             // La marge du micro brut, avant tout traitement : ce que règlent
             // les gains de la carte son (page Casque, et son calibrage).
@@ -2261,6 +2337,29 @@ fn capture_loop(
                 Some(c) if vers != changeur::VERS_JEUX => c,
                 _ => frame,
             };
+            // L'essai : ce qui part, passé par le codec comme chez les
+            // autres, rangé avec le brut de la même trame. Complet, il se
+            // rejoue d'office.
+            if let Some(brute) = brute_essai {
+                let mon = moniteur_essai
+                    .get_or_insert_with(|| Monitor::new(sh.bitrate.load(Ordering::Relaxed)));
+                let mut entendu = [0f32; FRAME_SAMPLES];
+                mon.process(&envoi, sh.bitrate.load(Ordering::Relaxed), &mut entendu);
+                let fini = {
+                    let mut e = sh.essai.lock().unwrap();
+                    // Arrêté entre-temps : la trame n'a plus où aller.
+                    let fini = sh.essai_actif.load(Ordering::Relaxed) && e.ajouter(&brute, &entendu);
+                    if fini {
+                        sh.essai_actif.store(false, Ordering::Relaxed);
+                    }
+                    fini
+                };
+                if fini {
+                    rejouer_essai(&sh, VersionEssai::Envoyee);
+                }
+            } else {
+                moniteur_essai = None;
+            }
             // 6. Vumètre : niveau après toute la chaîne (= ce qui part).
             let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
             sh.counters.mic_peak_bits.store(peak.to_bits(), Ordering::Relaxed);
@@ -2316,7 +2415,7 @@ fn capture_loop(
                 Duration::from_millis(sh.vad_hangover_ms.load(Ordering::Relaxed) as u64);
             let micro = micro_ouvert(
                 armed,
-                sh.loopback.load(Ordering::Relaxed),
+                sh.loopback.load(Ordering::Relaxed) || brute_essai.is_some(),
                 threshold,
                 last_voice.elapsed(),
                 hangover,
@@ -2631,6 +2730,127 @@ fn sleep_unless_shutdown(sh: &Arc<Shared>, total: Duration) {
         std::thread::sleep(nap);
         left -= nap;
     }
+}
+
+/// Durée de l'essai « enregistrer et réécouter », en secondes.
+pub const ESSAI_SECONDES: usize = 5;
+const ESSAI_ECHANTILLONS: usize = ESSAI_SECONDES * SAMPLE_RATE as usize;
+
+/// Les deux versions d'un essai enregistré.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VersionEssai {
+    /// Ce qui part vers les autres : toute la chaîne, puis le codec.
+    Envoyee,
+    /// Le micro tel que la carte son le livre, remis au volume de l'autre
+    /// pour comparer à l'oreille.
+    Brute,
+}
+
+/// Où en est l'essai.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EtatEssai {
+    /// Rien d'enregistré.
+    Vide,
+    /// Enregistrement en cours ; avancement de 0 à 1.
+    Enregistre(f32),
+    /// Enregistré.
+    Pret {
+        /// La version en lecture et son avancement, s'il y en a une.
+        lecture: Option<(VersionEssai, f32)>,
+        /// Le volume de sa voix chez les autres, en dB au-dessus de celui
+        /// d'une voix réglée par défaut ([`NIVEAU_VOIX_DEFAUT`]).
+        ecart_db: f32,
+    },
+}
+
+/// La crête de voix que vise le gain automatique réglé par défaut : le
+/// niveau de la plupart des voix du salon.
+pub const NIVEAU_VOIX_DEFAUT: f32 = 0.30;
+
+/// Les deux versions de l'essai, prises trame par trame par le fil de
+/// capture.
+#[derive(Default)]
+struct Essai {
+    brute: Vec<f32>,
+    envoyee: Vec<f32>,
+    lecture: Option<VersionEssai>,
+    /// Le volume mesuré (voir [`EtatEssai::Pret`]), une fois demandé.
+    ecart_db: Option<f32>,
+}
+
+impl Essai {
+    /// Repart à vide, la place réservée d'avance : le fil de capture
+    /// n'alloue rien en enregistrant.
+    fn commencer(&mut self) {
+        self.brute = Vec::with_capacity(ESSAI_ECHANTILLONS);
+        self.envoyee = Vec::with_capacity(ESSAI_ECHANTILLONS);
+        self.lecture = None;
+        self.ecart_db = None;
+    }
+
+    /// Ajoute une trame de chaque version ; vrai quand l'essai est complet.
+    fn ajouter(&mut self, brute: &[f32], envoyee: &[f32]) -> bool {
+        let place = ESSAI_ECHANTILLONS.saturating_sub(self.envoyee.len());
+        self.brute.extend_from_slice(&brute[..brute.len().min(place)]);
+        self.envoyee.extend_from_slice(&envoyee[..envoyee.len().min(place)]);
+        self.envoyee.len() >= ESSAI_ECHANTILLONS
+    }
+}
+
+/// Met une version de l'essai en lecture par le tampon de « M'écouter » :
+/// mixée comme une voix, au volume des voix — pas à celui des
+/// notifications, qu'on a pu baisser.
+fn rejouer_essai(sh: &Shared, version: VersionEssai) {
+    let mut e = sh.essai.lock().unwrap();
+    if e.envoyee.is_empty() {
+        return;
+    }
+    let pcm = match version {
+        VersionEssai::Envoyee => e.envoyee.clone(),
+        VersionEssai::Brute => au_meme_volume(&e.brute, &e.envoyee),
+    };
+    e.lecture = Some(version);
+    let mut buf = sh.loopback_buf.lock().unwrap();
+    buf.clear();
+    buf.extend(pcm);
+}
+
+/// Le volume de sa voix dans l'essai, en dB au-dessus de celui d'une voix
+/// réglée par défaut. Mesuré comme le gain automatique le mesure — la crête
+/// de chaque trame — sur la voix : la trame au rang du quart le plus fort,
+/// pour que les silences entre les phrases ne tirent pas la mesure vers le
+/// bas.
+fn ecart_au_defaut_db(x: &[f32]) -> f32 {
+    let mut cretes: Vec<f32> =
+        x.chunks(FRAME_SAMPLES).map(|t| t.iter().fold(0f32, |m, s| m.max(s.abs()))).collect();
+    if cretes.is_empty() {
+        return -120.0;
+    }
+    cretes.sort_by(|a, b| b.total_cmp(a));
+    let voix = cretes[cretes.len() / 4];
+    20.0 * (voix.max(1e-6) / NIVEAU_VOIX_DEFAUT).log10()
+}
+
+/// Le micro brut remis au volume de ce qui part. À l'oreille, le plus fort
+/// paraît toujours le meilleur : la comparaison se fait à volume égal.
+/// Mesuré sur la voix — la moitié la plus forte des trames —, pas sur les
+/// silences, que la chaîne nettoie et que le brut garde.
+fn au_meme_volume(brute: &[f32], reference: &[f32]) -> Vec<f32> {
+    fn niveau_voix(x: &[f32]) -> f32 {
+        let mut energies: Vec<f32> = x
+            .chunks(FRAME_SAMPLES)
+            .map(|t| t.iter().map(|s| s * s).sum::<f32>() / t.len() as f32)
+            .collect();
+        if energies.is_empty() {
+            return 0.0;
+        }
+        energies.sort_by(|a, b| b.total_cmp(a));
+        let fortes = &energies[..energies.len().div_ceil(2)];
+        (fortes.iter().sum::<f32>() / fortes.len() as f32).sqrt()
+    }
+    let (b, r) = (niveau_voix(brute), niveau_voix(reference));
+    let gain = if b > 1e-5 { (r / b).clamp(0.1, 30.0) } else { 1.0 };
+    brute.iter().map(|s| soft_clip(s * gain)).collect()
 }
 
 /// Moniteur « s'écouter » : un aller-retour complet par le codec Opus,
@@ -4212,6 +4432,85 @@ mod tests {
         assert!(!micro_ouvert(true, false, 0.02, Duration::from_secs(1), maintien));
         // Désarmé : rien, évidemment.
         assert!(!micro_ouvert(false, false, 0.0, court, maintien));
+    }
+
+    #[test]
+    fn l_essai_s_arrete_a_cinq_secondes() {
+        let mut e = Essai::default();
+        e.commencer();
+        let (brute, envoyee) = ([0.1f32; FRAME_SAMPLES], [0.2f32; FRAME_SAMPLES]);
+        let trames = ESSAI_ECHANTILLONS / FRAME_SAMPLES;
+        for n in 1..trames {
+            assert!(!e.ajouter(&brute, &envoyee), "complet trop tôt, trame {n}");
+        }
+        assert!(e.ajouter(&brute, &envoyee));
+        assert_eq!(e.envoyee.len(), ESSAI_ECHANTILLONS);
+        assert_eq!(e.brute.len(), ESSAI_ECHANTILLONS);
+        // Au-delà, rien ne déborde.
+        assert!(e.ajouter(&brute, &envoyee));
+        assert_eq!(e.envoyee.len(), ESSAI_ECHANTILLONS);
+        assert_eq!(e.brute.len(), ESSAI_ECHANTILLONS);
+    }
+
+    #[test]
+    fn le_volume_de_l_essai_se_mesure_sur_la_voix() {
+        // Parler un tiers du temps, à la crête que vise le gain automatique
+        // par défaut : 0 dB, malgré les silences.
+        let phrase = |crete: f32| -> Vec<f32> {
+            (0..ESSAI_ECHANTILLONS)
+                .map(|i| {
+                    let t = i as f32 / SAMPLE_RATE as f32;
+                    let parle = (i / FRAME_SAMPLES).is_multiple_of(3);
+                    if parle {
+                        crete * (2.0 * std::f32::consts::PI * 180.0 * t).sin()
+                    } else {
+                        0.001
+                    }
+                })
+                .collect()
+        };
+        assert!(ecart_au_defaut_db(&phrase(NIVEAU_VOIX_DEFAUT)).abs() < 0.5);
+        // Quatre fois plus bas : -12 dB.
+        let bas = ecart_au_defaut_db(&phrase(NIVEAU_VOIX_DEFAUT / 4.0));
+        assert!((bas + 12.04).abs() < 0.5, "{bas:.2} dB");
+        // Rien dit : très loin dessous, sans infini.
+        let rien = ecart_au_defaut_db(&vec![0f32; ESSAI_ECHANTILLONS]);
+        assert!(rien.is_finite() && rien < -60.0);
+        assert!(ecart_au_defaut_db(&[]) < -60.0);
+    }
+
+    #[test]
+    fn le_brut_se_compare_a_volume_egal() {
+        // Une voix : deux secondes de sinus, puis une de silence bruité.
+        let voix = |amplitude: f32, bruit: f32| -> Vec<f32> {
+            (0..3 * SAMPLE_RATE as usize)
+                .map(|i| {
+                    let t = i as f32 / SAMPLE_RATE as f32;
+                    if i < 2 * SAMPLE_RATE as usize {
+                        amplitude * (2.0 * std::f32::consts::PI * 200.0 * t).sin()
+                    } else {
+                        bruit * if i % 2 == 0 { 1.0 } else { -1.0 }
+                    }
+                })
+                .collect()
+        };
+        let efficace = |x: &[f32]| {
+            let voix = &x[..2 * SAMPLE_RATE as usize];
+            (voix.iter().map(|s| s * s).sum::<f32>() / voix.len() as f32).sqrt()
+        };
+        // Le brut quatre fois plus bas, et plus bruité entre les mots : il
+        // revient au niveau de la voix envoyée, sans se caler sur le bruit.
+        let envoyee = voix(0.4, 0.0);
+        let brute = voix(0.1, 0.02);
+        let rendu = au_meme_volume(&brute, &envoyee);
+        let ecart_db = 20.0 * (efficace(&rendu) / efficace(&envoyee)).log10();
+        assert!(ecart_db.abs() < 0.5, "écart {ecart_db:.2} dB");
+        // Un micro muet ne se gonfle pas à l'infini.
+        let muet = vec![0f32; envoyee.len()];
+        assert!(au_meme_volume(&muet, &envoyee).iter().all(|s| *s == 0.0));
+        // Et rien ne dépasse la pleine échelle.
+        let fort = au_meme_volume(&voix(0.03, 0.0), &voix(0.99, 0.0));
+        assert!(fort.iter().all(|s| s.abs() < 1.0));
     }
 
     #[test]

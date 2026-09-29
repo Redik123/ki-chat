@@ -545,14 +545,14 @@ impl KiApp {
                             "Ce que les autres entendent de toi, dans ki-chat comme dans les \
                              jeux. « Micro-casque » coupe sous la voix — le grondement, l'effet \
                              de proximité — sans toucher à son corps : la « cave » sans le « nez \
-                             bouché ». Écoute-toi avec « M'écouter » (onglet Audio)."
+                             bouché ». Enregistre-toi juste en dessous pour l'entendre."
                         } else if self.egaliseur_vue == VUE_TA_VOIX {
                             "Ce que les autres entendent de toi, dans ki-chat comme dans les \
                              jeux. Derrière la courbe, ta voix en direct : parle, et regarde où \
                              elle gonfle. « Micro-casque » coupe sous la voix — le grondement, \
                              l'effet de proximité — sans toucher à son corps : la « cave » sans \
-                             le « nez bouché ». Écoute-toi avec « M'écouter » (onglet Audio), et \
-                             « Comparer » pour entendre la différence."
+                             le « nez bouché ». Enregistre-toi juste en dessous — avec « Comparer \
+                             » allumé puis éteint pour entendre la différence."
                         } else {
                             "Les voix que tu entends dans ki-chat — ni les jeux, ni tes \
                              notifications. Derrière la courbe, les voix reçues en direct."
@@ -560,6 +560,9 @@ impl KiApp {
                     );
                 });
                 let ta_voix = self.egaliseur_vue == VUE_TA_VOIX;
+                if ta_voix {
+                    ui::ligne(ui, "T'écouter", |ui| self.essai_voix_ui(ui, voice.engine_up));
+                }
                 let (bandes, prereglages): (&mut Vec<Bande>, &[Prereglage]) = if ta_voix {
                     (&mut self.egaliseur_micro, &PREREGLAGES_VOIX)
                 } else {
