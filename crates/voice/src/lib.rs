@@ -2868,6 +2868,11 @@ impl Monitor {
             opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)
                 .expect("encodeur moniteur");
         let _ = encoder.set_bitrate(opus::Bitrate::Bits(bitrate));
+        // Réglé comme l'émetteur (`Sender::new`) : la FEC intra-bande pousse
+        // Opus vers SILK et l'hybride, là où il aurait pris CELT — sans elle,
+        // on s'entendait avec un autre rendu que celui qui part.
+        let _ = encoder.set_inband_fec(true);
+        let _ = encoder.set_packet_loss_perc(10);
         let decoder =
             opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono).expect("décodeur moniteur");
         Self { encoder, decoder, bitrate, buf: [0; VOICE_MAX_PACKET] }
