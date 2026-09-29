@@ -291,7 +291,7 @@ impl KiApp {
                     ui.add_space(8.0);
                 }
                 ui::ligne(ui, "Calibrer", |ui| {
-                    self.calibrage_ui(ui, voice, total);
+                    self.calibrage_ui(ui, voice, total, etat.topologie_lue);
                 });
                 // Le vrai bouton du volume chez les autres.
                 ui::ligne(ui, "Ton volume", |ui| {
@@ -679,10 +679,13 @@ impl KiApp {
     }
 
     /// Le calibrage des gains : le bouton, sa progression, son verdict.
-    fn calibrage_ui(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot, total_db: f32) {
+    fn calibrage_ui(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot, total_db: f32, topologie_lue: bool) {
         match &self.calibrage_micro {
             None => {
-                let pret = voice.engine_up;
+                // Sans les amplifications de la carte (lues quelques secondes
+                // après les volumes sur certaines cartes USB), le calibrage
+                // ne réglerait que la moitié du chemin.
+                let pret = voice.engine_up && topologie_lue;
                 ui.add_enabled_ui(pret, |ui| {
                     if ui::button(ui, Icon::Target, "Régler mon micro (5 s)")
                         .on_hover_text("parle aussi fort qu'en jeu — crie un bon coup")
@@ -709,6 +712,8 @@ impl KiApp {
                              saturation ; le gain automatique remonte ta voix normale. Gain \
                              actuel : {total_db:+.0} dB."
                         )
+                    } else if voice.engine_up {
+                        "Lecture des gains de ta carte son…".to_string()
                     } else {
                         "Connecte-toi à un serveur : c'est là que ton micro s'ouvre.".to_string()
                     },

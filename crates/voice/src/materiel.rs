@@ -59,6 +59,9 @@ pub struct EtatMateriel {
     pub entree: Option<Volume>,
     /// Les gains en plus du niveau, dans l'ordre du chemin.
     pub amplis: Vec<Gain>,
+    /// Les amplifications ont été cherchées : faux au tout premier relevé
+    /// d'une carte, publié avant (voir `lire`).
+    pub topologie_lue: bool,
 }
 
 /// Ce que l'interface demande au fil du matériel.
@@ -236,7 +239,7 @@ pub fn scinder_nom(nom: &str) -> (&str, Option<&str>) {
 mod windows_impl {
     use super::*;
     use crate::wasapi;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use windows::core::{Interface, GUID, PWSTR};
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
@@ -258,6 +261,7 @@ mod windows_impl {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
         let mut suivis: (Option<String>, Option<String>) = (None, None);
+        let mut prises = Prises::new();
         loop {
             let depuis = (depart.elapsed().as_millis() as u64).saturating_sub(eveil.load(Ordering::Relaxed));
             let eveille = depuis < SOMMEIL.as_millis() as u64;
@@ -281,11 +285,11 @@ mod windows_impl {
                     suivis = (entree.clone(), sortie.clone());
                     continue;
                 }
-                if let Err(e) = appliquer(&ordre, &suivis) {
+                if let Err(e) = appliquer(&ordre, &suivis, &mut prises) {
                     tracing::warn!("réglage matériel refusé ({ordre:?}) : {e:#}");
                 }
             }
-            let releve = lire(&suivis);
+            let releve = lire(&suivis, &mut prises, &etat);
             *etat.lock().unwrap() = releve;
         }
     }
@@ -341,6 +345,29 @@ mod windows_impl {
             CoTaskMemFree(Some(p.as_ptr() as *const _));
             s
         }
+    }
+
+    /// Les prises micro déjà trouvées, par point de terminaison (`None` : sa
+    /// carte n'en montre pas). Les chercher traverse vers la topologie de la
+    /// carte (`GetConnectedTo`), ce qui prend huit secondes la première fois
+    /// sur certaines cartes USB (NICEHCK NK1 MAX) : une fois par carte.
+    type Prises = HashMap<String, Option<IPart>>;
+
+    fn identifiant(device: &IMMDevice) -> String {
+        unsafe { device.GetId().map(texte).unwrap_or_default() }
+    }
+
+    /// La prise micro de ce périphérique, cherchée une seule fois.
+    fn prise_connue(device: &IMMDevice, prises: &mut Prises) -> Option<IPart> {
+        let id = identifiant(device);
+        // Une carte débranchée puis rebranchée garde son identifiant, mais
+        // l'ancienne topologie ne répond plus : on la cherche de nouveau.
+        if let Some(Some(p)) = prises.get(&id) {
+            if unsafe { p.GetGlobalId() }.map(texte).is_err() {
+                prises.remove(&id);
+            }
+        }
+        prises.entry(id).or_insert_with(|| prise_micro(device).ok()).clone()
     }
 
     /// Le premier élément du chemin du micro dans la topologie de la carte :
@@ -404,9 +431,8 @@ mod windows_impl {
     /// Les amplifications : les volumes du chemin, sauf celui que Windows
     /// présente comme niveau du micro — même plage que le volume du point de
     /// terminaison.
-    fn amplis(device: &IMMDevice, niveau: &Volume) -> Vec<(IPart, Gain)> {
-        let Ok(prise) = prise_micro(device) else { return Vec::new() };
-        let mut volumes = volumes_du_chemin(&prise);
+    fn amplis(prise: &IPart, niveau: &Volume) -> Vec<(IPart, Gain)> {
+        let mut volumes = volumes_du_chemin(prise);
         let meme_plage =
             |g: &Gain| (g.min_db - niveau.min_db).abs() < 0.1 && (g.max_db - niveau.max_db).abs() < 0.1;
         if let Some(i) = volumes.iter().position(|(_, g)| meme_plage(g)) {
@@ -415,7 +441,14 @@ mod windows_impl {
         volumes
     }
 
-    fn lire(suivis: &(Option<String>, Option<String>)) -> EtatMateriel {
+    /// Relève l'état. Quand la prise du micro reste à chercher (lent sur
+    /// certaines cartes), les volumes sont publiés d'abord : la page ne reste
+    /// pas vide le temps que les amplifications arrivent.
+    fn lire(
+        suivis: &(Option<String>, Option<String>),
+        prises: &mut Prises,
+        publier: &Mutex<EtatMateriel>,
+    ) -> EtatMateriel {
         let mut e = EtatMateriel { disponible: true, ..Default::default() };
         if let Ok(d) = peripherique(suivis.1.as_deref(), false) {
             e.sortie_nom = wasapi::friendly_name(&d).ok();
@@ -425,13 +458,19 @@ mod windows_impl {
             e.entree_nom = wasapi::friendly_name(&d).ok();
             e.entree = volume_de(&d).and_then(|v| lire_volume(&v)).ok();
             if let Some(niveau) = &e.entree {
-                e.amplis = amplis(&d, niveau).into_iter().map(|(_, g)| g).collect();
+                if !prises.contains_key(&identifiant(&d)) {
+                    *publier.lock().unwrap() = e.clone();
+                }
+                if let Some(prise) = prise_connue(&d, prises) {
+                    e.amplis = amplis(&prise, niveau).into_iter().map(|(_, g)| g).collect();
+                }
             }
         }
+        e.topologie_lue = true;
         e
     }
 
-    fn appliquer(ordre: &Ordre, suivis: &(Option<String>, Option<String>)) -> anyhow::Result<()> {
+    fn appliquer(ordre: &Ordre, suivis: &(Option<String>, Option<String>), prises: &mut Prises) -> anyhow::Result<()> {
         let aucun = std::ptr::null::<GUID>();
         unsafe {
             match ordre {
@@ -459,7 +498,9 @@ mod windows_impl {
                 }
                 Ordre::Ampli { id, db } => {
                     let d = peripherique(suivis.0.as_deref(), true)?;
-                    let prise = prise_micro(&d)?;
+                    let Some(prise) = prise_connue(&d, prises) else {
+                        anyhow::bail!("pas de prise micro dans la topologie de la carte");
+                    };
                     let Some((part, g)) = volumes_du_chemin(&prise).into_iter().find(|(_, g)| &g.id == id) else {
                         anyhow::bail!("gain introuvable sur le chemin du micro");
                     };

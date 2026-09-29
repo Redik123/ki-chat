@@ -11,8 +11,16 @@ fn main() {
     let m = Materiel::global();
     m.ordonner(Ordre::Suivre { entree: None, sortie: None });
     m.tenir_eveille();
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let e = m.etat();
+    // Les amplifications arrivent après les volumes : huit secondes plus
+    // tard sur certaines cartes USB (NICEHCK NK1 MAX).
+    let mut e = m.etat();
+    for _ in 0..300 {
+        if e.disponible && e.topologie_lue {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        e = m.etat();
+    }
     if !e.disponible {
         println!("réglages matériels indisponibles (Windows seulement)");
         return;
