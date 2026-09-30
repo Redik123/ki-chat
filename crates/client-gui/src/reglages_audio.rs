@@ -21,6 +21,15 @@ use ki_voice::egaliseur;
 use ki_voice::spectre::{self, NB_TIERS, TIERS};
 use ki_voice::{EtatEssai, VersionEssai, ESSAI_SECONDES};
 
+/// La présence (écart moyen à une voix moyenne sur 1,25 à 6,3 kHz) en
+/// dessous de laquelle la voix n'est plus « claire », puis plus seulement
+/// « un peu sourde ». Et le grondement (100 à 160 Hz) qui fait
+/// « caverneux ». La correction ne se propose qu'au-delà : en deçà, elle ne
+/// ferait que courir après la position du micro d'un essai à l'autre.
+const CLAIRE_DB: f32 = -5.0;
+const SOURDE_DB: f32 = -10.0;
+const GRONDEMENT_DB: f32 = 6.0;
+
 /// Combien de temps l'alerte de saturation reste affichée après la dernière
 /// trame saturée : assez pour la lire, et qu'elle ne clignote pas entre deux
 /// phrases.
@@ -679,9 +688,9 @@ impl KiApp {
         ui.add_space(6.0);
         courbe_de_voix(ui, &brute.ecarts_db(), &envoyee.ecarts_db());
         let (presence, graves) = (envoyee.presence_db(), envoyee.graves_db());
-        let (mot, couleur) = if presence >= -5.0 {
+        let (mot, couleur) = if presence >= CLAIRE_DB {
             ("claire", SPEAK)
-        } else if presence >= -10.0 {
+        } else if presence >= SOURDE_DB {
             ("un peu sourde", WARN)
         } else {
             ("étouffée", DANGER)
@@ -701,8 +710,8 @@ impl KiApp {
         let avant_eq = brute.presence_db();
         let apres_eq = brute.filtre(|f| egaliseur::reponse_db(&analyse.egaliseur, f)).presence_db();
         let (par_eq, par_chaine) = (apres_eq - avant_eq, presence - apres_eq);
-        if presence < -5.0 {
-            if avant_eq < -5.0 {
+        if presence < CLAIRE_DB {
+            if avant_eq < CLAIRE_DB {
                 ui::precision(
                     ui,
                     &format!(
@@ -729,7 +738,7 @@ impl KiApp {
         // Le grondement, de 100 à 160 Hz : l'effet de proximité d'un micro
         // tout près de la bouche.
         let grondement = envoyee.ecarts_db()[..3].iter().fold(f32::MIN, |m, e| m.max(*e));
-        if grondement > 6.0 {
+        if grondement > GRONDEMENT_DB {
             ui::precision(
                 ui,
                 &format!("Du grondement ({grondement:+.0} dB vers 100 Hz) : c'est ce qui fait « caverneux »."),
@@ -740,7 +749,7 @@ impl KiApp {
         let sans_eq = envoyee.filtre(|f| -egaliseur::reponse_db(&analyse.egaliseur, f));
         let correctif = spectre::egaliseur_correctif(&sans_eq);
         let a_corriger = correctif.iter().any(|b| b.forme != egaliseur::Forme::PasseHaut)
-            && (presence < spectre::PRESENCE_VISEE_DB - 2.0 || grondement > spectre::GRAVES_VISES_DB + 4.0);
+            && (presence < CLAIRE_DB || grondement > GRONDEMENT_DB);
         if self.egaliseur_micro == correctif {
             ui::precision(
                 ui,
