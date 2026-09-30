@@ -619,7 +619,7 @@ impl KiApp {
                         geste = Some(Geste::Enregistrer);
                     }
                 });
-                volume_de_l_essai(ui, ecart_db);
+                self.volume_de_l_essai(ui, ecart_db);
                 self.clarte_de_l_essai(ui, numero);
             }
         }
@@ -739,7 +739,8 @@ impl KiApp {
         // elle compense aussi ce que le débruitage et le codec retirent.
         let sans_eq = envoyee.filtre(|f| -egaliseur::reponse_db(&analyse.egaliseur, f));
         let correctif = spectre::egaliseur_correctif(&sans_eq);
-        let a_corriger = correctif.iter().any(|b| b.forme != egaliseur::Forme::PasseHaut);
+        let a_corriger = correctif.iter().any(|b| b.forme != egaliseur::Forme::PasseHaut)
+            && (presence < spectre::PRESENCE_VISEE_DB - 2.0 || grondement > spectre::GRAVES_VISES_DB + 4.0);
         if self.egaliseur_micro == correctif {
             ui::precision(
                 ui,
@@ -890,9 +891,60 @@ fn decrire(bandes: &[egaliseur::Bande]) -> String {
         .join(", ")
 }
 
-/// Le volume de sa voix dans l'essai, comparé à une voix réglée par défaut
-/// — ce que les autres entendent de lui à côté des autres —, et quoi faire.
-fn volume_de_l_essai(ui: &mut egui::Ui, ecart_db: f32) {
+impl KiApp {
+    /// Le volume de sa voix dans l'essai, comparé à une voix réglée par
+    /// défaut — ce que les autres entendent de lui à côté des autres —, et
+    /// de quoi le régler en un clic : le gain automatique, au niveau des
+    /// voix réglées par défaut.
+    fn volume_de_l_essai(&mut self, ui: &mut egui::Ui, ecart_db: f32) {
+        volume_en_mots(ui, ecart_db);
+        if !(-30.0..-5.0).contains(&ecart_db) {
+            return;
+        }
+        let defaut = ki_voice::NIVEAU_VOIX_DEFAUT;
+        let pendant = self
+            .link
+            .engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|e| e.essai_analyse())
+            .map(|a| a.gain_auto);
+        let regle = self.agc && self.agc_target >= defaut - 0.005;
+        match pendant {
+            // Enregistré gain automatique réglé au niveau des autres, et
+            // pourtant bas : il plafonne, le micro livre trop peu.
+            Some(Some(cible)) if cible >= defaut - 0.005 => ui::precision(
+                ui,
+                "Même le gain automatique ne te remonte pas assez : ton micro livre trop \
+                 peu. Monte son niveau dans la page Casque (« Régler mon micro »).",
+            ),
+            _ if regle => ui::precision(
+                ui,
+                "Le gain automatique est réglé au niveau des autres : refais un essai pour \
+                 l'entendre.",
+            ),
+            _ => {
+                ui.add_space(4.0);
+                let libelle = if self.agc { "Mettre ma voix au niveau des autres" } else { "Rallumer le gain automatique" };
+                if ui::button(ui, Icon::Volume, libelle)
+                    .on_hover_text(
+                        "il règle ta voix sur le niveau des voix réglées par défaut, quelle que \
+                         soit ta carte son",
+                    )
+                    .clicked()
+                {
+                    self.agc = true;
+                    self.agc_target = defaut;
+                    self.apply_audio_settings();
+                }
+            }
+        }
+    }
+}
+
+/// Le volume de sa voix dans l'essai, en mots, et ce qu'il y a à savoir.
+fn volume_en_mots(ui: &mut egui::Ui, ecart_db: f32) {
     let (mot, couleur) = if ecart_db < -30.0 {
         ("presque rien", DANGER)
     } else if ecart_db < -12.0 {
@@ -920,12 +972,6 @@ fn volume_de_l_essai(ui: &mut egui::Ui, ecart_db: f32) {
             ui,
             "Ton micro n'a presque rien capté : vérifie qu'il est branché, et choisi dans \
              « Périphérique » juste au-dessus.",
-        );
-    } else if ecart_db < -5.0 {
-        ui::precision(
-            ui,
-            "Monte « Ton volume » (page Casque, section Micro) — ou rallume le gain \
-             automatique : il te met au niveau des autres, quelle que soit ta carte son.",
         );
     } else if ecart_db > 4.0 {
         ui::precision(ui, "Baisse « Ton volume » (page Casque, section Micro).");

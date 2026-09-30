@@ -95,10 +95,12 @@ impl SpectreVoix {
 pub const PRESENCE_VISEE_DB: f32 = -1.0;
 /// Les graves visés : un peu de chaleur au-dessus de la parole moyenne.
 pub const GRAVES_VISES_DB: f32 = 2.0;
-/// Au-delà, c'est le micro qu'il faut changer, pas l'égaliseur. Les
-/// cloches de présence vont plus haut, sauf au-dessus de 4 kHz, où elles
-/// monteraient le souffle et les sifflantes.
-const GRAVES_MAX_DB: f32 = 9.0;
+/// Au-delà, c'est le micro qu'il faut changer, pas l'égaliseur. Le creux du
+/// grondement va jusqu'à -12 dB : un micro collé à la bouche en gonfle
+/// autant (+15 dB chez drion, le 30/09). Les cloches de présence aussi,
+/// sauf au-dessus de 4 kHz, où elles monteraient le souffle et les
+/// sifflantes.
+const GRAVES_MAX_DB: f32 = 12.0;
 const PRESENCE_MAX_DB: f32 = 12.0;
 const AIGUS_MAX_DB: f32 = 8.0;
 /// Les cloches de présence, à deux tiers d'octave l'une de l'autre et d'une
@@ -106,10 +108,11 @@ const AIGUS_MAX_DB: f32 = 8.0;
 /// chacune se règle à part — de quoi suivre n'importe quel creux.
 const CLOCHES: [f32; 4] = [1_250.0, 2_000.0, 3_150.0, 5_000.0];
 const Q_CLOCHE: f32 = 1.4;
-/// Le grondement : une cloche en creux sur 125 Hz, qui prend l'effet de
-/// proximité (100 à 160 Hz) sans toucher au corps de la voix (200 à
-/// 315 Hz) — c'est le corps qu'on coupe quand le nez se bouche.
-const GRONDEMENT_HZ: f32 = 125.0;
+/// Le grondement : une cloche en creux sur 110 Hz, la fondamentale d'une
+/// voix d'homme que l'effet de proximité gonfle, sans toucher au corps de
+/// la voix (200 à 315 Hz) — c'est le corps qu'on coupe quand le nez se
+/// bouche.
+const GRONDEMENT_HZ: f32 = 110.0;
 const Q_GRONDEMENT: f32 = 1.4;
 const GRONDEMENT: std::ops::RangeInclusive<usize> = 0..=2;
 /// Là où l'on juge la voix corrigée : 1 à 6,3 kHz. 1 kHz en fait partie
@@ -157,8 +160,21 @@ pub fn egaliseur_correctif(voix: &SpectreVoix) -> Vec<Bande> {
         } else {
             0.0
         };
+        // Un tiers d'octave déjà creux compte quatre fois moins qu'un qui
+        // gronde : une voix d'homme vers 120 Hz n'a pas d'harmonique entre
+        // 141 et 178 Hz, et ce creux naturel retenait la coupe.
         let grondement: f32 = if corriger_graves {
-            e[GRONDEMENT].iter().map(|x| (x - GRAVES_VISES_DB) * (x - GRAVES_VISES_DB)).sum()
+            e[GRONDEMENT]
+                .iter()
+                .map(|x| {
+                    let d = x - GRAVES_VISES_DB;
+                    if d < 0.0 {
+                        0.25 * d * d
+                    } else {
+                        d * d
+                    }
+                })
+                .sum()
         } else {
             0.0
         };
@@ -354,9 +370,10 @@ mod tests {
         let corrigee = s.filtre(|f| reponse_db(&eq, f));
         assert!((corrigee.presence_db() - PRESENCE_VISEE_DB).abs() < 0.6, "présence {:.2}", corrigee.presence_db());
         let (avant, apres) = (s.ecarts_db(), corrigee.ecarts_db());
-        // Le grondement redescend près des graves visés…
-        for k in 1..=2 {
-            assert!((apres[k] - GRAVES_VISES_DB).abs() < 2.0, "{} Hz : {:.1} dB", TIERS[k], apres[k]);
+        // Le grondement redescend près des graves visés — à 3 dB : une
+        // cloche ne rend pas plat un plateau de trois tiers d'octave…
+        for k in 0..=2 {
+            assert!((apres[k] - GRAVES_VISES_DB).abs() < 3.0, "{} Hz : {:.1} dB", TIERS[k], apres[k]);
         }
         // … sans toucher au corps de la voix.
         for k in 4..=6 {

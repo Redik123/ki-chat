@@ -1203,7 +1203,12 @@ impl VoiceEngine {
         static NUMEROS: AtomicU64 = AtomicU64::new(0);
         let numero = NUMEROS.fetch_add(1, Ordering::Relaxed) + 1;
         let egaliseur = self.shared.egaliseur_micro.lock().unwrap().clone();
-        self.shared.essai.lock().unwrap().commencer(numero, egaliseur);
+        let gain_auto = self
+            .shared
+            .agc
+            .load(Ordering::Relaxed)
+            .then(|| load_f32(&self.shared.agc_target));
+        self.shared.essai.lock().unwrap().commencer(numero, egaliseur, gain_auto);
         self.shared.loopback_buf.lock().unwrap().clear();
         self.shared.essai_actif.store(true, Ordering::Relaxed);
     }
@@ -1221,6 +1226,7 @@ impl VoiceEngine {
                 brute: spectre::analyser(&e.brute),
                 envoyee: spectre::analyser(&e.envoyee),
                 egaliseur: e.egaliseur.clone(),
+                gain_auto: e.gain_auto,
             });
         }
         e.analyse.clone()
@@ -2808,6 +2814,9 @@ pub struct AnalyseEssai {
     pub envoyee: Option<spectre::SpectreVoix>,
     /// L'égaliseur de sa voix pendant l'enregistrement.
     pub egaliseur: Vec<egaliseur::Bande>,
+    /// Le niveau que visait le gain automatique pendant l'enregistrement ;
+    /// `None` : il était coupé.
+    pub gain_auto: Option<f32>,
 }
 
 /// La crête de voix que vise le gain automatique réglé par défaut : le
@@ -2826,6 +2835,8 @@ struct Essai {
     ecart_db: Option<f32>,
     /// L'égaliseur de sa voix au départ de l'enregistrement.
     egaliseur: Vec<egaliseur::Bande>,
+    /// Le gain automatique au départ de l'enregistrement (son niveau visé).
+    gain_auto: Option<f32>,
     /// Le spectre des deux versions, une fois demandé.
     analyse: Option<AnalyseEssai>,
 }
@@ -2833,12 +2844,13 @@ struct Essai {
 impl Essai {
     /// Repart à vide, la place réservée d'avance : le fil de capture
     /// n'alloue rien en enregistrant.
-    fn commencer(&mut self, numero: u64, egaliseur: Vec<egaliseur::Bande>) {
+    fn commencer(&mut self, numero: u64, egaliseur: Vec<egaliseur::Bande>, gain_auto: Option<f32>) {
         *self = Essai {
             numero,
             brute: Vec::with_capacity(ESSAI_ECHANTILLONS),
             envoyee: Vec::with_capacity(ESSAI_ECHANTILLONS),
             egaliseur,
+            gain_auto,
             ..Essai::default()
         };
     }
@@ -4497,7 +4509,7 @@ mod tests {
     #[test]
     fn l_essai_s_arrete_a_cinq_secondes() {
         let mut e = Essai::default();
-        e.commencer(1, Vec::new());
+        e.commencer(1, Vec::new(), None);
         let (brute, envoyee) = ([0.1f32; FRAME_SAMPLES], [0.2f32; FRAME_SAMPLES]);
         let trames = ESSAI_ECHANTILLONS / FRAME_SAMPLES;
         for n in 1..trames {
