@@ -25,6 +25,9 @@ dasp_sample = "0.11"
 nnnoiseless = { version = "0.5", default-features = false }
 # Décodage WAV des effets sonores : pur Rust.
 hound = "3.5"
+# Spectre moyen de sa voix (essai « enregistrer et réécouter ») : déjà tiré
+# par DeepFilterNet, même version.
+realfft = "3.5"
 # Suppression de bruit DeepFilterNet3 (mode studio) : réseau de neurones,
 # inférence tract 100 % Rust, modèle embarqué dans le binaire (~2 Mo).
 # La version crates.io est obsolète : dépendance git épinglée sur le tag.

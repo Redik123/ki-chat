@@ -45,6 +45,23 @@ pub fn load_wav(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
     decode(reader)
 }
 
+/// Écrit un son mono 48 kHz en WAV flottant 32 bits : lisible partout, et
+/// sans rien arrondir de ce qu'on voudra analyser.
+pub fn ecrire_wav(path: impl AsRef<Path>, pcm: &[f32]) -> anyhow::Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: crate::SAMPLE_RATE,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut w = hound::WavWriter::create(path, spec)?;
+    for &s in pcm {
+        w.write_sample(s)?;
+    }
+    w.finalize()?;
+    Ok(())
+}
+
 /// Idem depuis un fichier.
 pub fn load_wav_file(path: impl AsRef<Path>) -> anyhow::Result<Vec<f32>> {
     let path = path.as_ref();

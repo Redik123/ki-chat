@@ -9,14 +9,16 @@
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, RichText, Vec2};
+use eframe::egui::{self, Color32, Pos2, RichText, Stroke, Vec2};
 
 use crate::icons::Icon;
 use crate::ptt::PttKey;
-use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, WARN};
+use crate::theme::{self, ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
 use crate::ui::{self, Tone};
 use crate::{KiApp, MicMode, VoiceSnapshot};
 use ki_voice::dynamique::{COMPRESSION_AUCUNE, COMPRESSION_DOUCE, COMPRESSION_FORTE, COMPRESSION_PERSO};
+use ki_voice::egaliseur;
+use ki_voice::spectre::{self, NB_TIERS, TIERS};
 use ki_voice::{EtatEssai, VersionEssai, ESSAI_SECONDES};
 
 /// Combien de temps l'alerte de saturation reste affichée après la dernière
@@ -590,7 +592,7 @@ impl KiApp {
                     }
                 });
             }
-            EtatEssai::Pret { lecture, ecart_db } => {
+            EtatEssai::Pret { lecture, ecart_db, numero } => {
                 if lecture.is_some() {
                     ui.ctx().request_repaint_after(Duration::from_millis(50));
                 }
@@ -618,6 +620,7 @@ impl KiApp {
                     }
                 });
                 volume_de_l_essai(ui, ecart_db);
+                self.clarte_de_l_essai(ui, numero);
             }
         }
         ui::precision(
@@ -653,6 +656,135 @@ impl KiApp {
         }
     }
 
+    /// La clarté de sa voix d'après l'essai : ses aigus et ses graves face à
+    /// une voix moyenne, bruts et envoyés, ce qui retire les aigus — le
+    /// micro, l'égaliseur, ou le reste de la chaîne —, et de quoi corriger.
+    /// L'essai est gardé en WAV au passage.
+    fn clarte_de_l_essai(&mut self, ui: &mut egui::Ui, numero: u64) {
+        let (analyse, pcm) = {
+            let moteur = self.link.engine.lock().unwrap();
+            let Some(e) = moteur.as_ref() else { return };
+            let pcm = if numero != self.essai_garde { e.essai_pcm() } else { None };
+            (e.essai_analyse(), pcm)
+        };
+        if let Some((brute, envoyee)) = pcm {
+            self.essai_garde = numero;
+            self.garder_essai(brute, envoyee);
+        }
+        let Some(analyse) = analyse else { return };
+        let (Some(brute), Some(envoyee)) = (&analyse.brute, &analyse.envoyee) else {
+            ui::precision(ui, "Pas assez de voix pour juger de ta clarté : parle pendant les 5 secondes.");
+            return;
+        };
+        ui.add_space(6.0);
+        courbe_de_voix(ui, &brute.ecarts_db(), &envoyee.ecarts_db());
+        let (presence, graves) = (envoyee.presence_db(), envoyee.graves_db());
+        let (mot, couleur) = if presence >= -6.0 {
+            ("claire", SPEAK)
+        } else if presence >= -12.0 {
+            ("un peu sourde", WARN)
+        } else {
+            ("étouffée", DANGER)
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Ta voix chez les autres :").color(TEXT_DIM).size(12.0));
+            ui.label(RichText::new(mot).color(couleur).size(12.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "aigus {presence:+.0} dB, graves {graves:+.0} dB par rapport à une voix moyenne"
+                ))
+                .color(TEXT_DIM)
+                .size(12.0),
+            );
+        });
+        // Qui retire les aigus : le micro, l'égaliseur, ou le reste.
+        let avant_eq = brute.presence_db();
+        let apres_eq = brute.filtre(|f| egaliseur::reponse_db(&analyse.egaliseur, f)).presence_db();
+        let (par_eq, par_chaine) = (apres_eq - avant_eq, presence - apres_eq);
+        if presence < -6.0 {
+            if avant_eq < -6.0 {
+                ui::precision(
+                    ui,
+                    &format!(
+                        "Ton micro capte déjà peu d'aigus ({avant_eq:+.0} dB) : ça se joue avant \
+                         ki-chat — sa position (la capsule au coin de la bouche, pas sous le \
+                         menton), sa mousse, ou l'entrée micro de ta carte son."
+                    ),
+                );
+            }
+            if par_eq < -1.5 {
+                ui::precision(ui, &format!("Ton égaliseur en retire {:.0} dB.", -par_eq));
+            }
+            if par_chaine < -3.0 {
+                ui::precision(
+                    ui,
+                    &format!(
+                        "Le débruitage ou le codec en retirent {:.0} dB de plus : essaie un autre \
+                         débruitage, section Traitement.",
+                        -par_chaine
+                    ),
+                );
+            }
+        }
+        if graves > 6.0 {
+            ui::precision(ui, "Beaucoup de graves : c'est ce qui fait « caverneux ».");
+        }
+        // La correction : réglée sur ce qui part, l'égaliseur actuel ôté —
+        // elle compense aussi ce que le débruitage et le codec retirent.
+        let sans_eq = envoyee.filtre(|f| -egaliseur::reponse_db(&analyse.egaliseur, f));
+        let correctif = spectre::egaliseur_correctif(&sans_eq);
+        let a_corriger = presence < spectre::PRESENCE_VISEE_DB - 2.0 || graves > spectre::GRAVES_VISES_DB + 2.0;
+        if self.egaliseur_micro == correctif {
+            ui::precision(
+                ui,
+                "L'égaliseur de ta voix est réglé sur cette mesure : refais un essai pour \
+                 l'entendre.",
+            );
+        } else if a_corriger {
+            ui.add_space(4.0);
+            if ui::button(ui, Icon::Sliders, "Corriger ma voix")
+                .on_hover_text(
+                    "règle l'égaliseur de ta voix sur cette mesure, à la place du réglage actuel",
+                )
+                .clicked()
+            {
+                self.egaliseur_micro = correctif.clone();
+                self.apply_audio_settings();
+            }
+            ui::precision(ui, &format!("L'égaliseur de ta voix deviendra : {}.", decrire(&correctif)));
+        }
+        if let Some(dossier) = self.essai_dossier.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("Les deux versions sont gardées en WAV, remplacées au prochain essai.")
+                        .color(TEXT_FAINT)
+                        .size(11.5),
+                );
+                if ui::icon_button(ui, Icon::Download, "Ouvrir le dossier").clicked() {
+                    crate::soundboard::ouvrir_dossier(&dossier);
+                }
+            });
+        }
+    }
+
+    /// Garde les deux versions de l'essai en WAV dans le dossier de ki-chat,
+    /// sur un fil : quelques mégaoctets à écrire, rien pour l'interface.
+    fn garder_essai(&mut self, brute: Vec<f32>, envoyee: Vec<f32>) {
+        let Some(dossier) = eframe::storage_dir("ki-chat").map(|d| d.join("essais")) else { return };
+        self.essai_dossier = Some(dossier.clone());
+        std::thread::spawn(move || {
+            let ecrire = || -> anyhow::Result<()> {
+                std::fs::create_dir_all(&dossier)?;
+                ki_voice::effects::ecrire_wav(dossier.join("essai-brut.wav"), &brute)?;
+                ki_voice::effects::ecrire_wav(dossier.join("essai-envoye.wav"), &envoyee)?;
+                Ok(())
+            };
+            if let Err(e) = ecrire() {
+                tracing::warn!("essai non gardé en WAV : {e:#}");
+            }
+        });
+    }
+
     /// La calibration de la porte (et du seuil d'activation) sur le bruit de
     /// la pièce : le bouton, ou sa progression.
     fn calibration_ui(&mut self, ui: &mut egui::Ui, engine_up: bool) {
@@ -686,6 +818,71 @@ impl KiApp {
             }
         }
     }
+}
+
+/// Le timbre de sa voix face à une voix moyenne (la ligne du milieu) : le
+/// micro brut en bleu, ce qui part en vert. Les aigus — la zone qui dit si
+/// la voix est claire ou étouffée — en fond.
+fn courbe_de_voix(ui: &mut egui::Ui, brute: &[f32; NB_TIERS], envoyee: &[f32; NB_TIERS]) {
+    let largeur = ui.available_width().min(420.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(largeur, 110.0), egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    let (fmin, fmax) = (80f32.log10(), 16_000f32.log10());
+    let (dmin, dmax) = (-24.0f32, 12.0f32);
+    let x = |f: f32| rect.left() + (f.log10() - fmin) / (fmax - fmin) * rect.width();
+    let y = |db: f32| rect.bottom() - (db.clamp(dmin, dmax) - dmin) / (dmax - dmin) * rect.height();
+    p.rect_filled(rect, 8.0, theme::BG_DEEP);
+    let police = egui::FontId::proportional(10.0);
+    p.rect_filled(
+        egui::Rect::from_x_y_ranges(x(2_000.0)..=x(6_300.0), rect.y_range()),
+        0.0,
+        theme::alpha(ACCENT, 12),
+    );
+    p.text(
+        Pos2::new((x(2_000.0) + x(6_300.0)) / 2.0, rect.top() + 3.0),
+        egui::Align2::CENTER_TOP,
+        "aigus",
+        police.clone(),
+        TEXT_FAINT,
+    );
+    let grille = theme::alpha(Color32::WHITE, 14);
+    for (f, texte) in [(100.0, "100"), (1_000.0, "1k"), (10_000.0, "10k")] {
+        p.line_segment([Pos2::new(x(f), rect.top()), Pos2::new(x(f), rect.bottom())], Stroke::new(1.0_f32, grille));
+        p.text(Pos2::new(x(f) + 3.0, rect.bottom() - 3.0), egui::Align2::LEFT_BOTTOM, texte, police.clone(), TEXT_FAINT);
+    }
+    for db in [-12.0f32, 6.0] {
+        p.line_segment([Pos2::new(rect.left(), y(db)), Pos2::new(rect.right(), y(db))], Stroke::new(1.0_f32, grille));
+        p.text(Pos2::new(rect.left() + 4.0, y(db) - 1.0), egui::Align2::LEFT_BOTTOM, format!("{db:+.0}"), police.clone(), TEXT_FAINT);
+    }
+    p.line_segment(
+        [Pos2::new(rect.left(), y(0.0)), Pos2::new(rect.right(), y(0.0))],
+        Stroke::new(1.0_f32, theme::alpha(Color32::WHITE, 50)),
+    );
+    p.text(Pos2::new(rect.right() - 4.0, y(0.0) - 1.0), egui::Align2::RIGHT_BOTTOM, "voix moyenne", police, TEXT_FAINT);
+    let points = |ecarts: &[f32; NB_TIERS]| -> Vec<Pos2> {
+        TIERS.iter().zip(ecarts).map(|(&f, &db)| Pos2::new(x(f), y(db))).collect()
+    };
+    p.add(egui::Shape::line(points(brute), Stroke::new(1.5_f32, theme::alpha(INFO, 200))));
+    p.add(egui::Shape::line(points(envoyee), Stroke::new(2.0_f32, ACCENT)));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("— ton micro brut").color(INFO).size(11.5));
+        ui.label(RichText::new("— ce que les autres entendent").color(ACCENT).size(11.5));
+    });
+}
+
+/// Un égaliseur en quelques mots : « coupe sous 80 Hz, graves -4 dB,
+/// présence +6 dB ».
+fn decrire(bandes: &[egaliseur::Bande]) -> String {
+    bandes
+        .iter()
+        .map(|b| match b.forme {
+            egaliseur::Forme::PasseHaut => format!("coupe sous {:.0} Hz", b.frequence),
+            egaliseur::Forme::EtagereBasse => format!("graves {:+.1} dB", b.gain_db),
+            egaliseur::Forme::Cloche => format!("présence {:+.1} dB", b.gain_db),
+            _ => format!("{:.0} Hz {:+.1} dB", b.frequence, b.gain_db),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Le volume de sa voix dans l'essai, comparé à une voix réglée par défaut

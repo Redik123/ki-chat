@@ -333,7 +333,7 @@ fn decoder_media(chemin: &Path) -> anyhow::Result<Vec<f32>> {
     Ok(pcm)
 }
 
-fn ouvrir_dossier(dossier: &Path) {
+pub(crate) fn ouvrir_dossier(dossier: &Path) {
     #[cfg(windows)]
     {
         let _ = std::process::Command::new("explorer.exe").arg(dossier).spawn();

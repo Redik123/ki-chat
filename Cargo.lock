@@ -2967,6 +2967,7 @@ dependencies = [
  "nnnoiseless",
  "prost",
  "rand 0.9.5",
+ "realfft",
  "tracing",
  "tract-onnx",
  "windows 0.61.3",

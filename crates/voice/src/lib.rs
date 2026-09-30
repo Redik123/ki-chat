@@ -27,6 +27,7 @@ pub mod medias;
 pub mod resample;
 /// Détection de parole neuronale (Silero VAD, par tract).
 pub mod silero;
+pub mod spectre;
 #[cfg(windows)]
 mod wasapi;
 /// Le son du jeu dans le stream : capture en boucle (Windows) et lecteur
@@ -1199,9 +1200,40 @@ impl VoiceEngine {
     /// d'office la seconde. Privé comme « M'écouter » : rien ne part vers le
     /// salon pendant l'enregistrement.
     pub fn enregistrer_essai(&self) {
-        self.shared.essai.lock().unwrap().commencer();
+        static NUMEROS: AtomicU64 = AtomicU64::new(0);
+        let numero = NUMEROS.fetch_add(1, Ordering::Relaxed) + 1;
+        let egaliseur = self.shared.egaliseur_micro.lock().unwrap().clone();
+        self.shared.essai.lock().unwrap().commencer(numero, egaliseur);
         self.shared.loopback_buf.lock().unwrap().clear();
         self.shared.essai_actif.store(true, Ordering::Relaxed);
+    }
+
+    /// Le spectre des deux versions de l'essai, calculé une fois (quelques
+    /// millisecondes) à la première demande. `None` tant qu'il n'y a pas
+    /// d'essai complet.
+    pub fn essai_analyse(&self) -> Option<AnalyseEssai> {
+        let mut e = self.shared.essai.lock().unwrap();
+        if self.shared.essai_actif.load(Ordering::Relaxed) || e.envoyee.len() < ESSAI_ECHANTILLONS {
+            return None;
+        }
+        if e.analyse.is_none() {
+            e.analyse = Some(AnalyseEssai {
+                brute: spectre::analyser(&e.brute),
+                envoyee: spectre::analyser(&e.envoyee),
+                egaliseur: e.egaliseur.clone(),
+            });
+        }
+        e.analyse.clone()
+    }
+
+    /// Les deux versions de l'essai complet (micro brut, ce qui part), pour
+    /// les garder en fichiers.
+    pub fn essai_pcm(&self) -> Option<(Vec<f32>, Vec<f32>)> {
+        let e = self.shared.essai.lock().unwrap();
+        if self.shared.essai_actif.load(Ordering::Relaxed) || e.envoyee.len() < ESSAI_ECHANTILLONS {
+            return None;
+        }
+        Some((e.brute.clone(), e.envoyee.clone()))
     }
 
     /// Rejoue une version de l'essai enregistré, d'une traite : sans le
@@ -1249,7 +1281,7 @@ impl VoiceEngine {
             .lecture
             .filter(|_| reste > 0)
             .map(|v| (v, 1.0 - reste as f32 / e.envoyee.len().max(1) as f32));
-        EtatEssai::Pret { lecture, ecart_db }
+        EtatEssai::Pret { lecture, ecart_db, numero: e.numero }
     }
 
     /// Joue un effet sonore (PCM mono 48 kHz, cf. `effects::load_wav`).
@@ -2760,7 +2792,22 @@ pub enum EtatEssai {
         /// Le volume de sa voix chez les autres, en dB au-dessus de celui
         /// d'une voix réglée par défaut ([`NIVEAU_VOIX_DEFAUT`]).
         ecart_db: f32,
+        /// Le numéro de l'essai : un nouveau numéro, un nouvel essai.
+        numero: u64,
     },
+}
+
+/// Le spectre des deux versions d'un essai, et l'égaliseur qu'il avait :
+/// de quoi dire si la voix est étouffée, et qui en retire les aigus — le
+/// micro, l'égaliseur, ou le reste de la chaîne (débruitage, codec).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnalyseEssai {
+    /// Le micro brut. `None` : pas assez de voix pour conclure.
+    pub brute: Option<spectre::SpectreVoix>,
+    /// Ce qui part vers les autres.
+    pub envoyee: Option<spectre::SpectreVoix>,
+    /// L'égaliseur de sa voix pendant l'enregistrement.
+    pub egaliseur: Vec<egaliseur::Bande>,
 }
 
 /// La crête de voix que vise le gain automatique réglé par défaut : le
@@ -2771,21 +2818,29 @@ pub const NIVEAU_VOIX_DEFAUT: f32 = 0.30;
 /// capture.
 #[derive(Default)]
 struct Essai {
+    numero: u64,
     brute: Vec<f32>,
     envoyee: Vec<f32>,
     lecture: Option<VersionEssai>,
     /// Le volume mesuré (voir [`EtatEssai::Pret`]), une fois demandé.
     ecart_db: Option<f32>,
+    /// L'égaliseur de sa voix au départ de l'enregistrement.
+    egaliseur: Vec<egaliseur::Bande>,
+    /// Le spectre des deux versions, une fois demandé.
+    analyse: Option<AnalyseEssai>,
 }
 
 impl Essai {
     /// Repart à vide, la place réservée d'avance : le fil de capture
     /// n'alloue rien en enregistrant.
-    fn commencer(&mut self) {
-        self.brute = Vec::with_capacity(ESSAI_ECHANTILLONS);
-        self.envoyee = Vec::with_capacity(ESSAI_ECHANTILLONS);
-        self.lecture = None;
-        self.ecart_db = None;
+    fn commencer(&mut self, numero: u64, egaliseur: Vec<egaliseur::Bande>) {
+        *self = Essai {
+            numero,
+            brute: Vec::with_capacity(ESSAI_ECHANTILLONS),
+            envoyee: Vec::with_capacity(ESSAI_ECHANTILLONS),
+            egaliseur,
+            ..Essai::default()
+        };
     }
 
     /// Ajoute une trame de chaque version ; vrai quand l'essai est complet.
@@ -4442,7 +4497,7 @@ mod tests {
     #[test]
     fn l_essai_s_arrete_a_cinq_secondes() {
         let mut e = Essai::default();
-        e.commencer();
+        e.commencer(1, Vec::new());
         let (brute, envoyee) = ([0.1f32; FRAME_SAMPLES], [0.2f32; FRAME_SAMPLES]);
         let trames = ESSAI_ECHANTILLONS / FRAME_SAMPLES;
         for n in 1..trames {

@@ -1232,6 +1232,10 @@ struct KiApp {
     jitter_frames: usize,
     ptt_release_ms: u32,
     loopback: bool,
+    /// Le dernier essai « enregistrer et réécouter » gardé en WAV (son
+    /// numéro), et le dossier où il l'a été.
+    essai_garde: u64,
+    essai_dossier: Option<std::path::PathBuf>,
     /// Calibration des seuils en cours : (départ, crête ambiante mesurée).
     calibrating: Option<(std::time::Instant, f32)>,
     // Labo vidéo (S1a du partage d'écran) : boucle locale de test.
@@ -1616,6 +1620,8 @@ impl KiApp {
             jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
             ptt_release_ms: get("ptt_release_ms", "100").parse().unwrap_or(100),
             loopback: false,
+            essai_garde: 0,
+            essai_dossier: None,
             calibrating: None,
             labo: None,
             labo_frame: Default::default(),
