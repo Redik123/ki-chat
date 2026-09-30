@@ -298,7 +298,9 @@ fn charger(dossiers: &[PathBuf]) -> Vec<Son> {
 /// Un fichier en PCM mono 48 kHz, borné à [`DUREE_MAX_S`] : le WAV par le
 /// décodeur des notifications, le reste (MP3, M4A…) par le décodeur de la
 /// visionneuse — Windows seulement, comme elle.
-fn decoder(chemin: &Path) -> anyhow::Result<Vec<f32>> {
+/// Un son lu depuis un fichier (WAV, ou ce que ki-media décode), en mono
+/// 48 kHz, tronqué à la durée d'un son du soundboard.
+pub(crate) fn decoder(chemin: &Path) -> anyhow::Result<Vec<f32>> {
     let ext = chemin
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())

@@ -666,6 +666,43 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
     change
 }
 
+/// Choix exclusif en pastilles séparées qui passent à la ligne : pour une
+/// liste trop longue pour une seule rangée — les personnages du changeur,
+/// qui débordaient de la page. Rend vrai quand la valeur a changé.
+pub fn pastilles<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &str)]) -> bool {
+    let font = FontId::proportional(12.5);
+    let mut change = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        for (v, libelle) in choix {
+            let galley = ui.fonts(|f| f.layout_no_wrap((*libelle).to_owned(), font.clone(), theme::TEXT));
+            let (rect, reponse) =
+                ui.allocate_exact_size(Vec2::new(galley.size().x + 24.0, 28.0), Sense::click());
+            if reponse.clicked() && *valeur != *v {
+                *valeur = *v;
+                change = true;
+            }
+            let actif = *valeur == *v;
+            let painter = ui.painter();
+            if actif {
+                painter.rect(
+                    rect,
+                    CornerRadius::same(8),
+                    theme::BG_ACTIVE,
+                    Stroke::new(1.0_f32, theme::alpha(theme::ACCENT, 90)),
+                    StrokeKind::Inside,
+                );
+            } else {
+                let fond = if reponse.hovered() { theme::BG_HOVER } else { theme::BG_DEEP };
+                painter.rect_filled(rect, CornerRadius::same(8), fond);
+            }
+            let couleur = if actif { theme::TEXT } else { theme::TEXT_DIM };
+            painter.galley(rect.center() - galley.size() / 2.0, galley, couleur);
+        }
+    });
+    change
+}
+
 /// Interrupteur : plus lisible qu'une case à cocher pour un réglage qui
 /// s'allume ou s'éteint. Le libellé suit à droite. Rend la réponse, `changed`
 /// quand on l'a basculé.

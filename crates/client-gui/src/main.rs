@@ -1236,6 +1236,14 @@ struct KiApp {
     /// numéro), et le dossier où il l'a été.
     essai_garde: u64,
     essai_dossier: Option<std::path::PathBuf>,
+    /// L'imitation assistée du changeur : la voix visée (le nom de
+    /// l'extrait, son empreinte), son analyse en cours sur un fil, l'erreur à
+    /// dire, et l'empreinte de sa propre voix (mesurée sur l'essai de ce
+    /// numéro).
+    imitation_cible: Option<(String, ki_voice::imitation::EmpreinteVoix)>,
+    imitation_calcul: Option<std::sync::mpsc::Receiver<Result<(String, ki_voice::imitation::EmpreinteVoix), String>>>,
+    imitation_erreur: Option<String>,
+    imitation_moi: Option<(u64, Option<ki_voice::imitation::EmpreinteVoix>)>,
     /// Calibration des seuils en cours : (départ, crête ambiante mesurée).
     calibrating: Option<(std::time::Instant, f32)>,
     // Labo vidéo (S1a du partage d'écran) : boucle locale de test.
@@ -1622,6 +1630,10 @@ impl KiApp {
             loopback: false,
             essai_garde: 0,
             essai_dossier: None,
+            imitation_cible: None,
+            imitation_calcul: None,
+            imitation_erreur: None,
+            imitation_moi: None,
             calibrating: None,
             labo: None,
             labo_frame: Default::default(),

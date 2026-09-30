@@ -2,21 +2,33 @@
 //! personnages, où part la voix changée, un raccourci pour basculer — et, en
 //! mode studio, chaque réglage à la main.
 
-use eframe::egui::{self, RichText};
+use std::time::Duration;
+
+use eframe::egui::{self, RichText, Vec2};
 use ki_voice::changeur::{ReglagesChangeur, PERSONNAGES, VERS_JEUX, VERS_KICHAT, VERS_TOUT};
+use ki_voice::imitation::{empreinte, rapprocher};
+use ki_voice::{EtatEssai, ESSAI_SECONDES};
 
 use crate::icons::Icon;
 use crate::ptt::PttKey;
 use crate::reglages_audio::curseur;
-use crate::theme::{SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
 use crate::ui;
 use crate::KiApp;
+
+/// Les extraits qu'on peut donner à imiter.
+const EXTENSIONS_SON: [&str; 9] = ["wav", "mp3", "ogg", "opus", "m4a", "aac", "flac", "webm", "mp4"];
 
 /// Les réglages du changeur tels que les préférences les rangent.
 pub(crate) fn ecrire_changeur(r: &ReglagesChangeur) -> String {
     format!(
-        "h={};so={};d={};r={};rhz={};t={};s={};v={};e={};ems={};rv={};rt={}",
+        "h={};f={};ch={};vo={};vs={};vhz={};so={};d={};r={};rhz={};t={};s={};v={};e={};ems={};rv={};rt={}",
         r.hauteur,
+        r.formants,
+        r.chuchotement,
+        r.vocodeur,
+        r.vocodeur_suit as u8,
+        r.vocodeur_hz,
         r.sous_octave,
         r.distorsion,
         r.robot,
@@ -32,13 +44,24 @@ pub(crate) fn ecrire_changeur(r: &ReglagesChangeur) -> String {
 }
 
 /// L'inverse d'[`ecrire_changeur`] ; ce qui manque garde sa valeur neutre.
+/// Des réglages d'avant le timbre (sans `f`) gardent leur son : leurs
+/// formants suivaient la hauteur.
 pub(crate) fn lire_changeur(texte: &str) -> ReglagesChangeur {
     let mut r = ReglagesChangeur::default();
+    let mut formants_lus = false;
     for champ in texte.split(';') {
         let Some((cle, valeur)) = champ.split_once('=') else { continue };
         let Ok(v) = valeur.trim().parse::<f32>() else { continue };
         match cle.trim() {
             "h" => r.hauteur = v,
+            "f" => {
+                r.formants = v;
+                formants_lus = true;
+            }
+            "ch" => r.chuchotement = v,
+            "vo" => r.vocodeur = v,
+            "vs" => r.vocodeur_suit = v != 0.0,
+            "vhz" => r.vocodeur_hz = v,
             "so" => r.sous_octave = v,
             "d" => r.distorsion = v,
             "r" => r.robot = v,
@@ -52,6 +75,9 @@ pub(crate) fn lire_changeur(texte: &str) -> ReglagesChangeur {
             "rt" => r.reverb_taille = v,
             _ => {}
         }
+    }
+    if !formants_lus {
+        r.formants = 2f32.powf(r.hauteur.clamp(-12.0, 12.0) / 12.0);
     }
     r.bornes()
 }
@@ -81,7 +107,7 @@ impl KiApp {
             "Changeur de voix",
             Some(
                 "Un personnage pour ta voix, dans ki-chat, dans les jeux, ou les deux. \
-                 Essaie-le avec « M'écouter » (onglet Audio).",
+                 Écoute-le avec l'essai de 5 s (onglet Audio, ou « T'écouter » plus bas).",
             ),
             |ui| {
                 ui::ligne(ui, "Changeur", |ui| {
@@ -98,7 +124,7 @@ impl KiApp {
                     let mut choix = personnage_de(&self.changeur).unwrap_or(usize::MAX);
                     let options: Vec<(usize, &str)> =
                         PERSONNAGES.iter().enumerate().map(|(i, (nom, _, _))| (i, *nom)).collect();
-                    if ui::segmente(ui, &mut choix, &options) {
+                    if ui::pastilles(ui, &mut choix, &options) {
                         if let Some((_, _, fabrique)) = PERSONNAGES.get(choix) {
                             self.changeur = fabrique();
                             // Choisir un personnage, c'est vouloir l'entendre.
@@ -112,6 +138,7 @@ impl KiApp {
                         .unwrap_or("Ton propre mélange — il se règle en mode studio.");
                     ui::precision(ui, description);
                 });
+                self.imitation_ui(ui, apply);
                 ui::ligne(ui, "Où", |ui| {
                     if ui::segmente(
                         ui,
@@ -170,6 +197,48 @@ impl KiApp {
                         "Monte ou descend ta voix, en demi-tons. -12 : une octave plus grave, voix de \
                          géant ; +12 : une octave plus aiguë, voix d'enfant. Entre -5 et +5 : la \
                          voix de quelqu'un d'autre.",
+                    );
+                });
+                ui::ligne(ui, "Timbre", |ui| {
+                    let mut pct = (r.formants - 1.0) * 100.0;
+                    if curseur(ui, &mut pct, -40.0..=60.0, " %", Some(1.0)) {
+                        r.formants = 1.0 + pct / 100.0;
+                    }
+                    let bande = 2f32.powf(r.hauteur / 12.0);
+                    if (r.formants - bande).abs() > 0.005
+                        && ui::button(ui, Icon::Repeat, "Suivre la hauteur (effet écureuil)").clicked()
+                    {
+                        r.formants = bande;
+                    }
+                    aide(
+                        ui,
+                        "La taille de ta bouche et de ta gorge, séparée de la hauteur. À 0, tu gardes \
+                         ta bouche : ta voix monte ou descend sans l'effet écureuil ni ralenti. +15 à \
+                         +20 % avec la hauteur montée : une voix de femme ou d'enfant crédible. -10 à \
+                         -20 % : un homme plus massif, un géant.",
+                    );
+                });
+                ui::ligne(ui, "Chuchotement", |ui| {
+                    pourcent(ui, &mut r.chuchotement);
+                    aide(
+                        ui,
+                        "Ajoute un souffle qui dit les mêmes mots que toi : l'ombre d'Omen, un \
+                         fantôme. À fond, il remplace ta voix — tu chuchotes sans chuchoter.",
+                    );
+                });
+                ui::ligne(ui, "Vocodeur", |ui| {
+                    pourcent(ui, &mut r.vocodeur);
+                    if r.vocodeur > 0.005 {
+                        ui::interrupteur(ui, &mut r.vocodeur_suit, "suit ta voix");
+                        if !r.vocodeur_suit {
+                            curseur(ui, &mut r.vocodeur_hz, 40.0..=500.0, " Hz", Some(1.0));
+                        }
+                    }
+                    aide(
+                        ui,
+                        "Une note de synthèse qui parle avec ta bouche : une voix de robot qu'on \
+                         comprend. Elle suit ta voix au demi-ton près, d'où les marches du robot ; \
+                         ou elle reste sur une note fixe, pour un robot monocorde.",
                     );
                 });
                 ui::ligne(ui, "Couche grave", |ui| {
@@ -258,6 +327,172 @@ impl KiApp {
     }
 }
 
+impl KiApp {
+    /// L'imitation assistée : l'extrait d'une voix, sa propre voix sur un
+    /// essai de 5 s, et les réglages qui rapprochent l'une de l'autre.
+    fn imitation_ui(&mut self, ui: &mut egui::Ui, apply: &mut bool) {
+        // L'analyse d'un extrait se fait sur un fil : un long MP3 à décoder
+        // et à mesurer figerait la fenêtre.
+        if let Some(rx) = &self.imitation_calcul {
+            match rx.try_recv() {
+                Ok(Ok(cible)) => {
+                    self.imitation_cible = Some(cible);
+                    self.imitation_erreur = None;
+                    self.imitation_calcul = None;
+                }
+                Ok(Err(erreur)) => {
+                    self.imitation_erreur = Some(erreur);
+                    self.imitation_calcul = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(Duration::from_millis(100)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.imitation_calcul = None,
+            }
+        }
+        ui::ligne(ui, "Imiter", |ui| {
+            // 1. La voix visée.
+            if self.imitation_calcul.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("analyse de l'extrait…").color(TEXT_DIM).size(12.0));
+                });
+            } else {
+                let libelle =
+                    if self.imitation_cible.is_some() { "Choisir un autre extrait…" } else { "Choisir l'extrait d'une voix…" };
+                if ui::button(ui, Icon::Paperclip, libelle).clicked() {
+                    if let Some(chemin) = rfd::FileDialog::new().add_filter("Son", &EXTENSIONS_SON).pick_file() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.imitation_calcul = Some(rx);
+                        std::thread::spawn(move || {
+                            let nom = chemin.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let resultat = crate::soundboard::decoder(&chemin)
+                                .map_err(|e| format!("Impossible de lire ce fichier : {e:#}"))
+                                .and_then(|pcm| {
+                                    empreinte(&pcm).ok_or_else(|| {
+                                        "Pas assez de voix dans cet extrait : prends un passage où la voix \
+                                         parle seule, sans musique ni bruitages."
+                                            .to_string()
+                                    })
+                                });
+                            let _ = tx.send(resultat.map(|e| (nom, e)));
+                        });
+                    }
+                }
+            }
+            if let Some(erreur) = &self.imitation_erreur {
+                ui.label(RichText::new(erreur).color(WARN).size(11.5));
+            }
+            let Some((nom, cible)) = self.imitation_cible.clone() else {
+                ui::precision(
+                    ui,
+                    "Donne un extrait de la voix à imiter (quelques secondes où elle parle seule) : \
+                     ki-chat mesure sa hauteur et son timbre, et règle le changeur pour t'en \
+                     rapprocher.",
+                );
+                return;
+            };
+            ui::precision(ui, &format!("Voix visée : « {nom} », vers {:.0} Hz.", cible.f0_hz));
+
+            // 2. Sa propre voix, sur l'essai de 5 s.
+            let etat = self.link.engine.lock().unwrap().as_ref().map(|e| e.essai());
+            let moi = match etat {
+                None => {
+                    ui::precision(ui, "Connecte-toi à un serveur pour enregistrer ta voix.");
+                    return;
+                }
+                Some(EtatEssai::Enregistre(avancement)) => {
+                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                    ui.horizontal(|ui| {
+                        ui::meter(ui, avancement, Vec2::new(150.0, 8.0), DANGER);
+                        let reste = ((1.0 - avancement) * ESSAI_SECONDES as f32).ceil().max(1.0);
+                        ui.label(RichText::new(format!("parle normalement… {reste:.0} s")).color(TEXT_DIM).size(12.0));
+                    });
+                    return;
+                }
+                Some(EtatEssai::Pret { numero, .. }) => self.empreinte_de_l_essai(numero),
+                Some(EtatEssai::Vide) => None,
+            };
+            let Some(moi) = moi else {
+                if ui::button(ui, Icon::Mic, &format!("Enregistrer ma voix ({ESSAI_SECONDES} s)")).clicked() {
+                    if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+                        e.enregistrer_essai();
+                    }
+                }
+                ui::precision(
+                    ui,
+                    "Parle normalement pendant 5 secondes, sans le changeur : ki-chat mesure ta \
+                     voix pour la comparer. Personne ne t'entend pendant l'enregistrement.",
+                );
+                return;
+            };
+
+            // 3. Le rapprochement.
+            let r = rapprocher(&moi, &cible);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Pour t'en rapprocher :").color(TEXT_DIM).size(12.0));
+                ui.label(
+                    RichText::new(format!(
+                        "hauteur {:+.1} demi-tons, timbre {:+.0} %",
+                        r.hauteur,
+                        (r.formants - 1.0) * 100.0
+                    ))
+                    .color(ACCENT)
+                    .size(12.0)
+                    .strong(),
+                );
+            });
+            if r.bornee {
+                ui::precision(ui, "La hauteur visée dépasse ce que permet le changeur (une octave) : il s'en approche.");
+            }
+            if r.confiance < 0.5 {
+                ui::precision(
+                    ui,
+                    "Le timbre est incertain : l'extrait est peut-être bruité, ou sa voix trop \
+                     différente de la tienne. Essaie un autre passage.",
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui::button(ui, Icon::Check, "Appliquer au changeur").clicked() {
+                    self.changeur.hauteur = r.hauteur;
+                    self.changeur.formants = r.formants;
+                    self.changeur = self.changeur.bornes();
+                    self.changeur_actif = true;
+                    *apply = true;
+                }
+                if ui::icon_button(ui, Icon::Mic, "Réenregistrer ma voix").clicked() {
+                    if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+                        e.enregistrer_essai();
+                    }
+                }
+            });
+            ui::precision(
+                ui,
+                "Seules la hauteur et le timbre changent : les effets (souffle, réverbération…) \
+                 restent tels quels, et se règlent en mode studio. La ressemblance s'arrête à la \
+                 voix — l'accent et la façon de parler, c'est toi.",
+            );
+        });
+    }
+
+    /// L'empreinte de sa voix sur l'essai de ce numéro — mesurée une fois.
+    /// Le micro brut passé par l'égaliseur de sa voix : ce que le changeur
+    /// reçoit, sans le changeur.
+    fn empreinte_de_l_essai(&mut self, numero: u64) -> Option<ki_voice::imitation::EmpreinteVoix> {
+        if let Some((n, e)) = &self.imitation_moi {
+            if *n == numero {
+                return e.clone();
+            }
+        }
+        let (mut brute, _) = self.link.engine.lock().unwrap().as_ref()?.essai_pcm()?;
+        let mut eq = ki_voice::egaliseur::Egaliseur::new(&self.egaliseur_micro);
+        for bloc in brute.chunks_mut(960) {
+            eq.traiter_trame(bloc);
+        }
+        let e = empreinte(&brute);
+        self.imitation_moi = Some((numero, e.clone()));
+        e
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,7 +504,14 @@ mod tests {
             assert_eq!(lire_changeur(&ecrire_changeur(&r)), r);
         }
         assert_eq!(lire_changeur(""), ReglagesChangeur::default());
-        assert_eq!(lire_changeur("h=99"), ReglagesChangeur { hauteur: 12.0, ..Default::default() });
+        // Un ancien réglage (sans formants) : ils suivent la hauteur, comme
+        // avant — le même son qu'hier.
+        assert_eq!(lire_changeur("h=99"), ReglagesChangeur { hauteur: 12.0, formants: 2.0, ..Default::default() });
+        let ancien = lire_changeur("h=-4;rv=0.3");
+        assert!((ancien.formants - 2f32.powf(-4.0 / 12.0)).abs() < 1e-6);
+        // Un nouveau garde les siens.
+        let r = ReglagesChangeur { hauteur: 5.0, formants: 1.2, chuchotement: 0.4, vocodeur: 0.7, vocodeur_suit: false, vocodeur_hz: 90.0, ..Default::default() };
+        assert_eq!(lire_changeur(&ecrire_changeur(&r)), r);
     }
 
     #[test]
