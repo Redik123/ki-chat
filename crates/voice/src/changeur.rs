@@ -1,4 +1,5 @@
-//! Le changeur de voix : hauteur, couche une octave dessous, distorsion,
+//! Le changeur de voix : hauteur, timbre (les formants, séparés de la
+//! hauteur), chuchotement, vocodeur, couche une octave dessous, distorsion,
 //! robot, talkie, filtre sombre, voile, écho, réverbération — et des
 //! personnages tout prêts.
 //!
@@ -14,9 +15,16 @@
 //! joue (recherche de corrélation sur ±5 ms) : le raccord tombe en phase, au
 //! lieu du « bouillonnement » des décaleurs naïfs. ~25 ms de retard quand la
 //! hauteur change ; aucun quand elle ne change pas.
+//!
+//! Le timbre, ensuite (`timbre`) : le décaleur déplace les formants avec la
+//! hauteur — la voix d'écureuil, le ralenti —, l'étage de timbre les remet
+//! où l'on veut. C'est lui qui fait une voix plus grave mais humaine, une
+//! voix d'homme ou de femme crédible ; lui aussi qui souffle le chuchotement
+//! et fait parler le vocodeur. 21 ms de plus, seulement quand il sert.
 
 use crate::dynamique::Limiteur;
 use crate::egaliseur::{Bande, Egaliseur, Forme, Q_NEUTRE};
+use crate::timbre::{ReglagesTimbre, Timbre};
 use crate::SAMPLE_RATE;
 
 /// Où part la voix changée.
@@ -29,6 +37,21 @@ pub const VERS_KICHAT: u8 = 2;
 pub struct ReglagesChangeur {
     /// Hauteur, en demi-tons (-12 à +12).
     pub hauteur: f32,
+    /// Les formants — la taille de la bouche et de la gorge —, en fois leur
+    /// place d'origine, quelle que soit la hauteur : 1,0 garde la bouche,
+    /// 1,18 la rapetisse (une voix de femme, d'enfant), 0,85 l'agrandit (un
+    /// homme massif). Pour l'ancien effet de bande accélérée, ils suivent la
+    /// hauteur : 2^(hauteur/12).
+    pub formants: f32,
+    /// Chuchotement (0 à 1) : un souffle qui dit les mêmes mots, ajouté à
+    /// la voix ; il la remplace tout à fait à 1.
+    pub chuchotement: f32,
+    /// Vocodeur (0 à 1) : une note de synthèse qui parle avec ta bouche.
+    pub vocodeur: f32,
+    /// La note du vocodeur suit ta voix (au demi-ton près) ; sinon elle
+    /// reste sur `vocodeur_hz`.
+    pub vocodeur_suit: bool,
+    pub vocodeur_hz: f32,
     /// Une couche une octave sous la voix changée (0 à 1).
     pub sous_octave: f32,
     /// Distorsion (0 à 1).
@@ -54,6 +77,11 @@ impl Default for ReglagesChangeur {
     fn default() -> Self {
         Self {
             hauteur: 0.0,
+            formants: 1.0,
+            chuchotement: 0.0,
+            vocodeur: 0.0,
+            vocodeur_suit: true,
+            vocodeur_hz: 110.0,
             sous_octave: 0.0,
             distorsion: 0.0,
             robot: 0.0,
@@ -76,6 +104,11 @@ impl ReglagesChangeur {
         let d = Self::default();
         Self {
             hauteur: ok(self.hauteur, -12.0, 12.0, 0.0),
+            formants: ok(self.formants, 0.5, 2.0, 1.0),
+            chuchotement: ok(self.chuchotement, 0.0, 1.0, 0.0),
+            vocodeur: ok(self.vocodeur, 0.0, 1.0, 0.0),
+            vocodeur_suit: self.vocodeur_suit,
+            vocodeur_hz: ok(self.vocodeur_hz, 40.0, 500.0, d.vocodeur_hz),
             sous_octave: ok(self.sous_octave, 0.0, 1.0, 0.0),
             distorsion: ok(self.distorsion, 0.0, 1.0, 0.0),
             robot: ok(self.robot, 0.0, 1.0, 0.0),
@@ -89,56 +122,100 @@ impl ReglagesChangeur {
             reverb_taille: ok(self.reverb_taille, 0.0, 1.0, d.reverb_taille),
         }
     }
+
+    /// Ce que l'étage de timbre doit faire pour ces réglages.
+    pub fn timbre(&self) -> ReglagesTimbre {
+        let rapport = 2f32.powf(self.hauteur / 12.0);
+        ReglagesTimbre {
+            etirement: rapport / self.formants,
+            chuchotement: self.chuchotement,
+            vocodeur: self.vocodeur,
+            vocodeur_note: (!self.vocodeur_suit).then_some(self.vocodeur_hz),
+        }
+    }
 }
 
 /// Un personnage : (nom, en quelques mots, réglages).
 pub type Personnage = (&'static str, &'static str, fn() -> ReglagesChangeur);
 
-pub const PERSONNAGES: [Personnage; 8] = [
-    ("Spectre", "façon Omen : grave, voilé, caverneux", || ReglagesChangeur {
+pub const PERSONNAGES: [Personnage; 12] = [
+    ("Spectre", "façon Omen : grave, soufflé, d'outre-tombe", || ReglagesChangeur {
         hauteur: -4.0,
-        sous_octave: 0.35,
-        distorsion: 0.12,
-        voile: 0.45,
-        sombre_hz: 6_000.0,
+        formants: 0.86,
+        chuchotement: 0.3,
+        sous_octave: 0.25,
+        distorsion: 0.08,
+        voile: 0.35,
+        sombre_hz: 7_000.0,
         reverb: 0.3,
         reverb_taille: 0.8,
         ..Default::default()
     }),
-    ("Ingénieure", "façon Killjoy : plus aiguë, plus claire", || ReglagesChangeur {
-        hauteur: 4.0,
+    ("Ingénieure", "façon Killjoy : une voix féminine, claire", || ReglagesChangeur {
+        hauteur: 6.0,
+        formants: 1.18,
         ..Default::default()
     }),
-    ("Robot", "voix de machine", || ReglagesChangeur {
+    ("Machine", "façon KAY/O : un robot qui parle avec ta voix", || ReglagesChangeur {
+        vocodeur: 0.9,
+        robot: 0.15,
+        robot_hz: 90.0,
+        distorsion: 0.12,
+        sombre_hz: 9_000.0,
+        ..Default::default()
+    }),
+    ("Fantôme", "un chuchotement qui flotte", || ReglagesChangeur {
+        chuchotement: 1.0,
+        voile: 0.3,
+        echo: 0.12,
+        echo_ms: 380.0,
+        reverb: 0.4,
+        reverb_taille: 0.7,
+        ..Default::default()
+    }),
+    ("Démon", "très grave, saturé, qui gronde", || ReglagesChangeur {
+        hauteur: -7.0,
+        formants: 0.8,
+        chuchotement: 0.15,
+        sous_octave: 0.45,
+        distorsion: 0.4,
+        sombre_hz: 5_000.0,
+        reverb: 0.2,
+        reverb_taille: 0.6,
+        ..Default::default()
+    }),
+    ("Robot", "machine rétro, modulée", || ReglagesChangeur {
         hauteur: -1.0,
         robot: 0.9,
         robot_hz: 55.0,
         distorsion: 0.1,
         ..Default::default()
     }),
-    ("Démon", "très grave, saturé", || ReglagesChangeur {
-        hauteur: -8.0,
-        sous_octave: 0.5,
-        distorsion: 0.45,
-        sombre_hz: 5_000.0,
-        reverb: 0.2,
-        reverb_taille: 0.6,
+    ("Voix grave", "un autre homme, plus grave", || ReglagesChangeur {
+        hauteur: -5.0,
+        formants: 0.88,
         ..Default::default()
     }),
+    ("Enfant", "plus aiguë, plus petite", || ReglagesChangeur {
+        hauteur: 8.0,
+        formants: 1.3,
+        ..Default::default()
+    }),
+    ("Géant", "grave et ample", || ReglagesChangeur {
+        hauteur: -6.0,
+        formants: 0.78,
+        sous_octave: 0.15,
+        reverb: 0.15,
+        reverb_taille: 0.7,
+        ..Default::default()
+    }),
+    ("Écureuil", "la bande accélérée", || ReglagesChangeur { hauteur: 8.0, formants: 1.587, ..Default::default() }),
     ("Talkie", "radio de poche", || ReglagesChangeur { talkie: true, distorsion: 0.3, ..Default::default() }),
     ("Grotte", "grande réverbération", || ReglagesChangeur {
         reverb: 0.55,
         reverb_taille: 0.9,
         echo: 0.2,
         echo_ms: 320.0,
-        ..Default::default()
-    }),
-    ("Écureuil", "très aiguë", || ReglagesChangeur { hauteur: 8.0, ..Default::default() }),
-    ("Géant", "grave et ample", || ReglagesChangeur {
-        hauteur: -5.0,
-        sous_octave: 0.2,
-        reverb: 0.15,
-        reverb_taille: 0.7,
         ..Default::default()
     }),
 ];
@@ -372,6 +449,7 @@ pub struct Changeur {
     r: ReglagesChangeur,
     hauteur: Option<Decaleur>,
     sous_octave: Option<Decaleur>,
+    timbre: Option<Timbre>,
     filtres: Egaliseur,
     phase_robot: f32,
     voile: Voile,
@@ -386,6 +464,7 @@ impl Changeur {
             r: ReglagesChangeur::default(),
             hauteur: None,
             sous_octave: None,
+            timbre: None,
             filtres: Egaliseur::default(),
             phase_robot: 0.0,
             voile: Voile::new(),
@@ -407,6 +486,14 @@ impl Changeur {
         let veut_sous = r.sous_octave > 0.005;
         if r.hauteur != self.r.hauteur || self.sous_octave.is_some() != veut_sous {
             self.sous_octave = veut_sous.then(|| Decaleur::new(r.hauteur - 12.0));
+        }
+        // L'étage de timbre ne sert que s'il a quelque chose à faire ; glisser
+        // un de ses réglages le règle sans le refaire.
+        let timbre = r.timbre();
+        match (timbre.neutre(), self.timbre.as_mut()) {
+            (true, _) => self.timbre = None,
+            (false, Some(t)) => t.regler(timbre),
+            (false, None) => self.timbre = Some(Timbre::new(timbre)),
         }
         let mut bandes = Vec::new();
         if r.talkie {
@@ -438,6 +525,17 @@ impl Changeur {
             if let Some(d) = self.sous_octave.as_mut() {
                 y = (y + r.sous_octave * d.traiter(x)) / (1.0 + 0.5 * r.sous_octave);
             }
+            *s = y;
+        }
+        // Le timbre, avant la distorsion : ce qu'elle ajoute brouillerait
+        // l'enveloppe à mesurer.
+        if let Some(t) = self.timbre.as_mut() {
+            for s in trame.iter_mut() {
+                *s = t.traiter(*s);
+            }
+        }
+        for s in trame.iter_mut() {
+            let mut y = *s;
             if r.distorsion > 0.005 {
                 y = (1.0 - r.distorsion) * y + r.distorsion * (pousse * y).tanh() * 0.4;
             }
@@ -494,7 +592,9 @@ mod tests {
     #[test]
     fn la_hauteur_change_de_ce_qu_on_demande() {
         for (demi_tons, attendu) in [(12.0, 400.0), (-12.0, 100.0), (7.0, 200.0 * 2f32.powf(7.0 / 12.0))] {
-            let mut c = Changeur::new(ReglagesChangeur { hauteur: demi_tons, ..Default::default() });
+            // Formants qui suivent : le décaleur seul, sans l'étage de timbre.
+            let formants = 2f32.powf(demi_tons / 12.0);
+            let mut c = Changeur::new(ReglagesChangeur { hauteur: demi_tons, formants, ..Default::default() });
             let mut x = sinus(200.0, 0.3, SAMPLE_RATE as usize);
             c.traiter_trame(&mut x);
             let fin = &x[SAMPLE_RATE as usize / 2..];
@@ -531,7 +631,75 @@ mod tests {
     /// Des réglages abîmés sont ramenés dans leurs plages.
     #[test]
     fn des_reglages_abimes_sont_bornes() {
-        let r = ReglagesChangeur { hauteur: 99.0, reverb: f32::NAN, echo_ms: 5.0, ..Default::default() }.bornes();
+        let r = ReglagesChangeur {
+            hauteur: 99.0,
+            reverb: f32::NAN,
+            echo_ms: 5.0,
+            formants: 0.0,
+            chuchotement: 7.0,
+            vocodeur_hz: f32::INFINITY,
+            ..Default::default()
+        }
+        .bornes();
         assert_eq!((r.hauteur, r.reverb, r.echo_ms), (12.0, 0.0, 40.0));
+        assert_eq!((r.formants, r.chuchotement, r.vocodeur_hz), (0.5, 1.0, 110.0));
+    }
+
+    /// Une voix de synthèse : les harmoniques d'une fondamentale, pesés par
+    /// une bosse de formant à `formant` Hz.
+    fn voix(f0: f32, formant: f32, n: usize) -> Vec<f32> {
+        let mut x = vec![0f32; n];
+        let mut h = 1;
+        while f0 * h as f32 <= 6_000.0 {
+            let f = f0 * h as f32;
+            let d = (f - formant) / 150.0;
+            let a = 0.05 * (0.05 + (-d * d).exp());
+            for (i, s) in x.iter_mut().enumerate() {
+                *s += a * (2.0 * std::f32::consts::PI * f * i as f32 / SAMPLE_RATE as f32 + h as f32).sin();
+            }
+            h += 1;
+        }
+        x
+    }
+
+    /// Le centre de gravité spectral entre `bas` et `haut` Hz, sur la fin.
+    fn centre(x: &[f32], bas: f32, haut: f32) -> f32 {
+        let n = 8192;
+        let fin = &x[x.len() - n..];
+        let hz = SAMPLE_RATE as f32 / n as f32;
+        let (mut somme, mut poids) = (0.0, 0.0);
+        let mut f = bas;
+        while f <= haut {
+            let e = energie_a(fin, f);
+            somme += f * e;
+            poids += e;
+            f += hz;
+        }
+        somme / poids
+    }
+
+    /// La hauteur monte d'une quinte, la bouche reste la même : les
+    /// harmoniques s'écartent, la bosse de formant ne bouge pas.
+    #[test]
+    fn la_hauteur_garde_la_bouche() {
+        let x = voix(140.0, 1_000.0, SAMPLE_RATE as usize);
+        let mut garde = x.clone();
+        Changeur::new(ReglagesChangeur { hauteur: 7.0, formants: 1.0, ..Default::default() }).traiter_trame(&mut garde);
+        let mut bande = x.clone();
+        Changeur::new(ReglagesChangeur { hauteur: 7.0, formants: 1.498, ..Default::default() })
+            .traiter_trame(&mut bande);
+        let (avant, apres_garde, apres_bande) =
+            (centre(&x, 400.0, 3_000.0), centre(&garde, 400.0, 3_000.0), centre(&bande, 400.0, 3_000.0));
+        // L'ancien décaleur emporte la bosse une quinte plus haut…
+        assert!(apres_bande / avant > 1.3, "bande accélérée : {avant:.0} → {apres_bande:.0} Hz");
+        // … le timbre la garde à sa place.
+        assert!((apres_garde / avant - 1.0).abs() < 0.12, "formants gardés : {avant:.0} → {apres_garde:.0} Hz");
+    }
+
+    /// Chaque personnage a son nom à lui.
+    #[test]
+    fn les_personnages_ont_des_noms_distincts() {
+        let noms: std::collections::HashSet<_> = PERSONNAGES.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(noms.len(), PERSONNAGES.len());
     }
 }

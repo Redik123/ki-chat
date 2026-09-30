@@ -12,6 +12,7 @@ pub mod changeur;
 pub mod docteur;
 pub mod dynamique;
 pub mod egaliseur;
+pub mod imitation;
 pub mod effects;
 // `jitter` et `resample` sont l'intérieur du moteur, et le resteraient
 // volontiers — mais un banc criterion est un crate EXTÉRIEUR : il ne voit que
@@ -28,6 +29,7 @@ pub mod resample;
 /// Détection de parole neuronale (Silero VAD, par tract).
 pub mod silero;
 pub mod spectre;
+pub mod timbre;
 #[cfg(windows)]
 mod wasapi;
 /// Le son du jeu dans le stream : capture en boucle (Windows) et lecteur
