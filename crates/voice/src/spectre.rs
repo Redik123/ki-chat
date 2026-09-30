@@ -30,13 +30,14 @@ const PAROLE: [f32; NB_TIERS] = [
 
 /// Les graves : 100 à 250 Hz.
 const GRAVES: std::ops::RangeInclusive<usize> = 0..=4;
-/// Le médium, corps de la voix : 315 Hz à 1 kHz. La référence de toutes les
+/// Le médium, corps de la voix : 315 à 800 Hz. La référence de toutes les
 /// comparaisons — l'effet de proximité d'un micro-casque gonfle les graves
-/// sous elle, pas elle.
-const MEDIUM: std::ops::RangeInclusive<usize> = 5..=10;
-/// La présence : 2 à 6,3 kHz, là où se jouent l'intelligibilité et la
-/// clarté. Qu'elle manque, et la voix sonne étouffée.
-const PRESENCE: std::ops::RangeInclusive<usize> = 13..=18;
+/// sous elle, pas elle ; et une cloche de présence qui déborde vers 1 kHz ne
+/// la déplace pas.
+const MEDIUM: std::ops::RangeInclusive<usize> = 5..=9;
+/// La présence : 1,25 à 6,3 kHz, là où se jouent l'intelligibilité et la
+/// netteté. Qu'elle manque, même par endroits, et la voix sonne étouffée.
+const PRESENCE: std::ops::RangeInclusive<usize> = 11..=18;
 
 const FENETRE: usize = 4096;
 const PAS: usize = FENETRE / 4;
@@ -57,10 +58,15 @@ impl SpectreVoix {
         std::array::from_fn(|k| self.niveaux_db[k] - PAROLE[k] - cale)
     }
 
-    /// La présence par rapport au médium, en dB au-dessus de la parole
-    /// moyenne. Très négative : une voix étouffée.
+    /// La présence : l'écart moyen à la parole moyenne sur 1,25 à 6,3 kHz,
+    /// en dB. Très négative : une voix étouffée. Une moyenne des écarts, et
+    /// non de l'énergie de la zone, que sa bande la plus forte dominerait :
+    /// une bosse ne doit pas cacher un trou. Chez drion, un trou de -15 dB
+    /// de 1,25 à 2,5 kHz disparaissait derrière une bosse à 4 kHz.
     pub fn presence_db(&self) -> f32 {
-        self.rapport_db(PRESENCE, MEDIUM)
+        let ecarts = self.ecarts_db();
+        let zone = &ecarts[PRESENCE];
+        zone.iter().sum::<f32>() / zone.len() as f32
     }
 
     /// Les graves par rapport au médium, de même. Très positifs : une voix
@@ -89,43 +95,112 @@ impl SpectreVoix {
 pub const PRESENCE_VISEE_DB: f32 = -1.0;
 /// Les graves visés : un peu de chaleur au-dessus de la parole moyenne.
 pub const GRAVES_VISES_DB: f32 = 2.0;
-/// Au-delà, c'est le micro qu'il faut changer, pas l'égaliseur. La cloche
-/// de présence va plus haut : large, elle ne relève qu'aux trois quarts
-/// d'elle-même la bande qu'elle vise.
+/// Au-delà, c'est le micro qu'il faut changer, pas l'égaliseur. Les
+/// cloches de présence vont plus haut, sauf au-dessus de 4 kHz, où elles
+/// monteraient le souffle et les sifflantes.
 const GRAVES_MAX_DB: f32 = 9.0;
 const PRESENCE_MAX_DB: f32 = 12.0;
+const AIGUS_MAX_DB: f32 = 8.0;
+/// Les cloches de présence, à deux tiers d'octave l'une de l'autre et d'une
+/// octave de large : ensemble, elles couvrent 1 à 6 kHz sans trou, et
+/// chacune se règle à part — de quoi suivre n'importe quel creux.
+const CLOCHES: [f32; 4] = [1_250.0, 2_000.0, 3_150.0, 5_000.0];
+const Q_CLOCHE: f32 = 1.4;
+/// Le grondement : une cloche en creux sur 125 Hz, qui prend l'effet de
+/// proximité (100 à 160 Hz) sans toucher au corps de la voix (200 à
+/// 315 Hz) — c'est le corps qu'on coupe quand le nez se bouche.
+const GRONDEMENT_HZ: f32 = 125.0;
+const Q_GRONDEMENT: f32 = 1.4;
+const GRONDEMENT: std::ops::RangeInclusive<usize> = 0..=2;
+/// Là où l'on juge la voix corrigée : 1 à 6,3 kHz. 1 kHz en fait partie
+/// pour qu'une cloche trop basse s'y voie — trop de 1 kHz, et la voix
+/// nasille.
+const JUGEMENT: std::ops::RangeInclusive<usize> = 10..=18;
 
 /// Un égaliseur qui rapproche cette voix d'une voix claire, réglé sur sa
-/// mesure : une coupe raide sous 80 Hz (le grondement), une étagère qui
-/// ramène les graves en trop, une cloche large qui rend la présence qui
-/// manque — chacune seulement si elle a de quoi faire. Chaque bande
-/// débordant un peu sur les autres, les gains se règlent en quelques passes
-/// sur la voix corrigée prévue.
+/// mesure : une coupe raide sous 80 Hz, une cloche en creux sur le
+/// grondement, et des cloches de présence. Les gains sont réglés pour que la
+/// voix prévue colle au mieux à la voix visée — sur 100 à 160 Hz pour le
+/// grondement, sur 1 à 6,3 kHz pour la présence, où un dépassement de plus
+/// de 2 dB pèse en plus : mieux vaut un rien sourd que nasillard ou criard.
+/// Recherche par coordonnées, à pas décroissants ; seules restent les
+/// bandes qui ont de quoi faire.
 pub fn egaliseur_correctif(voix: &SpectreVoix) -> Vec<Bande> {
-    let bandes = |graves: f32, presence: f32| {
+    let construire = |graves: f32, gains: &[f32; CLOCHES.len()]| {
         let mut b = vec![Bande::new(Forme::PasseHaut, 80.0, 0.0, Q_NEUTRE).raide()];
         if graves < -0.2 {
-            b.push(Bande::new(Forme::EtagereBasse, 220.0, graves, Q_NEUTRE));
+            b.push(Bande::new(Forme::Cloche, GRONDEMENT_HZ, graves, Q_GRONDEMENT));
         }
-        if presence > 0.2 {
-            b.push(Bande::new(Forme::Cloche, 3_500.0, presence, 0.7));
+        for (&f, &gain) in CLOCHES.iter().zip(gains) {
+            if gain > 0.2 {
+                b.push(Bande::new(Forme::Cloche, f, gain, Q_CLOCHE));
+            }
         }
         b
     };
-    let corriger_graves = voix.graves_db() > GRAVES_VISES_DB + 2.0;
+    let prevoir = |graves: f32, gains: &[f32; CLOCHES.len()]| {
+        voix.filtre(|f| reponse_db(&construire(graves, gains), f))
+    };
+    let corriger_graves = voix.graves_db() > GRAVES_VISES_DB + 2.0
+        || voix.ecarts_db()[GRONDEMENT].iter().any(|e| *e > GRAVES_VISES_DB + 4.0);
     let corriger_presence = voix.presence_db() < PRESENCE_VISEE_DB - 2.0;
-    let (mut graves, mut presence) = (0f32, 0f32);
-    for _ in 0..8 {
-        let prevue = voix.filtre(|f| reponse_db(&bandes(graves, presence), f));
-        if corriger_graves {
-            graves = (graves + GRAVES_VISES_DB - prevue.graves_db()).clamp(-GRAVES_MAX_DB, 0.0);
-        }
-        if corriger_presence {
-            presence = (presence + PRESENCE_VISEE_DB - prevue.presence_db()).clamp(0.0, PRESENCE_MAX_DB);
+    let erreur = |prevue: &SpectreVoix| -> f32 {
+        let e = prevue.ecarts_db();
+        let presence: f32 = if corriger_presence {
+            e[JUGEMENT]
+                .iter()
+                .map(|x| {
+                    let d = x - PRESENCE_VISEE_DB;
+                    d * d + if d > 2.0 { (d - 2.0) * (d - 2.0) } else { 0.0 }
+                })
+                .sum()
+        } else {
+            0.0
+        };
+        let grondement: f32 = if corriger_graves {
+            e[GRONDEMENT].iter().map(|x| (x - GRAVES_VISES_DB) * (x - GRAVES_VISES_DB)).sum()
+        } else {
+            0.0
+        };
+        presence + grondement
+    };
+    // Les réglages : le grondement (en creux), puis chaque cloche de
+    // présence (en bosse), chacun dans ses bornes.
+    let bornes = |i: usize| match i {
+        0 => (-GRAVES_MAX_DB, 0.0),
+        i if CLOCHES[i - 1] > 4_000.0 => (0.0, AIGUS_MAX_DB),
+        _ => (0.0, PRESENCE_MAX_DB),
+    };
+    let prevoir_tout = |r: &[f32; CLOCHES.len() + 1]| {
+        let gains: [f32; CLOCHES.len()] = std::array::from_fn(|i| r[i + 1]);
+        prevoir(r[0], &gains)
+    };
+    let mut reglages = [0f32; CLOCHES.len() + 1];
+    for pas in [3.0f32, 1.0, 0.5] {
+        for _ in 0..8 {
+            for i in 0..reglages.len() {
+                if !(if i == 0 { corriger_graves } else { corriger_presence }) {
+                    continue;
+                }
+                let (bas, haut) = bornes(i);
+                let mut meilleur = (erreur(&prevoir_tout(&reglages)), reglages[i]);
+                for essai in [reglages[i] - pas, reglages[i] + pas] {
+                    let mut r = reglages;
+                    r[i] = essai.clamp(bas, haut);
+                    let e = erreur(&prevoir_tout(&r));
+                    if e < meilleur.0 {
+                        meilleur = (e, r[i]);
+                    }
+                }
+                reglages[i] = meilleur.1;
+            }
         }
     }
+    let graves = reglages[0];
+    let gains: [f32; CLOCHES.len()] = std::array::from_fn(|i| reglages[i + 1]);
     // Au demi-décibel, comme l'éditeur les affiche.
-    bandes((graves * 2.0).round() / 2.0, (presence * 2.0).round() / 2.0)
+    let demi = |x: f32| (x * 2.0).round() / 2.0;
+    construire(demi(graves), &gains.map(demi))
 }
 
 /// L'énergie totale de quelques tiers d'octave, en dB.
@@ -200,20 +275,30 @@ mod tests {
     /// Une « voix » au timbre de la parole moyenne : un son par tiers
     /// d'octave, à son niveau, en syllabes — une enveloppe douce, dont les
     /// creux passent sous le seuil de la voix sans éclabousser le spectre
-    /// comme le ferait une coupure nette. `aigus_db` s'ajoute au-dessus de
-    /// 1,6 kHz.
+    /// comme le ferait une coupure nette. `aigus_db` s'ajoute dès 1,25 kHz.
     fn voix(aigus_db: f32) -> Vec<f32> {
         voix_timbree(0.0, aigus_db)
     }
 
     /// De même, avec `graves_db` en plus sous 300 Hz.
     fn voix_timbree(graves_db: f32, aigus_db: f32) -> Vec<f32> {
+        voix_sculptee(|f| {
+            if f >= 1250.0 {
+                aigus_db
+            } else if f < 300.0 {
+                graves_db
+            } else {
+                0.0
+            }
+        })
+    }
+
+    /// Une voix moyenne dont chaque tiers d'octave reçoit `ecart(f)` dB.
+    fn voix_sculptee(ecart: impl Fn(f32) -> f32) -> Vec<f32> {
         let n = 5 * SAMPLE_RATE as usize;
         let mut x = vec![0f32; n];
         for (k, (&f, &db)) in TIERS.iter().zip(&PAROLE).enumerate() {
-            let db = db
-                + if TIERS[k] > 1600.0 { aigus_db } else { 0.0 }
-                + if TIERS[k] < 300.0 { graves_db } else { 0.0 };
+            let db = db + ecart(f);
             let a = 10f32.powf((db - 70.0) / 20.0);
             for (i, s) in x.iter_mut().enumerate() {
                 *s += a * (2.0 * std::f32::consts::PI * f * i as f32 / SAMPLE_RATE as f32 + k as f32).sin();
@@ -247,21 +332,38 @@ mod tests {
     #[test]
     fn un_egaliseur_se_predit() {
         let s = analyser(&voix(-12.0)).unwrap();
-        // +12 dB au-dessus de 1,6 kHz : on retombe sur la voix moyenne.
-        let corrige = s.filtre(|f| if f > 1600.0 { 12.0 } else { 0.0 });
+        // +12 dB dès 1,25 kHz : on retombe sur la voix moyenne.
+        let corrige = s.filtre(|f| if f >= 1250.0 { 12.0 } else { 0.0 });
         assert!(corrige.presence_db().abs() < 0.7);
     }
 
     #[test]
     fn le_correctif_rend_une_voix_claire() {
-        // Étouffée et grondante : -8 dB d'aigus, +6 dB de graves.
-        let s = analyser(&voix_timbree(6.0, -8.0)).unwrap();
+        // Étouffée et grondante : -8 dB d'aigus, +8 dB de 100 à 160 Hz.
+        let s = analyser(&voix_sculptee(|f| {
+            if f >= 1_250.0 {
+                -8.0
+            } else if f <= 160.0 {
+                8.0
+            } else {
+                0.0
+            }
+        }))
+        .unwrap();
         let eq = egaliseur_correctif(&s);
         let corrigee = s.filtre(|f| reponse_db(&eq, f));
         assert!((corrigee.presence_db() - PRESENCE_VISEE_DB).abs() < 0.6, "présence {:.2}", corrigee.presence_db());
-        assert!((corrigee.graves_db() - GRAVES_VISES_DB).abs() < 0.6, "graves {:.2}", corrigee.graves_db());
-        // Coupe, étagère, cloche : trois bandes.
-        assert_eq!(eq.len(), 3);
+        let (avant, apres) = (s.ecarts_db(), corrigee.ecarts_db());
+        // Le grondement redescend près des graves visés…
+        for k in 1..=2 {
+            assert!((apres[k] - GRAVES_VISES_DB).abs() < 2.0, "{} Hz : {:.1} dB", TIERS[k], apres[k]);
+        }
+        // … sans toucher au corps de la voix.
+        for k in 4..=6 {
+            assert!((apres[k] - avant[k]).abs() < 1.5, "{} Hz : {:.1} → {:.1} dB", TIERS[k], avant[k], apres[k]);
+        }
+        // Coupe, creux, et des cloches de présence.
+        assert!(eq.len() >= 3);
         // Bien plus grondante et étouffée : chaque bande plafonne, sans
         // chercher à tout rattraper, et la voix s'améliore quand même.
         let s = analyser(&voix_timbree(12.0, -14.0)).unwrap();
@@ -269,7 +371,7 @@ mod tests {
         assert!(eq.iter().all(|b| b.gain_db >= -GRAVES_MAX_DB && b.gain_db <= PRESENCE_MAX_DB));
         let corrigee = s.filtre(|f| reponse_db(&eq, f));
         assert!(corrigee.presence_db() > s.presence_db() + 6.0);
-        assert!(corrigee.graves_db() < s.graves_db() - 4.0);
+        assert!(corrigee.ecarts_db()[1] < s.ecarts_db()[1] - 5.0);
         // Une voix déjà claire n'a que la coupe du grondement.
         let claire = egaliseur_correctif(&analyser(&voix(0.0)).unwrap());
         assert_eq!(claire.len(), 1);
@@ -277,6 +379,26 @@ mod tests {
         // Sans presque aucun aigu : la présence plafonne.
         let perdue = egaliseur_correctif(&analyser(&voix(-30.0)).unwrap());
         assert!(perdue.iter().any(|b| b.forme == Forme::Cloche && b.gain_db == PRESENCE_MAX_DB));
+    }
+
+    #[test]
+    fn une_bosse_ne_cache_pas_un_trou() {
+        // La voix de drion, le 30/09 : -15 dB de 1,25 à 2,5 kHz, presque
+        // rien de moins à 4 kHz.
+        let trou = |f: f32| if (1_250.0..=2_500.0).contains(&f) { -15.0 } else if f == 4_000.0 { -2.0 } else { 0.0 };
+        let s = analyser(&voix_sculptee(trou)).unwrap();
+        assert!(s.presence_db() < -6.0, "présence {:.2}", s.presence_db());
+        // La correction comble le trou, là où il est.
+        let eq = egaliseur_correctif(&s);
+        let premiere = eq.iter().find(|b| b.forme == Forme::Cloche).expect("une cloche");
+        assert!((1_250.0..=2_500.0).contains(&premiere.frequence), "cloche à {} Hz", premiere.frequence);
+        let corrigee = s.filtre(|f| reponse_db(&eq, f));
+        for (k, e) in corrigee.ecarts_db().iter().enumerate() {
+            if (1_250.0..=2_500.0).contains(&TIERS[k]) {
+                assert!(*e > -8.0, "{} Hz encore à {e:.1} dB", TIERS[k]);
+            }
+        }
+        assert!(corrigee.presence_db() > s.presence_db() + 5.0);
     }
 
     #[test]

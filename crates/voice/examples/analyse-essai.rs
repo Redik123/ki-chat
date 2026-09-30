@@ -12,7 +12,7 @@
 
 use ki_voice::egaliseur;
 use ki_voice::effects::load_wav_file;
-use ki_voice::spectre::{analyser, TIERS};
+use ki_voice::spectre::{analyser, egaliseur_correctif, TIERS};
 
 fn en_db(x: f32) -> f32 {
     20.0 * x.max(1e-9).log10()
@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
     };
     let avec_eq = b.filtre(|f| egaliseur::reponse_db(&eq, f));
     println!();
-    println!("Écart à une parole moyenne, calé à 0 sur 315 Hz - 1 kHz :");
+    println!("Écart à une parole moyenne, calé à 0 sur 315 - 800 Hz :");
     println!("   Hz |   brut | brut+EQ | envoyé | chaîne hors EQ");
     let (eb, ee, eq_) = (b.ecarts_db(), e.ecarts_db(), avec_eq.ecarts_db());
     for k in 0..TIERS.len() {
@@ -61,16 +61,39 @@ fn main() -> anyhow::Result<()> {
     }
     println!();
     println!(
-        "présence (2-6,3 kHz) : brut {:+.1}, brut+EQ {:+.1}, envoyé {:+.1} dB",
+        "présence (1,25-6,3 kHz) : brut {:+.1}, brut+EQ {:+.1}, envoyé {:+.1} dB",
         b.presence_db(),
         avec_eq.presence_db(),
         e.presence_db()
     );
     println!(
-        "graves (100-250 Hz)  : brut {:+.1}, brut+EQ {:+.1}, envoyé {:+.1} dB",
+        "graves (100-250 Hz)     : brut {:+.1}, brut+EQ {:+.1}, envoyé {:+.1} dB",
         b.graves_db(),
         avec_eq.graves_db(),
         e.graves_db()
+    );
+
+    // Ce que « Corriger ma voix » proposerait : réglé sur ce qui part,
+    // l'égaliseur actuel ôté — comme l'interface.
+    let sans_eq = e.filtre(|f| -egaliseur::reponse_db(&eq, f));
+    let correctif = egaliseur_correctif(&sans_eq);
+    let prevue = sans_eq.filtre(|f| egaliseur::reponse_db(&correctif, f));
+    println!();
+    println!("« Corriger ma voix » : {}", egaliseur::ecrire(&correctif));
+    for b in &correctif {
+        println!("  {:?} {:.0} Hz {:+.1} dB (Q {:.2})", b.forme, b.frequence, b.gain_db, b.q);
+    }
+    println!("   Hz | envoyé sans EQ | avec la correction");
+    let (a, p) = (sans_eq.ecarts_db(), prevue.ecarts_db());
+    for k in 0..TIERS.len() {
+        println!("{:5} | {:+14.1} | {:+6.1}", TIERS[k], a[k], p[k]);
+    }
+    println!(
+        "présence {:+.1} → {:+.1} dB, graves {:+.1} → {:+.1} dB",
+        sans_eq.presence_db(),
+        prevue.presence_db(),
+        sans_eq.graves_db(),
+        prevue.graves_db()
     );
     Ok(())
 }

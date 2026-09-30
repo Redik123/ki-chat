@@ -679,9 +679,9 @@ impl KiApp {
         ui.add_space(6.0);
         courbe_de_voix(ui, &brute.ecarts_db(), &envoyee.ecarts_db());
         let (presence, graves) = (envoyee.presence_db(), envoyee.graves_db());
-        let (mot, couleur) = if presence >= -6.0 {
+        let (mot, couleur) = if presence >= -5.0 {
             ("claire", SPEAK)
-        } else if presence >= -12.0 {
+        } else if presence >= -10.0 {
             ("un peu sourde", WARN)
         } else {
             ("étouffée", DANGER)
@@ -701,8 +701,8 @@ impl KiApp {
         let avant_eq = brute.presence_db();
         let apres_eq = brute.filtre(|f| egaliseur::reponse_db(&analyse.egaliseur, f)).presence_db();
         let (par_eq, par_chaine) = (apres_eq - avant_eq, presence - apres_eq);
-        if presence < -6.0 {
-            if avant_eq < -6.0 {
+        if presence < -5.0 {
+            if avant_eq < -5.0 {
                 ui::precision(
                     ui,
                     &format!(
@@ -726,14 +726,20 @@ impl KiApp {
                 );
             }
         }
-        if graves > 6.0 {
-            ui::precision(ui, "Beaucoup de graves : c'est ce qui fait « caverneux ».");
+        // Le grondement, de 100 à 160 Hz : l'effet de proximité d'un micro
+        // tout près de la bouche.
+        let grondement = envoyee.ecarts_db()[..3].iter().fold(f32::MIN, |m, e| m.max(*e));
+        if grondement > 6.0 {
+            ui::precision(
+                ui,
+                &format!("Du grondement ({grondement:+.0} dB vers 100 Hz) : c'est ce qui fait « caverneux »."),
+            );
         }
         // La correction : réglée sur ce qui part, l'égaliseur actuel ôté —
         // elle compense aussi ce que le débruitage et le codec retirent.
         let sans_eq = envoyee.filtre(|f| -egaliseur::reponse_db(&analyse.egaliseur, f));
         let correctif = spectre::egaliseur_correctif(&sans_eq);
-        let a_corriger = presence < spectre::PRESENCE_VISEE_DB - 2.0 || graves > spectre::GRAVES_VISES_DB + 2.0;
+        let a_corriger = correctif.iter().any(|b| b.forme != egaliseur::Forme::PasseHaut);
         if self.egaliseur_micro == correctif {
             ui::precision(
                 ui,
@@ -870,16 +876,15 @@ fn courbe_de_voix(ui: &mut egui::Ui, brute: &[f32; NB_TIERS], envoyee: &[f32; NB
     });
 }
 
-/// Un égaliseur en quelques mots : « coupe sous 80 Hz, graves -4 dB,
-/// présence +6 dB ».
+/// Un égaliseur en quelques mots : « coupe sous 80 Hz, grondement -4 dB,
+/// +12 dB à 2 kHz ».
 fn decrire(bandes: &[egaliseur::Bande]) -> String {
     bandes
         .iter()
         .map(|b| match b.forme {
             egaliseur::Forme::PasseHaut => format!("coupe sous {:.0} Hz", b.frequence),
-            egaliseur::Forme::EtagereBasse => format!("graves {:+.1} dB", b.gain_db),
-            egaliseur::Forme::Cloche => format!("présence {:+.1} dB", b.gain_db),
-            _ => format!("{:.0} Hz {:+.1} dB", b.frequence, b.gain_db),
+            egaliseur::Forme::Cloche if b.frequence < 500.0 => format!("grondement {:+.0} dB", b.gain_db),
+            _ => format!("{:+.0} dB à {}", b.gain_db, crate::egaliseur_ui::frequence_texte(b.frequence)),
         })
         .collect::<Vec<_>>()
         .join(", ")
