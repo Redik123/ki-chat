@@ -782,6 +782,9 @@ pub struct Regard {
     /// On lit la qualité basse : le serveur nous y a mis, notre connexion
     /// ne suivait pas la haute.
     pub basse: Arc<AtomicBool>,
+    /// Le dernier saut à une trame clé parce que le décodage ne suivait pas
+    /// (millisecondes depuis l'époque Unix ; 0 : jamais).
+    pub saut: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     /// Le fil du son du jeu, s'il a pu démarrer.
@@ -805,15 +808,16 @@ impl Regard {
         let image = Arc::new(Mutex::new(None));
         let images = Arc::new(AtomicU64::new(0));
         let basse = Arc::new(AtomicBool::new(false));
+        let saut = Arc::new(AtomicU64::new(0));
         // L'horloge du son : le fil du son y note où en est la lecture, le
         // fil de l'image retient chaque image jusqu'à cet instant-là.
         let horloge: Horloge = Arc::new(Mutex::new(None));
         let worker = {
-            let (stop, image, images, horloge, basse) =
-                (stop.clone(), image.clone(), images.clone(), horloge.clone(), basse.clone());
+            let (stop, image, images, horloge, basse, saut) =
+                (stop.clone(), image.clone(), images.clone(), horloge.clone(), basse.clone(), saut.clone());
             std::thread::Builder::new()
                 .name("video-regard".into())
-                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx, horloge, basse))
+                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx, horloge, basse, saut))
                 .ok()
         };
         let audio_worker = {
@@ -823,7 +827,7 @@ impl Regard {
                 .spawn(move || fil_audio(stream_id, key, audio_rx, engine, stop, horloge))
                 .ok()
         };
-        Self { stream_id, streamer, image, images, basse, stop, worker, audio_worker }
+        Self { stream_id, streamer, image, images, basse, saut, stop, worker, audio_worker }
     }
 
     pub fn arreter(mut self) {
@@ -919,6 +923,21 @@ fn fil_audio(
 /// d'espérer : saut à la prochaine trame clé disponible, ou table rase.
 const ATTENTE_MAX: usize = 30;
 
+/// Les trames reçues en attente du fil décodeur, au plus : 3 s à 30 i/s.
+/// Au-delà, la couche réseau jette. Le canal était sans limite : quand le
+/// processeur d'un spectateur décodait moins vite que le stream n'arrivait,
+/// le retard s'y entassait pendant des heures, jusqu'à geler le PC (CR0W,
+/// portable, 2580×1080 à 31 ms par image pour 33 de budget).
+pub const FILE_TRAMES_MAX: usize = 90;
+/// De même pour le son du jeu : 3 s de datagrammes.
+pub const FILE_SON_MAX: usize = 150;
+/// Plus de retard que ça à décoder derrière la lecture (les trames en
+/// attente × le temps moyen d'un décodage) : le processeur ne suit pas. On
+/// saute à la dernière trame clé en attente — l'image saute d'un coup, au
+/// lieu que le retard grossisse. Un décodeur rapide rattrape une rafale
+/// réseau sans sauter : c'est le temps qui compte, pas le nombre.
+const RETARD_MAX_MS: f64 = 330.0;
+
 /// Les trames d'une qualité en attente de leur tour, par séquence :
 /// (trame clé ?, horodatage, octets).
 type Attente = BTreeMap<u64, (bool, u64, Vec<u8>)>;
@@ -932,6 +951,49 @@ fn cle_de_bascule(autre: &Attente, lu_pts: Option<u64>) -> Option<u64> {
         .iter()
         .find(|(_, (idr, pts, _))| *idr && lu_pts.is_none_or(|l| *pts > l))
         .map(|(s, _)| *s)
+}
+
+/// La mémoire privée de ki-chat et la mémoire physique encore libre du PC,
+/// en Mo : dans le bilan du spectateur, de quoi voir si un PC qui gèle en
+/// plein stream manquait de mémoire.
+#[cfg(windows)]
+fn memoire_mo() -> Option<(u64, u64)> {
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    const MO: u64 = 1024 * 1024;
+    unsafe {
+        let mut processus = PROCESS_MEMORY_COUNTERS_EX {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut processus as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
+            processus.cb,
+        )
+        .ok()?;
+        let mut systeme = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+        GlobalMemoryStatusEx(&mut systeme).ok()?;
+        Some((processus.PrivateUsage as u64 / MO, systeme.ullAvailPhys / MO))
+    }
+}
+
+#[cfg(not(windows))]
+fn memoire_mo() -> Option<(u64, u64)> {
+    None
+}
+
+/// La trame clé où sauter quand le décodage ne suit pas : la dernière en
+/// attente après `next`, si décoder tout ce qui attend (au temps moyen d'un
+/// décodage) prendrait plus de [`RETARD_MAX_MS`].
+fn saut_de_retard(attente: &Attente, next: u64, decodage_moyen_ms: f64) -> Option<u64> {
+    if attente.range(next..).count() as f64 * decodage_moyen_ms <= RETARD_MAX_MS {
+        return None;
+    }
+    attente.iter().rev().find(|(k, (idr, _, _))| **k > next && *idr).map(|(s, _)| *s)
 }
 
 /// Le fil d'un spectateur : déchiffre, remet en ordre, décode.
@@ -960,11 +1022,21 @@ struct Bilan {
     affichees: u32,
     decodage_ms: f64,
     taille: (usize, usize),
+    /// Les sauts à une trame clé parce que le décodage ne suivait pas.
+    sauts: u32,
 }
 
 impl Bilan {
     fn new() -> Self {
-        Self { depuis: std::time::Instant::now(), recues: 0, decodees: 0, affichees: 0, decodage_ms: 0.0, taille: (0, 0) }
+        Self {
+            depuis: std::time::Instant::now(),
+            recues: 0,
+            decodees: 0,
+            affichees: 0,
+            decodage_ms: 0.0,
+            taille: (0, 0),
+            sauts: 0,
+        }
     }
 
     /// Au journal si c'est l'heure (et qu'il s'est passé quelque chose),
@@ -976,8 +1048,17 @@ impl Bilan {
         }
         if self.recues > 0 {
             let s = dt.as_secs_f64();
+            let sauts = if self.sauts > 0 {
+                format!(" · {} saut(s) : le décodage ne suit pas", self.sauts)
+            } else {
+                String::new()
+            };
+            let memoire = match memoire_mo() {
+                Some((ki_chat, libre)) => format!(" · mémoire : ki-chat {ki_chat} Mo, libre {libre} Mo"),
+                None => String::new(),
+            };
             ki_video::journal(format!(
-                "visionnage : {}x{} ({}) · {:.0} i/s reçues, {:.0} décodées, {:.0} affichées · décodage {:.1} ms par image",
+                "visionnage : {}x{} ({}) · {:.0} i/s reçues, {:.0} décodées, {:.0} affichées · décodage {:.1} ms par image{sauts}{memoire}",
                 self.taille.0,
                 self.taille.1,
                 if basse { "basse" } else { "haute" },
@@ -1002,6 +1083,7 @@ fn fil_decodeur(
     ctx: egui::Context,
     horloge: Horloge,
     basse: Arc<AtomicBool>,
+    saut: Arc<AtomicU64>,
 ) {
     let cipher = XChaCha20Poly1305::new(&key.into());
     let Ok(mut decodeur) = ViewerDecoder::new() else {
@@ -1025,42 +1107,50 @@ fn fil_decodeur(
     let mut a_afficher: std::collections::VecDeque<(u64, egui::ColorImage)> =
         std::collections::VecDeque::new();
     let mut bilan = Bilan::new();
+    // Le temps moyen d'un décodage, glissant : de quoi estimer le retard
+    // qu'on a devant soi.
+    let mut decodage_moyen_ms = 10.0f64;
 
     loop {
+        // L'arrêt se lit à chaque tour, et non plus seulement quand le canal
+        // est vide : avec du retard entassé il ne l'était jamais, et fermer
+        // ki-chat attendait la fin du décodage — le garde-fou tuait alors le
+        // processus (« fermeture bloquée »).
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         bilan.peut_etre_dire(couche == 1);
         // Une image en attente : on se réveille souvent pour la poser à
         // l'heure ; sinon, au rythme des trames.
         let delai = if a_afficher.is_empty() { 200 } else { 5 };
+        // Tout ce qui attend dans le canal, d'un coup : le retard passe dans
+        // les files en ordre, bornées, où il se voit et se rattrape.
+        let mut lot = Vec::new();
         match rx.recv_timeout(Duration::from_millis(delai)) {
             Ok(bytes) => {
-                if let Some(h) = ki_protocol::parse_media_header(&bytes) {
-                    if h.stream_id == stream_id {
-                        let domaine = if h.basse {
-                            ki_protocol::MEDIA_DOMAIN_VIDEO_BASSE
-                        } else {
-                            ki_protocol::MEDIA_DOMAIN_VIDEO
-                        };
-                        let nonce = ki_protocol::nonce_for_media(domaine, stream_id, h.seq);
-                        // L'en-tête est l'AAD : altéré en route, le tag le
-                        // trahit.
-                        let (aad, sealed) = bytes.split_at(ki_protocol::MEDIA_HEADER_LEN);
-                        if let Ok(clair) = cipher
-                            .decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
-                        {
-                            attentes[usize::from(h.basse)].insert(h.seq, (h.idr, h.pts_us, clair));
-                            if usize::from(h.basse) == couche {
-                                bilan.recues += 1;
-                            }
-                        }
-                    }
+                lot.push(bytes);
+                while let Ok(bytes) = rx.try_recv() {
+                    lot.push(bytes);
                 }
             }
-            Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                if stop.load(Ordering::Relaxed) {
-                    return;
-                }
-            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        for bytes in lot {
+            let Some(h) = ki_protocol::parse_media_header(&bytes) else { continue };
+            if h.stream_id != stream_id {
+                continue;
+            }
+            let domaine = if h.basse { ki_protocol::MEDIA_DOMAIN_VIDEO_BASSE } else { ki_protocol::MEDIA_DOMAIN_VIDEO };
+            let nonce = ki_protocol::nonce_for_media(domaine, stream_id, h.seq);
+            // L'en-tête est l'AAD : altéré en route, le tag le trahit.
+            let (aad, sealed) = bytes.split_at(ki_protocol::MEDIA_HEADER_LEN);
+            if let Ok(clair) = cipher.decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad }) {
+                attentes[usize::from(h.basse)].insert(h.seq, (h.idr, h.pts_us, clair));
+                if usize::from(h.basse) == couche {
+                    bilan.recues += 1;
+                }
+            }
         }
 
         // Le serveur nous a changé de qualité : une trame clé de l'autre,
@@ -1093,14 +1183,32 @@ fn fil_decodeur(
             }
         }
 
+        // En retard : trop à décoder derrière la lecture, le processeur ne
+        // suit pas. Saut à la dernière trame clé en attente.
+        if let Some(s) = prochaine.and_then(|next| saut_de_retard(attente, next, decodage_moyen_ms)) {
+            attente.retain(|k, _| *k >= s);
+            prochaine = Some(s);
+            bilan.sauts += 1;
+            let maintenant = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(1);
+            saut.store(maintenant, Ordering::Relaxed);
+        }
+
         if let Some(mut next) = prochaine {
             loop {
                 // Tout ce qui est contigu part au décodeur, dans l'ordre.
                 while let Some((_, pts, clair)) = attente.remove(&next) {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
                     lu_pts = Some(pts);
                     let t0 = std::time::Instant::now();
                     let decodee = decodeur.decode(&clair);
-                    bilan.decodage_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                    let duree_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    bilan.decodage_ms += duree_ms;
+                    decodage_moyen_ms = 0.9 * decodage_moyen_ms + 0.1 * duree_ms;
                     if let Some(frame) = decodee {
                         bilan.decodees += 1;
                         bilan.taille = (frame.width, frame.height);
@@ -1111,6 +1219,13 @@ fn fil_decodeur(
                             &frame.rgba,
                         );
                         a_afficher.push_back((pts, prete));
+                        // Un rattrapage d'un coup (des dizaines d'images de
+                        // 11 Mo en 2580×1080) ne doit pas s'entasser avant
+                        // l'affichage : les plus anciennes ne seraient de
+                        // toute façon plus à l'heure.
+                        while a_afficher.len() > FILE_AFFICHAGE_MAX {
+                            a_afficher.pop_front();
+                        }
                     }
                     next = next.wrapping_add(1);
                 }
@@ -1180,6 +1295,34 @@ fn fil_decodeur(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 40 trames en attente depuis la 1, des trames clés à 1, 20 et 35.
+    fn retard() -> Attente {
+        (1..=40u64).map(|k| (k, (matches!(k, 1 | 20 | 35), k * 33_333, Vec::new()))).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn la_memoire_se_lit() {
+        let (ki_chat, libre) = memoire_mo().expect("mémoire lisible");
+        // Un processus de test pèse quelques Mo ; un PC a de la mémoire libre.
+        assert!((1..64 * 1024).contains(&ki_chat), "ki-chat {ki_chat} Mo");
+        assert!(libre >= 1, "libre {libre} Mo");
+    }
+
+    #[test]
+    fn un_decodage_lent_saute_a_la_derniere_trame_cle() {
+        // 40 trames à 30 ms : 1,2 s de retard. Saut à la 35, la plus récente.
+        assert_eq!(saut_de_retard(&retard(), 1, 30.0), Some(35));
+        // Un décodeur rapide rattrape la même rafale sans sauter.
+        assert_eq!(saut_de_retard(&retard(), 1, 5.0), None);
+        // Du retard mais pas de trame clé devant (la seule est derrière) :
+        // rien où sauter, on décode dans l'ordre.
+        let sans_cle: Attente = (2..=40u64).map(|k| (k, (false, k * 33_333, Vec::new()))).collect();
+        assert_eq!(saut_de_retard(&sans_cle, 2, 30.0), None);
+        // Peu de retard devant soi : on ne saute pas, même avec une clé.
+        assert_eq!(saut_de_retard(&retard(), 30, 30.0), None);
+    }
 
     #[test]
     fn les_crans_de_l_encodeur_descendent_la_cadence_puis_la_hauteur() {

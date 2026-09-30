@@ -10421,8 +10421,10 @@ impl KiApp {
         if meme_machine {
             ki_voice::journal("visionnage : streamer sur cette machine, son du jeu coupé ici".into());
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        // Bornés : un spectateur dont le décodage ne suit pas ne doit pas
+        // entasser le retard en mémoire (voir `partage::FILE_TRAMES_MAX`).
+        let (tx, rx) = std::sync::mpsc::sync_channel(partage::FILE_TRAMES_MAX);
+        let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel(partage::FILE_SON_MAX);
         if let Some(conn) = &self.conn {
             conn.set_video_feed(Some(tx));
             conn.set_game_audio_feed(Some(audio_tx));
@@ -10758,15 +10760,26 @@ impl KiApp {
         // En qualité basse, le dire : l'image plus petite n'est pas une
         // panne, c'est sa connexion qui ne suivait pas la haute.
         let reduite = r.basse.load(std::sync::atomic::Ordering::Relaxed);
+        // Un saut dans les 10 dernières secondes : son PC ne décode pas assez
+        // vite, l'image saute pour rester à l'heure. Le dire, pour qu'on ne
+        // croie pas à une coupure.
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let saut = r.saut.load(std::sync::atomic::Ordering::Relaxed);
+        let rattrape = saut > 0 && maintenant.saturating_sub(saut) < 10_000;
         let etat = match &self.regard_tex {
             Some(tex) => {
                 let [w, h] = tex.size();
-                let base = format!("{w}x{h} · {:.0} i/s", self.cadence_regard.fps);
+                let mut base = format!("{w}x{h} · {:.0} i/s", self.cadence_regard.fps);
                 if reduite {
-                    format!("{base} · qualité réduite pour ta connexion")
-                } else {
-                    base
+                    base.push_str(" · qualité réduite pour ta connexion");
                 }
+                if rattrape {
+                    base.push_str(" · ton PC ne suit pas : l'image saute pour rester à l'heure");
+                }
+                base
             }
             None => String::new(),
         };

@@ -265,10 +265,10 @@ pub struct NetHandle {
     /// posé quand on regarde un stream, vidé sinon — le motif de la voix.
     /// Contrairement au lien audio, rien ici ne survit à la connexion : une
     /// coupure met fin au stream côté serveur de toute façon.
-    video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
+    video_feed: Arc<Mutex<Option<std_mpsc::SyncSender<Vec<u8>>>>>,
     /// Où aiguiller les datagrammes de son du jeu entrants — le lecteur du
     /// spectateur en est l'autre bout. Même vie que l'aiguillage vidéo.
-    game_audio_feed: Arc<Mutex<Option<std_mpsc::Sender<bytes::Bytes>>>>,
+    game_audio_feed: Arc<Mutex<Option<std_mpsc::SyncSender<bytes::Bytes>>>>,
     /// Poignée du runtime réseau, pour lancer la tâche d'émission vidéo
     /// depuis le fil de l'interface.
     rt: Arc<Mutex<Option<tokio::runtime::Handle>>>,
@@ -332,12 +332,12 @@ impl NetHandle {
 
     /// Pose (ou retire) l'aiguillage des trames vidéo entrantes : le fil
     /// décodeur du spectateur en est l'autre bout.
-    pub fn set_video_feed(&self, tx: Option<std_mpsc::Sender<Vec<u8>>>) {
+    pub fn set_video_feed(&self, tx: Option<std_mpsc::SyncSender<Vec<u8>>>) {
         *self.video_feed.lock().unwrap() = tx;
     }
 
     /// Pose (ou retire) l'aiguillage du son du jeu entrant.
-    pub fn set_game_audio_feed(&self, tx: Option<std_mpsc::Sender<bytes::Bytes>>) {
+    pub fn set_game_audio_feed(&self, tx: Option<std_mpsc::SyncSender<bytes::Bytes>>) {
         *self.game_audio_feed.lock().unwrap() = tx;
     }
 
@@ -559,8 +559,8 @@ pub fn connect(
 ) -> NetHandle {
     let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
     let (event_tx, event_rx) = std_mpsc::channel();
-    let video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
-    let game_audio_feed: Arc<Mutex<Option<std_mpsc::Sender<bytes::Bytes>>>> =
+    let video_feed: Arc<Mutex<Option<std_mpsc::SyncSender<Vec<u8>>>>> = Arc::new(Mutex::new(None));
+    let game_audio_feed: Arc<Mutex<Option<std_mpsc::SyncSender<bytes::Bytes>>>> =
         Arc::new(Mutex::new(None));
     let rt_slot: Arc<Mutex<Option<tokio::runtime::Handle>>> = Arc::new(Mutex::new(None));
 
@@ -607,8 +607,8 @@ async fn run(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Cmd>,
     event_tx: std_mpsc::Sender<Event>,
     link: VoiceLink,
-    video_feed: Arc<Mutex<Option<std_mpsc::Sender<Vec<u8>>>>>,
-    audio_feed: Arc<Mutex<Option<std_mpsc::Sender<bytes::Bytes>>>>,
+    video_feed: Arc<Mutex<Option<std_mpsc::SyncSender<Vec<u8>>>>>,
+    audio_feed: Arc<Mutex<Option<std_mpsc::SyncSender<bytes::Bytes>>>>,
     ctx: eframe::egui::Context,
 ) {
     use std::sync::atomic::Ordering;
@@ -682,7 +682,9 @@ async fn run(
                 if ki_protocol::is_audio_datagram(&dat) {
                     let g = audio_feed.lock().unwrap();
                     if let Some(tx) = g.as_ref() {
-                        let _ = tx.send(dat);
+                        // File pleine : le lecteur a trois secondes de retard,
+                        // ce datagramme ne servirait plus.
+                        let _ = tx.try_send(dat);
                     }
                     continue;
                 }
@@ -720,7 +722,9 @@ async fn run(
                     let Ok(Ok(bytes)) = lu else { return };
                     let guard = feed.lock().unwrap();
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(bytes);
+                        // File pleine : le décodeur a trois secondes de
+                        // retard ; il sautera à la prochaine trame clé.
+                        let _ = tx.try_send(bytes);
                     }
                 });
             }

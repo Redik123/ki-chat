@@ -123,6 +123,11 @@ windows = { version = "0.61", features = [
     # tenu par Windows, qui passe au-dessus du jeu (raccourci.rs).
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
+    # GetProcessMemoryInfo, GlobalMemoryStatusEx : la mémoire de ki-chat et
+    # celle qui reste au PC, dans le bilan du spectateur — pour voir, si un
+    # PC gèle en plein stream, si la mémoire grimpait.
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
     # CreateFileMappingW : ki-chat affiche son numéro de processus à côté de
     # son verrou d'instance, pour qu'un second lancement puisse le nommer —
     # et le fermer, si l'utilisateur le veut — quand il ne répond plus.
