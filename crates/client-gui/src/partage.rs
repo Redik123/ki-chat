@@ -1142,12 +1142,16 @@ impl Decodeur {
 /// recopier (`from_rgba_unmultiplied`, pixel par pixel sur un seul cœur)
 /// coûtait 12 ms par image 3440×1440 — en plus des 20 du décodage
 /// d'openh264, pour 33 de budget, et sans que le journal ne les compte.
-fn image_egui(largeur: usize, hauteur: usize, rgba: Vec<u8>) -> egui::ColorImage {
-    match bytemuck::try_cast_vec::<u8, egui::Color32>(rgba) {
-        Ok(pixels) if pixels.len() == largeur * hauteur => egui::ColorImage::new([largeur, hauteur], pixels),
-        Ok(pixels) => egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], bytemuck::cast_slice(&pixels)),
-        Err((_, rgba)) => egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], &rgba),
+/// Une image dont la taille ne colle pas est jetée : egui paniquerait.
+fn image_egui(largeur: usize, hauteur: usize, rgba: Vec<u8>) -> Option<egui::ColorImage> {
+    if rgba.len() != largeur * hauteur * 4 {
+        return None;
     }
+    Some(match bytemuck::try_cast_vec::<u8, egui::Color32>(rgba) {
+        Ok(pixels) => egui::ColorImage::new([largeur, hauteur], pixels),
+        // Une capacité qui n'est pas un multiple de quatre : on recopie.
+        Err((_, rgba)) => egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], &rgba),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1287,7 +1291,7 @@ fn fil_decodeur(
                     // ce temps-là qui dit si l'on suit.
                     let prete = decodeur
                         .decoder(&clair)
-                        .map(|(largeur, hauteur, rgba)| image_egui(largeur, hauteur, rgba));
+                        .and_then(|(largeur, hauteur, rgba)| image_egui(largeur, hauteur, rgba));
                     let duree_ms = t0.elapsed().as_secs_f64() * 1000.0;
                     bilan.decodage_ms += duree_ms;
                     decodage_moyen_ms = 0.9 * decodage_moyen_ms + 0.1 * duree_ms;
@@ -1378,6 +1382,19 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn l_image_passe_a_egui_sans_recopie() {
+        let rgba: Vec<u8> = (0..4 * 6).map(|i| i as u8).collect();
+        let adresse = rgba.as_ptr() as usize;
+        let image = image_egui(3, 2, rgba).expect("une image");
+        assert_eq!(image.size, [3, 2]);
+        // Le même tampon, pas une copie.
+        assert_eq!(image.pixels.as_ptr() as usize, adresse);
+        assert_eq!(image.pixels[1].to_array(), [4, 5, 6, 7]);
+        // Une taille qui ne colle pas : jetée, pas de panique.
+        assert!(image_egui(3, 3, vec![0; 4 * 6]).is_none());
+    }
+
     #[test]
     fn la_memoire_se_lit() {
         let (ki_chat, libre) = memoire_mo().expect("mémoire lisible");
