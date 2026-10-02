@@ -10855,6 +10855,7 @@ impl KiApp {
                                     .suffix(" %")
                                     .integer(),
                             )
+                            .on_hover_text("le son du stream est ramené au niveau des voix : 100 %, c'est ce niveau ; ce curseur l'ajuste")
                             .changed()
                         {
                             self.regard_volume = pct / 100.0;
@@ -11009,6 +11010,7 @@ impl KiApp {
                                     .suffix(" %")
                                     .integer(),
                             )
+                            .on_hover_text("le son du stream est ramené au niveau des voix : 100 %, c'est ce niveau ; ce curseur l'ajuste")
                             .changed()
                         {
                             volume = pct / 100.0;
