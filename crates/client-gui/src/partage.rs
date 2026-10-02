@@ -1381,7 +1381,6 @@ mod tests {
         (1..=40u64).map(|k| (k, (matches!(k, 1 | 20 | 35), k * 33_333, Vec::new()))).collect()
     }
 
-    #[cfg(windows)]
     #[test]
     fn l_image_passe_a_egui_sans_recopie() {
         let rgba: Vec<u8> = (0..4 * 6).map(|i| i as u8).collect();
@@ -1395,6 +1394,7 @@ mod tests {
         assert!(image_egui(3, 3, vec![0; 4 * 6]).is_none());
     }
 
+    #[cfg(windows)]
     #[test]
     fn la_memoire_se_lit() {
         let (ki_chat, libre) = memoire_mo().expect("mémoire lisible");
