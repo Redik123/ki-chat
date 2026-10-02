@@ -36,7 +36,11 @@ ki-client-quic = { path = "../client-quic" }
 bytes = "1"
 ki-video = { path = "../video" }
 # Le décodeur de la visionneuse (vidéos du chat) : Media Foundation sous Windows.
+# Et celui des streams regardés, sur la carte graphique quand elle sait.
 ki-media = { path = "../media" }
+# L'image décodée d'un stream passe à egui sans être recopiée (`cast_vec`) :
+# déjà dans l'arbre par egui, avec la même option.
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 tokio.workspace = true
 chrono = "0.4"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne

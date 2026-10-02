@@ -2799,6 +2799,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64",
+ "bytemuck",
  "bytes",
  "chacha20poly1305",
  "chrono",
@@ -2868,6 +2869,7 @@ name = "ki-media"
 version = "0.1.55"
 dependencies = [
  "anyhow",
+ "openh264",
  "rayon",
  "tracing",
  "windows 0.61.3",

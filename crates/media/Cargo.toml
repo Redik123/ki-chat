@@ -19,9 +19,20 @@ tracing.workspace = true
 # 60 par seconde.
 rayon = "1"
 
+[dev-dependencies]
+# Le décodeur des spectateurs d'avant : la référence des pixels du décodeur
+# de trames (mêmes couleurs), et le banc qui les compare (`banc_regard`).
+openh264 = { version = "0.9", features = ["source"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    # Le décodeur des streams sur la carte graphique (DXVA) : un appareil
+    # Direct3D 11 prêté au décodeur de Windows.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     # PROPVARIANT : la position de lecture et la durée du fichier.

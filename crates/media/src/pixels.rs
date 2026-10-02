@@ -2,9 +2,10 @@
 //!
 //! NV12 : un plan de luminance (un octet par pixel), puis un plan de
 //! chrominance entrelacée (U, V) à demi-résolution dans les deux sens. Les
-//! coefficients suivent la norme de la source : BT.709 pour la haute
-//! définition, BT.601 en dessous — c'est ce que les décodeurs supposent quand
-//! le fichier ne dit rien, et ce que ffmpeg écrit.
+//! coefficients suivent la norme de la source (`Matrice`) : pour un fichier,
+//! BT.709 en haute définition et BT.601 en dessous — c'est ce que les
+//! décodeurs supposent quand le fichier ne dit rien, et ce que ffmpeg écrit ;
+//! pour un stream, BT.601 à toutes les tailles.
 //!
 //! Arithmétique entière en virgule fixe (×256), deux pixels par pas (ils
 //! partagent leur chrominance), et les lignes réparties entre les cœurs par
@@ -16,12 +17,39 @@ use rayon::prelude::*;
 const BT601: (i32, i32, i32, i32) = (409, 100, 208, 516);
 const BT709: (i32, i32, i32, i32) = (459, 55, 136, 541);
 
+/// La matrice YCbCr de la source, plage limitée.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matrice {
+    Bt601,
+    Bt709,
+}
+
+impl Matrice {
+    /// Ce que les décodeurs supposent d'un fichier qui ne dit rien : BT.709
+    /// en haute définition, BT.601 en dessous.
+    pub fn selon_hauteur(hauteur: usize) -> Self {
+        if hauteur >= 720 {
+            Matrice::Bt709
+        } else {
+            Matrice::Bt601
+        }
+    }
+
+    fn coefs(self) -> (i32, i32, i32, i32) {
+        match self {
+            Matrice::Bt601 => BT601,
+            Matrice::Bt709 => BT709,
+        }
+    }
+}
+
 /// Convertit une image NV12 en RGBA serré dans `sortie` (redimensionné).
 ///
 /// `y` et `uv` sont les deux plans, chacun avec son pas (octets par ligne,
 /// remplissage compris) ; `uv` fait `hauteur / 2` lignes de `largeur` octets
 /// utiles. Dimensions impaires : la dernière colonne ou ligne prend la
 /// chrominance de sa voisine.
+#[allow(clippy::too_many_arguments)]
 pub fn nv12_vers_rgba(
     y: &[u8],
     pas_y: usize,
@@ -29,13 +57,22 @@ pub fn nv12_vers_rgba(
     pas_uv: usize,
     largeur: usize,
     hauteur: usize,
+    matrice: Matrice,
     sortie: &mut Vec<u8>,
 ) {
-    sortie.resize(largeur * hauteur * 4, 0);
+    // Une sortie neuve vient de la mémoire déjà nulle du système, et ses
+    // pages se touchent pour la première fois pendant la conversion, sur
+    // tous les cœurs : la remettre à zéro d'abord coûtait, sur un seul
+    // cœur, le tiers de la conversion d'une image 3440×1440.
+    if sortie.is_empty() {
+        *sortie = vec![0; largeur * hauteur * 4];
+    } else {
+        sortie.resize(largeur * hauteur * 4, 0);
+    }
     if largeur == 0 || hauteur == 0 {
         return;
     }
-    let coefs = if hauteur >= 720 { BT709 } else { BT601 };
+    let coefs = matrice.coefs();
     // Trente-deux lignes par tâche : assez de travail pour amortir la
     // distribution, assez de tâches pour occuper tous les cœurs en 1080p.
     const BANDE: usize = 32;
@@ -89,7 +126,7 @@ mod tests {
         // Deux lignes de chroma, la dernière tronquée d'un octet.
         let plan_uv = vec![128u8; pas * 2 - 1];
         let mut out = Vec::new();
-        nv12_vers_rgba(&plan_y, pas, &plan_uv, pas, largeur, hauteur, &mut out);
+        nv12_vers_rgba(&plan_y, pas, &plan_uv, pas, largeur, hauteur, Matrice::Bt601, &mut out);
         assert_eq!(out.len(), largeur * hauteur * 4);
     }
 
@@ -105,7 +142,7 @@ mod tests {
             p
         };
         let mut out = Vec::new();
-        nv12_vers_rgba(&plan_y, l, &plan_uv, l, l, h, &mut out);
+        nv12_vers_rgba(&plan_y, l, &plan_uv, l, l, h, Matrice::selon_hauteur(h), &mut out);
         [out[0], out[1], out[2], out[3]]
     }
 
@@ -140,7 +177,7 @@ mod tests {
         let y = vec![128u8; 4 * h];
         let uv = vec![128u8; 4 * 2];
         let mut out = Vec::new();
-        nv12_vers_rgba(&y, 4, &uv, 4, l, h, &mut out);
+        nv12_vers_rgba(&y, 4, &uv, 4, l, h, Matrice::Bt601, &mut out);
         assert_eq!(out.len(), l * h * 4);
         assert!(out
             .as_chunks::<4>()

@@ -1072,6 +1072,84 @@ impl Bilan {
     }
 }
 
+/// Le décodeur du spectateur. Celui de Windows d'abord, sur la carte
+/// graphique quand elle sait : openh264 décode sur un seul cœur, et une
+/// image 3440×1440 lui prenait 20 à 30 ms pour 33 de budget — l'image
+/// sautait dès que le PC faisait autre chose. Sur la carte, le processeur
+/// n'a plus que la conversion en RGBA (2 à 3 ms, sur tous les cœurs).
+/// openh264 reste en secours : pas de Media Foundation (Windows « N »,
+/// macOS), ou un décodeur de Windows qui refuse une trame ou ne rend rien.
+enum Decodeur {
+    Windows { decodeur: ki_media::h264::DecodeurH264, sans_image: u32, dit: bool },
+    Openh264(ViewerDecoder),
+}
+
+/// Des trames entrées sans qu'aucune image ne sorte : au-delà, le décodeur
+/// de Windows est tenu pour muet. Il en rend une par trame, d'habitude.
+const MUET_APRES: u32 = 60;
+
+impl Decodeur {
+    fn new() -> anyhow::Result<Self> {
+        if cfg!(windows) {
+            match ki_media::h264::DecodeurH264::new() {
+                Ok(decodeur) => return Ok(Decodeur::Windows { decodeur, sans_image: 0, dit: false }),
+                Err(e) => ki_video::journal(format!("visionnage : décodeur de Windows indisponible ({e:#}), openh264")),
+            }
+        }
+        Ok(Decodeur::Openh264(ViewerDecoder::new()?))
+    }
+
+    /// Une trame ; l'image décodée (largeur, hauteur, RGBA opaque), s'il en
+    /// sort une.
+    fn decoder(&mut self, trame: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+        let abandon = match self {
+            Decodeur::Openh264(d) => return d.decode(trame).map(|f| (f.width, f.height, f.rgba)),
+            Decodeur::Windows { decodeur, sans_image, dit } => match decodeur.decoder(trame) {
+                Ok(Some(image)) => {
+                    *sans_image = 0;
+                    if !*dit {
+                        *dit = true;
+                        let ou = match decodeur.sur_la_carte() {
+                            Some(true) => "sur la carte graphique",
+                            _ => "sur le processeur",
+                        };
+                        ki_video::journal(format!("visionnage : décodeur de Windows, {ou}"));
+                    }
+                    return Some((image.largeur as usize, image.hauteur as usize, image.rgba));
+                }
+                Ok(None) => {
+                    *sans_image += 1;
+                    if *sans_image <= MUET_APRES {
+                        return None;
+                    }
+                    format!("aucune image en {MUET_APRES} trames")
+                }
+                Err(e) => format!("{e:#}"),
+            },
+        };
+        // Jusqu'à la fin de ce stream : openh264 repart à la prochaine
+        // trame clé (deux secondes au plus).
+        ki_video::journal(format!("visionnage : décodeur de Windows abandonné ({abandon}), openh264"));
+        if let Ok(d) = ViewerDecoder::new() {
+            *self = Decodeur::Openh264(d);
+        }
+        None
+    }
+}
+
+/// RGBA opaque → image egui, sans recopie : un pixel opaque est le même,
+/// prémultiplié ou non, et `Color32` n'est que ses quatre octets. Les
+/// recopier (`from_rgba_unmultiplied`, pixel par pixel sur un seul cœur)
+/// coûtait 12 ms par image 3440×1440 — en plus des 20 du décodage
+/// d'openh264, pour 33 de budget, et sans que le journal ne les compte.
+fn image_egui(largeur: usize, hauteur: usize, rgba: Vec<u8>) -> egui::ColorImage {
+    match bytemuck::try_cast_vec::<u8, egui::Color32>(rgba) {
+        Ok(pixels) if pixels.len() == largeur * hauteur => egui::ColorImage::new([largeur, hauteur], pixels),
+        Ok(pixels) => egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], bytemuck::cast_slice(&pixels)),
+        Err((_, rgba)) => egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], &rgba),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fil_decodeur(
     stream_id: u32,
@@ -1086,7 +1164,7 @@ fn fil_decodeur(
     saut: Arc<AtomicU64>,
 ) {
     let cipher = XChaCha20Poly1305::new(&key.into());
-    let Ok(mut decodeur) = ViewerDecoder::new() else {
+    let Ok(mut decodeur) = Decodeur::new() else {
         ki_video::journal("visionnage impossible : décodeur H.264 du spectateur indisponible");
         return;
     };
@@ -1205,19 +1283,17 @@ fn fil_decodeur(
                     }
                     lu_pts = Some(pts);
                     let t0 = std::time::Instant::now();
-                    let decodee = decodeur.decode(&clair);
+                    // L'image prête pour egui, conversion comprise : c'est
+                    // ce temps-là qui dit si l'on suit.
+                    let prete = decodeur
+                        .decoder(&clair)
+                        .map(|(largeur, hauteur, rgba)| image_egui(largeur, hauteur, rgba));
                     let duree_ms = t0.elapsed().as_secs_f64() * 1000.0;
                     bilan.decodage_ms += duree_ms;
                     decodage_moyen_ms = 0.9 * decodage_moyen_ms + 0.1 * duree_ms;
-                    if let Some(frame) = decodee {
+                    if let Some(prete) = prete {
                         bilan.decodees += 1;
-                        bilan.taille = (frame.width, frame.height);
-                        // La conversion RGBA -> image egui (8 Mo en 1080p)
-                        // se paie ici, pas sur le fil d'interface.
-                        let prete = egui::ColorImage::from_rgba_unmultiplied(
-                            [frame.width, frame.height],
-                            &frame.rgba,
-                        );
+                        bilan.taille = (prete.size[0], prete.size[1]);
                         a_afficher.push_back((pts, prete));
                         // Un rattrapage d'un coup (des dizaines d'images de
                         // 11 Mo en 2580×1080) ne doit pas s'entasser avant

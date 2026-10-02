@@ -36,6 +36,7 @@ use windows::Win32::System::Com::StructuredStorage::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 
+use crate::pixels::Matrice;
 use crate::son::{en_mono, Reechantillonneur};
 use crate::{pixels, Flux, Image, Infos, Lecteur, Paquet};
 
@@ -63,16 +64,19 @@ pub(crate) fn preparer() -> anyhow::Result<()> {
 }
 
 /// Le format d'image tel que le lecteur le livre.
-struct FormatVideo {
+#[derive(Clone, Debug)]
+pub(crate) struct FormatVideo {
     /// La taille **codée** du tampon (1920×1088 pour du 1080p, souvent).
     codee: (usize, usize),
     /// L'image à montrer : décalage dans le tampon codé, et dimensions.
     decalage: (usize, usize),
-    largeur: usize,
-    hauteur: usize,
+    pub(crate) largeur: usize,
+    pub(crate) hauteur: usize,
     /// Octets par ligne annoncés par le type (0 = inconnu, on prend la
     /// largeur codée).
     pas: usize,
+    /// Pour un fichier, selon la hauteur ; le décodeur de trames la fixe.
+    pub(crate) matrice: Matrice,
 }
 
 struct FormatAudio {
@@ -274,6 +278,12 @@ fn choisir_video(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatV
 /// qu'il a changé (une résolution qui change en cours de fichier).
 fn format_video(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatVideo> {
     let t = unsafe { reader.GetCurrentMediaType(index) }.context("format vidéo")?;
+    format_du_type(&t)
+}
+
+/// Le format d'image d'un type NV12 : taille codée, ouverture d'affichage,
+/// pas — que le type vienne d'un fichier ou du décodeur de trames.
+pub(crate) fn format_du_type(t: &IMFMediaType) -> anyhow::Result<FormatVideo> {
     let taille = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE) }.context("taille d'image")?;
     let codee = ((taille >> 32) as usize, (taille & 0xffff_ffff) as usize);
     if codee.0 == 0 || codee.1 == 0 || codee.0 > 8192 || codee.1 > 8192 {
@@ -307,7 +317,7 @@ fn format_video(reader: &IMFSourceReader, index: u32) -> anyhow::Result<FormatVi
         .filter(|p| *p > 0)
         .map(|p| p as usize)
         .unwrap_or(0);
-    Ok(FormatVideo { codee, decalage, largeur, hauteur, pas })
+    Ok(FormatVideo { codee, decalage, largeur, hauteur, pas, matrice: Matrice::selon_hauteur(hauteur) })
 }
 
 fn cadence_images(reader: &IMFSourceReader, index: u32) -> f32 {
@@ -425,66 +435,7 @@ impl LecteurMf {
 
     fn image(&mut self, sample: &IMFSample, horodatage: i64) -> anyhow::Result<Image> {
         let v = self.video.as_ref().context("format vidéo inconnu")?;
-        let buffer = unsafe { sample.ConvertToContiguousBuffer() }.context("tampon d'image")?;
-        let mut rgba = Vec::new();
-        // Le tampon 2D donne le pas réel ; à défaut, le tampon plat et le pas
-        // annoncé par le type (ou la largeur codée).
-        if let Ok(b2) = buffer.cast::<IMF2DBuffer2>() {
-            let mut scan0: *mut u8 = null_mut();
-            let mut pas = 0i32;
-            let mut debut: *mut u8 = null_mut();
-            let mut longueur = 0u32;
-            unsafe {
-                b2.Lock2DSize(
-                    MF2DBuffer_LockFlags_Read,
-                    &mut scan0,
-                    &mut pas,
-                    &mut debut,
-                    &mut longueur,
-                )
-            }
-            .context("verrou du tampon 2D")?;
-            // La longueur se compte depuis le début du tampon, et la première
-            // ligne peut commencer plus loin : ce qui est lisible à partir
-            // d'elle, c'est la longueur moins ce décalage. Prendre la
-            // longueur entière depuis la première ligne lisait au-delà du
-            // tampon.
-            let lisible = (scan0 as usize)
-                .checked_sub(debut as usize)
-                .and_then(|decalage| (longueur as usize).checked_sub(decalage));
-            let resultat = match lisible {
-                Some(lisible) if pas > 0 && !scan0.is_null() && !debut.is_null() => {
-                    let octets = unsafe { std::slice::from_raw_parts(scan0, lisible) };
-                    convertir(v, octets, pas as usize, &mut rgba)
-                }
-                _ => Err(anyhow::anyhow!("tampon d'image renversé, vide ou incohérent")),
-            };
-            unsafe {
-                let _ = b2.Unlock2D();
-            }
-            resultat?;
-        } else {
-            let mut ptr: *mut u8 = null_mut();
-            let mut longueur = 0u32;
-            unsafe { buffer.Lock(&mut ptr, None, Some(&mut longueur)) }.context("verrou du tampon")?;
-            let resultat = if ptr.is_null() {
-                Err(anyhow::anyhow!("tampon d'image vide"))
-            } else {
-                let octets = unsafe { std::slice::from_raw_parts(ptr, longueur as usize) };
-                let pas = if v.pas > 0 { v.pas } else { v.codee.0 };
-                convertir(v, octets, pas, &mut rgba)
-            };
-            unsafe {
-                let _ = buffer.Unlock();
-            }
-            resultat?;
-        }
-        Ok(Image {
-            pts_ms: horodatage.max(0) as u64 / 10_000,
-            largeur: v.largeur as u32,
-            hauteur: v.hauteur as u32,
-            rgba,
-        })
+        image_nv12(v, sample, horodatage)
     }
 
     fn son(&mut self, sample: &IMFSample, horodatage: i64) -> anyhow::Result<Paquet> {
@@ -562,20 +513,95 @@ fn decoder_son(a: &mut FormatAudio, sample: &IMFSample) -> anyhow::Result<Vec<f3
     Ok(mono)
 }
 
+
+/// Une image NV12 d'un échantillon Media Foundation, convertie en RGBA :
+/// le pas réel par le tampon 2D, sinon celui du type.
+pub(crate) fn image_nv12(v: &FormatVideo, sample: &IMFSample, horodatage: i64) -> anyhow::Result<Image> {
+    let buffer = unsafe { sample.ConvertToContiguousBuffer() }.context("tampon d'image")?;
+    let mut rgba = Vec::new();
+    // Le tampon 2D donne le pas réel ; à défaut, le tampon plat et le pas
+    // annoncé par le type (ou la largeur codée).
+    if let Ok(b2) = buffer.cast::<IMF2DBuffer2>() {
+        let mut scan0: *mut u8 = null_mut();
+        let mut pas = 0i32;
+        let mut debut: *mut u8 = null_mut();
+        let mut longueur = 0u32;
+        unsafe {
+            b2.Lock2DSize(
+                MF2DBuffer_LockFlags_Read,
+                &mut scan0,
+                &mut pas,
+                &mut debut,
+                &mut longueur,
+            )
+        }
+        .context("verrou du tampon 2D")?;
+        // La longueur se compte depuis le début du tampon, et la première
+        // ligne peut commencer plus loin : ce qui est lisible à partir
+        // d'elle, c'est la longueur moins ce décalage. Prendre la
+        // longueur entière depuis la première ligne lisait au-delà du
+        // tampon.
+        let lisible = (scan0 as usize)
+            .checked_sub(debut as usize)
+            .and_then(|decalage| (longueur as usize).checked_sub(decalage));
+        let resultat = match lisible {
+            Some(lisible) if pas > 0 && !scan0.is_null() && !debut.is_null() => {
+                let octets = unsafe { std::slice::from_raw_parts(scan0, lisible) };
+                convertir(v, octets, pas as usize, v.codee.1, &mut rgba)
+            }
+            _ => Err(anyhow::anyhow!("tampon d'image renversé, vide ou incohérent")),
+        };
+        unsafe {
+            let _ = b2.Unlock2D();
+        }
+        resultat?;
+    } else {
+        let mut ptr: *mut u8 = null_mut();
+        let mut longueur = 0u32;
+        unsafe { buffer.Lock(&mut ptr, None, Some(&mut longueur)) }.context("verrou du tampon")?;
+        let resultat = if ptr.is_null() {
+            Err(anyhow::anyhow!("tampon d'image vide"))
+        } else {
+            let octets = unsafe { std::slice::from_raw_parts(ptr, longueur as usize) };
+            let pas = if v.pas > 0 { v.pas } else { v.codee.0 };
+            convertir(v, octets, pas, v.codee.1, &mut rgba)
+        };
+        unsafe {
+            let _ = buffer.Unlock();
+        }
+        resultat?;
+    }
+    Ok(Image {
+        pts_ms: horodatage.max(0) as u64 / 10_000,
+        largeur: v.largeur as u32,
+        hauteur: v.hauteur as u32,
+        rgba,
+    })
+}
+
 /// Découpe les deux plans NV12 dans le tampon et convertit l'image utile.
-fn convertir(v: &FormatVideo, octets: &[u8], pas: usize, rgba: &mut Vec<u8>) -> anyhow::Result<()> {
+/// `lignes_y` : les lignes du plan de luminance, après lesquelles commence
+/// celui de chrominance — la hauteur codée, ou plus pour une texture que la
+/// carte a allouée plus haute.
+pub(crate) fn convertir(
+    v: &FormatVideo,
+    octets: &[u8],
+    pas: usize,
+    lignes_y: usize,
+    rgba: &mut Vec<u8>,
+) -> anyhow::Result<()> {
     let (lc, hc) = v.codee;
     let hauteur_uv = hc.div_ceil(2);
-    if pas < lc || octets.len() < pas * (hc + hauteur_uv) {
+    if pas < lc || lignes_y < hc || octets.len() < pas * (lignes_y + hauteur_uv) {
         bail!(
             "tampon d'image trop court : {} octets pour {lc}x{hc} au pas {pas}",
             octets.len()
         );
     }
     let (dx, dy) = v.decalage;
-    let plan_y = &octets[dy * pas + dx..pas * hc];
-    let plan_uv = &octets[pas * hc + (dy / 2) * pas + (dx & !1)..];
-    pixels::nv12_vers_rgba(plan_y, pas, plan_uv, pas, v.largeur, v.hauteur, rgba);
+    let plan_y = &octets[dy * pas + dx..pas * lignes_y];
+    let plan_uv = &octets[pas * lignes_y + (dy / 2) * pas + (dx & !1)..];
+    pixels::nv12_vers_rgba(plan_y, pas, plan_uv, pas, v.largeur, v.hauteur, v.matrice, rgba);
     Ok(())
 }
 

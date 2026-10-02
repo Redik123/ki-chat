@@ -20,6 +20,7 @@ mod mf;
 #[cfg(windows)]
 mod mf_ecriture;
 pub mod annexb;
+pub mod h264;
 pub mod pixels;
 pub mod son;
 
