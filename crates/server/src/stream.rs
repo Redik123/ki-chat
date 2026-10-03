@@ -1183,8 +1183,12 @@ fn priorite(seq: u64, seq_start: u64) -> i32 {
 
 /// Trames d'un spectateur encore en vol (écrites, pas forcément arrivées)
 /// au-delà desquelles on annule les plus anciennes : trois secondes à
-/// 30 i/s, le temps qu'un lien lent se rattrape ou qu'une trame clé passe.
-const EN_VOL_MAX: usize = 90;
+/// 60 i/s, le temps qu'un lien lent se rattrape ou qu'une trame clé passe.
+/// La file ne se vide qu'à la trame clé : elle doit tenir un GOP entier
+/// (deux secondes, 120 trames à 60 i/s). À 90, un stream à 60 i/s la
+/// débordait à chaque GOP.
+const EN_VOL_MAX: usize = 180;
+const _: () = assert!(EN_VOL_MAX >= 2 * 60, "un GOP de deux secondes à 60 i/s doit tenir en vol");
 /// Une écriture qui n'aboutit pas dans ce délai, c'est un tampon d'envoi
 /// plein depuis trop longtemps : le lien du spectateur ne suit pas.
 const ECRITURE_MAX: Duration = Duration::from_millis(400);
@@ -1263,18 +1267,33 @@ async fn diffuser(
         }
         let _ = flux.finish();
         en_vol.push_back(flux);
-        while en_vol.len() > EN_VOL_MAX {
-            if let Some(mut vieux) = en_vol.pop_front() {
-                // Une trame annulée avant d'arriver casse les P qui la
-                // suivent : repartir d'une trame clé.
-                if vieux.reset(quinn::VarInt::from_u32(0)).is_ok() {
-                    needs_idr.store(true, Ordering::Relaxed);
-                    attend_idr = true;
-                }
-                mesure.saturations.fetch_add(1, Ordering::Relaxed);
+        // L'annulation est refusée à une trame déjà arrivée.
+        if deborder(&mut en_vol, EN_VOL_MAX, |vieux| vieux.reset(quinn::VarInt::from_u32(0)).is_ok()) > 0 {
+            needs_idr.store(true, Ordering::Relaxed);
+            attend_idr = true;
+            mesure.saturations.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Les trames en vol au-delà de `max` sortent de la file, les plus
+/// anciennes d'abord ; `annuler` rend vrai pour celle qui n'était pas encore
+/// arrivée. Rend le nombre de trames annulées : chacune casse les P qui la
+/// suivent — on repart d'une trame clé —, et c'est une saturation, la
+/// vraie. Une trame arrivée depuis longtemps ne coûte rien : la compter
+/// comme une saturation, c'était juger « trop lent » tout spectateur d'un
+/// stream à 60 i/s, même sur la fibre, et l'envoyer en qualité basse (30 i/s
+/// au plus).
+fn deborder<F>(en_vol: &mut VecDeque<F>, max: usize, mut annuler: impl FnMut(&mut F) -> bool) -> u32 {
+    let mut annulees = 0;
+    while en_vol.len() > max {
+        if let Some(mut vieux) = en_vol.pop_front() {
+            if annuler(&mut vieux) {
+                annulees += 1;
             }
         }
     }
+    annulees
 }
 
 #[cfg(test)]
@@ -1540,5 +1559,24 @@ mod tests {
         assert_eq!(mem.load(Ordering::Relaxed), 1000, "une copie vit encore");
         drop(t2);
         assert_eq!(mem.load(Ordering::Relaxed), 0);
+    }
+
+    /// Ce qui sort de la file en débordant : une trame arrivée depuis
+    /// longtemps (l'annulation est refusée) ne compte pas, seule une trame
+    /// annulée avant d'arriver en est une.
+    #[test]
+    fn deborder_ne_compte_que_les_trames_annulees() {
+        // Vrai : pas encore arrivée.
+        let mut arrivees: VecDeque<bool> = std::iter::repeat_n(false, 200).collect();
+        assert_eq!(deborder(&mut arrivees, 180, |pas_arrivee| *pas_arrivee), 0);
+        assert_eq!(arrivees.len(), 180);
+        // Les cinq plus anciennes ne sont pas arrivées : annulées.
+        let mut en_retard: VecDeque<bool> = (0..200).map(|i| i < 5).collect();
+        assert_eq!(deborder(&mut en_retard, 180, |pas_arrivee| *pas_arrivee), 5);
+        assert_eq!(en_retard.len(), 180);
+        // Sous la borne, rien ne bouge.
+        let mut peu: VecDeque<bool> = std::iter::repeat_n(true, 10).collect();
+        assert_eq!(deborder(&mut peu, 180, |_| true), 0);
+        assert_eq!(peu.len(), 10);
     }
 }
