@@ -112,6 +112,16 @@ impl Silero {
     pub fn derniere(&self) -> f32 {
         self.derniere
     }
+
+    /// Repart de zéro : état récurrent, contexte, échantillons en attente et
+    /// dernière probabilité. Au réarmement du micro, sinon la parole d'avant
+    /// la coupure rouvrait le micro sur rien.
+    pub fn reinitialiser(&mut self) {
+        self.etat = Tensor::zero::<f32>(&[2, 1, 128]).unwrap_or_else(|_| self.etat.clone());
+        self.contexte = [0.0; CONTEXTE];
+        self.tampon.clear();
+        self.derniere = 0.0;
+    }
 }
 
 #[cfg(test)]

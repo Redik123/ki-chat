@@ -278,6 +278,31 @@ impl Default for ReglagesPorte {
     }
 }
 
+impl ReglagesPorte {
+    /// La profondeur la plus douce qui fasse encore quelque chose : au-dessus,
+    /// une porte « fermée » laissait tout passer — un curseur poussé à fond à
+    /// droite rendait le seuil inerte sans que rien ne le dise.
+    pub const PROFONDEUR_MAX_DB: f32 = -6.0;
+
+    /// Ramenés dans les plages du moteur. Une profondeur au-dessus de
+    /// [`Self::PROFONDEUR_MAX_DB`] (ou absurde) redevient la coupure complète
+    /// d'origine : c'est ce que l'utilisateur croyait avoir.
+    pub fn bornes(self) -> Self {
+        let ok = |v: f32, min: f32, max: f32, defaut: f32| if v.is_finite() { v.clamp(min, max) } else { defaut };
+        let profondeur_db = if self.profondeur_db.is_finite() && self.profondeur_db <= Self::PROFONDEUR_MAX_DB {
+            self.profondeur_db.max(-80.0)
+        } else {
+            -80.0
+        };
+        Self {
+            profondeur_db,
+            attaque_ms: ok(self.attaque_ms, 0.1, 100.0, 2.0),
+            maintien_ms: ok(self.maintien_ms, 0.0, 2000.0, 150.0),
+            relachement_ms: ok(self.relachement_ms, 5.0, 2000.0, 150.0),
+        }
+    }
+}
+
 /// Porte de bruit, à l'échantillon près : s'ouvre dès que la voix passe le
 /// seuil, reste ouverte le temps du maintien, puis redescend jusqu'à sa
 /// profondeur. Une hystérésis de 4 dB l'empêche de battre sur une voix qui
@@ -315,12 +340,18 @@ impl Porte {
     }
 
     pub fn regler(&mut self, r: ReglagesPorte) {
-        let ok = |v: f32, min: f32, max: f32| if v.is_finite() { v.clamp(min, max) } else { min };
+        let r = r.bornes();
         self.reglages = r;
-        self.plancher = (ok(r.profondeur_db, -80.0, 0.0) * DB_VERS_LN).exp();
-        self.attaque = coefficient(ok(r.attaque_ms, 0.1, 100.0));
-        self.relachement = coefficient(ok(r.relachement_ms, 5.0, 2000.0));
-        self.maintien = (ok(r.maintien_ms, 0.0, 2000.0) / 1000.0 * SAMPLE_RATE as f32) as u32;
+        self.plancher = (r.profondeur_db * DB_VERS_LN).exp();
+        self.attaque = coefficient(r.attaque_ms);
+        self.relachement = coefficient(r.relachement_ms);
+        self.maintien = (r.maintien_ms / 1000.0 * SAMPLE_RATE as f32) as u32;
+    }
+
+    /// La porte est ouverte (ou dans son maintien) : c'est l'état du
+    /// détecteur, pas le gain — qui, fermée, vaut la profondeur.
+    pub fn ouverte(&self) -> bool {
+        self.ouverte || self.maintien_restant > 0
     }
 
     pub fn reglages(&self) -> ReglagesPorte {
@@ -590,6 +621,24 @@ mod tests {
 
     /// Une voix passée au-dessus du seuil puis retombée juste en dessous ne
     /// fait pas battre la porte : l'hystérésis la tient ouverte.
+    /// Une profondeur de 0 dB rendait la porte inerte sans le dire : elle
+    /// redevient la coupure complète, et la plus douce admise fait encore
+    /// -6 dB.
+    #[test]
+    fn une_profondeur_nulle_redevient_une_vraie_porte() {
+        let r = ReglagesPorte { profondeur_db: 0.0, ..ReglagesPorte::default() }.bornes();
+        assert_eq!(r.profondeur_db, -80.0);
+        let r = ReglagesPorte { profondeur_db: -3.0, ..ReglagesPorte::default() }.bornes();
+        assert_eq!(r.profondeur_db, -80.0);
+        let r = ReglagesPorte { profondeur_db: -12.0, ..ReglagesPorte::default() }.bornes();
+        assert_eq!(r.profondeur_db, -12.0);
+        let mut porte = Porte::new(ReglagesPorte { profondeur_db: 0.0, ..ReglagesPorte::default() });
+        let mut faible = sinus(0.01, SAMPLE_RATE as usize);
+        porte.traiter_trame(&mut faible, 0.1);
+        assert!(crete(&faible[SAMPLE_RATE as usize / 2..]) < 0.001, "la porte laisse passer");
+        assert!(!porte.ouverte());
+    }
+
     #[test]
     fn la_porte_ne_bat_pas_autour_du_seuil() {
         let mut p = Porte::new(ReglagesPorte { maintien_ms: 0.0, ..Default::default() });

@@ -25,9 +25,15 @@ pub mod effects;
 pub mod jitter;
 pub mod materiel;
 pub mod medias;
+/// La décision de prise de parole : hystérésis, veto de proximité, maintien.
+pub mod parole;
+/// La voix d'à côté : ne garder que la voix proche du micro.
+pub mod proximite;
 pub mod resample;
 /// Détection de parole neuronale (Silero VAD, par tract).
 pub mod silero;
+/// Le gain automatique de sa voix.
+pub mod agc;
 pub mod spectre;
 pub mod timbre;
 #[cfg(windows)]
@@ -38,6 +44,8 @@ pub mod jeu;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use agc::Agc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -177,8 +185,12 @@ pub struct VoiceConfig {
     /// sans ; active par défaut, l'adaptation est neutre quand il n'y a pas
     /// d'écho à enlever.
     pub aec: bool,
-    /// Mode de suppression de bruit (NOISE_OFF / NOISE_RNNOISE).
+    /// Mode de suppression de bruit (NOISE_OFF / NOISE_RNNOISE / NOISE_DEEP).
     pub noise_mode: u8,
+    /// Ne garder que la voix proche du micro (`proximite`) : la décision
+    /// d'émission, le gain automatique et un expanseur s'alignent sur le
+    /// niveau appris de sa propre voix.
+    pub proximite: proximite::ReglagesProximite,
     /// Volumes par émetteur (user_id -> gain, 1.0 = 100 %), appliqués au mixage.
     pub volumes: HashMap<u64, f32>,
     /// Gain d'entrée micro (1.0 = 100 %).
@@ -253,6 +265,7 @@ impl VoiceConfig {
             robust_output: false,
             aec: true,
             noise_mode: NOISE_RNNOISE,
+            proximite: proximite::ReglagesProximite::default(),
             volumes: HashMap::new(),
             input_gain: 1.0,
             output_gain: 1.0,
@@ -298,6 +311,30 @@ pub const NOISE_OFF: u8 = 0;
 pub const NOISE_RNNOISE: u8 = 1;
 /// DeepFilterNet3 : qualité studio, ajoute ~30 ms de latence (lookahead).
 pub const NOISE_DEEP: u8 = 2;
+
+/// Où en est le réseau de détection de parole (`VoiceStats::silero_etat`).
+/// Inactif : pas demandé (push-to-talk, micro ouvert, détection par seuil).
+pub const SILERO_INACTIF: u8 = 0;
+pub const SILERO_CHARGEMENT: u8 = 1;
+pub const SILERO_PRET: u8 = 2;
+/// Le modèle n'a pas pu se charger : le seuil d'amplitude tient la place.
+pub const SILERO_ECHEC: u8 = 3;
+
+/// Combien de trames `VoiceEngine::proximite_recents` peut rendre (5 s).
+pub const PROX_RECENTS_MAX: usize = 250;
+
+/// Le nom du micro par défaut de Windows — celui que ki-chat ouvre en
+/// « défaut système ». `None` hors Windows ou sans micro.
+pub fn micro_par_defaut() -> Option<String> {
+    #[cfg(windows)]
+    {
+        wasapi::default_endpoint_name(true)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
 
 /// Noms des périphériques audio disponibles : (entrées, sorties).
 pub fn list_devices() -> (Vec<String>, Vec<String>) {
@@ -551,6 +588,28 @@ pub struct VoiceStats {
     pub mic_peak: f32,
     /// Probabilité de parole du réseau de neurones (0 si désactivé).
     pub vad_prob: f32,
+    /// La décision d'émission est ouverte : une prise de parole proche est
+    /// en cours ou dans son maintien. C'est ce qui ouvre réellement le micro
+    /// en mode « à la voix » — pas la jauge de probabilité seule.
+    pub vad_ouvert: bool,
+    /// La crête de la trame au point où le seuil d'amplitude la juge : après
+    /// débruitage et égaliseur, **avant** le gain automatique.
+    pub niveau_decision: f32,
+    /// Où en est le réseau Silero (`SILERO_*`).
+    pub silero_etat: u8,
+    /// La proximité : niveau brut de la dernière trame (dBFS efficace), la
+    /// référence apprise de sa voix et le seuil d'ouverture s'il y en a, le
+    /// verdict, l'état de l'apprentissage (`proximite::Etat`, rangé en code :
+    /// 0 écoute, 1 apprentissage, 2 ancrée), et le gain de l'expanseur.
+    pub prox_niveau_db: f32,
+    pub prox_reference_db: Option<f32>,
+    pub prox_seuil_db: Option<f32>,
+    pub prox_proche: bool,
+    pub prox_etat: u8,
+    pub prox_gain: f32,
+    /// L'ancre que l'apprentissage vient de poser tout seul : à ranger par
+    /// l'application pour ce micro, puis à lui rendre dans les réglages.
+    pub prox_ancre_apprise: Option<f32>,
     /// Échantillons de voix distante réellement mixés vers la sortie.
     pub samples_played: u64,
     /// Pire gigue réseau mesurée parmi les locuteurs actifs, en ms.
@@ -584,6 +643,9 @@ pub struct VoiceStats {
     /// la porte (1 : ouverte), la réduction du de-esser et celle du
     /// compresseur, en dB (0 : rien, négatif : réduit).
     pub porte_gain: f32,
+    /// La porte est ouverte ou dans son maintien (l'état du détecteur : le
+    /// gain seul ne le dit pas quand la profondeur est douce).
+    pub porte_ouverte: bool,
     pub reduction_deesser_db: f32,
     pub reduction_compresseur_db: f32,
 }
@@ -597,6 +659,20 @@ struct Counters {
     rejected: AtomicU64,
     mic_peak_bits: std::sync::atomic::AtomicU32,
     vad_prob_bits: std::sync::atomic::AtomicU32,
+    /// La décision d'émission (voir `VoiceStats::vad_ouvert`) et la crête
+    /// qu'elle juge en mode seuil (bits f32).
+    vad_ouvert: AtomicBool,
+    niveau_decision_bits: std::sync::atomic::AtomicU32,
+    silero_etat: std::sync::atomic::AtomicU8,
+    /// La proximité (voir `VoiceStats::prox_*`). Les dB sont des bits f32 ;
+    /// une référence ou une ancre absente est un NaN.
+    prox_niveau_bits: std::sync::atomic::AtomicU32,
+    prox_reference_bits: std::sync::atomic::AtomicU32,
+    prox_seuil_bits: std::sync::atomic::AtomicU32,
+    prox_proche: AtomicBool,
+    prox_etat: std::sync::atomic::AtomicU8,
+    prox_gain_bits: std::sync::atomic::AtomicU32,
+    prox_ancre_bits: std::sync::atomic::AtomicU32,
     played: AtomicU64,
     /// Trames incomplètes parties vers la carte son : la sortie a réclamé
     /// des échantillons qu'aucun tampon de lecture n'avait, en pleine parole.
@@ -621,6 +697,7 @@ struct Counters {
     crete_brute_max_bits: std::sync::atomic::AtomicU32,
     /// Les aiguilles de la chaîne studio (bits f32, voir `VoiceStats`).
     porte_gain_bits: std::sync::atomic::AtomicU32,
+    porte_ouverte: AtomicBool,
     deesser_bits: std::sync::atomic::AtomicU32,
     compresseur_bits: std::sync::atomic::AtomicU32,
     /// Le moteur qui tient **réellement** le micro, d'après la dernière
@@ -691,6 +768,16 @@ struct Shared {
     vad_hangover_ms: AtomicU32,
     vad_neural: AtomicBool,
     vad_sens: AtomicU32,
+    /// La proximité : ses réglages et leur génération (relus par la capture
+    /// quand elle bouge).
+    proximite: Mutex<proximite::ReglagesProximite>,
+    proximite_gen: AtomicU64,
+    /// Les derniers (niveau brut dBFS, probabilité de parole), 5 s : de quoi
+    /// étalonner « ma voix » et « la voix d'à côté » depuis l'interface.
+    prox_recents: Mutex<std::collections::VecDeque<(f32, f32)>>,
+    /// L'interface regarde la jauge de parole (réglages ouverts, essai) : la
+    /// décision tourne alors même micro désarmé — sans rien émettre.
+    decision_demandee: AtomicBool,
     /// Tampon de gigue imposé en trames (0 = adaptatif).
     jitter_override: std::sync::atomic::AtomicUsize,
     /// Débit Opus demandé (appliqué à chaud par le thread de capture).
@@ -855,9 +942,13 @@ impl VoiceEngine {
             compression: std::sync::atomic::AtomicU8::new(cfg.compression),
             adoucir_cris: AtomicBool::new(cfg.adoucir_cris),
             depart: Instant::now(),
-            vad_hangover_ms: AtomicU32::new(cfg.vad_hangover_ms),
+            vad_hangover_ms: AtomicU32::new(cfg.vad_hangover_ms.clamp(50, 2000)),
             vad_neural: AtomicBool::new(cfg.vad_neural),
-            vad_sens: AtomicU32::new(cfg.vad_sensitivity.to_bits()),
+            vad_sens: AtomicU32::new(cfg.vad_sensitivity.clamp(0.1, 0.95).to_bits()),
+            proximite: Mutex::new(cfg.proximite.bornes()),
+            proximite_gen: AtomicU64::new(1),
+            prox_recents: Mutex::new(std::collections::VecDeque::with_capacity(PROX_RECENTS_MAX)),
+            decision_demandee: AtomicBool::new(false),
             jitter_override: std::sync::atomic::AtomicUsize::new(cfg.jitter_frames),
             bitrate: AtomicI32::new(cfg.bitrate),
             dred: AtomicI32::new(0),
@@ -1122,6 +1213,36 @@ impl VoiceEngine {
     /// Activation vocale neuronale (Silero) ou par seuil d'amplitude.
     pub fn set_vad_neural(&self, on: bool) {
         self.shared.vad_neural.store(on, Ordering::Relaxed);
+    }
+
+    /// La proximité (« ne garder que ma voix »), à chaud. Une ancre
+    /// différente de la précédente remplace la référence apprise.
+    pub fn set_proximite(&self, reglages: proximite::ReglagesProximite) {
+        let reglages = reglages.bornes();
+        let mut r = self.shared.proximite.lock().unwrap();
+        if *r != reglages {
+            *r = reglages;
+            self.shared.proximite_gen.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Les réglages de proximité en vigueur.
+    pub fn proximite(&self) -> proximite::ReglagesProximite {
+        *self.shared.proximite.lock().unwrap()
+    }
+
+    /// Les cinq dernières secondes de (niveau brut dBFS, probabilité de
+    /// parole), la plus ancienne d'abord : l'interface en tire le niveau de
+    /// « ma voix » (parle 5 s) ou de « la voix d'à côté » (elle parle 5 s).
+    pub fn proximite_recents(&self) -> Vec<(f32, f32)> {
+        self.shared.prox_recents.lock().unwrap().iter().copied().collect()
+    }
+
+    /// L'interface regarde la jauge de parole : la décision d'émission (et
+    /// Silero) tournent même micro désarmé, sans rien envoyer. À poser
+    /// pendant que les réglages audio sont ouverts.
+    pub fn set_decision_demandee(&self, on: bool) {
+        self.shared.decision_demandee.store(on, Ordering::Relaxed);
     }
 
     /// Probabilité de parole qui ouvre le micro en mode neuronal.
@@ -1413,16 +1534,36 @@ impl VoiceEngine {
             let worst = receivers.values().map(|r| r.jitter_ms()).fold(0f32, f32::max);
             (receivers.len(), worst)
         };
+        let c = &self.shared.counters;
+        // Un dB absent est un NaN — ou zéro, tant que rien n'a été écrit.
+        let db_option = |a: &std::sync::atomic::AtomicU32| {
+            let bits = a.load(Ordering::Relaxed);
+            let v = f32::from_bits(bits);
+            (bits != 0 && v.is_finite()).then_some(v)
+        };
         VoiceStats {
-            packets_sent: self.shared.counters.sent.load(Ordering::Relaxed),
-            packets_received: self.shared.counters.received.load(Ordering::Relaxed),
-            packets_lost: self.shared.counters.lost.load(Ordering::Relaxed),
-            packets_recovered: self.shared.counters.recovered.load(Ordering::Relaxed),
-            packets_rejected: self.shared.counters.rejected.load(Ordering::Relaxed),
+            packets_sent: c.sent.load(Ordering::Relaxed),
+            packets_received: c.received.load(Ordering::Relaxed),
+            packets_lost: c.lost.load(Ordering::Relaxed),
+            packets_recovered: c.recovered.load(Ordering::Relaxed),
+            packets_rejected: c.rejected.load(Ordering::Relaxed),
             active_senders,
-            mic_peak: f32::from_bits(self.shared.counters.mic_peak_bits.load(Ordering::Relaxed)),
-            vad_prob: f32::from_bits(self.shared.counters.vad_prob_bits.load(Ordering::Relaxed)),
-            samples_played: self.shared.counters.played.load(Ordering::Relaxed),
+            mic_peak: f32::from_bits(c.mic_peak_bits.load(Ordering::Relaxed)),
+            vad_prob: f32::from_bits(c.vad_prob_bits.load(Ordering::Relaxed)),
+            vad_ouvert: c.vad_ouvert.load(Ordering::Relaxed),
+            niveau_decision: f32::from_bits(c.niveau_decision_bits.load(Ordering::Relaxed)),
+            silero_etat: c.silero_etat.load(Ordering::Relaxed),
+            prox_niveau_db: db_option(&c.prox_niveau_bits).unwrap_or(-90.0),
+            prox_reference_db: db_option(&c.prox_reference_bits),
+            prox_seuil_db: db_option(&c.prox_seuil_bits),
+            prox_proche: c.prox_proche.load(Ordering::Relaxed),
+            prox_etat: c.prox_etat.load(Ordering::Relaxed),
+            prox_gain: {
+                let g = f32::from_bits(c.prox_gain_bits.load(Ordering::Relaxed));
+                if g.is_finite() && g > 0.0 { g } else { 1.0 }
+            },
+            prox_ancre_apprise: db_option(&c.prox_ancre_bits),
+            samples_played: c.played.load(Ordering::Relaxed),
             worst_jitter_ms,
             underruns: self.shared.counters.underruns.load(Ordering::Relaxed),
             sortie_a_sec: self.shared.counters.sortie_a_sec.load(Ordering::Relaxed),
@@ -1435,6 +1576,7 @@ impl VoiceEngine {
             crete_brute: f32::from_bits(self.shared.counters.crete_brute_bits.load(Ordering::Relaxed)),
             micro_jeux_actif: self.shared.micro_jeux_actif.load(Ordering::Relaxed),
             porte_gain: f32::from_bits(self.shared.counters.porte_gain_bits.load(Ordering::Relaxed)),
+            porte_ouverte: self.shared.counters.porte_ouverte.load(Ordering::Relaxed),
             reduction_deesser_db: f32::from_bits(self.shared.counters.deesser_bits.load(Ordering::Relaxed)),
             reduction_compresseur_db: f32::from_bits(self.shared.counters.compresseur_bits.load(Ordering::Relaxed)),
         }
@@ -1845,18 +1987,22 @@ fn capture_loop(
     // besoin (mode activation vocale, micro armé) : ~1 Mo de modèle qu'on
     // ne paie pas en push-to-talk. En arrière-plan, comme DeepFilterNet.
     let mut silero: EnFond<silero::Silero> = EnFond::Jamais;
-    let mut vad_ouvert = false;
+    // La décision de prise de parole (hystérésis, veto de proximité,
+    // maintien), et l'état d'armement de la trame d'avant : au réarmement,
+    // elle repart de zéro, Silero aussi — sinon la probabilité et le maintien
+    // d'avant la coupure rouvraient le micro ~200 ms sur rien.
+    let mut decision = parole::Decision::new();
+    let mut etait_actif = false;
+    // La proximité : le niveau brut de la trame face à celui de sa voix.
+    let mut proximite = proximite::Proximite::new(*sh.proximite.lock().unwrap());
+    let mut proximite_gen = sh.proximite_gen.load(Ordering::Relaxed);
+    // La dernière probabilité de parole rendue par Silero sur la trame
+    // d'avant : c'est elle qui dit à la proximité quelles trames apprendre.
+    let mut p_precedente: Option<f32> = None;
+    // Échantillons non finis reçus du micro : journalisés une fois.
+    let mut non_finis_signales = false;
     let mut monitor: Option<Monitor> = None;
     let mut moniteur_essai: Option<Monitor> = None;
-    // Activation vocale : on continue d'émettre un court instant après le
-    // dernier franchissement du seuil, pour ne pas hacher les fins de mots.
-    // checked_sub : soustraire à un Instant trop proche du démarrage de la
-    // machine (lancement automatique avec Windows) déborde et panique. À
-    // défaut, « maintenant » laisse le maintien VAD actif ~400 ms au premier
-    // lancement — inoffensif.
-    let mut last_voice = Instant::now()
-        .checked_sub(Duration::from_secs(60))
-        .unwrap_or_else(Instant::now);
     // Zombie à zéros : armé dès qu'un échantillon non nul passe, désarmé par
     // la réouverture qu'il déclenche. Une seule réouverture par épisode : un
     // casque coupé par son bouton mute matériel livre aussi des zéros
@@ -2178,6 +2324,20 @@ fn capture_loop(
         chunks.recycle(chunk);
         while resampler.can_pull(FRAME_SAMPLES) {
             resampler.pull(&mut frame);
+            // Un NaN ou un infini livré par un pilote empoisonnerait pour de
+            // bon les filtres récursifs de la chaîne (RNNoise, porte,
+            // compresseur, Silero) : assaini ici, une fois pour toutes.
+            if frame.iter().any(|s| !s.is_finite()) {
+                for s in frame.iter_mut() {
+                    if !s.is_finite() {
+                        *s = 0.0;
+                    }
+                }
+                if !non_finis_signales {
+                    non_finis_signales = true;
+                    journal("le micro a livré des échantillons invalides (NaN) — remis à zéro".into());
+                }
+            }
             if retour_brut && in_rate != SAMPLE_RATE {
                 pousser_retour(&sh, &frame, true);
             }
@@ -2244,6 +2404,26 @@ fn capture_loop(
                 sh.aec_far.lock().unwrap().clear();
             }
 
+            // 0 bis. Proximité : le niveau de la trame telle que la carte la
+            // livre, avant tout gain — face au niveau appris de sa voix.
+            // C'est le seul indice qui sépare sa bouche, à trois centimètres
+            // de la perche, de la personne assise à un mètre. Le verdict
+            // sert plus bas : à l'expanseur, au gain automatique, à la
+            // décision d'émission.
+            let gen = sh.proximite_gen.load(Ordering::Relaxed);
+            if gen != proximite_gen {
+                proximite_gen = gen;
+                proximite.regler(*sh.proximite.lock().unwrap());
+            }
+            let verdict = proximite.mesurer(&frame, p_precedente);
+            {
+                let mut r = sh.prox_recents.lock().unwrap();
+                if r.len() == PROX_RECENTS_MAX {
+                    r.pop_front();
+                }
+                r.push_back((verdict.niveau_db, p_precedente.unwrap_or(0.0)));
+            }
+
             // 1. Gain d'entrée. Sans écrêtage ici : au-delà de 100 %, une
             // voix forte était coupée net à la pleine échelle — c'est le
             // limiteur de fin de chaîne qui borne, en douceur.
@@ -2264,6 +2444,10 @@ fn capture_loop(
                 },
                 _ => {}
             }
+            // 2 bis. L'expanseur de proximité : une trame lointaine descend à
+            // sa profondeur, derrière le débruiteur (qui a besoin du signal
+            // entier pour tenir son estimation du bruit) et devant la porte.
+            proximite.attenuer(&mut frame);
             // La chaîne studio a-t-elle changé ?
             let gen = sh.studio_gen.load(Ordering::Relaxed);
             if gen != studio_gen {
@@ -2304,9 +2488,23 @@ fn capture_loop(
             if sh.analyse_source.load(Ordering::Relaxed) == ANALYSE_MICRO {
                 pousser_borne(&sh.analyse, &frame, ANALYSE_MAX);
             }
-            // 4. Gain automatique : normalise le niveau de la voix.
+            // La crête que juge le seuil d'amplitude : avant le gain
+            // automatique, qui ramènerait toute voix — même lointaine — au
+            // même niveau et rendrait le seuil aveugle.
+            let crete_decision = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+            sh.counters.niveau_decision_bits.store(crete_decision.to_bits(), Ordering::Relaxed);
+            // 4. Gain automatique : normalise le niveau de la voix — et ne
+            // s'adapte que sur une trame proche : une voix lointaine ne doit
+            // pas être remontée au niveau de la sienne.
             if sh.agc.load(Ordering::Relaxed) {
-                agc.process(&mut frame, load_f32(&sh.agc_target));
+                let adaptation = if !verdict.proche {
+                    agc::Adaptation::Non
+                } else if verdict.sur {
+                    agc::Adaptation::Sure
+                } else {
+                    agc::Adaptation::Proche
+                };
+                agc.process(&mut frame, load_f32(&sh.agc_target), adaptation);
             }
             // Le de-esser, sur une voix déjà mise à niveau : son seuil garde
             // son sens qu'on parle doucement ou fort.
@@ -2334,6 +2532,7 @@ fn capture_loop(
             // Les aiguilles de la page Casque.
             let compteurs = &sh.counters;
             compteurs.porte_gain_bits.store(porte.gain().to_bits(), Ordering::Relaxed);
+            compteurs.porte_ouverte.store(porte.ouverte(), Ordering::Relaxed);
             let red_deesser = deesser.as_mut().map_or(0.0, |d| d.reduction_db());
             compteurs.deesser_bits.store(red_deesser.to_bits(), Ordering::Relaxed);
             let red_comp = compresseur.as_mut().map_or(0.0, |c| c.reduction_db());
@@ -2361,16 +2560,6 @@ fn capture_loop(
                 if let Some(c) = &changee {
                     pousser_retour(&sh, c, true);
                 }
-            }
-            // Le micro pour les jeux : la voix traitée, telle qu'elle part —
-            // sans le soundboard, mêlé plus loin, qui n'a rien à faire dans
-            // le vocal d'un jeu. Rien n'est déposé sans sortie qui le lise.
-            if sh.micro_jeux_actif.load(Ordering::Relaxed) {
-                let pour_jeux = match &changee {
-                    Some(c) if vers != changeur::VERS_KICHAT => c,
-                    _ => &frame,
-                };
-                pousser_borne(&sh.micro_jeux_buf, pour_jeux, MICRO_JEUX_MAX);
             }
             // Ce qui part vers ki-chat.
             let mut envoi = match changee {
@@ -2412,19 +2601,35 @@ fn capture_loop(
             // 7. Décision d'émission : armé + activation vocale éventuelle.
             let armed = sh.transmitting.load(Ordering::Relaxed);
             let threshold = load_f32(&sh.vad_threshold);
+            // La décision tourne micro armé — et aussi quand l'interface
+            // regarde la jauge, ou que le micro des jeux la suit : sans
+            // elle, rien ne part de toute façon.
+            let actif = armed
+                || sh.decision_demandee.load(Ordering::Relaxed)
+                || sh.micro_jeux_actif.load(Ordering::Relaxed);
+            if actif && !etait_actif {
+                decision.reinitialiser();
+                if let EnFond::Pret(vad) = &mut silero {
+                    vad.reinitialiser();
+                }
+            }
+            etait_actif = actif;
             // Activation vocale : par le réseau de neurones si demandé (et
-            // s'il se charge), sinon par le seuil d'amplitude. Le réseau ne
-            // tourne qu'en mode activation vocale, micro armé — rien à
-            // décider sinon.
-            let neuronal = threshold > 0.0 && armed && sh.vad_neural.load(Ordering::Relaxed);
-            let voix = if neuronal {
+            // s'il se charge), sinon par le seuil d'amplitude, jugé sur la
+            // crête d'AVANT le gain automatique.
+            let neuronal = threshold > 0.0 && actif && sh.vad_neural.load(Ordering::Relaxed);
+            p_precedente = None;
+            let parole = if threshold <= 0.0 {
+                sh.counters.vad_prob_bits.store(0, Ordering::Relaxed);
+                sh.counters.silero_etat.store(SILERO_INACTIF, Ordering::Relaxed);
+                parole::Parole::Toujours
+            } else if neuronal {
                 let vad = match silero.obtenir("silero", silero::Silero::new) {
                     Ok(vad) => vad,
                     Err(e) => {
                         journal(format!(
                             "détection de parole neuronale indisponible ({e}) — retour au seuil d'amplitude"
                         ));
-                        sh.vad_neural.store(false, Ordering::Relaxed);
                         None
                     }
                 };
@@ -2433,32 +2638,73 @@ fn capture_loop(
                     Some(vad) => {
                         let _ = vad.traiter(&frame);
                         let p = vad.derniere();
+                        p_precedente = Some(p);
                         sh.counters.vad_prob_bits.store(p.to_bits(), Ordering::Relaxed);
-                        // Hystérésis : on ouvre à la sensibilité, on ne
-                        // referme qu'un bon cran en dessous — pas de micro qui
-                        // papillonne entre deux syllabes.
-                        let sens = load_f32(&sh.vad_sens);
-                        vad_ouvert = if vad_ouvert { p >= sens * 0.6 } else { p >= sens };
-                        vad_ouvert
+                        sh.counters.silero_etat.store(SILERO_PRET, Ordering::Relaxed);
+                        parole::Parole::Neuronale { p, sens: load_f32(&sh.vad_sens) }
                     }
-                    None => peak >= threshold,
+                    None => {
+                        let etat = if matches!(silero, EnFond::Echec) {
+                            SILERO_ECHEC
+                        } else {
+                            SILERO_CHARGEMENT
+                        };
+                        sh.counters.silero_etat.store(etat, Ordering::Relaxed);
+                        parole::Parole::Seuil { niveau: crete_decision, seuil: threshold }
+                    }
                 }
             } else {
                 sh.counters.vad_prob_bits.store(0, Ordering::Relaxed);
-                vad_ouvert = false;
-                peak >= threshold
+                sh.counters.silero_etat.store(SILERO_INACTIF, Ordering::Relaxed);
+                parole::Parole::Seuil { niveau: crete_decision, seuil: threshold }
             };
-            if voix {
-                last_voice = Instant::now();
+            let maintien = parole::maintien_trames(sh.vad_hangover_ms.load(Ordering::Relaxed));
+            let voix_recente = if actif { decision.trame(parole, verdict.proche, maintien) } else { false };
+            sh.counters.vad_ouvert.store(voix_recente, Ordering::Relaxed);
+            // Les aiguilles de la proximité.
+            {
+                let c = &sh.counters;
+                c.prox_niveau_bits.store(verdict.niveau_db.to_bits(), Ordering::Relaxed);
+                c.prox_reference_bits
+                    .store(verdict.reference_db.unwrap_or(f32::NAN).to_bits(), Ordering::Relaxed);
+                c.prox_seuil_bits
+                    .store(proximite.seuil_db().unwrap_or(f32::NAN).to_bits(), Ordering::Relaxed);
+                c.prox_proche.store(verdict.proche, Ordering::Relaxed);
+                c.prox_etat.store(
+                    match proximite.etat() {
+                        proximite::Etat::Ecoute => 0,
+                        proximite::Etat::Apprentissage => 1,
+                        proximite::Etat::Ancree => 2,
+                    },
+                    Ordering::Relaxed,
+                );
+                c.prox_gain_bits.store(proximite.gain().to_bits(), Ordering::Relaxed);
+                c.prox_ancre_bits
+                    .store(proximite.ancre_apprise().unwrap_or(f32::NAN).to_bits(), Ordering::Relaxed);
             }
-            let hangover =
-                Duration::from_millis(sh.vad_hangover_ms.load(Ordering::Relaxed) as u64);
+            // Le micro pour les jeux : la voix traitée, telle qu'elle part —
+            // sans le soundboard, mêlé plus loin, qui n'a rien à faire dans
+            // le vocal d'un jeu. En mode « à la voix », il suit la décision
+            // (du silence quand elle est fermée — du silence, pas rien, pour
+            // que le câble ne tombe pas à sec) ; la coupure du micro dans
+            // ki-chat, elle, ne le concerne pas : le jeu a la sienne. Rien
+            // n'est déposé sans sortie qui le lise.
+            if sh.micro_jeux_actif.load(Ordering::Relaxed) {
+                let silence = [0f32; FRAME_SAMPLES];
+                let pour_jeux = if threshold > 0.0 && !voix_recente {
+                    &silence
+                } else {
+                    match &changee {
+                        Some(c) if vers != changeur::VERS_KICHAT => c,
+                        _ => &frame,
+                    }
+                };
+                pousser_borne(&sh.micro_jeux_buf, pour_jeux, MICRO_JEUX_MAX);
+            }
             let micro = micro_ouvert(
                 armed,
                 sh.loopback.load(Ordering::Relaxed) || brute_essai.is_some(),
-                threshold,
-                last_voice.elapsed(),
-                hangover,
+                voix_recente,
             );
             // Le soundboard : ce qui en attend part vers le salon, mixé à
             // la voix — ou seul, micro fermé : un micro que l'on n'a pas
@@ -2965,97 +3211,6 @@ impl Monitor {
     }
 }
 
-/// Gain automatique : vise une crête de parole constante — et ne s'ajuste
-/// que sur la **voix**. L'ancien seuil absolu prenait le bruit de fond d'un
-/// micro un peu chargé (clavier, souffle que RNNoise laisse passer) pour de
-/// la parole et le gonflait ×8 entre les phrases : le « souffle montant »
-/// entendu sur le terrain. Un plancher de bruit glissant sépare désormais
-/// les deux : il suit la crête vers le bas sans délai (une respiration
-/// suffit), remonte lentement, et la voix doit le dominer nettement.
-///
-/// Trois conséquences voulues : le bruit stable n'est plus jamais amplifié ;
-/// pendant les silences le gain reflue vers le neutre au lieu de rester
-/// gonflé (le premier mot n'écrête plus) ; et la remontée est d'autant plus
-/// vive que le gain est loin du compte — après un cri, une phrase douce
-/// retrouve son niveau en quelques trames, pas en une demi-seconde.
-///
-/// Le gain glisse d'un bout à l'autre de la trame au lieu de sauter d'une
-/// trame à la suivante : ces marches de 20 ms s'entendaient comme un grain.
-/// Et il n'écrête plus lui-même : une attaque sur-amplifiée (une phrase forte
-/// après une douce, le gain encore haut) passait par un écrêtage doux jusqu'à
-/// ce que le gain redescende — 60 à 80 ms de saturation à chaque éclat. Le
-/// compresseur et le limiteur de fin de chaîne (`dynamique`) la prennent
-/// désormais, à l'échantillon près.
-struct Agc {
-    gain: f32,
-    /// Plancher de bruit estimé (crête des moments les plus calmes).
-    floor: f32,
-}
-
-impl Agc {
-    /// En-dessous, silence absolu : ni voix, ni bruit exploitable.
-    const GATE: f32 = 0.015;
-    /// La voix doit dominer le plancher de bruit d'au moins ce facteur.
-    const VOICE_OVER_FLOOR: f32 = 3.0;
-    /// Le plancher ne descend jamais sous GATE/3 : sans ce garde-fou, un
-    /// vrai silence l'écrasait à zéro et le premier bruit venu redevenait
-    /// « de la voix ».
-    const FLOOR_MIN: f32 = Self::GATE / 3.0;
-    /// Crête qu'aucune trame ne dépasse à la sortie du gain automatique.
-    const CRETE_MAX: f32 = 0.9;
-
-    fn new() -> Self {
-        Self { gain: 1.0, floor: Self::FLOOR_MIN }
-    }
-
-    fn process(&mut self, frame: &mut [f32], target: f32) {
-        let mut avant = self.gain;
-        let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
-        // Plancher : tombe immédiatement sur une trame calme, remonte
-        // lentement (~2 % par trame) — il s'établit en une seconde ou deux,
-        // et une seule respiration le remet en place.
-        if peak < self.floor {
-            self.floor = peak.max(Self::FLOOR_MIN);
-        } else {
-            self.floor = (self.floor * 1.02).min(0.25);
-        }
-        let voiced = peak >= Self::GATE && peak >= self.floor * Self::VOICE_OVER_FLOOR;
-        if voiced {
-            let desired = (target / peak).clamp(0.2, 8.0);
-            // Baisse vite (anti-saturation) ; monte vite quand on est loin
-            // du compte, doucement près de lui (anti-pompage).
-            let rate = if desired < self.gain {
-                0.5
-            } else if desired > self.gain * 2.0 {
-                0.2
-            } else {
-                0.02
-            };
-            self.gain += (desired - self.gain) * rate;
-        } else {
-            // Bruit ou silence : retour progressif au neutre.
-            self.gain += (1.0 - self.gain) * 0.005;
-        }
-        // Attaque instantanée contre la saturation : la trame entière est là,
-        // sa crête est connue avant d'appliquer quoi que ce soit. Le gain n'y
-        // dépasse jamais ce qui la porterait au-delà de 90 % de la pleine
-        // échelle — la phrase forte qui suit une douce n'arrive plus
-        // multipliée par le gain d'avant.
-        if peak > 0.0 {
-            let plafond = Self::CRETE_MAX / peak;
-            self.gain = self.gain.min(plafond);
-            avant = avant.min(plafond);
-        }
-        if (avant - 1.0).abs() > 0.001 || (self.gain - 1.0).abs() > 0.001 {
-            let n = frame.len().max(1) as f32;
-            let pas = (self.gain - avant) / n;
-            for (i, s) in frame.iter_mut().enumerate() {
-                *s *= avant + pas * (i as f32 + 1.0);
-            }
-        }
-    }
-}
-
 /// Écrêtage doux du mix : linéaire jusqu'à 85 %, compression progressive
 /// au-delà — plusieurs voix fortes saturent en douceur au lieu de craquer.
 fn soft_clip(x: f32) -> f32 {
@@ -3266,8 +3421,12 @@ impl Denoiser {
                 *dst = src * 32767.0;
             }
             self.state.process_frame(&mut self.out, &self.scaled);
+            // Bornée loin au-dessus de la pleine échelle, comme DeepFilterNet :
+            // le gain d'entrée peut y porter la voix, et c'est le limiteur de
+            // fin de chaîne qui la ramène en douceur — écrêter ici à ±1
+            // coupait net les syllabes fortes d'un micro chaud.
             for (dst, &src) in half.iter_mut().zip(self.out.iter()) {
-                *dst = (src / 32767.0).clamp(-1.0, 1.0);
+                *dst = (src / 32767.0).clamp(-4.0, 4.0);
             }
         }
     }
@@ -3284,14 +3443,8 @@ impl Denoiser {
 /// l'écho se reprenait lui-même dans le retour, en cascade. L'annulateur
 /// d'écho n'y peut rien : cet écho-là tombe toujours pendant qu'on parle,
 /// le seul moment où il n'apprend pas.
-fn micro_ouvert(
-    arme: bool,
-    essai_prive: bool,
-    seuil: f32,
-    depuis_la_voix: Duration,
-    maintien: Duration,
-) -> bool {
-    arme && !essai_prive && (seuil <= 0.0 || depuis_la_voix < maintien)
+fn micro_ouvert(arme: bool, essai_prive: bool, voix_recente: bool) -> bool {
+    arme && !essai_prive && voix_recente
 }
 
 /// Mode test : sinusoïde 440 Hz, cadencée à 20 ms, sans matériel audio.
@@ -4112,6 +4265,45 @@ fn build_output_stream(
     }
 }
 
+/// Enregistre le micro tel que le moteur le reçoit : même ouverture que
+/// `capture_loop` (moteur natif et mode brut au choix), ramené à 48 kHz mono,
+/// sans rien traiter. Pour les sondes de `examples/` : mesurer ce que la carte
+/// son livre, avant toute la chaîne.
+///
+/// `suivre` reçoit chaque trame de 20 ms avec le nombre d'échantillons déjà
+/// pris, et rend faux pour arrêter. Rend le signal et le nom du micro ouvert.
+pub fn capturer_micro(
+    device_name: Option<&str>,
+    native: bool,
+    raw: bool,
+    mut suivre: impl FnMut(usize, &[f32; FRAME_SAMPLES]) -> bool,
+) -> anyhow::Result<(Vec<f32>, String)> {
+    let OpenedInput { stream: _stream, chunks, rate, alive, name, .. } =
+        open_input(device_name, native, raw, false)?;
+    let mut resampler = CubicResampler::new(rate as f64 / SAMPLE_RATE as f64);
+    let mut frame = [0f32; FRAME_SAMPLES];
+    let mut pcm = Vec::new();
+    loop {
+        match chunks.recv_timeout(Duration::from_secs(2)) {
+            Ok(chunk) => {
+                resampler.push(&chunk);
+                chunks.recycle(chunk);
+            }
+            Err(_) => bail!("le micro « {name} » ne livre rien"),
+        }
+        if !alive.load(Ordering::Relaxed) {
+            bail!("le flux du micro « {name} » est tombé");
+        }
+        while resampler.can_pull(FRAME_SAMPLES) {
+            resampler.pull(&mut frame);
+            pcm.extend_from_slice(&frame);
+            if !suivre(pcm.len(), &frame) {
+                return Ok((pcm, name));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4201,10 +4393,10 @@ mod tests {
         // Signal fort : le gain doit descendre vite sous 1.
         for _ in 0..10 {
             let mut frame = [0.9f32; FRAME_SAMPLES];
-            agc.process(&mut frame, 0.30);
+            agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         }
         let mut frame = [0.9f32; FRAME_SAMPLES];
-        agc.process(&mut frame, 0.30);
+        agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!(peak < 0.5, "voix forte non atténuée : {peak}");
 
@@ -4217,15 +4409,15 @@ mod tests {
         for _ in 0..12 {
             for _ in 0..20 {
                 let mut frame = [0.05f32; FRAME_SAMPLES];
-                agc.process(&mut frame, 0.30);
+                agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
             }
             for _ in 0..5 {
                 let mut frame = [0.001f32; FRAME_SAMPLES];
-                agc.process(&mut frame, 0.30);
+                agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
             }
         }
         let mut frame = [0.05f32; FRAME_SAMPLES];
-        agc.process(&mut frame, 0.30);
+        agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.15, "voix faible non amplifiée : {peak}");
 
@@ -4233,9 +4425,9 @@ mod tests {
         let mut agc = Agc::new();
         for _ in 0..300 {
             let mut frame = [0.001f32; FRAME_SAMPLES];
-            agc.process(&mut frame, 0.30);
+            agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         }
-        assert!((agc.gain - 1.0).abs() < 0.01, "l'AGC a pompé le silence");
+        assert!((agc.gain() - 1.0).abs() < 0.01, "l'AGC a pompé le silence");
     }
 
     /// Le bug du « souffle montant » : l'ancien AGC prenait un bruit de fond
@@ -4247,16 +4439,16 @@ mod tests {
         let mut agc = Agc::new();
         for _ in 0..800 {
             let mut frame = [0.03f32; FRAME_SAMPLES];
-            agc.process(&mut frame, 0.30);
+            agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         }
-        assert!(agc.gain < 2.0, "l'AGC pompe encore le bruit : gain {}", agc.gain);
+        assert!(agc.gain() < 2.0, "l'AGC pompe encore le bruit : gain {}", agc.gain());
         // La voix qui suit domine le plancher : elle est bien normalisée.
         for _ in 0..20 {
             let mut frame = [0.3f32; FRAME_SAMPLES];
-            agc.process(&mut frame, 0.30);
+            agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         }
         let mut frame = [0.3f32; FRAME_SAMPLES];
-        agc.process(&mut frame, 0.30);
+        agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
         let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
         assert!((0.2..=0.5).contains(&peak), "voix mal normalisée après bruit : {peak}");
     }
@@ -4388,7 +4580,7 @@ mod tests {
             f
         };
         let mut chaine = |f: &mut [f32; FRAME_SAMPLES]| {
-            agc.process(f, 0.30);
+            agc.process(f, 0.30, agc::Adaptation::Sure);
             comp.traiter_trame(f);
             lim.traiter_trame(f);
         };
@@ -4494,18 +4686,41 @@ mod tests {
     /// le retour repris par le micro. Pendant l'essai, rien ne part.
     #[test]
     fn m_ecouter_reste_prive() {
-        let court = Duration::from_millis(10);
-        let maintien = Duration::from_millis(300);
-        // Micro ouvert ou push-to-talk tenu : la voix part…
-        assert!(micro_ouvert(true, false, 0.0, court, maintien));
+        // Micro ouvert ou push-to-talk tenu, voix récente : la voix part…
+        assert!(micro_ouvert(true, false, true));
         // … sauf pendant l'essai.
-        assert!(!micro_ouvert(true, true, 0.0, court, maintien));
-        // Activation vocale : pareil, et le maintien joue comme avant.
-        assert!(micro_ouvert(true, false, 0.02, court, maintien));
-        assert!(!micro_ouvert(true, true, 0.02, court, maintien));
-        assert!(!micro_ouvert(true, false, 0.02, Duration::from_secs(1), maintien));
+        assert!(!micro_ouvert(true, true, true));
+        // Sans prise de parole récente (activation vocale) : rien.
+        assert!(!micro_ouvert(true, false, false));
         // Désarmé : rien, évidemment.
-        assert!(!micro_ouvert(false, false, 0.0, court, maintien));
+        assert!(!micro_ouvert(false, false, true));
+    }
+
+    /// Le gain automatique ne s'adapte que sur SA voix : une voix lointaine
+    /// (verdict de proximité négatif) n'est pas remontée, même vivante.
+    #[test]
+    fn l_agc_ne_remonte_pas_une_voix_lointaine() {
+        let mut agc = Agc::new();
+        // Lui, à 0,3 : le gain s'établit autour de 1.
+        for _ in 0..50 {
+            let mut frame = [0.3f32; FRAME_SAMPLES];
+            agc.process(&mut frame, 0.30, agc::Adaptation::Sure);
+        }
+        // Elle, 25 dB plus bas, par salves, mais « lointaine ».
+        let elle = 0.3 * 10f32.powf(-25.0 / 20.0);
+        let mut crete = 0f32;
+        for _ in 0..12 {
+            for _ in 0..20 {
+                let mut frame = [elle; FRAME_SAMPLES];
+                agc.process(&mut frame, 0.30, agc::Adaptation::Non);
+                crete = crete.max(frame.iter().fold(0f32, |m, s| m.max(s.abs())));
+            }
+            for _ in 0..5 {
+                let mut frame = [0.001f32; FRAME_SAMPLES];
+                agc.process(&mut frame, 0.30, agc::Adaptation::Non);
+            }
+        }
+        assert!(crete < elle * 1.3, "voix lointaine remontée : {crete} pour {elle}");
     }
 
     #[test]

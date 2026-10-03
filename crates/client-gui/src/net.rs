@@ -100,6 +100,8 @@ pub struct VoicePrefs {
     pub agc_target: f32,
     /// Porte de bruit (0.0 = désactivée).
     pub gate_threshold: f32,
+    /// La voix d'à côté : ne garder que la voix proche du micro.
+    pub proximite: ki_voice::proximite::ReglagesProximite,
     /// Compression de sa voix (`ki_voice::dynamique::COMPRESSION_*`).
     pub compression: u8,
     /// Adoucir les cris des autres.
@@ -525,6 +527,7 @@ fn start_engine(
     cfg.aec = prefs.aec;
     cfg.agc_target = prefs.agc_target;
     cfg.gate_threshold = prefs.gate_threshold;
+    cfg.proximite = prefs.proximite;
     cfg.compression = prefs.compression;
     cfg.adoucir_cris = prefs.adoucir_cris;
     cfg.retour_voix = prefs.retour_voix;

@@ -62,6 +62,13 @@ pub struct EtatMateriel {
     /// Les amplifications ont été cherchées : faux au tout premier relevé
     /// d'une carte, publié avant (voir `lire`).
     pub topologie_lue: bool,
+    /// Le périphérique demandé est introuvable : ce qui est relevé (et
+    /// réglé) est le défaut de Windows, pas lui.
+    pub entree_repli: bool,
+    pub sortie_repli: bool,
+    /// Le dernier ordre que la carte a refusé, en clair — sinon l'interface
+    /// affichait « réglé » sur un réglage qui n'avait pas pris.
+    pub derniere_erreur: Option<String>,
 }
 
 /// Ce que l'interface demande au fil du matériel.
@@ -280,6 +287,7 @@ mod windows_impl {
             if !eveille && ordres.is_empty() {
                 continue;
             }
+            let mut erreur = None;
             for ordre in dernier_de_chaque(ordres) {
                 if let Ordre::Suivre { entree, sortie } = &ordre {
                     suivis = (entree.clone(), sortie.clone());
@@ -287,9 +295,11 @@ mod windows_impl {
                 }
                 if let Err(e) = appliquer(&ordre, &suivis, &mut prises) {
                     tracing::warn!("réglage matériel refusé ({ordre:?}) : {e:#}");
+                    erreur = Some(format!("la carte a refusé le réglage : {e}"));
                 }
             }
-            let releve = lire(&suivis, &mut prises, &etat);
+            let mut releve = lire(&suivis, &mut prises, &etat);
+            releve.derniere_erreur = erreur;
             *etat.lock().unwrap() = releve;
         }
     }
@@ -311,9 +321,11 @@ mod windows_impl {
         garde
     }
 
-    fn peripherique(nom: Option<&str>, entree: bool) -> anyhow::Result<IMMDevice> {
+    /// Le périphérique à suivre, et s'il s'agit d'un repli : le nom demandé
+    /// est introuvable et c'est le défaut de Windows qu'on a pris.
+    fn peripherique(nom: Option<&str>, entree: bool) -> anyhow::Result<(IMMDevice, bool)> {
         let enu = wasapi::enumerator()?;
-        Ok(wasapi::pick(&enu, nom, entree)?.0)
+        wasapi::pick(&enu, nom, entree)
     }
 
     fn volume_de(device: &IMMDevice) -> anyhow::Result<IAudioEndpointVolume> {
@@ -351,23 +363,37 @@ mod windows_impl {
     /// carte n'en montre pas). Les chercher traverse vers la topologie de la
     /// carte (`GetConnectedTo`), ce qui prend huit secondes la première fois
     /// sur certaines cartes USB (NICEHCK NK1 MAX) : une fois par carte.
-    type Prises = HashMap<String, Option<IPart>>;
+    /// La prise micro de chaque carte (par identifiant), ou l'échec à la
+    /// trouver, daté : une carte USB qui ne répond pas encore juste après son
+    /// branchement n'est pas condamnée pour la session.
+    type Prises = HashMap<String, (Option<IPart>, Instant)>;
+
+    /// Au-delà, un échec à trouver la prise est retenté.
+    const NOUVEL_ESSAI_PRISE: Duration = Duration::from_secs(10);
 
     fn identifiant(device: &IMMDevice) -> String {
         unsafe { device.GetId().map(texte).unwrap_or_default() }
     }
 
-    /// La prise micro de ce périphérique, cherchée une seule fois.
+    /// La prise micro de ce périphérique, cherchée une fois — et de nouveau
+    /// après un échec un peu ancien.
     fn prise_connue(device: &IMMDevice, prises: &mut Prises) -> Option<IPart> {
         let id = identifiant(device);
-        // Une carte débranchée puis rebranchée garde son identifiant, mais
-        // l'ancienne topologie ne répond plus : on la cherche de nouveau.
-        if let Some(Some(p)) = prises.get(&id) {
-            if unsafe { p.GetGlobalId() }.map(texte).is_err() {
+        match prises.get(&id) {
+            // Une carte débranchée puis rebranchée garde son identifiant,
+            // mais l'ancienne topologie ne répond plus : on la cherche de
+            // nouveau.
+            Some((Some(p), _)) if unsafe { p.GetGlobalId() }.map(texte).is_err() => {
                 prises.remove(&id);
             }
+            // Un échec transitoire (carte USB qui s'installe encore) n'est
+            // pas définitif.
+            Some((None, quand)) if quand.elapsed() > NOUVEL_ESSAI_PRISE => {
+                prises.remove(&id);
+            }
+            _ => {}
         }
-        prises.entry(id).or_insert_with(|| prise_micro(device).ok()).clone()
+        prises.entry(id).or_insert_with(|| (prise_micro(device).ok(), Instant::now())).0.clone()
     }
 
     /// Le premier élément du chemin du micro dans la topologie de la carte :
@@ -450,13 +476,15 @@ mod windows_impl {
         publier: &Mutex<EtatMateriel>,
     ) -> EtatMateriel {
         let mut e = EtatMateriel { disponible: true, ..Default::default() };
-        if let Ok(d) = peripherique(suivis.1.as_deref(), false) {
+        if let Ok((d, repli)) = peripherique(suivis.1.as_deref(), false) {
             e.sortie_nom = wasapi::friendly_name(&d).ok();
             e.sortie = volume_de(&d).and_then(|v| lire_volume(&v)).ok();
+            e.sortie_repli = repli;
         }
-        if let Ok(d) = peripherique(suivis.0.as_deref(), true) {
+        if let Ok((d, repli)) = peripherique(suivis.0.as_deref(), true) {
             e.entree_nom = wasapi::friendly_name(&d).ok();
             e.entree = volume_de(&d).and_then(|v| lire_volume(&v)).ok();
+            e.entree_repli = repli;
             if let Some(niveau) = &e.entree {
                 if !prises.contains_key(&identifiant(&d)) {
                     *publier.lock().unwrap() = e.clone();
@@ -475,11 +503,11 @@ mod windows_impl {
         unsafe {
             match ordre {
                 Ordre::VolumeSortie(s) => {
-                    let v = volume_de(&peripherique(suivis.1.as_deref(), false)?)?;
+                    let v = volume_de(&peripherique(suivis.1.as_deref(), false)?.0)?;
                     v.SetMasterVolumeLevelScalar(s.clamp(0.0, 1.0), aucun)?;
                 }
                 Ordre::Balance(b) => {
-                    let v = volume_de(&peripherique(suivis.1.as_deref(), false)?)?;
+                    let v = volume_de(&peripherique(suivis.1.as_deref(), false)?.0)?;
                     if v.GetChannelCount()? == 2 {
                         let (g, d) = canaux_pour(*b, v.GetMasterVolumeLevelScalar()?);
                         v.SetChannelVolumeLevelScalar(0, g, aucun)?;
@@ -487,17 +515,17 @@ mod windows_impl {
                     }
                 }
                 Ordre::NiveauMicro(s) => {
-                    let v = volume_de(&peripherique(suivis.0.as_deref(), true)?)?;
+                    let v = volume_de(&peripherique(suivis.0.as_deref(), true)?.0)?;
                     v.SetMasterVolumeLevelScalar(s.clamp(0.0, 1.0), aucun)?;
                 }
                 Ordre::NiveauMicroDb(db) => {
-                    let v = volume_de(&peripherique(suivis.0.as_deref(), true)?)?;
+                    let v = volume_de(&peripherique(suivis.0.as_deref(), true)?.0)?;
                     let (mut min, mut max, mut pas) = (0f32, 0f32, 0f32);
                     v.GetVolumeRange(&mut min, &mut max, &mut pas)?;
                     v.SetMasterVolumeLevel(caler(*db, min, max, 0.0), aucun)?;
                 }
                 Ordre::Ampli { id, db } => {
-                    let d = peripherique(suivis.0.as_deref(), true)?;
+                    let (d, _) = peripherique(suivis.0.as_deref(), true)?;
                     let Some(prise) = prise_connue(&d, prises) else {
                         anyhow::bail!("pas de prise micro dans la topologie de la carte");
                     };

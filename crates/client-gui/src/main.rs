@@ -27,6 +27,7 @@ mod reglages_casque;
 mod egaliseur_ui;
 mod studio_ui;
 mod changeur_ui;
+mod voisine_ui;
 mod raccourci;
 mod rangs;
 mod secours;
@@ -1246,6 +1247,20 @@ struct KiApp {
     imitation_moi: Option<(u64, Option<ki_voice::imitation::EmpreinteVoix>)>,
     /// Calibration des seuils en cours : (départ, crête ambiante mesurée).
     calibrating: Option<(std::time::Instant, f32)>,
+    /// La voix d'à côté : la force de l'isolation (`ki_voice::proximite::
+    /// PROXIMITE_*`), l'ancre apprise ou mesurée de sa voix par micro (nom
+    /// du périphérique → dBFS), la mesure de cinq secondes en cours et son
+    /// dernier verdict.
+    proximite_force: u8,
+    proximite_ancres: std::collections::HashMap<String, f32>,
+    mesure_prox: Option<voisine_ui::MesureProx>,
+    mesure_prox_verdict: Option<String>,
+    /// Page Casque : la crête brute retenue 300 ms pour la jauge « Marge »
+    /// (sinon un cri de 150 ms y passait une fois sur deux), et le dernier
+    /// gain total de la carte vu pour ce micro — quand il bouge, l'ancre de
+    /// la voix d'à côté bouge d'autant.
+    marge_crete: Option<(f32, std::time::Instant)>,
+    gain_carte_vu: Option<(String, f32)>,
     // Labo vidéo (S1a du partage d'écran) : boucle locale de test.
     labo: Option<ki_video::LocalLoop>,
     labo_frame: std::sync::Arc<std::sync::Mutex<Option<ki_video::RgbaFrame>>>,
@@ -1303,6 +1318,17 @@ impl KiApp {
                 .and_then(|s| s.get_string(key))
                 .unwrap_or_else(|| default.to_string())
         };
+        // Une porte de bruit réglée à 0 dB de profondeur ne faisait rien :
+        // son seuil a pu être poussé n'importe où sans que ça s'entende. La
+        // rallumer telle quelle couperait des bouts de voix — on la coupe,
+        // elle se réactive d'un geste dans l'onglet Audio.
+        let porte_inerte = studio_ui::porte_inerte(&get("studio", ""));
+        if porte_inerte {
+            ki_voice::journal(
+                "ta porte de bruit avait une profondeur de 0 dB (elle ne coupait rien) :                  elle est désactivée — remets un seuil dans l'onglet Audio si tu la veux"
+                    .into(),
+            );
+        }
         // Le carnet reprend l'unique adresse des versions précédentes ; on
         // rouvre sur le serveur utilisé en dernier.
         let book = servers::load(cc.storage);
@@ -1594,7 +1620,7 @@ impl KiApp {
             agc: get("agc", "on") != "off",
             aec_on: get("aec", "on") != "off",
             agc_target: get("agc_target", "0.30").parse().unwrap_or(0.30),
-            gate_threshold: get("gate_threshold", "0").parse().unwrap_or(0.0),
+            gate_threshold: if porte_inerte { 0.0 } else { get("gate_threshold", "0").parse().unwrap_or(0.0) },
             compression: get("compression", "1")
                 .parse()
                 .unwrap_or(ki_voice::dynamique::COMPRESSION_DOUCE)
@@ -1635,6 +1661,15 @@ impl KiApp {
             imitation_erreur: None,
             imitation_moi: None,
             calibrating: None,
+            proximite_force: get("proximite_force", "0")
+                .parse::<u8>()
+                .unwrap_or(ki_voice::proximite::PROXIMITE_OFF)
+                .min(ki_voice::proximite::PROXIMITE_FORTE),
+            proximite_ancres: voisine_ui::lire_ancres(&get("proximite_ancres", "{}")),
+            mesure_prox: None,
+            mesure_prox_verdict: None,
+            marge_crete: None,
+            gain_carte_vu: None,
             labo: None,
             labo_frame: Default::default(),
             labo_stats: Default::default(),
@@ -1834,10 +1869,15 @@ impl KiApp {
             engine.set_vad_neural(self.vad_neural);
             engine.set_vad_sensitivity(self.vad_sens);
             engine.set_bitrate(self.effective_bitrate());
-            engine.set_agc(self.agc);
+            // Pendant la calibration sur le bruit de la pièce, la porte et le
+            // gain automatique restent suspendus, quel que soit le réglage
+            // qui repasse par ici entre-temps (débit auto, DRED, un curseur).
+            let calibration = self.calibrating.is_some();
+            engine.set_agc(self.agc && !calibration);
             engine.set_aec(self.aec_on);
             engine.set_agc_target(self.agc_target);
-            engine.set_gate_threshold(self.gate_threshold);
+            engine.set_gate_threshold(if calibration { 0.0 } else { self.gate_threshold });
+            engine.set_proximite(self.proximite_reglages());
             engine.set_compression(self.compression);
             engine.set_adoucir_cris(self.adoucir_cris);
             engine.set_retour_voix(self.retour_voix, self.retour_voix_volume);
@@ -1888,6 +1928,7 @@ impl KiApp {
             aec: self.aec_on,
             agc_target: self.agc_target,
             gate_threshold: self.gate_threshold,
+            proximite: self.proximite_reglages(),
             compression: self.compression,
             adoucir_cris: self.adoucir_cris,
             retour_voix: self.retour_voix,
@@ -6056,29 +6097,45 @@ impl KiApp {
 
     /// Fait avancer la calibration ; à la fin, règle les seuils juste
     /// au-dessus du niveau ambiant mesuré et restaure la chaîne.
-    fn tick_calibration(&mut self, mic_peak: f32) {
+    fn tick_calibration(&mut self, niveau: f32) {
         const CALIB_SECS: f32 = 5.0;
         let Some((start, peak)) = &mut self.calibrating else { return };
-        *peak = peak.max(mic_peak);
+        // Les réglages refermés puis rouverts des heures plus tard : la
+        // mesure n'a rien vu entre-temps, elle ne vaut rien — on l'abandonne
+        // au lieu de poser des seuils sur la trame du moment.
+        if start.elapsed().as_secs_f32() > CALIB_SECS + 1.0 {
+            self.calibrating = None;
+            self.apply_audio_settings();
+            return;
+        }
+        *peak = peak.max(niveau);
         if start.elapsed().as_secs_f32() < CALIB_SECS {
             return;
         }
         let ambient = *peak;
+        let avant = self.gate_threshold;
         self.calibrating = None;
         self.gate_threshold = (ambient * 1.4).clamp(0.004, 0.10);
         if self.mode == MicMode::Vad {
             self.vad_threshold = (ambient * 1.8).clamp(0.01, 0.25);
         }
         self.apply_audio_settings();
+        // En détection neuronale, le seuil d'amplitude ne décide de rien :
+        // on ne l'annonce pas.
+        let seuil = if self.mode == MicMode::Vad && !self.vad_neural {
+            format!(", seuil d'activation {:.1} %", self.vad_threshold * 100.0)
+        } else {
+            String::new()
+        };
+        let baisse = if avant > 0.0 && self.gate_threshold < avant * 0.5 {
+            format!(" (elle était à {:.1} %)", avant * 100.0)
+        } else {
+            String::new()
+        };
         self.info = Some(format!(
-            "calibré : ambiance {:.1} % → porte de bruit {:.1} %{}",
+            "calibré : ambiance {:.1} % → porte de bruit {:.1} %{baisse}{seuil}",
             ambient * 100.0,
             self.gate_threshold * 100.0,
-            if self.mode == MicMode::Vad {
-                format!(", seuil d'activation {:.1} %", self.vad_threshold * 100.0)
-            } else {
-                String::new()
-            }
         ));
     }
 
@@ -7153,8 +7210,13 @@ impl KiApp {
                                 |ui| {
                                     if ui::icon_button(ui, Icon::Gear, "Réglages").clicked()
                                     {
-                                        self.show_settings = !self.show_settings;
+                                        // Fermer par l'engrenage range tout comme
+                                        // la croix : calibration, « M'écouter »,
+                                        // essai — rien ne reste en plan.
                                         if self.show_settings {
+                                            self.close_settings();
+                                        } else {
+                                            self.show_settings = true;
                                             let (i, o) = ki_voice::list_devices();
                                             self.input_devices = i;
                                             self.output_devices = o;
@@ -8875,8 +8937,15 @@ impl KiApp {
         let mut open = true;
         let engine_up = voice.engine_up;
         let stats = &voice.stats;
-        let mic_peak = stats.mic_peak;
-        self.tick_calibration(mic_peak);
+        // La calibration mesure là où la porte et le seuil jugent : avant le
+        // gain automatique, qui ramènerait tout bruit « vivant » vers la cible.
+        let niveau = stats.niveau_decision;
+        self.tick_calibration(niveau);
+        // Réglages ouverts : la décision de parole tourne même hors salon,
+        // micro coupé compris — pour que les jauges vivent sans émettre.
+        if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+            e.set_decision_demandee(true);
+        }
 
         // Hauteur d'ouverture : large sur un grand écran, sans jamais
         // déborder d'un petit. L'utilisateur peut ensuite redimensionner,
@@ -9633,6 +9702,10 @@ impl KiApp {
         self.show_settings = false;
         self.info = None;
         self.calibrage_micro = None;
+        self.mesure_prox = None;
+        if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
+            e.set_decision_demandee(false);
+        }
         if self.eq_editeur.comparer {
             // Fermer la fenêtre en pleine comparaison ne doit pas laisser
             // l'égaliseur coupé.
@@ -14620,6 +14693,7 @@ impl eframe::App for KiApp {
         // Un seul instantané par image, pris ici : l'écran principal l'affiche,
         // et c'est lui qui dit s'il faut une image de plus.
         let voice = self.voice_snapshot();
+        self.ranger_ancre_apprise(&voice.stats);
 
         // Un message est arrivé pendant que la fenêtre était à l'arrière-plan :
         // la barre des tâches clignote (l'équivalent sobre d'une notification).
@@ -14783,6 +14857,8 @@ impl eframe::App for KiApp {
         storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
         storage.set_string("ptt_release_ms", format!("{}", self.ptt_release_ms));
         storage.set_string("noise_mode", format!("{}", self.noise_mode));
+        storage.set_string("proximite_force", format!("{}", self.proximite_force));
+        storage.set_string("proximite_ancres", voisine_ui::ecrire_ancres(&self.proximite_ancres));
         storage.set_string("dred_mode", format!("{}", self.dred_mode));
         storage.set_string("ptt_key", self.ptt_key.id().into());
         storage.set_string("hotkey_micro", self.hotkey_micro.map(|k| k.id()).unwrap_or("").into());

@@ -76,12 +76,13 @@ impl KiApp {
 
                 ui::ligne(ui, "Niveau", |ui| {
                     ui.horizontal(|ui| {
+                        // En activation vocale, c'est la décision du moteur
+                        // (hystérésis et maintien compris) qui allume le
+                        // voyant — pas la probabilité seule : le micro peut
+                        // encore émettre quand la jauge est repassée sous le
+                        // repère.
                         let parle = if self.mode == MicMode::Vad {
-                            if self.vad_neural {
-                                stats.vad_prob >= self.vad_sens
-                            } else {
-                                stats.mic_peak >= self.vad_threshold
-                            }
+                            stats.vad_ouvert
                         } else {
                             stats.mic_peak > 0.01
                         };
@@ -94,14 +95,17 @@ impl KiApp {
                         } else {
                             TEXT_DIM
                         };
-                        // En détection par seuil, le repère est le seuil ; en
-                        // détection neuronale, il est sur la jauge de parole.
-                        let repere = (self.mode == MicMode::Vad && !self.vad_neural)
-                            .then(|| (self.vad_threshold * 3.0).min(1.0));
+                        // En détection par seuil, le repère est le seuil, et
+                        // la jauge montre le niveau que le seuil juge (avant
+                        // le gain automatique) ; en détection neuronale, le
+                        // repère est sur la jauge de parole.
+                        let par_seuil = self.mode == MicMode::Vad && !self.vad_neural;
+                        let repere = par_seuil.then(|| (self.vad_threshold * 3.0).min(1.0));
+                        let niveau = if par_seuil { stats.niveau_decision } else { stats.mic_peak };
                         let largeur = (ui.available_width() - 80.0).clamp(120.0, 300.0);
                         ui::meter_with_threshold(
                             ui,
-                            (stats.mic_peak * 3.0).min(1.0),
+                            (niveau * 3.0).min(1.0),
                             repere,
                             Vec2::new(largeur, 10.0),
                             couleur,
@@ -226,11 +230,28 @@ impl KiApp {
                             ui::precision(
                                 ui,
                                 "Un clavier, une respiration ou un souffle ne sont plus pris \
-                                 pour une voix.",
+                                 pour une voix. Elle reconnaît de la parole, pas la tienne : \
+                                 quelqu'un qui parle près de ton micro l'ouvre aussi — c'est le \
+                                 rôle de « Voix d'à côté », plus bas.",
                             );
+                            match stats.silero_etat {
+                                ki_voice::SILERO_ECHEC if self.vad_neural => {
+                                    ui::banner(
+                                        ui,
+                                        Tone::Warn,
+                                        "Le réseau Silero n'a pas pu se charger : la détection se fait \
+                                         au seuil d'amplitude (voir le journal audio, onglet Aide).",
+                                        false,
+                                    );
+                                }
+                                ki_voice::SILERO_CHARGEMENT if self.vad_neural => {
+                                    ui.label(RichText::new("chargement du réseau…").color(TEXT_DIM).size(11.5));
+                                }
+                                _ => {}
+                            }
                         });
                         if self.vad_neural {
-                            ui::ligne(ui, "Sensibilité", |ui| {
+                            ui::ligne(ui, "Seuil de parole", |ui| {
                                 let mut pct = self.vad_sens * 100.0;
                                 if curseur(ui, &mut pct, 20.0..=90.0, " %", Some(1.0)) {
                                     self.vad_sens = pct / 100.0;
@@ -238,17 +259,29 @@ impl KiApp {
                                 }
                                 ui.add_space(4.0);
                                 let prob = stats.vad_prob;
-                                let largeur = (ui.available_width() - 20.0).clamp(120.0, 300.0);
-                                ui::meter_with_threshold(
-                                    ui,
-                                    prob,
-                                    Some(self.vad_sens),
-                                    Vec2::new(largeur, 8.0),
-                                    if engine_up && prob >= self.vad_sens { SPEAK } else { TEXT_DIM },
-                                );
+                                let largeur = (ui.available_width() - 80.0).clamp(120.0, 300.0);
+                                ui.horizontal(|ui| {
+                                    ui::meter_with_threshold(
+                                        ui,
+                                        prob,
+                                        Some(self.vad_sens),
+                                        Vec2::new(largeur, 8.0),
+                                        if engine_up && stats.vad_ouvert { SPEAK } else { TEXT_DIM },
+                                    );
+                                    if engine_up {
+                                        let (texte, couleur) =
+                                            if stats.vad_ouvert { ("micro ouvert", SPEAK) } else { ("fermé", TEXT_DIM) };
+                                        ui.label(RichText::new(texte).color(couleur).size(11.5));
+                                    }
+                                });
                                 ui::precision(
                                     ui,
-                                    "Parle : la jauge doit passer le repère quand ta voix passe.",
+                                    &format!(
+                                        "Plus haut : il faut une parole plus nette pour ouvrir — ça \
+                                         n'écarte pas une autre personne. Ouvert, le micro tient \
+                                         jusqu'à {:.0} %, puis le maintien.",
+                                        ki_voice::parole::Decision::seuil_fermeture(self.vad_sens) * 100.0
+                                    ),
                                 );
                             });
                         } else {
@@ -272,6 +305,9 @@ impl KiApp {
                     }
                     MicMode::Open => {}
                 }
+                ui::ligne(ui, "Voix d'à côté", |ui| {
+                    self.voisine_ui(ui, voice, apply);
+                });
                 ui::ligne(ui, "Raccourcis", |ui| {
                     let touche_ptt = (self.mode == MicMode::Ptt).then_some(self.ptt_key);
                     for (intitule, salt, choix) in [
@@ -322,8 +358,10 @@ impl KiApp {
             Icon::Sliders,
             "Traitement de la voix",
             Some(
-                "Dans l'ordre où ta voix le traverse avant de partir. En bout de chaîne, un \
-                 limiteur, toujours là, empêche toute saturation.",
+                "Ce que ta voix traverse avant de partir — dans l'ordre réel : écho, pré-ampli, \
+                 suppression de bruit, voix d'à côté, porte, égaliseur, gain automatique, \
+                 compression. En bout de chaîne, un limiteur, toujours là, empêche toute \
+                 saturation.",
             ),
             |ui| {
                 ui::ligne(ui, "Suppression de bruit", |ui| {
@@ -342,11 +380,16 @@ impl KiApp {
                         ui,
                         match self.noise_mode {
                             ki_voice::NOISE_DEEP => {
-                                "DeepFilterNet3 : clavier, ventilo et fond sonore effacés, \
-                                 100 % local, 30 ms de plus."
+                                "DeepFilterNet3 : clavier, ventilo et bruits de fond effacés, \
+                                 100 % local, 30 ms de plus. Les voix autour de toi ne sont pas \
+                                 retirées : c'est « Voix d'à côté », plus haut."
                             }
                             ki_voice::NOISE_OFF => "Ta voix telle que le micro la capte.",
-                            _ => "RNNoise : le souffle et les bruits continus, pour presque rien.",
+                            _ => {
+                                "RNNoise : le souffle et les bruits continus, pour presque rien. \
+                                 Les voix autour de toi ne sont pas retirées : c'est « Voix d'à \
+                                 côté », plus haut."
+                            }
                         },
                     );
                 });
@@ -414,7 +457,24 @@ impl KiApp {
                         self.gate_threshold = pct / 100.0;
                         *apply = true;
                     }
-                    ui::precision(ui, "Coupe ce qui reste sous ce niveau ; 0 % la désactive.");
+                    let profondeur = self.studio.porte.profondeur_db;
+                    if profondeur > -79.0 {
+                        ui::precision(
+                            ui,
+                            &format!(
+                                "Sous ce niveau, le son baisse de {:.0} dB (profondeur réglée en mode \
+                                 Studio, page Casque) ; 0 % la désactive. Mesuré avant le gain \
+                                 automatique.",
+                                -profondeur
+                            ),
+                        );
+                    } else {
+                        ui::precision(
+                            ui,
+                            "Coupe ce qui reste sous ce niveau, mesuré avant le gain automatique ; \
+                             0 % la désactive.",
+                        );
+                    }
                     ui.add_space(4.0);
                     self.calibration_ui(ui, engine_up);
                 });
@@ -638,7 +698,8 @@ impl KiApp {
                 "Parle {ESSAI_SECONDES} s comme en partie : ki-chat te rejoue ce que les autres \
                  reçoivent, sans retard. Puis compare à ton micro brut, remis au même volume — \
                  ce qui sonne creux dans le premier et pas dans le second vient des réglages. \
-                 Personne ne t'entend pendant l'enregistrement."
+                 Personne ne t'entend dans ki-chat pendant l'enregistrement{}."
+                , if self.micro_jeux { " (le micro des jeux, lui, continue)" } else { "" }
             ),
         );
         match geste {
@@ -652,6 +713,12 @@ impl KiApp {
                 }
             }
             Some(Geste::Rejouer(version)) => {
+                // « M'écouter » rogne le même tampon à 250 ms : on n'entendrait
+                // que la fin de l'essai.
+                if self.loopback {
+                    self.loopback = false;
+                    self.apply_audio_settings();
+                }
                 if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
                     e.rejouer_essai(version);
                 }
@@ -945,7 +1012,17 @@ impl KiApp {
                 {
                     self.agc = true;
                     self.agc_target = defaut;
+                    // Un pré-ampli monté pour « parler plus fort » sans gain
+                    // automatique ne sert plus à rien avec lui — il ne fait
+                    // qu'abaisser le seuil où les bruits et les voix d'à côté
+                    // passent pour de la voix.
+                    if self.input_gain > 1.0 {
+                        self.input_gain = 1.0;
+                    }
                     self.apply_audio_settings();
+                }
+                if self.input_gain > 1.0 {
+                    ui::precision(ui, "Le pré-ampli sera remis à 100 % : avec le gain automatique il ne sert plus.");
                 }
             }
         }

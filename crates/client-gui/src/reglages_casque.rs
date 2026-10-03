@@ -34,8 +34,19 @@ const TOLERANCE_DB: f32 = 1.5;
 /// Combien de temps le verdict du calibrage reste affiché.
 const VERDICT: Duration = Duration::from_secs(40);
 /// Au-delà, les gains de la carte font saturer un micro-casque ordinaire à
-/// la moindre voix forte.
+/// la moindre voix forte. Ne concerne que les amplifications, qui sont de
+/// vrais gains ajoutés ; le niveau, lui, se juge par sa position dans la
+/// plage de la carte (sur une G8 le maximum est +9 dB, sur une Realtek +12
+/// plus 30 d'amplification : le même chiffre ne veut rien dire).
 const GAIN_TROP_DB: f32 = 20.0;
+/// Au-delà de cette position dans sa plage, le niveau est « au maximum ».
+const NIVEAU_AU_MAX: f32 = 0.9;
+/// Trames écrêtées (20 ms chacune) pendant le calibrage avant de parler de
+/// saturation : en dessous, c'est un choc sur la perche ou une plosive, et
+/// la crête suffit à régler.
+const SATURATION_SOUTENUE: u64 = 5;
+/// La jauge « Marge » retient sa crête ce temps-là.
+const RETENUE_MARGE: Duration = Duration::from_millis(300);
 
 /// Un calibrage en cours : depuis quand, la plus haute crête brute relevée,
 /// et le compteur de saturations au départ.
@@ -119,7 +130,7 @@ impl KiApp {
     /// de ki-chat est lui-même l'entrée d'un câble — la voix bouclerait sur
     /// elle-même.
     pub(crate) fn micro_jeux_resolu(&self) -> Option<String> {
-        if !self.micro_jeux || self.pref_input.as_deref().is_some_and(est_entree_de_cable) {
+        if !self.micro_jeux || self.micro_est_un_cable() {
             return None;
         }
         // La liste des sorties n'est relevée qu'à l'ouverture des réglages :
@@ -137,6 +148,42 @@ impl KiApp {
             .clone()
             .filter(|s| sorties.contains(s))
             .or_else(|| cable_virtuel(sorties))
+    }
+
+    /// Le micro de ki-chat est l'entrée d'un câble virtuel — celui qu'on a
+    /// choisi, ou le défaut de Windows quand on le suit : la voix traitée
+    /// reviendrait par là et tournerait en rond.
+    fn micro_est_un_cable(&self) -> bool {
+        match self.pref_input.as_deref() {
+            Some(nom) => est_entree_de_cable(nom),
+            None => ki_voice::micro_par_defaut().is_some_and(|n| est_entree_de_cable(&n)),
+        }
+    }
+
+    /// Le gain total de la carte a bougé pour ce micro (calibrage, curseur,
+    /// panneau Windows) : la référence de la voix d'à côté, apprise en dBFS
+    /// bruts, se décale d'autant — sans ça, +6 dB de niveau laissaient
+    /// passer la voisine, ou -6 fermaient la porte à sa propre voix.
+    fn suivre_gain_carte(&mut self, etat: &EtatMateriel) {
+        let (Some(nom), Some(niveau)) = (&etat.entree_nom, &etat.entree) else { return };
+        if !etat.disponible || !etat.topologie_lue || etat.entree_repli {
+            return;
+        }
+        let total = niveau.db + etat.amplis.iter().map(|g| g.db).sum::<f32>();
+        match &self.gain_carte_vu {
+            Some((vu, avant)) if vu == nom => {
+                let delta = total - avant;
+                if delta.abs() >= 0.1 {
+                    let cle = crate::voisine_ui::cle_micro(self.pref_input.as_deref());
+                    if let Some(a) = self.proximite_ancres.get_mut(&cle) {
+                        *a = (*a + delta).clamp(-80.0, 0.0);
+                        self.apply_audio_settings();
+                    }
+                    self.gain_carte_vu = Some((nom.clone(), total));
+                }
+            }
+            _ => self.gain_carte_vu = Some((nom.clone(), total)),
+        }
     }
 
     /// Le contenu de l'onglet. `apply` : un réglage du moteur a changé ;
@@ -161,6 +208,7 @@ impl KiApp {
         // que la page est ouverte.
         ui.ctx().request_repaint_after(Duration::from_millis(33));
         self.avancer_calibrage(voice, &etat);
+        self.suivre_gain_carte(&etat);
         let engine_up = voice.engine_up;
 
         // Deux façons de régler : l'essentiel, ou toute la chaîne. Les deux
@@ -193,7 +241,17 @@ impl KiApp {
             ),
             |ui| {
                 ui::ligne(ui, "Marge", |ui| {
-                    let crete = voice.stats.crete_brute;
+                    // La page dessine toutes les 33 ms, le moteur mesure toutes
+                    // les 20 ms : sans retenue, un cri court échappait à la
+                    // jauge une fois sur deux.
+                    let maintenant = Instant::now();
+                    let crete = match self.marge_crete {
+                        Some((c, quand)) if c >= voice.stats.crete_brute && maintenant - quand < RETENUE_MARGE => c,
+                        _ => {
+                            self.marge_crete = Some((voice.stats.crete_brute, maintenant));
+                            voice.stats.crete_brute
+                        }
+                    };
                     let crete_db = en_db(crete);
                     let couleur = if !engine_up {
                         theme::BG_ACTIVE
@@ -232,13 +290,41 @@ impl KiApp {
                 let Some(niveau) = etat.entree.clone().filter(|_| etat.disponible) else {
                     ui::precision(
                         ui,
-                        if cfg!(windows) {
-                            "Les gains de ce micro ne se règlent pas d'ici."
-                        } else {
+                        if !cfg!(windows) {
                             "Les gains de la carte son se règlent depuis Windows seulement."
+                        } else if !etat.disponible {
+                            "Lecture des gains de la carte son…"
+                        } else if etat.entree_nom.is_none() {
+                            "Micro introuvable : rien à régler tant qu'il n'est pas branché."
+                        } else {
+                            "Les gains de ce micro ne se règlent pas d'ici."
                         },
                     );
                     return;
+                };
+                if etat.entree_repli {
+                    ui::banner(
+                        ui,
+                        Tone::Warn,
+                        &format!(
+                            "Ton micro réglé est introuvable : ce que tu vois ici, ce sont les gains de \
+                             « {} », le micro par défaut de Windows.",
+                            etat.entree_nom.as_deref().unwrap_or("?")
+                        ),
+                        false,
+                    );
+                    ui.add_space(6.0);
+                }
+                if let Some(e) = &etat.derniere_erreur {
+                    ui::banner(ui, Tone::Warn, e, false);
+                    ui.add_space(6.0);
+                }
+                // La position dans la plage de la carte : c'est elle qui dit
+                // « au maximum », pas le chiffre en dB.
+                let position = if niveau.max_db > niveau.min_db {
+                    ((niveau.db - niveau.min_db) / (niveau.max_db - niveau.min_db)).clamp(0.0, 1.0)
+                } else {
+                    0.0
                 };
                 ui::ligne(ui, "Niveau", |ui| {
                     let mut pct = niveau.scalaire * 100.0;
@@ -248,9 +334,15 @@ impl KiApp {
                     ui::precision(
                         ui,
                         &format!(
-                            "{:+.1} dB — le volume du micro dans Windows. Il règle ta marge avant \
-                             la saturation, pas ton volume chez les autres.",
-                            niveau.db
+                            "{:+.1} dB{} — le volume du micro dans Windows. Il règle ta marge \
+                             avant la saturation, et ce qui franchit la porte de bruit et la \
+                             « voix d'à côté » : pas ton volume chez les autres.",
+                            niveau.db,
+                            if position >= NIVEAU_AU_MAX {
+                                " (le maximum de la carte)"
+                            } else {
+                                ""
+                            }
                         ),
                     );
                 });
@@ -271,20 +363,28 @@ impl KiApp {
                         );
                     });
                 }
-                let total = niveau.db + etat.amplis.iter().map(|g| g.db).sum::<f32>();
+                let amplis_db: f32 = etat.amplis.iter().map(|g| g.db).sum();
+                let total = niveau.db + amplis_db;
                 // Le piège : monter ces gains pour « parler plus fort ». Vu
                 // chez drion le 29/09 : +32 dB, une voix « caverneuse » et pas
-                // plus forte pour autant.
-                if total > GAIN_TROP_DB {
+                // plus forte pour autant. Et le 02/10 sur la G8 : niveau à
+                // 100 %, +9 dB, le maximum de la carte — la voix d'à côté
+                // passait au-dessus de tous les seuils.
+                if amplis_db > GAIN_TROP_DB || position >= NIVEAU_AU_MAX {
+                    let constat = if amplis_db > GAIN_TROP_DB {
+                        format!("{total:+.0} dB de gain en tout, c'est beaucoup pour un micro-casque")
+                    } else {
+                        "Le niveau du micro est au maximum de la carte".to_string()
+                    };
                     ui::banner(
                         ui,
                         Tone::Warn,
                         &format!(
-                            "{total:+.0} dB de gain en tout, c'est beaucoup pour un micro-casque : ta \
-                             voix sature dès que tu hausses le ton, et le fond de la pièce monte avec \
-                             elle — la voix « de cave ». Et ça ne te rend pas plus fort chez les \
-                             autres : le gain automatique te ramène toujours au même niveau. Clique \
-                             « Régler mon micro », puis règle « Ton volume » juste en dessous."
+                            "{constat} : ta voix sature dès que tu hausses le ton, et le fond de la \
+                             pièce — la personne à côté comprise — monte avec elle. Ça ne te rend pas \
+                             plus fort chez les autres : le gain automatique te ramène toujours au \
+                             même niveau. Clique « Régler mon micro », puis règle « Ton volume » \
+                             juste en dessous."
                         ),
                         false,
                     );
@@ -293,6 +393,26 @@ impl KiApp {
                 ui::ligne(ui, "Calibrer", |ui| {
                     self.calibrage_ui(ui, voice, total, etat.topologie_lue);
                 });
+                // Le pré-ampli de ki-chat s'ajoute au gain de la carte avant la
+                // porte et les seuils ; caché quand le gain automatique est
+                // allumé, il n'en agissait pas moins.
+                if self.agc && (self.input_gain - 1.0).abs() > 0.01 {
+                    ui::ligne(ui, "Pré-ampli", |ui| {
+                        let mut pct = self.input_gain * 100.0;
+                        if curseur(ui, &mut pct, 0.0..=200.0, " %", Some(1.0)) {
+                            self.input_gain = pct / 100.0;
+                            *apply = true;
+                        }
+                        ui::precision(
+                            ui,
+                            &format!(
+                                "{:+.1} dB dans ki-chat, avant la porte et la « voix d'à côté ». Avec le \
+                                 gain automatique il ne te rend pas plus fort : 100 % est la bonne valeur.",
+                                20.0 * self.input_gain.max(1e-3).log10()
+                            ),
+                        );
+                    });
+                }
                 // Le vrai bouton du volume chez les autres.
                 ui::ligne(ui, "Ton volume", |ui| {
                     if self.agc {
@@ -304,7 +424,8 @@ impl KiApp {
                         ui::precision(
                             ui,
                             "Ce que les autres entendent de toi. Pour être plus fort, c'est ici — \
-                             pas dans les gains de la carte, que le gain automatique compense.",
+                             pas dans les gains de la carte : le gain automatique les compense, et \
+                             les monter ne fait que remonter le fond et la voix d'à côté.",
                         );
                     } else {
                         let mut pct = self.input_gain * 100.0;
@@ -713,7 +834,12 @@ impl KiApp {
                             "Clique, puis parle aussi fort qu'en jeu pendant 5 secondes. ki-chat \
                              règle les gains pour que ton cri le plus fort reste 6 dB sous la \
                              saturation ; le gain automatique remonte ta voix normale. Gain \
-                             actuel : {total_db:+.0} dB."
+                             actuel : {total_db:+.0} dB sur la carte{}.",
+                            if (self.input_gain - 1.0).abs() > 0.01 {
+                                format!(", {:+.1} dB de pré-ampli dans ki-chat", 20.0 * self.input_gain.max(1e-3).log10())
+                            } else {
+                                String::new()
+                            }
                         )
                     } else if voice.engine_up {
                         "Lecture des gains de ta carte son…".to_string()
@@ -758,12 +884,17 @@ impl KiApp {
             return;
         }
         let Some(cal) = self.calibrage_micro.take() else { return };
-        let sature = voice.stats.saturations > cal.saturations || cal.crete >= 0.985;
-        let texte = self.conclure_calibrage(cal.crete, sature, etat);
+        // Une saturation soutenue (100 ms de trames écrêtées) : la vraie
+        // crête est inconnue, on recule franchement. Un choc isolé sur la
+        // perche ou une plosive (une trame, trois échantillons) se règle par
+        // la crête, comme le reste.
+        let ecretees = voice.stats.saturations.saturating_sub(cal.saturations);
+        let sature = ecretees >= SATURATION_SOUTENUE;
+        let texte = self.conclure_calibrage(cal.crete, sature, ecretees, etat);
         self.calibrage_verdict = Some((Instant::now(), texte));
     }
 
-    fn conclure_calibrage(&self, crete: f32, sature: bool, etat: &EtatMateriel) -> String {
+    fn conclure_calibrage(&self, crete: f32, sature: bool, ecretees: u64, etat: &EtatMateriel) -> String {
         if crete < 0.003 {
             return "Rien entendu. Ton micro est-il coupé (bouton du casque, perche relevée) ? \
                     Vérifie aussi que c'est bien lui qui est choisi dans l'onglet Audio."
@@ -771,6 +902,8 @@ impl KiApp {
         }
         let constat = if sature {
             "Ton micro saturait : ton cri le plus fort touchait le plafond.".to_string()
+        } else if ecretees > 0 || crete >= 0.985 {
+            "Un coup a touché le plafond (un choc sur la perche, une plosive), le reste non.".to_string()
         } else {
             format!("Ton cri le plus fort arrivait à {:+.0} dB.", en_db(crete))
         };
@@ -805,7 +938,9 @@ impl KiApp {
                 } else {
                     "Ton cri le plus fort arrivera vers -6 dB, sous la saturation."
                 };
-                format!("{constat} Réglé : {}. {suite}", changements.join(", "))
+                // Demandé, pas « réglé » : la carte peut refuser, et la page
+                // l'affiche alors au-dessus des curseurs.
+                format!("{constat} Demandé à la carte : {}. {suite}", changements.join(", "))
             }
         }
     }
@@ -956,6 +1091,21 @@ mod tests {
         // Sans amplification, le niveau seul, dans sa plage.
         let (niveau, ampli) = gains_pour(crete, false, (0.0, -17.25, 12.0), None, 0.0).unwrap();
         assert_eq!((niveau, ampli), (12.0, None));
+    }
+
+    /// La G8 : -48 à +9 dB, aucune amplification, réglée au maximum. Trop
+    /// faible, elle ne peut pas monter plus ; saturée, elle recule de 10 dB.
+    #[test]
+    fn une_g8_au_maximum_recule_ou_reste() {
+        let g8 = (9.0, -48.0, 9.0);
+        let faible = 10f32.powf(-30.0 / 20.0);
+        assert_eq!(gains_pour(faible, false, g8, None, 0.0), Some((9.0, None)));
+        assert_eq!(gains_pour(1.0, true, g8, None, 0.0), Some((-1.0, None)));
+        // Un cri à -2 dB : 4 dB de trop, le niveau descend d'autant.
+        let fort = 10f32.powf(-2.0 / 20.0);
+        let (niveau, ampli) = gains_pour(fort, false, g8, None, 0.0).unwrap();
+        assert!((niveau - 5.0).abs() < 0.01, "niveau {niveau}");
+        assert_eq!(ampli, None);
     }
 
     /// Déjà bien réglé : on ne touche à rien.

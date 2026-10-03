@@ -67,7 +67,10 @@ pub(crate) fn lire_studio(texte: &str) -> ReglagesStudio {
         let n: Vec<f32> = valeur.split(',').filter_map(|v| v.trim().parse().ok()).collect();
         match (cle.trim(), n.as_slice()) {
             ("porte", &[profondeur_db, attaque_ms, maintien_ms, relachement_ms]) => {
-                r.porte = ReglagesPorte { profondeur_db, attaque_ms, maintien_ms, relachement_ms };
+                // Bornée : une profondeur de 0 dB (curseur poussé à fond)
+                // rendait la porte inerte sans rien dire — elle redevient la
+                // coupure complète.
+                r.porte = ReglagesPorte { profondeur_db, attaque_ms, maintien_ms, relachement_ms }.bornes();
             }
             ("deesser", &[frequence, seuil_db, reduction_max_db]) => {
                 r.deesser = Some(ReglagesDeesser { frequence, seuil_db, reduction_max_db });
@@ -83,6 +86,20 @@ pub(crate) fn lire_studio(texte: &str) -> ReglagesStudio {
         }
     }
     r
+}
+
+/// Une chaîne studio dont la porte avait une profondeur de 0 dB (ou presque) :
+/// jusqu'à la 0.1.57 le curseur l'acceptait, et la porte « fermée » laissait
+/// tout passer — elle ne faisait rien, quel que soit son seuil. À la lecture,
+/// `lire_studio` la ramène à -80 dB ; mais rallumer d'un coup une porte à un
+/// seuil réglé pendant qu'elle était inerte couperait des bouts de voix sans
+/// prévenir. L'application la désactive donc (seuil à 0) et le dit.
+pub(crate) fn porte_inerte(texte: &str) -> bool {
+    texte.split(';').any(|champ| {
+        champ.trim().strip_prefix("porte=").and_then(|v| v.split(',').next()?.trim().parse::<f32>().ok()).is_some_and(
+            |profondeur| !profondeur.is_finite() || profondeur > ReglagesPorte::PROFONDEUR_MAX_DB,
+        )
+    })
 }
 
 pub(crate) fn lire_profils(texte: &str) -> Vec<ProfilVoix> {
@@ -292,10 +309,17 @@ impl KiApp {
                         ui,
                         "Profondeur",
                         "Ce qu'il reste du son quand elle est fermée. -80 dB : silence total ; \
-                         -15 dB : le fond reste, juste plus bas — plus naturel.",
+                         -15 dB : le fond reste, juste plus bas — plus naturel. -6 dB au plus : \
+                         au-dessus, la porte ne ferait plus rien.",
                         montrer,
                         |ui| {
-                            *apply |= curseur(ui, &mut p.profondeur_db, -80.0..=0.0, " dB", Some(1.0));
+                            *apply |= curseur(
+                                ui,
+                                &mut p.profondeur_db,
+                                -80.0..=ReglagesPorte::PROFONDEUR_MAX_DB,
+                                " dB",
+                                Some(1.0),
+                            );
                         },
                     );
                     parametre(
@@ -328,10 +352,12 @@ impl KiApp {
                             *apply |= curseur(ui, &mut p.relachement_ms, 10.0..=1000.0, " ms", Some(10.0));
                         },
                     );
+                    // L'état du détecteur, pas le gain : fermée, une porte
+                    // douce garde un gain proche de 1 et disait « ouverte ».
                     let g = stats.porte_gain.clamp(0.0, 1.0);
                     let (couleur, texte) = if !actif {
                         (TEXT_FAINT, "vocal inactif")
-                    } else if g > 0.9 {
+                    } else if stats.porte_ouverte {
                         (SPEAK, "ouverte")
                     } else {
                         (TEXT_DIM, "fermée")
@@ -595,6 +621,17 @@ impl KiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La porte de drion (« porte=0,1,150,150 ») : 0 dB de profondeur, donc
+    /// inerte ; la chaîne d'avant le mode studio ne l'est pas.
+    #[test]
+    fn une_porte_a_zero_db_est_reconnue_comme_inerte() {
+        assert!(porte_inerte("porte=0,1,150,150;deesser=-;comp=-22,3,6,5,120,0;chaleur=0.07;plafond=-1"));
+        assert!(porte_inerte("porte=-3,2,150,150"));
+        assert!(!porte_inerte("porte=-35,1,150,150;deesser=-"));
+        assert!(!porte_inerte(&ecrire_studio(&ReglagesStudio::default())));
+        assert!(!porte_inerte(""));
+    }
 
     #[test]
     fn la_chaine_fait_l_aller_retour() {
