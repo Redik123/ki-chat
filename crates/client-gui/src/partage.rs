@@ -88,7 +88,7 @@ impl Reglages {
             source,
             max_height: nombre("stream_max_height", d.max_height),
             fps: nombre("stream_fps", d.fps).clamp(1, 120),
-            kbps: nombre("stream_kbps", d.kbps).clamp(500, 60_000),
+            kbps: nombre("stream_kbps", d.kbps).clamp(500, ki_protocol::STREAM_KBPS_MAX),
             cursor: get("stream_cursor", "on") != "off",
             preview: get("stream_preview", "on") != "off",
             son: get("stream_audio", "on") != "off",
@@ -381,7 +381,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
         let mut mbit = r.kbps as f32 / 1000.0;
         if ui
             .add(
-                egui::Slider::new(&mut mbit, 1.0..=60.0)
+                egui::Slider::new(&mut mbit, 1.0..=ki_protocol::STREAM_KBPS_MAX as f32 / 1000.0)
                     .step_by(0.5)
                     .fixed_decimals(1)
                     .suffix(" Mbit/s"),
@@ -1605,6 +1605,11 @@ mod tests {
         assert_eq!(defaut, Reglages::default());
         assert_eq!(defaut.meta(&[0; 32]).fps, 30);
         assert_eq!(defaut.config().bitrate_bps, 6_000_000);
+
+        // Un débit enregistré par une version d'avant, au-dessus de la
+        // borne, y revient.
+        let trop = Reglages::load(|k, d| if k == "stream_kbps" { "50500".into() } else { d.to_string() });
+        assert_eq!(trop.kbps, ki_protocol::STREAM_KBPS_MAX);
     }
 
     /// Deux instances d'ici se reconnaissent pour un même stream ; d'un

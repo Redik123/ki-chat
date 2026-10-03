@@ -3852,6 +3852,15 @@ pub fn nonce_for_media(domain: u8, stream_id: u32, seq: u64) -> [u8; 24] {
     n
 }
 
+/// Le débit le plus haut d'un stream, en kbit/s — décision de drion le
+/// 03/10 : « on n'a pas besoin de plus ». Les streams sont encodés en débit
+/// constant : au-delà, l'encodeur remplit le débit avec des détails qu'on ne
+/// voit plus en 1080p à 60 i/s (net dès 10 Mbit/s), et chaque spectateur
+/// coûte autant de trafic au serveur. Le client y borne son réglage ; le
+/// serveur y borne ce qu'on lui annonce, et le dit au streamer — une version
+/// d'avant, réglée plus haut, s'y plie dès la première seconde.
+pub const STREAM_KBPS_MAX: u32 = 20_000;
+
 /// Ce qu'un stream diffuse, annoncé au salon et mis à jour au vol.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamMeta {

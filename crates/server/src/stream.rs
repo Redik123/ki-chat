@@ -61,8 +61,9 @@ use ki_protocol::{ChannelId, MediaHeader, StreamMeta, UserId};
 const MAX_PAR_SALON: usize = 2;
 
 /// Le débit qu'un streamer peut annoncer : il sert de plafond aux paliers et
-/// de base aux calculs de débit, et venait du client sans borne.
-const KBPS_MAX: u32 = 100_000;
+/// de base aux calculs de débit, et venait du client sans borne. Voir
+/// [`ki_protocol::STREAM_KBPS_MAX`].
+const KBPS_MAX: u32 = ki_protocol::STREAM_KBPS_MAX;
 
 /// Les réglages annoncés par le streamer, débit ramené à [`KBPS_MAX`].
 fn debit_borne(mut meta: StreamMeta) -> StreamMeta {
@@ -766,6 +767,10 @@ impl Streams {
         meta: StreamMeta,
         couches: bool,
     ) -> Result<u32, &'static str> {
+        // Ce que le streamer encode vraiment au départ : son réglage. Pris
+        // pour la dernière annonce, il fait partir le budget borné dès la
+        // première mesure quand la borne le coupe.
+        let demande = meta.kbps;
         let meta = debit_borne(meta);
         let mut inner = self.inner.lock().unwrap();
         if let Some((id, _)) = inner.by_id.iter().find(|(_, l)| l.streamer == streamer) {
@@ -795,7 +800,7 @@ impl Streams {
                 couches,
                 basse: Basse::eteinte(),
                 montant: Montant::neuf(meta.kbps),
-                annonce: Budget { haute: meta.kbps, basse: None, montant: false },
+                annonce: Budget { haute: demande, basse: None, montant: false },
                 spectateurs_annonces: None,
             },
         );
@@ -836,6 +841,7 @@ impl Streams {
     /// Met à jour les caractéristiques annoncées ; rend l'identifiant pour la
     /// rediffusion au salon.
     pub fn meta_update(&self, streamer: UserId, meta: StreamMeta) -> Option<u32> {
+        let demande = meta.kbps;
         let meta = debit_borne(meta);
         let mut inner = self.inner.lock().unwrap();
         let (id, live) = inner
@@ -850,6 +856,9 @@ impl Streams {
         if live.montant.palier >= live.meta.kbps || live.montant.palier > meta.kbps {
             live.montant.palier = meta.kbps;
         }
+        // Reconfiguré, le streamer encode à son réglage : le budget repart
+        // à la mesure suivante s'il en diffère — borné, entre autres.
+        live.annonce.haute = demande;
         live.meta = meta;
         Some(*id)
     }
@@ -1463,6 +1472,35 @@ mod tests {
         assert!(s.spectateurs_changes().is_empty(), "rien de neuf");
         assert_eq!(s.spectateurs_du_salon(10), vec![(id, vec![])]);
         assert!(s.spectateurs_du_salon(11).is_empty());
+    }
+
+    /// Un streamer réglé au-dessus de la borne (une version d'avant, qui
+    /// montait à 60 Mbit/s) reçoit le débit borné dès la première mesure,
+    /// au démarrage comme après une reconfiguration.
+    #[test]
+    fn un_reglage_trop_haut_est_ramene_a_la_borne() {
+        let s = Streams::new();
+        let trop = StreamMeta { kbps: 50_500, ..meta() };
+        let id = s.start(1, 10, "k1".into(), trop, false).unwrap();
+        let mesurer_maintenant = || {
+            s.inner.lock().unwrap().by_id.get_mut(&id).unwrap().palier.derniere_mesure =
+                Instant::now() - Duration::from_secs(2);
+            s.battre()
+        };
+        let consignes = mesurer_maintenant();
+        let budget = consignes.iter().find(|c| c.stream_id == id).and_then(|c| c.budget);
+        assert_eq!(budget.map(|b| b.haute), Some(ki_protocol::STREAM_KBPS_MAX));
+        // Dit une fois : rien de neuf ensuite.
+        assert!(mesurer_maintenant().iter().all(|c| c.budget.is_none()));
+        // Reconfiguré au-dessus encore : redit.
+        s.meta_update(1, trop);
+        let budget = mesurer_maintenant().iter().find(|c| c.stream_id == id).and_then(|c| c.budget);
+        assert_eq!(budget.map(|b| b.haute), Some(ki_protocol::STREAM_KBPS_MAX));
+        // Sous la borne, rien ne change pour personne.
+        let id2 = s.start(2, 11, "k2".into(), meta(), false).unwrap();
+        s.inner.lock().unwrap().by_id.get_mut(&id2).unwrap().palier.derniere_mesure =
+            Instant::now() - Duration::from_secs(2);
+        assert!(s.battre().iter().filter(|c| c.stream_id == id2).all(|c| c.budget.is_none()));
     }
 
     #[test]
