@@ -215,6 +215,12 @@ const DESCENTE_DB_S: f32 = 6.0;
 const DEMARRAGE_S: f32 = 3.0;
 /// Le plafond des crêtes : -1 dBFS.
 const PLAFOND: f32 = 0.891;
+/// L'anticipation du limiteur : le son attend 5 ms, le temps que le gain
+/// voie venir la crête et y descende en douceur.
+const ANTICIPATION: usize = (SAMPLE_RATE as usize) / 200;
+/// Le relâchement du limiteur, après la crête : assez lent pour ne pas
+/// moduler les graves d'une période à l'autre.
+const RELACHEMENT_S: f32 = 0.15;
 
 /// Le son du jeu ramené au niveau des voix. Chez le streamer, il sort au
 /// volume que le jeu a chez lui : un Valorant réglé à 40 % arrivait à 40 %
@@ -230,8 +236,76 @@ pub struct NiveauJeu {
     /// premier bloc qui ne soit pas un silence.
     sonie_db: Option<f32>,
     duree_s: f32,
-    gain_limiteur: f32,
+    limiteur: Limiteur,
+}
+
+/// Le limiteur à anticipation. Celui d'avant 0.1.58 baissait le gain à
+/// l'échantillon même qui dépassait, et le relâchait en 60 ms : chaque crête
+/// d'une explosion était écrasée d'un coup, et le gain repartait entre deux
+/// périodes d'un grave — 4 à 6 % de distorsion, un grésillement, sur une
+/// explosion qui suit un moment calme (gain au plus haut). Ici le son
+/// attend [`ANTICIPATION`] : le gain nécessaire passe par un minimum
+/// glissant sur cette fenêtre, lissé par une moyenne glissante de même
+/// longueur — il descend en rampe sur 5 ms et touche le plafond exactement
+/// à la crête, jamais après —, puis remonte en [`RELACHEMENT_S`].
+#[derive(Clone, Debug)]
+struct Limiteur {
+    /// Les trames (gauche, droite) qui attendent leur tour.
+    retard: std::collections::VecDeque<[f32; 2]>,
+    /// Le minimum glissant du gain nécessaire : (rang, gain), gains
+    /// croissants de l'avant vers l'arrière.
+    minima: std::collections::VecDeque<(u64, f32)>,
+    /// Les derniers minima, et leur somme : la moyenne glissante.
+    lissage: std::collections::VecDeque<f32>,
+    somme: f64,
+    rang: u64,
+    gain: f32,
     relachement: f32,
+}
+
+impl Limiteur {
+    fn new() -> Self {
+        Self {
+            // Le retard part plein de silence, le lissage plein de gain
+            // unité : tant qu'il ne sort que ce silence, le gain n'importe pas.
+            retard: std::iter::repeat_n([0.0; 2], ANTICIPATION).collect(),
+            minima: std::collections::VecDeque::with_capacity(ANTICIPATION + 1),
+            lissage: std::iter::repeat_n(1.0, ANTICIPATION).collect(),
+            somme: ANTICIPATION as f64,
+            rang: 0,
+            gain: 1.0,
+            relachement: 1.0 - (-1.0 / (RELACHEMENT_S * SAMPLE_RATE as f32)).exp(),
+        }
+    }
+
+    /// Une trame entre, celle d'il y a [`ANTICIPATION`] sort, limitée.
+    fn passer(&mut self, gauche: f32, droite: f32) -> [f32; 2] {
+        let crete = gauche.abs().max(droite.abs());
+        let besoin = if crete > PLAFOND { PLAFOND / crete } else { 1.0 };
+        let rang = self.rang;
+        self.rang += 1;
+        while self.minima.back().is_some_and(|&(_, g)| g >= besoin) {
+            self.minima.pop_back();
+        }
+        self.minima.push_back((rang, besoin));
+        while self.minima.front().is_some_and(|&(r, _)| r + (ANTICIPATION as u64) < rang) {
+            self.minima.pop_front();
+        }
+        let minimum = self.minima.front().map_or(1.0, |&(_, g)| g);
+        self.lissage.push_back(minimum);
+        self.somme += f64::from(minimum);
+        if let Some(sorti) = self.lissage.pop_front() {
+            self.somme -= f64::from(sorti);
+        }
+        // Chacun des minima moyennés couvre la trame qui sort : leur
+        // moyenne ne dépasse pas son gain nécessaire. Le relâchement ne fait
+        // que remonter plus lentement — toujours sous la moyenne.
+        let cible = (self.somme / ANTICIPATION as f64) as f32;
+        self.gain = if cible < self.gain { cible } else { self.gain + (cible - self.gain) * self.relachement };
+        let [g, d] = self.retard.pop_front().unwrap_or([0.0; 2]);
+        self.retard.push_back([gauche, droite]);
+        [g * self.gain, d * self.gain]
+    }
 }
 
 impl Default for NiveauJeu {
@@ -246,9 +320,7 @@ impl NiveauJeu {
             gain_db: 0.0,
             sonie_db: None,
             duree_s: 0.0,
-            gain_limiteur: 1.0,
-            // 60 ms pour relâcher.
-            relachement: 1.0 - (-1.0 / (0.06 * SAMPLE_RATE as f32)).exp(),
+            limiteur: Limiteur::new(),
         }
     }
 
@@ -282,20 +354,13 @@ impl NiveauJeu {
         }
         self.duree_s += dt;
         // Le gain glisse le long du bloc (pas de marche audible), puis le
-        // limiteur : attaque immédiate, sur la plus forte des deux voies.
+        // limiteur, sur la plus forte des deux voies.
         let (g0, g1) = (10f32.powf(gain_avant / 20.0), 10f32.powf(self.gain_db / 20.0));
         for i in 0..n {
             let g = g0 + (g1 - g0) * (i as f32 / n as f32);
-            let (gauche, droite) = (pcm[2 * i] * g, pcm[2 * i + 1] * g);
-            let crete = gauche.abs().max(droite.abs());
-            let voulu = if crete > PLAFOND { PLAFOND / crete } else { 1.0 };
-            if voulu < self.gain_limiteur {
-                self.gain_limiteur = voulu;
-            } else {
-                self.gain_limiteur += (voulu - self.gain_limiteur) * self.relachement;
-            }
-            pcm[2 * i] = gauche * self.gain_limiteur;
-            pcm[2 * i + 1] = droite * self.gain_limiteur;
+            let [gauche, droite] = self.limiteur.passer(pcm[2 * i] * g, pcm[2 * i + 1] * g);
+            pcm[2 * i] = gauche;
+            pcm[2 * i + 1] = droite;
         }
     }
 }
@@ -405,6 +470,89 @@ mod tests {
         let efficace = (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32).sqrt();
         let voulu = 10f32.powf(niveau_db / 20.0);
         x.iter().map(|s| s * voulu / efficace).collect()
+    }
+
+    /// L'amplitude d'une fréquence dans la voie gauche d'un stéréo entrelacé,
+    /// sur `[debut, debut + duree)` secondes (Goertzel).
+    fn amplitude(x: &[f32], f: f32, debut: f32, duree: f32) -> f32 {
+        let sr = SAMPLE_RATE as f32;
+        let (d, n) = ((debut * sr) as usize, (duree * sr) as usize);
+        let w = 2.0 * std::f32::consts::PI * f / sr;
+        let (mut re, mut im) = (0f64, 0f64);
+        for i in 0..n {
+            let s = f64::from(x[2 * (d + i)]);
+            re += s * f64::from((w * i as f32).cos());
+            im += s * f64::from((w * i as f32).sin());
+        }
+        (2.0 * (re * re + im * im).sqrt() / n as f64) as f32
+    }
+
+    /// Un grave fort (60 Hz) et un médium (1 kHz), pour `secondes` : de quoi
+    /// voir ce qu'un limiteur fait d'une explosion.
+    fn explosion(grave: f32, medium: f32, secondes: f32) -> Vec<f32> {
+        let n = (secondes * SAMPLE_RATE as f32) as usize;
+        let sr = SAMPLE_RATE as f32;
+        (0..n)
+            .flat_map(|i| {
+                let t = i as f32 / sr;
+                let s = grave * (2.0 * std::f32::consts::PI * 60.0 * t).sin()
+                    + medium * (2.0 * std::f32::consts::PI * 1000.0 * t).sin();
+                [s, s]
+            })
+            .collect()
+    }
+
+    /// La distorsion qu'ajoute le niveau à une explosion qui suit un long
+    /// calme (gain au plus haut) : les harmoniques du grave (120 à 600 Hz),
+    /// rapportées au grave, sur `[debut, debut + duree)` secondes de
+    /// l'explosion — comptées en sortie, donc après l'anticipation du
+    /// limiteur, sans quoi la fenêtre commencerait dans le calme.
+    fn distorsion_d_explosion(n: &mut NiveauJeu, grave: f32, debut: f32, duree: f32) -> f32 {
+        let mut calme = son_de_jeu(-40.0, 8.0);
+        normaliser(n, &mut calme);
+        let mut boum = explosion(grave, 0.1, 1.5);
+        normaliser(n, &mut boum);
+        let debut = debut + ANTICIPATION as f32 / SAMPLE_RATE as f32;
+        let fondamental = amplitude(&boum, 60.0, debut, duree);
+        let harmoniques: f32 =
+            (2..=10).map(|k| amplitude(&boum, 60.0 * k as f32, debut, duree).powi(2)).sum::<f32>().sqrt();
+        harmoniques / fondamental
+    }
+
+    /// Une explosion après un long calme : le gain est au plus haut, le
+    /// limiteur travaille dur. L'ancien (attaque à l'échantillon, 60 ms de
+    /// relâchement) y ajoutait 3,7 à 6,5 % de distorsion aux graves — un
+    /// grésillement.
+    #[test]
+    fn une_explosion_apres_le_calme_ne_gresille_pas() {
+        for (grave, debut, duree, quoi, max) in [
+            (0.5, 0.5, 0.5, "explosion, régime établi", 0.005),
+            (0.5, 0.0, 0.1, "explosion, attaque", 0.02),
+            (0.9, 0.5, 0.5, "forte explosion, régime établi", 0.005),
+            (0.9, 0.0, 0.1, "forte explosion, attaque", 0.02),
+        ] {
+            let thd = distorsion_d_explosion(&mut NiveauJeu::new(), grave, debut, duree);
+            eprintln!("{quoi} : {:.2} % de distorsion", thd * 100.0);
+            assert!(thd < max, "{quoi} : {:.2} %", thd * 100.0);
+        }
+    }
+
+    /// Le plafond tient à l'échantillon près, même sur une crête isolée qui
+    /// surgit d'un coup (un coup de feu) : l'anticipation la voit venir.
+    #[test]
+    fn une_crete_isolee_ne_passe_pas_le_plafond() {
+        let mut n = NiveauJeu::new();
+        let mut calme = son_de_jeu(-40.0, 8.0);
+        normaliser(&mut n, &mut calme);
+        let mut coup = vec![0f32; 2 * SAMPLE_RATE as usize / 2];
+        for i in 1000..1010 {
+            coup[2 * i] = 0.95;
+            coup[2 * i + 1] = -0.95;
+        }
+        normaliser(&mut n, &mut coup);
+        assert!(calme.iter().chain(&coup).all(|s| s.abs() <= PLAFOND + 1e-4));
+        // Et le coup est bien passé, à 5 ms près.
+        assert!(coup.iter().any(|s| s.abs() > 0.8 * PLAFOND));
     }
 
     fn efficace_db(x: &[f32]) -> f32 {
