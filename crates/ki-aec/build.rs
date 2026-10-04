@@ -61,6 +61,8 @@ fn main() {
         .include(src.join("include"))
         .include(&dsp)
         .include(out.join("gen"))
+        // Hors Windows, speexdsp_types.h l'inclut sans le préfixe speex/.
+        .include(&gen)
         // Virgule flottante et FFT embarquée : la configuration portable de
         // référence, celle des paquets Linux.
         .define("FLOATING_POINT", None)

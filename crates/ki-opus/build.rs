@@ -40,7 +40,11 @@ fn main() {
         }
     };
 
-    let dst = cmake::Config::new(&src_dir)
+    let mut config = cmake::Config::new(&src_dir);
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        android(&mut config);
+    }
+    let dst = config
         // Les chemins DSP/ML doivent être optimisés même en build debug.
         .profile("Release")
         .define("OPUS_BUILD_SHARED_LIBRARY", "OFF")
@@ -57,6 +61,61 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
     println!("cargo:rustc-link-lib=static=opus");
     println!("cargo:rerun-if-env-changed=KI_OPUS_SRC");
+}
+
+/// Android (cargo ndk) : sous Windows, cmake choisirait Visual Studio. On lui
+/// impose Ninja et la toolchain du NDK ; `ANDROID_ABI` fait reconnaître la
+/// compilation croisée au crate cmake. Ninja se prend dans le PATH ou, à
+/// défaut, dans le cmake du SDK Android.
+fn android(config: &mut cmake::Config) {
+    let ndk = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "ANDROID_NDK", "NDK_HOME"]
+        .iter()
+        .find_map(|v| std::env::var_os(v))
+        .map(PathBuf::from)
+        .expect("ANDROID_NDK_HOME (ou NDK_HOME, posé par Tauri) : dossier du NDK requis pour compiler opus pour Android");
+    let abi = match std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH").as_str() {
+        "aarch64" => "arm64-v8a",
+        "arm" => "armeabi-v7a",
+        "x86_64" => "x86_64",
+        "x86" => "x86",
+        autre => panic!("architecture Android non prise en charge : {autre}"),
+    };
+    // cargo ndk passe le niveau d'API dans la cible de l'éditeur de liens
+    // (« aarch64-linux-android26 ») ; 26 sinon.
+    let api: String = std::env::var("_CARGO_NDK_LINK_TARGET")
+        .map(|t| t.chars().rev().take_while(char::is_ascii_digit).collect::<String>().chars().rev().collect())
+        .ok()
+        .filter(|a: &String| !a.is_empty())
+        .unwrap_or_else(|| "26".into());
+    config
+        .generator("Ninja")
+        .define("CMAKE_TOOLCHAIN_FILE", ndk.join("build/cmake/android.toolchain.cmake"))
+        .define("ANDROID_ABI", abi)
+        .define("ANDROID_PLATFORM", format!("android-{api}"));
+    if let Some(ninja) = ninja_du_sdk() {
+        config.define("CMAKE_MAKE_PROGRAM", ninja);
+    }
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo:rerun-if-env-changed=NDK_HOME");
+}
+
+/// Le ninja livré avec le cmake du SDK Android, si aucun n'est dans le PATH.
+fn ninja_du_sdk() -> Option<PathBuf> {
+    let dans_path = std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("ninja.exe").exists() || d.join("ninja").exists()));
+    if dans_path {
+        return None;
+    }
+    let sdk = std::env::var_os("ANDROID_HOME")
+        .or_else(|| std::env::var_os("ANDROID_SDK_ROOT"))
+        .map(PathBuf::from)?;
+    let mut versions: Vec<PathBuf> = std::fs::read_dir(sdk.join("cmake")).ok()?.flatten().map(|e| e.path()).collect();
+    versions.sort();
+    versions
+        .into_iter()
+        .rev()
+        .map(|v| v.join("bin").join(if cfg!(windows) { "ninja.exe" } else { "ninja" }))
+        .find(|n| n.exists())
 }
 
 /// Des sources fournies à la main doivent être celles de la version épinglée :

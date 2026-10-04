@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ki-chat</title>
+<style>
+  :root {
+    --fond: #111318; --carte: #1b1e25; --bord: #2a2e38; --texte: #e6e8ee;
+    --doux: #8b91a0; --accent: #5b8cff; --ok: #3ccf7a; --mal: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--fond); color: var(--texte);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .carte { background: var(--carte); border: 1px solid var(--bord); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; color: var(--doux); font-size: 13px; margin: 8px 0 4px; }
+  input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bord); background: var(--fond); color: var(--texte); font-size: 16px; }
+  button { padding: 12px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; }
+  button.second { background: var(--bord); }
+  button:disabled { opacity: .5; }
+  .pleine { width: 100%; margin-top: 12px; }
+  .salon { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-top: 1px solid var(--bord); }
+  .salon:first-child { border-top: 0; }
+  .rangee { display: flex; gap: 8px; }
+  .rangee button { flex: 1; }
+  .jauge { height: 8px; background: var(--fond); border-radius: 4px; overflow: hidden; margin-top: 10px; }
+  .jauge > div { height: 100%; background: var(--ok); transform: scaleX(0); transform-origin: left; transition: transform .1s; }
+  .stats { color: var(--doux); font-size: 13px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  #journal { font: 12px/1.45 ui-monospace, monospace; color: var(--doux); max-height: 40vh; overflow-y: auto; white-space: pre-wrap; }
+  .cache { display: none; }
+</style>
+</head>
+<body>
+<h1>ki-chat <span style="color:var(--doux);font-weight:400">· essai mobile</span></h1>
+
+<div class="carte" id="connexion">
+  <label for="serveur">Serveur</label>
+  <input id="serveur" value="ts.baws.fun" autocapitalize="off" autocorrect="off">
+  <label for="pseudo">Pseudo</label>
+  <input id="pseudo" autocapitalize="off" autocorrect="off">
+  <label for="mdp">Mot de passe</label>
+  <input id="mdp" type="password">
+  <label for="invitation">Invitation (premier compte seulement)</label>
+  <input id="invitation" autocapitalize="off" autocorrect="off">
+  <button class="pleine" id="btn-connecter">Se connecter</button>
+</div>
+
+<div class="carte cache" id="vocaux">
+  <div id="liste-salons"></div>
+</div>
+
+<div class="carte cache" id="voix">
+  <div class="rangee">
+    <button id="btn-micro">Ouvrir le micro</button>
+    <button class="second" id="btn-quitter">Quitter</button>
+  </div>
+  <div class="jauge"><div id="niveau"></div></div>
+  <div class="stats" id="stats">—</div>
+</div>
+
+<div class="carte"><div id="journal"></div></div>
+
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const $ = (id) => document.getElementById(id);
+  let microOuvert = false;
+
+  function ecrire(ligne) {
+    const j = $("journal");
+    j.textContent += ligne + "\n";
+    j.scrollTop = j.scrollHeight;
+  }
+
+  // Le pseudo et le serveur se retiennent ; le mot de passe, non (le
+  // Keystore Android viendra à l'étape 3).
+  try {
+    $("serveur").value = localStorage.getItem("serveur") || $("serveur").value;
+    $("pseudo").value = localStorage.getItem("pseudo") || "";
+  } catch (_) {}
+
+  listen("journal", (e) => ecrire(e.payload));
+  listen("salons", (e) => {
+    const liste = $("liste-salons");
+    liste.innerHTML = "";
+    for (const s of e.payload.filter((s) => s.vocal)) {
+      const ligne = document.createElement("div");
+      ligne.className = "salon";
+      const nom = document.createElement("span");
+      nom.textContent = "🔊 " + s.nom;
+      const b = document.createElement("button");
+      b.textContent = "Rejoindre";
+      b.onclick = async () => {
+        try {
+          await invoke("rejoindre_vocal", { salon: s.id });
+          ecrire("→ salon vocal « " + s.nom + " »");
+          $("voix").classList.remove("cache");
+        } catch (err) { ecrire("! " + err); }
+      };
+      ligne.append(nom, b);
+      liste.append(ligne);
+    }
+    $("connexion").classList.add("cache");
+    $("vocaux").classList.remove("cache");
+  });
+  listen("deconnecte", () => {
+    $("connexion").classList.remove("cache");
+    $("vocaux").classList.add("cache");
+    $("voix").classList.add("cache");
+    microOuvert = false;
+  });
+
+  $("btn-connecter").onclick = async () => {
+    const b = $("btn-connecter");
+    b.disabled = true;
+    try {
+      try {
+        localStorage.setItem("serveur", $("serveur").value.trim());
+        localStorage.setItem("pseudo", $("pseudo").value.trim());
+      } catch (_) {}
+      const empreinte = await invoke("connecter", {
+        serveur: $("serveur").value.trim(),
+        pseudo: $("pseudo").value.trim(),
+        motDePasse: $("mdp").value,
+        invitation: $("invitation").value.trim() || null,
+      });
+      ecrire("empreinte du serveur : " + empreinte);
+    } catch (err) {
+      ecrire("! " + err);
+    } finally {
+      b.disabled = false;
+    }
+  };
+
+  $("btn-micro").onclick = async () => {
+    try {
+      await invoke("micro", { ouvert: !microOuvert });
+      microOuvert = !microOuvert;
+      $("btn-micro").textContent = microOuvert ? "Couper le micro" : "Ouvrir le micro";
+    } catch (err) { ecrire("! " + err); }
+  };
+  $("btn-quitter").onclick = async () => {
+    try {
+      await invoke("quitter_vocal");
+      microOuvert = false;
+      $("btn-micro").textContent = "Ouvrir le micro";
+      $("voix").classList.add("cache");
+    } catch (err) { ecrire("! " + err); }
+  };
+
+  // Jauge du micro et compteurs de paquets, quatre fois par seconde.
+  setInterval(async () => {
+    if ($("voix").classList.contains("cache")) return;
+    try {
+      const v = await invoke("etat_voix");
+      $("niveau").style.transform = `scaleX(${Math.min(1, v.niveau_micro)})`;
+      $("stats").textContent =
+        `${v.envoyes} envoyés · ${v.recus} reçus · ${v.perdus} perdus · ${v.emetteurs} qui parle(nt)`;
+    } catch (_) {}
+  }, 250);
+</script>
+</body>
+</html>

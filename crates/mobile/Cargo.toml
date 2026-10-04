@@ -1,0 +1,50 @@
+[package]
+name = "ki-mobile"
+version = "0.1.58"
+edition = "2021"
+license = "MIT"
+
+# ki-chat sur téléphone (Android d'abord), avec Tauri 2 : le cœur Rust
+# (QUIC, Opus, ki-voice) tourne en natif, l'interface est une page web.
+#
+# Espace de travail à part, exclu de celui de la racine : Tauri tire WebKitGTK
+# sous Linux, que la CI du PC n'a pas, et la version PC ne doit rien en payer.
+# Les crates partagées sont prises par chemin.
+[workspace]
+
+[lib]
+name = "ki_mobile_lib"
+# staticlib/cdylib : ce que charge l'appli Android ; rlib : le binaire PC
+# (main.rs), qui permet d'essayer l'interface sans émulateur.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ki-protocol = { path = "../protocol" }
+ki-client-quic = { path = "../client-quic" }
+ki-voice = { path = "../voice" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Les traces Rust dans logcat (balise « ki-chat »).
+tracing-android = "0.2"
+
+[profile.dev.package."*"]
+# Le DSP voix (Opus, RNNoise, Silero) doit tourner à vitesse réelle même en
+# build debug, comme sur PC.
+opt-level = 3
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
