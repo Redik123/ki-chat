@@ -51,8 +51,10 @@ impl NonLu {
 #[derive(Debug, Clone)]
 pub enum Effet {
     /// Un message mérite qu'on prévienne (son, vibration, notification).
-    /// `mention` : il me nomme, ce qui appelle une réponse.
-    Prevenir { salon: ChannelId, mention: bool },
+    /// `mention` : il me nomme, ce qui appelle une réponse. `auteur` et
+    /// `extrait` (nettoyés pour l'affichage) font le texte d'une
+    /// notification.
+    Prevenir { salon: ChannelId, mention: bool, auteur: String, extrait: String },
     /// À envoyer au serveur (entrée dans un salon, historique…).
     Envoyer(ClientMsg),
     /// Une information à montrer en passant.
@@ -100,6 +102,11 @@ pub struct Etat {
     pub serveur_gere_lus: bool,
     /// Le salon vocal où le serveur nous liste, **depuis cet appareil**.
     pub vocal: Option<ChannelId>,
+    /// On a demandé un vocal depuis cet appareil et on ne l'a pas quitté.
+    vocal_demande: bool,
+    /// Le serveur a déjà marqué ma fiche `mobile` : il connaît les
+    /// appareils. Un serveur antérieur ne le fait jamais.
+    serveur_connait_appareils: bool,
     /// L'interface montre le fil du salon ouvert, à jour : appli au premier
     /// plan, fil en bas. Un message qui y arrive est alors lu, pas non lu.
     /// Tenu par l'interface.
@@ -165,6 +172,11 @@ pub fn reaction_locale(reactions: &mut Vec<Reaction>, emoji: &str, by: UserId, o
 }
 
 impl Etat {
+    /// Un état vierge pour une connexion depuis cet appareil.
+    pub fn pour(appareil: ki_protocol::Appareil) -> Self {
+        Self { appareil, ..Self::default() }
+    }
+
     /// Mon pseudo, d'après la liste des membres.
     pub fn mon_pseudo(&self) -> Option<&str> {
         let moi = self.moi?;
@@ -246,14 +258,21 @@ impl Etat {
     /// on le dit tout de suite. Le salon ne compte qu'une fois le serveur
     /// nous y liste ([`Etat::vocal`]).
     pub fn rejoindre_vocal(
-        &self,
+        &mut self,
         salon: ChannelId,
         mot_de_passe: Option<String>,
     ) -> Result<ClientMsg, String> {
         if !self.peut(ki_protocol::perm::CONNECT_VOICE) {
             return Err("tu n'as pas le droit de rejoindre le vocal".into());
         }
+        self.vocal_demande = true;
         Ok(ClientMsg::JoinVoice { channel: salon, password: mot_de_passe })
+    }
+
+    /// Quitte le vocal.
+    pub fn quitter_vocal(&mut self) -> ClientMsg {
+        self.vocal_demande = false;
+        ClientMsg::LeaveVoice
     }
 
     fn compter_non_lu(&mut self, salon: ChannelId, ts: u64, mention: bool) {
@@ -263,12 +282,29 @@ impl Etat {
     /// Le vocal suit la liste des membres : c'est elle qui fait foi. Ma fiche
     /// dit `mobile` quand ma voix passe par le téléphone : elle n'est à cet
     /// appareil que s'il en est un.
+    ///
+    /// Un serveur antérieur aux appareils ne marque jamais personne
+    /// `mobile` et n'admet qu'une connexion par compte : sa voix est alors
+    /// forcément celle-ci, dès lors qu'on l'a demandée (ou qu'on y était
+    /// déjà, et qu'un modérateur nous a déplacés).
     fn suivre_vocal(&mut self) {
         let sur_mobile = self.appareil == ki_protocol::Appareil::Mobile;
-        if let Some(moi) = self.moi {
-            if let Some(m) = self.membres.iter().find(|m| m.user_id == moi) {
-                self.vocal = m.voice.filter(|_| m.mobile == sur_mobile);
-            }
+        let Some(moi) = self.moi else { return };
+        let Some(m) = self.membres.iter().find(|m| m.user_id == moi) else { return };
+        let (voice, mobile) = (m.voice, m.mobile);
+        if mobile {
+            self.serveur_connait_appareils = true;
+        }
+        let a_moi = if !sur_mobile {
+            !mobile
+        } else {
+            mobile
+                || (!self.serveur_connait_appareils
+                    && (self.vocal_demande || self.vocal.is_some()))
+        };
+        self.vocal = voice.filter(|_| a_moi);
+        if voice.is_none() {
+            self.vocal_demande = false;
         }
     }
 
@@ -328,6 +364,15 @@ impl Etat {
             }
             ServerMsg::Chat { user_id, username, text, ts, reply_to, channel } => {
                 let de_moi = Some(user_id) == self.moi;
+                let prevenir = |salon, mention| Effet::Prevenir {
+                    salon,
+                    mention,
+                    auteur: nom_sur(&username),
+                    extrait: ki_protocol::excerpt_of(&ki_protocol::safe_display(
+                        &text,
+                        ki_protocol::MAX_CHAT_TEXT,
+                    )),
+                };
                 // Écrit dans le salon qu'on vient de quitter, croisé avec
                 // notre `Join` : il compte comme un `Nouveau`. `0` = serveur
                 // antérieur, qui ne le dit pas.
@@ -336,7 +381,7 @@ impl Etat {
                         let mention = self.me_nomme(user_id, &text);
                         self.compter_non_lu(channel, ts, mention);
                         if !est_bot(user_id) {
-                            effets.push(Effet::Prevenir { salon: channel, mention });
+                            effets.push(prevenir(channel, mention));
                         }
                     }
                     return effets;
@@ -349,7 +394,7 @@ impl Etat {
                     // Pas de son pour soi ni pour le serveur ; pour les
                     // autres, quand on ne regarde pas, ou quand on est nommé.
                     if !de_moi && !est_bot(user_id) && (mention || !self.regarde) {
-                        effets.push(Effet::Prevenir { salon: c, mention });
+                        effets.push(prevenir(c, mention));
                     }
                 }
                 self.messages.push(message_sur(ChatRecord {
@@ -365,14 +410,22 @@ impl Etat {
                     self.messages.remove(0);
                 }
             }
-            ServerMsg::Nouveau { channel, user_id, text, ts, .. } => {
+            ServerMsg::Nouveau { channel, user_id, username, text, ts } => {
                 if Some(user_id) == self.moi || self.courant == Some(channel) {
                     return effets;
                 }
                 let mention = self.me_nomme(user_id, &text);
                 self.compter_non_lu(channel, ts, mention);
                 if !est_bot(user_id) {
-                    effets.push(Effet::Prevenir { salon: channel, mention });
+                    effets.push(Effet::Prevenir {
+                        salon: channel,
+                        mention,
+                        auteur: nom_sur(&username),
+                        extrait: ki_protocol::excerpt_of(&ki_protocol::safe_display(
+                            &text,
+                            ki_protocol::MAX_CHAT_TEXT,
+                        )),
+                    });
                 }
             }
             ServerMsg::NonLus { salons } => {
@@ -632,7 +685,7 @@ mod tests {
         let effets = e.appliquer(chat(2, "salut", 100, 10));
         assert_eq!(e.non_lus[&10].nb, 1);
         assert_eq!(e.non_lus[&10].depuis, 99);
-        assert!(egal(&effets, &[Effet::Prevenir { salon: 10, mention: false }]));
+        assert!(egal(&effets, &[Effet::Prevenir { salon: 10, mention: false, auteur: "bob".into(), extrait: "salut".into() }]));
     }
 
     #[test]
@@ -640,7 +693,7 @@ mod tests {
         let mut e = accueilli();
         e.regarde = true;
         let effets = e.appliquer(chat(2, "@moi tu viens ?", 100, 10));
-        assert!(egal(&effets, &[Effet::Prevenir { salon: 10, mention: true }]));
+        assert!(egal(&effets, &[Effet::Prevenir { salon: 10, mention: true, auteur: "bob".into(), extrait: "@moi tu viens ?".into() }]));
     }
 
     #[test]
@@ -693,8 +746,27 @@ mod tests {
         e.appliquer(ServerMsg::MemberUpdate { member: m.clone() });
         assert_eq!(e.vocal, None, "PC : la voix est sur le téléphone");
         e.appareil = ki_protocol::Appareil::Mobile;
-        e.appliquer(ServerMsg::MemberUpdate { member: m });
+        e.appliquer(ServerMsg::MemberUpdate { member: m.clone() });
         assert_eq!(e.vocal, Some(20), "téléphone : la voix est ici");
+        // Le PC la reprend : plus au téléphone, même s'il l'avait demandée.
+        m.mobile = false;
+        e.appliquer(ServerMsg::MemberUpdate { member: m });
+        assert_eq!(e.vocal, None, "téléphone : la voix est repartie sur le PC");
+    }
+
+    #[test]
+    fn sur_un_serveur_sans_appareils_la_voix_demandee_est_la_mienne() {
+        let mut e = accueilli();
+        e.appareil = ki_protocol::Appareil::Mobile;
+        e.rejoindre_vocal(20, None).unwrap();
+        // Un serveur antérieur : jamais `mobile`.
+        e.appliquer(ServerMsg::MemberUpdate { member: membre(1, "moi", Some(20)) });
+        assert_eq!(e.vocal, Some(20));
+        // Déplacé par un modérateur : toujours à moi.
+        e.appliquer(ServerMsg::MemberUpdate { member: membre(1, "moi", Some(21)) });
+        assert_eq!(e.vocal, Some(21));
+        e.appliquer(ServerMsg::MemberUpdate { member: membre(1, "moi", None) });
+        assert_eq!(e.vocal, None);
     }
 
     #[test]

@@ -74,7 +74,9 @@ impl Appli {
     }
 
     fn etat_vierge(courant: Option<ChannelId>) -> Etat {
-        Etat { appareil: Appareil::Mobile, courant, ..Etat::default() }
+        let mut e = Etat::pour(Appareil::Mobile);
+        e.courant = courant;
+        e
     }
 }
 
@@ -356,8 +358,8 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                     for effet in effets {
                         match effet {
                             Effet::Envoyer(m) => a.envoyer(m),
-                            Effet::Prevenir { salon, mention } => {
-                                let _ = app.emit("prevenir", (salon, mention));
+                            Effet::Prevenir { salon, mention, auteur, extrait } => {
+                                let _ = app.emit("prevenir", (salon, mention, auteur, extrait));
                             }
                             Effet::Info(t) => {
                                 let _ = app.emit("info", t);
@@ -624,7 +626,8 @@ fn quitter_vocal(partage: State<'_, Partage>) {
     let mut a = partage.lock().unwrap();
     a.vocal_voulu = None;
     a.parle_annonce = false;
-    a.envoyer(ClientMsg::LeaveVoice);
+    let m = a.etat.quitter_vocal();
+    a.envoyer(m);
 }
 
 #[tauri::command]
