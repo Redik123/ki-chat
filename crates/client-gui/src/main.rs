@@ -11,7 +11,7 @@ mod icons;
 mod images;
 mod instance;
 mod jeux;
-mod markup;
+use ki_core::markup;
 mod medailles;
 mod medias;
 mod net;
