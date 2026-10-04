@@ -136,6 +136,14 @@
   .volume { display: flex; align-items: center; padding: 8px 18px; }
   .volume .nom { flex: 1; min-width: 0; }
   .volume input { width: 45%; accent-color: var(--accent); }
+  .reglage-volume { padding: 4px 18px 10px; }
+  .reglage-volume .haut { display: flex; align-items: center; color: var(--doux); font-size: 13px; }
+  .reglage-volume .haut span:first-child { flex: 1; }
+  .reglage-volume input { width: 100%; accent-color: var(--accent); margin: 10px 0 4px; }
+  .petit-bouton { padding: 7px 12px; border-radius: 8px; border: 1px solid var(--bord); color: var(--doux); font-size: 13px; }
+  .feuille .action.danger { color: var(--danger); }
+  .feuille .separation { height: 1px; background: var(--bord); margin: 6px 0; }
+  .feuille h2 .rang { font-size: 12px; }
 
   /* Bandeau */
   #bandeau { position: fixed; left: 12px; right: 12px; top: calc(var(--haut) + 62px); z-index: 30; padding: 11px 14px; border-radius: 10px; background: var(--actif); font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.4); transition: opacity .2s, transform .2s; }
@@ -179,6 +187,9 @@
   <symbol id="i-sortir" viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></symbol>
   <symbol id="i-repondre" viewBox="0 0 24 24"><path d="M10 7L4 12l6 5M4 12h10a6 6 0 0 1 6 6"/></symbol>
   <symbol id="i-fermer" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-poke" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7 2.5 2.5 7z"/><path d="M10 13l4.5-4.5"/></symbol>
+  <symbol id="i-interdit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+  <symbol id="i-deplacer" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
   <symbol id="i-couronne" viewBox="0 0 24 24"><path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/></symbol>
 </svg>
 
@@ -490,6 +501,7 @@
   function occupant(p) {
     const d = document.createElement("div");
     d.className = "occupant";
+    d.onclick = (e) => { e.stopPropagation(); menuMembre(p.id); };
     d.append(avatar(p.nom, "mini" + (p.parle ? " parle" : ""), p.couleur));
     const bloc = document.createElement("div");
     bloc.className = "bloc";
@@ -533,6 +545,7 @@
         if (ou) { const j = document.createElement("div"); j.className = "jeu"; j.textContent = ou; info.append(j); }
         l.append(info);
         if (m.mobile && m.en_ligne) l.append(icone("telephone", "petit"));
+        l.onclick = () => menuMembre(m.id);
         racine.append(l);
       }
     }
@@ -577,6 +590,92 @@
 
   // Les volumes par personne, retenus sur le téléphone.
   function volumes() { try { return JSON.parse(relire("volumes") || "{}"); } catch (_) { return {}; } }
+  function reglerVolume(id, gain) {
+    const v = volumes(); v[id] = gain; retenir("volumes", JSON.stringify(v));
+    invoke("volume_membre", { id, gain });
+  }
+
+  // ---------- le menu d'un membre (comme le clic sur un nom, sur PC) ----------
+  function menuMembre(id) {
+    const m = vue?.membres.find((x) => x.id === id);
+    if (!m) return;
+    const moi = id === vue.moi;
+    ouvrirFeuille((f) => {
+      const h = titre("");
+      const nom = document.createElement("span");
+      nom.textContent = m.nom; nom.style.color = m.couleur;
+      h.append(nom);
+      if (m.rang) h.append(badgeRang(m.rang));
+      f.append(h);
+      if (m.jeu) { const j = document.createElement("div"); j.className = "occupant"; j.style.padding = "0 18px 8px"; j.textContent = m.jeu; f.append(j); }
+
+      if (!moi) {
+        // Son volume, chez moi seulement.
+        const bloc = document.createElement("div");
+        bloc.className = "reglage-volume";
+        const haut = document.createElement("div");
+        haut.className = "haut";
+        const lib = document.createElement("span"); lib.textContent = "Volume";
+        const val = document.createElement("span");
+        haut.append(lib, val);
+        const r = document.createElement("input");
+        r.type = "range"; r.min = 0; r.max = 200; r.step = 5;
+        r.setAttribute("aria-label", "Volume de " + m.nom);
+        const montrer = () => { val.textContent = r.value + " %"; };
+        r.value = Math.round((volumes()[id] ?? 1) * 100); montrer();
+        r.oninput = () => { montrer(); reglerVolume(id, r.value / 100); };
+        const remise = document.createElement("button");
+        remise.className = "petit-bouton"; remise.textContent = "Remettre à 100 %";
+        remise.onclick = () => { r.value = 100; montrer(); reglerVolume(id, 1); };
+        bloc.append(haut, r, remise);
+        f.append(bloc);
+        if (m.en_ligne) f.append(action("poke", "Poke", () => invoke("poke", { id })));
+      }
+
+      // Modération : seulement ce qui aboutira (permission et rang).
+      const d = vue.droits;
+      if (!moi && m.sous_moi && (d.couper || d.deplacer || d.expulser || d.bannir)) {
+        const sep = document.createElement("div"); sep.className = "separation"; f.append(sep);
+        if (d.couper) {
+          f.append(action(m.force_muet ? "micro" : "micro-coupe", m.force_muet ? "Rendre le micro" : "Couper le micro",
+            () => moderer(id, "muet"), !m.force_muet));
+          f.append(action(m.force_sourd ? "casque" : "casque-coupe", m.force_sourd ? "Rendre l'écoute" : "Rendre sourd",
+            () => moderer(id, "sourd"), !m.force_sourd));
+        }
+        if (d.deplacer && m.vocal != null) {
+          f.append(action("deplacer", "Déplacer en vocal", () => menuDeplacer(m)));
+        }
+        if (d.expulser) {
+          f.append(action("sortir", "Expulser", async () => {
+            const motif = await demander({ question: "Expulser " + m.nom + " ?", champ: "Motif (facultatif)", bouton: "Expulser", danger: true });
+            if (motif !== null) moderer(id, "expulser", { motif });
+          }, true));
+        }
+        if (d.bannir) {
+          f.append(action("interdit", "Bannir…", async () => {
+            const motif = await demander({ question: "Bannir " + m.nom + " définitivement ?", champ: "Motif", bouton: "Bannir", danger: true });
+            if (motif !== null) moderer(id, "bannir", { motif });
+          }, true));
+        }
+      }
+    });
+  }
+
+  function menuDeplacer(m) {
+    ouvrirFeuille((f) => {
+      f.append(titre("Déplacer " + m.nom));
+      for (const s of vue.salons.filter((x) => x.vocal && x.id !== m.vocal)) {
+        f.append(action("haut-parleur", s.nom, () => moderer(m.id, "deplacer", { salon: s.id })));
+      }
+      f.append(action("raccrocher", "Sortir du vocal", () => moderer(m.id, "deplacer", { salon: null }), true));
+    });
+  }
+
+  async function moderer(id, actionMod, extra = {}) {
+    try {
+      await invoke("moderer", { id, action: actionMod, salon: extra.salon ?? null, motif: extra.motif ?? null, dureeS: null });
+    } catch (err) { bandeau(String(err), true); }
+  }
   let feuilleVocale = false;
   function ouvrirFeuilleVocale() {
     feuilleVocale = true;
@@ -595,6 +694,8 @@
       l.append(avatar(p.nom, "mini" + (p.parle ? " parle" : "")));
       const n = document.createElement("span");
       n.className = "nom"; n.textContent = p.nom + (p.id === vue.moi ? " (toi)" : "");
+      n.style.color = p.couleur;
+      n.onclick = () => menuMembre(p.id);
       l.append(n);
       if (p.mobile) l.append(icone("telephone", "petit"));
       if (p.id !== vue.moi) {
@@ -602,11 +703,7 @@
         r.type = "range"; r.min = 0; r.max = 200; r.step = 5;
         r.value = Math.round((vol[p.id] ?? 1) * 100);
         r.setAttribute("aria-label", "Volume de " + p.nom);
-        r.oninput = () => {
-          const gain = r.value / 100;
-          const v = volumes(); v[p.id] = gain; retenir("volumes", JSON.stringify(v));
-          invoke("volume_membre", { id: p.id, gain });
-        };
+        r.oninput = () => reglerVolume(p.id, r.value / 100);
         l.append(r);
       }
       f.append(l);
@@ -618,8 +715,10 @@
   });
   listen("mot_de_passe_vocal", (e) => {
     const [salon, faux] = e.payload;
-    const mdp = prompt(faux ? "Mot de passe incorrect. Réessaie :" : "Ce salon vocal est verrouillé. Mot de passe :");
-    if (mdp) rejoindre(salon, mdp);
+    demander({
+      question: faux ? "Mot de passe incorrect" : "Ce salon vocal est verrouillé",
+      champ: "Mot de passe du salon", secret: true, bouton: "Entrer",
+    }).then((mdp) => { if (mdp) rejoindre(salon, mdp); });
   });
 
   // ---------- un salon texte ----------
@@ -688,12 +787,15 @@
   function message(m, suite) {
     const d = document.createElement("div");
     d.className = "msg" + (suite ? " suite" : "") + (m.me_nomme ? " nomme" : "");
-    d.append(avatar(m.auteur, "", m.couleur));
+    const av = avatar(m.auteur, "", m.couleur);
+    if (!m.bot) av.onclick = () => menuMembre(m.auteur_id);
+    d.append(av);
     const c = document.createElement("div");
     c.className = "corps-msg";
     if (!suite) {
       const q = document.createElement("div");
       q.className = "qui"; q.textContent = m.auteur; q.style.color = m.couleur;
+      if (!m.bot) q.onclick = () => menuMembre(m.auteur_id);
       if (m.bot) { const b = document.createElement("span"); b.className = "pastille-bot"; b.textContent = "BOT"; q.append(b); }
       const t = document.createElement("span");
       t.className = "quand"; t.textContent = heure(m.ts);
@@ -827,9 +929,37 @@
     if (quandFerme) { const q = quandFerme; quandFerme = null; q(); }
   }
   function titre(t) { const h = document.createElement("h2"); h.textContent = t; return h; }
-  function action(ic, libelle, faire) {
+
+  // Une question dans une feuille : un champ (ou aucun) et un bouton. Les
+  // prompt()/confirm() du navigateur ne sont pas garantis dans la WebView.
+  function demander({ question, champ = null, secret = false, bouton = "Valider", danger = false }) {
+    return new Promise((resoudre) => {
+      let repondu = false;
+      ouvrirFeuille((f) => {
+        f.append(titre(question));
+        let saisie = null;
+        if (champ !== null) {
+          saisie = document.createElement("input");
+          saisie.className = "champ";
+          saisie.type = secret ? "password" : "text";
+          saisie.placeholder = champ;
+          saisie.style.cssText = "width: calc(100% - 36px); margin: 4px 18px 0;";
+          f.append(saisie);
+          setTimeout(() => saisie.focus(), 50);
+        }
+        const ok = document.createElement("button");
+        ok.className = "bouton";
+        ok.style.cssText = "width: calc(100% - 36px); margin: 16px 18px 6px;" + (danger ? "background: var(--danger); color: #fff;" : "");
+        ok.textContent = bouton;
+        ok.onclick = () => { repondu = true; resoudre(saisie ? saisie.value : true); fermerFeuille(); };
+        if (saisie) saisie.addEventListener("keydown", (e) => { if (e.key === "Enter") ok.click(); });
+        f.append(ok);
+      }, () => { if (!repondu) resoudre(null); });
+    });
+  }
+  function action(ic, libelle, faire, danger = false) {
     const b = document.createElement("button");
-    b.className = "action";
+    b.className = "action" + (danger ? " danger" : "");
     b.append(icone(ic));
     b.append(document.createTextNode(libelle));
     b.onclick = () => { fermerFeuille(); faire(); };

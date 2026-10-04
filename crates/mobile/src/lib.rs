@@ -128,6 +128,12 @@ struct VueMembre {
     couleur: String,
     rang: Option<VueRang>,
     admin: bool,
+    /// Sanctions vocales posées par un modérateur.
+    force_muet: bool,
+    force_sourd: bool,
+    /// Mon rang est au-dessus du sien : les actions de modération sur lui
+    /// aboutiront (le rang tranche, comme sur PC).
+    sous_moi: bool,
     en_ligne: bool,
     mobile: bool,
     vocal: Option<ChannelId>,
@@ -148,6 +154,16 @@ struct Vue {
     sourd: bool,
     membres: Vec<VueMembre>,
     total_non_lus: u32,
+    droits: Droits,
+}
+
+/// Ce que mes permissions m'autorisent sur les autres.
+#[derive(Clone, Serialize)]
+struct Droits {
+    couper: bool,
+    deplacer: bool,
+    expulser: bool,
+    bannir: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -231,6 +247,9 @@ fn vue(a: &Appli) -> Vue {
             couleur: apparence::hex(apparence::couleur_membre(m)),
             rang: rang_de(m),
             admin: m.admin,
+            force_muet: m.force_muted,
+            force_sourd: m.force_deafened,
+            sous_moi: m.rank < e.rang,
             en_ligne: m.online,
             mobile: m.mobile,
             vocal: m.voice,
@@ -249,6 +268,12 @@ fn vue(a: &Appli) -> Vue {
         sourd: a.sourd,
         membres,
         total_non_lus: e.total_non_lus(),
+        droits: Droits {
+            couper: e.peut(ki_protocol::perm::MUTE_MEMBERS),
+            deplacer: e.peut(ki_protocol::perm::MOVE_MEMBERS),
+            expulser: e.peut(ki_protocol::perm::KICK),
+            bannir: e.peut(ki_protocol::perm::BAN),
+        },
     }
 }
 
@@ -693,6 +718,41 @@ fn volume_membre(partage: State<'_, Partage>, id: UserId, gain: f32) {
     }
 }
 
+#[tauri::command]
+fn poke(partage: State<'_, Partage>, id: UserId) {
+    partage.lock().unwrap().envoyer(ClientMsg::Poke { user_id: id });
+}
+
+/// Modération, comme le menu d'un membre sur PC. Le serveur revérifie
+/// permission et rang : la page ne fait que ne pas proposer l'impossible.
+#[tauri::command]
+fn moderer(
+    partage: State<'_, Partage>,
+    id: UserId,
+    action: String,
+    salon: Option<ChannelId>,
+    motif: Option<String>,
+    duree_s: Option<u64>,
+) -> Result<(), String> {
+    let a = partage.lock().unwrap();
+    let m = a.etat.membres.iter().find(|m| m.user_id == id).ok_or("membre introuvable")?;
+    let username = m.username.clone();
+    let msg = match action.as_str() {
+        "muet" => ClientMsg::AdminVoiceMute { username, muted: !m.force_muted },
+        "sourd" => ClientMsg::AdminVoiceDeafen { username, deafened: !m.force_deafened },
+        "deplacer" => ClientMsg::AdminVoiceMove { username, channel: salon },
+        "expulser" => ClientMsg::Kick { user_id: id, reason: motif.unwrap_or_default() },
+        "bannir" => ClientMsg::AdminBan {
+            username,
+            reason: motif.unwrap_or_default(),
+            duration_secs: duree_s.unwrap_or(0),
+        },
+        autre => return Err(format!("action inconnue : {autre}")),
+    };
+    a.envoyer(msg);
+    Ok(())
+}
+
 fn traces() {
     use tracing_subscriber::prelude::*;
     let filtre = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -739,6 +799,8 @@ pub fn run() {
             micro,
             sourdine,
             volume_membre,
+            poke,
+            moderer,
         ])
         .run(tauri::generate_context!())
         .expect("lancement de l'appli");
