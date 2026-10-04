@@ -32,6 +32,7 @@
   .icone { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; color: var(--doux); }
   .icone:active { background: var(--survol); }
   .defile { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  #vue-salons, #vue-membres { background: var(--cote); }
 
   /* Connexion */
   #connexion .corps { flex: 1; align-self: center; overflow-y: auto; padding: 32px 20px calc(24px + var(--bas)); max-width: 440px; width: 100%; margin: 0 auto; }
@@ -52,6 +53,15 @@
   .ligne:active { background: var(--survol); }
   .ligne .nom { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ligne.non-lu .nom { font-weight: 700; color: var(--texte); }
+  /* Le salon ouvert, comme sur PC : fond vert sombre, filet à gauche. */
+  .ligne.actif { background: rgba(0,210,106,.12); box-shadow: inset 3px 0 var(--accent); }
+  .ligne.actif .nom, .ligne.actif .diese { color: var(--accent); font-weight: 600; }
+  .rang { font-size: 11px; font-weight: 600; margin-left: 6px; white-space: nowrap; }
+  .couronne { width: 13px; height: 13px; color: var(--accent); margin-left: 5px; vertical-align: -1px; }
+  .pastille-bot { display: inline-block; background: var(--accent); color: var(--fond); font-size: 10px; font-weight: 800; padding: 1px 5px; border-radius: 4px; margin-left: 6px; vertical-align: 1px; }
+  .occupant .qui-joue { color: var(--pale); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .occupant .bloc { flex: 1; min-width: 0; }
+  .hors-ligne { opacity: .45; }
   .ligne .nom.calme { color: var(--doux); }
   .diese { color: var(--pale); font-weight: 700; width: 22px; text-align: center; }
   .pastille { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px; background: var(--actif); color: var(--texte); font-size: 12px; font-weight: 700; display: grid; place-items: center; }
@@ -169,6 +179,7 @@
   <symbol id="i-sortir" viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></symbol>
   <symbol id="i-repondre" viewBox="0 0 24 24"><path d="M10 7L4 12l6 5M4 12h10a6 6 0 0 1 6 6"/></symbol>
   <symbol id="i-fermer" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-couronne" viewBox="0 0 24 24"><path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/></symbol>
 </svg>
 
 <!-- Connexion -->
@@ -268,16 +279,25 @@
     return h;
   }
 
-  const teintes = ["#00d26a", "#58a6ff", "#ffa157", "#c792ea", "#ff6b9a", "#4dd0e1", "#ffd54f", "#9ccc65"];
+  // Repli seulement : les couleurs viennent du Rust, calculées comme sur PC
+  // (rôle, sinon hachage du pseudo dans la même palette).
+  const teintes = ["#2dd48f", "#62a8ff", "#ffa95c", "#ff8ac4", "#ba92ff", "#2ad3dd", "#ffd863", "#ff7d7d"];
   function couleur(nom) {
     let h = 0;
-    for (const c of nom) h = (h * 31 + c.codePointAt(0)) >>> 0;
+    for (const b of new TextEncoder().encode(nom)) h = (Math.imul(h, 31) + b) >>> 0;
     return teintes[h % teintes.length];
   }
-  function avatar(nom, classes = "") {
+  function badgeRang(rang) {
+    const r = document.createElement("span");
+    r.className = "rang";
+    r.textContent = rang.nom;
+    r.style.color = rang.couleur;
+    return r;
+  }
+  function avatar(nom, classes = "", teinte = null) {
     const a = document.createElement("div");
     a.className = "avatar " + classes;
-    a.style.background = couleur(nom);
+    a.style.background = teinte || couleur(nom);
     a.textContent = [...nom][0]?.toUpperCase() || "?";
     return a;
   }
@@ -418,10 +438,10 @@
     racine.replaceChildren();
     const textes = vue.salons.filter((s) => !s.vocal);
     const vocaux = vue.salons.filter((s) => s.vocal);
-    if (textes.length) racine.append(section("Salons"));
+    if (textes.length) racine.append(section("Salons textuels"));
     for (const s of textes) {
       const l = document.createElement("button");
-      l.className = "ligne" + (s.non_lus ? " non-lu" : "");
+      l.className = "ligne" + (s.non_lus ? " non-lu" : "") + (s.id === vue.courant ? " actif" : "");
       l.style.width = "100%";
       const d = document.createElement("span");
       d.className = "diese"; d.textContent = "#";
@@ -437,7 +457,7 @@
       l.onclick = () => ouvrirSalon(s.id);
       racine.append(l);
     }
-    if (vocaux.length) racine.append(section("Vocal"));
+    if (vocaux.length) racine.append(section("Salons vocaux"));
     for (const s of vocaux) {
       const l = document.createElement("button");
       l.className = "ligne"; l.style.width = "100%";
@@ -470,10 +490,17 @@
   function occupant(p) {
     const d = document.createElement("div");
     d.className = "occupant";
-    d.append(avatar(p.nom, "mini" + (p.parle ? " parle" : "")));
-    const n = document.createElement("span");
-    n.textContent = p.nom; n.style.flex = "1";
-    d.append(n);
+    d.append(avatar(p.nom, "mini" + (p.parle ? " parle" : ""), p.couleur));
+    const bloc = document.createElement("div");
+    bloc.className = "bloc";
+    const n = document.createElement("div");
+    const nom = document.createElement("span");
+    nom.textContent = p.nom; nom.style.color = p.couleur;
+    n.append(nom);
+    if (p.rang) n.append(badgeRang(p.rang));
+    bloc.append(n);
+    if (p.jeu) { const j = document.createElement("div"); j.className = "qui-joue"; j.textContent = p.jeu; bloc.append(j); }
+    d.append(bloc);
     if (p.mobile) d.append(icone("telephone", "petit"));
     if (p.muet) d.append(icone("micro-coupe", "petit"));
     return d;
@@ -490,11 +517,17 @@
       for (const m of liste) {
         const l = document.createElement("div");
         l.className = "ligne";
-        l.append(avatar(m.nom, m.en_ligne ? "" : "absent"));
+        l.append(avatar(m.nom, m.en_ligne ? "" : "absent", m.couleur));
         const info = document.createElement("div");
         info.className = "membre-info";
         const n = document.createElement("div");
-        n.className = "nom" + (m.en_ligne ? "" : " calme"); n.textContent = m.nom;
+        n.className = "nom";
+        const nom = document.createElement("span");
+        nom.textContent = m.nom; nom.style.color = m.couleur;
+        if (!m.en_ligne) nom.className = "hors-ligne";
+        n.append(nom);
+        if (m.admin) n.append(icone("couronne", "couronne"));
+        if (m.rang) n.append(badgeRang(m.rang));
         info.append(n);
         const ou = m.jeu || (m.vocal != null ? "en vocal · " + (vue.salons.find((s) => s.id === m.vocal)?.nom || "") : "");
         if (ou) { const j = document.createElement("div"); j.className = "jeu"; j.textContent = ou; info.append(j); }
@@ -655,12 +688,13 @@
   function message(m, suite) {
     const d = document.createElement("div");
     d.className = "msg" + (suite ? " suite" : "") + (m.me_nomme ? " nomme" : "");
-    d.append(avatar(m.auteur));
+    d.append(avatar(m.auteur, "", m.couleur));
     const c = document.createElement("div");
     c.className = "corps-msg";
     if (!suite) {
       const q = document.createElement("div");
-      q.className = "qui"; q.textContent = m.auteur; q.style.color = couleur(m.auteur);
+      q.className = "qui"; q.textContent = m.auteur; q.style.color = m.couleur;
+      if (m.bot) { const b = document.createElement("span"); b.className = "pastille-bot"; b.textContent = "BOT"; q.append(b); }
       const t = document.createElement("span");
       t.className = "quand"; t.textContent = heure(m.ts);
       q.append(t);

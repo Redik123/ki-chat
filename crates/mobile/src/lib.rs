@@ -17,6 +17,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ki_core::apparence;
 use ki_core::etat::{Effet, Etat};
 use ki_core::net::{self, Credentials, Event, NetHandle, VoiceLink, VoicePrefs};
 use ki_protocol::{Appareil, ChannelId, ChannelKind, ClientMsg, MsgRef, ServerMsg, UserId};
@@ -84,10 +85,27 @@ impl Appli {
 // Ce que voit la page
 // ---------------------------------------------------------------------------
 
+/// Un rang VALORANT, tel que le PC l'affiche : « Ascendant 1 », en couleur.
+#[derive(Clone, Serialize)]
+struct VueRang {
+    nom: String,
+    couleur: String,
+}
+
+fn rang_de(m: &ki_protocol::Member) -> Option<VueRang> {
+    apparence::palier(m).map(|p| VueRang {
+        nom: ki_protocol::nom_de_rang(p),
+        couleur: apparence::hex(apparence::couleur_rang(p)),
+    })
+}
+
 #[derive(Clone, Serialize)]
 struct VueOccupant {
     id: UserId,
     nom: String,
+    couleur: String,
+    rang: Option<VueRang>,
+    jeu: Option<String>,
     parle: bool,
     muet: bool,
     mobile: bool,
@@ -107,6 +125,9 @@ struct VueSalon {
 struct VueMembre {
     id: UserId,
     nom: String,
+    couleur: String,
+    rang: Option<VueRang>,
+    admin: bool,
     en_ligne: bool,
     mobile: bool,
     vocal: Option<ChannelId>,
@@ -140,6 +161,9 @@ struct VueReaction {
 struct VueMessage {
     auteur_id: UserId,
     auteur: String,
+    couleur: String,
+    /// Le serveur lui-même (fil de jeu VALORANT, bot musique) : pastille BOT.
+    bot: bool,
     texte: String,
     ts: u64,
     /// (auteur, extrait) du message auquel il répond.
@@ -157,20 +181,9 @@ struct Fil {
     separateur: Option<u64>,
 }
 
+/// « Valorant · en file compétitive · party 2/5 », comme sur PC.
 fn ligne_de_jeu(j: &ki_protocol::JeuStatut) -> String {
-    let etat = match j.etat {
-        ki_protocol::JeuEtat::EnJeu => "en partie",
-        ki_protocol::JeuEtat::PreGame => "sélection",
-        _ => "dans le menu",
-    };
-    let mut morceaux = vec![etat.to_string()];
-    if !j.carte.is_empty() {
-        morceaux.push(j.carte.clone());
-    }
-    if j.etat == ki_protocol::JeuEtat::EnJeu {
-        morceaux.push(format!("{}-{}", j.score_allie, j.score_adverse));
-    }
-    morceaux.join(" · ")
+    j.ligne()
 }
 
 fn vue(a: &Appli) -> Vue {
@@ -194,6 +207,9 @@ fn vue(a: &Appli) -> Vue {
                         .map(|m| VueOccupant {
                             id: m.user_id,
                             nom: m.username.clone(),
+                            couleur: apparence::hex(apparence::couleur_membre(m)),
+                            rang: rang_de(m),
+                            jeu: m.jeu.as_ref().map(ligne_de_jeu),
                             parle: m.speaking,
                             muet: m.muted || m.force_muted,
                             mobile: m.mobile,
@@ -212,6 +228,9 @@ fn vue(a: &Appli) -> Vue {
         .map(|m| VueMembre {
             id: m.user_id,
             nom: m.username.clone(),
+            couleur: apparence::hex(apparence::couleur_membre(m)),
+            rang: rang_de(m),
+            admin: m.admin,
             en_ligne: m.online,
             mobile: m.mobile,
             vocal: m.voice,
@@ -236,6 +255,15 @@ fn vue(a: &Appli) -> Vue {
 fn fil(a: &Appli) -> Fil {
     let e = &a.etat;
     let moi = e.moi;
+    let couleur_de = |id: UserId, nom: &str| {
+        let c = e
+            .membres
+            .iter()
+            .find(|m| m.user_id == id)
+            .map(apparence::couleur_membre)
+            .unwrap_or_else(|| apparence::couleur_pseudo(nom));
+        apparence::hex(c)
+    };
     Fil {
         salon: e.courant,
         messages: e
@@ -244,6 +272,8 @@ fn fil(a: &Appli) -> Fil {
             .map(|m| VueMessage {
                 auteur_id: m.user_id,
                 auteur: m.username.clone(),
+                couleur: couleur_de(m.user_id, &m.username),
+                bot: ki_core::etat::est_bot(m.user_id),
                 texte: m.text.clone(),
                 ts: m.ts,
                 reponse: m.reply_to.as_ref().map(|r| (r.username.clone(), r.excerpt.clone())),
