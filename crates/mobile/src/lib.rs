@@ -1,256 +1,662 @@
-//! ki-chat sur téléphone — étape 0 : l'essai de faisabilité.
+//! ki-chat sur téléphone (Tauri 2).
 //!
-//! Une coquille minimale qui prouve que la chaîne marche sur Android :
-//! connexion QUIC au serveur, authentification, salon vocal, micro et
-//! haut-parleur par ki-voice (cpal → AAudio). Pas encore d'état de client
-//! complet : il viendra avec la crate ki-core (étape 1).
+//! Le cœur est celui du PC, dans ki-core : la connexion et la voix
+//! ([`ki_core::net`]), l'état du client ([`ki_core::etat`]). Ce module ne fait
+//! que relier ce cœur à la page :
 //!
-//! La page parle au Rust par quatre commandes (`connecter`, `rejoindre_vocal`,
-//! `quitter_vocal`, `micro`) plus `etat_voix`, et reçoit en retour des
-//! événements : `journal` (une ligne de texte), `salons` (la liste à
-//! l'accueil), `deconnecte`.
+//! - les gestes de la page arrivent par des commandes (`connecter`,
+//!   `ouvrir_salon`, `envoyer`, `rejoindre_vocal`…) ;
+//! - un fil traite les événements du réseau et tient l'état à jour ;
+//! - un autre, toutes les 100 ms, pousse à la page ce qui a changé (`vue` :
+//!   salons, membres, vocal ; `fil` : les messages du salon ouvert), et
+//!   annonce qui parle.
+//!
+//! Les effets de l'état (prévenir, bannière, fin de session) partent vers la
+//! page en événements ponctuels.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use ki_client_quic::QuicClient;
-use ki_protocol::{ChannelKind, ClientMsg, ServerMsg};
-use ki_voice::{VoiceConfig, VoiceEngine};
+use ki_core::etat::{Effet, Etat};
+use ki_core::net::{self, Credentials, Event, NetHandle, VoiceLink, VoicePrefs};
+use ki_protocol::{Appareil, ChannelId, ChannelKind, ClientMsg, MsgRef, ServerMsg, UserId};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
-use tokio::sync::mpsc;
+use tauri::{AppHandle, Emitter, Manager, State};
 
-/// La session en cours : la file des messages vers le serveur et le moteur
-/// voix, démarré à l'accueil.
-#[derive(Default)]
-struct Session {
-    envoi: Option<mpsc::UnboundedSender<ClientMsg>>,
-    voix: Arc<Mutex<Option<VoiceEngine>>>,
+/// Délais entre deux tentatives de reconnexion ; le dernier se répète.
+const RECONNEXION_S: [u64; 5] = [1, 2, 5, 10, 20];
+
+/// Ce qu'il faut pour se reconnecter tout seul.
+#[derive(Clone)]
+struct Identifiants {
+    serveur: String,
+    pseudo: String,
+    mot_de_passe: String,
+    /// Le code d'invitation de la toute première connexion : effacé dès
+    /// l'accueil, il ne sert plus ensuite.
+    invitation: Option<String>,
+    empreinte: String,
 }
 
-type Etat = Mutex<Session>;
+#[derive(Default)]
+struct Appli {
+    net: Option<NetHandle>,
+    etat: Etat,
+    /// Le moteur voix survit aux reconnexions (voir `VoiceLink`).
+    lien: VoiceLink,
+    identifiants: Option<Identifiants>,
+    /// Le salon vocal où l'on veut être : retrouvé après une coupure.
+    vocal_voulu: Option<ChannelId>,
+    muet: bool,
+    sourd: bool,
+    /// Ce qu'on a annoncé de sa parole, pour n'envoyer que les changements.
+    parle_annonce: bool,
+    /// La vue et le fil ont changé depuis le dernier envoi à la page.
+    vue_sale: bool,
+    fil_sale: bool,
+    /// Numéro de la connexion en cours : le fil d'événements d'une connexion
+    /// remplacée s'arrête de lui-même.
+    generation: u64,
+    /// Le serveur nous a déjà accueillis depuis `connecter` : un échec de
+    /// connexion est alors une coupure à reprendre, pas un refus.
+    deja_accueilli: bool,
+    /// Le dernier repère de lecture envoyé : (salon, horodatage).
+    lu_envoye: Option<(ChannelId, u64)>,
+}
+
+type Partage = Arc<Mutex<Appli>>;
+
+impl Appli {
+    fn envoyer(&self, msg: ClientMsg) {
+        if let Some(n) = &self.net {
+            n.send(msg);
+        }
+    }
+
+    fn etat_vierge(courant: Option<ChannelId>) -> Etat {
+        Etat { appareil: Appareil::Mobile, courant, ..Etat::default() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ce que voit la page
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize)]
-struct Salon {
-    id: u32,
+struct VueOccupant {
+    id: UserId,
+    nom: String,
+    parle: bool,
+    muet: bool,
+    mobile: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct VueSalon {
+    id: ChannelId,
     nom: String,
     vocal: bool,
+    non_lus: u32,
+    mention: bool,
+    occupants: Vec<VueOccupant>,
 }
 
-#[derive(Serialize)]
-struct EtatVoix {
-    actif: bool,
-    envoyes: u64,
-    recus: u64,
-    perdus: u64,
-    niveau_micro: f32,
-    emetteurs: usize,
+#[derive(Clone, Serialize)]
+struct VueMembre {
+    id: UserId,
+    nom: String,
+    en_ligne: bool,
+    mobile: bool,
+    vocal: Option<ChannelId>,
+    /// « en partie · Ascent · 7-5 », s'il partage son statut VALORANT.
+    jeu: Option<String>,
 }
 
-fn journal(app: &AppHandle, ligne: impl Into<String>) {
-    let ligne = ligne.into();
-    tracing::info!("{ligne}");
-    let _ = app.emit("journal", ligne);
+#[derive(Clone, Serialize)]
+struct Vue {
+    connecte: bool,
+    moi: Option<UserId>,
+    mon_pseudo: Option<String>,
+    serveur: String,
+    salons: Vec<VueSalon>,
+    courant: Option<ChannelId>,
+    vocal: Option<ChannelId>,
+    muet: bool,
+    sourd: bool,
+    membres: Vec<VueMembre>,
+    total_non_lus: u32,
 }
 
-/// Se connecte, s'authentifie, puis laisse tourner deux tâches : la lecture
-/// des messages du serveur et l'envoi de ceux de la page. Rend l'empreinte du
-/// certificat du serveur.
+#[derive(Clone, Serialize)]
+struct VueReaction {
+    emoji: String,
+    nb: usize,
+    moi: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct VueMessage {
+    auteur_id: UserId,
+    auteur: String,
+    texte: String,
+    ts: u64,
+    /// (auteur, extrait) du message auquel il répond.
+    reponse: Option<(String, String)>,
+    reactions: Vec<VueReaction>,
+    modifie: bool,
+    me_nomme: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct Fil {
+    salon: Option<ChannelId>,
+    messages: Vec<VueMessage>,
+    suite: bool,
+    separateur: Option<u64>,
+}
+
+fn ligne_de_jeu(j: &ki_protocol::JeuStatut) -> String {
+    let etat = match j.etat {
+        ki_protocol::JeuEtat::EnJeu => "en partie",
+        ki_protocol::JeuEtat::PreGame => "sélection",
+        _ => "dans le menu",
+    };
+    let mut morceaux = vec![etat.to_string()];
+    if !j.carte.is_empty() {
+        morceaux.push(j.carte.clone());
+    }
+    if j.etat == ki_protocol::JeuEtat::EnJeu {
+        morceaux.push(format!("{}-{}", j.score_allie, j.score_adverse));
+    }
+    morceaux.join(" · ")
+}
+
+fn vue(a: &Appli) -> Vue {
+    let e = &a.etat;
+    let salons = e
+        .salons
+        .iter()
+        .map(|s| {
+            let vocal = s.kind == ChannelKind::Voice;
+            let n = e.non_lus.get(&s.id).copied().unwrap_or_default();
+            VueSalon {
+                id: s.id,
+                nom: s.name.clone(),
+                vocal,
+                non_lus: n.nb,
+                mention: n.mention,
+                occupants: if vocal {
+                    e.membres
+                        .iter()
+                        .filter(|m| m.online && m.voice == Some(s.id))
+                        .map(|m| VueOccupant {
+                            id: m.user_id,
+                            nom: m.username.clone(),
+                            parle: m.speaking,
+                            muet: m.muted || m.force_muted,
+                            mobile: m.mobile,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect();
+    let membres = e
+        .membres
+        .iter()
+        .filter(|m| !ki_core::etat::est_bot(m.user_id))
+        .map(|m| VueMembre {
+            id: m.user_id,
+            nom: m.username.clone(),
+            en_ligne: m.online,
+            mobile: m.mobile,
+            vocal: m.voice,
+            jeu: m.jeu.as_ref().filter(|_| m.online).map(ligne_de_jeu),
+        })
+        .collect();
+    Vue {
+        connecte: a.net.is_some() && e.accueilli,
+        moi: e.moi,
+        mon_pseudo: e.mon_pseudo().map(str::to_string),
+        serveur: e.serveur.name.clone(),
+        salons,
+        courant: e.courant,
+        vocal: e.vocal,
+        muet: a.muet,
+        sourd: a.sourd,
+        membres,
+        total_non_lus: e.total_non_lus(),
+    }
+}
+
+fn fil(a: &Appli) -> Fil {
+    let e = &a.etat;
+    let moi = e.moi;
+    Fil {
+        salon: e.courant,
+        messages: e
+            .messages
+            .iter()
+            .map(|m| VueMessage {
+                auteur_id: m.user_id,
+                auteur: m.username.clone(),
+                texte: m.text.clone(),
+                ts: m.ts,
+                reponse: m.reply_to.as_ref().map(|r| (r.username.clone(), r.excerpt.clone())),
+                reactions: m
+                    .reactions
+                    .iter()
+                    .map(|r| VueReaction {
+                        emoji: r.emoji.clone(),
+                        nb: r.users.len(),
+                        moi: moi.is_some_and(|id| r.users.contains(&id)),
+                    })
+                    .collect(),
+                modifie: m.edited,
+                me_nomme: e.me_nomme(m.user_id, &m.text),
+            })
+            .collect(),
+        suite: e.historique_suite,
+        separateur: e.separateur,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connexion et événements
+// ---------------------------------------------------------------------------
+
+/// Les messages qui touchent au fil du salon ouvert.
+fn touche_au_fil(msg: &ServerMsg) -> bool {
+    matches!(
+        msg,
+        ServerMsg::Welcome { .. }
+            | ServerMsg::Chat { .. }
+            | ServerMsg::History { .. }
+            | ServerMsg::HistoryPage { .. }
+            | ServerMsg::Reaction { .. }
+            | ServerMsg::MessageDeleted { .. }
+            | ServerMsg::MessageEdited { .. }
+            | ServerMsg::NonLus { .. }
+            | ServerMsg::ChannelsUpdated { .. }
+            // La liste des membres décide de qui est nommé.
+            | ServerMsg::Members { .. }
+    )
+}
+
+/// Ouvre une connexion avec les identifiants retenus, et lance le fil qui
+/// en traite les événements.
+fn lancer(app: &AppHandle, partage: &Partage) {
+    let mut a = partage.lock().unwrap();
+    let Some(id) = a.identifiants.clone() else { return };
+    if let Some(mut ancien) = a.net.take() {
+        ancien.quitter_borne(Duration::from_millis(500));
+    }
+    a.generation += 1;
+    let generation = a.generation;
+    // Une connexion neuve repart d'un état vierge, mais garde le salon lu :
+    // l'accueil le rouvrira.
+    a.etat = Appli::etat_vierge(a.etat.courant);
+    let reveil: net::Reveil = Arc::new(|| {});
+    let mut handle = net::connect(
+        id.serveur.clone(),
+        Credentials {
+            username: id.pseudo.clone(),
+            password: id.mot_de_passe.clone(),
+            invite: id.invitation.clone(),
+            fingerprint: id.empreinte.clone(),
+            appareil: Appareil::Mobile,
+        },
+        VoicePrefs::par_defaut(),
+        a.lien.clone(),
+        reveil,
+    );
+    // Les événements se lisent sur notre fil, pas sur celui de la page.
+    let evenements = std::mem::replace(&mut handle.events, std::sync::mpsc::channel().1);
+    a.net = Some(handle);
+    a.vue_sale = true;
+    drop(a);
+
+    let app = app.clone();
+    let partage = partage.clone();
+    std::thread::spawn(move || {
+        for ev in evenements.iter() {
+            let mut a = partage.lock().unwrap();
+            if a.generation != generation {
+                return;
+            }
+            match ev {
+                Event::Fingerprint(fp) => {
+                    if let Some(id) = a.identifiants.as_mut() {
+                        id.empreinte = fp.clone();
+                    }
+                    let _ = app.emit("empreinte", fp);
+                }
+                Event::Msg(msg) => {
+                    let accueil = matches!(msg, ServerMsg::Welcome { .. });
+                    if touche_au_fil(&msg) {
+                        a.fil_sale = true;
+                    }
+                    a.vue_sale = true;
+                    let effets = a.etat.appliquer(msg);
+                    if accueil {
+                        a.deja_accueilli = true;
+                        if let Some(id) = a.identifiants.as_mut() {
+                            id.invitation = None;
+                        }
+                        // Reprise : le salon vocal d'avant la coupure.
+                        if let Some(c) = a.vocal_voulu {
+                            if let Ok(m) = a.etat.rejoindre_vocal(c, None) {
+                                a.envoyer(m);
+                            }
+                        }
+                        let _ = app.emit("connecte", ());
+                    }
+                    for effet in effets {
+                        match effet {
+                            Effet::Envoyer(m) => a.envoyer(m),
+                            Effet::Prevenir { salon, mention } => {
+                                let _ = app.emit("prevenir", (salon, mention));
+                            }
+                            Effet::Info(t) => {
+                                let _ = app.emit("info", t);
+                            }
+                            Effet::Erreur(t) => {
+                                let _ = app.emit("erreur", t);
+                            }
+                            Effet::Poke(qui) => {
+                                let _ = app.emit("poke", qui);
+                            }
+                            Effet::MotDePasseVocal { salon, faux } => {
+                                a.vocal_voulu = None;
+                                let _ = app.emit("mot_de_passe_vocal", (salon, faux));
+                            }
+                            Effet::Fin(raison) => {
+                                fin(&mut a, &app, raison);
+                                return;
+                            }
+                        }
+                    }
+                }
+                Event::ConnectFailed(e) => {
+                    // Jamais accueilli sur cette session : un refus ou un
+                    // serveur injoignable, à dire. Déjà accueilli une fois (la
+                    // reprise d'une coupure) : on retente.
+                    if !a.deja_accueilli {
+                        fin(&mut a, &app, e);
+                    } else {
+                        let _ = app.emit("coupe", e);
+                        drop(a);
+                        reconnecter(&app, &partage, generation);
+                    }
+                    return;
+                }
+                Event::Disconnected => {
+                    a.vue_sale = true;
+                    let _ = app.emit("coupe", String::new());
+                    drop(a);
+                    reconnecter(&app, &partage, generation);
+                    return;
+                }
+                Event::Congedie(raison) => {
+                    fin(&mut a, &app, raison);
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Fin de session sans reprise : refus, expulsion, déconnexion voulue.
+fn fin(a: &mut Appli, app: &AppHandle, raison: String) {
+    a.identifiants = None;
+    a.vocal_voulu = None;
+    a.generation += 1;
+    if let Some(mut n) = a.net.take() {
+        n.quitter_borne(Duration::from_millis(500));
+    }
+    a.lien.arreter();
+    a.etat = Appli::etat_vierge(None);
+    a.parle_annonce = false;
+    a.vue_sale = true;
+    a.fil_sale = true;
+    let _ = app.emit("fin", raison);
+}
+
+/// Retente la connexion après un délai, tant que personne n'a fermé ni
+/// relancé la session entre-temps. Chaque échec repasse par ici avec le
+/// délai suivant.
+fn reconnecter(app: &AppHandle, partage: &Partage, generation: u64) {
+    let app = app.clone();
+    let partage = partage.clone();
+    std::thread::spawn(move || {
+        let essai = {
+            let mut a = partage.lock().unwrap();
+            if a.generation != generation || a.identifiants.is_none() {
+                return;
+            }
+            let n = ESSAIS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            a.vue_sale = true;
+            n
+        };
+        let attente = RECONNEXION_S[essai.min(RECONNEXION_S.len() - 1)];
+        std::thread::sleep(Duration::from_secs(attente));
+        {
+            let a = partage.lock().unwrap();
+            if a.generation != generation || a.identifiants.is_none() {
+                return;
+            }
+        }
+        lancer(&app, &partage);
+    });
+}
+
+/// Essais de reconnexion d'affilée, remis à zéro à chaque accueil.
+static ESSAIS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Toutes les 100 ms : la page reçoit ce qui a changé, le micro suit l'état,
+/// et l'on annonce sa parole au serveur quand elle change.
+fn horloge(app: AppHandle, partage: Partage) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let (v, f) = {
+            let mut a = partage.lock().unwrap();
+            if a.etat.accueilli {
+                ESSAIS.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Le micro n'émet qu'en vocal, ni muet ni sourd.
+            let arme = a.etat.vocal.is_some() && !a.muet && !a.sourd;
+            let parle = {
+                let moteur = a.lien.engine.lock().unwrap();
+                moteur.as_ref().map(|m| {
+                    m.set_transmit(arme);
+                    m.is_sending()
+                })
+            };
+            if let Some(parle) = parle {
+                if parle != a.parle_annonce && a.etat.vocal.is_some() {
+                    a.parle_annonce = parle;
+                    let muet = a.muet || a.sourd;
+                    a.envoyer(ClientMsg::VoiceState { speaking: parle, muted: muet });
+                }
+            }
+            // Ce qui arrive dans le fil qu'on regarde est lu : le serveur
+            // l'apprend, sans quoi ses pastilles reviendraient à la
+            // prochaine connexion — et sur le PC.
+            if a.etat.regarde && a.etat.serveur_gere_lus {
+                if let Some(c) = a.etat.courant {
+                    let dernier = a.etat.messages.iter().map(|m| m.ts).max().unwrap_or(0);
+                    if dernier > 0 && a.lu_envoye != Some((c, dernier)) {
+                        a.lu_envoye = Some((c, dernier));
+                        if let Some(m) = a.etat.marquer_lu(c) {
+                            a.envoyer(m);
+                        }
+                        a.vue_sale = true;
+                    }
+                }
+            }
+            let v = std::mem::take(&mut a.vue_sale).then(|| vue(&a));
+            let f = std::mem::take(&mut a.fil_sale).then(|| fil(&a));
+            (v, f)
+        };
+        if let Some(v) = v {
+            let _ = app.emit("vue", v);
+        }
+        if let Some(f) = f {
+            let _ = app.emit("fil", f);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Commandes de la page
+// ---------------------------------------------------------------------------
+
 #[tauri::command]
-async fn connecter(
+fn connecter(
     app: AppHandle,
-    etat: State<'_, Etat>,
+    partage: State<'_, Partage>,
     serveur: String,
     pseudo: String,
     mot_de_passe: String,
     invitation: Option<String>,
-) -> Result<String, String> {
-    // Une connexion à la fois : la précédente se ferme avec sa file.
+    empreinte: Option<String>,
+) {
     {
-        let mut s = etat.lock().unwrap();
-        s.envoi = None;
-        s.voix.lock().unwrap().take();
-    }
-
-    journal(&app, format!("connexion à {serveur}…"));
-    // Pas encore de carnet de serveurs : on accepte le certificat présenté et
-    // on montre son empreinte, comme le client en ligne de commande.
-    let mut client = QuicClient::connect(&serveur, None).await.map_err(|e| format!("{e:#}"))?;
-    let empreinte = client.fingerprint.clone();
-    client
-        .send_msg(&ClientMsg::Auth {
-            username: pseudo,
-            password: mot_de_passe,
-            invite: invitation.filter(|i| !i.trim().is_empty()),
-            protocole: ki_protocol::PROTOCOLE,
-            appareil: ki_protocol::Appareil::Mobile,
-        })
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    let (mut writer, mut reader) = client.split();
-
-    // Datagrammes voix entrants → moteur.
-    let (voix_tx, voix_rx) = std::sync::mpsc::sync_channel::<bytes::Bytes>(ki_voice::VOICE_QUEUE);
-    {
-        let conn = reader.conn.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Ok(dat) = conn.read_datagram().await {
-                if matches!(
-                    voix_tx.try_send(dat),
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_))
-                ) {
-                    break;
-                }
-            }
+        let mut a = partage.lock().unwrap();
+        a.identifiants = Some(Identifiants {
+            serveur: serveur.trim().to_string(),
+            pseudo: pseudo.trim().to_string(),
+            mot_de_passe,
+            invitation: invitation.map(|i| i.trim().to_string()).filter(|i| !i.is_empty()),
+            empreinte: empreinte.unwrap_or_default(),
         });
+        a.etat = Appli::etat_vierge(None);
+        a.vocal_voulu = None;
+        a.deja_accueilli = false;
     }
+    ESSAIS.store(0, std::sync::atomic::Ordering::Relaxed);
+    lancer(&app, &partage);
+}
 
-    let (envoi_tx, mut envoi_rx) = mpsc::unbounded_channel::<ClientMsg>();
-    let voix = {
-        let mut s = etat.lock().unwrap();
-        s.envoi = Some(envoi_tx);
-        s.voix.clone()
-    };
+#[tauri::command]
+fn deconnecter(app: AppHandle, partage: State<'_, Partage>) {
+    let mut a = partage.lock().unwrap();
+    fin(&mut a, &app, String::new());
+}
 
-    // Le moteur démarre à l'accueil (identité + clé voix).
-    let emplacement = Arc::new(Mutex::new(Some(writer.conn.clone())));
-    let mut voix_rx = Some(voix_rx);
-    let app_lecture = app.clone();
-    let voix_lecture = voix.clone();
-    tauri::async_runtime::spawn(async move {
-        let app = app_lecture;
-        while let Some(msg) = reader.next_msg().await {
-            match msg {
-                ServerMsg::Welcome { user_id, voice_key, channels, .. } => {
-                    journal(&app, format!("connecté (id {user_id})"));
-                    let salons: Vec<Salon> = channels
-                        .iter()
-                        .map(|c| Salon {
-                            id: c.id,
-                            nom: c.name.clone(),
-                            vocal: matches!(c.kind, ChannelKind::Voice),
-                        })
-                        .collect();
-                    let _ = app.emit("salons", salons);
-                    let cle: Option<[u8; 32]> =
-                        ki_protocol::hex_decode(&voice_key).and_then(|v| v.try_into().ok());
-                    let (Some(cle), Some(rx)) = (cle, voix_rx.take()) else {
-                        journal(&app, "! clé voix invalide reçue du serveur");
-                        continue;
-                    };
-                    let envoi = ki_client_quic::datagram_sender_slot(emplacement.clone());
-                    match VoiceEngine::start(VoiceConfig::new(user_id, cle), envoi, rx) {
-                        Ok(moteur) => {
-                            *voix_lecture.lock().unwrap() = Some(moteur);
-                            journal(&app, "moteur voix démarré");
-                        }
-                        Err(e) => journal(&app, format!("! vocal indisponible : {e:#}")),
-                    }
-                }
-                ServerMsg::Chat { username, text, .. } => {
-                    journal(&app, format!("<{username}> {text}"))
-                }
-                ServerMsg::UserJoined { username, .. } => {
-                    journal(&app, format!("* {username} est en ligne"))
-                }
-                ServerMsg::MemberUpdate { member } => journal(
-                    &app,
-                    format!(
-                        "* {} : {}",
-                        member.username,
-                        match member.voice {
-                            Some(c) => format!("vocal {c}"),
-                            None => "hors vocal".into(),
-                        }
-                    ),
-                ),
-                ServerMsg::VoiceLocked { channel, .. } => {
-                    journal(&app, format!("! salon vocal {channel} verrouillé"))
-                }
-                ServerMsg::Error { message } => journal(&app, format!("! {message}")),
-                _ => {}
+#[tauri::command]
+fn ouvrir_salon(partage: State<'_, Partage>, salon: ChannelId) {
+    let mut a = partage.lock().unwrap();
+    for m in a.etat.ouvrir_salon(salon) {
+        a.envoyer(m);
+    }
+    a.vue_sale = true;
+    a.fil_sale = true;
+}
+
+#[tauri::command]
+fn remonter(partage: State<'_, Partage>) {
+    let mut a = partage.lock().unwrap();
+    if let Some(m) = a.etat.remonter() {
+        a.envoyer(m);
+    }
+}
+
+/// La page montre le fil, à jour (appli au premier plan, fil en bas) : ce
+/// qui y arrive est lu.
+#[tauri::command]
+fn regarde(partage: State<'_, Partage>, oui: bool) {
+    let mut a = partage.lock().unwrap();
+    a.etat.regarde = oui;
+    if oui {
+        if let Some(c) = a.etat.courant {
+            if let Some(m) = a.etat.marquer_lu(c) {
+                a.envoyer(m);
             }
+            a.vue_sale = true;
         }
-        let raison = reader.conn.close_reason();
-        voix_lecture.lock().unwrap().take();
-        journal(
-            &app,
-            match raison {
-                Some(r) => format!("connexion fermée : {r}"),
-                None => "connexion fermée".into(),
-            },
-        );
-        let _ = app.emit("deconnecte", ());
+    }
+}
+
+#[tauri::command]
+fn envoyer(
+    partage: State<'_, Partage>,
+    texte: String,
+    reponse: Option<(UserId, u64)>,
+) -> Result<(), String> {
+    let a = partage.lock().unwrap();
+    let texte = texte.trim().to_string();
+    if texte.is_empty() {
+        return Ok(());
+    }
+    let salon = a.etat.courant.ok_or("aucun salon ouvert")?;
+    a.envoyer(ClientMsg::Chat {
+        text: texte,
+        reply_to: reponse.map(|(user_id, ts)| MsgRef { user_id, ts }),
+        salon: Some(salon),
     });
-
-    tauri::async_runtime::spawn(async move {
-        while let Some(msg) = envoi_rx.recv().await {
-            if let Err(e) = writer.send_msg(&msg).await {
-                tracing::warn!("envoi au serveur : {e:#}");
-                break;
-            }
-        }
-        writer.close_gracefully().await;
-    });
-
-    Ok(empreinte)
-}
-
-fn envoyer(etat: &State<'_, Etat>, msg: ClientMsg) -> Result<(), String> {
-    let s = etat.lock().unwrap();
-    let envoi = s.envoi.as_ref().ok_or("pas connecté")?;
-    envoi.send(msg).map_err(|_| "connexion fermée".to_string())
+    Ok(())
 }
 
 #[tauri::command]
-fn rejoindre_vocal(etat: State<'_, Etat>, salon: u32) -> Result<(), String> {
-    envoyer(&etat, ClientMsg::JoinVoice { channel: salon, password: None })
+fn reagir(partage: State<'_, Partage>, auteur: UserId, ts: u64, emoji: String, on: bool) {
+    let a = partage.lock().unwrap();
+    a.envoyer(ClientMsg::React { message: MsgRef { user_id: auteur, ts }, emoji, on });
 }
 
 #[tauri::command]
-fn quitter_vocal(etat: State<'_, Etat>) -> Result<(), String> {
-    if let Some(m) = etat.lock().unwrap().voix.lock().unwrap().as_ref() {
-        m.set_transmit(false);
+fn rejoindre_vocal(
+    partage: State<'_, Partage>,
+    salon: ChannelId,
+    mot_de_passe: Option<String>,
+) -> Result<(), String> {
+    let mut a = partage.lock().unwrap();
+    let m = a.etat.rejoindre_vocal(salon, mot_de_passe)?;
+    a.vocal_voulu = Some(salon);
+    a.envoyer(m);
+    Ok(())
+}
+
+#[tauri::command]
+fn quitter_vocal(partage: State<'_, Partage>) {
+    let mut a = partage.lock().unwrap();
+    a.vocal_voulu = None;
+    a.parle_annonce = false;
+    a.envoyer(ClientMsg::LeaveVoice);
+}
+
+#[tauri::command]
+fn micro(partage: State<'_, Partage>, muet: bool) {
+    let mut a = partage.lock().unwrap();
+    a.muet = muet;
+    a.vue_sale = true;
+    let parle = a.parle_annonce;
+    let muted = muet || a.sourd;
+    a.envoyer(ClientMsg::VoiceState { speaking: parle && !muet, muted });
+}
+
+/// Sourd coupe aussi le micro, comme sur PC.
+#[tauri::command]
+fn sourdine(partage: State<'_, Partage>, sourd: bool) {
+    let mut a = partage.lock().unwrap();
+    a.sourd = sourd;
+    a.muet = sourd;
+    a.vue_sale = true;
+    if let Some(m) = a.lien.engine.lock().unwrap().as_ref() {
+        m.set_output_gain(if sourd { 0.0 } else { 1.0 });
     }
-    envoyer(&etat, ClientMsg::LeaveVoice)
+    a.envoyer(ClientMsg::VoiceState { speaking: false, muted: sourd });
 }
 
-/// Micro ouvert (émission continue, comme `/mic on` de la ligne de commande)
-/// ou coupé.
+/// Le volume d'une personne, 1.0 = 100 %.
 #[tauri::command]
-fn micro(etat: State<'_, Etat>, ouvert: bool) -> Result<(), String> {
-    {
-        let s = etat.lock().unwrap();
-        let voix = s.voix.lock().unwrap();
-        let moteur = voix.as_ref().ok_or("vocal indisponible")?;
-        moteur.set_transmit(ouvert);
-    }
-    envoyer(&etat, ClientMsg::VoiceState { speaking: ouvert, muted: !ouvert })
-}
-
-#[tauri::command]
-fn etat_voix(etat: State<'_, Etat>) -> EtatVoix {
-    let s = etat.lock().unwrap();
-    let voix = s.voix.lock().unwrap();
-    match voix.as_ref() {
-        Some(m) => {
-            let st = m.stats();
-            EtatVoix {
-                actif: true,
-                envoyes: st.packets_sent,
-                recus: st.packets_received,
-                perdus: st.packets_lost,
-                niveau_micro: st.mic_peak,
-                emetteurs: st.active_senders,
-            }
-        }
-        None => EtatVoix {
-            actif: false,
-            envoyes: 0,
-            recus: 0,
-            perdus: 0,
-            niveau_micro: 0.0,
-            emetteurs: 0,
-        },
+fn volume_membre(partage: State<'_, Partage>, id: UserId, gain: f32) {
+    let moteur = partage.lock().unwrap().lien.engine.clone();
+    let garde = moteur.lock().unwrap();
+    if let Some(m) = garde.as_ref() {
+        m.set_user_volume(id, gain.clamp(0.0, 2.0));
     }
 }
 
@@ -277,14 +683,29 @@ fn traces() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     traces();
+    let partage: Partage = Arc::new(Mutex::new(Appli {
+        etat: Appli::etat_vierge(None),
+        ..Appli::default()
+    }));
     tauri::Builder::default()
-        .manage(Etat::default())
+        .manage(partage)
+        .setup(|app| {
+            horloge(app.handle().clone(), app.state::<Partage>().inner().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             connecter,
+            deconnecter,
+            ouvrir_salon,
+            remonter,
+            regarde,
+            envoyer,
+            reagir,
             rejoindre_vocal,
             quitter_vocal,
             micro,
-            etat_voix
+            sourdine,
+            volume_membre,
         ])
         .run(tauri::generate_context!())
         .expect("lancement de l'appli");

@@ -6,162 +6,819 @@
 <title>ki-chat</title>
 <style>
   :root {
-    --fond: #111318; --carte: #1b1e25; --bord: #2a2e38; --texte: #e6e8ee;
-    --doux: #8b91a0; --accent: #5b8cff; --ok: #3ccf7a; --mal: #ff5d5d;
+    --fond: #0c0f14; --cote: #11151b; --base: #151a21; --releve: #1b212a;
+    --survol: #242c37; --actif: #2d3744; --bord: #28313c; --bord-doux: #1e252e;
+    --texte: #e7edf4; --doux: #94a2b2; --pale: #63707f;
+    --accent: #00d26a; --parle: #00e676; --danger: #ff6b6b; --info: #58a6ff;
+    --haut: env(safe-area-inset-top); --bas: env(safe-area-inset-bottom);
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--fond); color: var(--texte);
-    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; overscroll-behavior: none;
   }
-  h1 { font-size: 20px; margin: 0 0 12px; }
-  .carte { background: var(--carte); border: 1px solid var(--bord); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
-  label { display: block; color: var(--doux); font-size: 13px; margin: 8px 0 4px; }
-  input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bord); background: var(--fond); color: var(--texte); font-size: 16px; }
-  button { padding: 12px 14px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; }
-  button.second { background: var(--bord); }
-  button:disabled { opacity: .5; }
-  .pleine { width: 100%; margin-top: 12px; }
-  .salon { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-top: 1px solid var(--bord); }
-  .salon:first-child { border-top: 0; }
-  .rangee { display: flex; gap: 8px; }
-  .rangee button { flex: 1; }
-  .jauge { height: 8px; background: var(--fond); border-radius: 4px; overflow: hidden; margin-top: 10px; }
-  .jauge > div { height: 100%; background: var(--ok); transform: scaleX(0); transform-origin: left; transition: transform .1s; }
-  .stats { color: var(--doux); font-size: 13px; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  #journal { font: 12px/1.45 ui-monospace, monospace; color: var(--doux); max-height: 40vh; overflow-y: auto; white-space: pre-wrap; }
-  .cache { display: none; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  input, textarea { font: inherit; color: var(--texte); }
+  svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .cache { display: none !important; }
+
+  /* Écrans : un seul visible, plein cadre. */
+  .ecran { position: fixed; top: 0; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; padding-top: var(--haut); background: var(--fond); }
+  .entete { display: flex; align-items: center; padding: 10px 14px; min-height: 54px; border-bottom: 1px solid var(--bord-doux); background: var(--cote); }
+  .entete h1 { font-size: 17px; margin: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .entete .sous { color: var(--pale); font-weight: 400; }
+  .icone { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; color: var(--doux); }
+  .icone:active { background: var(--survol); }
+  .defile { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Connexion */
+  #connexion .corps { flex: 1; align-self: center; overflow-y: auto; padding: 32px 20px calc(24px + var(--bas)); max-width: 440px; width: 100%; margin: 0 auto; }
+  .marque { font-size: 30px; font-weight: 800; letter-spacing: -.5px; margin: 8px 0 4px; }
+  .marque b { color: var(--accent); }
+  .accroche { color: var(--doux); margin: 0 0 28px; }
+  label { display: block; color: var(--doux); font-size: 13px; margin: 14px 0 6px; }
+  .champ { width: 100%; padding: 13px 14px; border-radius: 10px; border: 1px solid var(--bord); background: var(--base); font-size: 16px; outline: none; }
+  .champ:focus { border-color: var(--accent); }
+  .bouton { display: block; width: 100%; margin-top: 22px; padding: 14px; border-radius: 10px; background: var(--accent); color: #04140b; font-weight: 700; font-size: 16px; }
+  .bouton:disabled { opacity: .5; }
+  .lien { color: var(--info); font-size: 14px; margin-top: 16px; }
+  .alerte { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: rgba(255,107,107,.12); color: var(--danger); font-size: 14px; }
+
+  /* Listes */
+  .titre-section { color: var(--pale); font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 18px 16px 6px; }
+  .ligne { display: flex; align-items: center; padding: 11px 16px; min-height: 48px; text-align: left; }
+  .ligne:active { background: var(--survol); }
+  .ligne .nom { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ligne.non-lu .nom { font-weight: 700; color: var(--texte); }
+  .ligne .nom.calme { color: var(--doux); }
+  .diese { color: var(--pale); font-weight: 700; width: 22px; text-align: center; }
+  .pastille { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px; background: var(--actif); color: var(--texte); font-size: 12px; font-weight: 700; display: grid; place-items: center; }
+  .pastille.mention { background: var(--danger); color: #fff; }
+  .vocal-ici { color: var(--accent); }
+  .occupants { padding: 0 16px 6px 50px; }
+  .occupant { display: flex; align-items: center; padding: 5px 0; color: var(--doux); font-size: 14px; }
+  .petit { width: 16px; height: 16px; color: var(--pale); }
+
+  .avatar { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #0c0f14; flex: none; position: relative; }
+  .avatar.mini { width: 24px; height: 24px; font-size: 11px; }
+  .avatar.parle { box-shadow: 0 0 0 2px var(--fond), 0 0 0 4px var(--parle); }
+  .avatar.absent { opacity: .4; }
+  .membre-info { flex: 1; min-width: 0; }
+  .membre-info .jeu { color: var(--pale); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Onglets du bas */
+  .onglets { display: flex; border-top: 1px solid var(--bord-doux); background: var(--cote); padding-bottom: var(--bas); }
+  .onglets button { flex: 1; padding: 10px 0 8px; display: flex; flex-direction: column; align-items: center; color: var(--pale); font-size: 11px; font-weight: 600; position: relative; }
+  .onglets button.actif { color: var(--accent); }
+  .onglets .total { position: absolute; top: 4px; left: calc(50% + 6px); }
+
+  /* Barre vocale */
+  .barre-vocale { display: flex; align-items: center; padding: 8px 10px 8px 14px; background: var(--releve); border-top: 1px solid var(--bord); }
+  .barre-vocale .ou { flex: 1; min-width: 0; }
+  .barre-vocale .ou b { color: var(--accent); font-size: 13px; display: block; }
+  .barre-vocale .ou span { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+  .rond { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; background: var(--actif); color: var(--texte); }
+  .rond.coupe { background: rgba(255,107,107,.18); color: var(--danger); }
+  .rond.raccrocher { background: var(--danger); color: #fff; }
+
+  /* Salon texte */
+  #fil { padding: 8px 0 12px; }
+  .msg { display: flex; padding: 6px 14px; }
+  .msg.suite { padding-top: 1px; }
+  .msg.suite .avatar { visibility: hidden; height: 0; }
+  .msg.nomme { background: rgba(255,161,87,.08); box-shadow: inset 3px 0 0 #ffa157; }
+  .msg .corps-msg { flex: 1; min-width: 0; }
+  .msg .qui { font-weight: 700; font-size: 14px; }
+  .msg .quand { color: var(--pale); font-size: 11px; margin-left: 6px; font-weight: 400; }
+  .msg .texte { white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
+  .msg .texte code { background: var(--releve); padding: 1px 5px; border-radius: 5px; font-size: 13px; }
+  .msg .texte a { color: var(--info); }
+  .msg .texte .mention { color: var(--accent); font-weight: 600; }
+  .msg .modifie { color: var(--pale); font-size: 11px; }
+  .citation { font-size: 13px; color: var(--doux); border-left: 2px solid var(--bord); padding-left: 8px; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .reactions { display: flex; flex-wrap: wrap; margin-top: 5px; }
+  .reaction { padding: 2px 8px; border-radius: 12px; background: var(--releve); border: 1px solid var(--bord); font-size: 13px; }
+  .reaction.moi { border-color: var(--accent); background: rgba(0,210,106,.12); }
+  .separateur { display: flex; align-items: center; margin: 10px 14px; color: var(--danger); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+  .separateur::before, .separateur::after { content: ""; flex: 1; height: 1px; background: var(--danger); opacity: .5; }
+  .plus-ancien { text-align: center; color: var(--pale); font-size: 12px; padding: 10px; }
+  .vide { color: var(--pale); text-align: center; padding: 40px 20px; }
+
+  .redaction { border-top: 1px solid var(--bord-doux); background: var(--cote); padding: 8px 10px calc(8px + var(--bas)); }
+  .redaction .repond { display: flex; align-items: center; font-size: 13px; color: var(--doux); padding: 0 4px 6px; }
+  .redaction .repond span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .redaction .zone { display: flex; align-items: flex-end; }
+  .redaction textarea { flex: 1; resize: none; max-height: 120px; padding: 11px 14px; border-radius: 20px; border: 1px solid var(--bord); background: var(--base); outline: none; font-size: 16px; line-height: 1.35; }
+  .envoyer { width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: #04140b; display: grid; place-items: center; }
+
+  /* Feuilles (menus du bas) */
+  .voile { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.5); z-index: 20; }
+  .feuille { position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; background: var(--releve); border-radius: 16px 16px 0 0; padding: 8px 0 calc(12px + var(--bas)); max-height: 80vh; overflow-y: auto; }
+  .feuille .poignee { width: 36px; height: 4px; border-radius: 2px; background: var(--bord); margin: 4px auto 10px; }
+  .feuille h2 { font-size: 16px; margin: 4px 16px 10px; }
+  .feuille .action { display: flex; align-items: center; width: 100%; padding: 14px 18px; text-align: left; }
+  .feuille .action:active { background: var(--survol); }
+  .emojis { display: flex; justify-content: space-around; padding: 6px 10px 12px; border-bottom: 1px solid var(--bord); }
+  .emojis button { font-size: 26px; width: 46px; height: 46px; border-radius: 50%; }
+  .emojis button:active { background: var(--survol); }
+  .volume { display: flex; align-items: center; padding: 8px 18px; }
+  .volume .nom { flex: 1; min-width: 0; }
+  .volume input { width: 45%; accent-color: var(--accent); }
+
+  /* Bandeau */
+  #bandeau { position: fixed; left: 12px; right: 12px; top: calc(var(--haut) + 62px); z-index: 30; padding: 11px 14px; border-radius: 10px; background: var(--actif); font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.4); transition: opacity .2s, transform .2s; }
+  #bandeau.erreur { background: #3a1d22; color: #ffb4b4; }
+  #bandeau.masque { opacity: 0; transform: translateY(-8px); pointer-events: none; }
+  #etat-reseau { background: #3b2a12; color: #ffc785; font-size: 13px; text-align: center; padding: 6px; }
+
+  /* Les WebView d'avant la 84 ignorent « gap » dans les flexbox : les
+     espacements passent par des marges. */
+  .entete > * + * { margin-left: 10px; }
+  .ligne > * + * { margin-left: 12px; }
+  .occupant > * + * { margin-left: 10px; }
+  .onglets button > * + * { margin-top: 3px; }
+  /* Barre vocale */
+  .barre-vocale > * + * { margin-left: 6px; }
+  .msg > * + * { margin-left: 10px; }
+  .reactions > * { margin: 0 5px 5px 0; }
+  .separateur::before { margin-right: 8px; }
+  .separateur::after { margin-left: 8px; }
+  .redaction .repond > * + * { margin-left: 8px; }
+  .redaction .zone > * + * { margin-left: 8px; }
+  .feuille .action > svg { margin-right: 12px; }
+  .volume > * + * { margin-left: 10px; }
 </style>
 </head>
 <body>
-<h1>ki-chat <span style="color:var(--doux);font-weight:400">· essai mobile</span></h1>
 
-<div class="carte" id="connexion">
-  <label for="serveur">Serveur</label>
-  <input id="serveur" value="ts.baws.fun" autocapitalize="off" autocorrect="off">
-  <label for="pseudo">Pseudo</label>
-  <input id="pseudo" autocapitalize="off" autocorrect="off">
-  <label for="mdp">Mot de passe</label>
-  <input id="mdp" type="password">
-  <label for="invitation">Invitation (premier compte seulement)</label>
-  <input id="invitation" autocapitalize="off" autocorrect="off">
-  <button class="pleine" id="btn-connecter">Se connecter</button>
-</div>
+<!-- Icônes, réutilisées par <use> -->
+<svg class="cache" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-micro" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-micro-coupe" viewBox="0 0 24 24"><path d="M9 9v2a3 3 0 0 0 5.1 2.1M15 9.3V6a3 3 0 0 0-5.7-1.3M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18"/></symbol>
+  <symbol id="i-casque" viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></symbol>
+  <symbol id="i-casque-coupe" viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 13.7-5.7M20 12v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/><path d="M3 3l18 18"/></symbol>
+  <symbol id="i-raccrocher" viewBox="0 0 24 24"><path d="M3 14.5c5-4.5 13-4.5 18 0l-2.2 2.6-3.6-1.5v-2.4a9 9 0 0 0-6.4 0v2.4l-3.6 1.5z"/></symbol>
+  <symbol id="i-retour" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="i-envoyer" viewBox="0 0 24 24"><path d="M5 12h13M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-haut-parleur" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9a4 4 0 0 1 0 6"/></symbol>
+  <symbol id="i-salons" viewBox="0 0 24 24"><path d="M5 9h14M4 15h14M10 4l-2 16M16 4l-2 16"/></symbol>
+  <symbol id="i-membres" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18.5 20a6.5 6.5 0 0 0-2.5-5.1"/></symbol>
+  <symbol id="i-telephone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18h2"/></symbol>
+  <symbol id="i-sortir" viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></symbol>
+  <symbol id="i-repondre" viewBox="0 0 24 24"><path d="M10 7L4 12l6 5M4 12h10a6 6 0 0 1 6 6"/></symbol>
+  <symbol id="i-fermer" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+</svg>
 
-<div class="carte cache" id="vocaux">
-  <div id="liste-salons"></div>
-</div>
-
-<div class="carte cache" id="voix">
-  <div class="rangee">
-    <button id="btn-micro">Ouvrir le micro</button>
-    <button class="second" id="btn-quitter">Quitter</button>
+<!-- Connexion -->
+<section class="ecran" id="connexion">
+  <div class="corps">
+    <div class="marque">ki<b>·</b>chat</div>
+    <p class="accroche">Ton groupe, dans la poche.</p>
+    <label for="serveur">Serveur</label>
+    <input class="champ" id="serveur" value="ts.baws.fun" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url">
+    <label for="pseudo">Pseudo</label>
+    <input class="champ" id="pseudo" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="username">
+    <label for="mdp">Mot de passe</label>
+    <input class="champ" id="mdp" type="password" autocomplete="current-password">
+    <div id="bloc-invitation" class="cache">
+      <label for="invitation">Code d'invitation</label>
+      <input class="champ" id="invitation" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>
+    <button class="lien" id="montrer-invitation">Première connexion ? J'ai un code d'invitation</button>
+    <button class="bouton" id="btn-connecter">Se connecter</button>
+    <div class="alerte cache" id="erreur-connexion"></div>
   </div>
-  <div class="jauge"><div id="niveau"></div></div>
-  <div class="stats" id="stats">—</div>
-</div>
+</section>
 
-<div class="carte"><div id="journal"></div></div>
+<!-- Accueil : salons et membres -->
+<section class="ecran cache" id="accueil">
+  <div class="entete">
+    <h1 id="nom-serveur">ki-chat</h1>
+    <button class="icone" id="btn-deconnecter" aria-label="Se déconnecter"><svg><use href="#i-sortir"/></svg></button>
+  </div>
+  <div id="etat-reseau" class="cache">Connexion perdue — reconnexion…</div>
+  <div class="defile" id="vue-salons"></div>
+  <div class="defile cache" id="vue-membres"></div>
+  <div class="barre-vocale cache" data-barre-vocale></div>
+  <nav class="onglets">
+    <button class="actif" data-onglet="salons"><svg><use href="#i-salons"/></svg>Salons<span class="pastille total cache" id="total-non-lus"></span></button>
+    <button data-onglet="membres"><svg><use href="#i-membres"/></svg>Membres</button>
+  </nav>
+</section>
+
+<!-- Un salon texte -->
+<section class="ecran cache" id="salon">
+  <div class="entete">
+    <button class="icone" id="btn-retour" aria-label="Retour"><svg><use href="#i-retour"/></svg></button>
+    <h1><span class="sous">#</span> <span id="nom-salon"></span></h1>
+  </div>
+  <div class="defile" id="defile-fil"><div id="fil"></div></div>
+  <div class="barre-vocale cache" data-barre-vocale></div>
+  <div class="redaction">
+    <div class="repond cache" id="repond"><svg class="petit"><use href="#i-repondre"/></svg><span id="repond-a"></span><button class="icone" id="annuler-reponse" aria-label="Annuler la réponse"><svg class="petit"><use href="#i-fermer"/></svg></button></div>
+    <div class="zone">
+      <textarea id="saisie" rows="1" placeholder="Écrire un message" enterkeyhint="send"></textarea>
+      <button class="envoyer" id="btn-envoyer" aria-label="Envoyer"><svg><use href="#i-envoyer"/></svg></button>
+    </div>
+  </div>
+</section>
+
+<div id="bandeau" class="masque"></div>
+<div id="feuilles"></div>
 
 <script>
+  // Les WebView Android d'avant la 86 (téléphones jamais mis à jour,
+  // émulateur Android 11) n'ont pas replaceChildren.
+  if (!Element.prototype.replaceChildren) {
+    Element.prototype.replaceChildren = function (...noeuds) {
+      this.textContent = "";
+      this.append(...noeuds);
+    };
+  }
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
   const $ = (id) => document.getElementById(id);
-  let microOuvert = false;
 
-  function ecrire(ligne) {
-    const j = $("journal");
-    j.textContent += ligne + "\n";
-    j.scrollTop = j.scrollHeight;
+  let vue = null;          // dernier état reçu du Rust
+  let filCourant = null;   // dernier fil reçu
+  let onglet = "salons";
+  let reponseA = null;     // { auteur_id, ts, auteur, texte }
+  let enConnexion = false;
+
+  // ---------- petits outils ----------
+  function retenir(cle, val) { try { localStorage.setItem(cle, val); } catch (_) {} }
+  function relire(cle) { try { return localStorage.getItem(cle); } catch (_) { return null; } }
+  function empreintes() { try { return JSON.parse(relire("empreintes") || "{}"); } catch (_) { return {}; } }
+
+  function echapper(t) {
+    return t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
-  // Le pseudo et le serveur se retiennent ; le mot de passe, non (le
-  // Keystore Android viendra à l'étape 3).
-  try {
-    $("serveur").value = localStorage.getItem("serveur") || $("serveur").value;
-    $("pseudo").value = localStorage.getItem("pseudo") || "";
-  } catch (_) {}
+  // Le gras, l'italique, le code, les liens et les mentions — le même
+  // langage que sur PC, en plus simple.
+  function miseEnForme(texte) {
+    let h = echapper(texte);
+    h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    h = h.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+    h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+    h = h.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\s)@([\p{L}\p{N}_.\-]+)/gu, '$1<span class="mention">@$2</span>');
+    return h;
+  }
 
-  listen("journal", (e) => ecrire(e.payload));
-  listen("salons", (e) => {
-    const liste = $("liste-salons");
-    liste.innerHTML = "";
-    for (const s of e.payload.filter((s) => s.vocal)) {
-      const ligne = document.createElement("div");
-      ligne.className = "salon";
-      const nom = document.createElement("span");
-      nom.textContent = "🔊 " + s.nom;
-      const b = document.createElement("button");
-      b.textContent = "Rejoindre";
-      b.onclick = async () => {
-        try {
-          await invoke("rejoindre_vocal", { salon: s.id });
-          ecrire("→ salon vocal « " + s.nom + " »");
-          $("voix").classList.remove("cache");
-        } catch (err) { ecrire("! " + err); }
-      };
-      ligne.append(nom, b);
-      liste.append(ligne);
-    }
-    $("connexion").classList.add("cache");
-    $("vocaux").classList.remove("cache");
-  });
-  listen("deconnecte", () => {
-    $("connexion").classList.remove("cache");
-    $("vocaux").classList.add("cache");
-    $("voix").classList.add("cache");
-    microOuvert = false;
-  });
+  const teintes = ["#00d26a", "#58a6ff", "#ffa157", "#c792ea", "#ff6b9a", "#4dd0e1", "#ffd54f", "#9ccc65"];
+  function couleur(nom) {
+    let h = 0;
+    for (const c of nom) h = (h * 31 + c.codePointAt(0)) >>> 0;
+    return teintes[h % teintes.length];
+  }
+  function avatar(nom, classes = "") {
+    const a = document.createElement("div");
+    a.className = "avatar " + classes;
+    a.style.background = couleur(nom);
+    a.textContent = [...nom][0]?.toUpperCase() || "?";
+    return a;
+  }
+  function icone(nom, classe = "") {
+    const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    if (classe) s.setAttribute("class", classe);
+    const u = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    u.setAttribute("href", "#i-" + nom);
+    s.append(u);
+    return s;
+  }
+  function heure(ts) {
+    const d = new Date(ts);
+    const auj = new Date();
+    const hm = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === auj.toDateString()) return hm;
+    return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" }) + " " + hm;
+  }
+
+  let minuterieBandeau;
+  function bandeau(texte, erreur = false) {
+    const b = $("bandeau");
+    b.textContent = texte;
+    b.classList.toggle("erreur", erreur);
+    b.classList.remove("masque");
+    clearTimeout(minuterieBandeau);
+    minuterieBandeau = setTimeout(() => b.classList.add("masque"), 3500);
+  }
+
+  function montrer(ecran) {
+    for (const e of ["connexion", "accueil", "salon"]) $(e).classList.toggle("cache", e !== ecran);
+    signalerRegard();
+  }
+
+  // ---------- connexion ----------
+  $("serveur").value = relire("serveur") || $("serveur").value;
+  $("pseudo").value = relire("pseudo") || "";
+  $("montrer-invitation").onclick = () => {
+    $("bloc-invitation").classList.remove("cache");
+    $("montrer-invitation").classList.add("cache");
+    $("invitation").focus();
+  };
+
+  function erreurConnexion(texte) {
+    const e = $("erreur-connexion");
+    e.textContent = texte;
+    e.classList.toggle("cache", !texte);
+  }
 
   $("btn-connecter").onclick = async () => {
-    const b = $("btn-connecter");
-    b.disabled = true;
-    try {
-      try {
-        localStorage.setItem("serveur", $("serveur").value.trim());
-        localStorage.setItem("pseudo", $("pseudo").value.trim());
-      } catch (_) {}
-      const empreinte = await invoke("connecter", {
-        serveur: $("serveur").value.trim(),
-        pseudo: $("pseudo").value.trim(),
-        motDePasse: $("mdp").value,
-        invitation: $("invitation").value.trim() || null,
-      });
-      ecrire("empreinte du serveur : " + empreinte);
-    } catch (err) {
-      ecrire("! " + err);
-    } finally {
-      b.disabled = false;
+    const serveur = $("serveur").value.trim();
+    const pseudo = $("pseudo").value.trim();
+    if (!serveur || !pseudo || !$("mdp").value) {
+      erreurConnexion("Serveur, pseudo et mot de passe sont nécessaires.");
+      return;
     }
+    retenir("serveur", serveur);
+    retenir("pseudo", pseudo);
+    erreurConnexion("");
+    enConnexion = true;
+    $("btn-connecter").disabled = true;
+    $("btn-connecter").textContent = "Connexion…";
+    await invoke("connecter", {
+      serveur, pseudo,
+      motDePasse: $("mdp").value,
+      invitation: $("invitation").value.trim() || null,
+      // L'empreinte retenue pour ce serveur : un imposteur sera refusé.
+      empreinte: empreintes()[serveur] || null,
+    });
+  };
+  for (const id of ["serveur", "pseudo", "mdp", "invitation"]) {
+    $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") $("btn-connecter").click(); });
+  }
+
+  function finConnexionUi() {
+    enConnexion = false;
+    $("btn-connecter").disabled = false;
+    $("btn-connecter").textContent = "Se connecter";
+  }
+
+  listen("empreinte", (e) => {
+    const serveur = $("serveur").value.trim();
+    const toutes = empreintes();
+    toutes[serveur] = e.payload;
+    retenir("empreintes", JSON.stringify(toutes));
+  });
+  listen("connecte", () => {
+    finConnexionUi();
+    $("mdp").value = "";
+    $("etat-reseau").classList.add("cache");
+    if (!$("connexion").classList.contains("cache")) montrer("accueil");
+  });
+  listen("coupe", () => $("etat-reseau").classList.remove("cache"));
+  listen("fin", (e) => {
+    finConnexionUi();
+    montrer("connexion");
+    erreurConnexion(e.payload || "");
+    fermerFeuille();
+  });
+
+  $("btn-deconnecter").onclick = () => {
+    ouvrirFeuille((f) => {
+      f.append(titre("Se déconnecter de " + (vue?.serveur || "ce serveur") + " ?"));
+      f.append(action("sortir", "Se déconnecter", () => { invoke("deconnecter"); }));
+    });
   };
 
-  $("btn-micro").onclick = async () => {
-    try {
-      await invoke("micro", { ouvert: !microOuvert });
-      microOuvert = !microOuvert;
-      $("btn-micro").textContent = microOuvert ? "Couper le micro" : "Ouvrir le micro";
-    } catch (err) { ecrire("! " + err); }
-  };
-  $("btn-quitter").onclick = async () => {
-    try {
-      await invoke("quitter_vocal");
-      microOuvert = false;
-      $("btn-micro").textContent = "Ouvrir le micro";
-      $("voix").classList.add("cache");
-    } catch (err) { ecrire("! " + err); }
-  };
+  // ---------- onglets ----------
+  for (const b of document.querySelectorAll("[data-onglet]")) {
+    b.onclick = () => {
+      onglet = b.dataset.onglet;
+      document.querySelectorAll("[data-onglet]").forEach((x) => x.classList.toggle("actif", x === b));
+      $("vue-salons").classList.toggle("cache", onglet !== "salons");
+      $("vue-membres").classList.toggle("cache", onglet !== "membres");
+    };
+  }
 
-  // Jauge du micro et compteurs de paquets, quatre fois par seconde.
-  setInterval(async () => {
-    if ($("voix").classList.contains("cache")) return;
+  // ---------- la vue : salons, membres, vocal ----------
+  listen("vue", (e) => {
+    vue = e.payload;
+    if (!vue.connecte && !enConnexion && vue.moi == null) return;
+    $("nom-serveur").textContent = vue.serveur || "ki-chat";
+    const total = $("total-non-lus");
+    total.textContent = vue.total_non_lus > 99 ? "99+" : vue.total_non_lus;
+    total.classList.toggle("cache", !vue.total_non_lus);
+    dessinerSalons();
+    dessinerMembres();
+    dessinerBarreVocale();
+    if (!$("salon").classList.contains("cache")) {
+      const s = vue.salons.find((s) => s.id === vue.courant);
+      $("nom-salon").textContent = s ? s.nom : "";
+    }
+    if (feuilleVocale) dessinerFeuilleVocale();
+  });
+
+  function dessinerSalons() {
+    const racine = $("vue-salons");
+    racine.replaceChildren();
+    const textes = vue.salons.filter((s) => !s.vocal);
+    const vocaux = vue.salons.filter((s) => s.vocal);
+    if (textes.length) racine.append(section("Salons"));
+    for (const s of textes) {
+      const l = document.createElement("button");
+      l.className = "ligne" + (s.non_lus ? " non-lu" : "");
+      l.style.width = "100%";
+      const d = document.createElement("span");
+      d.className = "diese"; d.textContent = "#";
+      const n = document.createElement("span");
+      n.className = "nom" + (s.non_lus ? "" : " calme"); n.textContent = s.nom;
+      l.append(d, n);
+      if (s.non_lus) {
+        const p = document.createElement("span");
+        p.className = "pastille" + (s.mention ? " mention" : "");
+        p.textContent = s.non_lus > 99 ? "99+" : s.non_lus;
+        l.append(p);
+      }
+      l.onclick = () => ouvrirSalon(s.id);
+      racine.append(l);
+    }
+    if (vocaux.length) racine.append(section("Vocal"));
+    for (const s of vocaux) {
+      const l = document.createElement("button");
+      l.className = "ligne"; l.style.width = "100%";
+      const ic = icone("haut-parleur", vue.vocal === s.id ? "vocal-ici" : "petit");
+      const n = document.createElement("span");
+      n.className = "nom" + (vue.vocal === s.id ? " vocal-ici" : " calme"); n.textContent = s.nom;
+      l.append(ic, n);
+      l.onclick = () => (vue.vocal === s.id ? ouvrirFeuilleVocale() : rejoindre(s.id));
+      racine.append(l);
+      if (s.occupants.length) {
+        const o = document.createElement("div");
+        o.className = "occupants";
+        for (const p of s.occupants) o.append(occupant(p));
+        racine.append(o);
+      }
+    }
+    if (!textes.length && !vocaux.length) {
+      const v = document.createElement("div");
+      v.className = "vide"; v.textContent = "Aucun salon visible.";
+      racine.append(v);
+    }
+  }
+
+  function section(t) {
+    const d = document.createElement("div");
+    d.className = "titre-section"; d.textContent = t;
+    return d;
+  }
+
+  function occupant(p) {
+    const d = document.createElement("div");
+    d.className = "occupant";
+    d.append(avatar(p.nom, "mini" + (p.parle ? " parle" : "")));
+    const n = document.createElement("span");
+    n.textContent = p.nom; n.style.flex = "1";
+    d.append(n);
+    if (p.mobile) d.append(icone("telephone", "petit"));
+    if (p.muet) d.append(icone("micro-coupe", "petit"));
+    return d;
+  }
+
+  function dessinerMembres() {
+    const racine = $("vue-membres");
+    racine.replaceChildren();
+    const enLigne = vue.membres.filter((m) => m.en_ligne);
+    const absents = vue.membres.filter((m) => !m.en_ligne);
+    for (const [titreSection, liste] of [["En ligne — " + enLigne.length, enLigne], ["Hors ligne — " + absents.length, absents]]) {
+      if (!liste.length) continue;
+      racine.append(section(titreSection));
+      for (const m of liste) {
+        const l = document.createElement("div");
+        l.className = "ligne";
+        l.append(avatar(m.nom, m.en_ligne ? "" : "absent"));
+        const info = document.createElement("div");
+        info.className = "membre-info";
+        const n = document.createElement("div");
+        n.className = "nom" + (m.en_ligne ? "" : " calme"); n.textContent = m.nom;
+        info.append(n);
+        const ou = m.jeu || (m.vocal != null ? "en vocal · " + (vue.salons.find((s) => s.id === m.vocal)?.nom || "") : "");
+        if (ou) { const j = document.createElement("div"); j.className = "jeu"; j.textContent = ou; info.append(j); }
+        l.append(info);
+        if (m.mobile && m.en_ligne) l.append(icone("telephone", "petit"));
+        racine.append(l);
+      }
+    }
+  }
+
+  // ---------- le vocal ----------
+  async function rejoindre(salon, motDePasse = null) {
     try {
-      const v = await invoke("etat_voix");
-      $("niveau").style.transform = `scaleX(${Math.min(1, v.niveau_micro)})`;
-      $("stats").textContent =
-        `${v.envoyes} envoyés · ${v.recus} reçus · ${v.perdus} perdus · ${v.emetteurs} qui parle(nt)`;
-    } catch (_) {}
-  }, 250);
+      await invoke("rejoindre_vocal", { salon, motDePasse });
+    } catch (err) { bandeau(String(err), true); }
+  }
+
+  function dessinerBarreVocale() {
+    const s = vue.vocal != null ? vue.salons.find((x) => x.id === vue.vocal) : null;
+    for (const barre of document.querySelectorAll("[data-barre-vocale]")) {
+      barre.classList.toggle("cache", !s);
+      if (!s) continue;
+      barre.replaceChildren();
+      const ou = document.createElement("button");
+      ou.className = "ou"; ou.style.textAlign = "left";
+      ou.innerHTML = "<b>En vocal</b><span></span>";
+      ou.querySelector("span").textContent = s.nom + " · " + s.occupants.length + " présent" + (s.occupants.length > 1 ? "s" : "");
+      ou.onclick = ouvrirFeuilleVocale;
+      const micro = document.createElement("button");
+      micro.className = "rond" + (vue.muet ? " coupe" : "");
+      micro.setAttribute("aria-label", vue.muet ? "Rouvrir le micro" : "Couper le micro");
+      micro.append(icone(vue.muet ? "micro-coupe" : "micro"));
+      micro.onclick = () => invoke("micro", { muet: !vue.muet });
+      const casque = document.createElement("button");
+      casque.className = "rond" + (vue.sourd ? " coupe" : "");
+      casque.setAttribute("aria-label", vue.sourd ? "Rétablir le son" : "Couper le son");
+      casque.append(icone(vue.sourd ? "casque-coupe" : "casque"));
+      casque.onclick = () => invoke("sourdine", { sourd: !vue.sourd });
+      const fin = document.createElement("button");
+      fin.className = "rond raccrocher";
+      fin.setAttribute("aria-label", "Quitter le vocal");
+      fin.append(icone("raccrocher"));
+      fin.onclick = () => { invoke("quitter_vocal"); fermerFeuille(); };
+      barre.append(ou, micro, casque, fin);
+    }
+  }
+
+  // Les volumes par personne, retenus sur le téléphone.
+  function volumes() { try { return JSON.parse(relire("volumes") || "{}"); } catch (_) { return {}; } }
+  let feuilleVocale = false;
+  function ouvrirFeuilleVocale() {
+    feuilleVocale = true;
+    ouvrirFeuille(() => dessinerFeuilleVocale(), () => { feuilleVocale = false; });
+  }
+  function dessinerFeuilleVocale() {
+    const f = document.querySelector(".feuille .contenu");
+    if (!f || !vue) return;
+    const s = vue.salons.find((x) => x.id === vue.vocal);
+    if (!s) { fermerFeuille(); return; }
+    f.replaceChildren(titre(s.nom));
+    const vol = volumes();
+    for (const p of s.occupants) {
+      const l = document.createElement("div");
+      l.className = "volume";
+      l.append(avatar(p.nom, "mini" + (p.parle ? " parle" : "")));
+      const n = document.createElement("span");
+      n.className = "nom"; n.textContent = p.nom + (p.id === vue.moi ? " (toi)" : "");
+      l.append(n);
+      if (p.mobile) l.append(icone("telephone", "petit"));
+      if (p.id !== vue.moi) {
+        const r = document.createElement("input");
+        r.type = "range"; r.min = 0; r.max = 200; r.step = 5;
+        r.value = Math.round((vol[p.id] ?? 1) * 100);
+        r.setAttribute("aria-label", "Volume de " + p.nom);
+        r.oninput = () => {
+          const gain = r.value / 100;
+          const v = volumes(); v[p.id] = gain; retenir("volumes", JSON.stringify(v));
+          invoke("volume_membre", { id: p.id, gain });
+        };
+        l.append(r);
+      }
+      f.append(l);
+    }
+  }
+  listen("connecte", () => {
+    // Les volumes retenus repartent au moteur à chaque connexion.
+    for (const [id, gain] of Object.entries(volumes())) invoke("volume_membre", { id: Number(id), gain });
+  });
+  listen("mot_de_passe_vocal", (e) => {
+    const [salon, faux] = e.payload;
+    const mdp = prompt(faux ? "Mot de passe incorrect. Réessaie :" : "Ce salon vocal est verrouillé. Mot de passe :");
+    if (mdp) rejoindre(salon, mdp);
+  });
+
+  // ---------- un salon texte ----------
+  function ouvrirSalon(id) {
+    reponseAnnulee();
+    filCourant = null;
+    $("fil").replaceChildren();
+    const s = vue?.salons.find((x) => x.id === id);
+    $("nom-salon").textContent = s ? s.nom : "";
+    invoke("ouvrir_salon", { salon: id });
+    montrer("salon");
+  }
+  $("btn-retour").onclick = () => montrer("accueil");
+
+  listen("fil", (e) => {
+    const nouveau = e.payload;
+    const defile = $("defile-fil");
+    const enBas = defile.scrollHeight - defile.scrollTop - defile.clientHeight < 80;
+    const memeSalon = filCourant && filCourant.salon === nouveau.salon;
+    const hauteurAvant = defile.scrollHeight;
+    const premierAvant = filCourant?.messages[0]?.ts;
+    filCourant = nouveau;
+    dessinerFil();
+    // Une page d'historique arrivée en tête : la lecture ne bouge pas.
+    if (memeSalon && premierAvant && nouveau.messages[0]?.ts < premierAvant) {
+      defile.scrollTop += defile.scrollHeight - hauteurAvant;
+    } else if (!memeSalon || enBas) {
+      defile.scrollTop = defile.scrollHeight;
+    }
+    chargementEnCours = false;
+    signalerRegard();
+  });
+
+  function dessinerFil() {
+    const racine = $("fil");
+    racine.replaceChildren();
+    const f = filCourant;
+    if (!f) return;
+    if (!f.messages.length) {
+      const v = document.createElement("div");
+      v.className = "vide"; v.textContent = "Pas encore de message ici. Lance la conversation !";
+      racine.append(v);
+      return;
+    }
+    if (f.suite) {
+      const p = document.createElement("div");
+      p.className = "plus-ancien"; p.textContent = "Remonte pour voir les messages plus anciens";
+      racine.append(p);
+    }
+    let precedent = null;
+    let separateurPose = false;
+    for (const m of f.messages) {
+      if (!separateurPose && f.separateur != null && m.ts > f.separateur && m.auteur_id !== vue?.moi) {
+        const s = document.createElement("div");
+        s.className = "separateur"; s.textContent = "Nouveaux messages";
+        racine.append(s);
+        separateurPose = true;
+        precedent = null;
+      }
+      const suite = precedent && precedent.auteur_id === m.auteur_id && m.ts - precedent.ts < 5 * 60 * 1000 && !m.reponse;
+      racine.append(message(m, suite));
+      precedent = m;
+    }
+  }
+
+  function message(m, suite) {
+    const d = document.createElement("div");
+    d.className = "msg" + (suite ? " suite" : "") + (m.me_nomme ? " nomme" : "");
+    d.append(avatar(m.auteur));
+    const c = document.createElement("div");
+    c.className = "corps-msg";
+    if (!suite) {
+      const q = document.createElement("div");
+      q.className = "qui"; q.textContent = m.auteur; q.style.color = couleur(m.auteur);
+      const t = document.createElement("span");
+      t.className = "quand"; t.textContent = heure(m.ts);
+      q.append(t);
+      c.append(q);
+    }
+    if (m.reponse) {
+      const r = document.createElement("div");
+      r.className = "citation"; r.textContent = m.reponse[0] + " : " + m.reponse[1];
+      c.append(r);
+    }
+    const t = document.createElement("div");
+    t.className = "texte"; t.innerHTML = miseEnForme(m.texte);
+    if (m.modifie) { const e = document.createElement("span"); e.className = "modifie"; e.textContent = " (modifié)"; t.append(e); }
+    c.append(t);
+    if (m.reactions.length) {
+      const rs = document.createElement("div");
+      rs.className = "reactions";
+      for (const r of m.reactions) {
+        const b = document.createElement("button");
+        b.className = "reaction" + (r.moi ? " moi" : "");
+        b.textContent = r.emoji + " " + r.nb;
+        b.onclick = () => invoke("reagir", { auteur: m.auteur_id, ts: m.ts, emoji: r.emoji, on: !r.moi });
+        rs.append(b);
+      }
+      c.append(rs);
+    }
+    d.append(c);
+    appuiLong(d, () => menuMessage(m));
+    return d;
+  }
+
+  function appuiLong(el, faire) {
+    let t;
+    el.addEventListener("touchstart", () => { t = setTimeout(() => { navigator.vibrate?.(15); faire(); }, 450); }, { passive: true });
+    for (const ev of ["touchend", "touchmove", "touchcancel"]) el.addEventListener(ev, () => clearTimeout(t), { passive: true });
+    el.addEventListener("contextmenu", (e) => { e.preventDefault(); faire(); });
+  }
+
+  const EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
+  function menuMessage(m) {
+    ouvrirFeuille((f) => {
+      const e = document.createElement("div");
+      e.className = "emojis";
+      for (const emoji of EMOJIS) {
+        const b = document.createElement("button");
+        b.textContent = emoji;
+        const deja = m.reactions.find((r) => r.emoji === emoji)?.moi;
+        b.onclick = () => { invoke("reagir", { auteur: m.auteur_id, ts: m.ts, emoji, on: !deja }); fermerFeuille(); };
+        e.append(b);
+      }
+      f.append(e);
+      f.append(action("repondre", "Répondre", () => {
+        reponseA = m;
+        $("repond-a").textContent = "Réponse à " + m.auteur + " : " + m.texte;
+        $("repond").classList.remove("cache");
+        $("saisie").focus();
+      }));
+    });
+  }
+  function reponseAnnulee() {
+    reponseA = null;
+    $("repond").classList.add("cache");
+  }
+  $("annuler-reponse").onclick = reponseAnnulee;
+
+  // Remonter le fil : la page d'avant, une à la fois.
+  let chargementEnCours = false;
+  $("defile-fil").addEventListener("scroll", () => {
+    const d = $("defile-fil");
+    if (d.scrollTop < 200 && filCourant?.suite && !chargementEnCours && filCourant.messages.length) {
+      chargementEnCours = true;
+      invoke("remonter");
+    }
+    signalerRegard();
+  }, { passive: true });
+
+  // Ce qui arrive dans le fil est « lu » si on le regarde vraiment.
+  let regardSignale = null;
+  function signalerRegard() {
+    const d = $("defile-fil");
+    const oui = document.visibilityState === "visible"
+      && !$("salon").classList.contains("cache")
+      && d.scrollHeight - d.scrollTop - d.clientHeight < 80;
+    if (oui !== regardSignale) {
+      regardSignale = oui;
+      invoke("regarde", { oui });
+    }
+  }
+  document.addEventListener("visibilitychange", signalerRegard);
+
+  // Rédaction
+  const saisie = $("saisie");
+  saisie.addEventListener("input", () => {
+    saisie.style.height = "auto";
+    saisie.style.height = Math.min(saisie.scrollHeight, 120) + "px";
+  });
+  saisie.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); envoyerMessage(); }
+  });
+  $("btn-envoyer").onclick = envoyerMessage;
+  async function envoyerMessage() {
+    const texte = saisie.value.trim();
+    if (!texte) return;
+    try {
+      await invoke("envoyer", { texte, reponse: reponseA ? [reponseA.auteur_id, reponseA.ts] : null });
+      saisie.value = "";
+      saisie.style.height = "auto";
+      reponseAnnulee();
+      const d = $("defile-fil");
+      d.scrollTop = d.scrollHeight;
+    } catch (err) { bandeau(String(err), true); }
+  }
+
+  // ---------- feuilles du bas ----------
+  let quandFerme = null;
+  function ouvrirFeuille(remplir, fermeture = null) {
+    fermerFeuille();
+    quandFerme = fermeture;
+    const voile = document.createElement("div");
+    voile.className = "voile";
+    voile.onclick = fermerFeuille;
+    const f = document.createElement("div");
+    f.className = "feuille";
+    f.innerHTML = '<div class="poignee"></div><div class="contenu"></div>';
+    $("feuilles").replaceChildren(voile, f);
+    remplir(f.querySelector(".contenu"));
+  }
+  function fermerFeuille() {
+    $("feuilles").replaceChildren();
+    if (quandFerme) { const q = quandFerme; quandFerme = null; q(); }
+  }
+  function titre(t) { const h = document.createElement("h2"); h.textContent = t; return h; }
+  function action(ic, libelle, faire) {
+    const b = document.createElement("button");
+    b.className = "action";
+    b.append(icone(ic));
+    b.append(document.createTextNode(libelle));
+    b.onclick = () => { fermerFeuille(); faire(); };
+    return b;
+  }
+
+  // Le bouton « retour » d'Android : feuille, puis salon, puis rien.
+  history.pushState(null, "");
+  window.addEventListener("popstate", () => {
+    if ($("feuilles").childElementCount) fermerFeuille();
+    else if (!$("salon").classList.contains("cache")) montrer("accueil");
+    history.pushState(null, "");
+  });
+
+  // ---------- événements ponctuels ----------
+  listen("info", (e) => bandeau(e.payload));
+  listen("erreur", (e) => bandeau(e.payload, true));
+  listen("poke", (e) => { navigator.vibrate?.([80, 60, 80]); bandeau(e.payload + " te poke !"); });
+  listen("prevenir", (e) => {
+    const [salon, mention] = e.payload;
+    const lu = !$("salon").classList.contains("cache") && vue?.courant === salon && document.visibilityState === "visible";
+    if (mention || !lu) navigator.vibrate?.(mention ? [60, 40, 60] : 30);
+  });
 </script>
 </body>
 </html>

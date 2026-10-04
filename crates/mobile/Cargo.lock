@@ -2098,12 +2098,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ki-core"
+version = "0.1.58"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chacha20poly1305",
+ "ki-client-quic",
+ "ki-protocol",
+ "ki-voice",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ki-mobile"
 version = "0.1.58"
 dependencies = [
  "anyhow",
  "bytes",
  "ki-client-quic",
+ "ki-core",
  "ki-protocol",
  "ki-voice",
  "serde",

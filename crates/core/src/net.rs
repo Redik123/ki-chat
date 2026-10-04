@@ -136,6 +136,49 @@ pub struct VoicePrefs {
     pub dred: i32,
 }
 
+impl VoicePrefs {
+    /// Les réglages par défaut du moteur, tels que `VoiceConfig::new` les
+    /// pose : de quoi démarrer sans panneau de réglages (l'appli mobile).
+    pub fn par_defaut() -> Self {
+        let c = VoiceConfig::new(0, [0; 32]);
+        Self {
+            input_device: c.input_device,
+            output_device: c.output_device,
+            native_audio: c.native_audio,
+            raw_mic: c.raw_mic,
+            comms_mic: c.comms_mic,
+            robust_output: c.robust_output,
+            noise_mode: c.noise_mode,
+            volumes: c.volumes,
+            input_gain: c.input_gain,
+            output_gain: c.output_gain,
+            vad_threshold: c.vad_threshold,
+            vad_hangover_ms: c.vad_hangover_ms,
+            vad_neural: c.vad_neural,
+            vad_sensitivity: c.vad_sensitivity,
+            bitrate: c.bitrate,
+            medias: ki_voice::medias::File::new(),
+            agc: c.agc,
+            aec: c.aec,
+            agc_target: c.agc_target,
+            gate_threshold: c.gate_threshold,
+            proximite: c.proximite,
+            compression: c.compression,
+            adoucir_cris: c.adoucir_cris,
+            retour_voix: c.retour_voix,
+            retour_voix_gain: c.retour_voix_gain,
+            egaliseur: c.egaliseur,
+            egaliseur_micro: c.egaliseur_micro,
+            studio: c.studio,
+            changeur: c.changeur,
+            changeur_vers: c.changeur_vers,
+            micro_jeux: c.micro_jeux,
+            jitter_frames: c.jitter_frames,
+            dred: ki_voice::DRED_DEFAULT,
+        }
+    }
+}
+
 /// Identité voix reçue du serveur, conservée pour redémarrer le moteur
 /// (changement de périphérique) sans se reconnecter.
 #[derive(Clone, Copy, PartialEq, Eq)]

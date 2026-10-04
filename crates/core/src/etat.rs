@@ -21,6 +21,9 @@ use ki_protocol::{
 /// en remontant l'historique.
 pub const MESSAGES_MAX: usize = 500;
 
+/// Les messages demandés à l'ouverture d'un salon.
+pub const HISTORIQUE_PREMIERE_PAGE: u32 = 100;
+
 /// Ce qu'on n'a pas lu dans un salon : de quoi peindre sa pastille.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NonLu {
@@ -210,7 +213,7 @@ impl Etat {
         self.historique_en_cours = false;
         let repere = self.non_lus.remove(&salon).filter(|n| n.nb > 0).map(|n| n.depuis);
         self.separateur = if meme { repere.or(self.separateur) } else { repere };
-        vec![ClientMsg::Join { channel: salon }, ClientMsg::History { limit: 100 }]
+        vec![ClientMsg::Join { channel: salon }, ClientMsg::History { limit: HISTORIQUE_PREMIERE_PAGE }]
     }
 
     /// Demande la page d'historique précédente du salon ouvert.
@@ -392,6 +395,11 @@ impl Etat {
                 }
             }
             ServerMsg::History { messages } => {
+                // Une première page moins pleine que demandé : il n'y a rien
+                // avant.
+                if messages.len() < HISTORIQUE_PREMIERE_PAGE as usize {
+                    self.historique_suite = false;
+                }
                 self.messages = messages.into_iter().map(message_sur).collect();
             }
             ServerMsg::HistoryPage { messages, more, channel } => {
