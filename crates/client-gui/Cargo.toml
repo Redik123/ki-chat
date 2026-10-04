@@ -31,6 +31,8 @@ realfft = "3.5"
 # Chiffrement des trames du partage d'écran (clé de stream, en-tête en AAD).
 chacha20poly1305 = "0.10"
 ki-client-quic = { path = "../client-quic" }
+# La connexion et la voix, partagées avec l'appli mobile.
+ki-core = { path = "../core" }
 # Les datagrammes voix voyagent en `Bytes` du transport jusqu'au moteur,
 # sans jamais être recopiés.
 bytes = "1"

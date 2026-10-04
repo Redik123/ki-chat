@@ -9,6 +9,7 @@ members = [
     "crates/ki-opus",
     "crates/ki-aec",
     "crates/client-quic",
+    "crates/core",
     "crates/client-cli",
     "crates/client-gui",
     "crates/load",

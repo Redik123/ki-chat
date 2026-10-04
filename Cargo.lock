@@ -2809,6 +2809,7 @@ dependencies = [
  "flate2",
  "image",
  "ki-client-quic",
+ "ki-core",
  "ki-media",
  "ki-protocol",
  "ki-video",
@@ -2844,6 +2845,20 @@ dependencies = [
  "rustls",
  "serde_json",
  "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ki-core"
+version = "0.1.58"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chacha20poly1305",
+ "ki-client-quic",
+ "ki-protocol",
+ "ki-voice",
  "tokio",
  "tracing",
 ]

@@ -70,7 +70,7 @@ fn main() {
 fn android(config: &mut cmake::Config) {
     let ndk = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "ANDROID_NDK", "NDK_HOME"]
         .iter()
-        .find_map(|v| std::env::var_os(v))
+        .find_map(std::env::var_os)
         .map(PathBuf::from)
         .expect("ANDROID_NDK_HOME (ou NDK_HOME, posé par Tauri) : dossier du NDK requis pour compiler opus pour Android");
     let abi = match std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH").as_str() {

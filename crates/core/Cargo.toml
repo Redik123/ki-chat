@@ -1,0 +1,19 @@
+[package]
+name = "ki-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Le cœur du client sans interface : la connexion au serveur et la voix,
+# partagées par le client PC (egui) et l'appli mobile (Tauri). Rien ici ne
+# dépend d'egui ni de la vidéo.
+
+[dependencies]
+ki-protocol = { path = "../protocol" }
+ki-client-quic = { path = "../client-quic" }
+ki-voice = { path = "../voice" }
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+bytes = "1"
+chacha20poly1305 = "0.10"

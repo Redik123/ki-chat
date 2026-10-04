@@ -15,6 +15,7 @@ mod markup;
 mod medailles;
 mod medias;
 mod net;
+use net::EmissionVideo as _;
 mod overlay;
 mod partage;
 mod perf;
@@ -4577,7 +4578,10 @@ impl KiApp {
             },
             self.voice_prefs(),
             self.link.clone(),
-            ctx.clone(),
+            {
+                let ctx = ctx.clone();
+                std::sync::Arc::new(move || ctx.request_repaint())
+            },
         ));
     }
 
