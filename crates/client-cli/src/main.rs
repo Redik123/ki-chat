@@ -1,12 +1,14 @@
 //! Client CLI ki-chat : chat texte + vocal, transport QUIC.
 //!
-//! Usage : ki-client-cli <serveur> <pseudo> <mot_de_passe> [--invite <code>] [--tone] [--deaf]
+//! Usage : ki-client-cli <serveur> <pseudo> <mot_de_passe> [--invite <code>] [--tone] [--deaf] [--mobile]
 //!   ex.  : ki-client-cli 127.0.0.1 drion monpass --invite changeme
 //!
 //!   <serveur>        « hôte » ou « hôte:port » (port QUIC, défaut 9987)
 //!   --invite <code>  code d'invitation (création du compte au premier login)
 //!   --tone           émet une sinusoïde 440 Hz au lieu du micro (test)
 //!   --deaf           ne lit pas l'audio reçu (test sans matériel)
+//!   --mobile         se présente comme l'appli mobile (essai d'un compte
+//!                    ouvert sur deux appareils)
 
 use ki_client_quic::QuicClient;
 use ki_protocol::{ClientMsg, ServerMsg};
@@ -46,12 +48,17 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     let [server, username, password] = positional[..] else {
         eprintln!(
-            "usage : ki-client-cli <serveur> <pseudo> <mot_de_passe> [--invite <code>] [--tone] [--deaf]"
+            "usage : ki-client-cli <serveur> <pseudo> <mot_de_passe> [--invite <code>] [--tone] [--deaf] [--mobile]"
         );
         std::process::exit(1);
     };
     let tone = args.iter().any(|a| a == "--tone");
     let deaf = args.iter().any(|a| a == "--deaf");
+    let appareil = if args.iter().any(|a| a == "--mobile") {
+        ki_protocol::Appareil::Mobile
+    } else {
+        ki_protocol::Appareil::Pc
+    };
 
     // Pas de carnet de serveurs en ligne de commande : on accepte ce qui se
     // présente, mais l'empreinte est affichée pour pouvoir la comparer.
@@ -63,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             password: password.clone(),
             invite,
             protocole: ki_protocol::PROTOCOLE,
+            appareil,
         })
         .await?;
 
@@ -185,12 +193,13 @@ async fn main() -> anyhow::Result<()> {
                     // changement et passe. La liste complète, elle, arrive à
                     // la connexion et aux remaniements de rôles.
                     println!(
-                        "* {} : {}",
+                        "* {} : {}{}",
                         member.username,
                         match member.voice {
                             Some(c) => format!("vocal {c}"),
                             None => "hors vocal".into(),
-                        }
+                        },
+                        if member.mobile { " (mobile)" } else { "" }
                     );
                 }
                 ServerMsg::VoiceState { user_id, speaking, muted } => {
@@ -644,6 +653,9 @@ async fn main() -> anyhow::Result<()> {
         engine.shutdown();
     }
     reader_task.abort();
+    // Une fermeture QUIC propre : sans elle, le serveur ne l'apprend qu'à
+    // l'expiration d'inactivité, trente secondes plus tard.
+    writer.close_gracefully().await;
     Ok(())
 }
 

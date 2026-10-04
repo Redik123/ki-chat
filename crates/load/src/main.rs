@@ -291,6 +291,7 @@ async fn un_client(
             password: "charge-de-test".into(),
             invite: Some(invite.to_string()),
             protocole: ki_protocol::PROTOCOLE,
+            appareil: ki_protocol::Appareil::Pc,
         })
         .await?;
 

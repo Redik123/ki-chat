@@ -3362,6 +3362,7 @@ mod tests {
                 color: None,
                 rank: 0,
                 invite: false,
+                mobile: false,
             })
             .collect()
     }

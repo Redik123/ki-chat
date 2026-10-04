@@ -171,6 +171,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         password,
         invite,
         protocole,
+        appareil,
     }) = serde_json::from_str::<ClientMsg>(&first)
     else {
         send_direct(
@@ -305,7 +306,15 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
             &format!("{code} depuis {peer}"),
         );
     }
-    // Une session déjà ouverte sur ce compte cède la place à la nouvelle.
+    // Un compte peut être ouvert sur un PC et sur un téléphone à la fois, une
+    // connexion par appareil. Un appareil inconnu de cette version compte
+    // comme un PC.
+    let appareil = match appareil {
+        ki_protocol::Appareil::Mobile => ki_protocol::Appareil::Mobile,
+        _ => ki_protocol::Appareil::Pc,
+    };
+    // Une session déjà ouverte sur ce compte **depuis le même appareil** cède
+    // la place à la nouvelle ; celle de l'autre appareil reste.
     //
     // Refuser était pire : quand l'application se ferme brutalement — ou
     // plante, ou perd le réseau — aucune fermeture propre ne part, et le
@@ -313,10 +322,16 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     // 30 secondes pendant lesquelles se reconnecter était impossible. Aucune
     // fermeture propre ne peut couvrir ces cas : c'est donc à l'ouverture
     // que la question se règle. C'est aussi ce que font Discord et Mumble.
-    let previous = { state.users.lock().unwrap().contains_key(&user_id) };
-    if previous {
+    let previous = {
+        let users = state.users.lock().unwrap();
+        users
+            .get(&user_id)
+            .and_then(|u| u.liens.iter().find(|l| l.appareil == appareil))
+            .map(|l| l.jeton)
+    };
+    if let Some(jeton) = previous {
         tracing::info!("{username} se reconnecte : la session précédente est fermée");
-        state.disconnect(user_id);
+        state.disconnect_session(user_id, jeton);
     }
 
     // --- Phase 2 : enregistrement + tâches ---
@@ -336,14 +351,33 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     // redémarrage du client — sans quoi la sanction ne durerait que jusqu'au
     // prochain Alt+F4.
     let (force_muted, force_deafened) = state.accounts.voice_sanctions(&username);
-    let evincee = {
+    let lien = crate::state::Lien {
+        appareil,
+        jeton: voice_token,
+        tx: tx.clone(),
+        conn: conn.clone(),
+        channel: None,
+    };
+    // `Some` : le compte était déjà en ligne sur un autre appareil — il ne
+    // « rejoint » pas le serveur, il y ajoute une connexion.
+    let (evincee, deja_en_ligne) = {
         let mut users = state.users.lock().unwrap();
-        users.insert(
-            user_id,
-            ConnectedUser {
+        match users.get_mut(&user_id) {
+            Some(u) => {
+                let evincee = u
+                    .liens
+                    .iter()
+                    .position(|l| l.appareil == appareil)
+                    .map(|i| u.liens.remove(i));
+                u.liens.push(lien);
+                (evincee.map(|l| (l.conn, l.jeton)), true)
+            }
+            None => {
+                users.insert(user_id, ConnectedUser {
                 username: username.clone(),
-                channel: None,
+                liens: vec![lien],
                 voice: None,
+                voix_par: None,
                 speaking: false,
                 muted: false,
                 streaming: None,
@@ -356,9 +390,6 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 rank,
                 color,
                 admin: is_admin,
-                voice_token,
-                tx: tx.clone(),
-                conn: conn.clone(),
                 chat_budget: Default::default(),
                 voice_budget: crate::state::TokenBucket::new(3.0, 8.0),
                 pokes_ok: None,
@@ -366,8 +397,10 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 photo_budget: crate::state::TokenBucket::new(1.0 / 10.0, 3.0),
                 recherche_en_cours: Default::default(),
                 riot_budget: crate::state::TokenBucket::new(1.0 / 120.0, 2.0),
-            },
-        )
+                });
+                (None, false)
+            }
+        }
     };
     // Deux connexions du même compte arrivées ensemble passaient toutes
     // deux le contrôle de la session précédente, plus haut, avant que
@@ -375,9 +408,27 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     // dans la table sans la fermer, et celle-ci continuait d'agir au nom du
     // compte. L'écrasement se constate ici, sous le même verrou que
     // l'enregistrement, et la session évincée est fermée.
-    if let Some(ancienne) = evincee {
+    //
+    // La même chose vaut par appareil : la session évincée est celle du
+    // même appareil. Si elle portait la voix, le compte sort du vocal.
+    if let Some((ancienne, jeton)) = evincee {
         tracing::info!("{username} : session concurrente évincée");
-        ancienne.conn.close(0u32.into(), b"session remplacee");
+        ancienne.close(0u32.into(), b"session remplacee");
+        let voix_perdue = {
+            let mut users = state.users.lock().unwrap();
+            users.get_mut(&user_id).is_some_and(|u| {
+                let perdue = u.voix_par == Some(jeton);
+                if perdue {
+                    u.voice = None;
+                    u.voix_par = None;
+                    u.speaking = false;
+                }
+                perdue
+            })
+        };
+        if voix_perdue {
+            state.fin_de_streams(user_id);
+        }
     }
     state.rebuild_voice_routes();
     // Entré : la place du sas est rendue tout de suite. Le plafond borne ce
@@ -406,11 +457,14 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         protocole: ki_protocol::PROTOCOLE,
     });
     tracing::info!("connexion : {username} (id {user_id}, protocole {protocole})");
-    // La liste du serveur vient de changer, pour tout le monde.
-    state.broadcast_all(&ServerMsg::UserJoined {
-        user_id,
-        username: username.clone(),
-    });
+    // La liste du serveur vient de changer, pour tout le monde — sauf si le
+    // compte était déjà là, sur un autre appareil.
+    if !deja_en_ligne {
+        state.broadcast_all(&ServerMsg::UserJoined {
+            user_id,
+            username: username.clone(),
+        });
+    }
     // Le nouveau venu reçoit la liste **entière** : il n'a rien à mettre à
     // jour, il part de rien. Les autres n'ont besoin que de la fiche qui
     // change — la leur n'a pas bougé, ni celle des deux cents comptes hors
@@ -425,7 +479,13 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         salons: non_lus_de(&state, user_id, &username),
     });
     if let Some(member) = state.member_of(user_id) {
-        state.broadcast_all_except(user_id, &ServerMsg::MemberUpdate { member });
+        if deja_en_ligne {
+            // Sa fiche change (le badge mobile) : à tous, ses autres appareils
+            // compris.
+            state.broadcast_all(&ServerMsg::MemberUpdate { member });
+        } else {
+            state.broadcast_all_except(user_id, &ServerMsg::MemberUpdate { member });
+        }
     }
     let _ = tx.send(ServerMsg::MusiqueEtat {
         etat: state.musique.etat(),
@@ -450,7 +510,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     });
 
     // Tâche voix : datagrammes entrants -> relais + suivi des pertes.
-    let voice = tokio::spawn(voice_task(state.clone(), conn.clone(), user_id, tx.clone()));
+    let voice = tokio::spawn(voice_task(state.clone(), conn.clone(), user_id, voice_token, tx.clone()));
 
     // Tâche vidéo : les trames du partage d'écran arrivent chacune dans son
     // flux QUIC unidirectionnel — ingestion durcie, puis relais.
@@ -502,7 +562,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
             });
             continue;
         }
-        handle_msg(&state, user_id, &username, msg, &tx);
+        handle_msg(&state, user_id, voice_token, &username, msg, &tx);
     }
 
     // --- Phase 3 : nettoyage ---
@@ -635,6 +695,9 @@ async fn voice_task(
     state: Arc<AppState>,
     conn: quinn::Connection,
     user_id: UserId,
+    // Le jeton de cette connexion : seule celle qui porte la voix du compte
+    // est relayée (voir `Routes::jeton_of`).
+    jeton: u64,
     tx: crate::state::Outbox,
 ) {
     let mut last_counter = 0u64;
@@ -671,7 +734,8 @@ async fn voice_task(
                 // le son de son jeu, et un membre rendu sourd l'entendait.
                 let entendent: Option<Vec<UserId>> = {
                     let routes = state.voice_routes.read().unwrap();
-                    routes.channel_of.get(&user_id).map(|c| {
+                    let porte_la_voix = routes.jeton_of.get(&user_id) == Some(&jeton);
+                    routes.channel_of.get(&user_id).filter(|_| porte_la_voix).map(|c| {
                         routes
                             .peers
                             .get(c)
@@ -718,10 +782,15 @@ async fn voice_task(
         received += 1;
         last_counter = pkt.counter;
 
-        // Relais : une lecture partagée de la table précalculée.
+        // Relais : une lecture partagée de la table précalculée. Un autre
+        // appareil du compte que celui qui porte sa voix n'a pas de salon.
         let channel = {
             let routes = state.voice_routes.read().unwrap();
-            let channel = routes.channel_of.get(&user_id).copied();
+            let channel = routes
+                .channel_of
+                .get(&user_id)
+                .copied()
+                .filter(|_| routes.jeton_of.get(&user_id) == Some(&jeton));
             if let Some(peers) = channel.and_then(|c| routes.peers.get(&c)) {
                 for (peer_id, peer_conn) in peers {
                     if *peer_id != user_id {
@@ -811,13 +880,17 @@ pub fn load_or_create_cert(
 // Logique métier, indépendante du transport
 // ---------------------------------------------------------------------------
 
-fn current_channel(state: &Arc<AppState>, user_id: UserId) -> Option<ki_protocol::ChannelId> {
+fn current_channel(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    jeton: u64,
+) -> Option<ki_protocol::ChannelId> {
     let channel = state
         .users
         .lock()
         .unwrap()
         .get(&user_id)
-        .and_then(|u| u.channel)?;
+        .and_then(|u| u.lien(jeton)?.channel)?;
     // Revérifié à chaque usage, et pas seulement au `Join` : ce champ a été
     // posé par un `Join` autrefois valide, qu'un changement de rôle ou une
     // restriction posée depuis a pu périmer. C'est ce qui protège d'un coup
@@ -1032,6 +1105,9 @@ fn apply_server_info(
 fn handle_msg(
     state: &Arc<AppState>,
     user_id: UserId,
+    // Le jeton de la connexion d'où vient le message : un compte peut en
+    // avoir une par appareil, et le salon lu ou la voix sont à l'une d'elles.
+    jeton: u64,
     username: &str,
     msg: ClientMsg,
     tx: &crate::state::Outbox,
@@ -1059,8 +1135,8 @@ fn handle_msg(
             }
             let ancien = {
                 let mut users = state.users.lock().unwrap();
-                match users.get_mut(&user_id) {
-                    Some(u) => u.channel.replace(channel),
+                match users.get_mut(&user_id).and_then(|u| u.lien_mut(jeton)) {
+                    Some(l) => l.channel.replace(channel),
                     None => None,
                 }
             };
@@ -1075,7 +1151,7 @@ fn handle_msg(
         ClientMsg::Leave => {
             let ancien = {
                 let mut users = state.users.lock().unwrap();
-                users.get_mut(&user_id).and_then(|u| u.channel.take())
+                users.get_mut(&user_id).and_then(|u| u.lien_mut(jeton)?.channel.take())
             };
             if let Some(a) = ancien {
                 crate::porte::presents_changes(state, a);
@@ -1099,9 +1175,13 @@ fn handle_msg(
             // brûler. Le client s'est peut-être désynchronisé — on le recale
             // avec la liste des membres plutôt que de le laisser attendre une
             // confirmation qui ne viendrait jamais.
+            // Déjà dans ce salon, **depuis cet appareil**. Depuis l'autre, c'est
+            // un passage de la voix d'un appareil à l'autre : il a lieu.
             let already = {
                 let users = state.users.lock().unwrap();
-                users.get(&user_id).and_then(|u| u.voice) == Some(channel)
+                users
+                    .get(&user_id)
+                    .is_some_and(|u| u.voice == Some(channel) && u.voix_par == Some(jeton))
             };
             if already {
                 let _ = tx.send(ServerMsg::Members {
@@ -1131,6 +1211,9 @@ fn handle_msg(
                     return;
                 };
                 u.speaking = false;
+                // Un compte n'a qu'une voix : elle passe à cet appareil, et
+                // l'autre, s'il était en vocal, en sort.
+                u.voix_par = Some(jeton);
                 u.voice.replace(channel)
             };
             // Changer de salon, c'est quitter l'ancien : sa diffusion et
@@ -1155,14 +1238,19 @@ fn handle_msg(
             // dehors : elle continuait d'être entendue sans le savoir. Et une
             // rafale de sorties ne coûte rien — après la première, il n'y a
             // plus de salon à quitter, donc plus de rediffusion.
+            //
+            // Seul l'appareil qui porte la voix en sort : un client qui l'a vue
+            // passer sur son autre appareil sans le comprendre (une version
+            // antérieure) n'en tire pas l'autre dehors.
             let was_in_voice = {
                 let mut users = state.users.lock().unwrap();
                 match users.get_mut(&user_id) {
-                    Some(u) => {
+                    Some(u) if u.voix_par.is_none_or(|j| j == jeton) => {
                         u.speaking = false;
+                        u.voix_par = None;
                         u.voice.take().is_some()
                     }
-                    None => false,
+                    _ => false,
                 }
             };
             if was_in_voice {
@@ -1234,7 +1322,7 @@ fn handle_msg(
         ClientMsg::Watch { stream_id, couches } => {
             let viewer = {
                 let users = state.users.lock().unwrap();
-                users.get(&user_id).map(|u| (u.voice, u.conn.clone()))
+                users.get(&user_id).and_then(|u| Some((u.voice, u.conn_media()?.clone())))
             };
             let Some((channel, conn)) = viewer else {
                 return;
@@ -1271,7 +1359,7 @@ fn handle_msg(
             let channel = match salon {
                 Some(c) => (state.channel_is(c, ki_protocol::ChannelKind::Text) && state.can_view(user_id, c))
                     .then_some(c),
-                None => current_channel(state, user_id),
+                None => current_channel(state, user_id, jeton),
             };
             let Some(channel) = channel else {
                 let _ = tx.send(ServerMsg::Error {
@@ -1356,7 +1444,7 @@ fn handle_msg(
             state.lus.marquer(user_id, channel, ts.min(dernier));
         }
         ClientMsg::React { message, emoji, on } => {
-            let Some(channel) = current_channel(state, user_id) else {
+            let Some(channel) = current_channel(state, user_id, jeton) else {
                 let _ = tx.send(ServerMsg::Error {
                     message: "rejoins un salon d'abord".into(),
                 });
@@ -1401,7 +1489,7 @@ fn handle_msg(
             }
         }
         ClientMsg::DeleteMessage { message } => {
-            let Some(channel) = current_channel(state, user_id) else {
+            let Some(channel) = current_channel(state, user_id, jeton) else {
                 let _ = tx.send(ServerMsg::Error {
                     message: "rejoins un salon d'abord".into(),
                 });
@@ -1445,7 +1533,7 @@ fn handle_msg(
             if !require(state, user_id, tx, ki_protocol::perm::SEND_MESSAGE) {
                 return;
             }
-            let Some(channel) = current_channel(state, user_id) else {
+            let Some(channel) = current_channel(state, user_id, jeton) else {
                 let _ = tx.send(ServerMsg::Error {
                     message: "rejoins un salon d'abord".into(),
                 });
@@ -2073,7 +2161,7 @@ fn handle_msg(
             let _ = tx.send(crate::valorant::message_stats(resumes, esports, activite));
         }
         ClientMsg::History { limit } => {
-            let Some(channel) = current_channel(state, user_id) else {
+            let Some(channel) = current_channel(state, user_id, jeton) else {
                 let _ = tx.send(ServerMsg::Error {
                     message: "rejoins un salon d'abord".into(),
                 });
@@ -2085,7 +2173,7 @@ fn handle_msg(
         ClientMsg::HistoryBefore {
             before_ts, limit, ..
         } => {
-            let Some(channel) = current_channel(state, user_id) else {
+            let Some(channel) = current_channel(state, user_id, jeton) else {
                 let _ = tx.send(ServerMsg::Error {
                     message: "rejoins un salon d'abord".into(),
                 });
@@ -2347,7 +2435,7 @@ fn handle_msg(
                             client_recent: u.pokes_ok.is_some(),
                             accepte: u.pokes_ok.unwrap_or(true),
                         },
-                        Some(u.tx.clone()),
+                        true,
                     )
                 })
             };
@@ -2366,7 +2454,7 @@ fn handle_msg(
                         client_recent: true,
                         accepte: true,
                     };
-                    (nom, absent, None)
+                    (nom, absent, false)
                 }
             };
             // Les règles d'abord : un refus de règle ne coûte rien.
@@ -2386,14 +2474,19 @@ fn handle_msg(
                     return;
                 }
             }
-            let Some(t) = tx_cible else { return };
+            if !tx_cible {
+                return;
+            }
             tracing::info!("poke : {username} -> {nom}");
             // Un geste entre membres, pas une action d'administration : pas
-            // d'audit, une trace suffit.
-            let _ = t.send(ServerMsg::Poke {
-                user_id,
-                username: username.to_string(),
-            });
+            // d'audit, une trace suffit. À tous ses appareils.
+            state.send_to(
+                cible,
+                &ServerMsg::Poke {
+                    user_id,
+                    username: username.to_string(),
+                },
+            );
         }
         ClientMsg::VoiceState { speaking, muted } => {
             let changed = {
@@ -2404,7 +2497,11 @@ fn handle_msg(
                 // On ne « parle » que depuis un salon vocal. Et on ne relaie
                 // qu'un vrai changement : notre client ne transmet déjà que
                 // les transitions, mais rien n'oblige l'autre bout à être lui.
-                if u.voice.is_none() || (u.speaking == speaking && u.muted == muted) {
+                // Et seulement depuis l'appareil qui porte la voix.
+                if u.voice.is_none()
+                    || u.voix_par != Some(jeton)
+                    || (u.speaking == speaking && u.muted == muted)
+                {
                     false
                 } else {
                     u.speaking = speaking;
@@ -2451,12 +2548,10 @@ fn handle_msg(
             let reason = ki_protocol::safe_display(&reason, MAX_REASON);
             let target_tx = {
                 let users = state.users.lock().unwrap();
-                users
-                    .get(&target)
-                    .map(|u| (u.username.clone(), u.tx.clone()))
+                users.get(&target).map(|u| u.username.clone())
             };
             match target_tx {
-                Some((target_name, t)) => {
+                Some(target_name) => {
                     tracing::info!("expulsion de l'utilisateur {target} par {username}");
                     state
                         .audit
@@ -2464,11 +2559,7 @@ fn handle_msg(
                     // Le message reste pour les clients antérieurs, qui ne
                     // lisent pas le code de fermeture — sans illusion : la
                     // connexion se ferme avant qu'il parte, le plus souvent.
-                    if t.send(ServerMsg::Kicked { reason: reason.clone() }).is_err() {
-                        tracing::warn!(
-                            "motif d'expulsion non remis à {target_name} : sa session ne répondait plus"
-                        );
-                    }
+                    state.send_to(target, &ServerMsg::Kicked { reason: reason.clone() });
                     // Dehors pour un temps : un client qui se reconnecte tout
                     // seul se voit refuser l'entrée, motif à l'appui. Et le
                     // motif part dans la fermeture elle-même.
@@ -2615,11 +2706,12 @@ fn handle_msg(
                     reason: String::new(),
                     duration_secs: 0,
                 };
-                handle_msg(state, user_id, username, msg, tx);
+                handle_msg(state, user_id, jeton, username, msg, tx);
             } else {
                 handle_msg(
                     state,
                     user_id,
+                    jeton,
                     username,
                     ClientMsg::AdminUnban { username: target },
                     tx,
@@ -2669,12 +2761,15 @@ fn handle_msg(
                                 users
                                     .iter()
                                     .find(|(_, u)| u.username == target)
-                                    .map(|(id, u)| (*id, u.tx.clone()))
+                                    .map(|(id, _)| *id)
                             };
-                            if let Some((target_id, target_tx)) = online {
-                                let _ = target_tx.send(ServerMsg::Kicked {
-                                    reason: reason.clone(),
-                                });
+                            if let Some(target_id) = online {
+                                state.send_to(
+                                    target_id,
+                                    &ServerMsg::Kicked {
+                                        reason: reason.clone(),
+                                    },
+                                );
                                 state.congedier(target_id, ki_protocol::FERMETURE_BANNI, &reason);
                             }
                             let _ = tx.send(ServerMsg::Info {

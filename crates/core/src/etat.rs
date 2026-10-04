@@ -68,6 +68,9 @@ pub enum Effet {
 /// L'état du client pour une connexion.
 #[derive(Debug, Clone, Default)]
 pub struct Etat {
+    /// L'appareil de cette connexion : un compte peut être ouvert à la fois
+    /// sur un PC et sur un téléphone, avec une seule voix.
+    pub appareil: ki_protocol::Appareil,
     /// Accueilli par le serveur : avant, une erreur est un refus.
     pub accueilli: bool,
     pub moi: Option<UserId>,
@@ -92,7 +95,7 @@ pub struct Etat {
     pub non_lus: HashMap<ChannelId, NonLu>,
     /// Le serveur tient les lus : on lui dit ce qu'on lit.
     pub serveur_gere_lus: bool,
-    /// Le salon vocal où le serveur nous liste.
+    /// Le salon vocal où le serveur nous liste, **depuis cet appareil**.
     pub vocal: Option<ChannelId>,
     /// L'interface montre le fil du salon ouvert, à jour : appli au premier
     /// plan, fil en bas. Un message qui y arrive est alors lu, pas non lu.
@@ -254,11 +257,14 @@ impl Etat {
         self.non_lus.entry(salon).or_default().ajouter(ts, mention);
     }
 
-    /// Le vocal suit la liste des membres : c'est elle qui fait foi.
+    /// Le vocal suit la liste des membres : c'est elle qui fait foi. Ma fiche
+    /// dit `mobile` quand ma voix passe par le téléphone : elle n'est à cet
+    /// appareil que s'il en est un.
     fn suivre_vocal(&mut self) {
+        let sur_mobile = self.appareil == ki_protocol::Appareil::Mobile;
         if let Some(moi) = self.moi {
             if let Some(m) = self.membres.iter().find(|m| m.user_id == moi) {
-                self.vocal = m.voice;
+                self.vocal = m.voice.filter(|_| m.mobile == sur_mobile);
             }
         }
     }
@@ -669,6 +675,18 @@ mod tests {
         assert_eq!(e.vocal, Some(20));
         e.appliquer(ServerMsg::MemberUpdate { member: membre(1, "moi", None) });
         assert_eq!(e.vocal, None);
+    }
+
+    #[test]
+    fn la_voix_passee_sur_l_autre_appareil_n_est_plus_la_mienne() {
+        let mut e = accueilli();
+        let mut m = membre(1, "moi", Some(20));
+        m.mobile = true;
+        e.appliquer(ServerMsg::MemberUpdate { member: m.clone() });
+        assert_eq!(e.vocal, None, "PC : la voix est sur le téléphone");
+        e.appareil = ki_protocol::Appareil::Mobile;
+        e.appliquer(ServerMsg::MemberUpdate { member: m });
+        assert_eq!(e.vocal, Some(20), "téléphone : la voix est ici");
     }
 
     #[test]

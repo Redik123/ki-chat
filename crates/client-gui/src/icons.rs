@@ -56,6 +56,8 @@ pub enum Icon {
     Repeat,
     /// Une pellicule : une vidéo.
     Film,
+    /// Un téléphone : le membre est sur l'appli mobile.
+    Telephone,
 }
 
 /// Dessine `icon` centrée dans `rect` (le carré inscrit est utilisé).
@@ -205,6 +207,10 @@ impl Pen<'_> {
                 self.rrect(3.0, 12.5, 7.6, 20.5, 2.0, true);
                 self.rrect(16.4, 12.5, 21.0, 20.5, 2.0, true);
                 self.seg((3.5, 3.5), (20.5, 20.5));
+            }
+            Icon::Telephone => {
+                self.rrect(6.5, 2.5, 17.5, 21.5, 2.5, false);
+                self.seg((10.5, 18.0), (13.5, 18.0));
             }
             Icon::Screen => {
                 self.rrect(2.5, 4.0, 21.5, 16.5, 2.0, false);

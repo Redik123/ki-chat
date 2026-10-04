@@ -43,6 +43,7 @@ fn roster(n: usize) -> Vec<Member> {
             color: Some(0x5865f2),
             rank: (i % 4) as u16 * 10,
             invite: false,
+            mobile: false,
         })
         .collect()
 }

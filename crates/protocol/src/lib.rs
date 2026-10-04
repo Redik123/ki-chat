@@ -138,6 +138,11 @@ pub enum ClientMsg {
         /// pour un client antérieur.
         #[serde(default)]
         protocole: u32,
+        /// D'où l'on se connecte. Un compte peut être ouvert à la fois sur
+        /// un PC et sur un téléphone ; absent d'un client antérieur, d'où
+        /// le PC par défaut.
+        #[serde(default)]
+        appareil: Appareil,
     },
     /// Ouvrir un salon textuel (ce qu'on lit et où l'on écrit).
     Join { channel: ChannelId },
@@ -1474,6 +1479,9 @@ pub const MAX_LINE: usize = 160 * 1024;
 /// La version du protocole, échangée dans `Auth` et `Welcome`. Elle monte
 /// quand un message change d'une façon qu'un pair plus ancien ne lirait pas.
 /// 1 : la première numérotée (0.1.52).
+///
+/// Elle n'a pas monté avec les appareils multiples (`Auth::appareil`,
+/// `Member::mobile`) : deux champs facultatifs, qu'un pair ancien ignore.
 pub const PROTOCOLE: u32 = 1;
 
 /// Codes de fermeture de la connexion QUIC (« application close ») : ce que
@@ -1970,6 +1978,23 @@ pub struct Member {
     /// se lit sans connaître la plage.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invite: bool,
+    /// Sur téléphone : sa voix passe par l'appli mobile, ou, hors vocal, il
+    /// n'est connecté que depuis elle. Le client montre un badge.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mobile: bool,
+}
+
+/// D'où se connecte une session (voir `ClientMsg::Auth`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appareil {
+    #[default]
+    Pc,
+    Mobile,
+    /// Un appareil qu'une version plus récente connaît et pas celle-ci :
+    /// traité comme un PC plutôt que de refuser la connexion.
+    #[serde(other)]
+    Autre,
 }
 
 /// Un résultat de recherche : le message, et le salon d'où il vient.

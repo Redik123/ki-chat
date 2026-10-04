@@ -172,6 +172,8 @@ pub struct Voix<C> {
     pub channel: Option<ChannelId>,
     pub force_muted: bool,
     pub force_deafened: bool,
+    /// Le jeton du lien qui porte la voix du compte.
+    pub jeton: u64,
     pub conn: C,
 }
 
@@ -197,6 +199,7 @@ fn router<C>(monde: Vec<Voix<C>>) -> Routes<C> {
     for v in monde {
         // Le routage de la voix suit le salon **vocal**, pas le salon lu.
         let Some(channel) = v.channel else { continue };
+        routes.jeton_of.insert(v.id, v.jeton);
         if !v.force_muted {
             routes.channel_of.insert(v.id, channel);
         }
@@ -211,13 +214,44 @@ fn router<C>(monde: Vec<Voix<C>>) -> Routes<C> {
     routes
 }
 
+/// Une connexion d'un compte : un compte peut être ouvert à la fois sur un PC
+/// et sur un téléphone, une connexion par appareil.
+///
+/// Ce qui appartient à la **connexion** vit ici (sa file d'envoi, son lien
+/// QUIC, son jeton, le salon qu'elle lit) ; ce qui appartient au **compte**
+/// (rôles, vocal, sanctions, budgets anti-spam) reste dans `ConnectedUser`.
+pub struct Lien {
+    pub appareil: ki_protocol::Appareil,
+    /// Jeton de session : identifie la connexion, et authentifie les envois
+    /// HTTP de fichiers.
+    pub jeton: u64,
+    /// Canal vers la tâche d'écriture du flux de contrôle de cette connexion.
+    pub tx: Outbox,
+    /// La connexion QUIC elle-même (datagrammes voix, flux vidéo).
+    pub conn: quinn::Connection,
+    /// Salon textuel ouvert sur cet appareil : ce qu'on y lit en ce moment.
+    pub channel: Option<ChannelId>,
+}
+
+impl Lien {
+    pub fn mobile(&self) -> bool {
+        self.appareil == ki_protocol::Appareil::Mobile
+    }
+}
+
 pub struct ConnectedUser {
     pub username: String,
-    /// Salon textuel ouvert : ce que la personne lit en ce moment.
-    pub channel: Option<ChannelId>,
-    /// Salon vocal occupé. Distinct du précédent : on lit un salon sans
-    /// forcément y parler, et l'inverse.
+    /// Ses connexions, une par appareil, jamais vide tant qu'il est connecté.
+    pub liens: Vec<Lien>,
+    /// Salon vocal occupé. Distinct du salon lu : on lit un salon sans
+    /// forcément y parler, et l'inverse. Un compte n'a **qu'une** voix, quel
+    /// que soit le nombre de ses appareils : `voix_par` dit lequel la porte.
     pub voice: Option<ChannelId>,
+    /// Le jeton du lien qui porte la voix, quand `voice` est posé. Les
+    /// datagrammes voix des autres liens sont ignorés : ils partagent la clé
+    /// et l'identité du compte, et deux émetteurs sous le même identifiant
+    /// se mêleraient chez les autres.
+    pub voix_par: Option<u64>,
     pub speaking: bool,
     /// Micro coupé volontairement (annoncé par le client, montré aux autres).
     pub muted: bool,
@@ -245,12 +279,6 @@ pub struct ConnectedUser {
     /// Conservé pour les clients antérieurs aux rôles : dérivé de
     /// `perms`, jamais source de vérité.
     pub admin: bool,
-    /// Jeton de session (authentifie les uploads HTTP de fichiers).
-    pub voice_token: u64,
-    /// Canal vers la tâche d'écriture du flux de contrôle de ce client.
-    pub tx: Outbox,
-    /// Connexion QUIC du client (datagrammes voix).
-    pub conn: quinn::Connection,
     /// Anti-spam du chat.
     pub chat_budget: TokenBucket,
     /// Anti-spam des entrées et sorties de salon vocal.
@@ -279,6 +307,56 @@ pub struct ConnectedUser {
     /// Les liaisons de compte Riot : chacune coûte six requêtes à HenrikDev,
     /// sur vingt par minute pour tout le serveur.
     pub riot_budget: TokenBucket,
+}
+
+impl ConnectedUser {
+    /// Envoie un message à **toutes** ses connexions.
+    pub fn envoyer(&self, msg: ServerMsg) {
+        if let Some(line) = encode(&msg) {
+            self.envoyer_ligne(&line);
+        }
+    }
+
+    /// Envoie une ligne déjà prête à toutes ses connexions.
+    pub fn envoyer_ligne(&self, line: &Line) {
+        for l in &self.liens {
+            let _ = l.tx.send_line(line);
+        }
+    }
+
+    pub fn lien(&self, jeton: u64) -> Option<&Lien> {
+        self.liens.iter().find(|l| l.jeton == jeton)
+    }
+
+    pub fn lien_mut(&mut self, jeton: u64) -> Option<&mut Lien> {
+        self.liens.iter_mut().find(|l| l.jeton == jeton)
+    }
+
+    /// Le lien qui porte la voix, s'il est en vocal.
+    pub fn lien_voix(&self) -> Option<&Lien> {
+        self.voix_par.and_then(|j| self.lien(j))
+    }
+
+    /// La connexion où envoyer voix et vidéo : celle qui porte la voix, ou à
+    /// défaut la première (on ne regarde un stream qu'en vocal, de toute
+    /// façon).
+    pub fn conn_media(&self) -> Option<&quinn::Connection> {
+        self.lien_voix().or(self.liens.first()).map(|l| &l.conn)
+    }
+
+    /// Sur téléphone, pour le badge : sa voix passe par le mobile, ou, hors
+    /// vocal, il n'est connecté que depuis lui.
+    pub fn mobile(&self) -> bool {
+        match self.lien_voix() {
+            Some(l) => l.mobile(),
+            None => !self.liens.is_empty() && self.liens.iter().all(Lien::mobile),
+        }
+    }
+
+    /// L'un de ses appareils lit-il ce salon ?
+    pub fn lit(&self, channel: ChannelId) -> bool {
+        self.liens.iter().any(|l| l.channel == Some(channel))
+    }
 }
 
 /// Une expulsion encore fraîche : le compte ne rentre pas avant l'échéance.
@@ -464,6 +542,10 @@ pub struct Routes<C> {
     /// `quinn::Connection` est un handle clonable ; `send_datagram` ne
     /// bloque jamais.
     pub peers: HashMap<ChannelId, Vec<(UserId, C)>>,
+    /// user_id -> jeton du lien qui porte sa voix. Un compte ouvert sur deux
+    /// appareils n'a qu'une voix : les datagrammes voix des autres liens
+    /// sont ignorés.
+    pub jeton_of: HashMap<UserId, u64>,
 }
 
 /// `Default` à la main : celui que `derive` produirait exigerait `C: Default`,
@@ -473,6 +555,7 @@ impl<C> Default for Routes<C> {
         Self {
             channel_of: HashMap::new(),
             peers: HashMap::new(),
+            jeton_of: HashMap::new(),
         }
     }
 }
@@ -701,14 +784,20 @@ impl AppState {
     pub fn rebuild_voice_routes(&self) {
         let monde: Vec<Voix<quinn::Connection>> = {
             let users = self.users.lock().unwrap();
+            // Seul le lien qui porte la voix y figure : les autres appareils
+            // du compte n'entendent ni ne parlent.
             users
                 .iter()
-                .map(|(id, u)| Voix {
-                    id: *id,
-                    channel: u.voice,
-                    force_muted: u.force_muted,
-                    force_deafened: u.force_deafened,
-                    conn: u.conn.clone(),
+                .filter_map(|(id, u)| {
+                    let lien = u.lien_voix()?;
+                    Some(Voix {
+                        id: *id,
+                        channel: u.voice,
+                        force_muted: u.force_muted,
+                        force_deafened: u.force_deafened,
+                        jeton: lien.jeton,
+                        conn: lien.conn.clone(),
+                    })
                 })
                 .collect()
         };
@@ -797,7 +886,7 @@ impl AppState {
             let channels = self.visible_channels(id);
             let users = self.users.lock().unwrap();
             if let Some(u) = users.get(&id) {
-                let _ = u.tx.send(ServerMsg::ChannelsUpdated { channels });
+                u.envoyer(ServerMsg::ChannelsUpdated { channels });
             }
         }
     }
@@ -831,7 +920,7 @@ impl AppState {
             // d'apprendre qu'il vient d'être promu ou rétrogradé, `perms` et
             // `rank` ne voyageant autrement que dans `Welcome`.
             if changed {
-                let _ = u.tx.send(ServerMsg::Perms {
+                u.envoyer(ServerMsg::Perms {
                     perms,
                     rank,
                     is_admin,
@@ -853,17 +942,20 @@ impl AppState {
         // qu'ils regardaient, s'arrêtent avec — après la boucle, hors verrou.
         let mut sortis_du_vocal = Vec::new();
         for id in ids {
-            let (channel, voice) = {
+            // Le salon lu, appareil par appareil.
+            let (lus, voice) = {
                 let users = self.users.lock().unwrap();
                 let Some(u) = users.get(&id) else { continue };
-                (u.channel, u.voice)
+                let lus: Vec<(u64, ChannelId)> =
+                    u.liens.iter().filter_map(|l| Some((l.jeton, l.channel?))).collect();
+                (lus, u.voice)
             };
-            if let Some(c) = channel {
+            for (jeton, c) in lus {
                 if !self.can_view(id, c) {
                     let mut users = self.users.lock().unwrap();
-                    if let Some(u) = users.get_mut(&id) {
-                        u.channel = None;
-                        let _ = u.tx.send(ServerMsg::Info {
+                    if let Some(l) = users.get_mut(&id).and_then(|u| u.lien_mut(jeton)) {
+                        l.channel = None;
+                        let _ = l.tx.send(ServerMsg::Info {
                             message: "le salon que tu lisais ne t'est plus accessible".into(),
                         });
                     }
@@ -878,6 +970,7 @@ impl AppState {
                     let mut users = self.users.lock().unwrap();
                     if let Some(u) = users.get_mut(&id) {
                         u.voice = None;
+                        u.voix_par = None;
                         u.speaking = false;
                     }
                     voice_changed = true;
@@ -945,7 +1038,7 @@ impl AppState {
             let users = self.users.lock().unwrap();
             users
                 .iter()
-                .filter(|(id, u)| u.channel == Some(channel) && Some(**id) != except)
+                .filter(|(id, u)| u.lit(channel) && Some(**id) != except)
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -953,9 +1046,12 @@ impl AppState {
             if !self.can_view(id, channel) {
                 continue;
             }
+            // Aux seuls appareils qui lisent ce salon.
             let users = self.users.lock().unwrap();
             if let Some(u) = users.get(&id) {
-                let _ = u.tx.send_line(&line);
+                for l in u.liens.iter().filter(|l| l.channel == Some(channel)) {
+                    let _ = l.tx.send_line(&line);
+                }
             }
         }
         // La même ligne aux invités web attachés à ce salon, s'il en a. Tout
@@ -980,11 +1076,15 @@ impl AppState {
         msg: &ServerMsg,
     ) {
         let Some(line) = encode(msg) else { return };
+        // Appareil par appareil : le téléphone d'un compte qui lit ce salon
+        // sur son PC reçoit sa pastille.
         let targets: Vec<UserId> = {
             let users = self.users.lock().unwrap();
             users
                 .iter()
-                .filter(|(id, u)| u.channel != Some(channel) && Some(**id) != except)
+                .filter(|(id, u)| {
+                    u.liens.iter().any(|l| l.channel != Some(channel)) && Some(**id) != except
+                })
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -994,7 +1094,9 @@ impl AppState {
             }
             let users = self.users.lock().unwrap();
             if let Some(u) = users.get(&id) {
-                let _ = u.tx.send_line(&line);
+                for l in u.liens.iter().filter(|l| l.channel != Some(channel)) {
+                    let _ = l.tx.send_line(&line);
+                }
             }
         }
     }
@@ -1041,7 +1143,7 @@ impl AppState {
         let Some(line) = encode(msg) else { return };
         let users = self.users.lock().unwrap();
         for u in users.values() {
-            let _ = u.tx.send_line(&line);
+            u.envoyer_ligne(&line);
         }
     }
 
@@ -1051,7 +1153,7 @@ impl AppState {
         let Some(line) = encode(msg) else { return };
         let users = self.users.lock().unwrap();
         for u in users.values().filter(|u| u.voice == Some(channel)) {
-            let _ = u.tx.send_line(&line);
+            u.envoyer_ligne(&line);
         }
     }
 
@@ -1061,7 +1163,7 @@ impl AppState {
         let Some(line) = encode(msg) else { return };
         let users = self.users.lock().unwrap();
         if let Some(u) = users.get(&user_id) {
-            let _ = u.tx.send_line(&line);
+            u.envoyer_ligne(&line);
         }
     }
 
@@ -1112,7 +1214,7 @@ impl AppState {
         let users = self.users.lock().unwrap();
         for (id, u) in users.iter() {
             if *id != except {
-                let _ = u.tx.send_line(&line);
+                u.envoyer_ligne(&line);
             }
         }
     }
@@ -1155,6 +1257,7 @@ impl AppState {
             rank: u.rank,
             online: true,
             invite: false,
+            mobile: u.mobile(),
         })
     }
 
@@ -1242,6 +1345,7 @@ impl AppState {
                 rank: u.rank,
                 online: true,
                 invite: false,
+                mobile: u.mobile(),
             })
             .collect();
         drop(users);
@@ -1275,6 +1379,7 @@ impl AppState {
                 rank: account.rank,
                 online: false,
                 invite: false,
+                mobile: false,
             });
         }
         // `cached` et non `sort_by_key` : la clé est une String, donc une
@@ -1305,6 +1410,7 @@ impl AppState {
                 color: None,
                 rank: 0,
                 invite: false,
+                mobile: false,
             });
         }
         // Les invités web, en ligne le temps d'une porte : les membres les
@@ -1319,18 +1425,12 @@ impl AppState {
         let users = self.users.lock().unwrap();
         users
             .iter()
-            .find(|(_, u)| u.voice_token == token)
+            .find(|(_, u)| u.lien(token).is_some())
             .map(|(id, u)| (*id, u.username.clone()))
     }
 
-    /// Nettoyage complet à la déconnexion d'un client (ferme aussi sa
-    /// connexion QUIC — utile pour kick/ban).
-    pub fn disconnect(&self, user_id: UserId) {
-        self.remove_session(user_id, None, 0, "bye");
-    }
-
-    /// Comme `disconnect`, mais seulement si la session enregistrée est bien
-    /// **celle-ci**, identifiée par son jeton.
+    /// Ferme **une** connexion du compte, identifiée par son jeton ; les
+    /// autres appareils restent connectés.
     ///
     /// Sans cette garde, la tâche d'une connexion morte évincerait en
     /// s'achevant la session qui vient de la remplacer : on se reconnecte,
@@ -1359,26 +1459,55 @@ impl AppState {
         // `member_of` prend lui-même le verrou des connectés : l'appeler en le
         // tenant déjà serait un interblocage.
         let partant = self.member_of(user_id);
-        // Le salon qu'il lisait : ses invités web, s'il en a, sauront qu'il
-        // n'y est plus.
-        let salon_lu;
+        // Les salons que lisaient les connexions fermées : leurs invités web,
+        // s'il en a, sauront qu'il n'y est plus.
+        let salons_lus: Vec<ChannelId>;
+        // Il lui reste un autre appareil : le compte reste en ligne.
+        let reste;
+        // La connexion fermée portait sa voix.
+        let voix_perdue;
         {
             let mut users = self.users.lock().unwrap();
-            match users.get(&user_id) {
-                Some(u) if only_if_token.is_none_or(|t| u.voice_token == t) => {
-                    salon_lu = u.channel;
-                    let u = users.remove(&user_id).expect("présent à l'instant");
-                    // quinn tronque au besoin un motif trop long pour tenir
-                    // dans un paquet : le client le relit sans exiger d'UTF-8
-                    // entier.
-                    u.conn.close(code.into(), motif.as_bytes());
+            let Some(u) = users.get_mut(&user_id) else { return };
+            let fermes: Vec<Lien> = match only_if_token {
+                // Une session plus récente l'a déjà remplacée : rien à faire.
+                Some(t) => match u.liens.iter().position(|l| l.jeton == t) {
+                    Some(i) => vec![u.liens.remove(i)],
+                    None => return,
+                },
+                None => std::mem::take(&mut u.liens),
+            };
+            salons_lus = fermes.iter().filter_map(|l| l.channel).collect();
+            voix_perdue = u.voix_par.is_some_and(|j| fermes.iter().any(|l| l.jeton == j));
+            for l in &fermes {
+                // quinn tronque au besoin un motif trop long pour tenir dans
+                // un paquet : le client le relit sans exiger d'UTF-8 entier.
+                l.conn.close(code.into(), motif.as_bytes());
+            }
+            reste = !u.liens.is_empty();
+            if reste {
+                if voix_perdue {
+                    u.voice = None;
+                    u.voix_par = None;
+                    u.speaking = false;
                 }
-                // Personne, ou une session plus récente : rien à faire.
-                _ => return,
+            } else {
+                users.remove(&user_id);
             }
         }
-        if let Some(salon) = salon_lu {
+        for salon in salons_lus {
             crate::porte::presents_changes(self, salon);
+        }
+        if reste {
+            // Un appareil de moins. S'il portait la voix, le compte sort du
+            // vocal (sa diffusion avec) ; dans tous les cas sa fiche change,
+            // ne serait-ce que le badge mobile.
+            if voix_perdue {
+                self.fin_de_streams(user_id);
+                self.rebuild_voice_routes();
+            }
+            self.broadcast_member(user_id);
+            return;
         }
         // Sa diffusion éventuelle s'éteint avec lui, et il quitte les
         // publics qu'il suivait. APRÈS la garde du jeton : une session
@@ -1477,6 +1606,7 @@ mod tests {
             channel,
             force_muted: muet,
             force_deafened: sourd,
+            jeton: id,
             conn: id as u8,
         }
     }
@@ -1486,7 +1616,7 @@ mod tests {
     /// rien au relais et qu'aucun client ne les contourne.
     #[test]
     fn les_sanctions_vocales_sortent_de_la_table_de_routage() {
-        let Routes { channel_of, peers } = router(vec![
+        let Routes { channel_of, peers, .. } = router(vec![
             voix(1, Some(7), false, false), // ordinaire
             voix(2, Some(7), true, false),  // micro coupé
             voix(3, Some(7), false, true),  // sourd

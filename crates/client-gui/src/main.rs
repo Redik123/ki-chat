@@ -4099,7 +4099,9 @@ impl KiApp {
     /// reprend la main, ce qui évite tout affichage figé.
     fn after_roster_change(&mut self) {
         if let Some(me) = self.members.iter().find(|m| Some(m.user_id) == self.my_id) {
-            let mine = me.voice;
+            // Un compte n'a qu'une voix : si elle passe par l'appli mobile,
+            // ce PC n'est plus en vocal, même si le compte l'est.
+            let mine = if me.mobile { None } else { me.voice };
             let waiting = self.voice_intent.is_some()
                 && std::time::Instant::now() < self.voice_intent_until;
             match self.voice_intent {
@@ -4575,6 +4577,7 @@ impl KiApp {
                     .find(|s| s.address == self.url.trim())
                     .map(|s| s.cert_fingerprint.clone())
                     .unwrap_or_default(),
+                appareil: ki_protocol::Appareil::Pc,
             },
             self.voice_prefs(),
             self.link.clone(),
@@ -13512,6 +13515,13 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         );
         icons::draw(painter, badge, Icon::Crown, ACCENT);
         apres_nom += 18.0;
+    }
+    // Sur l'appli mobile : un petit téléphone, discret — il dit pourquoi
+    // quelqu'un répond moins vite, ou n'a pas le partage d'écran.
+    if member.mobile && member.online {
+        let badge = egui::Rect::from_min_size(egui::pos2(apres_nom, name_y - 6.5), Vec2::splat(13.0));
+        icons::draw(painter, badge, Icon::Telephone, TEXT_DIM);
+        apres_nom += 16.0;
     }
 
     // Son rang VALORANT — de sa fiche, ou de sa présence : l'icône du

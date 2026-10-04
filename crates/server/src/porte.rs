@@ -923,6 +923,7 @@ impl Portes {
                 color: None,
                 rank: 0,
                 invite: true,
+                mobile: false,
             })
             .collect()
     }
@@ -1035,7 +1036,7 @@ fn envoyer_aux_membres(state: &AppState, ids: &[UserId], msg: &ServerMsg) {
     let users = state.users.lock().unwrap();
     for id in ids {
         if let Some(u) = users.get(id) {
-            let _ = u.tx.send_line(&line);
+            u.envoyer_ligne(&line);
         }
     }
 }
@@ -1744,7 +1745,7 @@ pub fn presents_changes(state: &AppState, salon: ChannelId) {
         let users = state.users.lock().unwrap();
         users
             .iter()
-            .filter(|(_, u)| u.channel == Some(salon))
+            .filter(|(_, u)| u.lit(salon))
             .map(|(id, u)| (*id, u.username.clone()))
             .collect()
     };

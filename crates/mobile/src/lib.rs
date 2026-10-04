@@ -82,6 +82,7 @@ async fn connecter(
             password: mot_de_passe,
             invite: invitation.filter(|i| !i.trim().is_empty()),
             protocole: ki_protocol::PROTOCOLE,
+            appareil: ki_protocol::Appareil::Mobile,
         })
         .await
         .map_err(|e| format!("{e:#}"))?;

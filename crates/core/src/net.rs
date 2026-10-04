@@ -150,7 +150,9 @@ pub struct Credentials {
     pub invite: Option<String>,
     /// Empreinte du certificat retenue lors des connexions précédentes.
     /// Vide = on ne connaît pas encore ce serveur.
-    pub fingerprint: String,
+    pub fingerprint: String,    /// D'où l'on se connecte : un compte peut l'être à la fois depuis un PC
+    /// et depuis un téléphone.
+    pub appareil: ki_protocol::Appareil,
 }
 
 /// Ce qui doit **survivre à une coupure** : le moteur voix et ses attaches.
@@ -568,6 +570,7 @@ async fn run(
         password: creds.password,
         invite: creds.invite,
         protocole: ki_protocol::PROTOCOLE,
+        appareil: creds.appareil,
     };
     if client.send_msg(&auth).await.is_err() {
         emit(Event::ConnectFailed("échec de l'authentification".into()));
