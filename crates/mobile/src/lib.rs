@@ -21,7 +21,7 @@ use ki_core::apparence;
 use ki_core::etat::{Effet, Etat};
 use ki_core::net::{self, Credentials, Event, NetHandle, VoiceLink, VoicePrefs};
 use ki_protocol::{Appareil, ChannelId, ChannelKind, ClientMsg, MsgRef, ServerMsg, UserId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Délais entre deux tentatives de reconnexion ; le dernier se répète.
@@ -39,8 +39,75 @@ struct Identifiants {
     empreinte: String,
 }
 
+/// Les réglages audio, tenus par la page (retenus sur le téléphone) et
+/// appliqués au moteur à chaque changement comme à chaque connexion.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+struct Reglages {
+    /// « voix » : détection de la voix ; « ptt » : appuyer pour parler ;
+    /// « ouvert » : micro ouvert en continu.
+    mode: String,
+    /// Détection neuronale (Silero) en mode « voix », et sa sensibilité.
+    neuronal: bool,
+    sensibilite: f32,
+    /// Seuil d'amplitude en mode « voix » : sert aussi de garde à Silero.
+    seuil: f32,
+    /// ki_voice::NOISE_* : 0 aucune, 1 RNNoise, 2 DeepFilterNet.
+    bruit: u8,
+    echo: bool,
+    gain_auto: bool,
+    gain_micro: f32,
+    volume: f32,
+}
+
+impl Default for Reglages {
+    /// Les valeurs par défaut du PC.
+    fn default() -> Self {
+        Self {
+            mode: "voix".into(),
+            neuronal: true,
+            sensibilite: 0.5,
+            seuil: 0.02,
+            bruit: ki_voice::NOISE_RNNOISE,
+            echo: true,
+            gain_auto: true,
+            gain_micro: 1.0,
+            volume: 1.0,
+        }
+    }
+}
+
+impl Reglages {
+    /// Le seuil que voit le moteur : hors du mode « voix », aucun — le micro
+    /// s'ouvre selon le mode, pas selon la voix.
+    fn seuil_effectif(&self) -> f32 {
+        if self.mode == "voix" {
+            self.seuil.max(0.001)
+        } else {
+            0.0
+        }
+    }
+
+    fn prefs(&self) -> VoicePrefs {
+        let mut p = VoicePrefs::par_defaut();
+        p.vad_threshold = self.seuil_effectif();
+        p.vad_neural = self.neuronal;
+        p.vad_sensitivity = self.sensibilite;
+        p.vad_hangover_ms = 400;
+        p.noise_mode = self.bruit;
+        p.aec = self.echo;
+        p.agc = self.gain_auto;
+        p.input_gain = self.gain_micro;
+        p.output_gain = self.volume;
+        p
+    }
+}
+
 #[derive(Default)]
 struct Appli {
+    reglages: Reglages,
+    /// Le bouton « appuyer pour parler » est tenu.
+    ptt: bool,
     net: Option<NetHandle>,
     etat: Etat,
     /// Le moteur voix survit aux reconnexions (voir `VoiceLink`).
@@ -365,7 +432,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
             fingerprint: id.empreinte.clone(),
             appareil: Appareil::Mobile,
         },
-        VoicePrefs::par_defaut(),
+        a.reglages.prefs(),
         a.lien.clone(),
         reveil,
     );
@@ -522,8 +589,12 @@ fn horloge(app: AppHandle, partage: Partage) {
             if a.etat.accueilli {
                 ESSAIS.store(0, std::sync::atomic::Ordering::Relaxed);
             }
-            // Le micro n'émet qu'en vocal, ni muet ni sourd.
-            let arme = a.etat.vocal.is_some() && !a.muet && !a.sourd;
+            // Le micro n'émet qu'en vocal, ni muet ni sourd ; en
+            // « appuyer pour parler », que bouton tenu.
+            let arme = a.etat.vocal.is_some()
+                && !a.muet
+                && !a.sourd
+                && (a.reglages.mode != "ptt" || a.ptt);
             let parle = {
                 let moteur = a.lien.engine.lock().unwrap();
                 moteur.as_ref().map(|m| {
@@ -703,7 +774,7 @@ fn sourdine(partage: State<'_, Partage>, sourd: bool) {
     a.muet = sourd;
     a.vue_sale = true;
     if let Some(m) = a.lien.engine.lock().unwrap().as_ref() {
-        m.set_output_gain(if sourd { 0.0 } else { 1.0 });
+        m.set_output_gain(if sourd { 0.0 } else { a.reglages.volume });
     }
     a.envoyer(ClientMsg::VoiceState { speaking: false, muted: sourd });
 }
@@ -716,6 +787,130 @@ fn volume_membre(partage: State<'_, Partage>, id: UserId, gain: f32) {
     if let Some(m) = garde.as_ref() {
         m.set_user_volume(id, gain.clamp(0.0, 2.0));
     }
+}
+
+/// Applique les réglages au moteur, tout de suite, et les retient pour les
+/// connexions suivantes.
+#[tauri::command]
+fn regler(partage: State<'_, Partage>, reglages: Reglages) {
+    let mut a = partage.lock().unwrap();
+    a.reglages = reglages;
+    let r = &a.reglages;
+    let moteur = a.lien.engine.lock().unwrap();
+    if let Some(m) = moteur.as_ref() {
+        m.set_vad_threshold(r.seuil_effectif());
+        m.set_vad_neural(r.neuronal);
+        m.set_vad_sensitivity(r.sensibilite);
+        m.set_noise_mode(r.bruit);
+        m.set_aec(r.echo);
+        m.set_agc(r.gain_auto);
+        m.set_input_gain(r.gain_micro);
+        m.set_output_gain(if a.sourd { 0.0 } else { r.volume });
+    }
+}
+
+/// Appuyer pour parler : le bouton est tenu, ou relâché.
+#[tauri::command]
+fn parler(partage: State<'_, Partage>, oui: bool) {
+    partage.lock().unwrap().ptt = oui;
+}
+
+#[derive(Serialize)]
+struct EtatAudio {
+    /// Le moteur tourne (on est connecté).
+    actif: bool,
+    /// Crête du micro, 0..1.
+    niveau: f32,
+    /// Probabilité de parole selon Silero, 0..1.
+    parole: f32,
+    /// La décision d'émission est ouverte : on parle, pour le moteur.
+    ouvert: bool,
+    /// Ce qui part réellement vers les autres.
+    emet: bool,
+    /// « inactif », « chargement », « pret », « echec ».
+    silero: &'static str,
+    micro_sature: bool,
+    essai: EtatEssaiVue,
+}
+
+#[derive(Serialize)]
+struct EtatEssaiVue {
+    /// « vide », « enregistre », « pret ».
+    etat: &'static str,
+    /// Avancement de l'enregistrement ou de la lecture, 0..1.
+    avancement: f32,
+    /// « envoyee » ou « brute » pendant une lecture.
+    lecture: Option<&'static str>,
+    /// Le volume de sa voix chez les autres, en dB au-dessus d'une voix
+    /// réglée par défaut.
+    ecart_db: Option<f32>,
+}
+
+/// L'état du micro pour la page des réglages, lu à chaque image.
+#[tauri::command]
+fn etat_audio(partage: State<'_, Partage>) -> EtatAudio {
+    let moteur = partage.lock().unwrap().lien.engine.clone();
+    let garde = moteur.lock().unwrap();
+    let Some(m) = garde.as_ref() else {
+        return EtatAudio {
+            actif: false,
+            niveau: 0.0,
+            parole: 0.0,
+            ouvert: false,
+            emet: false,
+            silero: "inactif",
+            micro_sature: false,
+            essai: EtatEssaiVue { etat: "vide", avancement: 0.0, lecture: None, ecart_db: None },
+        };
+    };
+    let st = m.stats();
+    let essai = match m.essai() {
+        ki_voice::EtatEssai::Vide => {
+            EtatEssaiVue { etat: "vide", avancement: 0.0, lecture: None, ecart_db: None }
+        }
+        ki_voice::EtatEssai::Enregistre(av) => {
+            EtatEssaiVue { etat: "enregistre", avancement: av, lecture: None, ecart_db: None }
+        }
+        ki_voice::EtatEssai::Pret { lecture, ecart_db, .. } => EtatEssaiVue {
+            etat: "pret",
+            avancement: lecture.map(|(_, av)| av).unwrap_or(0.0),
+            lecture: lecture.map(|(v, _)| match v {
+                ki_voice::VersionEssai::Envoyee => "envoyee",
+                ki_voice::VersionEssai::Brute => "brute",
+            }),
+            ecart_db: Some(ecart_db),
+        },
+    };
+    EtatAudio {
+        actif: true,
+        niveau: st.mic_peak,
+        parole: st.vad_prob,
+        ouvert: st.vad_ouvert,
+        emet: m.is_sending(),
+        silero: match st.silero_etat {
+            ki_voice::SILERO_CHARGEMENT => "chargement",
+            ki_voice::SILERO_PRET => "pret",
+            ki_voice::SILERO_ECHEC => "echec",
+            _ => "inactif",
+        },
+        micro_sature: st.micro_sature,
+        essai,
+    }
+}
+
+/// L'essai « enregistrer 5 s et réécouter », celui de la page Casque du PC.
+#[tauri::command]
+fn essai(partage: State<'_, Partage>, action: String) -> Result<(), String> {
+    let moteur = partage.lock().unwrap().lien.engine.clone();
+    let garde = moteur.lock().unwrap();
+    let m = garde.as_ref().ok_or("connecte-toi d'abord : le micro s'ouvre avec la connexion")?;
+    match action.as_str() {
+        "enregistrer" => m.enregistrer_essai(),
+        "envoyee" => m.rejouer_essai(ki_voice::VersionEssai::Envoyee),
+        "brute" => m.rejouer_essai(ki_voice::VersionEssai::Brute),
+        _ => m.arreter_essai(),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -801,6 +996,10 @@ pub fn run() {
             volume_membre,
             poke,
             moderer,
+            regler,
+            parler,
+            etat_audio,
+            essai,
         ])
         .run(tauri::generate_context!())
         .expect("lancement de l'appli");

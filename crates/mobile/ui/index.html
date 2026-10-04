@@ -145,6 +145,37 @@
   .feuille .separation { height: 1px; background: var(--bord); margin: 6px 0; }
   .feuille h2 .rang { font-size: 12px; }
 
+  /* Réglages */
+  #vue-reglages { padding-bottom: 24px; }
+  .groupe { margin: 0 12px 12px; background: var(--base); border: 1px solid var(--bord-doux); border-radius: 12px; overflow: hidden; }
+  .option { padding: 13px 14px; border-top: 1px solid var(--bord-doux); }
+  .option:first-child { border-top: 0; }
+  .option .ligne-option { display: flex; align-items: center; }
+  .option .ligne-option > * + * { margin-left: 12px; }
+  .option .libelle { flex: 1; min-width: 0; }
+  .option .libelle small { display: block; color: var(--pale); font-size: 12px; margin-top: 2px; }
+  .option input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 10px; }
+  .valeur { color: var(--doux); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .segments { display: flex; background: var(--fond); border-radius: 9px; padding: 3px; margin-top: 10px; }
+  .segments button { flex: 1; padding: 8px 4px; border-radius: 7px; color: var(--doux); font-size: 13px; font-weight: 600; }
+  .segments button.choisi { background: var(--actif); color: var(--texte); }
+  .interrupteur { width: 46px; height: 28px; border-radius: 14px; background: var(--actif); position: relative; flex: none; transition: background .15s; }
+  .interrupteur::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--doux); transition: transform .15s, background .15s; }
+  .interrupteur.oui { background: rgba(0,210,106,.35); }
+  .interrupteur.oui::after { transform: translateX(18px); background: var(--accent); }
+  .jauge-micro { position: relative; height: 10px; border-radius: 5px; background: var(--fond); overflow: hidden; margin-top: 10px; }
+  .jauge-micro .niveau { position: absolute; top: 0; bottom: 0; left: 0; width: 100%; background: var(--pale); transform-origin: left; transform: scaleX(0); transition: transform .08s linear; }
+  .jauge-micro .niveau.parle { background: var(--parle); }
+  .jauge-micro .seuil { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--texte); opacity: .7; }
+  .puce { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; background: var(--actif); color: var(--doux); }
+  .puce.ok { background: rgba(0,210,106,.15); color: var(--accent); }
+  .puce.mal { background: rgba(255,107,107,.15); color: var(--danger); }
+  .rangee-boutons { display: flex; flex-wrap: wrap; margin-top: 10px; }
+  .rangee-boutons > * { margin: 0 8px 8px 0; }
+  .petit-bouton.plein { background: var(--accent); color: var(--fond); border-color: var(--accent); font-weight: 700; }
+  .ptt { flex: 1; padding: 12px; border-radius: 10px; background: var(--actif); font-weight: 700; user-select: none; -webkit-user-select: none; touch-action: none; }
+  .ptt.tenu { background: var(--accent); color: var(--fond); }
+
   /* Bandeau */
   #bandeau { position: fixed; left: 12px; right: 12px; top: calc(var(--haut) + 62px); z-index: 30; padding: 11px 14px; border-radius: 10px; background: var(--actif); font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.4); transition: opacity .2s, transform .2s; }
   #bandeau.erreur { background: #3a1d22; color: #ffb4b4; }
@@ -190,6 +221,7 @@
   <symbol id="i-poke" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7 2.5 2.5 7z"/><path d="M10 13l4.5-4.5"/></symbol>
   <symbol id="i-interdit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
   <symbol id="i-deplacer" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-reglages" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
   <symbol id="i-couronne" viewBox="0 0 24 24"><path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/></symbol>
 </svg>
 
@@ -223,10 +255,12 @@
   <div id="etat-reseau" class="cache">Connexion perdue — reconnexion…</div>
   <div class="defile" id="vue-salons"></div>
   <div class="defile cache" id="vue-membres"></div>
+  <div class="defile cache" id="vue-reglages"></div>
   <div class="barre-vocale cache" data-barre-vocale></div>
   <nav class="onglets">
     <button class="actif" data-onglet="salons"><svg><use href="#i-salons"/></svg>Salons<span class="pastille total cache" id="total-non-lus"></span></button>
     <button data-onglet="membres"><svg><use href="#i-membres"/></svg>Membres</button>
+    <button data-onglet="reglages"><svg><use href="#i-reglages"/></svg>Réglages</button>
   </nav>
 </section>
 
@@ -423,6 +457,8 @@
       document.querySelectorAll("[data-onglet]").forEach((x) => x.classList.toggle("actif", x === b));
       $("vue-salons").classList.toggle("cache", onglet !== "salons");
       $("vue-membres").classList.toggle("cache", onglet !== "membres");
+      $("vue-reglages").classList.toggle("cache", onglet !== "reglages");
+      if (onglet === "reglages") dessinerReglages();
     };
   }
 
@@ -584,9 +620,35 @@
       fin.setAttribute("aria-label", "Quitter le vocal");
       fin.append(icone("raccrocher"));
       fin.onclick = () => { invoke("quitter_vocal"); fermerFeuille(); };
-      barre.append(ou, micro, casque, fin);
+      if (reglages.mode === "ptt") {
+        // La barre se redessine souvent (qui parle change) : l'état « tenu »
+        // vit hors du bouton, et le relâcher s'écoute sur toute la page.
+        const ptt = document.createElement("button");
+        ptt.className = "ptt" + (pttTenu ? " tenu" : "");
+        ptt.textContent = pttTenu ? "Tu parles…" : "Maintenir pour parler";
+        ptt.addEventListener("pointerdown", (e) => { e.preventDefault(); tenirPtt(true); });
+        ou.style.flex = "0 1 auto";
+        barre.append(ou, ptt, micro, casque, fin);
+      } else {
+        barre.append(ou, micro, casque, fin);
+      }
     }
   }
+
+  // Appuyer pour parler.
+  let pttTenu = false;
+  function tenirPtt(oui) {
+    if (pttTenu === oui) return;
+    pttTenu = oui;
+    invoke("parler", { oui });
+    if (oui) navigator.vibrate?.(10);
+    for (const b of document.querySelectorAll(".ptt")) {
+      b.classList.toggle("tenu", oui);
+      b.textContent = oui ? "Tu parles…" : "Maintenir pour parler";
+    }
+  }
+  for (const ev of ["pointerup", "pointercancel"]) window.addEventListener(ev, () => tenirPtt(false));
+  document.addEventListener("visibilitychange", () => { if (document.hidden) tenirPtt(false); });
 
   // Les volumes par personne, retenus sur le téléphone.
   function volumes() { try { return JSON.parse(relire("volumes") || "{}"); } catch (_) { return {}; } }
@@ -910,6 +972,205 @@
     } catch (err) { bandeau(String(err), true); }
   }
 
+  // ---------- réglages ----------
+  const REGLAGES_DEFAUT = {
+    mode: "voix", neuronal: true, sensibilite: 0.5, seuil: 0.02,
+    bruit: 1, echo: true, gain_auto: true, gain_micro: 1, volume: 1,
+    notifs: "tout",
+  };
+  let reglages = { ...REGLAGES_DEFAUT };
+  try { Object.assign(reglages, JSON.parse(relire("reglages") || "{}")); } catch (_) {}
+
+  function envoyerReglages() {
+    retenir("reglages", JSON.stringify(reglages));
+    const { notifs, ...audio } = reglages;
+    invoke("regler", { reglages: audio });
+    if (vue) dessinerBarreVocale();
+  }
+  // À chaque connexion : le moteur repart des réglages du téléphone.
+  listen("connecte", envoyerReglages);
+  envoyerReglages();
+
+  function groupe(titreGroupe) {
+    $("vue-reglages").append(section(titreGroupe));
+    const g = document.createElement("div");
+    g.className = "groupe";
+    $("vue-reglages").append(g);
+    return g;
+  }
+  function option(g, libelle, aide = "") {
+    const o = document.createElement("div");
+    o.className = "option";
+    const l = document.createElement("div");
+    l.className = "ligne-option";
+    const t = document.createElement("div");
+    t.className = "libelle";
+    t.textContent = libelle;
+    if (aide) { const a = document.createElement("small"); a.textContent = aide; t.append(a); }
+    l.append(t);
+    o.append(l);
+    g.append(o);
+    return { o, l };
+  }
+  function interrupteur(g, libelle, aide, cle) {
+    const { l } = option(g, libelle, aide);
+    const b = document.createElement("button");
+    b.className = "interrupteur" + (reglages[cle] ? " oui" : "");
+    b.setAttribute("role", "switch");
+    b.setAttribute("aria-checked", String(!!reglages[cle]));
+    b.setAttribute("aria-label", libelle);
+    b.onclick = () => { reglages[cle] = !reglages[cle]; envoyerReglages(); dessinerReglages(); };
+    l.append(b);
+  }
+  function segments(g, libelle, aide, cle, choix) {
+    const { o } = option(g, libelle, aide);
+    const seg = document.createElement("div");
+    seg.className = "segments";
+    for (const [valeur, texte] of choix) {
+      const b = document.createElement("button");
+      b.textContent = texte;
+      if (reglages[cle] === valeur) b.className = "choisi";
+      b.onclick = () => { reglages[cle] = valeur; envoyerReglages(); dessinerReglages(); };
+      seg.append(b);
+    }
+    o.append(seg);
+  }
+  function curseur(g, libelle, aide, cle, min, max, pas, afficher) {
+    const { o, l } = option(g, libelle, aide);
+    const v = document.createElement("span");
+    v.className = "valeur";
+    l.append(v);
+    const r = document.createElement("input");
+    r.type = "range"; r.min = min; r.max = max; r.step = pas; r.value = reglages[cle];
+    r.setAttribute("aria-label", libelle);
+    const montrer = () => { v.textContent = afficher(Number(r.value)); };
+    montrer();
+    r.oninput = () => { reglages[cle] = Number(r.value); montrer(); envoyerReglages(); };
+    o.append(r);
+    return o;
+  }
+
+  let elementsAudio = null;
+  function dessinerReglages() {
+    const racine = $("vue-reglages");
+    racine.replaceChildren();
+
+    const micro = groupe("Micro");
+    segments(micro, "Quand ton micro s'ouvre", "", "mode",
+      [["voix", "À la voix"], ["ptt", "En appuyant"], ["ouvert", "Toujours"]]);
+    if (reglages.mode === "voix") {
+      interrupteur(micro, "Détection neuronale (Silero)",
+        "Reconnaît une voix plutôt qu'un bruit : clavier, ventilo, télé.", "neuronal");
+      if (reglages.neuronal) {
+        curseur(micro, "Sensibilité", "Plus haut : s'ouvre plus facilement.", "sensibilite", 0.1, 0.95, 0.05,
+          (x) => Math.round(x * 100) + " %");
+      }
+      curseur(micro, "Seuil de volume", "La barre blanche sur la jauge : en dessous, rien ne part.", "seuil", 0.005, 0.2, 0.005,
+        (x) => Math.round(x * 1000) / 10 + " %");
+    }
+    // La jauge en direct.
+    const { o: oj, l: lj } = option(micro, "Ton micro en direct", "Vert : tu parles, et ça part chez les autres.");
+    const etatSilero = document.createElement("span");
+    etatSilero.className = "puce";
+    lj.append(etatSilero);
+    const jauge = document.createElement("div");
+    jauge.className = "jauge-micro";
+    const niveau = document.createElement("div"); niveau.className = "niveau";
+    const seuil = document.createElement("div"); seuil.className = "seuil";
+    jauge.append(niveau, seuil);
+    oj.append(jauge);
+
+    // L'essai : enregistrer 5 s et réécouter.
+    const { o: oe } = option(micro, "Essai : t'enregistrer 5 secondes",
+      "Puis réécoute ce que les autres entendent. Rien ne part au salon pendant l'essai.");
+    const boutonsEssai = document.createElement("div");
+    boutonsEssai.className = "rangee-boutons";
+    oe.append(boutonsEssai);
+    const texteEssai = document.createElement("div");
+    texteEssai.className = "valeur";
+    oe.append(texteEssai);
+
+    const son = groupe("Traitement de la voix");
+    segments(son, "Suppression de bruit", reglages.bruit === 2 ? "Studio : meilleure qualité, mais lourd pour un téléphone." : "RNNoise retire les bruits de fond.", "bruit",
+      [[0, "Aucune"], [1, "RNNoise"], [2, "Studio"]]);
+    interrupteur(son, "Annulation d'écho", "Évite que les autres s'entendent quand tu es sur haut-parleur.", "echo");
+    interrupteur(son, "Gain automatique", "Garde ta voix au même niveau, que tu parles fort ou doucement.", "gain_auto");
+    curseur(son, "Volume de ton micro", "", "gain_micro", 0.2, 3, 0.05, (x) => Math.round(x * 100) + " %");
+
+    const sortie = groupe("Son");
+    curseur(sortie, "Volume des voix", "Le volume de chacun se règle en touchant son nom.", "volume", 0, 2, 0.05,
+      (x) => Math.round(x * 100) + " %");
+
+    const notifs = groupe("Notifications");
+    segments(notifs, "Me prévenir", "Quand l'appli est en arrière-plan, ou pour un autre salon.", "notifs",
+      [["tout", "Tout"], ["mentions", "Mentions"], ["rien", "Rien"]]);
+
+    const compte = groupe("Compte");
+    const { l: lc } = option(compte, (vue?.mon_pseudo || "") + " · " + (vue?.serveur || ""), relire("serveur") || "");
+    const sortir = document.createElement("button");
+    sortir.className = "petit-bouton";
+    sortir.textContent = "Se déconnecter";
+    sortir.onclick = () => $("btn-deconnecter").click();
+    lc.append(sortir);
+
+    elementsAudio = { niveau, seuil, etatSilero, boutonsEssai, texteEssai, dernierEssai: null };
+  }
+
+  // La jauge et l'essai suivent le moteur, dix fois par seconde, tant que
+  // l'onglet est affiché.
+  setInterval(async () => {
+    if (onglet !== "reglages" || $("accueil").classList.contains("cache") || !elementsAudio) return;
+    let a;
+    try { a = await invoke("etat_audio"); } catch (_) { return; }
+    const e = elementsAudio;
+    // Échelle douce : les voix vivent en bas de l'échelle.
+    const echelle = (x) => Math.min(1, Math.sqrt(Math.max(0, x)) * 1.6);
+    e.niveau.style.transform = "scaleX(" + echelle(a.niveau) + ")";
+    e.niveau.classList.toggle("parle", a.emet || a.ouvert);
+    e.seuil.style.left = (echelle(reglages.mode === "voix" ? reglages.seuil : 0) * 100) + "%";
+    e.seuil.style.display = reglages.mode === "voix" ? "" : "none";
+    const silero = !a.actif ? ["Pas connecté", ""]
+      : reglages.mode !== "voix" || !reglages.neuronal ? ["Silero coupé", ""]
+      : a.silero === "pret" ? ["Silero actif · " + Math.round(a.parole * 100) + " %", "ok"]
+      : a.silero === "chargement" ? ["Silero se charge…", ""]
+      : a.silero === "echec" ? ["Silero en panne", "mal"]
+      : ["Silero en attente", ""];
+    e.etatSilero.textContent = a.micro_sature ? "Micro saturé" : silero[0];
+    e.etatSilero.className = "puce " + (a.micro_sature ? "mal" : silero[1]);
+
+    // L'essai : les boutons ne changent qu'avec l'état.
+    const cle = a.essai.etat + "|" + (a.essai.lecture || "") + "|" + a.actif;
+    if (cle !== e.dernierEssai) {
+      e.dernierEssai = cle;
+      e.boutonsEssai.replaceChildren();
+      const bouton = (texte, act, plein = false) => {
+        const b = document.createElement("button");
+        b.className = "petit-bouton" + (plein ? " plein" : "");
+        b.textContent = texte;
+        b.disabled = !a.actif;
+        b.onclick = () => invoke("essai", { action: act }).catch((err) => bandeau(String(err), true));
+        e.boutonsEssai.append(b);
+      };
+      if (a.essai.etat === "enregistre") bouton("Arrêter", "arreter");
+      else bouton(a.essai.etat === "pret" ? "Recommencer" : "Enregistrer 5 s", "enregistrer", a.essai.etat !== "pret");
+      if (a.essai.etat === "pret") {
+        if (a.essai.lecture) bouton("Arrêter la lecture", "arreter");
+        else {
+          bouton("Ce que les autres entendent", "envoyee", true);
+          bouton("Micro brut", "brute");
+        }
+      }
+    }
+    e.texteEssai.textContent =
+      a.essai.etat === "enregistre" ? "Parle normalement… " + Math.round(a.essai.avancement * 100) + " %"
+      : a.essai.lecture ? "Lecture… " + Math.round(a.essai.avancement * 100) + " %"
+      : a.essai.etat === "pret" && a.essai.ecart_db != null
+        ? (Math.abs(a.essai.ecart_db) < 3 ? "Ta voix arrive au bon volume chez les autres."
+          : a.essai.ecart_db > 0 ? "Ta voix arrive " + Math.round(a.essai.ecart_db) + " dB plus fort que la moyenne."
+          : "Ta voix arrive " + Math.round(-a.essai.ecart_db) + " dB plus bas que la moyenne.")
+      : !a.actif ? "Connecte-toi pour essayer ton micro." : "";
+  }, 100);
+
   // ---------- feuilles du bas ----------
   let quandFerme = null;
   function ouvrirFeuille(remplir, fermeture = null) {
@@ -980,6 +1241,7 @@
   listen("poke", (e) => { navigator.vibrate?.([80, 60, 80]); bandeau(e.payload + " te poke !"); });
   listen("prevenir", (e) => {
     const [salon, mention] = e.payload;
+    if (reglages.notifs === "rien" || (reglages.notifs === "mentions" && !mention)) return;
     const lu = !$("salon").classList.contains("cache") && vue?.courant === salon && document.visibilityState === "visible";
     if (mention || !lu) navigator.vibrate?.(mention ? [60, 40, 60] : 30);
   });
