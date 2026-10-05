@@ -117,6 +117,16 @@ struct Appli {
     demarrage: Option<std::time::Instant>,
     /// Les volumes par personne, rendus au moteur à chaque démarrage.
     volumes: std::collections::HashMap<UserId, f32>,
+    /// L'appli est en arrière-plan : les battements s'espacent.
+    arriere_plan: bool,
+    /// Déconnectée exprès en arrière-plan (option « rester connecté »
+    /// coupée) : on se reconnecte au retour.
+    en_veille: bool,
+    /// Le dernier battement envoyé au serveur (voir `horloge`).
+    dernier_ping: Option<std::time::Instant>,
+    /// La dernière réponse du serveur, quelle qu'elle soit : la preuve que
+    /// la connexion vit.
+    dernier_signe: Option<std::time::Instant>,
     net: Option<NetHandle>,
     etat: Etat,
     /// Le moteur voix survit aux reconnexions (voir `VoiceLink`).
@@ -500,6 +510,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
     a.etat = Appli::etat_vierge(a.etat.courant);
     a.pokes_annonces = false;
     a.logo_envoye = None;
+    a.dernier_signe = None;
     a.photos_demandees.clear();
     let reveil: net::Reveil = Arc::new(|| {});
     let mut handle = net::connect(
@@ -550,6 +561,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                     let _ = app.emit("photo", (id_page(user_id), url));
                 }
                 Event::Msg(msg) => {
+                    a.dernier_signe = Some(std::time::Instant::now());
                     let accueil = matches!(msg, ServerMsg::Welcome { .. });
                     let roster = matches!(msg, ServerMsg::Members { .. } | ServerMsg::MemberUpdate { .. });
                     let non_lus = matches!(msg, ServerMsg::NonLus { .. });
@@ -719,6 +731,39 @@ fn horloge(app: AppHandle, partage: Partage) {
             let mut a = partage.lock().unwrap();
             if a.etat.accueilli {
                 ESSAIS.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Le battement : la connexion du téléphone n'en a pas
+            // d'automatique (voir `QuicClient::connect_mobile`). Toutes les
+            // cinq secondes au premier plan ou en vocal ; toutes les vingt en
+            // arrière-plan, sous les quarante d'inactivité tolérée.
+            if a.net.is_some() && a.etat.accueilli {
+                let rythme = if a.arriere_plan && a.etat.vocal.is_none() {
+                    Duration::from_secs(20)
+                } else {
+                    Duration::from_secs(5)
+                };
+                if a.dernier_ping.is_none_or(|t| t.elapsed() >= rythme) {
+                    a.dernier_ping = Some(std::time::Instant::now());
+                    a.envoyer(ClientMsg::Ping);
+                }
+                // Le serveur ne répond plus (redémarré, réseau perdu) : QUIC
+                // ne s'en apercevrait qu'au bout des quarante secondes
+                // d'inactivité. Au premier plan, dix secondes sans le moindre
+                // signe suffisent pour se reconnecter tout de suite.
+                let silence = a.dernier_signe.map(|t| t.elapsed()).unwrap_or_default();
+                let tolere = if a.arriere_plan { Duration::from_secs(45) } else { Duration::from_secs(10) };
+                if silence > tolere {
+                    tracing::info!("le serveur ne répond plus depuis {} s : reconnexion", silence.as_secs());
+                    a.dernier_signe = None;
+                    a.generation += 1;
+                    let generation = a.generation;
+                    if let Some(mut n) = a.net.take() {
+                        std::thread::spawn(move || n.quitter_borne(Duration::from_millis(500)));
+                    }
+                    a.vue_sale = true;
+                    let _ = app.emit("coupe", String::new());
+                    reconnecter(&app, &partage, generation);
+                }
             }
             // Le moteur (donc le micro) ne tourne qu'en vocal, ou pendant
             // l'essai des réglages : hors de là, Android n'a pas à montrer
@@ -989,6 +1034,40 @@ fn regler(partage: State<'_, Partage>, reglages: Reglages) {
     }
 }
 
+/// L'appli passe au premier plan ou en arrière-plan. En arrière-plan, hors
+/// vocal, et si l'on ne doit pas rester connecté (batterie faible), on se
+/// déconnecte tout à fait ; au retour, on se reconnecte.
+#[tauri::command]
+fn premier_plan(app: AppHandle, partage: State<'_, Partage>, oui: bool, rester_connecte: bool) {
+    let relancer = {
+        let mut a = partage.lock().unwrap();
+        a.arriere_plan = !oui;
+        if oui {
+            // Un battement tout de suite : la connexion a peut-être dormi. Et
+            // l'on compte le silence à partir de maintenant.
+            a.dernier_ping = None;
+            a.dernier_signe = Some(std::time::Instant::now());
+            std::mem::take(&mut a.en_veille) && a.identifiants.is_some()
+        } else {
+            let en_vocal = a.etat.vocal.is_some() || a.vocal_voulu.is_some();
+            if !rester_connecte && !en_vocal && a.net.is_some() {
+                // Comme une fin, mais en gardant de quoi revenir : les
+                // identifiants et le salon lu.
+                a.generation += 1;
+                a.en_veille = true;
+                if let Some(mut n) = a.net.take() {
+                    std::thread::spawn(move || n.quitter_borne(Duration::from_millis(500)));
+                }
+                a.vue_sale = true;
+            }
+            false
+        }
+    };
+    if relancer {
+        lancer(&app, &partage);
+    }
+}
+
 /// La page des réglages est ouverte : le micro tourne pour la jauge et
 /// l'essai, même hors vocal.
 #[tauri::command]
@@ -1254,6 +1333,7 @@ pub fn run() {
             regler,
             parler,
             tester_micro,
+            premier_plan,
             etat_audio,
             essai,
             modifier,

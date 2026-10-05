@@ -52,13 +52,16 @@ pub async fn run(
         quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?,
     ));
     let transport = Arc::get_mut(&mut server_config.transport).expect("transport config unique");
-    // Quinze secondes d'inactivité tolérée, deux de battement — voir le
-    // client, qui porte le raisonnement. Ici l'enjeu est le **fantôme** : un
-    // client parti brutalement restait trente secondes dans la liste des
-    // membres et dans son salon vocal, où les autres continuaient de le voir
-    // et de lui relayer de la voix.
-    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into()?));
-    transport.keep_alive_interval(Some(Duration::from_secs(2)));
+    // L'inactivité tolérée est le plus court des deux délais annoncés. Le PC
+    // annonce quinze secondes et bat lui-même toutes les deux (voir le
+    // client) : un PC parti brutalement disparaît en quinze secondes, sans
+    // rester en **fantôme** dans la liste et le salon vocal. Le téléphone
+    // annonce quarante et bat à son rythme, lent en arrière-plan : le
+    // serveur l'accepte, et ne bat plus lui-même — son battement toutes les
+    // deux secondes réveillait la radio du téléphone sans arrêt.
+    // Quarante secondes : `ki_client_quic::INACTIVITE_MOBILE`.
+    transport.max_idle_timeout(Some(Duration::from_secs(40).try_into()?));
+    transport.keep_alive_interval(None);
     // Anti-bufferbloat : le défaut d'1 Mio peut mettre ~2 minutes de voix en
     // file sous congestion. 32 Kio ≈ 1 s d'audio : au-delà, on jette du vieux.
     transport.datagram_send_buffer_size(32 * 1024);

@@ -22,6 +22,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 pub use quinn;
 
+/// L'inactivité tolérée d'un téléphone (voir [`QuicClient::connect_mobile`]),
+/// et le plafond qu'en accepte le serveur.
+pub const INACTIVITE_MOBILE: Duration = Duration::from_secs(40);
+
 /// Port QUIC par défaut d'un serveur ki-chat.
 pub const DEFAULT_PORT: u16 = 9987;
 const ALPN: &[u8] = b"ki-chat";
@@ -95,6 +99,22 @@ impl QuicClient {
     /// déjà. `None` = première connexion : on accepte et l'on rend
     /// l'empreinte rencontrée, à conserver pour la prochaine fois.
     pub async fn connect(addr: &str, expected: Option<&str>) -> anyhow::Result<Self> {
+        Self::connect_mobile(addr, expected, false).await
+    }
+
+    /// Comme [`connect`](Self::connect), avec le profil du **téléphone** si
+    /// `mobile` : aucun battement automatique, et quarante secondes
+    /// d'inactivité tolérées. L'appli bat elle-même la mesure
+    /// (`ClientMsg::Ping`) : vite au premier plan, lentement en
+    /// arrière-plan — un battement toutes les deux secondes réveillait la
+    /// radio sans arrêt et vidait la batterie. Le délai effectif est le plus
+    /// court des deux pairs : le serveur en tolère quarante, un PC en annonce
+    /// quinze et garde sa détection rapide.
+    pub async fn connect_mobile(
+        addr: &str,
+        expected: Option<&str>,
+        mobile: bool,
+    ) -> anyhow::Result<Self> {
         // La résolution DNS bloque : sur le pool bloquant, pour que qui
         // attend cette connexion puisse l'abandonner pendant ce temps-là —
         // un appel bloquant au milieu d'une fonction asynchrone ne se laisse
@@ -141,8 +161,13 @@ impl QuicClient {
         // le micro, et les rendre plus fréquentes aurait échangé une gêne
         // rare contre une gêne régulière. Le moteur voix survivant désormais
         // aux coupures, il ne coûte plus rien.
-        transport.keep_alive_interval(Some(Duration::from_secs(2)));
-        transport.max_idle_timeout(Some(Duration::from_secs(15).try_into()?));
+        if mobile {
+            transport.keep_alive_interval(None);
+            transport.max_idle_timeout(Some(INACTIVITE_MOBILE.try_into()?));
+        } else {
+            transport.keep_alive_interval(Some(Duration::from_secs(2)));
+            transport.max_idle_timeout(Some(Duration::from_secs(15).try_into()?));
+        }
         // Anti-bufferbloat : 32 Kio ≈ 1 s de voix en file au maximum (le
         // défaut d'1 Mio en autoriserait ~2 minutes sous congestion).
         transport.datagram_send_buffer_size(32 * 1024);

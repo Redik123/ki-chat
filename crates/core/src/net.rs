@@ -614,7 +614,11 @@ async fn run(
     // entre-temps attend son tour ; un abandon part tout de suite, sans rien
     // à défaire : l'emplacement de connexion n'est pas encore posé.
     let mut en_attente: Vec<ClientMsg> = Vec::new();
-    let connexion = QuicClient::connect(&url, known);
+    let connexion = QuicClient::connect_mobile(
+        &url,
+        known,
+        creds.appareil == ki_protocol::Appareil::Mobile,
+    );
     tokio::pin!(connexion);
     let mut client = loop {
         tokio::select! {

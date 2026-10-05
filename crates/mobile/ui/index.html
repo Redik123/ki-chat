@@ -1145,6 +1145,11 @@
   // office.
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && android) android.effacerNotifications();
+    // Premier plan ou arrière-plan : les battements s'espacent, ou l'on se
+    // déconnecte tout à fait si l'on ne doit pas rester connecté.
+    if (sessionOuverte) {
+      invoke("premier_plan", { oui: !document.hidden, resterConnecte: !!reglages.arriere_plan || !android });
+    }
   });
 
   // Rédaction
@@ -1310,7 +1315,9 @@
       [["tout", "Tout"], ["mentions", "Mentions"], ["rien", "Rien"]]);
     if (android) {
       interrupteur(notifs, "Rester connecté en arrière-plan",
-        "Les messages arrivent l'appli fermée, avec une notification « Connecté » permanente. Consomme un peu de batterie.",
+        reglages.arriere_plan
+          ? "Les messages arrivent l'appli fermée, avec une notification « Connecté » permanente. Consomme un peu de batterie."
+          : "Batterie au plus bas : l'appli se déconnecte quand tu la quittes (sauf en vocal), et se reconnecte à ton retour.",
         "arriere_plan");
     }
 

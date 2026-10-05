@@ -62,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Pas de carnet de serveurs en ligne de commande : on accepte ce qui se
     // présente, mais l'empreinte est affichée pour pouvoir la comparer.
-    let mut client = QuicClient::connect(server, None).await?;
+    // En profil mobile, aucun battement automatique : la ligne de commande
+    // n'en envoie pas non plus, la connexion expire au bout de quarante
+    // secondes de silence — de quoi éprouver le délai du serveur.
+    let mut client = QuicClient::connect_mobile(server, None, appareil == ki_protocol::Appareil::Mobile).await?;
     println!("empreinte du serveur : {}", client.fingerprint);
     client
         .send_msg(&ClientMsg::Auth {
