@@ -20,7 +20,7 @@ members = [
 exclude = ["crates/protocol/fuzz"]
 
 [workspace.package]
-version = "0.1.58"
+version = "0.1.59"
 edition = "2021"
 license = "MIT"
 

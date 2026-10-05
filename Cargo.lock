@@ -2769,7 +2769,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "ki-aec"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "cc",
  "flate2",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-cli"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-gui"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-quic"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2851,7 +2851,7 @@ dependencies = [
 
 [[package]]
 name = "ki-core"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2868,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "ki-load"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "ki-media"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "openh264",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "ki-opus"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "cmake",
  "flate2",
@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "ki-protocol"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "base64",
  "criterion",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "ki-server"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "ki-signer"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "ed25519-dalek",
  "sha2",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "ki-video"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "openh264",
@@ -2970,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "ki-voice"
-version = "0.1.58"
+version = "0.1.59"
 dependencies = [
  "anyhow",
  "bytes",
