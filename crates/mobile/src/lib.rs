@@ -130,6 +130,12 @@ struct Appli {
     deja_accueilli: bool,
     /// Le dernier repère de lecture envoyé : (salon, horodatage).
     lu_envoye: Option<(ChannelId, u64)>,
+    /// « J'accepte les pokes » est parti sur cette connexion.
+    pokes_annonces: bool,
+    /// Les photos de profil reçues (empreinte), et celles demandées : on ne
+    /// redemande que ce qui a changé.
+    photos: std::collections::HashMap<UserId, String>,
+    photos_demandees: std::collections::HashSet<(UserId, String)>,
 }
 
 type Partage = Arc<Mutex<Appli>>;
@@ -152,6 +158,27 @@ impl Appli {
 // Ce que voit la page
 // ---------------------------------------------------------------------------
 
+/// Un identifiant tel que la page le voit. Les nombres JavaScript perdent
+/// leur précision au-delà de 2^53 : celui du bot musique (2^64 - 2) arrivait
+/// arrondi, et revenait faux. Il passe en -1.
+type IdPage = i64;
+
+fn id_page(id: UserId) -> IdPage {
+    if id == ki_protocol::MUSIQUE_ID {
+        -1
+    } else {
+        id as IdPage
+    }
+}
+
+fn id_rust(id: IdPage) -> UserId {
+    if id == -1 {
+        ki_protocol::MUSIQUE_ID
+    } else {
+        id as UserId
+    }
+}
+
 /// Un rang VALORANT, tel que le PC l'affiche : « Ascendant 1 », en couleur.
 #[derive(Clone, Serialize)]
 struct VueRang {
@@ -168,7 +195,7 @@ fn rang_de(m: &ki_protocol::Member) -> Option<VueRang> {
 
 #[derive(Clone, Serialize)]
 struct VueOccupant {
-    id: UserId,
+    id: IdPage,
     nom: String,
     couleur: String,
     rang: Option<VueRang>,
@@ -190,7 +217,9 @@ struct VueSalon {
 
 #[derive(Clone, Serialize)]
 struct VueMembre {
-    id: UserId,
+    id: IdPage,
+    /// Le serveur lui-même (bot musique) : pas de menu de modération.
+    bot: bool,
     nom: String,
     couleur: String,
     rang: Option<VueRang>,
@@ -211,7 +240,10 @@ struct VueMembre {
 #[derive(Clone, Serialize)]
 struct Vue {
     connecte: bool,
-    moi: Option<UserId>,
+    moi: Option<IdPage>,
+    /// « https://hôte:8080 » : les liens vers des fichiers de ce serveur
+    /// s'affichent (images, vidéos).
+    origine: String,
     mon_pseudo: Option<String>,
     serveur: String,
     salons: Vec<VueSalon>,
@@ -231,6 +263,8 @@ struct Droits {
     deplacer: bool,
     expulser: bool,
     bannir: bool,
+    /// Supprimer les messages des autres.
+    supprimer: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -242,7 +276,7 @@ struct VueReaction {
 
 #[derive(Clone, Serialize)]
 struct VueMessage {
-    auteur_id: UserId,
+    auteur_id: IdPage,
     auteur: String,
     couleur: String,
     /// Le serveur lui-même (fil de jeu VALORANT, bot musique) : pastille BOT.
@@ -265,6 +299,25 @@ struct Fil {
 }
 
 /// « Valorant · en file compétitive · party 2/5 », comme sur PC.
+/// L'origine HTTPS d'un serveur, comme le PC : le même hôte que QUIC, port
+/// 8080.
+fn origine(serveur: &str) -> String {
+    let hote = serveur
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("ws://")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    // « hôte:port » → l'hôte ; une adresse IPv6 entre crochets garde les siens.
+    let hote = match hote.rsplit_once(':') {
+        Some((h, port)) if !h.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => hote,
+    };
+    format!("https://{hote}:8080")
+}
+
 fn ligne_de_jeu(j: &ki_protocol::JeuStatut) -> String {
     j.ligne()
 }
@@ -288,13 +341,19 @@ fn vue(a: &Appli) -> Vue {
                         .iter()
                         .filter(|m| m.online && m.voice == Some(s.id))
                         .map(|m| VueOccupant {
-                            id: m.user_id,
+                            id: id_page(m.user_id),
                             nom: m.username.clone(),
                             couleur: apparence::hex(apparence::couleur_membre(m)),
                             rang: rang_de(m),
                             jeu: m.jeu.as_ref().map(ligne_de_jeu),
-                            parle: m.speaking,
-                            muet: m.muted || m.force_muted,
+                            // Sa propre parole, le serveur ne la renvoie pas :
+                            // c'est ce qu'on annonce soi-même.
+                            parle: if Some(m.user_id) == e.moi { a.parle_annonce } else { m.speaking },
+                            muet: if Some(m.user_id) == e.moi {
+                                a.muet || a.sourd || m.force_muted
+                            } else {
+                                m.muted || m.force_muted
+                            },
                             mobile: m.mobile,
                         })
                         .collect()
@@ -307,9 +366,12 @@ fn vue(a: &Appli) -> Vue {
     let membres = e
         .membres
         .iter()
-        .filter(|m| !ki_core::etat::est_bot(m.user_id))
+        // Le fil de jeu (0) n'est personne ; le bot musique, si : on règle
+        // son volume comme celui d'un membre.
+        .filter(|m| m.user_id != 0)
         .map(|m| VueMembre {
-            id: m.user_id,
+            id: id_page(m.user_id),
+            bot: ki_core::etat::est_bot(m.user_id),
             nom: m.username.clone(),
             couleur: apparence::hex(apparence::couleur_membre(m)),
             rang: rang_de(m),
@@ -325,7 +387,8 @@ fn vue(a: &Appli) -> Vue {
         .collect();
     Vue {
         connecte: a.net.is_some() && e.accueilli,
-        moi: e.moi,
+        moi: e.moi.map(id_page),
+        origine: a.identifiants.as_ref().map(|i| origine(&i.serveur)).unwrap_or_default(),
         mon_pseudo: e.mon_pseudo().map(str::to_string),
         serveur: e.serveur.name.clone(),
         salons,
@@ -340,6 +403,7 @@ fn vue(a: &Appli) -> Vue {
             deplacer: e.peut(ki_protocol::perm::MOVE_MEMBERS),
             expulser: e.peut(ki_protocol::perm::KICK),
             bannir: e.peut(ki_protocol::perm::BAN),
+            supprimer: e.peut(ki_protocol::perm::DELETE_MESSAGES),
         },
     }
 }
@@ -362,7 +426,7 @@ fn fil(a: &Appli) -> Fil {
             .messages
             .iter()
             .map(|m| VueMessage {
-                auteur_id: m.user_id,
+                auteur_id: id_page(m.user_id),
                 auteur: m.username.clone(),
                 couleur: couleur_de(m.user_id, &m.username),
                 bot: ki_core::etat::est_bot(m.user_id),
@@ -422,6 +486,8 @@ fn lancer(app: &AppHandle, partage: &Partage) {
     // Une connexion neuve repart d'un état vierge, mais garde le salon lu :
     // l'accueil le rouvrira.
     a.etat = Appli::etat_vierge(a.etat.courant);
+    a.pokes_annonces = false;
+    a.photos_demandees.clear();
     let reveil: net::Reveil = Arc::new(|| {});
     let mut handle = net::connect(
         id.serveur.clone(),
@@ -457,13 +523,38 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                     }
                     let _ = app.emit("empreinte", fp);
                 }
+                Event::Msg(ServerMsg::Avatar { user_id, hash, data }) => {
+                    // Une photo de profil : base64 d'un PNG, qu'on passe à
+                    // la page telle quelle (après un contrôle des caractères :
+                    // elle finit dans une adresse « data: »).
+                    let url = data
+                        .filter(|d| {
+                            d.len() < 200_000
+                                && d.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+                        })
+                        .map(|d| format!("data:image/png;base64,{d}"));
+                    a.photos.insert(user_id, hash);
+                    let _ = app.emit("photo", (id_page(user_id), url));
+                }
                 Event::Msg(msg) => {
                     let accueil = matches!(msg, ServerMsg::Welcome { .. });
+                    let roster = matches!(msg, ServerMsg::Members { .. } | ServerMsg::MemberUpdate { .. });
+                    let non_lus = matches!(msg, ServerMsg::NonLus { .. });
                     if touche_au_fil(&msg) {
                         a.fil_sale = true;
                     }
                     a.vue_sale = true;
                     let effets = a.etat.appliquer(msg);
+                    // Un serveur qui tient les lus connaît les pokes : on les
+                    // accepte, comme le PC. Sans ça, il refusait qu'on nous
+                    // poke (« client d'avant »).
+                    if non_lus && !a.pokes_annonces {
+                        a.pokes_annonces = true;
+                        a.envoyer(ClientMsg::AccepterPokes { accepter: true });
+                    }
+                    if roster {
+                        demander_photos(&mut a);
+                    }
                     if accueil {
                         a.deja_accueilli = true;
                         if let Some(id) = a.identifiants.as_mut() {
@@ -530,6 +621,23 @@ fn lancer(app: &AppHandle, partage: &Partage) {
             }
         }
     });
+}
+
+/// Demande les photos de profil manquantes ou changées, en une fois.
+fn demander_photos(a: &mut Appli) {
+    let mut ids = Vec::new();
+    for m in &a.etat.membres {
+        let Some(h) = &m.avatar else { continue };
+        if a.photos.get(&m.user_id) == Some(h) {
+            continue;
+        }
+        if a.photos_demandees.insert((m.user_id, h.clone())) {
+            ids.push(m.user_id);
+        }
+    }
+    for lot in ids.chunks(64) {
+        a.envoyer(ClientMsg::RequestAvatars { user_ids: lot.to_vec() });
+    }
 }
 
 /// Fin de session sans reprise : refus, expulsion, déconnexion voulue.
@@ -605,6 +713,7 @@ fn horloge(app: AppHandle, partage: Partage) {
             if let Some(parle) = parle {
                 if parle != a.parle_annonce && a.etat.vocal.is_some() {
                     a.parle_annonce = parle;
+                    a.vue_sale = true;
                     let muet = a.muet || a.sourd;
                     a.envoyer(ClientMsg::VoiceState { speaking: parle, muted: muet });
                 }
@@ -712,7 +821,7 @@ fn regarde(partage: State<'_, Partage>, oui: bool) {
 fn envoyer(
     partage: State<'_, Partage>,
     texte: String,
-    reponse: Option<(UserId, u64)>,
+    reponse: Option<(IdPage, u64)>,
 ) -> Result<(), String> {
     let a = partage.lock().unwrap();
     let texte = texte.trim().to_string();
@@ -722,16 +831,34 @@ fn envoyer(
     let salon = a.etat.courant.ok_or("aucun salon ouvert")?;
     a.envoyer(ClientMsg::Chat {
         text: texte,
-        reply_to: reponse.map(|(user_id, ts)| MsgRef { user_id, ts }),
+        reply_to: reponse.map(|(user_id, ts)| MsgRef { user_id: id_rust(user_id), ts }),
         salon: Some(salon),
     });
     Ok(())
 }
 
 #[tauri::command]
-fn reagir(partage: State<'_, Partage>, auteur: UserId, ts: u64, emoji: String, on: bool) {
+fn reagir(partage: State<'_, Partage>, auteur: IdPage, ts: u64, emoji: String, on: bool) {
     let a = partage.lock().unwrap();
-    a.envoyer(ClientMsg::React { message: MsgRef { user_id: auteur, ts }, emoji, on });
+    a.envoyer(ClientMsg::React { message: MsgRef { user_id: id_rust(auteur), ts }, emoji, on });
+}
+
+/// Modifier son propre message (le serveur refuse ceux des autres).
+#[tauri::command]
+fn modifier(partage: State<'_, Partage>, auteur: IdPage, ts: u64, texte: String) {
+    let texte = texte.trim().to_string();
+    if texte.is_empty() {
+        return;
+    }
+    let a = partage.lock().unwrap();
+    a.envoyer(ClientMsg::EditMessage { message: MsgRef { user_id: id_rust(auteur), ts }, text: texte });
+}
+
+/// Supprimer un message : le sien, ou celui d'un autre avec la permission.
+#[tauri::command]
+fn supprimer(partage: State<'_, Partage>, auteur: IdPage, ts: u64) {
+    let a = partage.lock().unwrap();
+    a.envoyer(ClientMsg::DeleteMessage { message: MsgRef { user_id: id_rust(auteur), ts } });
 }
 
 #[tauri::command]
@@ -781,7 +908,8 @@ fn sourdine(partage: State<'_, Partage>, sourd: bool) {
 
 /// Le volume d'une personne, 1.0 = 100 %.
 #[tauri::command]
-fn volume_membre(partage: State<'_, Partage>, id: UserId, gain: f32) {
+fn volume_membre(partage: State<'_, Partage>, id: IdPage, gain: f32) {
+    let id = id_rust(id);
     let moteur = partage.lock().unwrap().lien.engine.clone();
     let garde = moteur.lock().unwrap();
     if let Some(m) = garde.as_ref() {
@@ -914,8 +1042,8 @@ fn essai(partage: State<'_, Partage>, action: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn poke(partage: State<'_, Partage>, id: UserId) {
-    partage.lock().unwrap().envoyer(ClientMsg::Poke { user_id: id });
+fn poke(partage: State<'_, Partage>, id: IdPage) {
+    partage.lock().unwrap().envoyer(ClientMsg::Poke { user_id: id_rust(id) });
 }
 
 /// Modération, comme le menu d'un membre sur PC. Le serveur revérifie
@@ -923,12 +1051,13 @@ fn poke(partage: State<'_, Partage>, id: UserId) {
 #[tauri::command]
 fn moderer(
     partage: State<'_, Partage>,
-    id: UserId,
+    id: IdPage,
     action: String,
     salon: Option<ChannelId>,
     motif: Option<String>,
     duree_s: Option<u64>,
 ) -> Result<(), String> {
+    let id = id_rust(id);
     let a = partage.lock().unwrap();
     let m = a.etat.membres.iter().find(|m| m.user_id == id).ok_or("membre introuvable")?;
     let username = m.username.clone();
@@ -946,6 +1075,67 @@ fn moderer(
     };
     a.envoyer(msg);
     Ok(())
+}
+
+/// Les images et vidéos postées dans les salons, servies à la page par le
+/// protocole `kimedia` : la page demande `kimedia://…/<adresse encodée>`, on
+/// va la chercher chez le serveur — **lui seul**, par HTTPS épinglé sur
+/// son empreinte, comme le PC — et on rend les octets. La WebView ne
+/// pourrait pas le faire seule : le certificat du port 8080 est celui du
+/// serveur, que rien ne signe.
+fn media(partage: &Partage, requete: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::{header, Response, StatusCode};
+    let refus = |code: StatusCode| Response::builder().status(code).body(Vec::new()).unwrap();
+    // Le chemin porte l'adresse d'origine, encodée.
+    let brut = requete.uri().path().trim_start_matches('/');
+    let Ok(adresse) = urlencoding::decode(brut) else { return refus(StatusCode::BAD_REQUEST) };
+    let (origine_attendue, empreinte) = {
+        let a = partage.lock().unwrap();
+        match &a.identifiants {
+            Some(i) => (origine(&i.serveur), i.empreinte.clone()),
+            None => return refus(StatusCode::FORBIDDEN),
+        }
+    };
+    // Seulement les fichiers de notre serveur.
+    if !adresse.starts_with(&format!("{origine_attendue}/files/")) {
+        return refus(StatusCode::FORBIDDEN);
+    }
+    let agent = ureq::AgentBuilder::new()
+        .tls_config(ki_client_quic::pinned_tls_config((!empreinte.is_empty()).then_some(empreinte.as_str())))
+        .https_only(true)
+        .build();
+    let mut req = agent.get(&adresse).timeout(Duration::from_secs(30));
+    // La lecture d'une vidéo avance par plages : on les transmet.
+    if let Some(plage) = requete.headers().get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        req = req.set("Range", plage);
+    }
+    let reponse = match req.call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => {
+            return refus(StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY))
+        }
+        Err(e) => {
+            tracing::warn!("média {adresse} : {e}");
+            return refus(StatusCode::BAD_GATEWAY);
+        }
+    };
+    let statut = reponse.status();
+    let mut construit = Response::builder()
+        .status(statut)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::ACCEPT_RANGES, "bytes");
+    for nom in ["content-type", "content-range"] {
+        if let Some(v) = reponse.header(nom) {
+            construit = construit.header(nom, v);
+        }
+    }
+    // 64 Mio au plus : la plus grosse vidéo raisonnable d'un salon.
+    let mut octets = Vec::new();
+    use std::io::Read;
+    if reponse.into_reader().take(64 << 20).read_to_end(&mut octets).is_err() {
+        return refus(StatusCode::BAD_GATEWAY);
+    }
+    construit.body(octets).unwrap_or_else(|_| refus(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 fn traces() {
@@ -975,7 +1165,13 @@ pub fn run() {
         etat: Appli::etat_vierge(None),
         ..Appli::default()
     }));
+    let pour_media = partage.clone();
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("kimedia", move |_ctx, requete, repondre| {
+            let partage = pour_media.clone();
+            // Hors du fil de la WebView : un téléchargement prend son temps.
+            std::thread::spawn(move || repondre.respond(media(&partage, &requete)));
+        })
         .manage(partage)
         .setup(|app| {
             horloge(app.handle().clone(), app.state::<Partage>().inner().clone());
@@ -1000,6 +1196,8 @@ pub fn run() {
             parler,
             etat_audio,
             essai,
+            modifier,
+            supprimer,
         ])
         .run(tauri::generate_context!())
         .expect("lancement de l'appli");

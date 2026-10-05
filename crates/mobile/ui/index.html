@@ -73,6 +73,12 @@
 
   .avatar { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #0c0f14; flex: none; position: relative; }
   .avatar.mini { width: 24px; height: 24px; font-size: 11px; }
+  .avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+  .media { display: block; margin-top: 6px; max-width: min(100%, 360px); max-height: 320px; border-radius: 10px; background: var(--releve); }
+  video.media { width: min(100%, 360px); }
+  #visionneuse { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 40; background: rgba(0,0,0,.92); display: flex; align-items: center; justify-content: center; }
+  #visionneuse img { max-width: 100%; max-height: 100%; }
+  .msg .texte-msg:active { background: var(--releve); border-radius: 6px; }
   .avatar.parle { box-shadow: 0 0 0 2px var(--fond), 0 0 0 4px var(--parle); }
   .avatar.absent { opacity: .4; }
   .membre-info { flex: 1; min-width: 0; }
@@ -222,6 +228,8 @@
   <symbol id="i-interdit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
   <symbol id="i-deplacer" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
   <symbol id="i-reglages" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-crayon" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M14 6l4 4"/></symbol>
+  <symbol id="i-poubelle" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
   <symbol id="i-couronne" viewBox="0 0 24 24"><path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/></symbol>
 </svg>
 
@@ -250,7 +258,6 @@
 <section class="ecran cache" id="accueil">
   <div class="entete">
     <h1 id="nom-serveur">ki-chat</h1>
-    <button class="icone" id="btn-deconnecter" aria-label="Se déconnecter"><svg><use href="#i-sortir"/></svg></button>
   </div>
   <div id="etat-reseau" class="cache">Connexion perdue — reconnexion…</div>
   <div class="defile" id="vue-salons"></div>
@@ -301,6 +308,7 @@
   let filCourant = null;   // dernier fil reçu
   let onglet = "salons";
   let reponseA = null;     // { auteur_id, ts, auteur, texte }
+  let edition = null;      // le message qu'on modifie
   let enConnexion = false;
 
   // ---------- petits outils ----------
@@ -339,9 +347,24 @@
     r.style.color = rang.couleur;
     return r;
   }
-  function avatar(nom, classes = "", teinte = null) {
+  // Les photos de profil, reçues du Rust au fil de l'eau.
+  const photos = {};
+  listen("photo", (e) => {
+    const [id, url] = e.payload;
+    if (url) photos[id] = url; else delete photos[id];
+    if (vue) { dessinerSalons(); dessinerMembres(); }
+    if (filCourant) dessinerFil();
+  });
+  function avatar(nom, classes = "", teinte = null, id = null) {
     const a = document.createElement("div");
     a.className = "avatar " + classes;
+    if (id != null && photos[id]) {
+      const img = document.createElement("img");
+      img.src = photos[id];
+      img.alt = "";
+      a.append(img);
+      return a;
+    }
     a.style.background = teinte || couleur(nom);
     a.textContent = [...nom][0]?.toUpperCase() || "?";
     return a;
@@ -443,7 +466,7 @@
     fermerFeuille();
   });
 
-  $("btn-deconnecter").onclick = () => {
+  function demanderDeconnexion() {
     ouvrirFeuille((f) => {
       f.append(titre("Se déconnecter de " + (vue?.serveur || "ce serveur") + " ?"));
       f.append(action("sortir", "Se déconnecter", () => { invoke("deconnecter"); }));
@@ -538,7 +561,7 @@
     const d = document.createElement("div");
     d.className = "occupant";
     d.onclick = (e) => { e.stopPropagation(); menuMembre(p.id); };
-    d.append(avatar(p.nom, "mini" + (p.parle ? " parle" : ""), p.couleur));
+    d.append(avatar(p.nom, "mini" + (p.parle ? " parle" : ""), p.couleur, p.id));
     const bloc = document.createElement("div");
     bloc.className = "bloc";
     const n = document.createElement("div");
@@ -557,15 +580,15 @@
   function dessinerMembres() {
     const racine = $("vue-membres");
     racine.replaceChildren();
-    const enLigne = vue.membres.filter((m) => m.en_ligne);
-    const absents = vue.membres.filter((m) => !m.en_ligne);
+    const enLigne = vue.membres.filter((m) => m.en_ligne && !m.bot);
+    const absents = vue.membres.filter((m) => !m.en_ligne && !m.bot);
     for (const [titreSection, liste] of [["En ligne — " + enLigne.length, enLigne], ["Hors ligne — " + absents.length, absents]]) {
       if (!liste.length) continue;
       racine.append(section(titreSection));
       for (const m of liste) {
         const l = document.createElement("div");
         l.className = "ligne";
-        l.append(avatar(m.nom, m.en_ligne ? "" : "absent", m.couleur));
+        l.append(avatar(m.nom, m.en_ligne ? "" : "absent", m.couleur, m.id));
         const info = document.createElement("div");
         info.className = "membre-info";
         const n = document.createElement("div");
@@ -691,12 +714,12 @@
         remise.onclick = () => { r.value = 100; montrer(); reglerVolume(id, 1); };
         bloc.append(haut, r, remise);
         f.append(bloc);
-        if (m.en_ligne) f.append(action("poke", "Poke", () => invoke("poke", { id })));
+        if (m.en_ligne && !m.bot) f.append(action("poke", "Poke", () => invoke("poke", { id })));
       }
 
       // Modération : seulement ce qui aboutira (permission et rang).
       const d = vue.droits;
-      if (!moi && m.sous_moi && (d.couper || d.deplacer || d.expulser || d.bannir)) {
+      if (!moi && !m.bot && m.sous_moi && (d.couper || d.deplacer || d.expulser || d.bannir)) {
         const sep = document.createElement("div"); sep.className = "separation"; f.append(sep);
         if (d.couper) {
           f.append(action(m.force_muet ? "micro" : "micro-coupe", m.force_muet ? "Rendre le micro" : "Couper le micro",
@@ -753,7 +776,7 @@
     for (const p of s.occupants) {
       const l = document.createElement("div");
       l.className = "volume";
-      l.append(avatar(p.nom, "mini" + (p.parle ? " parle" : "")));
+      l.append(avatar(p.nom, "mini" + (p.parle ? " parle" : ""), p.couleur, p.id));
       const n = document.createElement("span");
       n.className = "nom"; n.textContent = p.nom + (p.id === vue.moi ? " (toi)" : "");
       n.style.color = p.couleur;
@@ -846,10 +869,38 @@
     }
   }
 
+  // Un lien vers un fichier de notre serveur : image ou vidéo, montrée dans
+  // le fil comme sur PC. Les autres liens restent des liens.
+  const IMAGE = /\.(png|jpe?g|bmp|gif|webp)$/i;
+  const VIDEO = /\.(mp4|mov|webm|mkv|m4v|avi)$/i;
+  function medias(texte) {
+    const origine = vue?.origine;
+    if (!origine) return [];
+    const trouves = [];
+    for (const lien of texte.match(/https?:\/\/[^\s<]+/g) || []) {
+      const net = lien.replace(/^http:/, "https:");
+      if (!net.startsWith(origine + "/files/")) continue;
+      const chemin = net.split(/[?#]/)[0];
+      if (IMAGE.test(chemin)) trouves.push({ type: "image", url: net });
+      else if (VIDEO.test(chemin)) trouves.push({ type: "video", url: net, poster: chemin.replace(/[^/]+$/, "poster.jpg") });
+    }
+    return trouves;
+  }
+  const viaRust = (url) => window.__TAURI__.core.convertFileSrc(url, "kimedia");
+  function ouvrirImage(src) {
+    const v = document.createElement("div");
+    v.id = "visionneuse";
+    const img = document.createElement("img");
+    img.src = src;
+    v.append(img);
+    v.onclick = () => v.remove();
+    document.body.append(v);
+  }
+
   function message(m, suite) {
     const d = document.createElement("div");
     d.className = "msg" + (suite ? " suite" : "") + (m.me_nomme ? " nomme" : "");
-    const av = avatar(m.auteur, "", m.couleur);
+    const av = avatar(m.auteur, "", m.couleur, m.auteur_id);
     if (!m.bot) av.onclick = () => menuMembre(m.auteur_id);
     d.append(av);
     const c = document.createElement("div");
@@ -872,7 +923,28 @@
     const t = document.createElement("div");
     t.className = "texte"; t.innerHTML = miseEnForme(m.texte);
     if (m.modifie) { const e = document.createElement("span"); e.className = "modifie"; e.textContent = " (modifié)"; t.append(e); }
+    t.classList.add("texte-msg");
     c.append(t);
+    for (const md of medias(m.texte)) {
+      if (md.type === "image") {
+        const img = document.createElement("img");
+        img.className = "media";
+        img.loading = "lazy";
+        img.src = viaRust(md.url);
+        img.alt = "image";
+        img.onclick = (e) => { e.stopPropagation(); ouvrirImage(img.src); };
+        c.append(img);
+      } else {
+        const v = document.createElement("video");
+        v.className = "media";
+        v.controls = true;
+        v.preload = "metadata";
+        v.poster = viaRust(md.poster);
+        v.src = viaRust(md.url);
+        v.onclick = (e) => e.stopPropagation();
+        c.append(v);
+      }
+    }
     if (m.reactions.length) {
       const rs = document.createElement("div");
       rs.className = "reactions";
@@ -886,6 +958,8 @@
       c.append(rs);
     }
     d.append(c);
+    // Toucher le texte ouvre le menu du message ; l'appui long aussi.
+    t.onclick = (e) => { if (!e.target.closest("a")) menuMessage(m); };
     appuiLong(d, () => menuMessage(m));
     return d;
   }
@@ -911,15 +985,35 @@
       }
       f.append(e);
       f.append(action("repondre", "Répondre", () => {
+        edition = null;
         reponseA = m;
         $("repond-a").textContent = "Réponse à " + m.auteur + " : " + m.texte;
         $("repond").classList.remove("cache");
         $("saisie").focus();
       }));
+      const mien = m.auteur_id === vue?.moi;
+      if (mien) {
+        f.append(action("crayon", "Modifier", () => {
+          reponseA = null;
+          edition = m;
+          $("repond-a").textContent = "Modification de ton message";
+          $("repond").classList.remove("cache");
+          saisie.value = m.texte;
+          saisie.dispatchEvent(new Event("input"));
+          saisie.focus();
+        }));
+      }
+      if (mien || vue?.droits.supprimer) {
+        f.append(action("poubelle", "Supprimer", async () => {
+          const ok = await demander({ question: "Supprimer ce message ?", bouton: "Supprimer", danger: true });
+          if (ok) invoke("supprimer", { auteur: m.auteur_id, ts: m.ts });
+        }, true));
+      }
     });
   }
   function reponseAnnulee() {
     reponseA = null;
+    if (edition) { edition = null; saisie.value = ""; saisie.style.height = "auto"; }
     $("repond").classList.add("cache");
   }
   $("annuler-reponse").onclick = reponseAnnulee;
@@ -963,7 +1057,12 @@
     const texte = saisie.value.trim();
     if (!texte) return;
     try {
-      await invoke("envoyer", { texte, reponse: reponseA ? [reponseA.auteur_id, reponseA.ts] : null });
+      if (edition) {
+        await invoke("modifier", { auteur: edition.auteur_id, ts: edition.ts, texte });
+        edition = null;
+      } else {
+        await invoke("envoyer", { texte, reponse: reponseA ? [reponseA.auteur_id, reponseA.ts] : null });
+      }
       saisie.value = "";
       saisie.style.height = "auto";
       reponseAnnulee();
@@ -1110,7 +1209,7 @@
     const sortir = document.createElement("button");
     sortir.className = "petit-bouton";
     sortir.textContent = "Se déconnecter";
-    sortir.onclick = () => $("btn-deconnecter").click();
+    sortir.onclick = demanderDeconnexion;
     lc.append(sortir);
 
     elementsAudio = { niveau, seuil, etatSilero, boutonsEssai, texteEssai, dernierEssai: null };
