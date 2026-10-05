@@ -37,7 +37,8 @@
 
   /* Connexion */
   #connexion .corps { flex: 1; align-self: center; overflow-y: auto; padding: 32px 20px calc(24px + var(--bas)); max-width: 440px; width: 100%; margin: 0 auto; }
-  .marque { font-size: 30px; font-weight: 800; letter-spacing: -.5px; margin: 8px 0 4px; }
+  .marque { font-size: 30px; font-weight: 800; letter-spacing: -.5px; margin: 8px 0 4px; display: flex; align-items: center; }
+  .marque .logo-ki { width: 44px; height: 44px; stroke: none; margin-right: 12px; }
   .marque b { color: var(--accent); }
   .accroche { color: var(--doux); margin: 0 0 28px; }
   label { display: block; color: var(--doux); font-size: 13px; margin: 14px 0 6px; }
@@ -237,7 +238,19 @@
 <!-- Connexion -->
 <section class="ecran" id="connexion">
   <div class="corps">
-    <div class="marque">ki<b>·</b>chat</div>
+    <div class="marque">
+      <!-- Le logo de ki-chat, celui du PC (appicon.rs), redessiné en vectoriel. -->
+      <svg class="logo-ki" viewBox="0 0 1024 1024" aria-hidden="true">
+        <rect x="48" y="48" width="928" height="928" rx="250" fill="#00d26a"/>
+        <g fill="#0c0f14">
+          <rect x="184" y="416" width="80" height="192" rx="40"/>
+          <rect x="360" y="256" width="80" height="512" rx="40"/>
+          <rect x="536" y="336" width="80" height="352" rx="40"/>
+          <rect x="712" y="464" width="80" height="96" rx="40"/>
+        </g>
+      </svg>
+      <span>ki<b>·</b>chat</span>
+    </div>
     <p class="accroche">Ton groupe, dans la poche.</p>
     <label for="serveur">Serveur</label>
     <input class="champ" id="serveur" value="ts.baws.fun" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url">
