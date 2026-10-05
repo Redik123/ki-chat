@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fusionné par Tauri dans gen/apple/ki-mobile_iOS/Info.plist à chaque build.
+  Sans la phrase du micro, iOS tue l'appli à la première ouverture du micro ;
+  le mode « audio » garde le vocal vivant écran éteint (comme VocalService
+  sur Android).
+-->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ki-chat utilise le micro pour parler dans les salons vocaux.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+</dict>
+</plist>

@@ -1,0 +1,488 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		07243CAD47B7EEBB66F76455 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1AC27043072B0F17130344B4 /* WebKit.framework */; };
+		0B8E924ABB0DF9D5993C34B2 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 997EDCE2287F0342647CC81C /* CoreGraphics.framework */; };
+		0E9B41CA884138D94728D7EA /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 15D89A1768E77FEBE9710A9F /* CoreAudio.framework */; };
+		3A134ABDC25BEE4102420959 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C741286287933F84645DCAF2 /* Metal.framework */; };
+		457D9E8E9B2B0CE9B6612B46 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6F8FBB7B75EE6ADBEF5EDFEA /* Assets.xcassets */; };
+		4D12E1B167046989E4256566 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 66F6554FF7E08F9153CB1D42 /* main.mm */; };
+		5CA2C397EFA633834CD6A2C6 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D06EB5EC1AC7D3CD153CCB26 /* AVFoundation.framework */; };
+		8DE037F20E01575A1A4C8D36 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 68BD62145E9A5B71D89760CC /* LaunchScreen.storyboard */; };
+		8E542EE7485F1A5AB0E98373 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3B999840BE5C2E54D8225881 /* MetalKit.framework */; };
+		A2D0508E2F0BF893B31EE7AB /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B9DB58F48B12503F4895BEC /* AudioToolbox.framework */; };
+		B15B3C72737016B5B57C4FA9 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 977D0EC51B78B146D6981C68 /* QuartzCore.framework */; };
+		BED52392CACF38159DAE30F8 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 50EEA74761C9669DCF44BFFF /* Security.framework */; };
+		D82F7DEF69027C9FD5992A1A /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2BBAFAEC61872069369B42C4 /* libapp.a */; };
+		E3D3E3D695FD9DB81DF85231 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 8865999D350350D1134776B9 /* assets */; };
+		ED12E8FF8778797298B5823A /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0EC9775E839BBB4C7D2E7A4E /* UIKit.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		02BCDCF3338801DA6B823FB1 /* ki-mobile_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "ki-mobile_iOS.entitlements"; sourceTree = "<group>"; };
+		0449CC880F2B52A1DAA770EE /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		0EC9775E839BBB4C7D2E7A4E /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		15D89A1768E77FEBE9710A9F /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
+		1AC27043072B0F17130344B4 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		2BBAFAEC61872069369B42C4 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		3B999840BE5C2E54D8225881 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		3DBF2B088C386D06D1B932B7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		50EEA74761C9669DCF44BFFF /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		66F6554FF7E08F9153CB1D42 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		68BD62145E9A5B71D89760CC /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		6B9DB58F48B12503F4895BEC /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
+		6F8FBB7B75EE6ADBEF5EDFEA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8865999D350350D1134776B9 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		8CB5AF382A6BF5347551E885 /* ki-mobile_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "ki-mobile_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		977D0EC51B78B146D6981C68 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		997EDCE2287F0342647CC81C /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		B44125039FA2107B1BBEAD40 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		C741286287933F84645DCAF2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		D06EB5EC1AC7D3CD153CCB26 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		F3F7C126FAD1C0364D354D76 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D060D3AA16B3EAFE1D07351F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D82F7DEF69027C9FD5992A1A /* libapp.a in Frameworks */,
+				A2D0508E2F0BF893B31EE7AB /* AudioToolbox.framework in Frameworks */,
+				5CA2C397EFA633834CD6A2C6 /* AVFoundation.framework in Frameworks */,
+				0E9B41CA884138D94728D7EA /* CoreAudio.framework in Frameworks */,
+				0B8E924ABB0DF9D5993C34B2 /* CoreGraphics.framework in Frameworks */,
+				3A134ABDC25BEE4102420959 /* Metal.framework in Frameworks */,
+				8E542EE7485F1A5AB0E98373 /* MetalKit.framework in Frameworks */,
+				B15B3C72737016B5B57C4FA9 /* QuartzCore.framework in Frameworks */,
+				BED52392CACF38159DAE30F8 /* Security.framework in Frameworks */,
+				ED12E8FF8778797298B5823A /* UIKit.framework in Frameworks */,
+				07243CAD47B7EEBB66F76455 /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0CE260757A3DE52358E58A06 /* bindings */ = {
+			isa = PBXGroup;
+			children = (
+				F3F7C126FAD1C0364D354D76 /* bindings.h */,
+			);
+			path = bindings;
+			sourceTree = "<group>";
+		};
+		195C88AB2C90547792B4AE97 /* ki-mobile */ = {
+			isa = PBXGroup;
+			children = (
+				66F6554FF7E08F9153CB1D42 /* main.mm */,
+				0CE260757A3DE52358E58A06 /* bindings */,
+			);
+			path = "ki-mobile";
+			sourceTree = "<group>";
+		};
+		2145922018D57C52767367E0 /* ki-mobile_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				3DBF2B088C386D06D1B932B7 /* Info.plist */,
+				02BCDCF3338801DA6B823FB1 /* ki-mobile_iOS.entitlements */,
+			);
+			path = "ki-mobile_iOS";
+			sourceTree = "<group>";
+		};
+		2FFA2F9BB91532D9003E96A9 /* Externals */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Externals;
+			sourceTree = "<group>";
+		};
+		4CD32ECE1D8D6751C49A8009 = {
+			isa = PBXGroup;
+			children = (
+				8865999D350350D1134776B9 /* assets */,
+				6F8FBB7B75EE6ADBEF5EDFEA /* Assets.xcassets */,
+				68BD62145E9A5B71D89760CC /* LaunchScreen.storyboard */,
+				2FFA2F9BB91532D9003E96A9 /* Externals */,
+				2145922018D57C52767367E0 /* ki-mobile_iOS */,
+				FAD3996216D9F585104E431B /* Sources */,
+				FCC671ED8808F7D6380BD304 /* src */,
+				DAF3A09EF94000DBCD654E2B /* Frameworks */,
+				E3D356F1C20DEEAFCF510797 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DAF3A09EF94000DBCD654E2B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				6B9DB58F48B12503F4895BEC /* AudioToolbox.framework */,
+				D06EB5EC1AC7D3CD153CCB26 /* AVFoundation.framework */,
+				15D89A1768E77FEBE9710A9F /* CoreAudio.framework */,
+				997EDCE2287F0342647CC81C /* CoreGraphics.framework */,
+				2BBAFAEC61872069369B42C4 /* libapp.a */,
+				C741286287933F84645DCAF2 /* Metal.framework */,
+				3B999840BE5C2E54D8225881 /* MetalKit.framework */,
+				977D0EC51B78B146D6981C68 /* QuartzCore.framework */,
+				50EEA74761C9669DCF44BFFF /* Security.framework */,
+				0EC9775E839BBB4C7D2E7A4E /* UIKit.framework */,
+				1AC27043072B0F17130344B4 /* WebKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		E3D356F1C20DEEAFCF510797 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8CB5AF382A6BF5347551E885 /* ki-mobile_iOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		FAD3996216D9F585104E431B /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				195C88AB2C90547792B4AE97 /* ki-mobile */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		FCC671ED8808F7D6380BD304 /* src */ = {
+			isa = PBXGroup;
+			children = (
+				B44125039FA2107B1BBEAD40 /* lib.rs */,
+				0449CC880F2B52A1DAA770EE /* main.rs */,
+			);
+			name = src;
+			path = ../../src;
+			sourceTree = "<group>";
+		};
+		"TEMP_60266F61-00E4-404D-9D9D-CAD4946B4484" /* x86_64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = x86_64;
+			sourceTree = "<group>";
+		};
+		"TEMP_DB745918-79AC-47C9-AC79-17E97D23BCCF" /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = arm64;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		39538074FEDCF2BAE607E46E /* ki-mobile_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CF65942593A269D7FE043906 /* Build configuration list for PBXNativeTarget "ki-mobile_iOS" */;
+			buildPhases = (
+				F8AF97ACBBCF82BCF39B52F5 /* Build Rust Code */,
+				3EC9962F47D9DE486CD57409 /* Sources */,
+				CBD5520F88E63280CC20891D /* Resources */,
+				D060D3AA16B3EAFE1D07351F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "ki-mobile_iOS";
+			packageProductDependencies = (
+			);
+			productName = "ki-mobile_iOS";
+			productReference = 8CB5AF382A6BF5347551E885 /* ki-mobile_iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B5E61451C6AA5C51ACCDF4FE /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = 92CC8B93B9C4DB61B4AAD283 /* Build configuration list for PBXProject "ki-mobile" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4CD32ECE1D8D6751C49A8009;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E3D356F1C20DEEAFCF510797 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				39538074FEDCF2BAE607E46E /* ki-mobile_iOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CBD5520F88E63280CC20891D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				457D9E8E9B2B0CE9B6612B46 /* Assets.xcassets in Resources */,
+				8DE037F20E01575A1A4C8D36 /* LaunchScreen.storyboard in Resources */,
+				E3D3E3D695FD9DB81DF85231 /* assets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		F8AF97ACBBCF82BCF39B52F5 /* Build Rust Code */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Code";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a",
+				"$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Le .cargo/config.toml de la racine pose le cmake de Visual Studio\n# (chemin Windows) ; une variable d'environnement l'emporte.\nexport PATH=\"/opt/homebrew/bin:$PATH\"\nexport CMAKE=\"$(command -v cmake)\"\ncargo tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		3EC9962F47D9DE486CD57409 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4D12E1B167046989E4256566 /* main.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		695A84C356F3233FA0573C1D /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = debug;
+		};
+		8D3EEE979705DBE9044B3856 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "ki-mobile_iOS/ki-mobile_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "ki-mobile_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = fun.baws.kichat;
+				PRODUCT_NAME = "ki-chat";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "9NK7XZ7V9K";
+			};
+			name = release;
+		};
+		BC48BC8910D78C022B06A8FA /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "ki-mobile_iOS/ki-mobile_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "ki-mobile_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = fun.baws.kichat;
+				PRODUCT_NAME = "ki-chat";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "9NK7XZ7V9K";
+			};
+			name = debug;
+		};
+		DD59D2A7E4D7EE6F4CEAA1D4 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		92CC8B93B9C4DB61B4AAD283 /* Build configuration list for PBXProject "ki-mobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				695A84C356F3233FA0573C1D /* debug */,
+				DD59D2A7E4D7EE6F4CEAA1D4 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		CF65942593A269D7FE043906 /* Build configuration list for PBXNativeTarget "ki-mobile_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC48BC8910D78C022B06A8FA /* debug */,
+				8D3EEE979705DBE9044B3856 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B5E61451C6AA5C51ACCDF4FE /* Project object */;
+}

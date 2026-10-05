@@ -1,5 +1,8 @@
 # Artefacts de compilation
 /target
+# L'appli mobile compilée à la main (sans CARGO_TARGET_DIR, comme sur Mac
+# pour iOS) écrit à côté de son Cargo.toml.
+/crates/mobile/target
 
 # Données du serveur : comptes (hachages Argon2id), historique des salons,
 # fichiers partagés, identité du serveur — et surtout la CLÉ PRIVÉE TLS
@@ -31,3 +34,6 @@
 
 # Outillage local de session : réglages et copies de travail des agents.
 /.claude/
+
+# Métadonnées du Finder (macOS)
+.DS_Store
