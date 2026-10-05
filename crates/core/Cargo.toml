@@ -17,6 +17,9 @@ tracing.workspace = true
 anyhow.workspace = true
 bytes = "1"
 chacha20poly1305 = "0.10"
+# La vérification des mises à jour (maj.rs) : les mêmes que le PC et ki-signer.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 serde_json.workspace = true

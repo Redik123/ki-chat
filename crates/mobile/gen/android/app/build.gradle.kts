@@ -14,16 +14,40 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// La clé de signature des versions publiées. Le fichier n'est jamais dans
+// Git : sur le PC de drion il pointe vers D:\DEV\KI-Chat-cles, en CI il est
+// écrit à partir des secrets du dépôt. Absent, la version « release » n'est
+// pas signée (et Android refusera de l'installer) : c'est voulu, plutôt que
+// de la signer avec une clé de passage qui interdirait ensuite toute mise à
+// jour.
+val cleSignature = Properties().apply {
+    val fichier = rootProject.file("keystore.properties")
+    if (fichier.exists()) {
+        fichier.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 37
     namespace = "fun.baws.kichat"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "fun.baws.kichat"
-        minSdk = 24
+        // AAudio (le son du vocal, par cpal) demande Android 8.
+        minSdk = 26
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (cleSignature.getProperty("storeFile") != null) {
+            create("publication") {
+                storeFile = file(cleSignature.getProperty("storeFile"))
+                storePassword = cleSignature.getProperty("password")
+                keyAlias = cleSignature.getProperty("keyAlias")
+                keyPassword = cleSignature.getProperty("password")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -39,6 +63,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfigs.findByName("publication")?.let { signingConfig = it }
             optimization {
                enable = true
             }

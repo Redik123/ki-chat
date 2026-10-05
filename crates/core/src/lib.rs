@@ -6,9 +6,11 @@
 //!   tenu à jour d'après les messages du serveur ;
 //! - [`markup`] : la mise en forme des messages et la détection des
 //!   mentions ;
-//! - [`apparence`] : les couleurs des pseudos et des rangs, celles du PC.
+//! - [`apparence`] : les couleurs des pseudos et des rangs, celles du PC ;
+//! - [`maj`] : la vérification des mises à jour signées.
 
 pub mod apparence;
 pub mod etat;
+pub mod maj;
 pub mod markup;
 pub mod net;

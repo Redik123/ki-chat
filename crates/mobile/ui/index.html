@@ -191,6 +191,9 @@
   #bandeau.erreur { background: #3a1d22; color: #ffb4b4; }
   #bandeau.masque { opacity: 0; transform: translateY(-8px); pointer-events: none; }
   #etat-reseau { background: #3b2a12; color: #ffc785; font-size: 13px; text-align: center; padding: 6px; }
+  #bandeau-maj { display: flex; align-items: center; padding: 9px 14px; background: rgba(0,210,106,.12); border-bottom: 1px solid var(--bord-doux); font-size: 14px; }
+  #bandeau-maj span { flex: 1; min-width: 0; }
+  #bandeau-maj button { margin-left: 10px; }
 
   /* Les WebView d'avant la 84 ignorent « gap » dans les flexbox : les
      espacements passent par des marges. */
@@ -281,6 +284,7 @@
     <h1 id="nom-serveur">ki-chat</h1>
   </div>
   <div id="etat-reseau" class="cache">Connexion perdue — reconnexion…</div>
+  <div id="bandeau-maj" class="cache"><span id="texte-maj"></span><button class="petit-bouton plein" id="btn-maj">Mettre à jour</button></div>
   <div class="defile" id="vue-salons"></div>
   <div class="defile cache" id="vue-membres"></div>
   <div class="defile cache" id="vue-reglages"></div>
@@ -1321,6 +1325,15 @@
         "arriere_plan");
     }
 
+    const ver = groupe("Version");
+    const { l: lv } = option(ver, "ki-chat " + versionAppli,
+      majDispo ? "La version " + majDispo.version + " est disponible." : "Les mises à jour se vérifient au lancement.");
+    const bv = document.createElement("button");
+    bv.className = "petit-bouton" + (majDispo ? " plein" : "");
+    bv.textContent = majDispo ? "Mettre à jour" : "Vérifier";
+    bv.onclick = () => (majDispo ? installerMaj() : verifierMaj(false));
+    lv.append(bv);
+
     const compte = groupe("Compte");
     const { l: lc } = option(compte, (vue?.mon_pseudo || "") + " · " + (vue?.serveur || ""), relire("serveur") || "");
     const sortir = document.createElement("button");
@@ -1386,6 +1399,60 @@
           : "Ta voix arrive " + Math.round(-a.essai.ecart_db) + " dB plus bas que la moyenne.")
       : !a.actif ? "Le micro démarre…" : "";
   }, 100);
+
+  // ---------- mises à jour ----------
+  // Comme le PC : la dernière release GitHub ; l'APK est téléchargé et
+  // vérifié par le Rust (manifeste signé), puis confié à l'installeur
+  // d'Android, qui demande l'accord de l'utilisateur au besoin.
+  let majDispo = null;
+  let majEnCours = false;
+  let versionAppli = "";
+  invoke("version").then((v) => { versionAppli = v; });
+
+  async function verifierMaj(silencieux = true) {
+    try {
+      majDispo = await invoke("verifier_maj");
+    } catch (err) {
+      if (!silencieux) bandeau("Impossible de vérifier les mises à jour : " + err, true);
+      return;
+    }
+    $("bandeau-maj").classList.toggle("cache", !majDispo);
+    if (majDispo) $("texte-maj").textContent = "Nouvelle version " + majDispo.version + " disponible";
+    else if (!silencieux) bandeau("ki-chat est à jour (" + versionAppli + ")");
+    if (onglet === "reglages") dessinerReglages();
+  }
+
+  async function installerMaj() {
+    if (!majDispo || majEnCours) return;
+    if (!android) { bandeau("La mise à jour s'installe depuis le téléphone.", true); return; }
+    majEnCours = true;
+    $("btn-maj").disabled = true;
+    $("texte-maj").textContent = "Téléchargement de la " + majDispo.version + "…";
+    try {
+      const chemin = await invoke("telecharger_maj");
+      $("texte-maj").textContent = "Installation…";
+      const r = android.installerApk(chemin);
+      if (r === "autorisation") {
+        $("texte-maj").textContent = "Autorise ki-chat à installer des applis, puis reviens et réappuie";
+      } else if (r !== "ok") {
+        bandeau("Installation impossible : " + r, true);
+        $("texte-maj").textContent = "Nouvelle version " + majDispo.version + " disponible";
+      }
+    } catch (err) {
+      bandeau("Mise à jour refusée : " + err, true);
+      $("texte-maj").textContent = "Nouvelle version " + majDispo.version + " disponible";
+    } finally {
+      majEnCours = false;
+      $("btn-maj").disabled = false;
+    }
+  }
+  $("btn-maj").onclick = installerMaj;
+  listen("maj_progres", (e) => {
+    if (majEnCours) $("texte-maj").textContent = "Téléchargement de la " + majDispo.version + "… " + Math.round(e.payload * 100) + " %";
+  });
+  // Au lancement, puis toutes les six heures tant que l'appli reste ouverte.
+  setTimeout(() => verifierMaj(true), 3000);
+  setInterval(() => verifierMaj(true), 6 * 3600 * 1000);
 
   // ---------- feuilles du bas ----------
   let quandFerme = null;

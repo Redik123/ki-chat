@@ -19,3 +19,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# La page appelle window.KiAndroid : R8 ne doit ni renommer ni retirer ses
+# méthodes, qu'il croit inutilisées (aucun appel Kotlin ne les vise).
+-keepclassmembers class fun.baws.kichat.KiAndroid {
+    @android.webkit.JavascriptInterface <methods>;
+}

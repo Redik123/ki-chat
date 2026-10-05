@@ -36,7 +36,7 @@ bytes = "1"
 tracing = "0.1"
 # Les images et vidéos des salons, par HTTPS épinglé sur le serveur (comme
 # le PC) : voir `media` dans lib.rs.
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 urlencoding = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

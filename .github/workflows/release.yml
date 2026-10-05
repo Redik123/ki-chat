@@ -6,10 +6,11 @@
 # Les deux doivent donc coïncider, sans quoi un client à jour se croirait
 # indéfiniment en retard — d'où le contrôle qui ouvre chaque compilation.
 #
-# Quatre travaux : `windows` et `macos` compilent et déposent leurs artefacts,
-# NON signés ; `signature` signe, à part ; `publish` attend tout le monde et
-# crée la release d'un seul geste — deux travaux qui créeraient chacun la
-# release se marcheraient dessus.
+# Cinq travaux : `windows`, `macos` et `android` compilent et déposent leurs
+# artefacts, NON signés en Ed25519 (l'APK porte déjà la signature Android,
+# imposée par le système) ; `signature` signe, à part ; `publish` attend tout
+# le monde et crée la release d'un seul geste — deux travaux qui créeraient
+# chacun la release se marcheraient dessus.
 #
 # Les actions sont épinglées par empreinte de commit, pas par étiquette : une
 # étiquette se déplace, et elle déplacerait avec elle du code qui tourne à
@@ -242,8 +243,100 @@ jobs:
   # L'environnement `release` permet d'exiger une approbation et de limiter
   # la signature aux tags, dans les réglages du dépôt (deploy/SIGNATURE.md).
   # ---------------------------------------------------------------------
+  # L'appli Android (crates/mobile, Tauri 2) : un APK signé par la clé
+  # Android de ki-chat, la même pour toujours — une autre clé interdirait à
+  # chaque téléphone de se mettre à jour. Elle vit dans les secrets du dépôt
+  # (deploy/ANDROID.md) et n'est écrite sur le disque que le temps de la
+  # compilation.
+  #
+  # Comme macOS, ne bloque pas la release : sans APK, elle sort sans lui.
+  # ---------------------------------------------------------------------
+  android:
+    needs: ci
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    environment: release
+    env:
+      CMAKE: cmake
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Versions alignées
+        run: |
+          # L'appli lit sa version dans son Cargo.toml : décalée de celle du
+          # dépôt, elle se croirait en retard (ou en avance) pour toujours.
+          depot=$(grep -m1 -oP '^version = "\K[^"]+' Cargo.toml)
+          appli=$(grep -m1 -oP '^version = "\K[^"]+' crates/mobile/Cargo.toml)
+          tauri=$(grep -m1 -oP '"version": "\K[^"]+' crates/mobile/tauri.conf.json)
+          echo "dépôt $depot, appli $appli, tauri $tauri"
+          if [[ "$depot" != "$appli" || "$depot" != "$tauri" ]]; then
+            echo "::error::versions décalées : Cargo.toml $depot, crates/mobile/Cargo.toml $appli, tauri.conf.json $tauri"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: crates/mobile -> ../../target/mobile
+
+      - name: Outils
+        run: |
+          sudo apt-get install -y ninja-build
+          cargo install tauri-cli --version "^2" --locked
+
+      - name: Clé de signature Android
+        env:
+          CLE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          MDP: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [[ -z "$CLE" || -z "$MDP" ]]; then
+            echo "::error::ANDROID_KEYSTORE_B64 ou ANDROID_KEYSTORE_PASSWORD absent (deploy/ANDROID.md)"
+            exit 1
+          fi
+          echo "$CLE" | base64 -d > "$RUNNER_TEMP/ki-chat-android.jks"
+          printf 'storeFile=%s\nkeyAlias=ki-chat\npassword=%s\n' "$RUNNER_TEMP/ki-chat-android.jks" "$MDP" \
+            > crates/mobile/gen/android/keystore.properties
+
+      - name: Compiler l'APK
+        working-directory: crates/mobile
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/mobile
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo tauri android build --apk --target aarch64 --target armv7
+          apk=$(find gen/android/app/build/outputs/apk -name '*-release.apk' | head -1)
+          if [[ -z "$apk" ]]; then
+            echo "::error::APK signé introuvable"
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/apk"
+          cp "$apk" "$GITHUB_WORKSPACE/apk/ki-chat-android.apk"
+          ls -l "$GITHUB_WORKSPACE/apk"
+
+      - name: Effacer la clé
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ki-chat-android.jks" crates/mobile/gen/android/keystore.properties
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ki-chat-android
+          path: apk/ki-chat-android.apk
+
+  # ---------------------------------------------------------------------
   signature:
-    needs: [windows, macos]
+    needs: [windows, macos, android]
     # Même si macOS a lâché — mais jamais sans Windows.
     if: always() && needs.windows.result == 'success'
     runs-on: ubuntu-latest
@@ -305,6 +398,14 @@ jobs:
           else
             echo "::warning::pas d'archive macOS à signer : la release sortira sans elle"
           fi
+          # L'APK : l'appli vérifie ce manifeste avant de se mettre à jour.
+          apk=$(find artefacts -type f -name ki-chat-android.apk | head -1)
+          if [[ -n "$apk" ]]; then
+            "$signeur" "$apk" signatures/ki-chat-android.apk.sig \
+              --manifeste android "$VERSION" signatures/ki-chat-android.apk.manifeste --cle-attendue "$attendue"
+          else
+            echo "::warning::pas d'APK à signer : la release sortira sans lui"
+          fi
           for f in signatures/*; do test -s "$f"; done
           ls -l signatures
 
@@ -320,7 +421,7 @@ jobs:
   # La release elle-même, une fois que tout le monde a livré.
   # ---------------------------------------------------------------------
   publish:
-    needs: [windows, macos, signature]
+    needs: [windows, macos, android, signature]
     # `always()` : publier même si macOS a lâché — mais jamais sans Windows,
     # ni sans signatures.
     if: always() && startsWith(github.ref, 'refs/tags/') && needs.windows.result == 'success' && needs.signature.result == 'success'
@@ -347,7 +448,9 @@ jobs:
             -o -name 'ki-chat.exe.manifeste' -o -name 'ki-chat.exe.manifeste.sig' \
             -o -name 'ki-chat-setup.exe' -o -name 'ki-chat-macos.tar.gz' \
             -o -name 'ki-chat-macos.tar.gz.sig' -o -name 'ki-chat-macos.tar.gz.manifeste' \
-            -o -name 'ki-chat-macos.tar.gz.manifeste.sig' -o -name 'ki-chat-macos.pkg' \))
+            -o -name 'ki-chat-macos.tar.gz.manifeste.sig' -o -name 'ki-chat-macos.pkg' \
+            -o -name 'ki-chat-android.apk' -o -name 'ki-chat-android.apk.sig' \
+            -o -name 'ki-chat-android.apk.manifeste' -o -name 'ki-chat-android.apk.manifeste.sig' \))
           echo "$files"
           # Pas de release Windows sans sa signature et son manifeste.
           for requis in ki-chat.exe ki-chat.exe.sig ki-chat.exe.manifeste ki-chat.exe.manifeste.sig; do

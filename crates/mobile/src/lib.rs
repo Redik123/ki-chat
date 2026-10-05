@@ -122,6 +122,9 @@ struct Appli {
     /// Déconnectée exprès en arrière-plan (option « rester connecté »
     /// coupée) : on se reconnecte au retour.
     en_veille: bool,
+    /// La mise à jour trouvée par `verifier_maj`, en attente d'être
+    /// téléchargée.
+    maj: Option<MajDispo>,
     /// Le dernier battement envoyé au serveur (voir `horloge`).
     dernier_ping: Option<std::time::Instant>,
     /// La dernière réponse du serveur, quelle qu'elle soit : la preuve que
@@ -1276,6 +1279,148 @@ fn media(partage: &Partage, requete: &tauri::http::Request<Vec<u8>>) -> tauri::h
     construit.body(octets).unwrap_or_else(|_| refus(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+// ---------------------------------------------------------------------------
+// Mises à jour (comme le PC : la dernière release GitHub, vérifiée)
+// ---------------------------------------------------------------------------
+
+const DEPOT: &str = "Redik123/ki-chat";
+const APK: &str = "ki-chat-android.apk";
+
+/// Une version plus récente, telle que la release l'annonce.
+#[derive(Clone, Serialize)]
+struct MajDispo {
+    version: String,
+    notes: String,
+    taille: u64,
+    #[serde(skip)]
+    url_apk: String,
+    #[serde(skip)]
+    url_manifeste: String,
+    #[serde(skip)]
+    url_signature: String,
+}
+
+fn agent_https() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .user_agent(concat!("ki-chat-android/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(60))
+        .build()
+}
+
+/// La dernière release, si elle est plus récente que cette appli et porte
+/// un APK signé.
+fn derniere_release() -> anyhow::Result<Option<MajDispo>> {
+    let rep: serde_json::Value = agent_https()
+        .get(&format!("https://api.github.com/repos/{DEPOT}/releases/latest"))
+        .set("Accept", "application/vnd.github+json")
+        .call()?
+        .into_json()?;
+    let version = rep["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
+    if !ki_core::maj::plus_recente(&version, env!("CARGO_PKG_VERSION")) {
+        return Ok(None);
+    }
+    let actif = |nom: &str| {
+        rep["assets"].as_array().and_then(|a| {
+            a.iter().find(|x| x["name"].as_str() == Some(nom)).map(|x| {
+                (
+                    x["browser_download_url"].as_str().unwrap_or("").to_string(),
+                    x["size"].as_u64().unwrap_or(0),
+                )
+            })
+        })
+    };
+    let (Some((url_apk, taille)), Some((url_manifeste, _)), Some((url_signature, _))) = (
+        actif(APK),
+        actif(&format!("{APK}.manifeste")),
+        actif(&format!("{APK}.manifeste.sig")),
+    ) else {
+        // Une release sans APK (ou sans sa signature) : rien à proposer.
+        return Ok(None);
+    };
+    anyhow::ensure!(url_apk.starts_with("https://"), "adresse de téléchargement non HTTPS");
+    Ok(Some(MajDispo {
+        version,
+        notes: rep["body"].as_str().unwrap_or("").chars().take(2000).collect(),
+        taille,
+        url_apk,
+        url_manifeste,
+        url_signature,
+    }))
+}
+
+/// Y a-t-il une version plus récente ? Retenue pour le téléchargement.
+#[tauri::command]
+async fn verifier_maj(partage: State<'_, Partage>) -> Result<Option<MajDispo>, String> {
+    let maj = tauri::async_runtime::spawn_blocking(derniere_release)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))?;
+    partage.lock().unwrap().maj = maj.clone();
+    Ok(maj)
+}
+
+/// Télécharge l'APK de la mise à jour, le vérifie (manifeste signé par la
+/// clé des releases : plateforme « android », version, empreinte), et rend
+/// son chemin pour que la page le confie à l'installeur d'Android.
+#[tauri::command]
+async fn telecharger_maj(app: AppHandle, partage: State<'_, Partage>) -> Result<String, String> {
+    let maj = partage.lock().unwrap().maj.clone().ok_or("aucune mise à jour à télécharger")?;
+    let dossier = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<String> {
+        use std::io::Read;
+        let agent = agent_https();
+        let lire_petit = |url: &str, max: u64| -> anyhow::Result<Vec<u8>> {
+            let mut v = Vec::new();
+            agent.get(url).call()?.into_reader().take(max).read_to_end(&mut v)?;
+            Ok(v)
+        };
+        let manifeste = lire_petit(&maj.url_manifeste, 4096)?;
+        let signature = ki_core::maj::lire_signature(&lire_petit(&maj.url_signature, 256)?)?;
+        // L'APK, avec sa progression.
+        let mut lecteur = agent.get(&maj.url_apk).call()?.into_reader().take(200 << 20);
+        let mut apk = Vec::with_capacity(maj.taille as usize);
+        let mut morceau = vec![0u8; 64 * 1024];
+        let mut dernier = std::time::Instant::now();
+        loop {
+            let n = lecteur.read(&mut morceau)?;
+            if n == 0 {
+                break;
+            }
+            apk.extend_from_slice(&morceau[..n]);
+            if dernier.elapsed() > Duration::from_millis(200) && maj.taille > 0 {
+                dernier = std::time::Instant::now();
+                let _ = app.emit("maj_progres", apk.len() as f64 / maj.taille as f64);
+            }
+        }
+        anyhow::ensure!(maj.taille == 0 || apk.len() as u64 == maj.taille, "téléchargement incomplet");
+        ki_core::maj::verifier_manifeste(
+            &ki_core::maj::cle_releases()?,
+            &manifeste,
+            &signature,
+            "android",
+            &maj.version,
+            &apk,
+            b"PK",
+        )?;
+        std::fs::create_dir_all(&dossier)?;
+        let chemin = dossier.join(format!("ki-chat-{}.apk", maj.version));
+        std::fs::write(&chemin, &apk)?;
+        let _ = app.emit("maj_progres", 1.0);
+        Ok(chemin.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// La version de cette appli.
+#[tauri::command]
+fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 fn traces() {
     use tracing_subscriber::prelude::*;
     let filtre = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -1334,6 +1479,9 @@ pub fn run() {
             parler,
             tester_micro,
             premier_plan,
+            verifier_maj,
+            telecharger_maj,
+            version,
             etat_audio,
             essai,
             modifier,
