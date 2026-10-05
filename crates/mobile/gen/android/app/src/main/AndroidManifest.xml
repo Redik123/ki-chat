@@ -5,6 +5,13 @@
          communication de l'audio. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Le vocal écran éteint : service au premier plan de type micro,
+         processeur et Wi-Fi gardés éveillés (voir VocalService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Les notifications de messages et de mentions. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -37,5 +44,9 @@
             android:name="android.support.FILE_PROVIDER_PATHS"
             android:resource="@xml/file_paths" />
         </provider>
+        <service
+          android:name=".VocalService"
+          android:exported="false"
+          android:foregroundServiceType="microphone" />
     </application>
 </manifest>

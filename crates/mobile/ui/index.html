@@ -47,6 +47,8 @@
   .bouton { display: block; width: 100%; margin-top: 22px; padding: 14px; border-radius: 10px; background: var(--accent); color: #04140b; font-weight: 700; font-size: 16px; }
   .bouton:disabled { opacity: .5; }
   .lien { color: var(--info); font-size: 14px; margin-top: 16px; }
+  .case { display: flex; align-items: center; margin: 18px 0 0; color: var(--doux); font-size: 14px; }
+  .case input { width: 20px; height: 20px; accent-color: var(--accent); margin: 0 10px 0 0; flex: none; }
   .alerte { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: rgba(255,107,107,.12); color: var(--danger); font-size: 14px; }
 
   /* Listes */
@@ -262,6 +264,10 @@
       <label for="invitation">Code d'invitation</label>
       <input class="champ" id="invitation" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
+    <label class="case" for="retenir">
+      <input type="checkbox" id="retenir" checked>
+      <span>Retenir mon mot de passe et me reconnecter tout seul</span>
+    </label>
     <button class="lien" id="montrer-invitation">Première connexion ? J'ai un code d'invitation</button>
     <button class="bouton" id="btn-connecter">Se connecter</button>
     <div class="alerte cache" id="erreur-connexion"></div>
@@ -425,6 +431,30 @@
     $("invitation").focus();
   };
 
+  // Android : le pont vers le service vocal, le Keystore et les
+  // notifications. Absent hors du téléphone (essai sur PC) : tout devient
+  // sans effet.
+  const android = window.KiAndroid || null;
+  const cleSecret = (serveur, pseudo) => "mdp|" + serveur + "|" + pseudo;
+  let mdpEnCours = null;      // le mot de passe de la connexion en cours
+  let connexionAuto = false;  // lancée toute seule, avec le mot de passe retenu
+
+  async function connecter({ serveur, pseudo, mdp, invitation = null, auto = false }) {
+    retenir("serveur", serveur);
+    retenir("pseudo", pseudo);
+    erreurConnexion("");
+    enConnexion = true;
+    connexionAuto = auto;
+    mdpEnCours = mdp;
+    $("btn-connecter").disabled = true;
+    $("btn-connecter").textContent = auto ? "Reconnexion…" : "Connexion…";
+    await invoke("connecter", {
+      serveur, pseudo, motDePasse: mdp, invitation,
+      // L'empreinte retenue pour ce serveur : un imposteur sera refusé.
+      empreinte: empreintes()[serveur] || null,
+    });
+  }
+
   function erreurConnexion(texte) {
     const e = $("erreur-connexion");
     e.textContent = texte;
@@ -438,19 +468,7 @@
       erreurConnexion("Serveur, pseudo et mot de passe sont nécessaires.");
       return;
     }
-    retenir("serveur", serveur);
-    retenir("pseudo", pseudo);
-    erreurConnexion("");
-    enConnexion = true;
-    $("btn-connecter").disabled = true;
-    $("btn-connecter").textContent = "Connexion…";
-    await invoke("connecter", {
-      serveur, pseudo,
-      motDePasse: $("mdp").value,
-      invitation: $("invitation").value.trim() || null,
-      // L'empreinte retenue pour ce serveur : un imposteur sera refusé.
-      empreinte: empreintes()[serveur] || null,
-    });
+    await connecter({ serveur, pseudo, mdp: $("mdp").value, invitation: $("invitation").value.trim() || null });
   };
   for (const id of ["serveur", "pseudo", "mdp", "invitation"]) {
     $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") $("btn-connecter").click(); });
@@ -470,12 +488,32 @@
   });
   listen("connecte", () => {
     finConnexionUi();
+    // Le mot de passe, chiffré par le Keystore, pour la prochaine fois.
+    if (android && mdpEnCours && !connexionAuto) {
+      const cle = cleSecret(relire("serveur") || "", relire("pseudo") || "");
+      if ($("retenir").checked) {
+        android.retenirSecret(cle, mdpEnCours);
+        retenir("auto", "1");
+      } else {
+        android.oublierSecret(cle);
+        retenir("auto", "0");
+      }
+    }
+    mdpEnCours = null;
     $("mdp").value = "";
     $("etat-reseau").classList.add("cache");
     if (!$("connexion").classList.contains("cache")) montrer("accueil");
   });
   listen("coupe", () => $("etat-reseau").classList.remove("cache"));
   listen("fin", (e) => {
+    // Refusé alors qu'on se reconnectait tout seul : le mot de passe retenu
+    // n'est plus le bon (changé, réinitialisé). On l'oublie.
+    if (connexionAuto && e.payload && android) {
+      android.oublierSecret(cleSecret(relire("serveur") || "", relire("pseudo") || ""));
+      retenir("auto", "0");
+    }
+    connexionAuto = false;
+    mdpEnCours = null;
     finConnexionUi();
     montrer("connexion");
     erreurConnexion(e.payload || "");
@@ -485,9 +523,20 @@
   function demanderDeconnexion() {
     ouvrirFeuille((f) => {
       f.append(titre("Se déconnecter de " + (vue?.serveur || "ce serveur") + " ?"));
-      f.append(action("sortir", "Se déconnecter", () => { invoke("deconnecter"); }));
+      f.append(action("sortir", "Se déconnecter", () => {
+        // Se déconnecter, c'est aussi ne plus se reconnecter tout seul.
+        if (android) android.oublierSecret(cleSecret(relire("serveur") || "", relire("pseudo") || ""));
+        retenir("auto", "0");
+        invoke("deconnecter");
+      }));
     });
   };
+
+  if (android && relire("auto") === "1") {
+    const serveur = relire("serveur"), pseudo = relire("pseudo");
+    const mdp = serveur && pseudo ? android.relireSecret(cleSecret(serveur, pseudo)) : null;
+    if (mdp) connecter({ serveur, pseudo, mdp, auto: true });
+  }
 
   // ---------- onglets ----------
   for (const b of document.querySelectorAll("[data-onglet]")) {
@@ -635,8 +684,15 @@
     } catch (err) { bandeau(String(err), true); }
   }
 
+  // Le service au premier plan (vocal écran éteint) suit l'état du vocal.
+  let serviceVocal = null;
   function dessinerBarreVocale() {
     const s = vue.vocal != null ? vue.salons.find((x) => x.id === vue.vocal) : null;
+    const nomVocal = s ? s.nom : "";
+    if (android && nomVocal !== serviceVocal) {
+      serviceVocal = nomVocal;
+      android.vocal(nomVocal);
+    }
     for (const barre of document.querySelectorAll("[data-barre-vocale]")) {
       barre.classList.toggle("cache", !s);
       if (!s) continue;
@@ -1064,6 +1120,11 @@
     }
   }
   document.addEventListener("visibilitychange", signalerRegard);
+  // De retour dans l'appli : les notifications de messages ont fait leur
+  // office.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && android) android.effacerNotifications();
+  });
 
   // Rédaction
   const saisie = $("saisie");
@@ -1370,13 +1431,21 @@
     }
     place.classList.toggle("cache", !e.payload);
   });
-  listen("fin", () => $("logo-serveur").classList.add("cache"));
+  listen("fin", () => {
+    $("logo-serveur").classList.add("cache");
+    if (android && serviceVocal) { android.vocal(""); serviceVocal = null; }
+  });
   listen("info", (e) => bandeau(e.payload));
   listen("erreur", (e) => bandeau(e.payload, true));
   listen("poke", (e) => { navigator.vibrate?.([80, 60, 80]); bandeau(e.payload + " te poke !"); });
   listen("prevenir", (e) => {
-    const [salon, mention] = e.payload;
+    const [salon, mention, auteur, extrait] = e.payload;
     if (reglages.notifs === "rien" || (reglages.notifs === "mentions" && !mention)) return;
+    if (document.hidden && android) {
+      const nomSalon = vue?.salons.find((s) => s.id === salon)?.nom || "";
+      android.notifier(salon, (mention ? "@ " : "") + auteur + " · #" + nomSalon, extrait, !!mention);
+      return;
+    }
     const lu = !$("salon").classList.contains("cache") && vue?.courant === salon && document.visibilityState === "visible";
     if (mention || !lu) navigator.vibrate?.(mention ? [60, 40, 60] : 30);
   });
