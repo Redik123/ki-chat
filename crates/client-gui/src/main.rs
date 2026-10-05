@@ -1947,6 +1947,7 @@ impl KiApp {
                 _ if self.dred_active => ki_voice::DRED_DEFAULT,
                 _ => 0,
             },
+            moteur_a_la_demande: false,
         }
     }
 

@@ -99,6 +99,8 @@ impl Reglages {
         p.agc = self.gain_auto;
         p.input_gain = self.gain_micro;
         p.output_gain = self.volume;
+        // Le micro ne s'ouvre qu'en vocal (voir `horloge`).
+        p.moteur_a_la_demande = true;
         p
     }
 }
@@ -108,6 +110,13 @@ struct Appli {
     reglages: Reglages,
     /// Le bouton « appuyer pour parler » est tenu.
     ptt: bool,
+    /// La page des réglages essaie le micro : le moteur tourne hors vocal.
+    test_micro: bool,
+    /// Dernier démarrage demandé au moteur, pour ne pas le relancer en
+    /// boucle pendant qu'il démarre.
+    demarrage: Option<std::time::Instant>,
+    /// Les volumes par personne, rendus au moteur à chaque démarrage.
+    volumes: std::collections::HashMap<UserId, f32>,
     net: Option<NetHandle>,
     etat: Etat,
     /// Le moteur voix survit aux reconnexions (voir `VoiceLink`).
@@ -697,6 +706,30 @@ fn horloge(app: AppHandle, partage: Partage) {
             if a.etat.accueilli {
                 ESSAIS.store(0, std::sync::atomic::Ordering::Relaxed);
             }
+            // Le moteur (donc le micro) ne tourne qu'en vocal, ou pendant
+            // l'essai des réglages : hors de là, Android n'a pas à montrer
+            // son témoin de micro.
+            let veut = a.vocal_voulu.is_some() || a.etat.vocal.is_some() || a.test_micro;
+            let tourne = a.lien.engine.lock().unwrap().is_some();
+            if tourne {
+                a.demarrage = None;
+            }
+            if veut && !tourne && a.lien.pret()
+                && a.demarrage.is_none_or(|t| t.elapsed() > Duration::from_secs(3))
+            {
+                a.demarrage = Some(std::time::Instant::now());
+                let mut prefs = a.reglages.prefs();
+                prefs.volumes = a.volumes.clone();
+                if a.sourd {
+                    prefs.output_gain = 0.0;
+                }
+                a.lien.restart_voice(prefs);
+            } else if !veut && tourne {
+                // L'arrêt attend les fils audio : hors du verrou.
+                let lien = a.lien.clone();
+                a.parle_annonce = false;
+                std::thread::spawn(move || lien.suspendre());
+            }
             // Le micro n'émet qu'en vocal, ni muet ni sourd ; en
             // « appuyer pour parler », que bouton tenu.
             let arme = a.etat.vocal.is_some()
@@ -910,10 +943,15 @@ fn sourdine(partage: State<'_, Partage>, sourd: bool) {
 #[tauri::command]
 fn volume_membre(partage: State<'_, Partage>, id: IdPage, gain: f32) {
     let id = id_rust(id);
-    let moteur = partage.lock().unwrap().lien.engine.clone();
+    let gain = gain.clamp(0.0, 2.0);
+    let moteur = {
+        let mut a = partage.lock().unwrap();
+        a.volumes.insert(id, gain);
+        a.lien.engine.clone()
+    };
     let garde = moteur.lock().unwrap();
     if let Some(m) = garde.as_ref() {
-        m.set_user_volume(id, gain.clamp(0.0, 2.0));
+        m.set_user_volume(id, gain);
     }
 }
 
@@ -935,6 +973,13 @@ fn regler(partage: State<'_, Partage>, reglages: Reglages) {
         m.set_input_gain(r.gain_micro);
         m.set_output_gain(if a.sourd { 0.0 } else { r.volume });
     }
+}
+
+/// La page des réglages est ouverte : le micro tourne pour la jauge et
+/// l'essai, même hors vocal.
+#[tauri::command]
+fn tester_micro(partage: State<'_, Partage>, oui: bool) {
+    partage.lock().unwrap().test_micro = oui;
 }
 
 /// Appuyer pour parler : le bouton est tenu, ou relâché.
@@ -1194,6 +1239,7 @@ pub fn run() {
             moderer,
             regler,
             parler,
+            tester_micro,
             etat_audio,
             essai,
             modifier,

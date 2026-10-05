@@ -134,6 +134,12 @@ pub struct VoicePrefs {
     pub jitter_frames: usize,
     /// Redondance neuronale DRED (0 = désactivée, sinon valeur du CTL).
     pub dred: i32,
+    /// Le moteur ne démarre pas tout seul à l'accueil : l'application le
+    /// lance quand elle en a besoin ([`VoiceLink::restart_voice`]) et l'arrête
+    /// ensuite ([`VoiceLink::suspendre`]). Sur téléphone, un micro ouvert hors
+    /// de tout vocal allume le témoin d'Android et inquiète à juste titre ;
+    /// sur PC, le moteur reste debout pour traverser coupures et jeux.
+    pub moteur_a_la_demande: bool,
 }
 
 impl VoicePrefs {
@@ -175,6 +181,7 @@ impl VoicePrefs {
             micro_jeux: c.micro_jeux,
             jitter_frames: c.jitter_frames,
             dred: ki_voice::DRED_DEFAULT,
+            moteur_a_la_demande: false,
         }
     }
 }
@@ -250,6 +257,24 @@ impl VoiceLink {
         if let Some(e) = old {
             e.shutdown();
         }
+    }
+
+    /// Arrête le moteur et relâche le micro, mais garde l'identité voix et la
+    /// connexion : [`restart_voice`](Self::restart_voice) le relance sans
+    /// se reconnecter. Pour un moteur « à la demande ».
+    pub fn suspendre(&self) {
+        use std::sync::atomic::Ordering;
+        self.gen.fetch_add(1, Ordering::SeqCst);
+        *self.feed.lock().unwrap() = None;
+        let ancien = self.engine.lock().unwrap().take();
+        if let Some(e) = ancien {
+            e.shutdown();
+        }
+    }
+
+    /// L'identité voix est connue : le moteur peut démarrer.
+    pub fn pret(&self) -> bool {
+        self.params.lock().unwrap().is_some()
     }
 
     /// Redémarre le moteur voix avec de nouvelles préférences (périphérique,
@@ -771,8 +796,16 @@ async fn run(
                                     // partant à la déconnexion ; il existe
                                     // depuis qu'il lui survit.
                                     let ancien = engine_slot.lock().unwrap().take();
+                                    let tournait = ancien.is_some();
                                     if let Some(ancien) = ancien {
                                         ancien.shutdown();
+                                    }
+                                    // À la demande : l'identité est retenue, le
+                                    // moteur attend qu'on le demande — sauf s'il
+                                    // tournait déjà, qu'on remplace.
+                                    if prefs.moteur_a_la_demande && !tournait {
+                                        emit(Event::Msg(msg));
+                                        continue;
                                     }
                                     let (tx, rx) =
                                         std_mpsc::sync_channel(ki_voice::VOICE_QUEUE);

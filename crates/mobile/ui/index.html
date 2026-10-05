@@ -398,6 +398,7 @@
   function montrer(ecran) {
     for (const e of ["connexion", "accueil", "salon"]) $(e).classList.toggle("cache", e !== ecran);
     signalerRegard();
+    invoke("tester_micro", { oui: ecran === "accueil" && onglet === "reglages" });
   }
 
   // ---------- connexion ----------
@@ -482,6 +483,8 @@
       $("vue-membres").classList.toggle("cache", onglet !== "membres");
       $("vue-reglages").classList.toggle("cache", onglet !== "reglages");
       if (onglet === "reglages") dessinerReglages();
+      // Le micro ne tourne hors vocal que le temps des réglages (jauge, essai).
+      invoke("tester_micro", { oui: onglet === "reglages" });
     };
   }
 
@@ -671,7 +674,11 @@
     }
   }
   for (const ev of ["pointerup", "pointercancel"]) window.addEventListener(ev, () => tenirPtt(false));
-  document.addEventListener("visibilitychange", () => { if (document.hidden) tenirPtt(false); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) tenirPtt(false);
+    // Appli en arrière-plan : plus d'essai de micro.
+    invoke("tester_micro", { oui: !document.hidden && onglet === "reglages" && !$("accueil").classList.contains("cache") });
+  });
 
   // Les volumes par personne, retenus sur le téléphone.
   function volumes() { try { return JSON.parse(relire("volumes") || "{}"); } catch (_) { return {}; } }
@@ -1228,7 +1235,7 @@
     e.niveau.classList.toggle("parle", a.emet || a.ouvert);
     e.seuil.style.left = (echelle(reglages.mode === "voix" ? reglages.seuil : 0) * 100) + "%";
     e.seuil.style.display = reglages.mode === "voix" ? "" : "none";
-    const silero = !a.actif ? ["Pas connecté", ""]
+    const silero = !a.actif ? ["Micro en démarrage", ""]
       : reglages.mode !== "voix" || !reglages.neuronal ? ["Silero coupé", ""]
       : a.silero === "pret" ? ["Silero actif · " + Math.round(a.parole * 100) + " %", "ok"]
       : a.silero === "chargement" ? ["Silero se charge…", ""]
@@ -1267,7 +1274,7 @@
         ? (Math.abs(a.essai.ecart_db) < 3 ? "Ta voix arrive au bon volume chez les autres."
           : a.essai.ecart_db > 0 ? "Ta voix arrive " + Math.round(a.essai.ecart_db) + " dB plus fort que la moyenne."
           : "Ta voix arrive " + Math.round(-a.essai.ecart_db) + " dB plus bas que la moyenne.")
-      : !a.actif ? "Connecte-toi pour essayer ton micro." : "";
+      : !a.actif ? "Le micro démarre…" : "";
   }, 100);
 
   // ---------- feuilles du bas ----------
