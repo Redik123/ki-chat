@@ -141,6 +141,9 @@ struct Appli {
     lu_envoye: Option<(ChannelId, u64)>,
     /// « J'accepte les pokes » est parti sur cette connexion.
     pokes_annonces: bool,
+    /// Le logo du serveur tel qu'envoyé à la page : on ne le renvoie que
+    /// s'il change (il pèse jusqu'à quelques dizaines de Kio).
+    logo_envoye: Option<Option<String>>,
     /// Les photos de profil reçues (empreinte), et celles demandées : on ne
     /// redemande que ce qui a changé.
     photos: std::collections::HashMap<UserId, String>,
@@ -496,6 +499,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
     // l'accueil le rouvrira.
     a.etat = Appli::etat_vierge(a.etat.courant);
     a.pokes_annonces = false;
+    a.logo_envoye = None;
     a.photos_demandees.clear();
     let reveil: net::Reveil = Arc::new(|| {});
     let mut handle = net::connect(
@@ -563,6 +567,16 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                     }
                     if roster {
                         demander_photos(&mut a);
+                    }
+                    // Le logo du serveur, à l'accueil ou quand un admin le
+                    // change : base64 d'un PNG, passé à la page en « data: ».
+                    let logo = a.etat.serveur.icon.clone().filter(|d| {
+                        d.len() < 200_000
+                            && d.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+                    });
+                    if a.logo_envoye.as_ref() != Some(&logo) {
+                        let _ = app.emit("logo", logo.as_ref().map(|d| format!("data:image/png;base64,{d}")));
+                        a.logo_envoye = Some(logo);
                     }
                     if accueil {
                         a.deja_accueilli = true;

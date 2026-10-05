@@ -29,6 +29,7 @@
   .entete { display: flex; align-items: center; padding: 10px 14px; min-height: 54px; border-bottom: 1px solid var(--bord-doux); background: var(--cote); }
   .entete h1 { font-size: 17px; margin: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .entete .sous { color: var(--pale); font-weight: 400; }
+  .logo-serveur { width: 32px; height: 32px; border-radius: 9px; object-fit: cover; flex: none; }
   .icone { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; color: var(--doux); }
   .icone:active { background: var(--survol); }
   .defile { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
@@ -257,6 +258,7 @@
 <!-- Accueil : salons et membres -->
 <section class="ecran cache" id="accueil">
   <div class="entete">
+    <img id="logo-serveur" class="logo-serveur cache" alt="">
     <h1 id="nom-serveur">ki-chat</h1>
   </div>
   <div id="etat-reseau" class="cache">Connexion perdue — reconnexion…</div>
@@ -1342,6 +1344,13 @@
   });
 
   // ---------- événements ponctuels ----------
+  // Le logo du serveur, à côté de son nom, comme sur PC.
+  listen("logo", (e) => {
+    const img = $("logo-serveur");
+    if (e.payload) img.src = e.payload;
+    img.classList.toggle("cache", !e.payload);
+  });
+  listen("fin", () => $("logo-serveur").classList.add("cache"));
   listen("info", (e) => bandeau(e.payload));
   listen("erreur", (e) => bandeau(e.payload, true));
   listen("poke", (e) => { navigator.vibrate?.([80, 60, 80]); bandeau(e.payload + " te poke !"); });
