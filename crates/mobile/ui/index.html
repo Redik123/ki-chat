@@ -684,15 +684,29 @@
     } catch (err) { bandeau(String(err), true); }
   }
 
-  // Le service au premier plan (vocal écran éteint) suit l'état du vocal.
-  let serviceVocal = null;
+  // Le service au premier plan suit l'état : en vocal (micro écran éteint),
+  // connecté (si l'option le demande), ou rien.
+  let serviceEtat = null;
+  // Une session ouverte, même en pleine reconnexion : le service tient
+  // pendant la coupure, sinon Android gèlerait l'appli avant qu'elle se
+  // reconnecte. Fermée seulement par « fin » (déconnexion, refus).
+  let sessionOuverte = false;
+  listen("connecte", () => { sessionOuverte = true; suivreService(); });
+  function suivreService() {
+    if (!android || !vue) return;
+    const s = vue.vocal != null ? vue.salons.find((x) => x.id === vue.vocal) : null;
+    const [mode, texte] = s ? ["vocal", s.nom + " · " + (vue.serveur || "")]
+      : sessionOuverte && reglages.arriere_plan ? ["connecte", vue.serveur || "ki-chat"]
+      : ["", ""];
+    const cle = mode + "|" + texte;
+    if (cle !== serviceEtat) {
+      serviceEtat = cle;
+      android.service(mode, texte);
+    }
+  }
   function dessinerBarreVocale() {
     const s = vue.vocal != null ? vue.salons.find((x) => x.id === vue.vocal) : null;
-    const nomVocal = s ? s.nom : "";
-    if (android && nomVocal !== serviceVocal) {
-      serviceVocal = nomVocal;
-      android.vocal(nomVocal);
-    }
+    suivreService();
     for (const barre of document.querySelectorAll("[data-barre-vocale]")) {
       barre.classList.toggle("cache", !s);
       if (!s) continue;
@@ -874,7 +888,14 @@
   }
   listen("connecte", () => {
     // Les volumes retenus repartent au moteur à chaque connexion.
-    for (const [id, gain] of Object.entries(volumes())) invoke("volume_membre", { id: Number(id), gain });
+    // Une version antérieure retenait le bot musique sous son identifiant
+    // arrondi (au-delà de 2^53) : ces entrées-là sont jetées.
+    const v = volumes();
+    for (const [id, gain] of Object.entries(v)) {
+      if (!Number.isSafeInteger(Number(id))) { delete v[id]; continue; }
+      invoke("volume_membre", { id: Number(id), gain });
+    }
+    retenir("volumes", JSON.stringify(v));
   });
   listen("mot_de_passe_vocal", (e) => {
     const [salon, faux] = e.payload;
@@ -1158,14 +1179,15 @@
   const REGLAGES_DEFAUT = {
     mode: "voix", neuronal: true, sensibilite: 0.5, seuil: 0.02,
     bruit: 1, echo: true, gain_auto: true, gain_micro: 1, volume: 1,
-    notifs: "tout",
+    notifs: "tout", arriere_plan: true,
   };
   let reglages = { ...REGLAGES_DEFAUT };
   try { Object.assign(reglages, JSON.parse(relire("reglages") || "{}")); } catch (_) {}
 
   function envoyerReglages() {
     retenir("reglages", JSON.stringify(reglages));
-    const { notifs, ...audio } = reglages;
+    suivreService();
+    const { notifs, arriere_plan, ...audio } = reglages;
     invoke("regler", { reglages: audio });
     if (vue) dessinerBarreVocale();
   }
@@ -1286,6 +1308,11 @@
     const notifs = groupe("Notifications");
     segments(notifs, "Me prévenir", "Quand l'appli est en arrière-plan, ou pour un autre salon.", "notifs",
       [["tout", "Tout"], ["mentions", "Mentions"], ["rien", "Rien"]]);
+    if (android) {
+      interrupteur(notifs, "Rester connecté en arrière-plan",
+        "Les messages arrivent l'appli fermée, avec une notification « Connecté » permanente. Consomme un peu de batterie.",
+        "arriere_plan");
+    }
 
     const compte = groupe("Compte");
     const { l: lc } = option(compte, (vue?.mon_pseudo || "") + " · " + (vue?.serveur || ""), relire("serveur") || "");
@@ -1433,7 +1460,8 @@
   });
   listen("fin", () => {
     $("logo-serveur").classList.add("cache");
-    if (android && serviceVocal) { android.vocal(""); serviceVocal = null; }
+    sessionOuverte = false;
+    if (android && serviceEtat) { android.service("", ""); serviceEtat = null; }
   });
   listen("info", (e) => bandeau(e.payload));
   listen("erreur", (e) => bandeau(e.payload, true));

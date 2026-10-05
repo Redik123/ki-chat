@@ -16,16 +16,20 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
 /**
- * Le vocal tient écran éteint.
+ * Garde ki-chat en vie quand l'appli passe en arrière-plan.
  *
  * Sans service au premier plan, Android coupe le micro d'une appli qui passe
- * en arrière-plan, et finit par geler son processus : la voix (moteur Rust,
- * dans ce même processus) s'arrêtait dès qu'on éteignait l'écran. Le service
- * de type « microphone » garde le droit au micro et le processus éveillé ;
- * une notification permanente dit qu'on est en vocal.
+ * en arrière-plan, puis gèle son processus : la voix (moteur Rust, dans ce
+ * même processus) s'arrêtait à l'extinction de l'écran, et la connexion au
+ * serveur avec elle — plus de messages, plus de notifications.
  *
- * Le verrou de veille partiel et celui du Wi-Fi gardent le processeur et la
- * radio pour les datagrammes voix, cinquante par seconde.
+ * Deux modes, une seule notification permanente :
+ * - « connecté » : la connexion tient, les messages arrivent et notifient ;
+ * - « vocal » : en plus, le micro reste ouvert (type « microphone »).
+ *
+ * Le verrou de veille partiel garde le processeur pour les paquets QUIC ; en
+ * vocal, celui du Wi-Fi garde la radio pour les cinquante datagrammes voix
+ * par seconde.
  */
 class VocalService : Service() {
   private var veille: PowerManager.WakeLock? = null
@@ -34,22 +38,22 @@ class VocalService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    val salon = intent?.getStringExtra(EXTRA_SALON) ?: "Vocal"
-    val notification = notification(this, salon)
-    val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-    } else {
-      0
+    val vocal = intent?.getStringExtra(EXTRA_MODE) == MODE_VOCAL
+    val texte = intent?.getStringExtra(EXTRA_TEXTE) ?: ""
+    val type = when {
+      vocal && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+      !vocal && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+      else -> 0
     }
-    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(this, vocal, texte), type)
     if (veille == null) {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-      veille = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ki-chat:vocal").apply {
+      veille = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ki-chat:connexion").apply {
         setReferenceCounted(false)
         acquire()
       }
     }
-    if (wifi == null) {
+    if (vocal && wifi == null) {
       val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
       @Suppress("DEPRECATION")
       val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -61,6 +65,9 @@ class VocalService : Service() {
         setReferenceCounted(false)
         acquire()
       }
+    } else if (!vocal) {
+      wifi?.release()
+      wifi = null
     }
     return START_NOT_STICKY
   }
@@ -73,7 +80,7 @@ class VocalService : Service() {
     super.onDestroy()
   }
 
-  /** L'appli balayée hors des récentes : le processus part, le vocal avec. */
+  /** L'appli balayée hors des récentes : le processus part, le service avec. */
   override fun onTaskRemoved(rootIntent: Intent?) {
     stopSelf()
   }
@@ -81,14 +88,17 @@ class VocalService : Service() {
   companion object {
     const val NOTIFICATION_ID = 1
     const val CANAL_VOCAL = "vocal"
-    const val EXTRA_SALON = "salon"
+    const val EXTRA_MODE = "mode"
+    const val EXTRA_TEXTE = "texte"
+    const val MODE_VOCAL = "vocal"
+    const val MODE_CONNECTE = "connecte"
 
     fun canaux(context: Context) {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
       val nm = context.getSystemService(NotificationManager::class.java)
       nm.createNotificationChannel(
-        NotificationChannel(CANAL_VOCAL, "En vocal", NotificationManager.IMPORTANCE_LOW).apply {
-          description = "Pendant que tu es dans un salon vocal"
+        NotificationChannel(CANAL_VOCAL, "Connexion et vocal", NotificationManager.IMPORTANCE_LOW).apply {
+          description = "Pendant que ki-chat reste connecté, ou que tu es en vocal"
           setShowBadge(false)
         }
       )
@@ -107,14 +117,14 @@ class VocalService : Service() {
       )
     }
 
-    private fun notification(context: Context, salon: String): Notification =
+    private fun notification(context: Context, vocal: Boolean, texte: String): Notification =
       NotificationCompat.Builder(context, CANAL_VOCAL)
         .setSmallIcon(R.mipmap.ic_launcher)
-        .setContentTitle("En vocal")
-        .setContentText(salon)
+        .setContentTitle(if (vocal) "En vocal" else "Connecté")
+        .setContentText(texte)
         .setOngoing(true)
         .setSilent(true)
-        .setCategory(NotificationCompat.CATEGORY_CALL)
+        .setCategory(if (vocal) NotificationCompat.CATEGORY_CALL else NotificationCompat.CATEGORY_SERVICE)
         .setContentIntent(retourAppli(context))
         .build()
   }

@@ -24,14 +24,19 @@ class KiAndroid(private val activite: Activity) {
   private val contexte = activite.applicationContext
   private var prochaineNotification = 100
 
-  /** Entrée (`salon` non vide) ou sortie du vocal. */
+  /**
+   * Le service qui garde l'appli en vie : `mode` « vocal » (micro compris),
+   * « connecte » (la connexion seulement), ou vide pour l'arrêter. `texte`
+   * s'affiche dans sa notification (le salon, le serveur).
+   */
   @JavascriptInterface
-  fun vocal(salon: String) {
+  fun service(mode: String, texte: String) {
     val intent = Intent(contexte, VocalService::class.java)
-    if (salon.isEmpty()) {
+    if (mode.isEmpty()) {
       contexte.stopService(intent)
     } else {
-      intent.putExtra(VocalService.EXTRA_SALON, salon)
+      intent.putExtra(VocalService.EXTRA_MODE, mode)
+      intent.putExtra(VocalService.EXTRA_TEXTE, texte)
       ContextCompat.startForegroundService(contexte, intent)
     }
   }

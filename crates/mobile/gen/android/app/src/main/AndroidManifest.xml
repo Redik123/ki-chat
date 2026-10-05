@@ -9,6 +9,9 @@
          processeur et Wi-Fi gardés éveillés (voir VocalService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Rester connecté hors vocal (option des réglages) : aucun type
+         standard ne convient à une messagerie sans service de push. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Les notifications de messages et de mentions. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -47,6 +50,10 @@
         <service
           android:name=".VocalService"
           android:exported="false"
-          android:foregroundServiceType="microphone" />
+          android:foregroundServiceType="microphone|specialUse">
+          <property
+            android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+            android:value="Messagerie auto-hébergée : garder la connexion au serveur du groupe pour recevoir les messages" />
+        </service>
     </application>
 </manifest>
