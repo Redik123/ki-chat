@@ -258,7 +258,7 @@
 <!-- Accueil : salons et membres -->
 <section class="ecran cache" id="accueil">
   <div class="entete">
-    <img id="logo-serveur" class="logo-serveur cache" alt="">
+    <span id="logo-serveur" class="cache"></span>
     <h1 id="nom-serveur">ki-chat</h1>
   </div>
   <div id="etat-reseau" class="cache">Connexion perdue — reconnexion…</div>
@@ -1346,9 +1346,16 @@
   // ---------- événements ponctuels ----------
   // Le logo du serveur, à côté de son nom, comme sur PC.
   listen("logo", (e) => {
-    const img = $("logo-serveur");
-    if (e.payload) img.src = e.payload;
-    img.classList.toggle("cache", !e.payload);
+    const place = $("logo-serveur");
+    place.replaceChildren();
+    if (e.payload) {
+      const img = document.createElement("img");
+      img.className = "logo-serveur";
+      img.src = e.payload;
+      img.alt = "";
+      place.append(img);
+    }
+    place.classList.toggle("cache", !e.payload);
   });
   listen("fin", () => $("logo-serveur").classList.add("cache"));
   listen("info", (e) => bandeau(e.payload));
