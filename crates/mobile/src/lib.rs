@@ -14,6 +14,8 @@
 //! Les effets de l'état (prévenir, bannière, fin de session) partent vers la
 //! page en événements ponctuels.
 
+mod ios;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1455,6 +1457,7 @@ pub fn run() {
             // Hors du fil de la WebView : un téléchargement prend son temps.
             std::thread::spawn(move || repondre.respond(media(&partage, &requete)));
         })
+        .plugin(ios::greffon())
         .manage(partage)
         .setup(|app| {
             horloge(app.handle().clone(), app.state::<Partage>().inner().clone());
@@ -1486,6 +1489,12 @@ pub fn run() {
             essai,
             modifier,
             supprimer,
+            ios::ios_service,
+            ios::ios_retenir_secret,
+            ios::ios_relire_secret,
+            ios::ios_oublier_secret,
+            ios::ios_notifier,
+            ios::ios_effacer_notifications,
         ])
         .run(tauri::generate_context!())
         .expect("lancement de l'appli");

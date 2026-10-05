@@ -435,10 +435,15 @@
     $("invitation").focus();
   };
 
-  // Android : le pont vers le service vocal, le Keystore et les
-  // notifications. Absent hors du téléphone (essai sur PC) : tout devient
-  // sans effet.
-  const android = window.KiAndroid || null;
+  // Le pont vers le système du téléphone : service vocal, Keystore et
+  // notifications sur Android (KiAndroid, Kotlin) ; session audio, Trousseau
+  // et notifications sur iOS (KiIos, posé par ios.rs). Mêmes méthodes, sauf
+  // relireSecret qui rend une promesse sur iOS. Absent hors du téléphone
+  // (essai sur PC) : tout devient sans effet.
+  const android = window.KiAndroid || window.KiIos || null;
+  // iOS suspend l'appli en arrière-plan (sauf en vocal) et ne s'installe pas
+  // de mise à jour lui-même : ni « rester connecté », ni APK.
+  const ios = !!window.KiIos;
   const cleSecret = (serveur, pseudo) => "mdp|" + serveur + "|" + pseudo;
   let mdpEnCours = null;      // le mot de passe de la connexion en cours
   let connexionAuto = false;  // lancée toute seule, avec le mot de passe retenu
@@ -537,9 +542,11 @@
   };
 
   if (android && relire("auto") === "1") {
-    const serveur = relire("serveur"), pseudo = relire("pseudo");
-    const mdp = serveur && pseudo ? android.relireSecret(cleSecret(serveur, pseudo)) : null;
-    if (mdp) connecter({ serveur, pseudo, mdp, auto: true });
+    (async () => {
+      const serveur = relire("serveur"), pseudo = relire("pseudo");
+      const mdp = serveur && pseudo ? await android.relireSecret(cleSecret(serveur, pseudo)) : null;
+      if (mdp) connecter({ serveur, pseudo, mdp, auto: true });
+    })();
   }
 
   // ---------- onglets ----------
@@ -1152,7 +1159,7 @@
     // Premier plan ou arrière-plan : les battements s'espacent, ou l'on se
     // déconnecte tout à fait si l'on ne doit pas rester connecté.
     if (sessionOuverte) {
-      invoke("premier_plan", { oui: !document.hidden, resterConnecte: !!reglages.arriere_plan || !android });
+      invoke("premier_plan", { oui: !document.hidden, resterConnecte: (!!reglages.arriere_plan && !ios) || !android });
     }
   });
 
@@ -1317,7 +1324,7 @@
     const notifs = groupe("Notifications");
     segments(notifs, "Me prévenir", "Quand l'appli est en arrière-plan, ou pour un autre salon.", "notifs",
       [["tout", "Tout"], ["mentions", "Mentions"], ["rien", "Rien"]]);
-    if (android) {
+    if (android && !ios) {
       interrupteur(notifs, "Rester connecté en arrière-plan",
         reglages.arriere_plan
           ? "Les messages arrivent l'appli fermée, avec une notification « Connecté » permanente. Consomme un peu de batterie."
@@ -1327,12 +1334,15 @@
 
     const ver = groupe("Version");
     const { l: lv } = option(ver, "ki-chat " + versionAppli,
-      majDispo ? "La version " + majDispo.version + " est disponible." : "Les mises à jour se vérifient au lancement.");
-    const bv = document.createElement("button");
-    bv.className = "petit-bouton" + (majDispo ? " plein" : "");
-    bv.textContent = majDispo ? "Mettre à jour" : "Vérifier";
-    bv.onclick = () => (majDispo ? installerMaj() : verifierMaj(false));
-    lv.append(bv);
+      ios ? "Les mises à jour arrivent par TestFlight."
+      : majDispo ? "La version " + majDispo.version + " est disponible." : "Les mises à jour se vérifient au lancement.");
+    if (!ios) {
+      const bv = document.createElement("button");
+      bv.className = "petit-bouton" + (majDispo ? " plein" : "");
+      bv.textContent = majDispo ? "Mettre à jour" : "Vérifier";
+      bv.onclick = () => (majDispo ? installerMaj() : verifierMaj(false));
+      lv.append(bv);
+    }
 
     const compte = groupe("Compte");
     const { l: lc } = option(compte, (vue?.mon_pseudo || "") + " · " + (vue?.serveur || ""), relire("serveur") || "");
@@ -1451,8 +1461,11 @@
     if (majEnCours) $("texte-maj").textContent = "Téléchargement de la " + majDispo.version + "… " + Math.round(e.payload * 100) + " %";
   });
   // Au lancement, puis toutes les six heures tant que l'appli reste ouverte.
-  setTimeout(() => verifierMaj(true), 3000);
-  setInterval(() => verifierMaj(true), 6 * 3600 * 1000);
+  // Pas sur iOS : l'APK ne le concerne pas, TestFlight s'en charge.
+  if (!ios) {
+    setTimeout(() => verifierMaj(true), 3000);
+    setInterval(() => verifierMaj(true), 6 * 3600 * 1000);
+  }
 
   // ---------- feuilles du bas ----------
   let quandFerme = null;

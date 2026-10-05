@@ -44,6 +44,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Les traces Rust dans logcat (balise « ki-chat »).
 tracing-android = "0.2"
 
+# iOS : ce que fait KiAndroid (Kotlin) côté Android, fait ici en Rust — voir
+# ios.rs. Le Trousseau pour le mot de passe, la session audio pour le micro
+# et le vocal écran éteint, les notifications locales.
+[target.'cfg(target_os = "ios")'.dependencies]
+security-framework = "3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSDictionary"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioSession", "AVAudioSessionTypes"] }
+objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSound", "block2"] }
+block2 = "0.6"
+
 [profile.dev.package."*"]
 # Le DSP voix (Opus, RNNoise, Silero) doit tourner à vitesse réelle même en
 # build debug, comme sur PC.
