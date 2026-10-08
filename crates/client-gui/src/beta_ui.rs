@@ -1,14 +1,15 @@
 //! L'onglet « Bêta » des réglages : les fonctions encore en essai, et
 //! celles que tout le monde n'utilise pas. Coupées d'origine — on les
 //! allume si on en a l'usage, et qui n'en veut pas ne les voit nulle part
-//! ailleurs. Aujourd'hui : le Loupedeck Live, et le bouton de la
-//! soundboard (visible d'origine pour qui a déjà des sons).
+//! ailleurs. Aujourd'hui : le Loupedeck Live, l'overlay en jeu, et le
+//! bouton de la soundboard (visible d'origine pour qui a déjà des sons).
 
 use eframe::egui::{self, RichText};
 
 use crate::icons::Icon;
 use crate::theme::TEXT_FAINT;
 use crate::ui;
+use crate::overlay;
 use crate::KiApp;
 
 impl KiApp {
@@ -30,6 +31,18 @@ impl KiApp {
             Some("Ses boutons, ses molettes et ses écrans tactiles, pilotés par ki-chat."),
             |ui| {
                 ui::ligne(ui, "Loupedeck", |ui| self.loupedeck_ui(ui));
+            },
+        );
+
+        ui::section(
+            ui,
+            Icon::User,
+            "Overlay en jeu",
+            Some("Qui parle, par-dessus le jeu — sans rien y injecter."),
+            |ui| {
+                ui::ligne(ui, "Overlay", |ui| {
+                    overlay::reglages_ui(ui, &mut self.overlay);
+                });
             },
         );
 

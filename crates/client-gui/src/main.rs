@@ -252,7 +252,6 @@ enum Onglet {
     Casque,
     Reseau,
     Diffusion,
-    Overlay,
     Jeu,
     Clips,
     Sons,
@@ -262,12 +261,11 @@ enum Onglet {
 }
 
 impl Onglet {
-    const TOUS: [Onglet; 10] = [
+    const TOUS: [Onglet; 9] = [
         Onglet::Audio,
         Onglet::Casque,
         Onglet::Reseau,
         Onglet::Diffusion,
-        Onglet::Overlay,
         Onglet::Jeu,
         Onglet::Clips,
         Onglet::Sons,
@@ -281,7 +279,6 @@ impl Onglet {
             Onglet::Casque => "Casque",
             Onglet::Reseau => "Réseau & qualité",
             Onglet::Diffusion => "Diffusion d'écran",
-            Onglet::Overlay => "Overlay en jeu",
             Onglet::Jeu => "Jeu",
             Onglet::Clips => "Clips",
             Onglet::Sons => "Sons & notifications",
@@ -298,7 +295,6 @@ impl Onglet {
             Onglet::Casque => "casque",
             Onglet::Reseau => "reseau",
             Onglet::Diffusion => "diffusion",
-            Onglet::Overlay => "overlay",
             Onglet::Jeu => "jeu",
             Onglet::Clips => "clips",
             Onglet::Sons => "sons",
@@ -308,6 +304,10 @@ impl Onglet {
     }
 
     fn depuis(cle: &str) -> Self {
+        // L'overlay avait son onglet ; il est passé en Bêta.
+        if cle == "overlay" {
+            return Onglet::Beta;
+        }
         Self::TOUS.into_iter().find(|o| o.cle() == cle).unwrap_or(Onglet::Audio)
     }
 }
@@ -9353,11 +9353,6 @@ impl KiApp {
                                 }
                             }
 
-                        }
-                        if onglet == Onglet::Overlay {
-                            // --- Overlay en jeu ---
-                            ui::group_title(ui, Icon::User, "Overlay en jeu");
-                            overlay::reglages_ui(ui, &mut self.overlay);
                         }
                         if onglet == Onglet::Sons {
                             // --- Effets sonores ---
