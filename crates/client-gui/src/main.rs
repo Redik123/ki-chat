@@ -1066,6 +1066,9 @@ struct KiApp {
     /// ki-chat qui tient le verrou d'instance sans arriver jusque-là — sans
     /// fenêtre — se reconnaît à l'absence de cette ligne.
     premiere_image: bool,
+    /// L'instantané de la voix pris par `logique`, que l'image affiche
+    /// ensuite (`interface`) : un seul par image.
+    instantane_voix: Option<VoiceSnapshot>,
     // Panneau admin
     show_admin: bool,
     /// Nom du serveur en cours d'édition dans le panneau admin.
@@ -1580,6 +1583,7 @@ impl KiApp {
             upload_status: Default::default(),
             info: None,
             premiere_image: false,
+            instantane_voix: None,
             show_admin: false,
             admin_users: Vec::new(),
             admin_invites: Vec::new(),
@@ -14623,17 +14627,30 @@ impl eframe::App for KiApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // La mesure encadre TOUT le corps de `update`, sinon elle mentirait
+        self.logique(ctx, frame);
+        self.interface(ctx);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.sauver(storage);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.quitter_proprement();
+    }
+}
+
+impl KiApp {
+    /// Tout ce qui doit tourner même quand rien ne se dessine — fenêtre
+    /// réduite dans la zone de notification, en pleine partie : le réseau,
+    /// la voix, la zone de notification, le Loupedeck, les clips. Rien n'y
+    /// dessine. Depuis egui 0.34, eframe n'appelle plus que cette partie
+    /// (`App::logic`) quand la fenêtre est cachée.
+    fn logique(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // La mesure encadre la logique ET le dessin, sinon elle mentirait
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
         // celui de la partie qu'on a pensé à instrumenter.
         self.perf.debut_image();
-        if !self.premiere_image {
-            self.premiere_image = true;
-            tracing::info!("interface prête : première image");
-        }
-        // Les images VALORANT arrivées depuis l'image d'avant deviennent des
-        // textures ; rien ne se télécharge ici.
-        self.catalogue.preparer(ctx);
 
         // Géométrie : on ne restaure que « maximisée », et on suit l'état
         // courant pour le réenregistrer. Cf. `main` pour le pourquoi.
@@ -14871,6 +14888,26 @@ impl eframe::App for KiApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(titre));
         }
 
+        // Le prochain réveil, demandé ici aussi : fenêtre cachée, il n'y a
+        // pas d'`interface` pour le faire (voir la fin de celle-ci).
+        if let Some(delai) = self.repaint_delay(&voice) {
+            ctx.request_repaint_after(delai);
+        }
+        self.instantane_voix = Some(voice);
+    }
+
+    /// Ce que l'image dessine. Depuis egui 0.34, eframe ne l'appelle que si
+    /// la fenêtre se voit (`App::ui`) — juste après `logique`.
+    fn interface(&mut self, ctx: &egui::Context) {
+        if !self.premiere_image {
+            self.premiere_image = true;
+            tracing::info!("interface prête : première image");
+        }
+        // Les images VALORANT arrivées depuis l'image d'avant deviennent des
+        // textures ; rien ne se télécharge ici.
+        self.catalogue.preparer(ctx);
+        let voice = self.instantane_voix.take().unwrap_or_else(|| self.voice_snapshot());
+
         if self.welcomed {
             // Échap ferme la fenêtre la plus « en avant ».
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -14926,7 +14963,7 @@ impl eframe::App for KiApp {
         self.perf.fin_image();
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+    fn sauver(&mut self, storage: &mut dyn eframe::Storage) {
         servers::save(storage, &self.book);
         storage.set_string(
             "session_auto",
@@ -15028,7 +15065,7 @@ impl eframe::App for KiApp {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn quitter_proprement(&mut self) {
         // Une fermeture ne doit pas pouvoir s'éterniser — fenêtre figée,
         // « ne répond pas », mise à jour jamais relancée : un fil la
         // surveille, et termine le processus s'il le faut.
