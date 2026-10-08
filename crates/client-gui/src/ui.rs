@@ -7,6 +7,9 @@ use eframe::egui::{
     StrokeKind, Ui, Vec2,
 };
 
+use ki_ui::flex::{Aligne, Case, Flex};
+use ki_ui::jetons::{espace, rayon, texte};
+
 use crate::icons::{self, Icon};
 use crate::theme;
 
@@ -531,8 +534,9 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
 
 /// Largeur de la colonne des libellés d'une ligne de réglage.
 const LIBELLE_W: f32 = 150.0;
-/// En-dessous de cette largeur, le libellé passe au-dessus du contrôle.
-const LIGNE_ETROITE: f32 = 430.0;
+/// La place minimale du contrôle à côté de son libellé : en dessous, il
+/// passe sous le libellé — à 430 points de ligne, comme avant.
+const CONTROLE_MIN: f32 = 430.0 - LIBELLE_W - espace::M;
 
 /// Une section de réglages : une surface à peine relevée, son titre, une
 /// phrase qui dit à quoi elle sert, puis ses lignes.
@@ -546,7 +550,7 @@ pub fn section(
     egui::Frame::NONE
         .fill(theme::BG_RAISED)
         .stroke(Stroke::new(1.0_f32, theme::BORDER_SOFT))
-        .corner_radius(CornerRadius::same(12))
+        .corner_radius(CornerRadius::same(rayon::XL))
         .inner_margin(egui::Margin::symmetric(16, 14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -554,48 +558,54 @@ pub fn section(
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, icon, theme::ACCENT);
                 ui.add_space(2.0);
-                ui.label(RichText::new(titre).color(theme::TEXT).size(15.0).strong());
+                ui.label(RichText::new(titre).color(theme::TEXT).size(texte::TITRE).strong());
             });
             if let Some(s) = sous_titre {
                 ui.add_space(2.0);
-                ui.label(RichText::new(s).color(theme::TEXT_FAINT).size(11.5));
+                ui.label(RichText::new(s).color(theme::TEXT_FAINT).size(texte::PETIT));
             }
-            ui.add_space(12.0);
+            ui.add_space(espace::L);
             add(ui);
         });
     ui.add_space(12.0);
 }
 
-/// Une ligne de réglage : le libellé sur sa colonne, le contrôle à droite —
-/// ou le libellé au-dessus quand la fenêtre est étroite. Ce que `add`
-/// ajoute s'empile dans la colonne du contrôle (une explication sous un
-/// curseur, par exemple).
+/// Une ligne de réglage : le libellé sur sa colonne, le contrôle qui prend
+/// le reste — et qui passe sous le libellé quand ils ne tiennent plus côte
+/// à côte. Ce que `add` ajoute s'empile dans la colonne du contrôle (une
+/// explication sous un curseur, par exemple).
 pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
-    let texte = RichText::new(libelle).color(theme::TEXT_DIM).size(12.5);
-    if ui.available_width() < LIGNE_ETROITE {
-        ui.label(texte);
-        ui.add_space(3.0);
-        add(ui);
-    } else {
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(LIBELLE_W, 24.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(LIBELLE_W);
-                    ui.label(texte);
-                },
-            );
-            ui.vertical(|ui| add(ui));
+    let libelle_texte = RichText::new(libelle).color(theme::TEXT_DIM).size(texte::COURANT);
+    // Le passage à la ligne, c'est le flex qui en décide (le contrôle a sa
+    // largeur minimale), plus un seuil de largeur de fenêtre.
+    Flex::ligne()
+        .aligner(Aligne::Debut)
+        .ecarts(espace::M, espace::XS)
+        .passer_a_la_ligne()
+        .show(ui, ("ligne", libelle), |f| {
+            f.case(Case::new().base(LIBELLE_W).rigide(), |ui| {
+                // Centré sur la hauteur d'un contrôle : en face de sa
+                // première ligne.
+                ui.allocate_ui_with_layout(
+                    Vec2::new(LIBELLE_W, 24.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(LIBELLE_W);
+                        ui.label(libelle_texte);
+                    },
+                );
+            });
+            f.case(Case::new().grandir(1.0).largeur_min(CONTROLE_MIN), |ui| {
+                ui.vertical(|ui| add(ui));
+            });
         });
-    }
     ui.add_space(10.0);
 }
 
 /// Explication sous un contrôle, dans la colonne de la ligne.
 pub fn precision(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
-    ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT_FAINT).size(11.5)).wrap());
+    ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT)).wrap());
 }
 
 /// Choix exclusif en pastilles jointes (« Aucune · Douce · Forte ») :

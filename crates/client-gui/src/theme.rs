@@ -15,38 +15,9 @@ use eframe::egui::{
 // Palette
 // ---------------------------------------------------------------------
 
-/// Fond le plus profond : zone de conversation, champs « creusés ».
-pub const BG_DEEP: Color32 = Color32::from_rgb(0x0c, 0x0f, 0x14);
-/// Colonne de gauche (salons, membres).
-pub const BG_SIDE: Color32 = Color32::from_rgb(0x11, 0x15, 0x1b);
-/// Fond général des panneaux.
-pub const BG_BASE: Color32 = Color32::from_rgb(0x15, 0x1a, 0x21);
-/// Surfaces en relief : fenêtres, cartes, boutons.
-pub const BG_RAISED: Color32 = Color32::from_rgb(0x1b, 0x21, 0x2a);
-pub const BG_HOVER: Color32 = Color32::from_rgb(0x24, 0x2c, 0x37);
-pub const BG_ACTIVE: Color32 = Color32::from_rgb(0x2d, 0x37, 0x44);
-/// Survol très discret (lignes de message).
-pub const BG_GHOST: Color32 = Color32::from_rgb(0x1a, 0x20, 0x28);
-
-pub const BORDER: Color32 = Color32::from_rgb(0x28, 0x31, 0x3c);
-pub const BORDER_SOFT: Color32 = Color32::from_rgb(0x1e, 0x25, 0x2e);
-/// Trait ou texte très en retrait, mais encore lisible.
-pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x44, 0x51, 0x60);
-
-pub const TEXT: Color32 = Color32::from_rgb(0xe7, 0xed, 0xf4);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0x94, 0xa2, 0xb2);
-pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x63, 0x70, 0x7f);
-
-/// Accent de la marque (vert ki-chat).
-pub const ACCENT: Color32 = Color32::from_rgb(0x00, 0xd2, 0x6a);
-/// Vert « quelqu'un parle ».
-pub const SPEAK: Color32 = Color32::from_rgb(0x00, 0xe6, 0x76);
-pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
-pub const WARN: Color32 = Color32::from_rgb(0xff, 0xa1, 0x57);
-pub const INFO: Color32 = Color32::from_rgb(0x58, 0xa6, 0xff);
-/// Les invités web : un ambre à part, ni l'accent (le bot, le serveur)
-/// ni une couleur de rôle — « pas des nôtres, le temps d'une porte ».
-pub const INVITE: Color32 = Color32::from_rgb(0xf0, 0xb8, 0x6c);
+/// La palette vit dans les jetons de ki-ui : une seule source pour toutes
+/// les applis ki-*. Les noms restent ceux de toujours.
+pub use ki_ui::jetons::couleur::*;
 
 /// Couleurs de pseudos, stables par hachage du nom.
 const PALETTE: [Color32; 8] = [

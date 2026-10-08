@@ -1,0 +1,21 @@
+[package]
+name = "ki-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# La boîte à outils d'interface de ki-chat, par-dessus egui : les jetons de
+# design (couleurs, espacements, rayons, tailles de texte) et la mise en page
+# flexbox. Faite pour servir aussi aux futures applis ki-* (ki-studio).
+
+[dependencies]
+# La version d'eframe dans ki-chat : déjà dans l'arbre.
+egui = { version = "0.36", default-features = false }
+# Flexbox, grille et block CSS, calculés par taffy. Caché derrière `flex` :
+# si egui_taffy prend du retard sur egui, on le remplace sans toucher aux
+# écrans.
+egui_taffy = "0.14"
+
+[dev-dependencies]
+# Les polices d'egui, pour les tests qui mesurent du texte.
+egui = { version = "0.36", features = ["default_fonts"] }

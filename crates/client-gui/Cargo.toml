@@ -59,6 +59,8 @@ chrono = "0.4"
 # écrans sont dessinés ici, avec les polices d'egui. ab_glyph n'est plus
 # tiré que pour eux : egui l'a remplacé par skrifa en 0.34.
 ki-loupedeck = { path = "../loupedeck" }
+# La boîte à outils d'interface : jetons de design, mise en page flexbox.
+ki-ui = { path = "../ui" }
 ab_glyph = "0.2"
 epaint_default_fonts = "0.36"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne

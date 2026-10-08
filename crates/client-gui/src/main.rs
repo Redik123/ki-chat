@@ -71,6 +71,7 @@ use ki_protocol::{
     IconChange, InviteInfo, Member, MsgRef, Reaction, ReplyRef, ServerInfo, ServerMsg, UserId,
 };
 use ptt::PttKey;
+use ki_ui::flex::Flex;
 use theme::{color_for, ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
 use ui::Tone;
 
@@ -8197,16 +8198,19 @@ impl KiApp {
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(6, 5))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if can_upload
-                        && ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)")
-                            .clicked()
-                    {
-                        self.start_upload();
+                // Le trombone et l'envoi à leur taille, le champ prend tout ce qui
+                // reste — le flex fait le calcul qu'on faisait à la main.
+                let ecart = ui.spacing().item_spacing.x;
+                Flex::ligne().ecart(ecart).show(ui, "saisie", |f| {
+                    if can_upload {
+                        f.ui(|ui| {
+                            if ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)").clicked() {
+                                self.start_upload();
+                            }
+                        });
                     }
 
                     let filled = !self.input.trim().is_empty();
-                    let send_width = 34.0 + ui.spacing().item_spacing.x;
                     // Zone **multiligne**. Le protocole a toujours accepté les
                     // sauts de ligne ; c'était l'interface qui les interdisait,
                     // si bien que Maj+Entrée envoyait le message au lieu d'aller
@@ -8222,70 +8226,75 @@ impl KiApp {
                     } else {
                         format!("Message dans #{channel_name}")
                     };
-                    let response = ui.add_sized(
-                        Vec2::new(ui.available_width() - send_width, 18.0 * lignes as f32 + 8.0),
-                        egui::TextEdit::multiline(&mut self.input)
-                            .char_limit(ki_protocol::MAX_CHAT_TEXT)
-                            .desired_rows(lignes)
-                            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 4)))
-                            .hint_text(indice),
-                    );
-                    if menu_edition(&response, &mut self.input, false) {
-                        self.focus_input = true;
-                    }
-                    // Entrée envoie, Maj+Entrée va à la ligne. La zone
-                    // multiligne consomme Entrée pour son propre compte : on
-                    // intercepte donc AVANT elle, et l'on retire le saut de
-                    // ligne qu'elle vient d'insérer.
-                    if response.has_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                    {
-                        // egui a déjà écrit le saut de ligne dans le tampon au
-                        // moment où l'on regarde : on l'enlève, sinon chaque
-                        // message partirait avec une ligne vide en trop.
-                        if self.input.ends_with('\n') {
-                            self.input.pop();
+                    f.grandit(|ui| {
+                        let response = ui.add_sized(
+                            Vec2::new(ui.available_width(), 18.0 * lignes as f32 + 8.0),
+                            egui::TextEdit::multiline(&mut self.input)
+                                .id(egui::Id::new("saisie_du_chat"))
+                                .char_limit(ki_protocol::MAX_CHAT_TEXT)
+                                .desired_rows(lignes)
+                                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 4)))
+                                .hint_text(indice),
+                        );
+                        if menu_edition(&response, &mut self.input, false) {
+                            self.focus_input = true;
                         }
-                        submit = true;
-                        self.focus_input = true;
-                    }
-                    // Flèche haut dans un champ vide : reprendre son dernier
-                    // message pour le corriger — le geste de Discord.
-                    if response.has_focus()
-                        && self.input.is_empty()
-                        && self.edition.is_none()
-                        && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
-                    {
-                        let dernier = self
-                            .my_id
-                            .and_then(|me| self.messages.iter().rev().find(|m| m.user_id == me))
-                            .cloned();
-                        if let Some(m) = dernier {
-                            self.commencer_edition(&m);
+                        // Entrée envoie, Maj+Entrée va à la ligne. La zone
+                        // multiligne consomme Entrée pour son propre compte : on
+                        // intercepte donc AVANT elle, et l'on retire le saut de
+                        // ligne qu'elle vient d'insérer.
+                        if response.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                        {
+                            // egui a déjà écrit le saut de ligne dans le tampon au
+                            // moment où l'on regarde : on l'enlève, sinon chaque
+                            // message partirait avec une ligne vide en trop.
+                            if self.input.ends_with('\n') {
+                                self.input.pop();
+                            }
+                            submit = true;
+                            self.focus_input = true;
                         }
-                    }
-                    if std::mem::take(&mut self.focus_input) {
-                        response.request_focus();
-                    }
+                        // Flèche haut dans un champ vide : reprendre son dernier
+                        // message pour le corriger — le geste de Discord.
+                        if response.has_focus()
+                            && self.input.is_empty()
+                            && self.edition.is_none()
+                            && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
+                        {
+                            let dernier = self
+                                .my_id
+                                .and_then(|me| self.messages.iter().rev().find(|m| m.user_id == me))
+                                .cloned();
+                            if let Some(m) = dernier {
+                                self.commencer_edition(&m);
+                            }
+                        }
+                        if std::mem::take(&mut self.focus_input) {
+                            response.request_focus();
+                        }
+                    });
 
-                    // En attente de cadence, le bouton passe à l'ambre et le
-                    // dit : le message reste écrit, il partira dans un instant.
-                    let reste = self
-                        .dernier_envoi
-                        .map(|t| CADENCE_CHAT.saturating_sub(t.elapsed()))
-                        .filter(|r| !r.is_zero());
-                    let (tint, aide) = match reste {
-                        Some(r) => {
-                            ui.ctx().request_repaint_after(r);
-                            (Some(WARN), "un message toutes les 1,5 s — encore un instant")
+                    f.ui(|ui| {
+                        // En attente de cadence, le bouton passe à l'ambre et le
+                        // dit : le message reste écrit, il partira dans un instant.
+                        let reste = self
+                            .dernier_envoi
+                            .map(|t| CADENCE_CHAT.saturating_sub(t.elapsed()))
+                            .filter(|r| !r.is_zero());
+                        let (tint, aide) = match reste {
+                            Some(r) => {
+                                ui.ctx().request_repaint_after(r);
+                                (Some(WARN), "un message toutes les 1,5 s — encore un instant")
+                            }
+                            None if filled => (Some(ACCENT), "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
+                            None => (None, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
+                        };
+                        if ui::icon_button_ex(ui, Icon::Send, 32.0, aide, tint).clicked() {
+                            submit = true;
+                            self.focus_input = true;
                         }
-                        None if filled => (Some(ACCENT), "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
-                        None => (None, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
-                    };
-                    if ui::icon_button_ex(ui, Icon::Send, 32.0, aide, tint).clicked() {
-                        submit = true;
-                        self.focus_input = true;
-                    }
+                    });
                 });
             });
         // Sur une ligne, la barre donne sa hauteur au pied de la colonne des
