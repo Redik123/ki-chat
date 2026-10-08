@@ -24,12 +24,17 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# Pas au-delà de 0.33 sans chantier : depuis 0.34, eframe ne fait plus
-# tourner l'interface d'une fenêtre réduite, et repousse ses réveils d'au
-# moins 100 ms. Or le push-to-talk, les raccourcis, le Loupedeck et l'overlay
-# passent par cette boucle — ki-chat réduit en jeu couperait le début de
-# chaque prise de parole.
-eframe = { version = "0.33", features = ["persistence"] }
+# Depuis 0.34, eframe ne fait plus tourner l'interface d'une fenêtre
+# réduite (seulement `App::logic`), et repousse ses réveils d'au moins
+# 100 ms : le push-to-talk est donc lu par le moteur vocal, l'overlay a son
+# veilleur et le stream détaché sa propre fenêtre.
+#
+# Le rendu reste en OpenGL (glow), alors que 0.34 prend wgpu par défaut :
+# changer de moteur de rendu se fera à part, essayé pour lui-même —
+# l'overlay découpé, les streams et la reprise après un pilote
+# réinitialisé en dépendent. Les options par défaut retirées ne servaient
+# qu'à Linux (x11, wayland) et au web ; `links` ouvre les liens du chat.
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "links", "persistence"] }
 # Le spectre de la voix derrière la courbe de l'égaliseur (page Casque). Déjà
 # compilé pour le débruitage : la même version, rien de plus à télécharger.
 realfft = "3.5"
@@ -51,11 +56,11 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 tokio.workspace = true
 chrono = "0.4"
 # Le Loupedeck Live, piloté directement (boutons, molettes, écrans) ; ses
-# écrans sont dessinés ici. ab_glyph et les polices d'egui sont déjà dans
-# l'arbre (epaint) : rien de plus à télécharger.
+# écrans sont dessinés ici, avec les polices d'egui. ab_glyph n'est plus
+# tiré que pour eux : egui l'a remplacé par skrifa en 0.34.
 ki-loupedeck = { path = "../loupedeck" }
 ab_glyph = "0.2"
-epaint_default_fonts = "0.33"
+epaint_default_fonts = "0.36"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne
 # même quand la fenêtre n'a pas le focus — indispensable en jeu.
 device_query = "2"

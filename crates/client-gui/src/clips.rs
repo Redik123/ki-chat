@@ -1744,6 +1744,9 @@ mod tests {
             fn set_string(&mut self, key: &str, value: String) {
                 self.0.insert(key.into(), value);
             }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
             fn flush(&mut self) {}
         }
         let mut s = S(Default::default());

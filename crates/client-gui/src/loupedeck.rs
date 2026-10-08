@@ -1204,10 +1204,13 @@ impl Icones {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256.0, 256.0))),
                 ..Default::default()
             };
-            let sortie = ctx.run(entree, |ctx| {
-                let p = ctx.layer_painter(egui::LayerId::background());
+            let mut sortie = ctx.run_ui(entree, |ui| {
+                let p = ui.ctx().layer_painter(egui::LayerId::background());
                 icons::draw(&p, cadre, icone, Color32::WHITE);
             });
+            // Rastérisé ici même, hors écran : les textures (l'atlas des
+            // polices) n'iront nulle part — egui veut qu'on le dise.
+            sortie.textures_delta.clear();
             for primitive in ctx.tessellate(sortie.shapes, sortie.pixels_per_point) {
                 let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive else { continue };
                 for t in mesh.indices.as_chunks::<3>().0 {

@@ -119,7 +119,7 @@ pub fn alpha(c: Color32, a: u8) -> Color32 {
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals = visuals();
     style.text_styles = text_styles();
 
@@ -146,6 +146,14 @@ pub fn install(ctx: &egui::Context) {
 
     style.interaction.tooltip_delay = 0.35;
     style.interaction.selectable_labels = true;
+    // egui 0.35 a doublé la durée de ses animations (0,2 s) : on garde la
+    // vivacité d'avant.
+    style.animation_time = 0.1;
+
+    // Depuis egui 0.34, Ctrl+Q ferme l'application. Pas ici : c'est une
+    // touche qu'on frôle en écrivant, et ki-chat se quitte par sa croix ou
+    // par le menu de son icône. (Sous macOS, le menu natif garde Cmd+Q.)
+    ctx.options_mut(|o| o.quit_shortcuts.clear());
 
     // Le client n'a qu'un thème, celui-ci : ses couleurs sont des
     // constantes, peintes partout. Or egui suit par défaut le thème du
@@ -303,11 +311,12 @@ mod tests {
         ctx.set_theme(egui::ThemePreference::Light);
         install(&ctx);
         let entree = egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
-        let _ = ctx.run(entree, |ctx| {
+        ctx.run_ui(entree, |ui| {
+            let ctx = ui.ctx();
             assert_eq!(ctx.theme(), egui::Theme::Dark);
-            assert_eq!(ctx.style().visuals.window_fill, BG_RAISED);
-            assert!(ctx.style().visuals.dark_mode);
-        });
+            assert_eq!(ctx.global_style().visuals.window_fill, BG_RAISED);
+            assert!(ctx.global_style().visuals.dark_mode);
+        }).drop_without_applying_deltas();
         // Et même la case « clair » porte nos couleurs, au cas où.
         assert_eq!(ctx.style_of(egui::Theme::Light).visuals.window_fill, BG_RAISED);
     }

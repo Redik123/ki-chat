@@ -767,7 +767,7 @@ impl KiApp {
                             .font(egui::FontId::proportional(20.0))
                             .text_color(TEXT)
                             .desired_width(ui.available_width().min(240.0))
-                            .frame(false),
+                            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))),
                     )
                     .on_hover_text("clique pour lui donner son nom");
                     ui.add_space(6.0);

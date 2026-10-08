@@ -124,7 +124,9 @@ fn hwnd_de(h: &impl HasWindowHandle) -> Option<isize> {
 }
 
 impl eframe::App for Sonde {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    /// Tourne même fenêtre réduite (eframe n'appelle alors plus `ui`) :
+    /// c'est elle que la sonde observe.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let n = IMAGES.fetch_add(1, Ordering::Relaxed) + 1;
         if !self.fil_lance {
             self.fil_lance = true;
@@ -150,7 +152,7 @@ impl eframe::App for Sonde {
                 .expect("fil scénario");
         }
 
-        // Une ligne par seconde entière : si elle manque, `update()` dormait.
+        // Une ligne par seconde entière : si elle manque, `logic()` dormait.
         let s = secondes() as u64;
         if s > self.seconde_journalisee {
             let d = n - self.images_seconde_prec;
@@ -173,7 +175,11 @@ impl eframe::App for Sonde {
             ));
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let n = IMAGES.load(Ordering::Relaxed);
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("ki-chat sonde — se ferme toute seule à 32 s");
             ui.label(format!("phase {} — image n° {n}", phase()));
             ui.label(&self.zone.etat);

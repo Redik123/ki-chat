@@ -46,8 +46,9 @@ impl eframe::App for Sonde {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.label("sonde de transparence — se ferme toute seule");
         });
         let builder = egui::ViewportBuilder::default()
@@ -64,8 +65,8 @@ impl eframe::App for Sonde {
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("sonde-overlay"),
             builder,
-            |ctx, _| {
-                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+            |ui, _| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
                     ui.painter().circle_filled(
                         egui::pos2(60.0, 60.0),
                         30.0,

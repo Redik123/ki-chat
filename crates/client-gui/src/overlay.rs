@@ -509,8 +509,8 @@ impl Overlay {
             .with_active(false)
             .with_inner_size([largeur, hauteur])
             .with_position(pos);
-        ctx.show_viewport_immediate(id, builder, move |ctx, _classe| {
-            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+        ctx.show_viewport_immediate(id, builder, move |ui, _classe| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
                 let rect = ui.max_rect();
                 let painter = ui.painter();
                 for (i, (nom, parle, photo)) in affichees.iter().enumerate() {
@@ -597,7 +597,7 @@ impl Overlay {
                 }
             });
             if anime {
-                ctx.request_repaint_after(Duration::from_millis(100));
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
         });
         // La découpe suit la forme, et ne se refait qu'au changement.
@@ -708,6 +708,9 @@ mod tests {
             }
             fn set_string(&mut self, key: &str, value: String) {
                 self.0.insert(key.to_string(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
             }
             fn flush(&mut self) {}
         }

@@ -3370,7 +3370,7 @@ mod tests {
     /// Une image egui sans écran, la souris posée quelque part : ce que
     /// la page dessine ne doit jamais paniquer, quelles que soient les
     /// données — pleines, pauvres, ou d'un serveur d'avant.
-    fn dessiner(ctx: &egui::Context, souris: Option<Pos2>, mut corps: impl FnMut(&egui::Context)) {
+    fn dessiner(ctx: &egui::Context, souris: Option<Pos2>, mut corps: impl FnMut(&mut egui::Ui)) {
         let mut entree = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_400.0, 900.0))),
             ..Default::default()
@@ -3380,7 +3380,7 @@ mod tests {
         }
         // Deux passes : la seconde voit les tailles que la première a mesurées.
         for _ in 0..2 {
-            let _ = ctx.run(entree.clone(), |ctx| corps(ctx));
+            ctx.run_ui(entree.clone(), |ui| corps(ui)).drop_without_applying_deltas();
         }
     }
 
@@ -3404,7 +3404,8 @@ mod tests {
                 for periode in Periode::TOUTES {
                     page.periode = periode;
                     for souris in [None, Some(Pos2::new(300.0, 300.0)), Some(Pos2::new(700.0, 500.0))] {
-                        dessiner(&ctx, souris, |ctx| {
+                        dessiner(&ctx, souris, |ui| {
+                            let ctx = ui.ctx();
                             let demandes =
                                 page.fenetre(ctx, &stats, true, &[], &activite, Some(1), &membres, &rangs, &catalogue, &mut boutique);
                             assert!(demandes.is_empty());
@@ -3417,7 +3418,8 @@ mod tests {
             for tri in [Tri::Rang, Tri::Rr7, Tri::Rr30, Tri::Kd, Tri::Acs, Tri::Adr, Tri::Kast, Tri::Matchs] {
                 page.tri = tri;
                 page.tri_desc = !page.tri_desc;
-                dessiner(&ctx, None, |ctx| {
+                dessiner(&ctx, None, |ui| {
+                    let ctx = ui.ctx();
                     page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &catalogue, &mut boutique);
                 });
             }
@@ -3425,11 +3427,13 @@ mod tests {
             page.filtre_membre = Some(2);
             page.filtre_mode = Some(MODE_CLASSE.into());
             page.plus = true;
-            dessiner(&ctx, None, |ctx| {
+            dessiner(&ctx, None, |ui| {
+                let ctx = ui.ctx();
                 page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &catalogue, &mut boutique);
             });
             // Avant la réponse du serveur, et sans personne de lié.
-            dessiner(&ctx, None, |ctx| {
+            dessiner(&ctx, None, |ui| {
+                let ctx = ui.ctx();
                 page.fenetre(ctx, &stats, false, &[], &[], None, &membres, &rangs, &catalogue, &mut boutique);
                 page.fenetre(ctx, &[], true, &[], &[], None, &[], &rangs, &catalogue, &mut boutique);
             });
@@ -3449,7 +3453,8 @@ mod tests {
                         page.deplie = Some("m1".into());
                         page.fiche_plus = periode == PeriodeFiche::Tout;
                         for souris in [None, Some(Pos2::new(200.0, 250.0)), Some(Pos2::new(320.0, 600.0))] {
-                            dessiner(&ctx, souris, |ctx| {
+                            dessiner(&ctx, souris, |ui| {
+                                let ctx = ui.ctx();
                                 assert!(page.fiche(ctx, ouverte, &stats, &membres, &rangs, &catalogue));
                             });
                         }
@@ -3470,8 +3475,8 @@ mod tests {
         let souris = Pos2::new(60.0, 60.0);
         for cadre_avant in [true, false] {
             let mut survols = (false, false);
-            dessiner(&ctx, Some(souris), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            dessiner(&ctx, Some(souris), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 40.0));
                     let id = egui::Id::new("ligne_test");
                     let cadre = cadre_avant.then(|| ui.interact(rect, id, Sense::click()));
@@ -3503,8 +3508,8 @@ mod tests {
         ];
         for events in entrees {
             let entree = egui::RawInput { screen_rect: Some(ecran), events, ..Default::default() };
-            let _ = ctx.run(entree, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            ctx.run_ui(entree, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let fond = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(1_000.0, 800.0));
                     ui.interact(fond, egui::Id::new("defilement_test"), Sense::drag());
                     let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 40.0));
@@ -3513,7 +3518,7 @@ mod tests {
                     ui.interact(dedans, egui::Id::new("pastille_test"), Sense::hover());
                     clique |= cadre.clicked();
                 });
-            });
+            }).drop_without_applying_deltas();
         }
         assert!(clique, "le clic traverse le label muet et ignore le fond glissable");
     }
@@ -3600,10 +3605,11 @@ mod tests {
         // Quelques images : les grilles et les zones de défilement se
         // stabilisent à la deuxième.
         for _ in 0..4 {
-            let _ = ctx.run(entree(), |ctx| {
+            ctx.run_ui(entree(), |ui| {
+                let ctx = ui.ctx();
                 page.fenetre(ctx, &stats, true, &[], &[], Some(1), &membres, &rangs, &catalogue, &mut boutique);
                 page.fiche(ctx, &ouverte, &stats, &membres, &rangs, &catalogue);
-            });
+            }).drop_without_applying_deltas();
         }
         let groupe = ctx.memory(|m| m.area_rect(egui::Id::new("valo_page_v5"))).expect("la page est ouverte");
         let fiche = ctx.memory(|m| m.area_rect(egui::Id::new("fiche_valorant_v5"))).expect("la fiche est ouverte");
@@ -3674,7 +3680,8 @@ mod tests {
         page.onglet = Onglet::Groupe;
         for recu in [false, true] {
             for souris in [None, Some(Pos2::new(200.0, 160.0))] {
-                dessiner(&ctx, souris, |ctx| {
+                dessiner(&ctx, souris, |ui| {
+                    let ctx = ui.ctx();
                     page.fenetre(ctx, &stats, recu, &[], &[], Some(1), &membres, &rangs, &catalogue, &mut boutique);
                 });
             }

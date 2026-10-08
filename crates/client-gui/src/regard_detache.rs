@@ -119,14 +119,15 @@ impl Fenetre {
             .with_min_inner_size([320.0, 180.0])
             .with_icon(self.icone.clone());
         let etat = self.etat.clone();
-        ctx.show_viewport_deferred(id(), builder, move |ctx, _classe| {
-            etat.lock().unwrap().dessiner(ctx);
+        ctx.show_viewport_deferred(id(), builder, move |ui, _classe| {
+            etat.lock().unwrap().dessiner(ui);
         });
     }
 }
 
 impl Etat {
-    fn dessiner(&mut self, ctx: &egui::Context) {
+    fn dessiner(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if let Some(image) = self.image.lock().unwrap().take() {
             match &mut self.tex {
                 Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
@@ -174,7 +175,7 @@ impl Etat {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::BLACK))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let dispo = ui.max_rect();
                 let toile = ui.interact(dispo, egui::Id::new("regard-toile"), Sense::click());
                 if toile.double_clicked() {

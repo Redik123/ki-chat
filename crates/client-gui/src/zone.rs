@@ -911,7 +911,7 @@ mod tests {
         let mut input = egui::RawInput::default();
         input.viewports.entry(egui::ViewportId::ROOT).or_default().minimized = minimisee;
         let mut constat = Constat::Rien;
-        let _ = ctx.run(input, |ctx| constat = zone.tick(ctx));
+        ctx.run_ui(input, |ui| constat = zone.tick(ui.ctx())).drop_without_applying_deltas();
         constat
     }
 
@@ -980,10 +980,10 @@ mod tests {
         let mut zone = Zone::factice();
         zone.veille.revele.store(true, Ordering::Relaxed);
         let mut premier = Constat::Rien;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| premier = zone.tick(ctx));
+        ctx.run_ui(egui::RawInput::default(), |ui| premier = zone.tick(ui.ctx())).drop_without_applying_deltas();
         assert_eq!(premier, Constat::Revelee);
         let mut second = Constat::Rien;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| second = zone.tick(ctx));
+        ctx.run_ui(egui::RawInput::default(), |ui| second = zone.tick(ui.ctx())).drop_without_applying_deltas();
         assert_eq!(second, Constat::Rien);
     }
 

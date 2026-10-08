@@ -295,10 +295,7 @@ pub(crate) fn editeur(
                 let b = &mut bandes[i];
                 b.q = (b.q * 2f32.powf(defilement / 240.0)).clamp(Q_MIN, Q_MAX);
                 change = true;
-                ui.input_mut(|inp| {
-                    inp.smooth_scroll_delta = Vec2::ZERO;
-                    inp.raw_scroll_delta = Vec2::ZERO;
-                });
+                ui.input_mut(|inp| inp.smooth_scroll_delta = Vec2::ZERO);
             }
         }
         if let Some(i) = etat.selection {

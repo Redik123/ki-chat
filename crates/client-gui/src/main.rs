@@ -6254,7 +6254,8 @@ impl KiApp {
     // Écran de connexion
     // -----------------------------------------------------------------
 
-    fn login_screen(&mut self, ctx: &egui::Context) {
+    fn login_screen(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         // Teste les serveurs en tâche de fond, au plus une fois toutes les
         // 20 s : l'état et le ping sont connus avant même de se connecter.
         self.probes.sweep(&self.book, ctx, false);
@@ -6269,7 +6270,7 @@ impl KiApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_DEEP))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 const CARD: f32 = 420.0;
                 ui.vertical_centered(|ui| {
                     // Bloc centré, très légèrement remonté (centre optique).
@@ -6647,16 +6648,17 @@ impl KiApp {
     // Écran principal
     // -----------------------------------------------------------------
 
-    fn main_screen(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
+    fn main_screen(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot) {
+        let ctx = &ui.ctx().clone();
         self.mount_avatars(ctx);
         self.previews.set_origin(self.http_base());
         self.previews.set_agent(self.http_agent());
         self.previews.mount(ctx);
 
-        self.voice_bar(ctx, voice);
-        self.sidebar(ctx, voice);
-        self.roster_panel(ctx, voice);
-        self.chat_panel(ctx);
+        self.voice_bar(ui, voice);
+        self.sidebar(ui, voice);
+        self.roster_panel(ui, voice);
+        self.chat_panel(ui);
         self.comms_popup(ctx, voice);
         self.partage_windows(ctx);
         self.diffusion_window(ctx);
@@ -6833,14 +6835,14 @@ impl KiApp {
     }
 
     /// Barre du bas : tout le contrôle vocal et la télémétrie réseau.
-    fn voice_bar(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
-        egui::TopBottomPanel::bottom("voice_bar")
+    fn voice_bar(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot) {
+        egui::Panel::bottom("voice_bar")
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG_SIDE)
                     .inner_margin(egui::Margin::symmetric(12, 9)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // Périphérique disparu : le dire franchement. Sans ça, on
                 // parle dans le vide sans comprendre pourquoi — le cas le
                 // plus courant étant un casque sans fil qui sort de veille.
@@ -7165,7 +7167,8 @@ impl KiApp {
     }
 
     /// Colonne de gauche : marque, salons, membres, et mon compte en pied.
-    fn sidebar(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
+    fn sidebar(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot) {
+        let ctx = &ui.ctx().clone();
         // Résolus avant le panneau : la fermeture emprunte déjà `self`.
         let header_name = self.server_label();
         let header_icon = self
@@ -7173,20 +7176,20 @@ impl KiApp {
             .cloned()
             .and_then(|server| self.server_icon(ctx, &server));
 
-        egui::SidePanel::left("sidebar")
+        egui::Panel::left("sidebar")
             .resizable(true)
-            .default_width(SIDEBAR_WIDTH)
-            .width_range(SIDEBAR_LARGEURS)
+            .default_size(SIDEBAR_WIDTH)
+            .size_range(SIDEBAR_LARGEURS)
             .frame(egui::Frame::NONE.fill(theme::BG_SIDE))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // --- En-tête : marque + serveur ---
-                egui::TopBottomPanel::top("brand")
+                egui::Panel::top("brand")
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_SIDE)
                             .inner_margin(egui::Margin::symmetric(12, 11)),
                     )
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         // Le logo et le nom du serveur priment : avec
                         // plusieurs serveurs enregistrés, c'est ce qui situe.
                         ui.horizontal(|ui| {
@@ -7239,14 +7242,14 @@ impl KiApp {
                 // --- Pied : mon compte ---
                 // De la hauteur de la barre de saisie d'à côté, contenu
                 // centré : la carte et la barre s'alignent.
-                egui::TopBottomPanel::bottom("me")
-                    .exact_height(self.hauteur_saisie + 2.0 * PIED_MARGE)
+                egui::Panel::bottom("me")
+                    .exact_size(self.hauteur_saisie + 2.0 * PIED_MARGE)
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_SIDE)
                             .inner_margin(egui::Margin::symmetric(10, 0)),
                     )
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let me = self.username.clone();
                             let mine = self.my_id.and_then(|id| self.avatars.get(&id));
@@ -7333,7 +7336,7 @@ impl KiApp {
                             .fill(theme::BG_SIDE)
                             .inner_margin(egui::Margin::symmetric(8, 4)),
                     )
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         egui::ScrollArea::vertical()
                             .auto_shrink(false)
                             .show(ui, |ui| {
@@ -7875,17 +7878,17 @@ impl KiApp {
 
     /// Colonne de droite : tout le monde sur le serveur, comme sur Discord.
     /// On y voit qui est là même sans partager de salon vocal.
-    fn roster_panel(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
-        egui::SidePanel::right("roster")
+    fn roster_panel(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot) {
+        egui::Panel::right("roster")
             .resizable(true)
-            .default_width(ROSTER_WIDTH)
-            .width_range(ROSTER_LARGEURS)
+            .default_size(ROSTER_WIDTH)
+            .size_range(ROSTER_LARGEURS)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG_SIDE)
                     .inner_margin(egui::Margin::symmetric(8, 10)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // `take` et non `clone` : la liste est empruntée le temps du
                 // rendu, puis remise. Copiée, elle coûtait — pseudo, rôles et
                 // empreinte d'avatar par membre — une reconstruction complète
@@ -8027,7 +8030,8 @@ impl KiApp {
     }
 
     /// Zone centrale : en-tête du salon, conversation, saisie.
-    fn chat_panel(&mut self, ctx: &egui::Context) {
+    fn chat_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let channel_name = self
             .current
             .and_then(|id| self.channels.iter().find(|c| c.id == id))
@@ -8037,7 +8041,12 @@ impl KiApp {
         // Un fichier lâché sur la fenêtre part dans le salon, par le même
         // chemin que le trombone ; en survol, la conversation le dit.
         let laches: Vec<std::path::PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
         });
         if !laches.is_empty() {
             if self.can(ki_protocol::perm::UPLOAD_FILE) {
@@ -8053,15 +8062,15 @@ impl KiApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG_BASE))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // --- En-tête ---
-                egui::TopBottomPanel::top("chat_head")
+                egui::Panel::top("chat_head")
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_BASE)
                             .inner_margin(egui::Margin::symmetric(16, 12)),
                     )
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui::glyph(ui, Icon::Hash, 17.0, TEXT_FAINT);
                             ui.label(RichText::new(&channel_name).color(TEXT).size(16.5).strong());
@@ -8104,17 +8113,17 @@ impl KiApp {
                     .is_some_and(|m| m.voice.is_some());
                 let peut_appeler = self.musique.disponible && en_vocal && self.can(ki_protocol::perm::CONTROL_MUSIC);
                 if self.musique.salon.is_some() || peut_appeler {
-                    egui::TopBottomPanel::top("chat_musique")
+                    egui::Panel::top("chat_musique")
                         .frame(
                             egui::Frame::NONE
                                 .fill(theme::BG_RAISED)
                                 .inner_margin(egui::Margin::symmetric(14, 8)),
                         )
-                        .show_inside(ui, |ui| self.bandeau_musique(ui));
+                        .show(ui, |ui| self.bandeau_musique(ui));
                 }
 
                 // --- Saisie ---
-                egui::TopBottomPanel::bottom("chat_input")
+                egui::Panel::bottom("chat_input")
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_BASE)
@@ -8125,12 +8134,12 @@ impl KiApp {
                                 bottom: PIED_MARGE as i8,
                             }),
                     )
-                    .show_inside(ui, |ui| self.chat_input(ui, &channel_name));
+                    .show(ui, |ui| self.chat_input(ui, &channel_name));
 
                 // --- Conversation ---
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE.fill(theme::BG_BASE))
-                    .show_inside(ui, |ui| self.chat_log(ui, &channel_name));
+                    .show(ui, |ui| self.chat_log(ui, &channel_name));
             });
 
         if survol {
@@ -8218,8 +8227,7 @@ impl KiApp {
                         egui::TextEdit::multiline(&mut self.input)
                             .char_limit(ki_protocol::MAX_CHAT_TEXT)
                             .desired_rows(lignes)
-                            .frame(false)
-                            .margin(egui::Margin::symmetric(4, 4))
+                            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 4)))
                             .hint_text(indice),
                     );
                     if menu_edition(&response, &mut self.input, false) {
@@ -8837,7 +8845,7 @@ impl KiApp {
         // demande repart à chaque image. Le bouton explicite couvre le cas où
         // l'on est déjà en haut sans rien toucher.
         let scrolling = ui.input(|i| {
-            i.raw_scroll_delta.y.abs() > 0.0 || i.smooth_scroll_delta.y.abs() > 0.0
+            i.is_scrolling() || i.smooth_scroll_delta.y.abs() > 0.0
         });
         // `offset_y` et non `out.state.offset.y` : sur l'image du recalage,
         // ce dernier vaut encore la valeur d'avant correction, c'est-à-dire
@@ -13313,7 +13321,7 @@ fn menu_edition(reponse: &egui::Response, texte: &mut String, secret: bool) -> b
         let mut etat = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
         // La sélection courante, en indices de caractères, ordonnée.
         let selection = etat.cursor.char_range().map(|r| {
-            let (a, b) = (r.primary.index, r.secondary.index);
+            let (a, b) = (r.primary.index.0, r.secondary.index.0);
             (a.min(b), a.max(b))
         });
         let curseur = selection.map(|(a, _)| a).unwrap_or_else(|| texte.chars().count());
@@ -14482,9 +14490,12 @@ impl eframe::App for KiApp {
         overlay::CLE
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.logique(ctx, frame);
-        self.interface(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.interface(ui);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -14500,8 +14511,8 @@ impl KiApp {
     /// Tout ce qui doit tourner même quand rien ne se dessine — fenêtre
     /// réduite dans la zone de notification, en pleine partie : le réseau,
     /// la voix, la zone de notification, le Loupedeck, les clips. Rien n'y
-    /// dessine. Depuis egui 0.34, eframe n'appelle plus que cette partie
-    /// (`App::logic`) quand la fenêtre est cachée.
+    /// dessine. Fenêtre cachée, eframe n'appelle que cette partie
+    /// (`App::logic`), au plus dix fois par seconde.
     fn logique(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // La mesure encadre la logique ET le dessin, sinon elle mentirait
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
@@ -14752,9 +14763,10 @@ impl KiApp {
         self.instantane_voix = Some(voice);
     }
 
-    /// Ce que l'image dessine. Depuis egui 0.34, eframe ne l'appelle que si
-    /// la fenêtre se voit (`App::ui`) — juste après `logique`.
-    fn interface(&mut self, ctx: &egui::Context) {
+    /// Ce que l'image dessine. eframe ne l'appelle que si la fenêtre se
+    /// voit, ou l'une des siennes (`App::ui`) — juste après `logique`.
+    fn interface(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if !self.premiere_image {
             self.premiere_image = true;
             tracing::info!("interface prête : première image");
@@ -14792,9 +14804,9 @@ impl KiApp {
                     self.show_clips = false;
                 }
             }
-            self.main_screen(ctx, &voice);
+            self.main_screen(ui, &voice);
         } else {
-            self.login_screen(ctx);
+            self.login_screen(ui);
         }
         self.update_window(ctx);
         self.zone_dialogue_window(ctx);
