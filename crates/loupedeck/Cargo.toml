@@ -1,0 +1,28 @@
+[package]
+name = "ki-loupedeck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Pilote direct du Loupedeck Live : l'appareil se présente comme un port
+# série USB (VID 0x2EC2) qui parle WebSocket par-dessus le série. Protocole
+# documenté par la communauté (github.com/foxxyz/loupedeck). Le logiciel
+# officiel Loupedeck/Logi doit être fermé : un seul programme peut ouvrir
+# le port à la fois.
+
+[dependencies]
+anyhow.workspace = true
+
+# Le port série par l'API Windows (voir src/port.rs) : la même version que
+# celle de l'interface, déjà dans l'arbre. Ailleurs, l'appareil n'est pas
+# piloté.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Devices_Communication",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Registry",
+] }

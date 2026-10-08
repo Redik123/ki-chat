@@ -77,6 +77,14 @@ impl Soundboard {
         crate::sound_dirs().into_iter().map(|d| d.join("soundboard")).collect()
     }
 
+    /// Vrai si un dossier de la soundboard contient déjà un fichier : qui y
+    /// a déposé des sons s'en sert, son bouton reste visible d'origine.
+    pub fn a_des_sons() -> bool {
+        Self::dossiers().iter().any(|d| {
+            std::fs::read_dir(d).is_ok_and(|mut entrees| entrees.any(|e| e.is_ok_and(|e| e.path().is_file())))
+        })
+    }
+
     /// Le dossier où déposer ses sons : celui des réglages, créé au besoin.
     pub fn dossier_perso() -> Option<PathBuf> {
         let dossier = Self::dossiers().into_iter().last()?;
@@ -89,6 +97,16 @@ impl Soundboard {
         if self.ouvert && !self.charge {
             self.recharger();
         }
+    }
+
+    /// Les sons, pour qui en a besoin hors de la fenêtre (le Loupedeck) :
+    /// la lecture des dossiers part la première fois, et ce qu'elle a
+    /// trouvé est relevé.
+    pub fn preparer(&mut self) {
+        if !self.charge {
+            self.recharger();
+        }
+        self.relever();
     }
 
     /// Relit les dossiers sur un fil : décoder dix MP3 n'a rien à faire

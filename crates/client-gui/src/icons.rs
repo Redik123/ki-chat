@@ -9,7 +9,8 @@
 
 use eframe::egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// Sérialisable : une touche du Loupedeck retient l'icône qu'on lui a choisie.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Icon {
     Star,
     Mic,
@@ -58,6 +59,19 @@ pub enum Icon {
     Film,
     /// Un téléphone : le membre est sur l'appli mobile.
     Telephone,
+}
+
+impl Icon {
+    /// Toutes, dans l'ordre de l'énumération : le choix d'une icône pour une
+    /// touche du Loupedeck.
+    pub const TOUTES: [Icon; 40] = [
+        Icon::Star, Icon::Mic, Icon::MicOff, Icon::Headphones, Icon::Gear, Icon::Sliders, Icon::Crown,
+        Icon::Paperclip, Icon::Copy, Icon::Plus, Icon::Refresh, Icon::Play, Icon::Target, Icon::Logout,
+        Icon::Hash, Icon::User, Icon::Close, Icon::ArrowUp, Icon::ArrowDown, Icon::Ban, Icon::Key,
+        Icon::Volume, Icon::Send, Icon::Check, Icon::Warning, Icon::Info, Icon::Chat, Icon::Pencil,
+        Icon::Trash, Icon::Server, Icon::Loupe, Icon::HeadphonesOff, Icon::Screen, Icon::Pause,
+        Icon::Download, Icon::ChevronLeft, Icon::ChevronRight, Icon::Repeat, Icon::Film, Icon::Telephone,
+    ];
 }
 
 /// Dessine `icon` centrée dans `rect` (le carré inscrit est utilisé).

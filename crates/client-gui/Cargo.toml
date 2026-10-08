@@ -45,6 +45,12 @@ ki-media = { path = "../media" }
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 tokio.workspace = true
 chrono = "0.4"
+# Le Loupedeck Live, piloté directement (boutons, molettes, écrans) ; ses
+# écrans sont dessinés ici. ab_glyph et les polices d'egui sont déjà dans
+# l'arbre (epaint) : rien de plus à télécharger.
+ki-loupedeck = { path = "../loupedeck" }
+ab_glyph = "0.2"
+epaint_default_fonts = "0.32"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne
 # même quand la fenêtre n'a pas le focus — indispensable en jeu.
 device_query = "2"

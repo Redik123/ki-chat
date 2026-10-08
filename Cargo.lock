@@ -2796,6 +2796,7 @@ dependencies = [
 name = "ki-client-gui"
 version = "0.1.59"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "arboard",
  "base64",
@@ -2806,10 +2807,12 @@ dependencies = [
  "device_query",
  "ed25519-dalek",
  "eframe",
+ "epaint_default_fonts",
  "flate2",
  "image",
  "ki-client-quic",
  "ki-core",
+ "ki-loupedeck",
  "ki-media",
  "ki-protocol",
  "ki-video",
@@ -2879,6 +2882,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "ki-loupedeck"
+version = "0.1.59"
+dependencies = [
+ "anyhow",
  "windows 0.61.3",
 ]
 

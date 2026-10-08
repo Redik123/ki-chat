@@ -206,6 +206,14 @@ pub fn index() -> Option<Arc<Index>> {
     g.index.clone()
 }
 
+/// Le portrait d'un agent sur le disque, par son nom anglais : le fil du
+/// Loupedeck lit ses images lui-même. Le fichier n'y est qu'une fois le
+/// portrait voulu par l'appli ([`Catalogue::agent`]).
+pub fn fichier_agent(nom: &str) -> Option<PathBuf> {
+    let url = index()?.agents.chercher(nom.trim())?.clone();
+    Some(dossier()?.join("images").join(nom_de_fichier(&url)))
+}
+
 /// Le catalogue s'il est déjà lu, sans rien lancer.
 fn index_lu() -> Option<Arc<Index>> {
     global().index.clone()

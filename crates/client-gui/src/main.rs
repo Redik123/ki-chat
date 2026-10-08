@@ -5,12 +5,17 @@
 mod appicon;
 mod admin_fichiers;
 mod atelier;
+mod beta_ui;
 mod clips;
 mod graphes;
 mod icons;
 mod images;
 mod instance;
 mod jeux;
+mod loupedeck;
+mod loupedeck_config;
+mod loupedeck_page;
+mod loupedeck_ui;
 use ki_core::markup;
 mod medailles;
 mod medias;
@@ -100,8 +105,20 @@ const BITRATES: [i32; 6] = [24_000, 32_000, 48_000, 64_000, 96_000, 128_000];
 /// Deux messages du même auteur espacés de moins de ça sont regroupés.
 const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 
+/// Les colonnes des salons (à gauche) et des membres (à droite) : leur
+/// largeur d'origine, et ce qu'on peut leur retirer ou leur ajouter en
+/// tirant leur bord. egui retient la largeur choisie d'une session à
+/// l'autre ; ce qui ne tiendrait pas dans une colonne étroite est coupé à
+/// son bord, jamais par-dessus la conversation.
 const SIDEBAR_WIDTH: f32 = 248.0;
+const SIDEBAR_LARGEURS: std::ops::RangeInclusive<f32> = 200.0..=360.0;
 const ROSTER_WIDTH: f32 = 210.0;
+const ROSTER_LARGEURS: std::ops::RangeInclusive<f32> = 180.0..=340.0;
+
+/// Le pied de la colonne des salons (mon compte) et celui de la
+/// conversation (la saisie) : la même marge dessus et dessous, et la même
+/// hauteur au repos — la carte du compte et la barre de saisie s'alignent.
+const PIED_MARGE: f32 = 10.0;
 
 /// À la fermeture, la connexion a une seconde et demie pour se fermer
 /// proprement, le démontage (fils de veille, moteur vocal…) deux secondes :
@@ -238,11 +255,13 @@ enum Onglet {
     Jeu,
     Clips,
     Sons,
+    /// Les fonctions encore en essai, coupées d'origine.
+    Beta,
     Aide,
 }
 
 impl Onglet {
-    const TOUS: [Onglet; 9] = [
+    const TOUS: [Onglet; 10] = [
         Onglet::Audio,
         Onglet::Casque,
         Onglet::Reseau,
@@ -251,6 +270,7 @@ impl Onglet {
         Onglet::Jeu,
         Onglet::Clips,
         Onglet::Sons,
+        Onglet::Beta,
         Onglet::Aide,
     ];
 
@@ -264,6 +284,7 @@ impl Onglet {
             Onglet::Jeu => "Jeu",
             Onglet::Clips => "Clips",
             Onglet::Sons => "Sons & notifications",
+            Onglet::Beta => "Bêta",
             Onglet::Aide => "Aide & diagnostics",
         }
     }
@@ -280,6 +301,7 @@ impl Onglet {
             Onglet::Jeu => "jeu",
             Onglet::Clips => "clips",
             Onglet::Sons => "sons",
+            Onglet::Beta => "beta",
             Onglet::Aide => "aide",
         }
     }
@@ -1272,6 +1294,18 @@ struct KiApp {
     /// `Option` parce qu'elle a besoin du contexte egui, qui n'existe qu'une
     /// fois la fenêtre ouverte : elle démarre à la première image.
     ptt: Option<ptt::Watcher>,
+    /// Le Loupedeck Live, sur son propre fil — démarré à la première image,
+    /// comme `ptt` —, et ce que l'interface en retient : l'interrupteur des
+    /// réglages, la page montrée, la personne choisie.
+    loupedeck: Option<loupedeck::Loupedeck>,
+    loupedeck_etat: loupedeck_ui::Etat,
+    /// La hauteur de la barre de saisie sur une ligne, mesurée à l'image
+    /// d'avant : le pied de la colonne des salons la prend pour s'aligner
+    /// sur elle.
+    hauteur_saisie: f32,
+    /// Le bouton « Soundboard » de la barre du bas (onglet Bêta). D'origine,
+    /// visible pour qui a déjà des sons dans ses dossiers, caché sinon.
+    soundboard_visible: bool,
     /// Interdiction de veille système pendant le vocal.
     veille: veille::Garde,
 }
@@ -1676,6 +1710,14 @@ impl KiApp {
             labo_stats: Default::default(),
             labo_texture: None,
             ptt: None,
+            loupedeck: None,
+            loupedeck_etat: loupedeck_ui::Etat::new(get("loupedeck", "off") == "on", &get("loupedeck_config", "")),
+            hauteur_saisie: 44.0,
+            soundboard_visible: match get("soundboard_visible", "").as_str() {
+                "on" => true,
+                "off" => false,
+                _ => soundboard::Soundboard::a_des_sons(),
+            },
             veille: veille::Garde::default(),
         };
         // Instance relancée par le dispositif de secours : le dire. Sans ce
@@ -2563,6 +2605,9 @@ impl KiApp {
         if let Some(p) = &self.ptt {
             p.action_raccourci(None);
         }
+        if let Some(l) = &self.loupedeck {
+            l.action_clip(None);
+        }
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             engine.brancher_micro(None);
             engine.brancher_copains(None);
@@ -2581,6 +2626,10 @@ impl KiApp {
         if let Some(p) = &self.ptt {
             let d = e.declencheur();
             p.action_raccourci(Some(std::sync::Arc::new(move || d.appuyer())));
+        }
+        if let Some(l) = &self.loupedeck {
+            let d = e.declencheur();
+            l.action_clip(Some(std::sync::Arc::new(move || d.appuyer())));
         }
         let son = (self.clips_reglages.son && self.sfx_on && !self.sfx_muted.contains("clip"))
             .then(|| self.sounds.get("clip").cloned())
@@ -2648,6 +2697,7 @@ impl KiApp {
                 if self.show_clips {
                     self.rafraichir_clips();
                 }
+                self.loupedeck_etat.clips_perimes();
             }
             Some(Err(m)) => {
                 ki_voice::journal(format!("clips : {m}"));
@@ -3674,6 +3724,11 @@ impl KiApp {
     /// Le soundboard : la fenêtre, et ce qu'elle demande au moteur vocal.
     /// Sans moteur (hors connexion), rien ne joue — la fenêtre le dit.
     fn soundboard_window(&mut self, ctx: &egui::Context) {
+        // Bouton caché (onglet Bêta) : la fenêtre se ferme avec lui.
+        if !self.soundboard_visible {
+            self.soundboard.ouvert = false;
+            return;
+        }
         let en_vocal = self.voice_channel.is_some();
         let Some(commande) = self.soundboard.fenetre(ctx, en_vocal) else { return };
         let joue = {
@@ -6161,8 +6216,11 @@ impl KiApp {
         // après relâchement y est calculé aussi. Ici on ne fait plus que lire
         // le verdict : plus aucune raison de repeindre pour surveiller un
         // clavier.
-        let ptt_active =
-            self.mode == MicMode::Ptt && self.ptt.as_ref().is_some_and(|w| w.active());
+        // Le bouton du Loupedeck tient le même rôle que la touche, avec le
+        // même maintien.
+        let ptt_active = self.mode == MicMode::Ptt
+            && (self.ptt.as_ref().is_some_and(|w| w.active())
+                || self.loupedeck.as_ref().is_some_and(|l| l.ptt(self.ptt_release_ms)));
         // Hors d'un salon vocal, le micro reste fermé quoi qu'il arrive.
         let armed = !self.muted
             && self.voice_channel.is_some()
@@ -6602,6 +6660,7 @@ impl KiApp {
         self.clips_window(ctx);
         self.soundboard_window(ctx);
         self.portes_window(ctx);
+        self.loupedeck_window(ctx, voice);
         self.partage_clip_window(ctx);
         self.visionneuse_window(ctx);
         self.atelier_window(ctx);
@@ -6938,8 +6997,12 @@ impl KiApp {
                     }
 
                     ui.add_space(6.0);
-                    if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
-                        self.ouvrir_recherche();
+                    if self.loupedeck_etat.actif
+                        && ui::button(ui, Icon::Sliders, "Loupedeck")
+                            .on_hover_text("ce que font les boutons, les molettes et les écrans de ton Loupedeck Live")
+                            .clicked()
+                    {
+                        self.loupedeck_etat.page_ouverte = !self.loupedeck_etat.page_ouverte;
                     }
                     if ui::button(ui, Icon::Target, "Valorant").clicked() {
                         self.ouvrir_stats();
@@ -6947,9 +7010,10 @@ impl KiApp {
                     if ui::button(ui, Icon::Film, "Clips").clicked() {
                         self.ouvrir_clips();
                     }
-                    if ui::button(ui, Icon::Volume, "Soundboard")
-                        .on_hover_text("des sons à la touche, entendus par tout le salon vocal")
-                        .clicked()
+                    if self.soundboard_visible
+                        && ui::button(ui, Icon::Volume, "Soundboard")
+                            .on_hover_text("des sons à la touche, entendus par tout le salon vocal")
+                            .clicked()
                     {
                         self.soundboard.basculer();
                     }
@@ -7104,8 +7168,9 @@ impl KiApp {
             .and_then(|server| self.server_icon(ctx, &server));
 
         egui::SidePanel::left("sidebar")
-            .resizable(false)
-            .exact_width(SIDEBAR_WIDTH)
+            .resizable(true)
+            .default_width(SIDEBAR_WIDTH)
+            .width_range(SIDEBAR_LARGEURS)
             .frame(egui::Frame::NONE.fill(theme::BG_SIDE))
             .show(ctx, |ui| {
                 // --- En-tête : marque + serveur ---
@@ -7166,14 +7231,17 @@ impl KiApp {
                     });
 
                 // --- Pied : mon compte ---
+                // De la hauteur de la barre de saisie d'à côté, contenu
+                // centré : la carte et la barre s'alignent.
                 egui::TopBottomPanel::bottom("me")
+                    .exact_height(self.hauteur_saisie + 2.0 * PIED_MARGE)
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_SIDE)
-                            .inner_margin(egui::Margin::symmetric(10, 9)),
+                            .inner_margin(egui::Margin::symmetric(10, 0)),
                     )
                     .show_inside(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let me = self.username.clone();
                             let mine = self.my_id.and_then(|id| self.avatars.get(&id));
                             let clicked = ui::avatar(
@@ -7186,27 +7254,44 @@ impl KiApp {
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked();
-                            let named = ui
-                                .vertical(|ui| {
-                                    ui.label(
-                                        RichText::new(&me)
-                                            .color(color_for(&me))
-                                            .size(13.0)
-                                            .strong(),
-                                    );
-                                    let (dot, text) = if self.muted {
-                                        (DANGER, "micro coupé")
-                                    } else if self.transmitting {
-                                        (SPEAK, "en émission")
-                                    } else {
-                                        (theme::BORDER, "connecté")
-                                    };
-                                    ui.horizontal(|ui| {
-                                        ui::status_dot(ui, dot, text, 8.0);
-                                    });
-                                })
-                                .response
-                                .interact(Sense::click())
+                            // Le pseudo et l'état, serrés l'un sur l'autre à
+                            // la hauteur de l'avatar — le pseudo sur sa moitié
+                            // haute, l'état sur la basse —, peints d'un bloc
+                            // que la rangée centre comme l'avatar et
+                            // l'engrenage. Empilés en widgets, l'interligne
+                            // d'egui les écartait : le pseudo dépassait
+                            // au-dessus de l'avatar, seul en haut.
+                            let (dot, text) = if self.muted {
+                                (DANGER, "micro coupé")
+                            } else if self.transmitting {
+                                (SPEAK, "en émission")
+                            } else {
+                                (theme::BORDER, "connecté")
+                            };
+                            let largeur = (ui.available_width() - 44.0).max(60.0);
+                            let (bloc, reponse) =
+                                ui.allocate_exact_size(Vec2::new(largeur, 32.0), Sense::click());
+                            if ui.is_rect_visible(bloc) {
+                                let p = ui.painter_at(bloc);
+                                p.text(
+                                    egui::pos2(bloc.left(), bloc.top() + 9.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    &me,
+                                    egui::FontId::proportional(13.0),
+                                    color_for(&me),
+                                );
+                                let y = bloc.top() + 24.0;
+                                icons::dot(&p, egui::pos2(bloc.left() + 4.0, y), 8.0 * 0.32, dot);
+                                p.text(
+                                    egui::pos2(bloc.left() + 12.0, y),
+                                    egui::Align2::LEFT_CENTER,
+                                    text,
+                                    egui::FontId::proportional(12.5),
+                                    dot,
+                                );
+                            }
+                            let named = reponse
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("gérer mon compte")
                                 .clicked();
                             if clicked || named {
@@ -7786,8 +7871,9 @@ impl KiApp {
     /// On y voit qui est là même sans partager de salon vocal.
     fn roster_panel(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
         egui::SidePanel::right("roster")
-            .resizable(false)
-            .exact_width(ROSTER_WIDTH)
+            .resizable(true)
+            .default_width(ROSTER_WIDTH)
+            .width_range(ROSTER_LARGEURS)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG_SIDE)
@@ -7976,6 +8062,9 @@ impl KiApp {
                             // Plus de compteur ici : un salon textuel n'a pas
                             // de membres, et la colonne de droite dit déjà qui
                             // est connecté au serveur.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                self.recherche_en_tete(ui);
+                            });
                         });
 
                         let status = self.upload_status.lock().unwrap().clone();
@@ -8026,8 +8115,8 @@ impl KiApp {
                             .inner_margin(egui::Margin {
                                 left: 16,
                                 right: 16,
-                                top: 6,
-                                bottom: 14,
+                                top: PIED_MARGE as i8,
+                                bottom: PIED_MARGE as i8,
                             }),
                     )
                     .show_inside(ui, |ui| self.chat_input(ui, &channel_name));
@@ -8087,7 +8176,7 @@ impl KiApp {
         let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
         self.edition_bar(ui);
         self.reply_bar(ui);
-        egui::Frame::NONE
+        let cadre = egui::Frame::NONE
             .fill(theme::BG_RAISED)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
             .corner_radius(egui::CornerRadius::same(12))
@@ -8185,6 +8274,12 @@ impl KiApp {
                     }
                 });
             });
+        // Sur une ligne, la barre donne sa hauteur au pied de la colonne des
+        // salons (voir `PIED_MARGE`) ; sur plusieurs, elle grandit vers le
+        // haut et la garde.
+        if self.input.lines().count() <= 1 {
+            self.hauteur_saisie = cadre.response.rect.height();
+        }
 
         if submit {
             let text = self.input.trim().to_string();
@@ -8221,6 +8316,21 @@ impl KiApp {
                 self.input.clear();
             }
         }
+    }
+
+    /// Allumer ou couper le changeur de voix — par le raccourci global ou le
+    /// Loupedeck —, et dire lequel.
+    fn basculer_changeur(&mut self) {
+        self.changeur_actif = !self.changeur_actif;
+        self.apply_audio_settings();
+        self.info = Some(if self.changeur_actif {
+            let nom = changeur_ui::personnage_de(&self.changeur)
+                .map(|i| ki_voice::changeur::PERSONNAGES[i].0)
+                .unwrap_or("réglage perso");
+            format!("changeur de voix allumé : {nom}")
+        } else {
+            "changeur de voix coupé".into()
+        });
     }
 
     /// Couper ou rétablir son micro — par le bouton ou le raccourci global.
@@ -8744,10 +8854,20 @@ impl KiApp {
     // -----------------------------------------------------------------
 
     /// Ouvre la recherche, curseur dans le champ.
-    fn ouvrir_recherche(&mut self) {
-        self.show_search = !self.show_search;
-        if self.show_search {
-            self.search_focus = true;
+    /// La recherche en haut à droite du salon : on tape, Entrée cherche et
+    /// ouvre les résultats ; la loupe ouvre la fenêtre sans chercher.
+    fn recherche_en_tete(&mut self, ui: &mut egui::Ui) {
+        let champ = ui.add(ui::text_field(&mut self.search_query, "chercher…", false).desired_width(190.0));
+        menu_edition(&champ, &mut self.search_query, false);
+        if champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.show_search = true;
+            self.lancer_recherche();
+        }
+        if ui::icon_button_ex(ui, Icon::Loupe, 24.0, "chercher dans les messages", None).clicked() {
+            self.show_search = !self.show_search;
+            if self.show_search {
+                self.search_focus = true;
+            }
         }
     }
 
@@ -8988,6 +9108,9 @@ impl KiApp {
                         }
                         if onglet == Onglet::Casque {
                             self.onglet_casque(ui, voice, &mut apply, &mut restart);
+                        }
+                        if onglet == Onglet::Beta {
+                            self.onglet_beta(ui);
                         }
                         if onglet == Onglet::Aide {
                             // --- Journal audio ---
@@ -14650,16 +14773,7 @@ impl eframe::App for KiApp {
             let bascule = pressions_changeur.wrapping_sub(self.hotkey_changeur_vues) % 2 == 1;
             self.hotkey_changeur_vues = pressions_changeur;
             if bascule {
-                self.changeur_actif = !self.changeur_actif;
-                self.apply_audio_settings();
-                self.info = Some(if self.changeur_actif {
-                    let nom = changeur_ui::personnage_de(&self.changeur)
-                        .map(|i| ki_voice::changeur::PERSONNAGES[i].0)
-                        .unwrap_or("réglage perso");
-                    format!("changeur de voix allumé : {nom}")
-                } else {
-                    "changeur de voix coupé".into()
-                });
+                self.basculer_changeur();
             }
         }
         if pressions != self.hotkey_vues {
@@ -14709,6 +14823,7 @@ impl eframe::App for KiApp {
         // et c'est lui qui dit s'il faut une image de plus.
         let voice = self.voice_snapshot();
         self.ranger_ancre_apprise(&voice.stats);
+        self.tick_loupedeck(ctx, &voice);
 
         // Un message est arrivé pendant que la fenêtre était à l'arrière-plan :
         // la barre des tâches clignote (l'équivalent sobre d'une notification).
@@ -14878,6 +14993,9 @@ impl eframe::App for KiApp {
         storage.set_string("ptt_key", self.ptt_key.id().into());
         storage.set_string("hotkey_micro", self.hotkey_micro.map(|k| k.id()).unwrap_or("").into());
         storage.set_string("hotkey_sourd", self.hotkey_sourd.map(|k| k.id()).unwrap_or("").into());
+        storage.set_string("loupedeck", if self.loupedeck_etat.actif { "on" } else { "off" }.into());
+        storage.set_string("loupedeck_config", self.loupedeck_etat.config.ecrire());
+        storage.set_string("soundboard_visible", if self.soundboard_visible { "on" } else { "off" }.into());
         storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
         storage.set_string(
             "output_device",
