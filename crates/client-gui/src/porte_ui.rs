@@ -460,13 +460,7 @@ impl Portes {
         ui.add(ui::text_field(&mut self.nom_salon, "sinon, celui de la porte", false));
         ui.add_space(espace::M);
         ui::field_label(ui, "Durée");
-        ui.horizontal_wrapped(|ui| {
-            for (minutes, label) in DUREES {
-                if ui.selectable_label(self.duree_min == minutes, label).clicked() {
-                    self.duree_min = minutes;
-                }
-            }
-        });
+        ui::pastilles(ui, &mut self.duree_min, &DUREES);
         ui::hint(ui, "la porte ferme d'elle-même au bout de ce temps, ou dix minutes après le départ du dernier invité ; le salon est alors effacé");
         ui.add_space(espace::M);
         if plafond {

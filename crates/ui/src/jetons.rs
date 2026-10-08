@@ -57,6 +57,13 @@ pub mod couleur {
         Color32::from_rgb(0xff, 0x7d, 0x7d),
     ];
 
+    /// Les couleurs d'une série — bandes d'un égaliseur, courbes d'un
+    /// graphe : l'accent, l'info, l'alerte, puis des teintes des pseudos,
+    /// franchement distinctes les unes des autres.
+    pub const SERIES: [Color32; 8] = [
+        ACCENT, INFO, WARN, PALETTE[4], PALETTE[3], PALETTE[6], PALETTE[5], PALETTE[7],
+    ];
+
     /// Couleur attribuée à un pseudo — même pseudo, même couleur, partout
     /// (et d'une appli ki-* à l'autre).
     ///

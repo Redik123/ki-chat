@@ -1096,7 +1096,7 @@ impl PageValo {
                 // pour les agrégats du groupe et l'en-tête du fil.
                 ui.horizontal(|ui| {
                     for o in Onglet::TOUS {
-                        if ui.selectable_label(self.onglet == o, o.label()).clicked() {
+                        if ui::onglet(ui, self.onglet == o, o.label()).clicked() {
                             self.onglet = o;
                         }
                     }

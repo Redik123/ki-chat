@@ -261,7 +261,7 @@ impl Soundboard {
                     }
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                            ui.spacing_mut().item_spacing = Vec2::splat(espace::S);
                             for (i, son) in self.sons.iter().enumerate() {
                                 let nom = crate::ellipsize(&son.nom, 22);
                                 let libelle = if i < 9 {

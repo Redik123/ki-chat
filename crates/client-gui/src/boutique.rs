@@ -132,7 +132,7 @@ impl Lecteur {
             }
             Etat::Prete(b) => {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    ui.spacing_mut().item_spacing = egui::Vec2::splat(espace::L);
                     for (i, offre) in b.offres.iter_mut().enumerate() {
                         if offre.texture.is_none() {
                             if let Some(image) = offre.image.take() {

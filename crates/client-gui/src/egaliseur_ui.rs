@@ -30,17 +30,8 @@ const SPECTRE_BAS: f32 = -84.0;
 const SPECTRE_HAUT: f32 = -6.0;
 /// La hauteur du graphe.
 const HAUTEUR: f32 = 240.0;
-/// Une couleur par bande.
-const COULEURS: [Color32; BANDES_MAX] = [
-    ACCENT,
-    INFO,
-    WARN,
-    Color32::from_rgb(0xb3, 0x8b, 0xff),
-    Color32::from_rgb(0xff, 0x7a, 0xb6),
-    Color32::from_rgb(0xf5, 0xd0, 0x4a),
-    Color32::from_rgb(0x4a, 0xd8, 0xe0),
-    Color32::from_rgb(0xff, 0x8a, 0x6b),
-];
+/// Une couleur par bande : celles des séries de ki-ui.
+const COULEURS: [Color32; BANDES_MAX] = theme::SERIES;
 
 /// Le spectre : une FFT sur la fenêtre la plus récente, ramenée sur des
 /// points logarithmiques (la crête de chaque tranche), lissée à la descente

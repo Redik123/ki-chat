@@ -220,20 +220,10 @@ impl Fichiers {
                     }
                 });
         });
-        ui.horizontal_wrapped(|ui| {
-            for g in Genre::TOUS {
-                if ui.selectable_label(self.genre == g, g.label()).clicked() {
-                    self.genre = g;
-                }
-            }
-            ui.separator();
-            if ui.selectable_label(self.tri == Tri::Recents, "Récents").clicked() {
-                self.tri = Tri::Recents;
-            }
-            if ui.selectable_label(self.tri == Tri::Lourds, "Plus lourds").clicked() {
-                self.tri = Tri::Lourds;
-            }
-        });
+        let genres: Vec<_> = Genre::TOUS.into_iter().map(|g| (g, g.label())).collect();
+        ui::pastilles(ui, &mut self.genre, &genres);
+        ui.add_space(espace::XS);
+        ui::segmente(ui, &mut self.tri, &[(Tri::Recents, "Récents"), (Tri::Lourds, "Plus lourds")]);
 
         // La sélection.
         let visibles = self.visibles();

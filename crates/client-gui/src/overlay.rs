@@ -593,7 +593,7 @@ impl Overlay {
                         egui::Align2::CENTER_CENTER,
                         texte,
                         police.clone(),
-                        Color32::from_rgb(0x00, 0xd2, 0x6a),
+                        crate::theme::ACCENT,
                     );
                 }
             });

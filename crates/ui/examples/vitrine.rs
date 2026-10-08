@@ -45,6 +45,7 @@ struct Vitrine {
     qualite: u8,
     pseudo: String,
     volume: f32,
+    onglet: u8,
     bandeau_ferme: bool,
     /// Les clés des éléments de la liste virtualisée, et la prochaine à
     /// donner à ce qu'on ajoute au-dessus.
@@ -247,7 +248,9 @@ impl Vitrine {
     }
 
     fn reglages(&mut self, ui: &mut egui::Ui) {
-        c::section(ui, Icon::Gear, "Réglages", Some("section, ligne, interrupteur, segmente, pastilles"), |ui| {
+        c::section(ui, Icon::Gear, "Réglages", Some("onglets, section, ligne, interrupteur, segmente, pastilles, curseur"), |ui| {
+            c::onglets(ui, &mut self.onglet, &[(0, "Audio"), (1, "Réseau"), (2, "Diffusion"), (3, "Overlay")]);
+            ui.add_space(espace::M);
             c::ligne(ui, "Interrupteur", |ui| {
                 c::interrupteur(ui, &mut self.actif, "Activer la chose");
                 c::precision(ui, "Une précision sous le contrôle, qui passe à la ligne quand la colonne est étroite.");

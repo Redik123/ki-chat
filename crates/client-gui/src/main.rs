@@ -73,6 +73,7 @@ use ki_protocol::{
 };
 use ptt::PttKey;
 use ki_ui::flex::Flex;
+use ki_ui::liste::Liste;
 use theme::{color_for, ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
 use ui::Tone;
 
@@ -3547,13 +3548,9 @@ impl KiApp {
         ui.add_space(espace::L);
 
         ui::field_label(ui, "Durée gardée");
-        ui.horizontal_wrapped(|ui| {
-            for d in clips::DUREES {
-                if ui.selectable_label(self.clips_reglages.duree_s == d, format!("{d} s")).clicked() {
-                    self.clips_reglages.duree_s = d;
-                }
-            }
-        });
+        let libelles: Vec<String> = clips::DUREES.iter().map(|d| format!("{d} s")).collect();
+        let durees: Vec<_> = clips::DUREES.iter().copied().zip(libelles.iter().map(String::as_str)).collect();
+        ui::pastilles(ui, &mut self.clips_reglages.duree_s, &durees);
         ui::field_label(ui, "Qualité");
         egui::ComboBox::from_id_salt("clips_qualite")
             .width(300.0)
@@ -3564,13 +3561,7 @@ impl KiApp {
                 }
             });
         ui::field_label(ui, "Cadence");
-        ui.horizontal(|ui| {
-            for f in [30u32, 60] {
-                if ui.selectable_label(self.clips_reglages.fps == f, format!("{f} images/s")).clicked() {
-                    self.clips_reglages.fps = f;
-                }
-            }
-        });
+        ui::segmente(ui, &mut self.clips_reglages.fps, &[(30, "30 images/s"), (60, "60 images/s")]);
         ui::hint(ui, "en mémoire : 45 Mo pour 30 s en qualité équilibrée, 300 Mo pour 120 s en haute");
         ui::hint(
             ui,
@@ -6771,16 +6762,8 @@ impl KiApp {
                 ui.add_space(espace::M);
 
                 ui::field_label(ui, "Durée");
-                ui.horizontal_wrapped(|ui| {
-                    for (label, secs) in BAN_DURATIONS {
-                        if ui
-                            .selectable_label(draft.duration_secs == *secs, *label)
-                            .clicked()
-                        {
-                            draft.duration_secs = *secs;
-                        }
-                    }
-                });
+                let durees: Vec<_> = BAN_DURATIONS.iter().map(|(label, secs)| (*secs, *label)).collect();
+                ui::pastilles(ui, &mut draft.duration_secs, &durees);
                 ui.add_space(espace::L);
                 ui::hairline(ui);
                 ui.add_space(espace::M);
@@ -8435,7 +8418,7 @@ impl KiApp {
                         fermer = true;
                     }
                     if peut_supprimer {
-                        let rouge = Color32::from_rgb(232, 84, 84);
+                        let rouge = theme::DANGER;
                         if menu.confirmer {
                             if ui
                                 .button(RichText::new("Confirmer la suppression").color(rouge))
@@ -8551,7 +8534,7 @@ impl KiApp {
         // à chaque image pour en montrer une vingtaine —, et la ligne qu'on
         // lit ne bouge pas d'un pixel quand une page plus ancienne s'ajoute
         // au-dessus.
-        let sortie = ki_ui::liste::Liste::new("fil")
+        let sortie = Liste::new("fil")
             .coller_en_bas(true)
             .aller_en_bas(std::mem::take(&mut self.fil_au_bas))
             .hauteur_estimee(48.0)
@@ -8830,17 +8813,10 @@ impl KiApp {
                     lancer = true;
                 }
                 ui.horizontal(|ui| {
-                    let ici = ui.selectable_label(self.search_ici, "Ce salon");
-                    let partout = ui.selectable_label(!self.search_ici, "Partout");
                     // Changer de portée relance : sinon la liste affichée ne
                     // correspond plus au bouton allumé, et l'on croit que la
                     // recherche n'a rien trouvé ailleurs.
-                    if ici.clicked() && !self.search_ici {
-                        self.search_ici = true;
-                        lancer = true;
-                    }
-                    if partout.clicked() && self.search_ici {
-                        self.search_ici = false;
+                    if ui::pastilles(ui, &mut self.search_ici, &[(true, "Ce salon"), (false, "Partout")]) {
                         lancer = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -8876,19 +8852,24 @@ impl KiApp {
                 // cherche, alors que le serveur rend l'ordre du fil.
                 let hits: Vec<ki_protocol::SearchHit> =
                     self.search_hits.iter().rev().cloned().collect();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for (rang, hit) in hits.iter().enumerate() {
-                        let nom = self
-                            .channels
+                // Jusqu'à cent résultats : seuls ceux à l'écran sont
+                // construits.
+                let channels = &self.channels;
+                Liste::new("recherche").ecart(espace::XS).show(
+                    ui,
+                    hits.len(),
+                    // Le rang en plus de salon et horodatage : deux messages
+                    // peuvent partager les deux à la milliseconde près, et
+                    // deux widgets de même identité, egui n'en peint qu'un.
+                    |rang| (rang, hits[rang].channel, hits[rang].record.ts),
+                    |ui, rang| {
+                        let hit = &hits[rang];
+                        let nom = channels
                             .iter()
                             .find(|c| c.id == hit.channel)
                             .map(|c| c.name.clone())
                             .unwrap_or_else(|| format!("salon {}", hit.channel));
-                        // Le rang, et non salon+horodatage : deux messages
-                        // peuvent partager les deux à la milliseconde près,
-                        // et deux widgets de même identité, egui n'en peint
-                        // qu'un.
-                        let bloc = ui.push_id(("hit", rang), |ui| {
+                        let bloc = ui.scope(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(format!("#{nom}")).color(ACCENT).size(texte::PETIT),
@@ -8925,9 +8906,8 @@ impl KiApp {
                         }
                         ui.add_space(espace::XS);
                         ui::hairline(ui);
-                        ui.add_space(espace::XS);
-                    }
-                });
+                    },
+                );
             });
         if lancer {
             self.lancer_recherche();
@@ -8975,13 +8955,8 @@ impl KiApp {
                 // Onglets : une seule colonne à faire défiler ne se lisait
                 // plus une fois l'overlay, les sons et la diffusion venus se
                 // ranger sous « audio ».
-                ui.horizontal_wrapped(|ui| {
-                    for o in Onglet::TOUS {
-                        if ui.selectable_label(self.reglages_onglet == o, o.label()).clicked() {
-                            self.reglages_onglet = o;
-                        }
-                    }
-                });
+                let onglets: Vec<_> = Onglet::TOUS.into_iter().map(|o| (o, o.label())).collect();
+                ui::onglets(ui, &mut self.reglages_onglet, &onglets);
                 ui.add_space(espace::M);
                 let onglet = self.reglages_onglet;
                 egui::ScrollArea::vertical()
@@ -11624,7 +11599,9 @@ impl KiApp {
                     let tabs: Vec<AdminTab> =
                         AdminTab::ALL.into_iter().filter(|t| self.can(t.needs())).collect();
                     for tab in tabs {
-                        if ui.selectable_label(self.admin_tab == tab, tab.label()).clicked() {
+                        // Un clic, même sur l'onglet ouvert, recharge ce
+                        // qu'il montre.
+                        if ui::onglet(ui, self.admin_tab == tab, tab.label()).clicked() {
                             self.admin_tab = tab;
                             // Le journal ne se charge qu'à l'ouverture de
                             // son onglet : inutile de le pousser à chaque
@@ -12067,15 +12044,11 @@ impl KiApp {
         ui.add_space(espace::M);
 
         ui::field_label(ui, "Nombre d'utilisations");
-        ui.horizontal_wrapped(|ui| {
-            for (label, uses) in
-                [("1", Some(1u32)), ("5", Some(5)), ("25", Some(25)), ("Illimité", None)]
-            {
-                if ui.selectable_label(self.invite_uses == uses, label).clicked() {
-                    self.invite_uses = uses;
-                }
-            }
-        });
+        ui::segmente(
+            ui,
+            &mut self.invite_uses,
+            &[(Some(1u32), "1"), (Some(5), "5"), (Some(25), "25"), (None, "Illimité")],
+        );
         if self.invite_uses.is_none() {
             ui::hint(ui, "lien permanent — chaque compte créé sera consigné au journal");
         }

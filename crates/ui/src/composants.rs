@@ -694,11 +694,7 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
             painter.rect_filled(seg, CornerRadius::same(rayon::L), theme::BG_HOVER);
         }
         let couleur = if actif { theme::TEXT } else { theme::TEXT_DIM };
-        painter.galley(
-            seg.center() - galley.size() / 2.0,
-            galley,
-            couleur,
-        );
+        painter.galley_with_override_text_color(seg.center() - galley.size() / 2.0, galley, couleur);
     }
     change
 }
@@ -734,10 +730,55 @@ pub fn pastilles<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, 
                 painter.rect_filled(rect, CornerRadius::same(rayon::L), fond);
             }
             let couleur = if actif { theme::TEXT } else { theme::TEXT_DIM };
-            painter.galley(rect.center() - galley.size() / 2.0, galley, couleur);
+            painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, couleur);
         }
     });
     change
+}
+
+/// Une barre d'onglets : les libellés côte à côte, celui qui est ouvert
+/// souligné de l'accent ; elle passe à la ligne si la place manque. Rend
+/// vrai quand l'onglet a changé.
+pub fn onglets<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &str)]) -> bool {
+    let mut change = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = espace::XS;
+        for (v, libelle) in choix {
+            if onglet(ui, *valeur == *v, libelle).clicked() && *valeur != *v {
+                *valeur = *v;
+                change = true;
+            }
+        }
+    });
+    change
+}
+
+/// Un onglet seul, pour une barre qu'on monte soi-même — avec une bulle,
+/// un bouton « + » au bout, ou un effet à chaque clic. Rend sa réponse.
+pub fn onglet(ui: &mut Ui, ouvert: bool, libelle: &str) -> Response {
+    let galley =
+        ui.fonts_mut(|f| f.layout_no_wrap(libelle.to_owned(), FontId::proportional(texte::CORPS), theme::TEXT));
+    let taille = Vec2::new(galley.size().x + 2.0 * espace::M, 30.0);
+    let (rect, reponse) = ui.allocate_exact_size(taille, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if reponse.hovered() && !ouvert {
+            painter.rect_filled(rect, CornerRadius::same(rayon::M), theme::BG_HOVER);
+        }
+        let couleur = if ouvert || reponse.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+        painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, couleur);
+        if ouvert {
+            let souligne = Rect::from_min_max(
+                egui::pos2(rect.left() + espace::S, rect.bottom() - 2.0),
+                egui::pos2(rect.right() - espace::S, rect.bottom()),
+            );
+            painter.rect_filled(souligne, CornerRadius::same(1), theme::ACCENT);
+        }
+    }
+    reponse.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, ouvert, libelle)
+    });
+    reponse
 }
 
 /// Interrupteur : plus lisible qu'une case à cocher pour un réglage qui

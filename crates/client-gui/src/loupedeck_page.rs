@@ -248,7 +248,7 @@ impl KiApp {
             for (i, page) in etat.config.pages.iter().enumerate() {
                 let texte = if i == etat.ecran { format!("{}  ●", page.nom) } else { page.nom.clone() };
                 let bulle = if i == etat.ecran { "la page que montre l'appareil" } else { "voir et régler cette page" };
-                if ui.selectable_label(i == etat.onglet, RichText::new(texte).size(texte::CORPS)).on_hover_text(bulle).clicked() {
+                if ui::onglet(ui, i == etat.onglet, &texte).on_hover_text(bulle).clicked() {
                     onglet = Some(i);
                 }
             }
