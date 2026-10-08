@@ -10,6 +10,8 @@
 //!   sections et lignes de réglage, interrupteurs, bandeaux, vumètres,
 //!   avatars —, et [`icones`], le jeu d'icônes vectorielles qu'ils
 //!   emploient.
+//! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
+//!   sombre), installée en un appel.
 //!
 //! egui reste dessous : tout ce qui n'a pas besoin de ki-ui continue de
 //! s'écrire en egui ordinaire, et ki-ui s'y mêle sans rien imposer.
@@ -18,6 +20,7 @@ pub mod composants;
 pub mod flex;
 pub mod icones;
 pub mod jetons;
+pub mod style;
 #[cfg(debug_assertions)]
 mod mouchard;
 

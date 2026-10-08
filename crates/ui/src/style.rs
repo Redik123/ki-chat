@@ -1,0 +1,206 @@
+//! L'allure des applis ki-* : polices, palette, tailles de texte,
+//! espacements, thème sombre, appliqués au contexte egui en un appel —
+//! `ki_ui::style::installer(ctx)` à la création de la fenêtre.
+
+use egui::{
+    epaint::Shadow,
+    style::{HandleShape, Selection},
+    Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2,
+};
+
+use crate::jetons::couleur::*;
+
+// ---------------------------------------------------------------------
+// Installation
+// ---------------------------------------------------------------------
+
+/// Applique polices, couleurs et espacements au contexte egui.
+pub fn installer(ctx: &egui::Context) {
+    install_fonts(ctx);
+
+    let mut style = (*ctx.global_style()).clone();
+    style.visuals = visuals();
+    style.text_styles = text_styles();
+
+    let s = &mut style.spacing;
+    s.item_spacing = Vec2::new(8.0, 6.0);
+    s.button_padding = Vec2::new(11.0, 6.0);
+    s.window_margin = Margin::same(16);
+    s.menu_margin = Margin::same(8);
+    s.interact_size = Vec2::new(40.0, 26.0);
+    s.slider_width = 170.0;
+    s.slider_rail_height = 6.0;
+    s.combo_width = 150.0;
+    s.icon_width = 18.0;
+    s.icon_width_inner = 11.0;
+    s.menu_spacing = 4.0;
+    s.tooltip_width = 320.0;
+    s.scroll.bar_width = 9.0;
+    s.scroll.floating = true;
+    s.scroll.floating_width = 5.0;
+    s.scroll.floating_allocated_width = 0.0;
+    s.scroll.dormant_handle_opacity = 0.0;
+    s.scroll.active_handle_opacity = 0.5;
+    s.scroll.interact_handle_opacity = 0.85;
+
+    style.interaction.tooltip_delay = 0.35;
+    style.interaction.selectable_labels = true;
+    // egui 0.35 a doublé la durée de ses animations (0,2 s) : on garde la
+    // vivacité d'avant.
+    style.animation_time = 0.1;
+
+    // Depuis egui 0.34, Ctrl+Q ferme l'application. Pas ici : c'est une
+    // touche qu'on frôle en écrivant, et ki-chat se quitte par sa croix ou
+    // par le menu de son icône. (Sous macOS, le menu natif garde Cmd+Q.)
+    ctx.options_mut(|o| o.quit_shortcuts.clear());
+
+    // Le client n'a qu'un thème, celui-ci : ses couleurs sont des
+    // constantes, peintes partout. Or egui suit par défaut le thème du
+    // système, et `set_style` ne règle que le thème courant — chez qui a
+    // Windows en clair, les widgets passaient en clair pendant que les
+    // tuiles, les tableaux et les graphiques gardaient leurs couleurs
+    // sombres : du texte blanc sur du blanc. On impose donc le sombre, et
+    // l'on remplit les deux cases pour ne dépendre d'aucun ordre.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
+}
+
+/// Ajoute Hack à la famille proportionnelle.
+///
+/// Par défaut egui n'y met que Ubuntu-Light + les deux polices emoji : les
+/// symboles géométriques (`●`, `↑`, `↓`…) n'y existent pas et s'affichaient
+/// donc en carrés « tofu ». Hack les couvre — filet de sécurité pour tout
+/// caractère un peu exotique qui traverserait l'interface.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+        family.push("Hack".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
+    use FontFamily::{Monospace, Proportional};
+    [
+        (TextStyle::Heading, FontId::new(19.0, Proportional)),
+        (TextStyle::Body, FontId::new(14.0, Proportional)),
+        (TextStyle::Button, FontId::new(14.0, Proportional)),
+        (TextStyle::Small, FontId::new(11.5, Proportional)),
+        (TextStyle::Monospace, FontId::new(13.0, Monospace)),
+    ]
+    .into()
+}
+
+fn visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::dark();
+
+    v.panel_fill = BG_BASE;
+    v.window_fill = BG_RAISED;
+    v.extreme_bg_color = BG_DEEP;
+    v.text_edit_bg_color = Some(BG_DEEP);
+    v.faint_bg_color = BG_GHOST;
+    v.code_bg_color = BG_DEEP;
+
+    v.window_stroke = Stroke::new(1.0_f32, BORDER);
+    v.window_corner_radius = CornerRadius::same(14);
+    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_shadow = Shadow {
+        offset: [0, 14],
+        blur: 40,
+        spread: 0,
+        color: Color32::from_black_alpha(140),
+    };
+    v.popup_shadow = Shadow {
+        offset: [0, 6],
+        blur: 20,
+        spread: 0,
+        color: Color32::from_black_alpha(120),
+    };
+
+    // Sert au surlignage du texte, au remplissage des curseurs, et au
+    // contour du champ de saisie qui a le focus — d'où l'accent.
+    v.selection = Selection {
+        bg_fill: translucide(ACCENT, 105),
+        stroke: Stroke::new(1.0_f32, ACCENT),
+    };
+    v.hyperlink_color = INFO;
+    v.error_fg_color = DANGER;
+    v.warn_fg_color = WARN;
+    v.weak_text_color = Some(TEXT_FAINT);
+    v.slider_trailing_fill = true;
+    v.handle_shape = HandleShape::Circle;
+    v.striped = false;
+
+    // Deux fonds distincts, et c'est important :
+    //   `bg_fill`      → creux imposés (rail de curseur, case à cocher) ;
+    //   `weak_bg_fill` → surfaces optionnelles (boutons, listes déroulantes).
+    // Les confondre rendait le rail des curseurs invisible sur la fenêtre.
+    let radius = CornerRadius::same(6);
+
+    // Texte et traits « non interactifs » : labels, séparateurs.
+    let w = &mut v.widgets.noninteractive;
+    w.bg_fill = BG_DEEP;
+    w.weak_bg_fill = BG_BASE;
+    w.bg_stroke = Stroke::new(1.0_f32, BORDER_SOFT);
+    w.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.corner_radius = radius;
+    w.expansion = 0.0;
+
+    // Boutons, combos, champs au repos.
+    let w = &mut v.widgets.inactive;
+    w.bg_fill = BG_DEEP;
+    w.weak_bg_fill = BG_RAISED;
+    w.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    w.fg_stroke = Stroke::new(1.6_f32, TEXT_DIM);
+    w.corner_radius = radius;
+    w.expansion = 0.0;
+
+    let w = &mut v.widgets.hovered;
+    w.bg_fill = BG_ACTIVE;
+    w.weak_bg_fill = BG_HOVER;
+    w.bg_stroke = Stroke::new(1.0_f32, melanger(BORDER, ACCENT, 0.35));
+    w.fg_stroke = Stroke::new(1.8_f32, TEXT);
+    w.corner_radius = radius;
+    w.expansion = 1.0;
+
+    let w = &mut v.widgets.active;
+    w.bg_fill = BG_ACTIVE;
+    w.weak_bg_fill = BG_ACTIVE;
+    w.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    w.fg_stroke = Stroke::new(1.8_f32, TEXT);
+    w.corner_radius = radius;
+    w.expansion = 0.0;
+
+    let w = &mut v.widgets.open;
+    w.bg_fill = BG_DEEP;
+    w.weak_bg_fill = BG_HOVER;
+    w.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    w.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.corner_radius = radius;
+
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le thème du système ne commande pas : un contexte qui se croit en
+    /// clair prend quand même nos couleurs, les widgets comme le reste.
+    #[test]
+    fn le_theme_sombre_s_impose_meme_a_un_systeme_en_clair() {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Light);
+        installer(&ctx);
+        let entree = egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
+        ctx.run_ui(entree, |ui| {
+            let ctx = ui.ctx();
+            assert_eq!(ctx.theme(), egui::Theme::Dark);
+            assert_eq!(ctx.global_style().visuals.window_fill, BG_RAISED);
+            assert!(ctx.global_style().visuals.dark_mode);
+        }).drop_without_applying_deltas();
+        // Et même la case « clair » porte nos couleurs, au cas où.
+        assert_eq!(ctx.style_of(egui::Theme::Light).visuals.window_fill, BG_RAISED);
+    }
+}
