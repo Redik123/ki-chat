@@ -518,7 +518,7 @@ fn decoder_son(a: &mut FormatAudio, sample: &IMFSample) -> anyhow::Result<Vec<f3
 /// le pas réel par le tampon 2D, sinon celui du type.
 pub(crate) fn image_nv12(v: &FormatVideo, sample: &IMFSample, horodatage: i64) -> anyhow::Result<Image> {
     let buffer = unsafe { sample.ConvertToContiguousBuffer() }.context("tampon d'image")?;
-    let mut rgba = Vec::new();
+    let mut rgba = pixels::Rgba::default();
     // Le tampon 2D donne le pas réel ; à défaut, le tampon plat et le pas
     // annoncé par le type (ou la largeur codée).
     if let Ok(b2) = buffer.cast::<IMF2DBuffer2>() {
@@ -588,7 +588,7 @@ pub(crate) fn convertir(
     octets: &[u8],
     pas: usize,
     lignes_y: usize,
-    rgba: &mut Vec<u8>,
+    rgba: &mut pixels::Rgba,
 ) -> anyhow::Result<()> {
     let (lc, hc) = v.codee;
     let hauteur_uv = hc.div_ceil(2);

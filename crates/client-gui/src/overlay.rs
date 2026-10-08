@@ -398,7 +398,7 @@ impl Overlay {
             affichees
                 .iter()
                 .map(|(nom, _, _)| {
-                    ctx.fonts(|f| f.layout_no_wrap(nom.clone(), police.clone(), Color32::WHITE))
+                    ctx.fonts_mut(|f| f.layout_no_wrap(nom.clone(), police.clone(), Color32::WHITE))
                         .size()
                         .x
                 })
@@ -418,7 +418,7 @@ impl Overlay {
         let largeur_annonce = annonce
             .as_ref()
             .map(|(t, _)| {
-                ctx.fonts(|f| f.layout_no_wrap(t.clone(), police.clone(), Color32::WHITE)).size().x
+                ctx.fonts_mut(|f| f.layout_no_wrap(t.clone(), police.clone(), Color32::WHITE)).size().x
                     + 2.0 * PAD
                     + 10.0
             })

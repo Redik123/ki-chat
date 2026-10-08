@@ -2793,7 +2793,7 @@ impl KiApp {
         let total: u64 = self.clips_liste.iter().map(|c| c.taille).sum();
         let dossier = self.clips_reglages.dossier_effectif();
         let raccourci = self.clips_reglages.raccourci.label();
-        let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
+        let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
         let liste = &self.clips_liste;
         let vignettes = &self.clips_vignettes;
         egui::Window::new("Clips")
@@ -6524,7 +6524,7 @@ impl KiApp {
         ui::field_label(ui, "Pseudo");
         let field = ui.add(ui::text_field(&mut self.username, "ton pseudo", false));
         if stored {
-            let galley = ui.fonts(|f| {
+            let galley = ui.fonts_mut(|f| {
                 f.layout_no_wrap(
                     "ENREGISTRÉ".into(),
                     egui::FontId::proportional(9.5),
@@ -8128,7 +8128,7 @@ impl KiApp {
             });
 
         if survol {
-            let rect = ctx.screen_rect();
+            let rect = ctx.content_rect();
             egui::Area::new(egui::Id::new("depot-fichier"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(rect.min)
@@ -8925,7 +8925,7 @@ impl KiApp {
         let mut open = true;
         let mut lancer = false;
         let mut saut: Option<(ChannelId, u64)> = None;
-        let roomy = (ctx.screen_rect().height() - 160.0).clamp(280.0, 720.0);
+        let roomy = (ctx.content_rect().height() - 160.0).clamp(280.0, 720.0);
         egui::Window::new("Rechercher")
             .open(&mut open)
             .collapsible(false)
@@ -9078,7 +9078,7 @@ impl KiApp {
         // Hauteur d'ouverture : large sur un grand écran, sans jamais
         // déborder d'un petit. L'utilisateur peut ensuite redimensionner,
         // et egui retient la taille d'une session à l'autre.
-        let roomy = (ctx.screen_rect().height() - 120.0).clamp(320.0, 900.0);
+        let roomy = (ctx.content_rect().height() - 120.0).clamp(320.0, 900.0);
         egui::Window::new("Réglages")
             .open(&mut open)
             .collapsible(false)
@@ -11864,7 +11864,7 @@ impl KiApp {
     fn admin_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut to_send: Vec<ClientMsg> = Vec::new();
-        let roomy = (ctx.screen_rect().height() - 120.0).clamp(320.0, 900.0);
+        let roomy = (ctx.content_rect().height() - 120.0).clamp(320.0, 900.0);
         egui::Window::new("Administration")
             .open(&mut open)
             .collapsible(false)
@@ -12968,7 +12968,7 @@ fn audit_tone(action: &str) -> egui::Color32 {
 
 /// Logo + nom + accroche, centrés au pixel près, posés sur un halo.
 fn brand(ui: &mut egui::Ui) {
-    let galley = ui.fonts(|f| {
+    let galley = ui.fonts_mut(|f| {
         f.layout_no_wrap("ki-chat".into(), egui::FontId::proportional(38.0), ACCENT)
     });
     let mark = 56.0;
@@ -13124,7 +13124,7 @@ fn server_row(
         } else {
             egui::FontId::proportional(12.0)
         };
-        let galley = ui.fonts(|f| f.layout_no_wrap(text, font, color));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap(text, font, color));
         let value_left = rect.right() - EDIT - 14.0 - galley.size().x;
         let baseline = rect.center().y - galley.size().y / 2.0;
         painter.galley(egui::pos2(value_left, baseline), galley, color);
@@ -13257,7 +13257,7 @@ fn channel_row(
         if temporaire {
             // Le badge « temporaire », à la couleur des invités : ce salon
             // s'effacera, et ce qui s'y dit avec.
-            let galley = ui.fonts(|f| {
+            let galley = ui.fonts_mut(|f| {
                 f.layout_no_wrap("temporaire".into(), egui::FontId::proportional(9.5), theme::INVITE)
             });
             let taille = Vec2::new(galley.size().x + 8.0, 14.0);
@@ -13280,7 +13280,7 @@ fn channel_row(
         }
         if let Some(n) = non_lu {
             let texte = if n.nb > 99 { "99+".to_string() } else { n.nb.to_string() };
-            let galley = ui.fonts(|f| {
+            let galley = ui.fonts_mut(|f| {
                 f.layout_no_wrap(texte, egui::FontId::proportional(10.5), theme::BG_DEEP)
             });
             let taille = Vec2::new(galley.size().x + 10.0, 16.0);
@@ -13300,7 +13300,7 @@ fn channel_row(
         // « En gras » au sens de l'application : `strong()` n'a pas de
         // graisse, c'est la couleur pleine — `TEXT` au lieu de `TEXT_DIM`.
         let galley =
-            ui.fonts(|f| f.layout_no_wrap(name.to_owned(), egui::FontId::proportional(14.0), fg));
+            ui.fonts_mut(|f| f.layout_no_wrap(name.to_owned(), egui::FontId::proportional(14.0), fg));
         let gauche = rect.left() + 34.0;
         painter.with_clip_rect(egui::Rect::from_min_max(
             egui::pos2(gauche, rect.top()),
@@ -13577,7 +13577,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         couleur_de_membre(member).gamma_multiply(0.45)
     };
     let font = egui::FontId::proportional(13.5);
-    let galley = ui.fonts(|f| f.layout_no_wrap(member.username.clone(), font, color));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(member.username.clone(), font, color));
     let name_width = galley.size().x;
     let name_left = avatar_rect.right() + 9.0;
     // En jeu : le pseudo monte d'un cran, et la partie se lit dessous —
@@ -13603,7 +13603,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     let mut apres_nom = name_left + name_width + 5.0;
     if est_bot(member.user_id) {
         // La pastille BOT, franche : personne ne le prend pour un membre.
-        let galley = ui.fonts(|f| f.layout_no_wrap("BOT".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap("BOT".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
         let pastille = egui::Rect::from_min_size(
             egui::pos2(apres_nom + 1.0, name_y - 7.0),
             Vec2::new(galley.size().x + 8.0, 14.0),
@@ -13619,7 +13619,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     if est_invite_membre(member) {
         // La pastille INVITÉ, même dessin que BOT, à la couleur des
         // invités : pas un compte, présent le temps d'une porte.
-        let galley = ui.fonts(|f| f.layout_no_wrap("INVITÉ".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap("INVITÉ".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
         let pastille = egui::Rect::from_min_size(
             egui::pos2(apres_nom + 1.0, name_y - 7.0),
             Vec2::new(galley.size().x + 8.0, 14.0),
@@ -13657,7 +13657,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
             painter.image(icone.id(), cadre, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             apres_nom += 18.0;
         }
-        let galley = ui.fonts(|f| {
+        let galley = ui.fonts_mut(|f| {
             f.layout_no_wrap(
                 ki_protocol::nom_de_rang(tier),
                 egui::FontId::proportional(10.0),
@@ -13750,7 +13750,7 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
     if !ui.is_rect_visible(rect) {
         return;
     }
-    let galley = ui.fonts(|f| {
+    let galley = ui.fonts_mut(|f| {
         f.layout_no_wrap(
             label.to_owned(),
             egui::FontId::proportional(11.0),
@@ -13804,7 +13804,7 @@ fn separateur_nouveaux(ui: &mut egui::Ui) {
     if !ui.is_rect_visible(rect) {
         return;
     }
-    let galley = ui.fonts(|f| {
+    let galley = ui.fonts_mut(|f| {
         f.layout_no_wrap("nouveaux messages".to_owned(), egui::FontId::proportional(11.0), ACCENT)
     });
     let painter = ui.painter();

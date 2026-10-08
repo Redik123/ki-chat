@@ -403,7 +403,7 @@ impl<'a> Annuaire<'a> {
 /// La taille au-delà de laquelle une fenêtre ne va pas : l'écran, moins
 /// une marge pour garder la poignée et la croix à portée.
 fn bornes_de_fenetre(ctx: &egui::Context) -> (f32, f32) {
-    let ecran = ctx.screen_rect();
+    let ecran = ctx.content_rect();
     ((ecran.width() - 40.0).max(360.0), (ecran.height() - 40.0).max(300.0))
 }
 
@@ -753,7 +753,7 @@ fn carte_cellule(ui: &mut Ui, carte: &str, catalogue: &Catalogue) -> Response {
 /// Un nom sur le bandeau de sa carte : l'image rognée au centre pour
 /// remplir la pastille, un voile sombre, le texte en blanc.
 fn pastille_carte(ui: &mut Ui, texte: &str, bandeau: &egui::TextureHandle, hauteur: f32, taille: f32) -> Response {
-    let galley = ui.fonts(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(taille), Color32::WHITE));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(taille), Color32::WHITE));
     let dimensions = Vec2::new((galley.size().x + 16.0).max(LARGEUR_PASTILLE_MIN), hauteur);
     let (rect, reponse) = ui.allocate_exact_size(dimensions, Sense::hover());
     if ui.is_rect_visible(rect) {
@@ -836,7 +836,7 @@ fn medailles_cellule(ui: &mut Ui, md: Option<&MedaillesDuMatch>) -> Response {
 
 /// Une étiquette en capitales sur un fond de sa couleur : « EN PARTIE ».
 fn badge(ui: &mut Ui, texte: &str, couleur: Color32) -> Response {
-    let galley = ui.fonts(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(9.5), couleur));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(9.5), couleur));
     let (rect, reponse) = ui.allocate_exact_size(Vec2::new(galley.size().x + 10.0, 16.0), Sense::hover());
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(couleur, 36));
@@ -1053,7 +1053,7 @@ impl PageValo {
             return demandes;
         }
         let mut open = true;
-        let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
+        let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
         let maintenant = maintenant_ms();
         let (lignes, local) = lignes_du_groupe(stats, maintenant);
         let noms = Annuaire::new(stats, membres);
@@ -2049,7 +2049,7 @@ impl PageValo {
         catalogue: &Catalogue,
     ) -> bool {
         let mut open = true;
-        let roomy = (ctx.screen_rect().height() - 120.0).clamp(360.0, 780.0);
+        let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
         let titre = format!("VALORANT — {}", ouverte.username);
         let (max_l, max_h) = bornes_de_fenetre(ctx);
         egui::Window::new(titre)
@@ -2388,10 +2388,10 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
     } else {
         (TEXT, TEXT_DIM)
     };
-    let mut lignes = vec![ui.fonts(|f| f.layout_no_wrap(fiche.riot_id.clone(), FontId::proportional(19.0), fort))];
-    lignes.push(ui.fonts(|f| f.layout_no_wrap(detail, FontId::proportional(11.5), doux)));
+    let mut lignes = vec![ui.fonts_mut(|f| f.layout_no_wrap(fiche.riot_id.clone(), FontId::proportional(19.0), fort))];
+    lignes.push(ui.fonts_mut(|f| f.layout_no_wrap(detail, FontId::proportional(11.5), doux)));
     if let Some(titre) = titre {
-        lignes.push(ui.fonts(|f| f.layout_no_wrap(titre, FontId::proportional(11.5), doux)));
+        lignes.push(ui.fonts_mut(|f| f.layout_no_wrap(titre, FontId::proportional(11.5), doux)));
     }
     let hauteur: f32 = lignes.iter().map(|g| g.size().y).sum::<f32>() + 2.0 * (lignes.len() as f32 - 1.0);
     let mut y = rect.center().y - hauteur / 2.0;
@@ -2922,7 +2922,7 @@ fn detail_du_match(ui: &mut Ui, m: &MatchResume, vue: &Vue, largeur_page: f32) {
     let texte = recit_du_match(m, &vue.noms);
     let police = egui::FontId::proportional(11.5);
     let largeur = (largeur_page - 16.0).max(80.0);
-    let galley = ui.fonts(|f| f.layout(texte, police, TEXT_DIM, largeur));
+    let galley = ui.fonts_mut(|f| f.layout(texte, police, TEXT_DIM, largeur));
     let deroule = m.manches_detail.as_ref().map(|d| d.deroule.as_str()).unwrap_or("");
     let hauteur_cases = if deroule.is_empty() { 0.0 } else { 14.0 + 4.0 };
     let hauteur = hauteur_cases + galley.size().y + 6.0;

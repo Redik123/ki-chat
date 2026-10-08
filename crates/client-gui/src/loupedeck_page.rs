@@ -155,7 +155,7 @@ impl KiApp {
 
         // On la déplace et on l'agrandit à volonté ; egui retient sa place
         // et sa taille d'une session à l'autre.
-        let ecran = ctx.screen_rect();
+        let ecran = ctx.content_rect();
         let mut ouvert = true;
         egui::Window::new("Loupedeck Live")
             .open(&mut ouvert)

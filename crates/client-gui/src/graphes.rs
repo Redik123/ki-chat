@@ -728,8 +728,8 @@ pub fn barres(ui: &mut Ui, lignes: &[Barre], largeur_label: f32, hauteur_ligne: 
         if !ui.is_rect_visible(rect) {
             continue;
         }
-        let libelle = ui.fonts(|f| f.layout_no_wrap(ligne.label.to_owned(), police.clone(), TEXT_DIM));
-        let texte = ui.fonts(|f| f.layout_no_wrap(ligne.texte.clone(), police.clone(), TEXT));
+        let libelle = ui.fonts_mut(|f| f.layout_no_wrap(ligne.label.to_owned(), police.clone(), TEXT_DIM));
+        let texte = ui.fonts_mut(|f| f.layout_no_wrap(ligne.texte.clone(), police.clone(), TEXT));
         let painter = ui.painter();
         let centre_y = rect.center().y;
 

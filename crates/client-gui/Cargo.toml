@@ -24,7 +24,12 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-eframe = { version = "0.32", features = ["persistence"] }
+# Pas au-delà de 0.33 sans chantier : depuis 0.34, eframe ne fait plus
+# tourner l'interface d'une fenêtre réduite, et repousse ses réveils d'au
+# moins 100 ms. Or le push-to-talk, les raccourcis, le Loupedeck et l'overlay
+# passent par cette boucle — ki-chat réduit en jeu couperait le début de
+# chaque prise de parole.
+eframe = { version = "0.33", features = ["persistence"] }
 # Le spectre de la voix derrière la courbe de l'égaliseur (page Casque). Déjà
 # compilé pour le débruitage : la même version, rien de plus à télécharger.
 realfft = "3.5"
@@ -50,7 +55,7 @@ chrono = "0.4"
 # l'arbre (epaint) : rien de plus à télécharger.
 ki-loupedeck = { path = "../loupedeck" }
 ab_glyph = "0.2"
-epaint_default_fonts = "0.32"
+epaint_default_fonts = "0.33"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne
 # même quand la fenêtre n'a pas le focus — indispensable en jeu.
 device_query = "2"

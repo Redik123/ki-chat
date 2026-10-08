@@ -695,7 +695,7 @@ impl Visionneuse {
             });
         }
 
-        let ecran = ctx.screen_rect();
+        let ecran = ctx.content_rect();
         let est_video = cible.est_video();
         let locale = cible.est_locale();
         let bas = if est_video { BAS_VIDEO } else { BAS_IMAGE };

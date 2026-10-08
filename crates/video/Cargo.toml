@@ -14,6 +14,10 @@ license.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 openh264 = { version = "0.9", features = ["source"] }
+# L'image du spectateur est rangée en mots de 32 bits (`ViewerFrame`) et
+# écrite comme des octets : egui la reprend sans la recopier. Déjà dans
+# l'arbre (egui, ki-chat).
+bytemuck = "1"
 
 # La capture (Windows.Graphics.Capture) et NVENC (Direct3D 11) sont des
 # affaires de Windows : ailleurs, ces crates ne sont même pas lus. Le reste

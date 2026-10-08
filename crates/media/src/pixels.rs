@@ -13,6 +13,46 @@
 
 use rayon::prelude::*;
 
+/// Des pixels RGBA serrés, rangés en mots de 32 bits : la mémoire est
+/// alignée sur quatre octets, comme le `Color32` d'egui (depuis 0.33). egui
+/// peut donc la reprendre telle quelle (`into_mots`), sans recopier
+/// l'image — 20 Mo à chaque image d'un stream 3440×1440. Pour tout le
+/// reste, ce sont des octets (`Deref<Target = [u8]>`).
+#[derive(Clone, Default)]
+pub struct Rgba(Vec<u32>);
+
+impl Rgba {
+    /// `pixels` pixels à zéro, pris à la mémoire déjà nulle du système.
+    pub fn zeros(pixels: usize) -> Self {
+        Rgba(vec![0; pixels])
+    }
+
+    /// Les mots eux-mêmes : un pixel par mot, ses octets dans l'ordre R, G,
+    /// B, A en mémoire.
+    pub fn into_mots(self) -> Vec<u32> {
+        self.0
+    }
+
+    /// Les octets dans un `Vec<u8>` à part, pour qui l'exige : c'est une
+    /// copie.
+    pub fn into_octets(self) -> Vec<u8> {
+        bytemuck::cast_slice(&self.0).to_vec()
+    }
+}
+
+impl std::ops::Deref for Rgba {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.0)
+    }
+}
+
+impl std::ops::DerefMut for Rgba {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        bytemuck::cast_slice_mut(&mut self.0)
+    }
+}
+
 /// Coefficients ×256 : (rv, gu, gv, bu).
 const BT601: (i32, i32, i32, i32) = (409, 100, 208, 516);
 const BT709: (i32, i32, i32, i32) = (459, 55, 136, 541);
@@ -58,16 +98,16 @@ pub fn nv12_vers_rgba(
     largeur: usize,
     hauteur: usize,
     matrice: Matrice,
-    sortie: &mut Vec<u8>,
+    sortie: &mut Rgba,
 ) {
     // Une sortie neuve vient de la mémoire déjà nulle du système, et ses
     // pages se touchent pour la première fois pendant la conversion, sur
     // tous les cœurs : la remettre à zéro d'abord coûtait, sur un seul
     // cœur, le tiers de la conversion d'une image 3440×1440.
     if sortie.is_empty() {
-        *sortie = vec![0; largeur * hauteur * 4];
+        *sortie = Rgba::zeros(largeur * hauteur);
     } else {
-        sortie.resize(largeur * hauteur * 4, 0);
+        sortie.0.resize(largeur * hauteur, 0);
     }
     if largeur == 0 || hauteur == 0 {
         return;
@@ -125,7 +165,7 @@ mod tests {
         let plan_y = vec![128u8; pas * hauteur];
         // Deux lignes de chroma, la dernière tronquée d'un octet.
         let plan_uv = vec![128u8; pas * 2 - 1];
-        let mut out = Vec::new();
+        let mut out = Rgba::default();
         nv12_vers_rgba(&plan_y, pas, &plan_uv, pas, largeur, hauteur, Matrice::Bt601, &mut out);
         assert_eq!(out.len(), largeur * hauteur * 4);
     }
@@ -141,7 +181,7 @@ mod tests {
             }
             p
         };
-        let mut out = Vec::new();
+        let mut out = Rgba::default();
         nv12_vers_rgba(&plan_y, l, &plan_uv, l, l, h, Matrice::selon_hauteur(h), &mut out);
         [out[0], out[1], out[2], out[3]]
     }
@@ -176,7 +216,7 @@ mod tests {
         let (l, h) = (3usize, 3usize);
         let y = vec![128u8; 4 * h];
         let uv = vec![128u8; 4 * 2];
-        let mut out = Vec::new();
+        let mut out = Rgba::default();
         nv12_vers_rgba(&y, 4, &uv, 4, l, h, Matrice::Bt601, &mut out);
         assert_eq!(out.len(), l * h * 4);
         assert!(out

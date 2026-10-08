@@ -46,7 +46,7 @@ pub struct Image {
     pub pts_ms: u64,
     pub largeur: u32,
     pub hauteur: u32,
-    pub rgba: Vec<u8>,
+    pub rgba: pixels::Rgba,
 }
 
 /// Ce que `suivant` rend.

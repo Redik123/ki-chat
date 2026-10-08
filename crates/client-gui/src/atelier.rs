@@ -539,7 +539,7 @@ impl Atelier {
         let libre = ctx.memory(|m| m.focused().is_none());
         let espace = libre && ctx.input(|i| i.key_pressed(egui::Key::Space));
 
-        let ecran = ctx.screen_rect();
+        let ecran = ctx.content_rect();
         let mut fermer = false;
         let mut lancer_export = false;
         let mut demande_qr = false;

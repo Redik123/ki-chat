@@ -1361,7 +1361,7 @@ pub fn oublier_serveur(clip: &Path) -> Option<Fiche> {
 pub fn vignette(clip: &Path) -> anyhow::Result<PathBuf> {
     let cible = chemin_vignette(clip).ok_or_else(|| anyhow::anyhow!("pas de dossier de vignettes"))?;
     let image = ki_media::premiere_image(clip)?;
-    let source = image::RgbaImage::from_raw(image.largeur, image.hauteur, image.rgba)
+    let source = image::RgbaImage::from_raw(image.largeur, image.hauteur, image.rgba.into_octets())
         .ok_or_else(|| anyhow::anyhow!("image incohérente"))?;
     let largeur = 320u32.min(image.largeur.max(1));
     let hauteur = (u64::from(largeur) * u64::from(image.hauteur) / u64::from(image.largeur.max(1))).max(1) as u32;

@@ -121,7 +121,7 @@ fn styled_button(
     width: Option<f32>,
 ) -> Response {
     let font = FontId::proportional(14.0);
-    let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font, theme::TEXT));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font, theme::TEXT));
     let icon_size = 16.0;
     let gap = if icon.is_some() && !label.is_empty() {
         7.0
@@ -605,7 +605,7 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
     let font = FontId::proportional(12.5);
     let textes: Vec<_> = choix
         .iter()
-        .map(|(_, l)| ui.fonts(|f| f.layout_no_wrap((*l).to_owned(), font.clone(), theme::TEXT)))
+        .map(|(_, l)| ui.fonts_mut(|f| f.layout_no_wrap((*l).to_owned(), font.clone(), theme::TEXT)))
         .collect();
     let pad = 12.0;
     let tailles: Vec<f32> = textes.iter().map(|g| g.size().x + 2.0 * pad).collect();
@@ -675,7 +675,7 @@ pub fn pastilles<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
         for (v, libelle) in choix {
-            let galley = ui.fonts(|f| f.layout_no_wrap((*libelle).to_owned(), font.clone(), theme::TEXT));
+            let galley = ui.fonts_mut(|f| f.layout_no_wrap((*libelle).to_owned(), font.clone(), theme::TEXT));
             let (rect, reponse) =
                 ui.allocate_exact_size(Vec2::new(galley.size().x + 24.0, 28.0), Sense::click());
             if reponse.clicked() && *valeur != *v {
@@ -805,7 +805,7 @@ pub fn stat_row(ui: &mut Ui, items: &[(Icon, String, Color32)], size: f32) -> Re
     let font = FontId::proportional(size);
     let galleys: Vec<_> = items
         .iter()
-        .map(|(_, text, color)| ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), *color)))
+        .map(|(_, text, color)| ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), *color)))
         .collect();
 
     let icon = size * 1.25;
@@ -837,7 +837,7 @@ pub fn stat_row(ui: &mut Ui, items: &[(Icon, String, Color32)], size: f32) -> Re
 /// Barres de réseau + valeur, pour le ping.
 pub fn signal_badge(ui: &mut Ui, lit: u8, text: &str, color: Color32) -> Response {
     let font = FontId::proportional(11.5);
-    let galley = ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font, color));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font, color));
     let bars = 14.0;
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(bars + 4.0 + galley.size().x, bars.max(galley.size().y)),

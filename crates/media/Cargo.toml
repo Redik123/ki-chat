@@ -18,6 +18,10 @@ tracing.workspace = true
 # sur un cœur ; par bandes de lignes, elle tient dans le budget d'une image à
 # 60 par seconde.
 rayon = "1"
+# Les pixels sont rangés en mots de 32 bits (`pixels::Rgba`) et lus comme
+# des octets : egui reprend alors l'image sans la recopier. Déjà dans
+# l'arbre (egui, ki-chat).
+bytemuck = "1"
 
 [dev-dependencies]
 # Le décodeur des spectateurs d'avant : la référence des pixels du décodeur

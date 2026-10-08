@@ -1099,9 +1099,9 @@ impl Decodeur {
         Ok(Decodeur::Openh264(ViewerDecoder::new()?))
     }
 
-    /// Une trame ; l'image décodée (largeur, hauteur, RGBA opaque), s'il en
-    /// sort une.
-    fn decoder(&mut self, trame: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    /// Une trame ; l'image décodée (largeur, hauteur, RGBA opaque en mots de
+    /// 32 bits, un par pixel), s'il en sort une.
+    fn decoder(&mut self, trame: &[u8]) -> Option<(usize, usize, Vec<u32>)> {
         let abandon = match self {
             Decodeur::Openh264(d) => return d.decode(trame).map(|f| (f.width, f.height, f.rgba)),
             Decodeur::Windows { decodeur, sans_image, dit } => match decodeur.decoder(trame) {
@@ -1115,7 +1115,7 @@ impl Decodeur {
                         };
                         ki_video::journal(format!("visionnage : décodeur de Windows, {ou}"));
                     }
-                    return Some((image.largeur as usize, image.hauteur as usize, image.rgba));
+                    return Some((image.largeur as usize, image.hauteur as usize, image.rgba.into_mots()));
                 }
                 Ok(None) => {
                     *sans_image += 1;
@@ -1142,15 +1142,22 @@ impl Decodeur {
 /// recopier (`from_rgba_unmultiplied`, pixel par pixel sur un seul cœur)
 /// coûtait 12 ms par image 3440×1440 — en plus des 20 du décodage
 /// d'openh264, pour 33 de budget, et sans que le journal ne les compte.
+///
+/// Les décodeurs rendent des mots de 32 bits et non des octets : depuis
+/// egui 0.33, `Color32` est aligné sur quatre octets, et un `Vec<u8>` ne
+/// peut plus lui être cédé.
 /// Une image dont la taille ne colle pas est jetée : egui paniquerait.
-fn image_egui(largeur: usize, hauteur: usize, rgba: Vec<u8>) -> Option<egui::ColorImage> {
-    if rgba.len() != largeur * hauteur * 4 {
+fn image_egui(largeur: usize, hauteur: usize, rgba: Vec<u32>) -> Option<egui::ColorImage> {
+    if rgba.len() != largeur * hauteur {
         return None;
     }
-    Some(match bytemuck::try_cast_vec::<u8, egui::Color32>(rgba) {
+    Some(match bytemuck::try_cast_vec::<u32, egui::Color32>(rgba) {
         Ok(pixels) => egui::ColorImage::new([largeur, hauteur], pixels),
-        // Une capacité qui n'est pas un multiple de quatre : on recopie.
-        Err((_, rgba)) => egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], &rgba),
+        // Un `Color32` qui changerait encore de forme : on recopie, et le
+        // test `l_image_passe_a_egui_sans_recopie` le signale.
+        Err((_, rgba)) => {
+            egui::ColorImage::from_rgba_unmultiplied([largeur, hauteur], bytemuck::cast_slice(&rgba))
+        }
     })
 }
 
@@ -1383,7 +1390,10 @@ mod tests {
 
     #[test]
     fn l_image_passe_a_egui_sans_recopie() {
-        let rgba: Vec<u8> = (0..4 * 6).map(|i| i as u8).collect();
+        let mut rgba = vec![0u32; 6];
+        for (i, octet) in bytemuck::cast_slice_mut::<u32, u8>(&mut rgba).iter_mut().enumerate() {
+            *octet = i as u8;
+        }
         let adresse = rgba.as_ptr() as usize;
         let image = image_egui(3, 2, rgba).expect("une image");
         assert_eq!(image.size, [3, 2]);
@@ -1391,7 +1401,7 @@ mod tests {
         assert_eq!(image.pixels.as_ptr() as usize, adresse);
         assert_eq!(image.pixels[1].to_array(), [4, 5, 6, 7]);
         // Une taille qui ne colle pas : jetée, pas de panique.
-        assert!(image_egui(3, 3, vec![0; 4 * 6]).is_none());
+        assert!(image_egui(3, 3, vec![0; 6]).is_none());
     }
 
     #[cfg(windows)]

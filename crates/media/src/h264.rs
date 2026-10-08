@@ -326,7 +326,7 @@ mod mft {
             // pas — la taille que la carte annonce (`DepthPitch`) le confirme
             // quand elle la donne.
             let longueur = pas * (lignes + lignes.div_ceil(2));
-            let mut rgba = Vec::new();
+            let mut rgba = crate::pixels::Rgba::default();
             let resultat = if lu.pData.is_null() || (lu.DepthPitch != 0 && (lu.DepthPitch as usize) < longueur) {
                 Err(anyhow::anyhow!(
                     "image de la carte illisible ({} octets annoncés, {longueur} attendus)",

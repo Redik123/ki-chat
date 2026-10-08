@@ -1204,6 +1204,16 @@ fn streamer_pipeline(
     }
 }
 
+/// Image d'un spectateur : RGBA serré, rangé en mots de 32 bits. La mémoire
+/// est alignée sur quatre octets, comme le `Color32` d'egui (depuis 0.33),
+/// qui reprend donc l'image sans la recopier.
+pub struct ViewerFrame {
+    pub width: usize,
+    pub height: usize,
+    /// Un pixel par mot, ses octets dans l'ordre R, G, B, A en mémoire.
+    pub rgba: Vec<u32>,
+}
+
 /// Décodeur d'un spectateur : reçoit du H.264 en clair (déjà déchiffré et
 /// remis en ordre par la couche réseau), rend des images prêtes à peindre.
 /// `None` n'est pas une erreur : un paquet SPS/PPS seul ne produit pas
@@ -1217,13 +1227,13 @@ impl ViewerDecoder {
         Ok(Self { decoder: Decoder::new().context("décodeur H.264 spectateur")? })
     }
 
-    pub fn decode(&mut self, h264: &[u8]) -> Option<RgbaFrame> {
+    pub fn decode(&mut self, h264: &[u8]) -> Option<ViewerFrame> {
         match self.decoder.decode(h264) {
             Ok(Some(image)) => {
                 let (w, h) = image.dimensions();
-                let mut rgba = vec![0u8; w * h * 4];
-                image.write_rgba8(&mut rgba);
-                Some(RgbaFrame { width: w, height: h, rgba })
+                let mut rgba = vec![0u32; w * h];
+                image.write_rgba8(bytemuck::cast_slice_mut(&mut rgba));
+                Some(ViewerFrame { width: w, height: h, rgba })
             }
             Ok(None) => None,
             Err(e) => {
