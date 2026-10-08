@@ -7,9 +7,10 @@
 //! - [`flex`] : la mise en page flexbox (rangées, colonnes, retour à la
 //!   ligne, répartition, éléments qui grandissent), calculée par taffy.
 //! - [`composants`] : les briques dessinées à la main — boutons à icône,
-//!   sections et lignes de réglage, interrupteurs, bandeaux, vumètres,
-//!   avatars —, et [`icones`], le jeu d'icônes vectorielles qu'ils
-//!   emploient.
+//!   onglets, sections et lignes de réglage, choix segmentés et en
+//!   pastilles, interrupteurs, curseurs, champs, bandeaux, encarts,
+//!   rappels, étiquettes, vumètres, avatars —, et [`icones`], le jeu
+//!   d'icônes vectorielles qu'ils emploient.
 //! - [`liste`] : la liste virtualisée, qui ne construit que ce qui se voit
 //!   et garde immobile la ligne qu'on lit quand le reste bouge.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème

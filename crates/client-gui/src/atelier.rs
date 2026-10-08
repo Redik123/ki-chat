@@ -1887,11 +1887,7 @@ fn panneau_reglages(
 
     ui.add_space(espace::M);
     ui::section_label(ui, "Titre");
-    ui.add(
-        egui::TextEdit::singleline(&mut p.titre)
-            .hint_text("un titre, si tu veux")
-            .desired_width(f32::INFINITY),
-    );
+    ui.add(ui::text_field(&mut p.titre, "un titre, si tu veux", false));
     if p.titre.chars().count() > 80 {
         p.titre = p.titre.chars().take(80).collect();
     }
@@ -2047,11 +2043,7 @@ fn panneau_reglages(
                         ui.selectable_value(&mut r.salon, Some(*id), format!("#{nom}"));
                     }
                 });
-            ui.add(
-                egui::TextEdit::singleline(&mut r.legende)
-                    .hint_text("une légende, si tu veux")
-                    .desired_width(f32::INFINITY),
-            );
+            ui.add(ui::text_field(&mut r.legende, "une légende, si tu veux", false));
             let envoi = r.envoi.is_some();
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!envoi && r.salon.is_some(), |ui| {

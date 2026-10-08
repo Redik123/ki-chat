@@ -2437,11 +2437,11 @@ impl KiApp {
             {
                 let ui = &mut cols[2];
                 ui.add_enabled_ui(peut_ajouter, |ui| {
-                    let champ = ui.add(
-                        egui::TextEdit::singleline(&mut self.musique_recherche)
-                            .hint_text("chercher, ou coller l'adresse d'un morceau ou d'une playlist…")
-                            .desired_width(f32::INFINITY),
-                    );
+                    let champ = ui.add(ui::text_field(
+                        &mut self.musique_recherche,
+                        "chercher, ou coller l'adresse d'un morceau ou d'une playlist…",
+                        false,
+                    ));
                     menu_edition(&champ, &mut self.musique_recherche, false);
                     let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let mut lancer = entree;
@@ -3121,11 +3121,7 @@ impl KiApp {
                     });
                 ui.add_space(espace::S);
                 ui::field_label(ui, "Légende");
-                ui.add(
-                    egui::TextEdit::singleline(&mut p.legende)
-                        .hint_text("un mot, si tu veux")
-                        .desired_width(f32::INFINITY),
-                );
+                ui.add(ui::text_field(&mut p.legende, "un mot, si tu veux", false));
                 if p.fiche.as_ref().is_some_and(|f| f.pistes.as_ref().is_some_and(|p| p.iter().any(|x| x == "copains"))) {
                     ui.add_space(espace::S);
                     ui.checkbox(&mut p.voix, "avec les voix des copains");
@@ -6699,12 +6695,7 @@ impl KiApp {
                     ui.add_space(espace::S);
                 }
                 ui::field_label(ui, "Mot de passe du salon");
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut prompt.password)
-                        .password(true)
-                        .margin(marge::symetrique(espace::L, espace::M))
-                        .desired_width(f32::INFINITY),
-                );
+                let response = ui.add(ui::text_field(&mut prompt.password, "", true));
                 menu_edition(&response, &mut prompt.password, true);
                 response.request_focus();
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
