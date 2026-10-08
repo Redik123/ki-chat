@@ -7166,51 +7166,50 @@ impl KiApp {
                     .show(ui, |ui| {
                         // Le logo et le nom du serveur priment : avec
                         // plusieurs serveurs enregistrés, c'est ce qui situe.
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-                            match &header_icon {
-                                Some(icon) => ui::paint_server_badge(
-                                    ui.painter(),
-                                    rect,
-                                    &header_name,
-                                    self.url.trim(),
-                                    Some(icon),
-                                ),
-                                None => icons::logo(ui.painter(), rect, ACCENT, theme::BG_SIDE),
-                            }
+                        let mut deconnecter = false;
+                        Flex::ligne().ecart(espace::M).show(ui, "en-tete-serveur", |f| {
+                            f.ui(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                                match &header_icon {
+                                    Some(icon) => ui::paint_server_badge(
+                                        ui.painter(),
+                                        rect,
+                                        &header_name,
+                                        self.url.trim(),
+                                        Some(icon),
+                                    ),
+                                    None => icons::logo(ui.painter(), rect, ACCENT, theme::BG_SIDE),
+                                }
+                            });
                             // Le nom et l'adresse prennent la place qui reste
                             // — tronqués s'il le faut —, le bouton de
                             // déconnexion garde la sienne, à droite.
-                            let place = (ui.available_width() - 36.0).max(40.0);
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(place, 34.0),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&header_name).color(TEXT).size(texte::TITRE).strong(),
-                                        )
-                                        .truncate(),
-                                    );
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(self.url.trim()).color(TEXT_FAINT).size(texte::PETIT),
-                                        )
-                                        .truncate(),
-                                    );
-                                },
-                            );
+                            f.grandit(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&header_name).color(TEXT).size(texte::TITRE).strong(),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(self.url.trim()).color(TEXT_FAINT).size(texte::PETIT),
+                                    )
+                                    .truncate(),
+                                );
+                            });
                             // Se déconnecter : à côté du serveur qu'on quitte.
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui::icon_button(ui, Icon::Logout, "Se déconnecter de ce serveur").clicked() {
-                                    // Voulu : on ne reviendra pas tout
-                                    // seul au prochain lancement.
-                                    self.session_auto = None;
-                                    self.disconnect(None);
-                                }
+                            f.ui(|ui| {
+                                deconnecter =
+                                    ui::icon_button(ui, Icon::Logout, "Se déconnecter de ce serveur").clicked();
                             });
                         });
+                        if deconnecter {
+                            // Voulu : on ne reviendra pas tout seul au
+                            // prochain lancement.
+                            self.session_auto = None;
+                            self.disconnect(None);
+                        }
                     });
 
                 // --- Pied : mon compte ---
@@ -8490,28 +8489,9 @@ impl KiApp {
             self.annuler_edition();
             return;
         }
-        egui::Frame::NONE
-            .fill(theme::BG_RAISED)
-            .corner_radius(egui::CornerRadius::same(rayon::L))
-            .inner_margin(marge::symetrique(espace::L, espace::XS))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("✎ Tu modifies ton message — Entrée pour enregistrer")
-                            .color(TEXT_DIM)
-                            .size(texte::COURANT),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(RichText::new("✕").color(TEXT_DIM))
-                            .on_hover_text("Annuler (Échap)")
-                            .clicked()
-                        {
-                            self.annuler_edition();
-                        }
-                    });
-                });
-            });
+        if ui::rappel(ui, "✎ Tu modifies ton message — Entrée pour enregistrer", "Annuler (Échap)") {
+            self.annuler_edition();
+        }
         ui.add_space(espace::XS);
     }
 
@@ -8523,31 +8503,10 @@ impl KiApp {
             self.reponse_a = None;
             return;
         }
-        egui::Frame::NONE
-            .fill(theme::BG_RAISED)
-            .corner_radius(egui::CornerRadius::same(rayon::L))
-            .inner_margin(marge::symetrique(espace::L, espace::XS))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("↩ Réponse à {} — {}", r.username, r.excerpt))
-                                .color(TEXT_DIM)
-                                .size(texte::COURANT),
-                        )
-                        .truncate(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(RichText::new("✕").color(TEXT_DIM))
-                            .on_hover_text("Ne plus répondre (Échap)")
-                            .clicked()
-                        {
-                            self.reponse_a = None;
-                        }
-                    });
-                });
-            });
+        let texte_rappel = format!("↩ Réponse à {} — {}", r.username, r.excerpt);
+        if ui::rappel(ui, &texte_rappel, "Ne plus répondre (Échap)") {
+            self.reponse_a = None;
+        }
         ui.add_space(espace::XS);
     }
 
@@ -12132,12 +12091,7 @@ impl KiApp {
 
         if let Some(code) = self.last_invite.clone() {
             ui.add_space(espace::M);
-            egui::Frame::NONE
-                .fill(theme::alpha(ACCENT, 24))
-                .stroke(egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 80)))
-                .corner_radius(egui::CornerRadius::same(rayon::L))
-                .inner_margin(marge::symetrique(espace::L, espace::M))
-                .show(ui, |ui| {
+            ui::encart(ui, ACCENT, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(&code).color(ACCENT).strong().monospace().size(texte::TITRE),
@@ -13190,14 +13144,7 @@ fn couleur_de_membre(m: &Member) -> Color32 {
 
 /// La pastille « BOT », à la couleur d'accent, à côté d'un nom.
 fn pastille_bot(ui: &mut egui::Ui) -> egui::Response {
-    egui::Frame::new()
-        .fill(ACCENT)
-        .corner_radius(egui::CornerRadius::same(rayon::S))
-        .inner_margin(marge::symetrique(espace::XS, 1.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new("BOT").size(texte::MINUSCULE).strong().color(theme::BG_DEEP));
-        })
-        .response
+    ui::etiquette(ui, "BOT", ACCENT)
 }
 
 /// « 3:56 » — une durée en minutes et secondes.
@@ -13387,34 +13334,15 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     let mut apres_nom = name_left + name_width + 5.0;
     if est_bot(member.user_id) {
         // La pastille BOT, franche : personne ne le prend pour un membre.
-        let galley = ui.fonts_mut(|f| f.layout_no_wrap("BOT".into(), egui::FontId::proportional(texte::MINUSCULE), theme::BG_DEEP));
-        let pastille = egui::Rect::from_min_size(
-            egui::pos2(apres_nom + 1.0, name_y - 7.0),
-            Vec2::new(galley.size().x + 8.0, 14.0),
-        );
-        painter.rect_filled(pastille, egui::CornerRadius::same(rayon::S), ACCENT);
-        painter.galley(
-            egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
-            galley,
-            theme::BG_DEEP,
-        );
-        apres_nom += pastille.width() + 6.0;
+        let pastille = ui::peindre_etiquette(painter, egui::pos2(apres_nom + 1.0, name_y), "BOT", ACCENT);
+        apres_nom += pastille.width() + espace::S;
     }
     if est_invite_membre(member) {
         // La pastille INVITÉ, même dessin que BOT, à la couleur des
         // invités : pas un compte, présent le temps d'une porte.
-        let galley = ui.fonts_mut(|f| f.layout_no_wrap("INVITÉ".into(), egui::FontId::proportional(texte::MINUSCULE), theme::BG_DEEP));
-        let pastille = egui::Rect::from_min_size(
-            egui::pos2(apres_nom + 1.0, name_y - 7.0),
-            Vec2::new(galley.size().x + 8.0, 14.0),
-        );
-        painter.rect_filled(pastille, egui::CornerRadius::same(rayon::S), theme::INVITE);
-        painter.galley(
-            egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
-            galley,
-            theme::BG_DEEP,
-        );
-        apres_nom += pastille.width() + 6.0;
+        let pastille =
+            ui::peindre_etiquette(painter, egui::pos2(apres_nom + 1.0, name_y), "INVITÉ", theme::INVITE);
+        apres_nom += pastille.width() + espace::S;
     }
     if member.admin && !est_bot(member.user_id) {
         let badge = egui::Rect::from_min_size(

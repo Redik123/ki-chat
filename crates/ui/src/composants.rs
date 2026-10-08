@@ -489,42 +489,70 @@ pub fn hint(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT));
 }
 
+/// Un encart teinté de `couleur` : fond translucide, filet de la même
+/// couleur. Le fond des bandeaux, des demandes, de ce qui doit se voir
+/// sans crier.
+pub fn encart<R>(ui: &mut Ui, couleur: Color32, contenu: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    egui::Frame::NONE
+        .fill(theme::translucide(couleur, 26))
+        .stroke(Stroke::new(1.0_f32, theme::translucide(couleur, 70)))
+        .corner_radius(CornerRadius::same(rayon::L))
+        .inner_margin(marge::symetrique(espace::L, espace::M))
+        .show(ui, contenu)
+}
+
 /// Bandeau d'information coloré. Renvoie `true` si l'utilisateur l'a fermé
 /// (la croix n'apparaît que si `closable`).
 pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
     let color = tone.color();
     let mut closed = false;
-    egui::Frame::NONE
-        .fill(theme::translucide(color, 26))
-        .stroke(Stroke::new(1.0_f32, theme::translucide(color, 70)))
-        .corner_radius(CornerRadius::same(rayon::L))
-        .inner_margin(marge::symetrique(espace::L, espace::M))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
+    encart(ui, color, |ui| {
+        // Le texte passe à la ligne dans la largeur qui reste : posé tel
+        // quel dans la rangée, un bandeau long élargissait toute la page
+        // au-delà de l'écran.
+        Flex::ligne().ecart(espace::S).show(ui, "bandeau", |f| {
+            f.ui(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, tone.icon(), color);
-                ui.add_space(espace::XXS);
-                // Le texte passe à la ligne dans la largeur qui reste : posé
-                // tel quel dans la rangée, un bandeau long élargissait toute
-                // la page au-delà de l'écran.
-                let text_width = (ui.available_width() - if closable { 26.0 } else { 0.0 }).max(40.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(text_width, 0.0),
-                    egui::Layout::top_down(egui::Align::LEFT),
-                    |ui| {
-                        ui.add(egui::Label::new(RichText::new(text).color(color).size(texte::CORPS)).wrap());
-                    },
-                );
-                if closable {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button_ex(ui, Icon::Close, 22.0, "Masquer", None).clicked() {
-                            closed = true;
-                        }
-                    });
-                }
+            });
+            f.grandit(|ui| {
+                ui.add(egui::Label::new(RichText::new(text).color(color).size(texte::CORPS)).wrap());
+            });
+            if closable {
+                f.ui(|ui| {
+                    closed = icon_button_ex(ui, Icon::Close, 22.0, "Masquer", None).clicked();
+                });
+            }
+        });
+    });
+    closed
+}
+
+/// Un rappel au-dessus d'un champ — « en réponse à… », « tu modifies ton
+/// message » : une ligne discrète, tronquée s'il le faut, et une croix
+/// dont `bulle` dit ce qu'elle fait. Rend vrai si la croix a été cliquée.
+pub fn rappel(ui: &mut Ui, texte_rappel: &str, bulle: &str) -> bool {
+    let mut ferme = false;
+    egui::Frame::NONE
+        .fill(theme::BG_RAISED)
+        .corner_radius(CornerRadius::same(rayon::L))
+        .inner_margin(marge::symetrique(espace::L, espace::XS))
+        .show(ui, |ui| {
+            Flex::ligne().ecart(espace::S).show(ui, "rappel", |f| {
+                f.grandit(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(texte_rappel).color(theme::TEXT_DIM).size(texte::COURANT),
+                        )
+                        .truncate(),
+                    );
+                });
+                f.ui(|ui| {
+                    ferme = icon_button_ex(ui, Icon::Close, 20.0, bulle, None).clicked();
+                });
             });
         });
-    closed
+    ferme
 }
 
 // ---------------------------------------------------------------------
@@ -762,7 +790,7 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     let response = egui::Frame::NONE
         .fill(theme::BG_RAISED)
         .stroke(Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(CornerRadius::same(rayon::PILULE))
+        .corner_radius(CornerRadius::same(rayon::XL))
         .inner_margin(marge::egale(espace::XL))
         .shadow(egui::epaint::Shadow {
             offset: [0, 10],
@@ -785,9 +813,72 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     );
 }
 
+/// La place laissée à droite d'un curseur pour sa valeur.
+const PLACE_VALEUR: f32 = 76.0;
+
+/// Les curseurs qui suivent prennent la largeur de la colonne, en laissant
+/// à droite la place de leur valeur — pour un `egui::Slider` monté à la
+/// main ; [`curseur`] le fait de lui-même.
+pub fn curseurs_a_la_largeur(ui: &mut Ui) {
+    ui.spacing_mut().slider_width = (ui.available_width() - PLACE_VALEUR).clamp(120.0, 260.0);
+}
+
+/// Un curseur à la largeur de la colonne, sa valeur à droite. `pas` :
+/// `Some(1.0)` pour des entiers. Rend vrai au changement.
+pub fn curseur(
+    ui: &mut Ui,
+    valeur: &mut f32,
+    plage: std::ops::RangeInclusive<f32>,
+    suffixe: &str,
+    pas: Option<f64>,
+) -> bool {
+    curseurs_a_la_largeur(ui);
+    let mut s = egui::Slider::new(valeur, plage).suffix(suffixe);
+    if let Some(p) = pas {
+        s = s.step_by(p);
+        if p >= 1.0 {
+            s = s.fixed_decimals(0);
+        }
+    }
+    ui.add(s).changed()
+}
+
 // ---------------------------------------------------------------------
 // Indicateurs
 // ---------------------------------------------------------------------
+
+/// Une étiquette à côté d'un nom — « BOT », « INVITÉ » : des capitales
+/// sombres sur un fond franc.
+pub fn etiquette(ui: &mut Ui, mot: &str, fond: Color32) -> Response {
+    egui::Frame::new()
+        .fill(fond)
+        .corner_radius(CornerRadius::same(rayon::S))
+        .inner_margin(marge::symetrique(espace::XS, 1.0))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(mot).size(texte::MINUSCULE).strong().color(theme::BG_DEEP))
+                    .selectable(false),
+            );
+        })
+        .response
+}
+
+/// La même étiquette, peinte, pour les rangées dessinées au pinceau.
+/// `gauche` : le milieu de son bord gauche. Rend la place qu'elle a prise.
+pub fn peindre_etiquette(painter: &Painter, gauche: egui::Pos2, mot: &str, fond: Color32) -> Rect {
+    let galley = painter.layout_no_wrap(mot.to_owned(), FontId::proportional(texte::MINUSCULE), theme::BG_DEEP);
+    let rect = Rect::from_min_size(
+        egui::pos2(gauche.x, gauche.y - 7.0),
+        Vec2::new(galley.size().x + 2.0 * espace::XS, 14.0),
+    );
+    painter.rect_filled(rect, CornerRadius::same(rayon::S), fond);
+    painter.galley(
+        egui::pos2(rect.left() + espace::XS, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::BG_DEEP,
+    );
+    rect
+}
 
 /// Petite icône décorative, sans interaction.
 pub fn glyph(ui: &mut Ui, icon: Icon, size: f32, color: Color32) {

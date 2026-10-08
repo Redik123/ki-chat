@@ -17,10 +17,11 @@
 //! et aucun de ces messages n'arrive : le panneau ne se montre pas, et
 //! rien de nouveau ne part.
 
-use ki_ui::jetons::{espace, marge, rayon, texte};
+use ki_ui::flex::Flex;
+use ki_ui::jetons::{espace, rayon, texte};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Vec2};
 use ki_protocol::{ChannelId, ChannelInfo, ClientMsg, DemandeWeb, InviteWeb, UserId};
 
 use crate::icons::{self, Icon};
@@ -720,51 +721,36 @@ fn boutons_invite(
 fn banniere_demande(ui: &mut egui::Ui, texte: &str, survol: &str) -> Option<bool> {
     let color = ACCENT;
     let mut reponse = None;
-    egui::Frame::NONE
-        .fill(theme::alpha(color, 26))
-        .stroke(Stroke::new(1.0_f32, theme::alpha(color, 70)))
-        .corner_radius(CornerRadius::same(rayon::L))
-        .inner_margin(marge::symetrique(espace::L, espace::M))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
+    ui::encart(ui, color, |ui| {
+        // Le texte prend la place que lui laissent les boutons, et se
+        // tronque plutôt que de les pousser hors du cadre.
+        Flex::ligne().ecart(espace::S).show(ui, "demande", |f| {
+            f.ui(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, Icon::User, color);
-                ui.add_space(espace::XXS);
-                // Les boutons d'abord, à droite ; le texte prend le reste
-                // et se tronque plutôt que de les pousser hors du cadre.
-                let boutons = 190.0;
-                let largeur = (ui.available_width() - boutons).max(60.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(largeur, 0.0),
-                    egui::Layout::top_down(egui::Align::LEFT),
-                    |ui| {
-                        ui.add(egui::Label::new(RichText::new(texte).color(color).size(texte::CORPS)).truncate())
-                            .on_hover_text(survol);
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui::tinted_button(ui, Some(Icon::Close), "Refuser", Tone::Danger).clicked() {
-                        reponse = Some(false);
-                    }
-                    if ui::tinted_button(ui, Some(Icon::Check), "Accepter", Tone::Accent).clicked() {
-                        reponse = Some(true);
-                    }
-                });
+            });
+            f.grandit(|ui| {
+                ui.add(egui::Label::new(RichText::new(texte).color(color).size(texte::CORPS)).truncate())
+                    .on_hover_text(survol);
+            });
+            f.ui(|ui| {
+                if ui::tinted_button(ui, Some(Icon::Check), "Accepter", Tone::Accent).clicked() {
+                    reponse = Some(true);
+                }
+            });
+            f.ui(|ui| {
+                if ui::tinted_button(ui, Some(Icon::Close), "Refuser", Tone::Danger).clicked() {
+                    reponse = Some(false);
+                }
             });
         });
+    });
     reponse
 }
 
 /// La pastille « INVITÉ », à la couleur des invités, à côté d'un nom.
 pub fn pastille_invite(ui: &mut egui::Ui) -> egui::Response {
-    egui::Frame::new()
-        .fill(theme::INVITE)
-        .corner_radius(CornerRadius::same(rayon::S))
-        .inner_margin(marge::symetrique(espace::XS, 1.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new("INVITÉ").size(texte::MINUSCULE).strong().color(theme::BG_DEEP));
-        })
-        .response
+    ui::etiquette(ui, "INVITÉ", theme::INVITE)
         .on_hover_text("vient du web par une porte, sans compte — il ne voit que ce salon")
 }
 

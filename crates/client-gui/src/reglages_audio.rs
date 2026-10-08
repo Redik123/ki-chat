@@ -7,7 +7,6 @@
 //! marches/arrêts par interrupteur.
 
 use ki_ui::jetons::{espace, texte};
-use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, RichText, Stroke, Vec2};
@@ -1096,25 +1095,9 @@ fn combo_peripherique(
     change
 }
 
-/// Un curseur à la largeur de la colonne. `pas` : `Some(1.0)` pour des
-/// entiers. Rend vrai au changement.
-pub(crate) fn curseur(
-    ui: &mut egui::Ui,
-    valeur: &mut f32,
-    plage: RangeInclusive<f32>,
-    suffixe: &str,
-    pas: Option<f64>,
-) -> bool {
-    ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
-    let mut s = egui::Slider::new(valeur, plage).suffix(suffixe);
-    if let Some(p) = pas {
-        s = s.step_by(p);
-        if p >= 1.0 {
-            s = s.fixed_decimals(0);
-        }
-    }
-    ui.add(s).changed()
-}
+/// Un curseur à la largeur de la colonne : celui de ki-ui, sous le nom
+/// que les réglages lui connaissent.
+pub(crate) use crate::ui::curseur;
 
 /// Le panneau « Enregistrement » de Windows : c'est là que se règle le
 /// niveau du micro, celui qui sature avant ki-chat.

@@ -3,6 +3,10 @@
 //! la main, et vérifier qu'un changement de ki-ui n'abîme rien.
 //!
 //! `cargo run -p ki-ui --example vitrine`
+//!
+//! `VITRINE_CAPTURE=dossier` : la vitrine se photographie page par page
+//! (`vitrine-1.png`, `vitrine-2.png`…) puis se ferme — de quoi voir un
+//! changement sans ouvrir la fenêtre soi-même.
 
 use eframe::egui::{self, vec2, Color32, CornerRadius, RichText, Sense};
 use ki_ui::composants::{self as c, Tone};
@@ -23,7 +27,13 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             ki_ui::style::installer(&cc.egui_ctx);
-            Ok(Box::new(Vitrine::default()))
+            let capture = std::env::var_os("VITRINE_CAPTURE").map(|d| Capture {
+                dossier: d.into(),
+                page: 0,
+                attente: 0,
+                demandee: false,
+            });
+            Ok(Box::new(Vitrine { capture, ..Default::default() }))
         }),
     )
 }
@@ -34,11 +44,23 @@ struct Vitrine {
     mode: u8,
     qualite: u8,
     pseudo: String,
+    volume: f32,
     bandeau_ferme: bool,
     /// Les clés des éléments de la liste virtualisée, et la prochaine à
     /// donner à ce qu'on ajoute au-dessus.
     elements: Vec<u64>,
     plus_ancien: u64,
+    capture: Option<Capture>,
+}
+
+/// Le mode capture : une page d'écran à la fois, photographiée quand la
+/// mise en page s'est posée.
+struct Capture {
+    dossier: std::path::PathBuf,
+    page: usize,
+    /// Images à laisser passer avant de photographier la page.
+    attente: u32,
+    demandee: bool,
 }
 
 impl eframe::App for Vitrine {
@@ -48,8 +70,12 @@ impl eframe::App for Vitrine {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
         let niveau = ((temps * 1.7).sin() * 0.5 + 0.5) as f32;
 
+        let mut zone = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(c) = &self.capture {
+            zone = zone.vertical_scroll_offset(c.page as f32 * (ui.available_height() - 80.0).max(200.0));
+        }
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let sortie = zone.show(ui, |ui| {
                 ui.label(RichText::new("Vitrine ki-ui").size(texte::GRAND).strong().color(couleur::TEXT));
                 c::hint(ui, "Tout ce qu'une appli ki-* a sous la main : jetons, composants, mise en page.");
                 ui.add_space(espace::L);
@@ -64,11 +90,50 @@ impl eframe::App for Vitrine {
                 self.flex(ui);
                 self.liste(ui);
             });
+            if self.capture.is_some() {
+                self.photographier(ui, sortie.state.offset.y, sortie.content_size.y - sortie.inner_rect.height());
+            }
         });
     }
 }
 
 impl Vitrine {
+    /// Le mode capture, à chaque image : attendre que la page se pose, la
+    /// demander à egui, l'écrire quand elle arrive, passer à la suivante.
+    fn photographier(&mut self, ui: &egui::Ui, decalage: f32, fond: f32) {
+        let Some(c) = &mut self.capture else { return };
+        let image = ui.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            c.page += 1;
+            let chemin = c.dossier.join(format!("vitrine-{}.png", c.page));
+            let fichier = std::fs::File::create(&chemin).expect("dossier de capture");
+            let mut png = png::Encoder::new(std::io::BufWriter::new(fichier), image.width() as u32, image.height() as u32);
+            png.set_color(png::ColorType::Rgba);
+            png.set_depth(png::BitDepth::Eight);
+            let octets: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+            png.write_header().and_then(|mut w| w.write_image_data(&octets)).expect("écriture du PNG");
+            println!("{}", chemin.display());
+            c.demandee = false;
+            c.attente = 0;
+            // La dernière page atteinte : c'est fini.
+            if decalage >= fond - 1.0 {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+        c.attente += 1;
+        if !c.demandee && c.attente > 6 {
+            c.demandee = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        ui.ctx().request_repaint();
+    }
+
     fn palette(&mut self, ui: &mut egui::Ui) {
         c::section(ui, Icon::Star, "Palette", Some("ki_ui::jetons::couleur"), |ui| {
             let teintes = [
@@ -196,20 +261,44 @@ impl Vitrine {
             c::ligne(ui, "Champ", |ui| {
                 ui.add(c::text_field(&mut self.pseudo, "Ton pseudo", false));
             });
+            c::ligne(ui, "Curseur", |ui| {
+                c::curseur(ui, &mut self.volume, 0.0..=200.0, " %", Some(1.0));
+            });
         });
     }
 
     fn bandeaux(&mut self, ui: &mut egui::Ui) {
-        c::section(ui, Icon::Info, "Bandeaux et repères", Some("banner, hint, card, group_title…"), |ui| {
+        c::section(ui, Icon::Info, "Bandeaux et repères", Some("banner, encart, rappel, etiquette, card…"), |ui| {
             c::banner(ui, Tone::Info, "Un bandeau d'information.", false);
             ui.add_space(espace::S);
             c::banner(ui, Tone::Warn, "Un bandeau d'avertissement.", false);
             ui.add_space(espace::S);
             c::banner(ui, Tone::Danger, "Un bandeau d'erreur.", false);
             ui.add_space(espace::S);
-            if !self.bandeau_ferme && c::banner(ui, Tone::Accent, "Un bandeau qu'on peut fermer.", true) {
+            if !self.bandeau_ferme
+                && c::banner(
+                    ui,
+                    Tone::Accent,
+                    "Un bandeau qu'on peut fermer, et dont le texte est assez long pour passer à la ligne quand la fenêtre se fait étroite : la croix garde sa place à droite.",
+                    true,
+                )
+            {
                 self.bandeau_ferme = true;
             }
+            ui.add_space(espace::S);
+            c::encart(ui, couleur::INFO, |ui| {
+                ui.label(RichText::new("Un encart : ce qu'on veut, sur un fond teinté.").color(couleur::INFO));
+            });
+            ui.add_space(espace::S);
+            c::rappel(ui, "↩ Réponse à Kiwi — un rappel discret au-dessus d'un champ, tronqué s'il le faut", "Ne plus répondre");
+            ui.add_space(espace::S);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Bastion").color(couleur::TEXT));
+                c::etiquette(ui, "BOT", couleur::ACCENT);
+                ui.add_space(espace::M);
+                ui.label(RichText::new("Visiteur").color(couleur::TEXT));
+                c::etiquette(ui, "INVITÉ", couleur::INVITE);
+            });
             ui.add_space(espace::M);
             c::group_title(ui, Icon::Chat, "Titre de groupe");
             c::field_label(ui, "Libellé de champ");

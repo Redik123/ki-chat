@@ -27,3 +27,5 @@ egui = { version = "0.36", features = ["default_fonts"] }
 tracing-subscriber.workspace = true
 # La vitrine (examples/vitrine.rs) : une fenêtre, comme ki-chat.
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+# Le mode capture de la vitrine (VITRINE_CAPTURE) écrit ses pages en PNG.
+png = "0.18"

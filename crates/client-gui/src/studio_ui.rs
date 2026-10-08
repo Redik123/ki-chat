@@ -515,7 +515,7 @@ impl KiApp {
                          voix ne dépasse plus du tout le seuil.",
                         montrer,
                         |ui| {
-                            ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
+                            ui::curseurs_a_la_largeur(ui);
                             ui.add(
                                 egui::Slider::new(&mut r.ratio, 1.0..=20.0)
                                     .logarithmic(true)

@@ -581,7 +581,7 @@ impl KiApp {
                         if let Some(b) = v.balance {
                             ui::ligne(ui, "Balance", |ui| {
                                 let mut pct = b * 100.0;
-                                ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
+                                ui::curseurs_a_la_largeur(ui);
                                 let r = ui.add(
                                     egui::Slider::new(&mut pct, -100.0..=100.0)
                                         .step_by(1.0)
