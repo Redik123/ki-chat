@@ -122,7 +122,8 @@ const POIGNEE: &[u8] = b"GET /index.html HTTP/1.1\r\n\
 
 /// Comment le micrologiciel lit l'en-tête d'une trame : le masque
 /// seulement s'il est annoncé (la norme), ou toujours. On ne le sait pas ;
-/// la reprise essaie l'une puis l'autre.
+/// la reprise essaie l'une puis l'autre. Sur le Live de drion (08/10), la
+/// norme a suffi du premier coup : l'autre lecture reste en secours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lecture {
     Norme,
