@@ -10692,6 +10692,7 @@ impl KiApp {
     /// membres (mon état local pour moi, le drapeau serveur ou le niveau
     /// reçu pour les autres).
     fn overlay_en_jeu(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
+        self.overlay.veiller(ctx);
         let Some(channel) = self.voice_channel else {
             self.overlay.montrer(ctx, Vec::new(), self.window_focused);
             return;

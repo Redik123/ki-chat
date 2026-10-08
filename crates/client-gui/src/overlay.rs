@@ -315,6 +315,31 @@ impl Overlay {
         self.annonce = Some((texte.into(), Instant::now()));
     }
 
+    /// Fenêtre principale réduite — en pleine partie —, eframe (depuis 0.34)
+    /// ne fait plus tourner l'interface ; or c'est elle qui crée l'overlay,
+    /// qui n'apparaîtrait donc plus quand quelqu'un se met à parler. Sauf
+    /// si une autre fenêtre de ki-chat existe : eframe fait alors tourner
+    /// l'interface pour elle. D'où ce veilleur, tant que l'overlay est
+    /// activé : une fenêtre cachée, jamais dessinée, qui ne sert qu'à ça.
+    ///
+    /// Sous Windows, une fenêtre cachée compte pour eframe comme visible : il
+    /// ne regarde que la réduction et l'occultation, que Windows ne signale
+    /// pas. Si cela changeait, l'overlay ne se montrerait plus fenêtre
+    /// principale réduite : c'est le premier endroit où chercher.
+    pub fn veiller(&self, ctx: &egui::Context) {
+        if !self.actif {
+            return;
+        }
+        let builder = ViewportBuilder::default()
+            .with_title("ki-chat — veilleur")
+            .with_visible(false)
+            .with_decorations(false)
+            .with_taskbar(false)
+            .with_active(false)
+            .with_inner_size([1.0, 1.0]);
+        ctx.show_viewport_deferred(egui::ViewportId::from_hash_of("overlay-veilleur"), builder, |_, _| {});
+    }
+
     pub fn montrer(&mut self, ctx: &egui::Context, lignes: Vec<Ligne>, focus_principal: bool) {
         let annonce = self
             .annonce
