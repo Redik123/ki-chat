@@ -73,7 +73,7 @@ pub fn icon_button_ex(
             Color32::TRANSPARENT
         };
         if bg != Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+            ui.painter().rect_filled(rect, CornerRadius::same(rayon::L), bg);
         }
         let fg = tint.unwrap_or(if response.hovered() {
             theme::TEXT
@@ -122,7 +122,7 @@ fn styled_button(
     fill: Fill,
     width: Option<f32>,
 ) -> Response {
-    let font = FontId::proportional(14.0);
+    let font = FontId::proportional(texte::CORPS);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font, theme::TEXT));
     let icon_size = 16.0;
     let gap = if icon.is_some() && !label.is_empty() {
@@ -197,7 +197,7 @@ fn styled_button(
         let painter = ui.painter();
         painter.rect(
             rect,
-            CornerRadius::same(8),
+            CornerRadius::same(rayon::L),
             bg.gamma_multiply(alpha),
             Stroke::new(border.width, border.color.gamma_multiply(alpha)),
             StrokeKind::Inside,
@@ -453,15 +453,15 @@ pub fn section_label(ui: &mut Ui, text: &str) {
     ui.label(
         RichText::new(text.to_uppercase())
             .color(theme::TEXT_FAINT)
-            .size(10.5)
+            .size(texte::MINUSCULE)
             .strong(),
     );
-    ui.add_space(2.0);
+    ui.add_space(espace::XXS);
 }
 
 /// Titre de bloc dans une fenêtre : filet accentué + libellé.
 pub fn group_title(ui: &mut Ui, icon: Icon, text: &str) {
-    ui.add_space(2.0);
+    ui.add_space(espace::XXS);
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
         icons::draw(ui.painter(), rect, icon, theme::ACCENT);
@@ -486,7 +486,7 @@ pub fn field_label(ui: &mut Ui, text: &str) {
 
 /// Explication en petit sous un réglage.
 pub fn hint(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::TEXT_FAINT).size(11.5));
+    ui.label(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT));
 }
 
 /// Bandeau d'information coloré. Renvoie `true` si l'utilisateur l'a fermé
@@ -503,7 +503,7 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, tone.icon(), color);
-                ui.add_space(2.0);
+                ui.add_space(espace::XXS);
                 // Le texte passe à la ligne dans la largeur qui reste : posé
                 // tel quel dans la rangée, un bandeau long élargissait toute
                 // la page au-delà de l'écran.
@@ -556,17 +556,17 @@ pub fn section(
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, icon, theme::ACCENT);
-                ui.add_space(2.0);
+                ui.add_space(espace::XXS);
                 ui.label(RichText::new(titre).color(theme::TEXT).size(texte::TITRE).strong());
             });
             if let Some(s) = sous_titre {
-                ui.add_space(2.0);
+                ui.add_space(espace::XXS);
                 ui.label(RichText::new(s).color(theme::TEXT_FAINT).size(texte::PETIT));
             }
             ui.add_space(espace::L);
             add(ui);
         });
-    ui.add_space(12.0);
+    ui.add_space(espace::L);
 }
 
 /// Une ligne de réglage : le libellé sur sa colonne, le contrôle qui prend
@@ -603,7 +603,7 @@ pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
 
 /// Explication sous un contrôle, dans la colonne de la ligne.
 pub fn precision(ui: &mut Ui, text: &str) {
-    ui.add_space(2.0);
+    ui.add_space(espace::XXS);
     ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT)).wrap());
 }
 
@@ -611,7 +611,7 @@ pub fn precision(ui: &mut Ui, text: &str) {
 /// toutes les options se voient d'un coup, sans liste à dérouler. Rend vrai
 /// quand la valeur a changé.
 pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &str)]) -> bool {
-    let font = FontId::proportional(12.5);
+    let font = FontId::proportional(texte::COURANT);
     let textes: Vec<_> = choix
         .iter()
         .map(|(_, l)| ui.fonts_mut(|f| f.layout_no_wrap((*l).to_owned(), font.clone(), theme::TEXT)))
@@ -679,7 +679,7 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
 /// liste trop longue pour une seule rangée — les personnages du changeur,
 /// qui débordaient de la page. Rend vrai quand la valeur a changé.
 pub fn pastilles<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &str)]) -> bool {
-    let font = FontId::proportional(12.5);
+    let font = FontId::proportional(texte::COURANT);
     let mut change = false;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
@@ -696,14 +696,14 @@ pub fn pastilles<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, 
             if actif {
                 painter.rect(
                     rect,
-                    CornerRadius::same(8),
+                    CornerRadius::same(rayon::L),
                     theme::BG_ACTIVE,
                     Stroke::new(1.0_f32, theme::translucide(theme::ACCENT, 90)),
                     StrokeKind::Inside,
                 );
             } else {
                 let fond = if reponse.hovered() { theme::BG_HOVER } else { theme::BG_DEEP };
-                painter.rect_filled(rect, CornerRadius::same(8), fond);
+                painter.rect_filled(rect, CornerRadius::same(rayon::L), fond);
             }
             let couleur = if actif { theme::TEXT } else { theme::TEXT_DIM };
             painter.galley(rect.center() - galley.size() / 2.0, galley, couleur);
@@ -762,7 +762,7 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     let response = egui::Frame::NONE
         .fill(theme::BG_RAISED)
         .stroke(Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(CornerRadius::same(14))
+        .corner_radius(CornerRadius::same(rayon::PILULE))
         .inner_margin(egui::Margin::same(16))
         .shadow(egui::epaint::Shadow {
             offset: [0, 10],
@@ -804,7 +804,7 @@ pub fn status_dot(ui: &mut Ui, color: Color32, label: &str, size: f32) {
         icons::dot(ui.painter(), rect.center(), size * 0.32, color);
     }
     if !label.is_empty() {
-        ui.label(RichText::new(label).color(color).size(12.5).strong());
+        ui.label(RichText::new(label).color(color).size(texte::COURANT).strong());
     }
 }
 
@@ -845,7 +845,7 @@ pub fn stat_row(ui: &mut Ui, items: &[(Icon, String, Color32)], size: f32) -> Re
 
 /// Barres de réseau + valeur, pour le ping.
 pub fn signal_badge(ui: &mut Ui, lit: u8, text: &str, color: Color32) -> Response {
-    let font = FontId::proportional(11.5);
+    let font = FontId::proportional(texte::PETIT);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font, color));
     let bars = 14.0;
     let (rect, response) = ui.allocate_exact_size(
