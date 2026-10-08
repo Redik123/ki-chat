@@ -96,6 +96,118 @@ pub fn rgb565(r: u8, g: u8, b: u8) -> u16 {
 pub struct Ecrivain {
     port: Arc<Port>,
     transaction: u8,
+    poignee: Poignee,
+}
+
+/// Comment la poignée de main s'est passée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poignee {
+    /// L'appareil attendait sa poignée de main, et a répondu.
+    Directe,
+    /// Il était resté en WebSocket (programme précédent arrêté net, ou
+    /// fermé sans la trame de fermeture) et a été remis d'aplomb.
+    Reprise,
+}
+
+/// La trame WebSocket « fermeture », masquée d'un masque nul : l'appareil
+/// quitte le WebSocket et attend de nouveau une poignée de main. Le pilote
+/// de référence (foxxyz/loupedeck) l'envoie avant de rendre le port.
+const FERMETURE: [u8; 6] = [0x88, 0x80, 0x00, 0x00, 0x00, 0x00];
+
+/// La requête qui fait passer l'appareil en WebSocket.
+const POIGNEE: &[u8] = b"GET /index.html HTTP/1.1\r\n\
+    Connection: Upgrade\r\n\
+    Upgrade: websocket\r\n\
+    Sec-WebSocket-Key: 123abc\r\n\r\n";
+
+/// Comment le micrologiciel lit l'en-tête d'une trame : le masque
+/// seulement s'il est annoncé (la norme), ou toujours. On ne le sait pas ;
+/// la reprise essaie l'une puis l'autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lecture {
+    Norme,
+    MasqueToujours,
+}
+
+/// Les octets nuls qu'il faut encore envoyer pour que l'appareil, resté
+/// en WebSocket et sur une frontière de trame quand on a ouvert le port,
+/// retombe sur une frontière après avoir lu `envoyes` comme des trames.
+/// Notre requête de poignée de main en fait partie : le « E » de « GET »
+/// y passe pour une longueur de 69 octets, et ainsi de suite — à la fin,
+/// l'appareil attend la suite d'une trame qui n'existe pas, avale ce qu'on
+/// lui envoie ensuite, et ne s'en remettait qu'en étant débranché.
+fn zeros_jusqu_a_une_frontiere(lecture: Lecture, envoyes: &[u8]) -> usize {
+    #[derive(Clone, Copy)]
+    enum Etat {
+        Debut,
+        Longueur,
+        Etendue { reste: u8, valeur: u64 },
+        Masque { reste: u8, charge: u64 },
+        Charge(u64),
+    }
+    fn apres_longueur(lecture: Lecture, masque: bool, charge: u64) -> Etat {
+        if masque || lecture == Lecture::MasqueToujours {
+            Etat::Masque { reste: 4, charge }
+        } else if charge == 0 {
+            Etat::Debut
+        } else {
+            Etat::Charge(charge)
+        }
+    }
+    fn avancer(etat: Etat, octet: u8, lecture: Lecture, masque: &mut bool) -> Etat {
+        match etat {
+            Etat::Debut => Etat::Longueur,
+            Etat::Longueur => {
+                *masque = octet & 0x80 != 0;
+                match octet & 0x7f {
+                    126 => Etat::Etendue { reste: 2, valeur: 0 },
+                    127 => Etat::Etendue { reste: 8, valeur: 0 },
+                    n => apres_longueur(lecture, *masque, u64::from(n)),
+                }
+            }
+            Etat::Etendue { reste, valeur } => {
+                let valeur = (valeur << 8) | u64::from(octet);
+                if reste > 1 {
+                    Etat::Etendue { reste: reste - 1, valeur }
+                } else {
+                    apres_longueur(lecture, *masque, valeur)
+                }
+            }
+            Etat::Masque { reste, charge } => {
+                if reste > 1 {
+                    Etat::Masque { reste: reste - 1, charge }
+                } else if charge == 0 {
+                    Etat::Debut
+                } else {
+                    Etat::Charge(charge)
+                }
+            }
+            Etat::Charge(n) if n > 1 => Etat::Charge(n - 1),
+            Etat::Charge(_) => Etat::Debut,
+        }
+    }
+    let mut masque = false;
+    let mut etat = Etat::Debut;
+    for &octet in envoyes {
+        etat = avancer(etat, octet, lecture, &mut masque);
+    }
+    let mut zeros = 0;
+    // Borné : une trame annoncée plus longue que tout ce qu'on envoie un
+    // jour ne se complète pas à coups de zéros.
+    while !matches!(etat, Etat::Debut) && zeros < 1 << 20 {
+        etat = avancer(etat, 0, lecture, &mut masque);
+        zeros += 1;
+    }
+    zeros
+}
+
+impl Drop for Ecrivain {
+    /// L'appareil est rendu en attente de poignée de main : sans la trame
+    /// de fermeture, il restait en WebSocket, et le prochain lancement de
+    /// ki-chat le trouvait sourd.
+    fn drop(&mut self) {
+        let _ = self.port.ecrire(&FERMETURE);
+    }
 }
 
 /// Moitié « lecture » : les événements.
@@ -105,50 +217,80 @@ pub struct Lecteur {
 }
 
 /// Ouvre le Loupedeck (port trouvé tout seul si `port` vaut `None`) et
-/// fait la poignée de main WebSocket.
+/// fait la poignée de main WebSocket — en le remettant d'aplomb s'il était
+/// resté en WebSocket (voir [`Poignee::Reprise`]).
 pub fn ouvrir(port: Option<&str>) -> Result<(Ecrivain, Lecteur)> {
     let nom = match port {
         Some(p) => p.to_string(),
         None => trouver_port()?,
     };
     let sp = Arc::new(Port::ouvrir(&nom, BAUDS)?);
-
     sp.vider();
-    sp.ecrire(
-        b"GET /index.html HTTP/1.1\r\n\
-          Connection: Upgrade\r\n\
-          Upgrade: websocket\r\n\
-          Sec-WebSocket-Key: 123abc\r\n\r\n",
-    )?;
-    // Un appareil resté en mode WebSocket (programme précédent fermé sans
-    // le réinitialiser) ignore la poignée de main et peut encore cracher
-    // des trames : on ramasse tout pendant 1,5 s au plus, on cherche la
-    // réponse 101, et sans elle on continue quand même.
     sp.delai(Duration::from_millis(100))?;
+
+    // Tout ce qui part avant la réponse : de quoi refaire, octet par
+    // octet, la lecture qu'en a faite un appareil resté en WebSocket.
+    let mut envoyes: Vec<u8> = Vec::new();
+    let mut poignee = Poignee::Directe;
+    let mut reste = poignee_de_main(&sp, &mut envoyes)?;
+    if reste.is_none() {
+        // Pas de réponse : resté en WebSocket, il a lu notre requête comme
+        // des trames. On complète la dernière par des zéros, on lui dit de
+        // fermer, et on recommence — selon chacune des deux lectures
+        // possibles de ses en-têtes.
+        for lecture in [Lecture::Norme, Lecture::MasqueToujours] {
+            let zeros = vec![0u8; zeros_jusqu_a_une_frontiere(lecture, &envoyes)];
+            envoyer_brut(&sp, &mut envoyes, &zeros)?;
+            envoyer_brut(&sp, &mut envoyes, &FERMETURE)?;
+            std::thread::sleep(Duration::from_millis(150));
+            sp.vider();
+            reste = poignee_de_main(&sp, &mut envoyes)?;
+            if reste.is_some() {
+                poignee = Poignee::Reprise;
+                break;
+            }
+        }
+    }
+    let Some(reste) = reste else {
+        bail!(
+            "le Loupedeck ne répond plus (resté bloqué au milieu d'un envoi par un programme \
+             arrêté net) : débranche-le et rebranche-le"
+        );
+    };
+
+    Ok((
+        Ecrivain { port: sp.clone(), transaction: 0, poignee },
+        Lecteur { port: sp, tampon: reste },
+    ))
+}
+
+fn envoyer_brut(sp: &Port, envoyes: &mut Vec<u8>, octets: &[u8]) -> Result<()> {
+    if octets.is_empty() {
+        return Ok(());
+    }
+    envoyes.extend_from_slice(octets);
+    sp.ecrire(octets)
+}
+
+/// Envoie la requête et attend la réponse 101, 1,5 s au plus — en
+/// ramassant au passage ce qu'un appareil resté en WebSocket peut encore
+/// cracher. Rend ce qui suit la réponse (le début du flux WebSocket), ou
+/// `None` sans réponse.
+fn poignee_de_main(sp: &Port, envoyes: &mut Vec<u8>) -> Result<Option<Vec<u8>>> {
+    envoyer_brut(sp, envoyes, POIGNEE)?;
     let mut recu = Vec::new();
     let limite = std::time::Instant::now() + Duration::from_millis(1500);
-    let mut reste = Vec::new();
-    let mut accepte = false;
     let mut morceau = [0u8; 512];
     while std::time::Instant::now() < limite {
         let n = sp.lire(&mut morceau).context("poignée de main")?;
         recu.extend_from_slice(&morceau[..n]);
         if let Some(debut) = chercher(&recu, b"HTTP/1.1 101") {
             if let Some(fin) = chercher(&recu[debut..], b"\r\n\r\n") {
-                reste = recu[debut + fin + 4..].to_vec();
-                accepte = true;
-                break;
+                return Ok(Some(recu[debut + fin + 4..].to_vec()));
             }
         }
     }
-    if !accepte {
-        eprintln!("loupedeck : pas de réponse 101 à la poignée de main, déjà connecté ?");
-    }
-
-    Ok((
-        Ecrivain { port: sp.clone(), transaction: 0 },
-        Lecteur { port: sp, tampon: reste },
-    ))
+    Ok(None)
 }
 
 impl Ecrivain {
@@ -174,6 +316,11 @@ impl Ecrivain {
         trame.extend_from_slice(&paquet);
         self.port.ecrire(&trame)?;
         Ok(())
+    }
+
+    /// Comment la poignée de main s'est passée.
+    pub fn poignee(&self) -> Poignee {
+        self.poignee
     }
 
     /// Luminosité des écrans, de 0 à 10.
@@ -329,6 +476,34 @@ mod tests {
         assert_eq!(touche_a(419, 269), Some(11));
         assert_eq!(touche_a(150, 95), Some(5));
         assert_eq!(touche_a(420, 10), None);
+    }
+
+    /// Resté en WebSocket, l'appareil lit notre requête comme des trames et
+    /// attend, à la fin, la suite d'une charge qui n'existe pas : 78 octets
+    /// selon la norme.
+    #[test]
+    fn la_poignee_de_main_lue_comme_des_trames() {
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::Norme, POIGNEE), 78);
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::MasqueToujours, POIGNEE), 84);
+        // Une fois complétée, on est sur une frontière : rien à ajouter.
+        let mut complete = POIGNEE.to_vec();
+        complete.extend(std::iter::repeat_n(0, 78));
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::Norme, &complete), 0);
+    }
+
+    /// Nos propres trames se lisent jusqu'au bout, petites ou étendues.
+    #[test]
+    fn nos_trames_tombent_sur_une_frontiere() {
+        let petite = [0x82, 0x80 + 4, 0, 0, 0, 0, 4, 0x09, 1, 10];
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::Norme, &petite), 0);
+        let mut etendue = vec![0x82, 0xff, 0, 0, 0, 0];
+        etendue.extend_from_slice(&300u32.to_be_bytes());
+        etendue.extend_from_slice(&[0, 0, 0, 0]);
+        etendue.extend(std::iter::repeat_n(7, 300));
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::Norme, &etendue), 0);
+        // Coupée au milieu de sa charge : il manque le reste, exactement.
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::Norme, &etendue[..100]), 214);
+        assert_eq!(zeros_jusqu_a_une_frontiere(Lecture::Norme, &FERMETURE), 0);
     }
 
     #[test]

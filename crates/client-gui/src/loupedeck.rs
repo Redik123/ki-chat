@@ -483,6 +483,11 @@ struct Appareil {
 impl Appareil {
     fn ouvrir(port: &str) -> anyhow::Result<Self> {
         let (ecrivain, mut lecteur) = ki_loupedeck::ouvrir(Some(port))?;
+        if ecrivain.poignee() == ki_loupedeck::Poignee::Reprise {
+            tracing::info!(
+                "loupedeck : il était resté en WebSocket (ki-chat précédent arrêté net) — remis d'aplomb"
+            );
+        }
         // Court : le relâché du push-to-talk et le dessin n'attendent pas.
         lecteur.delai(Duration::from_millis(15))?;
         Ok(Self {
