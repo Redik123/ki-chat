@@ -82,6 +82,25 @@ impl Repartit {
     }
 }
 
+/// L'identifiant d'un conteneur : `base`, numéroté s'il a déjà servi
+/// pendant cette passe. egui donne le même `id` à des zones sœurs (deux
+/// sections, deux cadres) : deux lignes de réglage du même nom y
+/// partageaient leur mise en page — « Tester » du micro et « Tester » de la
+/// sortie s'écrasaient l'une l'autre, et l'image était rejouée sans fin.
+/// Le numéro suit l'ordre d'apparition : stable d'une image à l'autre.
+fn identifiant(ui: &Ui, base: egui::Id) -> egui::Id {
+    let passe = ui.ctx().cumulative_pass_nr();
+    let cle = base.with("ki-ui-deja-vu");
+    let (derniere, deja) = ui.data(|d| d.get_temp::<(u64, u32)>(cle)).unwrap_or((u64::MAX, 0));
+    let rang = if derniere == passe { deja + 1 } else { 0 };
+    ui.data_mut(|d| d.insert_temp(cle, (passe, rang)));
+    if rang == 0 {
+        base
+    } else {
+        base.with(rang)
+    }
+}
+
 /// La hauteur de la zone où un conteneur se pose (voir [`Flex::show`]) :
 /// fixe, et plus grande que tout ce qu'on y mettra.
 const HAUTEUR_D_ACCUEIL: f32 = 100_000.0;
@@ -164,7 +183,7 @@ impl Flex {
     ) -> R {
         #[cfg(debug_assertions)]
         let etiquette = format!("{id:?}");
-        let id = ui.id().with(id);
+        let id = identifiant(ui, ui.id().with(id));
         let en_ligne = self.en_ligne();
         // Toute la largeur : sans elle, la racine se contente de celle de
         // son contenu, et rien n'a de place à prendre ni à répartir.
@@ -188,6 +207,8 @@ impl Flex {
                         tui,
                         en_ligne,
                         #[cfg(debug_assertions)]
+                        cle: id,
+                        #[cfg(debug_assertions)]
                         etiquette: etiquette.clone(),
                         #[cfg(debug_assertions)]
                         rang: 0,
@@ -196,7 +217,7 @@ impl Flex {
             })
             .inner;
         #[cfg(debug_assertions)]
-        crate::mouchard::conteneur(ui, &etiquette, avant);
+        crate::mouchard::conteneur(ui, id, &etiquette, avant);
         rendu
     }
 
@@ -321,6 +342,8 @@ pub struct Contenu<'a> {
     en_ligne: bool,
     /// Pour le mouchard : le conteneur, et le rang de la dernière case.
     #[cfg(debug_assertions)]
+    cle: egui::Id,
+    #[cfg(debug_assertions)]
     etiquette: String,
     #[cfg(debug_assertions)]
     rang: usize,
@@ -351,9 +374,9 @@ impl Contenu<'_> {
             case.hauteur_imposee || (!self.en_ligne && case.grandit()),
         );
         #[cfg(debug_assertions)]
-        let (etiquette, rang) = {
+        let (cle, etiquette, rang) = {
             self.rang += 1;
-            (self.etiquette.clone(), self.rang)
+            (self.cle, self.etiquette.clone(), self.rang)
         };
         (&mut *self.tui).style(case.style).ui_manual(|ui, _| {
             let inner = ajout(ui);
@@ -365,7 +388,7 @@ impl Contenu<'_> {
                 taille.y = 0.0;
             }
             #[cfg(debug_assertions)]
-            crate::mouchard::case(ui, &etiquette, rang, taille);
+            crate::mouchard::case(ui, cle, &etiquette, rang, taille);
             TuiContainerResponse {
                 inner,
                 min_size: taille,
@@ -391,14 +414,16 @@ impl Contenu<'_> {
     ) -> R {
         let en_ligne = flex.en_ligne();
         #[cfg(debug_assertions)]
-        let etiquette = {
+        let (cle, etiquette) = {
             self.rang += 1;
-            format!("{} › {}", self.etiquette, self.rang)
+            (self.cle.with(("imbrique", self.rang)), format!("{} › {}", self.etiquette, self.rang))
         };
         (&mut *self.tui).style(case.avec_conteneur(flex)).add(|tui| {
             contenu(&mut Contenu {
                 tui,
                 en_ligne,
+                #[cfg(debug_assertions)]
+                cle,
                 #[cfg(debug_assertions)]
                 etiquette,
                 #[cfg(debug_assertions)]
@@ -637,6 +662,26 @@ mod stabilite {
             });
         });
         assert!(p[2..].iter().all(|&n| n == 2), "instable : {p:?}");
+    }
+
+    /// Deux conteneurs du même nom dans deux zones sœurs (deux sections) :
+    /// egui donne le même `id` aux zones sœurs. Ils ne doivent pas partager
+    /// leur mise en page — la ligne « Tester » du micro (haute) et celle de
+    /// la sortie (basse) s'écrasaient l'une l'autre à chaque image.
+    #[test]
+    fn deux_homonymes_dans_deux_sections() {
+        let p = passes(8, |ui| {
+            for hauteur in [140.0, 32.0] {
+                ui.scope(|ui| {
+                    Flex::ligne().show(ui, ("ligne", "Tester"), |f| {
+                        f.grandit(|ui| {
+                            ui.allocate_exact_size(vec2(10.0, hauteur), egui::Sense::hover());
+                        });
+                    });
+                });
+            }
+        });
+        assert!(p[2..].iter().all(|&n| n == 1), "{p:?}");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! conteneur fautif et, pour chacune de ses cases dont la taille bouge,
 //! l'avant et l'après.
 
-use egui::{Ui, Vec2};
+use egui::{Id, Ui, Vec2};
 
 /// À partir de combien d'images de suite on le dit.
 const DE_SUITE: u32 = 10;
@@ -23,9 +23,9 @@ struct Suivi {
 
 /// Le conteneur `etiquette` a-t-il, pendant cette image, demandé à egui de
 /// la rejouer ? `avant` : la demande était-elle déjà là avant lui.
-pub(crate) fn conteneur(ui: &Ui, etiquette: &str, avant: bool) {
+pub(crate) fn conteneur(ui: &Ui, cle: Id, etiquette: &str, avant: bool) {
     let rejoue = !avant && ui.ctx().will_discard();
-    compter(ui, ("ki-ui-mouchard", etiquette), rejoue, Vec2::ZERO, |n| {
+    compter(ui, cle.with("ki-ui-mouchard"), rejoue, Vec2::ZERO, |n| {
         tracing::warn!(
             "ki-ui : la mise en page de « {etiquette} » est refaite à chaque image ({n} de suite) — \
              egui la rejoue sans fin ; la case qui bouge est signalée juste avant"
@@ -35,9 +35,9 @@ pub(crate) fn conteneur(ui: &Ui, etiquette: &str, avant: bool) {
 
 /// La taille qu'une case rapporte : si elle change à chaque image, c'est
 /// elle qui relance le calcul.
-pub(crate) fn case(ui: &Ui, etiquette: &str, rang: usize, taille: Vec2) {
-    let id = ("ki-ui-mouchard-case", etiquette, rang);
-    let precedente = ui.data(|d| d.get_temp::<Suivi>(ui.id().with(id))).map(|s| s.taille);
+pub(crate) fn case(ui: &Ui, cle: Id, etiquette: &str, rang: usize, taille: Vec2) {
+    let id = cle.with(("ki-ui-mouchard-case", rang));
+    let precedente = ui.data(|d| d.get_temp::<Suivi>(id)).map(|s| s.taille);
     let bouge = precedente.is_some_and(|p| p != taille);
     compter(ui, id, bouge, taille, |n| {
         tracing::warn!(
@@ -49,8 +49,7 @@ pub(crate) fn case(ui: &Ui, etiquette: &str, rang: usize, taille: Vec2) {
     });
 }
 
-fn compter(ui: &Ui, cle: impl egui::AsIdSalt, evenement: bool, taille: Vec2, dire: impl FnOnce(u32)) {
-    let id = ui.id().with(cle);
+fn compter(ui: &Ui, id: Id, evenement: bool, taille: Vec2, dire: impl FnOnce(u32)) {
     let image = ui.ctx().cumulative_frame_nr();
     let mut suivi = ui.data(|d| d.get_temp::<Suivi>(id)).unwrap_or_default();
     if suivi.image != image {
