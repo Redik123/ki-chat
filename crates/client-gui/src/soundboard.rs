@@ -156,6 +156,20 @@ impl Soundboard {
             .default_height(360.0)
             .resizable(true)
             .show(ctx, |ui| {
+                // Le message (« 5 sons »…) réservé d'abord, en bas : la liste
+                // prend toute la hauteur qui reste. Écrit après elle, il
+                // agrandissait la fenêtre de sa hauteur à chaque image — depuis
+                // egui 0.35, une fenêtre suit son contenu — jusqu'au bas de
+                // l'écran, où plus rien ne la rétrécissait.
+                if let Some(m) = &self.message {
+                    egui::Panel::bottom("soundboard_message")
+                        .show_separator_line(false)
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(m).color(TEXT_FAINT).size(11.0));
+                        });
+                }
                 ui::hint(
                     ui,
                     "un clic — ou les touches 1 à 9, cette fenêtre ouverte — et le son part \
@@ -268,10 +282,6 @@ impl Soundboard {
                             }
                         });
                     });
-                }
-                if let Some(m) = &self.message {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(m).color(TEXT_FAINT).size(11.0));
                 }
             });
         if recharger {

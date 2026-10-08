@@ -25,7 +25,7 @@
 
 use egui::Ui;
 use egui_taffy::taffy::{self, prelude::{length, percent}};
-use egui_taffy::{Tui, TuiBuilderLogic};
+use egui_taffy::{Tui, TuiBuilderLogic, TuiContainerResponse};
 
 /// Où les éléments se placent sur l'axe transversal : en hauteur dans une
 /// rangée, en largeur dans une colonne.
@@ -159,13 +159,18 @@ impl Flex {
         contenu: impl FnOnce(&mut Contenu<'_>) -> R,
     ) -> R {
         let id = ui.id().with(id);
+        let en_ligne = self.en_ligne();
         // Toute la largeur : sans elle, la racine se contente de celle de
         // son contenu, et rien n'a de place à prendre ni à répartir.
         let style = taffy::Style { size: taffy::Size { width: percent(1.0_f32), ..self.style.size }, ..self.style };
         egui_taffy::tui(ui, id)
             .reserve_available_width()
             .style(style)
-            .show(|tui| contenu(&mut Contenu { tui }))
+            .show(|tui| contenu(&mut Contenu { tui, en_ligne }))
+    }
+
+    fn en_ligne(&self) -> bool {
+        matches!(self.style.flex_direction, taffy::FlexDirection::Row | taffy::FlexDirection::RowReverse)
     }
 }
 
@@ -175,6 +180,10 @@ impl Flex {
 #[must_use]
 pub struct Case {
     style: taffy::Style,
+    /// Sa largeur (sa hauteur) ne dépend pas de son contenu : elle est
+    /// fixée, ou donnée par le partage.
+    largeur_imposee: bool,
+    hauteur_imposee: bool,
 }
 
 impl Default for Case {
@@ -192,6 +201,8 @@ impl Case {
                 flex_shrink: 1.0,
                 ..Default::default()
             },
+            largeur_imposee: false,
+            hauteur_imposee: false,
         }
     }
 
@@ -207,6 +218,11 @@ impl Case {
         self
     }
 
+    /// Grandit-il : sa taille sur l'axe principal vient du partage.
+    fn grandit(&self) -> bool {
+        self.style.flex_grow > 0.0
+    }
+
     /// Sa taille de départ sur l'axe principal, avant partage.
     pub fn base(mut self, points: f32) -> Self {
         self.style.flex_basis = length(points);
@@ -215,11 +231,13 @@ impl Case {
 
     pub fn largeur(mut self, points: f32) -> Self {
         self.style.size.width = length(points);
+        self.largeur_imposee = true;
         self
     }
 
     pub fn hauteur(mut self, points: f32) -> Self {
         self.style.size.height = length(points);
+        self.hauteur_imposee = true;
         self
     }
 
@@ -268,6 +286,8 @@ impl Case {
 /// Ce qu'on ajoute dans un conteneur, dans l'ordre.
 pub struct Contenu<'a> {
     tui: &'a mut Tui,
+    /// Le conteneur est une rangée (sinon, une colonne).
+    en_ligne: bool,
 }
 
 impl Contenu<'_> {
@@ -283,8 +303,34 @@ impl Contenu<'_> {
     }
 
     /// Un élément réglé par `case`.
+    ///
+    /// Sa taille mesurée n'est rapportée que là où elle compte. Celle que
+    /// le partage ou un réglage impose n'a pas à l'être : une valeur en
+    /// direct (un niveau en dB qui change de largeur à chaque image) y
+    /// relançait le calcul de la mise en page — et egui rejouait chaque
+    /// image deux fois, sans fin.
     pub fn case<R>(&mut self, case: Case, ajout: impl FnOnce(&mut Ui) -> R) -> R {
-        (&mut *self.tui).style(case.style).ui(ajout)
+        let (ignorer_largeur, ignorer_hauteur) = (
+            case.largeur_imposee || (self.en_ligne && case.grandit()),
+            case.hauteur_imposee || (!self.en_ligne && case.grandit()),
+        );
+        (&mut *self.tui).style(case.style).ui_manual(|ui, _| {
+            let inner = ajout(ui);
+            let mut taille = ui.min_size();
+            if ignorer_largeur {
+                taille.x = 0.0;
+            }
+            if ignorer_hauteur {
+                taille.y = 0.0;
+            }
+            TuiContainerResponse {
+                inner,
+                min_size: taille,
+                intrinsic_size: None,
+                max_size: taille,
+                infinite: egui::Vec2b::FALSE,
+            }
+        })
     }
 
     /// Un conteneur imbriqué, à sa taille naturelle.
@@ -300,7 +346,8 @@ impl Contenu<'_> {
         flex: Flex,
         contenu: impl FnOnce(&mut Contenu<'_>) -> R,
     ) -> R {
-        (&mut *self.tui).style(case.avec_conteneur(flex)).add(|tui| contenu(&mut Contenu { tui }))
+        let en_ligne = flex.en_ligne();
+        (&mut *self.tui).style(case.avec_conteneur(flex)).add(|tui| contenu(&mut Contenu { tui, en_ligne }))
     }
 
     /// Un vide qui prend toute la place qui reste : ce qui le suit est
@@ -436,5 +483,89 @@ mod tests {
             });
         });
         assert!(proche(r[1].max.x, 400.0), "{r:?}");
+    }
+}
+
+#[cfg(test)]
+mod stabilite {
+    use super::*;
+    use egui::{vec2, Rect};
+
+    /// Le nombre de passes de la dernière de `images` images : 1 si la mise
+    /// en page est stable, 2 si elle a encore demandé à rejouer l'image.
+    fn passes(images: usize, mut dessin: impl FnMut(&mut Ui)) -> Vec<usize> {
+        let ctx = egui::Context::default();
+        let mut toutes = Vec::new();
+        for _ in 0..images {
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(700.0, 500.0))),
+                ..Default::default()
+            };
+            let sortie = ctx.run_ui(entree, |ui| dessin(ui));
+            toutes.push(sortie.platform_output.num_completed_passes);
+            sortie.drop_without_applying_deltas();
+        }
+        toutes
+    }
+
+    fn ligne(ui: &mut Ui, n: usize) {
+        Flex::ligne().aligner(Aligne::Debut).ecarts(8.0, 4.0).passer_a_la_ligne().show(ui, ("l", n), |f| {
+            f.case(Case::new().base(150.0).rigide(), |ui| {
+                ui.label("Libellé");
+            });
+            f.case(Case::new().grandir(1.0).largeur_min(272.0), |ui| {
+                ui.vertical(|ui| {
+                    ui.add(egui::Label::new(
+                        "Une longue précision qui passe à la ligne parce qu'elle ne tient pas sur une \
+                         seule ligne dans la colonne du contrôle, comme dans les réglages.",
+                    ).wrap());
+                    let mut v = 0.5_f32;
+                    ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(120.0, 260.0);
+                    ui.add(egui::Slider::new(&mut v, 0.0..=1.0));
+                });
+            });
+        });
+    }
+
+    /// Une valeur en direct (un niveau en dB) qui change de largeur à
+    /// chaque image, au bout d'une rangée qui remplit la colonne.
+    #[test]
+    fn valeur_en_direct() {
+        let mut image = 0u32;
+        let passes = passes(8, |ui| {
+                image += 1;
+                Flex::ligne().ecart(8.0).show(ui, "v", |f| {
+                    f.case(Case::new().base(150.0).rigide(), |ui| {
+                        ui.label("Marge");
+                    });
+                    f.case(Case::new().grandir(1.0).largeur_min(272.0), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space((ui.available_width() - 80.0).max(0.0));
+                            ui.label(format!("{} dB", if image.is_multiple_of(2) { -9 } else { -122 }));
+                        });
+                    });
+                });
+            });
+        // La première mesure, puis plus rien : la largeur de la case vient du
+        // partage, pas de ce qu'elle affiche.
+        assert!(passes[2..].iter().all(|&p| p == 1), "{passes:?}");
+    }
+
+    #[test]
+    fn ligne_seule() {
+        let p = passes(8, |ui| ligne(ui, 0));
+        assert!(p[2..].iter().all(|&n| n == 1), "{p:?}");
+    }
+
+    #[test]
+    fn lignes_dans_un_defilement() {
+        let p = passes(8, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for n in 0..6 {
+                    ligne(ui, n);
+                }
+            });
+        });
+        assert!(p[2..].iter().all(|&n| n == 1), "{p:?}");
     }
 }
