@@ -82,6 +82,10 @@ impl Repartit {
     }
 }
 
+/// La hauteur de la zone où un conteneur se pose (voir [`Flex::show`]) :
+/// fixe, et plus grande que tout ce qu'on y mettra.
+const HAUTEUR_D_ACCUEIL: f32 = 100_000.0;
+
 /// Un conteneur : une rangée ou une colonne, et la façon d'y placer ses
 /// éléments.
 #[derive(Clone, Debug)]
@@ -163,10 +167,23 @@ impl Flex {
         // Toute la largeur : sans elle, la racine se contente de celle de
         // son contenu, et rien n'a de place à prendre ni à répartir.
         let style = taffy::Style { size: taffy::Size { width: percent(1.0_f32), ..self.style.size }, ..self.style };
-        egui_taffy::tui(ui, id)
-            .reserve_available_width()
-            .style(style)
-            .show(|tui| contenu(&mut Contenu { tui, en_ligne }))
+        // Une zone d'accueil de hauteur fixe. egui_taffy refait toute la
+        // mise en page — et fait rejouer l'image — dès que la zone où il se
+        // pose change de taille, hauteur comprise ; or la place qui reste
+        // sous un conteneur change dès que ce qui est au-dessus change de
+        // hauteur (une valeur en direct, un bandeau qui apparaît). La
+        // hauteur ne sert pas au calcul : seule la largeur est réservée.
+        let accueil = egui::Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            egui::vec2(ui.available_width(), HAUTEUR_D_ACCUEIL),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(accueil), |ui| {
+            egui_taffy::tui(ui, id)
+                .reserve_available_width()
+                .style(style)
+                .show(|tui| contenu(&mut Contenu { tui, en_ligne }))
+        })
+        .inner
     }
 
     fn en_ligne(&self) -> bool {
@@ -549,6 +566,20 @@ mod stabilite {
         // La première mesure, puis plus rien : la largeur de la case vient du
         // partage, pas de ce qu'elle affiche.
         assert!(passes[2..].iter().all(|&p| p == 1), "{passes:?}");
+    }
+
+    /// Au-dessus de la ligne, un bloc dont la hauteur change à chaque image
+    /// (une valeur en direct qui passe sur deux lignes, un bandeau qui
+    /// apparaît) : la place qui reste sous lui change, la ligne non.
+    #[test]
+    fn la_place_au_dessus_change() {
+        let mut image = 0u32;
+        let p = passes(8, |ui| {
+            image += 1;
+            ui.add_space(if image.is_multiple_of(2) { 10.0 } else { 27.0 });
+            ligne(ui, 0);
+        });
+        assert!(p[2..].iter().all(|&n| n == 1), "{p:?}");
     }
 
     #[test]
