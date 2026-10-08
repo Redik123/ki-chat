@@ -1294,6 +1294,9 @@ struct KiApp {
     /// `Option` parce qu'elle a besoin du contexte egui, qui n'existe qu'une
     /// fois la fenêtre ouverte : elle démarre à la première image.
     ptt: Option<ptt::Watcher>,
+    /// La touche push-to-talk telle que le moteur vocal la lit : celle du
+    /// clavier et le bouton du Loupedeck, branchés à leur démarrage.
+    touche_ptt: ptt::TouchePtt,
     /// Le Loupedeck Live, sur son propre fil — démarré à la première image,
     /// comme `ptt` —, et ce que l'interface en retient : l'interrupteur des
     /// réglages, la page montrée, la personne choisie.
@@ -1710,6 +1713,7 @@ impl KiApp {
             labo_stats: Default::default(),
             labo_texture: None,
             ptt: None,
+            touche_ptt: ptt::TouchePtt::default(),
             loupedeck: None,
             loupedeck_etat: loupedeck_ui::Etat::new(get("loupedeck", "off") == "on", &get("loupedeck_config", "")),
             hauteur_saisie: 44.0,
@@ -6212,19 +6216,21 @@ impl KiApp {
 
         // « Armé » : le micro a le droit d'émettre. En activation vocale,
         // c'est ensuite le moteur qui décide selon le seuil.
-        // La touche est lue par le fil dédié, à cent hertz, et le maintien
-        // après relâchement y est calculé aussi. Ici on ne fait plus que lire
-        // le verdict : plus aucune raison de repeindre pour surveiller un
-        // clavier.
-        // Le bouton du Loupedeck tient le même rôle que la touche, avec le
-        // même maintien.
-        let ptt_active = self.mode == MicMode::Ptt
-            && (self.ptt.as_ref().is_some_and(|w| w.active())
-                || self.loupedeck.as_ref().is_some_and(|l| l.ptt(self.ptt_release_ms)));
+        //
+        // En push-to-talk, la touche (lue par son fil à cent hertz, maintien
+        // compris) et le bouton du Loupedeck sont lus par le moteur lui-même,
+        // à chaque trame (`brancher_ptt`) : la prise de parole n'attend pas
+        // l'interface, qu'eframe espace quand la fenêtre est réduite. D'ici,
+        // on ne lui dit que le reste — en vocal, pas coupé, et si le mode
+        // exige la touche ; `ptt_active` ne sert plus qu'à l'affichage.
+        self.touche_ptt.regler(self.mode == MicMode::Ptt, self.ptt_release_ms);
+        if !engine.ptt_branche() {
+            engine.brancher_ptt(Some(self.touche_ptt.source()));
+        }
+        let ptt_active = self.mode == MicMode::Ptt && self.touche_ptt.tenue();
         // Hors d'un salon vocal, le micro reste fermé quoi qu'il arrive.
-        let armed = !self.muted
-            && self.voice_channel.is_some()
-            && (matches!(self.mode, MicMode::Open | MicMode::Vad) || ptt_active);
+        let autorise = !self.muted && self.voice_channel.is_some();
+        let armed = autorise && (matches!(self.mode, MicMode::Open | MicMode::Vad) || ptt_active);
         // Le moteur est réglé **à chaque image**, et non sur la seule
         // transition. `self.armed` était écrit hors d'ici — en quittant le
         // vocal, sur une erreur, à la disparition d'un salon — si bien que
@@ -6233,7 +6239,7 @@ impl KiApp {
         // montrait fermé, et l'on continuait d'être entendu. L'écriture est
         // un simple stockage atomique, la refaire à chaque image ne coûte rien.
         self.armed = armed;
-        engine.set_transmit(armed);
+        engine.set_transmit(autorise);
 
         // Émission réelle (après VAD) : indicateur TX + diffusion aux autres.
         let sending = engine.is_sending();
@@ -14750,7 +14756,12 @@ impl eframe::App for KiApp {
         // La surveillance du clavier démarre à la première image : elle a
         // besoin du contexte pour réveiller la fenêtre, et lui seul sait
         // quand il existe.
-        let ptt = self.ptt.get_or_insert_with(|| ptt::Watcher::start(ctx.clone()));
+        let touche_ptt = &self.touche_ptt;
+        let ptt = self.ptt.get_or_insert_with(|| {
+            let watcher = ptt::Watcher::start(ctx.clone());
+            touche_ptt.brancher_clavier(&watcher);
+            watcher
+        });
         // Deux écritures atomiques, à chaque image : le fil suit les réglages
         // à chaud sans qu'on ait à le redémarrer. Hors push-to-talk il ne lit
         // même pas le clavier.

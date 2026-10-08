@@ -234,6 +234,25 @@ impl Partage {
     }
 }
 
+/// Le bouton push-to-talk du Loupedeck, vu d'un autre fil.
+#[derive(Clone)]
+pub struct BoutonPtt(Arc<Partage>);
+
+impl BoutonPtt {
+    /// Vrai si le bouton est enfoncé, ou relâché depuis moins que le
+    /// maintien.
+    pub fn tenu(&self, maintien_ms: u32) -> bool {
+        if self.0.ptt_tenu.load(Ordering::Relaxed) {
+            return true;
+        }
+        self.0
+            .ptt_relache
+            .lock()
+            .unwrap()
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(maintien_ms as u64))
+    }
+}
+
 pub struct Loupedeck {
     partage: Arc<Partage>,
     /// Le dernier affichage transmis au fil.
@@ -291,17 +310,10 @@ impl Loupedeck {
         }
     }
 
-    /// Vrai si le bouton du push-to-talk est enfoncé, ou relâché depuis
-    /// moins que le maintien.
-    pub fn ptt(&self, maintien_ms: u32) -> bool {
-        if self.partage.ptt_tenu.load(Ordering::Relaxed) {
-            return true;
-        }
-        self.partage
-            .ptt_relache
-            .lock()
-            .unwrap()
-            .is_some_and(|t| t.elapsed() < Duration::from_millis(maintien_ms as u64))
+    /// Le bouton du push-to-talk, pour le fil du micro : il le lit à chaque
+    /// trame, sans passer par l'interface.
+    pub fn bouton_ptt(&self) -> BoutonPtt {
+        BoutonPtt(self.partage.clone())
     }
 
     /// Ce que déclenche le bouton des clips. `None` = l'interface s'en

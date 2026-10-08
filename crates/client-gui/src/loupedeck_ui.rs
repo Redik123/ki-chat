@@ -220,7 +220,12 @@ impl KiApp {
     /// À chaque image : l'interrupteur, les commandes reçues, et ce que
     /// l'appareil doit montrer.
     pub(crate) fn tick_loupedeck(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
-        let l = self.loupedeck.get_or_insert_with(|| Loupedeck::demarrer(ctx.clone()));
+        let touche_ptt = &self.touche_ptt;
+        let l = self.loupedeck.get_or_insert_with(|| {
+            let l = Loupedeck::demarrer(ctx.clone());
+            touche_ptt.brancher_loupedeck(l.bouton_ptt());
+            l
+        });
         l.activer(self.loupedeck_etat.actif);
         l.roles(self.loupedeck_etat.config.roles());
         l.luminosite(self.loupedeck_etat.config.luminosite);

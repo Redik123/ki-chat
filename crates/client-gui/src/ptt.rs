@@ -455,12 +455,13 @@ impl Raccourci {
 // ---------------------------------------------------------------------------
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use device_query::{DeviceQuery, DeviceState};
 use eframe::egui;
 
+use crate::loupedeck::BoutonPtt;
 use crate::raccourci;
 
 /// Ce que déclenche un appui sur la combinaison de l'enregistreur, sur le
@@ -661,11 +662,53 @@ impl Watcher {
     pub fn set_release_ms(&self, ms: u32) {
         self.release_ms.store(ms, Ordering::Relaxed);
     }
+}
 
-    /// Vrai si l'on doit émettre : touche enfoncée, ou relâchée depuis moins
-    /// que le maintien.
-    pub fn active(&self) -> bool {
-        self.active.load(Ordering::Relaxed)
+/// Ce qui tient le micro armé en push-to-talk : la touche du clavier ou le
+/// bouton du Loupedeck, maintien compris. Le moteur vocal le lit à chaque
+/// trame (`Engine::brancher_ptt`) : la prise de parole ne dépend plus du
+/// réveil de l'interface, qu'eframe espace d'au moins 100 ms quand la
+/// fenêtre est réduite — en pleine partie, donc.
+#[derive(Clone, Default)]
+pub struct TouchePtt(Arc<EtatTouche>);
+
+#[derive(Default)]
+struct EtatTouche {
+    /// Le mode push-to-talk est choisi : sans lui, le micro n'attend
+    /// aucune touche.
+    exigee: AtomicBool,
+    maintien_ms: AtomicU32,
+    clavier: OnceLock<Arc<AtomicBool>>,
+    loupedeck: OnceLock<BoutonPtt>,
+}
+
+impl TouchePtt {
+    /// Le mode et le maintien du bouton du Loupedeck (celui du clavier est
+    /// calculé par son propre fil).
+    pub fn regler(&self, exigee: bool, maintien_ms: u32) {
+        self.0.exigee.store(exigee, Ordering::Relaxed);
+        self.0.maintien_ms.store(maintien_ms, Ordering::Relaxed);
+    }
+
+    pub fn brancher_clavier(&self, w: &Watcher) {
+        let _ = self.0.clavier.set(w.active.clone());
+    }
+
+    pub fn brancher_loupedeck(&self, bouton: BoutonPtt) {
+        let _ = self.0.loupedeck.set(bouton);
+    }
+
+    /// La touche ou le bouton est tenu, maintien compris.
+    pub fn tenue(&self) -> bool {
+        self.0.clavier.get().is_some_and(|a| a.load(Ordering::Relaxed))
+            || self.0.loupedeck.get().is_some_and(|b| b.tenu(self.0.maintien_ms.load(Ordering::Relaxed)))
+    }
+
+    /// Ce que lit le moteur : oui hors push-to-talk, sinon tant que la
+    /// touche est tenue.
+    pub fn source(&self) -> ki_voice::SourcePtt {
+        let touche = self.clone();
+        Arc::new(move || !touche.0.exigee.load(Ordering::Relaxed) || touche.tenue())
     }
 }
 

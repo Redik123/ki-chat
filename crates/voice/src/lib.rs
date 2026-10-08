@@ -149,6 +149,11 @@ pub type DatagramSend = std::sync::Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 /// copains (PLAN-CLIPS.md, C1).
 pub type Robinet = std::sync::Arc<dyn Fn(&[f32]) + Send + Sync>;
 
+/// La touche push-to-talk vue du moteur : vrai tant qu'elle est tenue
+/// (maintien après relâchement compris). Lue à chaque trame par le fil du
+/// micro : elle doit répondre tout de suite, sans rien attendre.
+pub type SourcePtt = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 pub struct VoiceConfig {
     /// Notre identité (en-tête des paquets + nonce de chiffrement).
     pub user_id: u64,
@@ -874,6 +879,8 @@ struct Shared {
     /// partirait sur le réseau, armé ou non) et le mélange des copains.
     robinet_micro: Mutex<Option<Robinet>>,
     robinet_copains: Mutex<Option<Robinet>>,
+    /// La touche push-to-talk, quand le mode l'exige (voir `brancher_ptt`).
+    ptt: Mutex<Option<SourcePtt>>,
     /// Micro affamé : la bascule en catégorie « communications » est
     /// **proposée** à l'utilisateur, jamais imposée — c'est elle qui peut
     /// faire baisser le volume de ses autres sons, à lui de choisir.
@@ -984,6 +991,7 @@ impl VoiceEngine {
             medias: cfg.medias.clone().unwrap_or_default(),
             robinet_micro: Mutex::new(None),
             robinet_copains: Mutex::new(None),
+            ptt: Mutex::new(None),
             comms_proposed: AtomicBool::new(false),
             comms_decision: std::sync::atomic::AtomicU8::new(0),
             input_lost: AtomicBool::new(false),
@@ -1106,9 +1114,23 @@ impl VoiceEngine {
         *self.shared.robinet_copains.lock().unwrap() = robinet;
     }
 
-    /// Active/coupe l'émission micro (l'équivalent du push-to-talk).
+    /// Active/coupe l'émission micro. Avec une touche push-to-talk branchée,
+    /// il faut en plus qu'elle soit tenue.
     pub fn set_transmit(&self, on: bool) {
         self.shared.transmitting.store(on, Ordering::Relaxed);
+    }
+
+    /// Branche (ou débranche) la touche push-to-talk. Le fil du micro la lit
+    /// à chaque trame : la prise de parole ne dépend plus du réveil de
+    /// l'interface, qu'eframe espace d'au moins 100 ms quand la fenêtre est
+    /// réduite — le début de chaque phrase y passait.
+    pub fn brancher_ptt(&self, source: Option<SourcePtt>) {
+        *self.shared.ptt.lock().unwrap() = source;
+    }
+
+    /// Une touche push-to-talk est-elle branchée ?
+    pub fn ptt_branche(&self) -> bool {
+        self.shared.ptt.lock().unwrap().is_some()
     }
 
     /// Change le mode de suppression de bruit (NOISE_*), à chaud.
@@ -1690,6 +1712,12 @@ impl Drop for VoiceEngine {
             self.shared.shutdown.store(true, Ordering::Relaxed);
         }
     }
+}
+
+/// Le micro a-t-il le droit d'émettre : armé par l'application, et la
+/// touche push-to-talk tenue si elle est branchée.
+fn arme(sh: &Shared) -> bool {
+    sh.transmitting.load(Ordering::Relaxed) && sh.ptt.lock().unwrap().as_ref().is_none_or(|tenue| tenue())
 }
 
 fn is_shutdown(sh: &Shared) -> bool {
@@ -2599,7 +2627,7 @@ fn capture_loop(
             }
 
             // 7. Décision d'émission : armé + activation vocale éventuelle.
-            let armed = sh.transmitting.load(Ordering::Relaxed);
+            let armed = arme(&sh);
             let threshold = load_f32(&sh.vad_threshold);
             // La décision tourne micro armé — et aussi quand l'interface
             // regarde la jauge, ou que le micro des jeux la suit : sans
@@ -3460,7 +3488,7 @@ fn tone_loop(sh: Arc<Shared>, user_id: u64, bitrate: i32, send: DatagramSend) {
     let mut sent_frames = 0u64;
 
     while !is_shutdown(&sh) {
-        let armed = sh.transmitting.load(Ordering::Relaxed);
+        let armed = arme(&sh);
         sh.sending.store(armed, Ordering::Relaxed);
         if armed {
             for s in frame.iter_mut() {
@@ -4307,6 +4335,53 @@ pub fn capturer_micro(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La touche push-to-talk branchée, le moteur émet tant qu'elle est
+    /// tenue — et rien que l'application n'ait à faire entre-temps : c'est
+    /// le fil du micro qui la lit.
+    #[test]
+    fn la_touche_ptt_branchee_suffit_a_emettre() {
+        let envoyes = Arc::new(AtomicU32::new(0));
+        let send: DatagramSend = {
+            let envoyes = envoyes.clone();
+            Arc::new(move |_| {
+                envoyes.fetch_add(1, Ordering::Relaxed);
+                true
+            })
+        };
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut cfg = VoiceConfig::new(7, [0; 32]);
+        cfg.tone = true;
+        cfg.no_playback = true;
+        let engine = VoiceEngine::start(cfg, send, rx).expect("moteur");
+        let tenue = Arc::new(AtomicBool::new(false));
+        engine.brancher_ptt(Some({
+            let tenue = tenue.clone();
+            Arc::new(move || tenue.load(Ordering::Relaxed))
+        }));
+        assert!(engine.ptt_branche());
+        engine.set_transmit(true);
+
+        // Armé, mais la touche n'est pas tenue : rien ne part.
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(envoyes.load(Ordering::Relaxed), 0);
+
+        // Tenue : ça part, sans autre appel au moteur.
+        tenue.store(true, Ordering::Relaxed);
+        let depart = Instant::now();
+        while envoyes.load(Ordering::Relaxed) == 0 && depart.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(envoyes.load(Ordering::Relaxed) > 0, "rien n'est parti, touche tenue");
+
+        // Relâchée : ça s'arrête.
+        tenue.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(60));
+        let arret = envoyes.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(envoyes.load(Ordering::Relaxed), arret);
+        engine.shutdown();
+    }
 
     #[test]
     fn une_trame_stereo_se_repartit_sur_les_voies() {
