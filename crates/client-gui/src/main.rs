@@ -11006,7 +11006,11 @@ impl KiApp {
                     // bas : bouton et cadence restent visibles.
                     let hauteur = (dispo.y - 44.0).max(60.0);
                     let echelle = (dispo.x / taille.x).min(hauteur / taille.y).min(2.0);
-                    ui.image((tex.id(), taille * echelle.max(0.05)));
+                    // Centrée : plus étroite que la fenêtre — bornée par la
+                    // hauteur, ou un 360p qu'on n'agrandit pas plus de deux
+                    // fois —, elle restait collée à gauche, une bande vide à
+                    // droite.
+                    ui.vertical_centered(|ui| ui.image((tex.id(), taille * echelle.max(0.05))));
                 } else {
                     ui.label(
                         RichText::new("en attente de la première image…").color(TEXT_DIM),
