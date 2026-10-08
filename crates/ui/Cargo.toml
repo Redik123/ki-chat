@@ -17,6 +17,8 @@ egui = { version = "0.36", default-features = false }
 egui_taffy = "0.14"
 # Le mouchard des mises en page instables (versions de développement).
 tracing.workspace = true
+# Une icône se retient (la touche d'un Loupedeck retient la sienne).
+serde.workspace = true
 
 [dev-dependencies]
 # Les polices d'egui, pour les tests qui mesurent du texte.

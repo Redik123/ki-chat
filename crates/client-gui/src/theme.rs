@@ -18,29 +18,8 @@ use eframe::egui::{
 /// La palette vit dans les jetons de ki-ui : une seule source pour toutes
 /// les applis ki-*. Les noms restent ceux de toujours.
 pub use ki_ui::jetons::couleur::*;
-
-/// Couleurs de pseudos, stables par hachage du nom.
-const PALETTE: [Color32; 8] = [
-    Color32::from_rgb(0x2d, 0xd4, 0x8f),
-    Color32::from_rgb(0x62, 0xa8, 0xff),
-    Color32::from_rgb(0xff, 0xa9, 0x5c),
-    Color32::from_rgb(0xff, 0x8a, 0xc4),
-    Color32::from_rgb(0xba, 0x92, 0xff),
-    Color32::from_rgb(0x2a, 0xd3, 0xdd),
-    Color32::from_rgb(0xff, 0xd8, 0x63),
-    Color32::from_rgb(0xff, 0x7d, 0x7d),
-];
-
-/// Couleur attribuée à un pseudo — même pseudo, même couleur, partout.
-///
-/// Une palette fermée de huit teintes : les pseudos se lisent dans le fil de
-/// discussion, mieux vaut peu de couleurs mais franchement distinctes.
-pub fn color_for(name: &str) -> Color32 {
-    let h = name
-        .bytes()
-        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-    PALETTE[(h % PALETTE.len() as u32) as usize]
-}
+/// Les outils de couleur de ki-ui, sous leurs noms de toujours.
+pub use ki_ui::jetons::couleur::{melanger as mix, pour_pseudo as color_for, translucide as alpha};
 
 /// Couleur d'un membre : celle que son rôle lui donne, sinon le hachage de
 /// son pseudo.
@@ -52,34 +31,6 @@ pub fn member_color(color: Option<u32>, username: &str) -> Color32 {
         Some(rgb) => Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8),
         None => color_for(username),
     }
-}
-
-/// Couleur d'identité d'un serveur : teinte **continue** dérivée du nom.
-///
-/// Contrairement aux pseudos, on n'a ici que quelques vignettes côte à côte
-/// et elles doivent se distinguer au premier coup d'œil : une palette de
-/// huit couleurs donnerait une collision une fois sur huit. Le hachage
-/// FNV-1a répartit sur tout le cercle chromatique.
-pub fn badge_color(seed: &str) -> Color32 {
-    let hash = seed
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |acc, b| {
-            (acc ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-    let hue = (hash % 3600) as f32 / 3600.0;
-    egui::ecolor::Hsva::new(hue, 0.60, 0.94, 1.0).into()
-}
-
-/// Mélange linéaire de deux couleurs (`t` = 0 → `a`, 1 → `b`).
-pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
-}
-
-/// Même couleur, translucide (utile pour les fonds teintés).
-pub fn alpha(c: Color32, a: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
 // ---------------------------------------------------------------------

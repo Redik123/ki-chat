@@ -2924,6 +2924,7 @@ version = "0.1.60"
 dependencies = [
  "egui",
  "egui_taffy",
+ "serde",
  "tracing",
  "tracing-subscriber",
 ]
