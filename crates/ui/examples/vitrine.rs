@@ -9,6 +9,7 @@ use ki_ui::composants::{self as c, Tone};
 use ki_ui::flex::{Case, Flex, Repartit};
 use ki_ui::icones::{self, Icon};
 use ki_ui::jetons::{couleur, espace, rayon, texte};
+use ki_ui::liste::Liste;
 
 fn main() -> eframe::Result {
     // Le mouchard de ki-ui parle au journal : on le veut dans le terminal.
@@ -34,6 +35,10 @@ struct Vitrine {
     qualite: u8,
     pseudo: String,
     bandeau_ferme: bool,
+    /// Les clés des éléments de la liste virtualisée, et la prochaine à
+    /// donner à ce qu'on ajoute au-dessus.
+    elements: Vec<u64>,
+    plus_ancien: u64,
 }
 
 impl eframe::App for Vitrine {
@@ -57,6 +62,7 @@ impl eframe::App for Vitrine {
                 self.bandeaux(ui);
                 self.mesures(ui, niveau, temps);
                 self.flex(ui);
+                self.liste(ui);
             });
         });
     }
@@ -276,6 +282,62 @@ impl Vitrine {
                     });
                 }
             });
+        });
+    }
+
+    fn liste(&mut self, ui: &mut egui::Ui) {
+        if self.elements.is_empty() {
+            self.plus_ancien = 1_000_000;
+            self.elements = (self.plus_ancien..self.plus_ancien + 10_000).collect();
+        }
+        c::section(ui, Icon::Chat, "Liste virtualisée", Some("ki_ui::liste"), |ui| {
+            let mut en_haut = false;
+            let mut en_bas = false;
+            ui.horizontal(|ui| {
+                en_haut = c::button(ui, Icon::ArrowUp, "500 plus anciens").clicked();
+                en_bas = c::button(ui, Icon::ArrowDown, "Un nouveau").clicked();
+            });
+            if en_haut {
+                let debut = self.plus_ancien - 500;
+                self.elements.splice(0..0, debut..self.plus_ancien);
+                self.plus_ancien = debut;
+            }
+            if en_bas {
+                let suivant = self.elements.last().map_or(0, |d| d + 1);
+                self.elements.push(suivant);
+            }
+            ui.add_space(espace::S);
+            let elements = &self.elements;
+            let sortie = ui
+                .allocate_ui(vec2(ui.available_width(), 320.0), |ui| {
+                    Liste::new("vitrine-liste").coller_en_bas(true).show(
+                        ui,
+                        elements.len(),
+                        |i| elements[i],
+                        |ui, i| {
+                            let cle = elements[i];
+                            // Des longueurs variées : de quoi passer à la
+                            // ligne, ou pas.
+                            let mots = 3 + (cle * 7919 % 41) as usize;
+                            let texte_ = std::iter::repeat_n("ki-chat", mots).collect::<Vec<_>>().join(" ");
+                            ui.horizontal_top(|ui| {
+                                ui.label(RichText::new(format!("#{cle}")).color(couleur::pour_pseudo(&cle.to_string())).strong());
+                                ui.add(egui::Label::new(RichText::new(texte_).color(couleur::TEXT_DIM)).wrap());
+                            });
+                        },
+                    )
+                })
+                .inner;
+            c::hint(
+                ui,
+                &format!(
+                    "{} éléments, {} construits à cette image, {} mesurés d'avance — {}",
+                    self.elements.len(),
+                    sortie.dessines,
+                    sortie.mesures,
+                    if sortie.en_bas { "collée en bas" } else { "remontée" }
+                ),
+            );
         });
     }
 }

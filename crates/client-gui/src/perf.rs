@@ -10,8 +10,9 @@
 //! # Ce qu'on mesure, et pourquoi ces trois-là
 //!
 //! - **le temps d'une image** : ce que `update()` coûte de bout en bout ;
-//! - **le temps du fil de discussion** : la part qui croît avec le nombre de
-//!   messages chargés, et que P3.3 doit rendre constante ;
+//! - **le temps du fil de discussion** : la part qui croissait avec le
+//!   nombre de messages chargés ; le fil est désormais une liste virtualisée
+//!   (`ki_ui::liste`), elle doit rester constante ;
 //! - **les images par seconde réellement peintes** : aujourd'hui vingt, quoi
 //!   qu'il arrive et même fenêtre réduite. C'est le chiffre que P3.2 doit
 //!   faire tomber au repos — et que le partage d'écran devra faire monter.
@@ -108,8 +109,8 @@ pub struct Perf {
     debut_image: Option<Instant>,
     /// Début de la mise en page du fil, dans l'image en cours.
     debut_fil: Option<Instant>,
-    /// Messages effectivement parcourus par le fil à la dernière image. Sous
-    /// P3.3 (virtualisation), ce nombre doit cesser de suivre le total.
+    /// Lignes du fil construites à la dernière image : celles à l'écran (le
+    /// fil est virtualisé), quel que soit le total chargé.
     messages_rendus: usize,
     /// Messages en mémoire à la dernière image, pour la comparaison.
     messages_charges: usize,
@@ -160,9 +161,9 @@ impl Perf {
         self.debut_fil = Some(Instant::now());
     }
 
-    /// Fin de la mise en page du fil. `rendus` est le nombre de messages
-    /// réellement parcourus, `charges` le nombre en mémoire : tant que les
-    /// deux sont égaux, le fil n'est pas virtualisé.
+    /// Fin de la mise en page du fil. `rendus` est le nombre de lignes
+    /// construites, `charges` le nombre de messages en mémoire : le premier
+    /// ne doit pas suivre le second.
     pub fn fin_fil(&mut self, rendus: usize, charges: usize) {
         if let Some(debut) = self.debut_fil.take() {
             self.fil.push(debut.elapsed().as_secs_f32() * 1000.0);

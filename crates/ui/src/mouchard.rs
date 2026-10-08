@@ -49,6 +49,19 @@ pub(crate) fn case(ui: &Ui, cle: Id, etiquette: &str, rang: usize, taille: Vec2)
     });
 }
 
+/// La liste `etiquette` a-t-elle dû, à cette image, recaler son défilement
+/// sur son ancre ? Une fois de temps en temps, c'est son travail ; à chaque
+/// image, un élément change de hauteur sans arrêt et la liste se repeint
+/// sans fin.
+pub(crate) fn liste(ui: &Ui, cle: Id, etiquette: &str, recalee: bool) {
+    compter(ui, cle.with("ki-ui-mouchard-liste"), recalee, Vec2::ZERO, |n| {
+        tracing::warn!(
+            "ki-ui : la liste « {etiquette} » se recale à chaque image ({n} de suite) — \
+             un élément au-dessus de l'écran change de hauteur sans arrêt"
+        );
+    });
+}
+
 fn compter(ui: &Ui, id: Id, evenement: bool, taille: Vec2, dire: impl FnOnce(u32)) {
     let image = ui.ctx().cumulative_frame_nr();
     let mut suivi = ui.data(|d| d.get_temp::<Suivi>(id)).unwrap_or_default();

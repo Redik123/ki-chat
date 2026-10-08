@@ -824,15 +824,9 @@ struct KiApp {
     voice_intent: Option<Option<ChannelId>>,
     /// Fin de la fenêtre pendant laquelle l'intention prime.
     voice_intent_until: std::time::Instant,
-    /// Hauteur du fil au rendu précédent, en points.
-    ///
-    /// Sert à recaler la vue quand une page s'ajoute **au-dessus** : sans ça
-    /// le contenu grandit vers le haut, la vue reste collée au sommet, et l'on
-    /// perd la ligne qu'on était en train de lire.
-    chat_height: f32,
-    /// Hauteur du fil juste avant qu'une page ne s'y ajoute en tête. Le
-    /// prochain rendu s'en sert pour rattraper le décalage, puis l'efface.
-    history_anchor: Option<f32>,
+    /// Le fil doit descendre tout en bas à sa prochaine image : on vient
+    /// d'entrer dans un salon, ou d'y sauter.
+    fil_au_bas: bool,
 
     // UI
     input: String,
@@ -1045,13 +1039,6 @@ struct KiApp {
     /// cent mille par seconde, pour un résultat qui ne change qu'à la
     /// réception d'un roster.
     author_colors: HashMap<UserId, egui::Color32>,
-    /// Hauteur mesurée de chaque message à l'image précédente, pour pouvoir
-    /// sauter ceux qui sont hors de l'écran sans changer la taille du fil.
-    /// Clé : (auteur, horodatage). Vidée dès que la largeur change, une
-    /// hauteur dépendant du retour à la ligne.
-    msg_heights: HashMap<(UserId, u64), f32>,
-    /// Largeur pour laquelle `msg_heights` a été mesurée.
-    msg_heights_width: f32,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
     upload_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -1470,8 +1457,7 @@ impl KiApp {
             identity_alarm: None,
             voice_intent: None,
             voice_intent_until: std::time::Instant::now(),
-            chat_height: 0.0,
-            history_anchor: None,
+            fil_au_bas: true,
             input: String::new(),
             focus_input: false,
             show_settings: false,
@@ -1573,8 +1559,6 @@ impl KiApp {
             show_perf: false,
             perf: perf::Perf::default(),
             author_colors: HashMap::new(),
-            msg_heights: HashMap::new(),
-            msg_heights_width: 0.0,
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             upload_status: Default::default(),
@@ -3980,9 +3964,9 @@ impl KiApp {
         // Entrer normalement dans un salon, c'est en voir la fin : le pied de
         // fil « tu regardes un message retrouvé » n'a plus lieu d'être.
         self.retour_present = None;
-        // L'ancre de défilement se rapporte à la hauteur du salon qu'on
-        // quitte : la garder ferait sauter la vue du nouveau.
-        self.history_anchor = None;
+        // Le fil s'ouvre sur la fin du salon, où qu'on en était dans celui
+        // qu'on quitte.
+        self.fil_au_bas = true;
         self.focus_input = true;
         // Entrer, c'est lire : la pastille tombe, et « nouveaux messages »
         // se posera là où l'on en était. Le serveur l'apprend dans une
@@ -3996,9 +3980,6 @@ impl KiApp {
         // un saut de recherche — n'est pas en changer : le repère posé à
         // l'entrée reste, on veut le retrouver en bas du fil.
         self.separateur_nouveaux = if meme_salon { repere.or(self.separateur_nouveaux) } else { repere };
-        // Les hauteurs mesurées comprenaient, ou non, ce séparateur : à
-        // remesurer.
-        self.msg_heights.clear();
         self.programmer_lu(channel);
         self.send(ClientMsg::Join { channel });
         self.send(ClientMsg::History { limit: 100 });
@@ -4422,7 +4403,6 @@ impl KiApp {
         self.edition = None;
         self.history_more = false;
         self.history_pending = false;
-        self.history_anchor = None;
         // Les non-lus sont ceux d'un serveur : le prochain redira les siens,
         // et redira s'il tient les lus.
         self.non_lus.clear();
@@ -5331,9 +5311,6 @@ impl KiApp {
                     .find(|m| m.user_id == message.user_id && m.ts == message.ts)
                 {
                     reaction_locale(&mut m.reactions, &emoji, by, on);
-                    // La hauteur du message change avec sa rangée de
-                    // réactions : à remesurer.
-                    self.msg_heights.remove(&(message.user_id, message.ts));
                 }
             }
             ServerMsg::MessageDeleted { channel, message } => {
@@ -5341,7 +5318,6 @@ impl KiApp {
                     return;
                 }
                 self.messages.retain(|m| !(m.user_id == message.user_id && m.ts == message.ts));
-                self.msg_heights.remove(&(message.user_id, message.ts));
                 if self.reponse_a.as_ref().is_some_and(|r| r.user_id == message.user_id && r.ts == message.ts) {
                     self.reponse_a = None;
                 }
@@ -5366,8 +5342,6 @@ impl KiApp {
                 {
                     m.text = propre.clone();
                     m.edited = true;
-                    // La hauteur change avec le texte : à remesurer.
-                    self.msg_heights.remove(&(message.user_id, message.ts));
                 }
                 // La citation sous une réponse en cours suit le texte.
                 if let Some(r) = self
@@ -5417,10 +5391,8 @@ impl KiApp {
                 if older.is_empty() {
                     return;
                 }
-                // La hauteur d'avant est retenue : le contenu va grandir vers
-                // le haut, et le prochain rendu rattrapera le décalage pour
-                // que la ligne en cours de lecture ne bouge pas d'un pixel.
-                self.history_anchor = Some(self.chat_height);
+                // Rien à recaler : la liste du fil garde à sa place la ligne
+                // qu'on lit quand le contenu grandit au-dessus d'elle.
                 older.append(&mut self.messages);
                 self.messages = older;
             }
@@ -8579,129 +8551,128 @@ impl KiApp {
     }
 
     fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
+        if self.messages.is_empty() {
+            empty_state(ui, channel_name);
+            return;
+        }
         let mut want_older = false;
         let mut revenir = false;
-        // Compté, et pas déduit de `messages.len()` : le jour où le fil sera
-        // virtualisé (P3.3), les deux cesseront de coïncider — et c'est
-        // précisément l'écart qui prouvera que ça marche.
-        let mut rendus = 0usize;
         self.perf.debut_fil();
-        let out = egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                if self.messages.is_empty() {
-                    empty_state(ui, channel_name);
-                    return;
-                }
 
-                // En-tête du fil : c'est là que se remonte le passé. Un
-                // bouton explicite en plus du chargement au défilement — le
-                // défilement seul laisse croire qu'on est au début alors
-                // qu'il reste des mois de conversation.
-                if self.history_pending {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new("Chargement des messages plus anciens…")
-                                .color(TEXT_FAINT)
-                                .size(11.5),
-                        );
-                        ui.add_space(6.0);
-                    });
-                } else if self.history_more {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(6.0);
-                        if ui
-                            .button(
-                                RichText::new("Charger les messages plus anciens")
-                                    .color(TEXT_DIM)
-                                    .size(11.5),
-                            )
-                            .clicked()
-                        {
-                            want_older = true;
+        // Les pseudos connus, empruntés le temps du rendu comme les
+        // messages : c'est ce qui permet de reconnaître une mention
+        // sans allouer une chaîne par membre et par image.
+        let membres_source = std::mem::take(&mut self.members);
+        let membres: Vec<&str> = membres_source.iter().map(|m| m.username.as_str()).collect();
+        let moi = self
+            .my_id
+            .and_then(|id| membres_source.iter().find(|m| m.user_id == id))
+            .map(|m| m.username.clone());
+        let moi_id = self.my_id;
+        // Ce qu'un clic sur un message a demandé : exécuté après le
+        // rendu, quand les messages sont revenus dans l'état.
+        let mut demande: Option<(MsgRef, MessageAction)> = None;
+
+        let messages = std::mem::take(&mut self.messages);
+        let n = messages.len();
+        // « Nouveaux messages » : avant le premier message postérieur au
+        // repère. Posé à l'entrée du salon, il reste jusqu'au prochain
+        // changement de salon — on veut le retrouver en remontant.
+        let nouveaux = self.separateur_nouveaux.and_then(|depuis| messages.iter().position(|m| m.ts > depuis));
+        let (history_pending, history_more) = (self.history_pending, self.history_more);
+        // On a sauté au milieu du passé : ce qui a suivi n'est pas affiché.
+        let retour = self.retour_present == self.current;
+        let previews = &mut self.previews;
+        let avatars = &self.avatars;
+        let author_colors = &self.author_colors;
+
+        // Le fil : un en-tête, les messages, un pied. Seul ce qui est à
+        // l'écran est construit — on construisait jusqu'à cinq cents blocs
+        // à chaque image pour en montrer une vingtaine —, et la ligne qu'on
+        // lit ne bouge pas d'un pixel quand une page plus ancienne s'ajoute
+        // au-dessus.
+        let sortie = ki_ui::liste::Liste::new("fil")
+            .coller_en_bas(true)
+            .aller_en_bas(std::mem::take(&mut self.fil_au_bas))
+            .hauteur_estimee(48.0)
+            .show(
+                ui,
+                n + 2,
+                |i| match i {
+                    0 => CleFil::EnTete,
+                    i if i > n => CleFil::Pied,
+                    i => CleFil::Message(messages[i - 1].user_id, messages[i - 1].ts),
+                },
+                |ui, i| {
+                    if i == 0 {
+                        // En-tête du fil : c'est là que se remonte le passé.
+                        // Un bouton explicite en plus du chargement au
+                        // défilement — le défilement seul laisse croire qu'on
+                        // est au début alors qu'il reste des mois de
+                        // conversation.
+                        if history_pending {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Chargement des messages plus anciens…")
+                                        .color(TEXT_FAINT)
+                                        .size(11.5),
+                                );
+                                ui.add_space(6.0);
+                            });
+                        } else if history_more {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(6.0);
+                                if ui
+                                    .button(
+                                        RichText::new("Charger les messages plus anciens")
+                                            .color(TEXT_DIM)
+                                            .size(11.5),
+                                    )
+                                    .clicked()
+                                {
+                                    want_older = true;
+                                }
+                                ui.add_space(6.0);
+                            });
+                        } else {
+                            day_separator(ui, &format!("Début de #{channel_name}"));
                         }
-                        ui.add_space(6.0);
-                    });
-                } else {
-                    day_separator(ui, &format!("Début de #{channel_name}"));
-                }
-
-                // Une hauteur dépend du retour à la ligne, donc de la largeur :
-                // la moindre variation périme toutes les mesures.
-                let largeur = ui.available_width();
-                if (self.msg_heights_width - largeur).abs() > 0.5 {
-                    self.msg_heights.clear();
-                    self.msg_heights_width = largeur;
-                }
-                // La zone réellement visible. Une marge d'un écran de part et
-                // d'autre : on préfère peindre un peu trop que de laisser un
-                // blanc apparaître au défilement rapide.
-                let vue = ui.clip_rect();
-                let marge = vue.height().max(200.0);
-
-                // Les pseudos connus, empruntés le temps du rendu comme les
-                // messages : c'est ce qui permet de reconnaître une mention
-                // sans allouer une chaîne par membre et par image.
-                let membres_source = std::mem::take(&mut self.members);
-                let membres: Vec<&str> =
-                    membres_source.iter().map(|m| m.username.as_str()).collect();
-                let moi = self
-                    .my_id
-                    .and_then(|id| membres_source.iter().find(|m| m.user_id == id))
-                    .map(|m| m.username.clone());
-                let moi_id = self.my_id;
-                // Ce qu'un clic sur un message a demandé : exécuté après le
-                // rendu, quand les messages sont revenus dans l'état.
-                let mut demande: Option<(MsgRef, MessageAction)> = None;
-
-                let mut last_day = i32::MIN;
-                let mut previous: Option<(UserId, u64)> = None;
-                // « Nouveaux messages » : avant le premier message postérieur
-                // au repère, une fois. Posé à l'entrée du salon, il reste
-                // jusqu'au prochain changement de salon — on veut le retrouver
-                // en remontant.
-                let mut separateur = self.separateur_nouveaux;
-                let messages = std::mem::take(&mut self.messages);
-                for msg in &messages {
-                    let day = day_key(msg.ts);
-                    let jour_change = day != last_day;
-                    if jour_change {
-                        last_day = day;
+                        return;
                     }
-                    let nouveaux = separateur.is_some_and(|depuis| msg.ts > depuis);
-                    if nouveaux {
-                        separateur = None;
+                    if i > n {
+                        // Le pied. Sans « revenir au présent » après un saut
+                        // dans le passé, on croirait le salon mort depuis ce
+                        // jour-là.
+                        if retour {
+                            ui.add_space(6.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("tu regardes un message retrouvé")
+                                        .color(TEXT_FAINT)
+                                        .size(11.5),
+                                );
+                                if ui
+                                    .button(RichText::new("Revenir au présent").color(TEXT_DIM).size(11.5))
+                                    .clicked()
+                                {
+                                    revenir = true;
+                                }
+                            });
+                        }
+                        ui.add_space(10.0);
+                        return;
                     }
+
+                    let k = i - 1;
+                    let msg = &messages[k];
+                    let precedent = k.checked_sub(1).map(|j| &messages[j]);
+                    let jour_change = precedent.is_none_or(|p| day_key(p.ts) != day_key(msg.ts));
                     let grouped = !jour_change
-                        && previous.is_some_and(|(user, ts)| {
-                            user == msg.user_id && msg.ts.saturating_sub(ts) < GROUP_WINDOW_MS
+                        && precedent.is_some_and(|p| {
+                            p.user_id == msg.user_id && msg.ts.saturating_sub(p.ts) < GROUP_WINDOW_MS
                         });
-                    previous = Some((msg.user_id, msg.ts));
-
-                    // Hors écran, et la hauteur est connue de l'image
-                    // précédente : on réserve la place sans rien construire.
-                    //
-                    // C'est tout l'objet de la manœuvre. Le fil parcourait
-                    // TOUS les messages en mémoire à chaque image, visibles ou
-                    // non — jusqu'à cinq cents blocs de widgets construits,
-                    // mis en page et poussés vers le GPU vingt fois par
-                    // seconde, pour en montrer une vingtaine. La place étant
-                    // réservée à l'identique, la barre de défilement et le
-                    // rattrapage de pagination ne voient aucune différence.
-                    let cle = (msg.user_id, msg.ts);
-                    let haut = ui.cursor().top();
-                    if let Some(hauteur) = self.msg_heights.get(&cle).copied() {
-                        let bas = haut + hauteur;
-                        if bas < vue.top() - marge || haut > vue.bottom() + marge {
-                            ui.allocate_space(Vec2::new(largeur, hauteur));
-                            continue;
-                        }
-                    }
-
-                    rendus += 1;
-                    let photo = self.avatars.get(&msg.user_id).map(|(_, t)| t.clone());
+                    let photo = avatars.get(&msg.user_id).map(|(_, t)| t.clone());
                     // L'auteur peut avoir quitté le serveur : on retombe
                     // alors sur son pseudo, plutôt que de perdre la couleur.
                     // Le serveur lui-même (le fil de jeu, identifiant 0)
@@ -8713,113 +8684,61 @@ impl KiApp {
                         // ne dépend pas du roster.
                         theme::INVITE
                     } else {
-                        self.author_colors
-                            .get(&msg.user_id)
-                            .copied()
-                            .unwrap_or_else(|| color_for(&msg.username))
+                        author_colors.get(&msg.user_id).copied().unwrap_or_else(|| color_for(&msg.username))
                     };
 
-                    // `scope` et non une mesure du curseur : c'est ce qui rend
-                    // les deux chemins interchangeables. Le curseur, lui,
-                    // avance de la hauteur PLUS l'espacement entre widgets ;
-                    // on aurait donc réservé un espacement de trop par message
-                    // sauté, et le fil se serait allongé à mesure qu'on le
-                    // remonte. Un `scope` et un `allocate_space` sont deux
-                    // widgets qui occupent exactement la hauteur demandée.
-                    let previews = &mut self.previews;
-                    let bloc = ui.scope(|ui| {
-                        if jour_change {
-                            day_separator(ui, &day_label(msg.ts));
-                        }
-                        if nouveaux {
-                            separateur_nouveaux(ui);
-                        }
-                        message_block(
-                            ui,
-                            MessageRow {
-                                msg,
-                                with_header: !grouped,
-                                photo: photo.as_ref(),
-                                color,
-                                membres: &membres,
-                                moi: moi.as_deref(),
-                                moi_id,
-                            },
-                            previews,
-                        )
-                    });
-                    if !matches!(bloc.inner, MessageAction::Rien) {
-                        demande = Some((MsgRef { user_id: msg.user_id, ts: msg.ts }, bloc.inner));
+                    if jour_change {
+                        day_separator(ui, &day_label(msg.ts));
                     }
-                    // Mesurée séparateur compris : c'est le bloc entier qu'on
-                    // sautera la prochaine fois.
-                    self.msg_heights.insert(cle, bloc.response.rect.height());
-                }
-                self.messages = messages;
-                drop(membres);
-                self.members = membres_source;
-                if let Some((message, action)) = demande {
-                    match action {
-                        MessageAction::Menu(pos) => {
-                            self.menu_message = Some(MenuMessage { message, pos, confirmer: false });
-                        }
-                        MessageAction::Reagir(emoji, on) => {
-                            self.send(ClientMsg::React { message, emoji, on });
-                        }
-                        MessageAction::Aller(ts) => {
-                            if let Some(c) = self.current {
-                                self.sauter_a(c, ts);
-                            }
-                        }
-                        MessageAction::Ouvrir(cible) => self.ouvrir_visionneuse(cible),
-                        MessageAction::Rien => {}
+                    if nouveaux == Some(k) {
+                        separateur_nouveaux(ui);
                     }
-                }
-                // Le cache ne garde que ce qui est encore affiché : sans ça,
-                // remonter un fil de plusieurs mois y laisserait une entrée
-                // par message lu, pour toujours.
-                if self.msg_heights.len() > self.messages.len() * 2 {
-                    let vivants: std::collections::HashSet<(UserId, u64)> =
-                        self.messages.iter().map(|m| (m.user_id, m.ts)).collect();
-                    self.msg_heights.retain(|k, _| vivants.contains(k));
-                }
+                    let action = message_block(
+                        ui,
+                        MessageRow {
+                            msg,
+                            with_header: !grouped,
+                            photo: photo.as_ref(),
+                            color,
+                            membres: &membres,
+                            moi: moi.as_deref(),
+                            moi_id,
+                        },
+                        previews,
+                    );
+                    if !matches!(action, MessageAction::Rien) {
+                        demande = Some((MsgRef { user_id: msg.user_id, ts: msg.ts }, action));
+                    }
+                },
+            );
+        self.messages = messages;
+        drop(membres);
+        self.members = membres_source;
+        self.perf.fin_fil(sortie.dessines, self.messages.len());
 
-                // On a sauté au milieu du passé : ce qui a suivi n'est pas
-                // affiché, et rien ne le dirait. Sans ce pied de fil, on croit
-                // le salon mort depuis ce jour-là.
-                if self.retour_present == self.current {
-                    ui.add_space(6.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new("tu regardes un message retrouvé")
-                                .color(TEXT_FAINT)
-                                .size(11.5),
-                        );
-                        if ui
-                            .button(
-                                RichText::new("Revenir au présent").color(TEXT_DIM).size(11.5),
-                            )
-                            .clicked()
-                        {
-                            revenir = true;
-                        }
-                    });
+        if let Some((message, action)) = demande {
+            match action {
+                MessageAction::Menu(pos) => {
+                    self.menu_message = Some(MenuMessage { message, pos, confirmer: false });
                 }
-                ui.add_space(10.0);
-            });
-        self.perf.fin_fil(rendus, self.messages.len());
-        // Une page vient de s'ajouter au-dessus : on décale la vue d'autant
-        // que le contenu a grandi. Sans ce rattrapage, la vue reste au sommet
-        // du nouveau bloc — l'écran saute, on perd sa ligne, et la condition
-        // « on est tout en haut » reste vraie, ce qui enchaînait les
-        // chargements jusqu'à épuiser le salon.
-        self.chat_height = out.content_size.y;
-        let mut offset_y = out.state.offset.y;
+                MessageAction::Reagir(emoji, on) => {
+                    self.send(ClientMsg::React { message, emoji, on });
+                }
+                MessageAction::Aller(ts) => {
+                    if let Some(c) = self.current {
+                        self.sauter_a(c, ts);
+                    }
+                }
+                MessageAction::Ouvrir(cible) => self.ouvrir_visionneuse(cible),
+                MessageAction::Rien => {}
+            }
+        }
+
         // Collé en bas, à quelques points près : c'est ce qui décide si un
         // message qui arrive est vu, ou s'il pose une pastille.
-        let fond = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        let fond = (sortie.hauteur_contenu - sortie.rect.height()).max(0.0);
         let etait_en_bas = self.fil_en_bas;
-        self.fil_en_bas = offset_y >= fond - 8.0;
+        self.fil_en_bas = sortie.decalage >= fond - 8.0;
         // Redescendu en bas, fenêtre au premier plan : ce qui est arrivé
         // pendant qu'on relisait le passé est sous les yeux maintenant. Sans
         // ça, la pastille posée sur le salon courant restait jusqu'au message
@@ -8831,35 +8750,18 @@ impl KiApp {
                 }
             }
         }
-        if let Some(before) = self.history_anchor.take() {
-            let grown = out.content_size.y - before;
-            if grown > 0.0 {
-                let mut state = out.state;
-                // Borné dès cette image, et pas seulement à la suivante par
-                // egui : un fil qui tenait entièrement dans la fenêtre est
-                // collé en bas, et ajouter `grown` par-dessus l'envoyait
-                // au-delà de la fin — un éclair de vide, puis un retour en bas,
-                // soit l'inverse de ce qu'on cherche.
-                let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
-                state.offset.y = (state.offset.y + grown).clamp(0.0, max);
-                offset_y = state.offset.y;
-                state.store(ui.ctx(), out.id);
-                ui.ctx().request_repaint();
-            }
-        }
 
         // Arrivé tout en haut, on charge sans attendre le clic : c'est le
         // geste naturel pour remonter une conversation. Mais seulement si l'on
         // défile **réellement** : rester en haut ne doit pas suffire, sinon la
         // demande repart à chaque image. Le bouton explicite couvre le cas où
-        // l'on est déjà en haut sans rien toucher.
+        // l'on est déjà en haut sans rien toucher. Une page arrivée, la liste
+        // recale la vue sur la ligne qu'on lisait : on n'est plus en haut, la
+        // demande ne s'enchaîne pas.
         let scrolling = ui.input(|i| {
             i.is_scrolling() || i.smooth_scroll_delta.y.abs() > 0.0
         });
-        // `offset_y` et non `out.state.offset.y` : sur l'image du recalage,
-        // ce dernier vaut encore la valeur d'avant correction, c'est-à-dire
-        // ~0 — et l'on redemanderait aussitôt une page de plus.
-        if offset_y <= 24.0 && !self.messages.is_empty() && scrolling {
+        if sortie.decalage <= 24.0 && scrolling {
             want_older = true;
         }
         if want_older {
@@ -8921,10 +8823,9 @@ impl KiApp {
     fn sauter_a(&mut self, channel: ChannelId, ts: u64) {
         self.current = Some(channel);
         self.messages.clear();
-        self.msg_heights.clear();
         self.history_more = true;
         self.history_pending = true;
-        self.history_anchor = None;
+        self.fil_au_bas = true;
         self.retour_present = Some(channel);
         // C'est bien entrer dans le salon, comme `join` : la pastille tombe
         // (le serveur nous tient pour lecteur dès le `Join`, elle ne
@@ -13678,6 +13579,15 @@ fn lecture_effective(
     channel: ChannelId,
 ) -> bool {
     window_focused && fil_en_bas && current == Some(channel)
+}
+
+/// Ce qui identifie une ligne du fil d'une image à l'autre — même quand une
+/// page plus ancienne s'ajoute au-dessus.
+#[derive(Hash, Debug)]
+enum CleFil {
+    EnTete,
+    Message(UserId, u64),
+    Pied,
 }
 
 fn separateur_nouveaux(ui: &mut egui::Ui) {

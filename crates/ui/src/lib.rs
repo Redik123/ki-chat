@@ -10,6 +10,8 @@
 //!   sections et lignes de réglage, interrupteurs, bandeaux, vumètres,
 //!   avatars —, et [`icones`], le jeu d'icônes vectorielles qu'ils
 //!   emploient.
+//! - [`liste`] : la liste virtualisée, qui ne construit que ce qui se voit
+//!   et garde immobile la ligne qu'on lit quand le reste bouge.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
 //!   sombre), installée en un appel.
 //!
@@ -20,6 +22,7 @@ pub mod composants;
 pub mod flex;
 pub mod icones;
 pub mod jetons;
+pub mod liste;
 pub mod style;
 #[cfg(debug_assertions)]
 mod mouchard;
