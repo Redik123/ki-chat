@@ -2,10 +2,11 @@
 //! espacements, thème sombre, appliqués au contexte egui en un appel —
 //! `ki_ui::style::installer(ctx)` à la création de la fenêtre.
 
+use crate::jetons::{espace, marge, rayon, texte};
 use egui::{
     epaint::Shadow,
     style::{HandleShape, Selection},
-    Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2,
+    Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Vec2,
 };
 
 use crate::jetons::couleur::*;
@@ -23,10 +24,10 @@ pub fn installer(ctx: &egui::Context) {
     style.text_styles = text_styles();
 
     let s = &mut style.spacing;
-    s.item_spacing = Vec2::new(8.0, 6.0);
-    s.button_padding = Vec2::new(11.0, 6.0);
-    s.window_margin = Margin::same(16);
-    s.menu_margin = Margin::same(8);
+    s.item_spacing = Vec2::new(espace::M, espace::S);
+    s.button_padding = Vec2::new(espace::L, espace::S);
+    s.window_margin = marge::egale(espace::XL);
+    s.menu_margin = marge::egale(espace::M);
     s.interact_size = Vec2::new(40.0, 26.0);
     s.slider_width = 170.0;
     s.slider_rail_height = 6.0;
@@ -83,11 +84,11 @@ fn install_fonts(ctx: &egui::Context) {
 fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
     use FontFamily::{Monospace, Proportional};
     [
-        (TextStyle::Heading, FontId::new(19.0, Proportional)),
-        (TextStyle::Body, FontId::new(14.0, Proportional)),
-        (TextStyle::Button, FontId::new(14.0, Proportional)),
-        (TextStyle::Small, FontId::new(11.5, Proportional)),
-        (TextStyle::Monospace, FontId::new(13.0, Monospace)),
+        (TextStyle::Heading, FontId::new(texte::GRAND, Proportional)),
+        (TextStyle::Body, FontId::new(texte::CORPS, Proportional)),
+        (TextStyle::Button, FontId::new(texte::CORPS, Proportional)),
+        (TextStyle::Small, FontId::new(texte::PETIT, Proportional)),
+        (TextStyle::Monospace, FontId::new(texte::COURANT, Monospace)),
     ]
     .into()
 }
@@ -103,8 +104,8 @@ fn visuals() -> egui::Visuals {
     v.code_bg_color = BG_DEEP;
 
     v.window_stroke = Stroke::new(1.0_f32, BORDER);
-    v.window_corner_radius = CornerRadius::same(14);
-    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_corner_radius = CornerRadius::same(rayon::XL);
+    v.menu_corner_radius = CornerRadius::same(rayon::XL);
     v.window_shadow = Shadow {
         offset: [0, 14],
         blur: 40,
@@ -136,7 +137,7 @@ fn visuals() -> egui::Visuals {
     //   `bg_fill`      → creux imposés (rail de curseur, case à cocher) ;
     //   `weak_bg_fill` → surfaces optionnelles (boutons, listes déroulantes).
     // Les confondre rendait le rail des curseurs invisible sur la fenêtre.
-    let radius = CornerRadius::same(6);
+    let radius = CornerRadius::same(rayon::M);
 
     // Texte et traits « non interactifs » : labels, séparateurs.
     let w = &mut v.widgets.noninteractive;

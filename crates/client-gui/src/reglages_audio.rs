@@ -6,6 +6,7 @@
 //! bas. Les choix courts se font en pastilles (tout se voit d'un coup), les
 //! marches/arrêts par interrupteur.
 
+use ki_ui::jetons::{espace, texte};
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
@@ -111,9 +112,9 @@ impl KiApp {
                             couleur,
                         );
                         if !engine_up {
-                            ui.label(RichText::new("vocal inactif").color(WARN).size(11.5));
+                            ui.label(RichText::new("vocal inactif").color(WARN).size(texte::PETIT));
                         } else if stats.micro_sature {
-                            ui.label(RichText::new("saturé").color(DANGER).size(11.5).strong());
+                            ui.label(RichText::new("saturé").color(DANGER).size(texte::PETIT).strong());
                         }
                     });
                 });
@@ -132,14 +133,14 @@ impl KiApp {
                         false,
                     );
                     if cfg!(windows) {
-                        ui.add_space(6.0);
+                        ui.add_space(espace::S);
                         if ui::button(ui, Icon::Gear, "Ouvrir le réglage du micro dans Windows")
                             .clicked()
                         {
                             ouvrir_reglage_micro_windows();
                         }
                     }
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                 }
 
                 ui::ligne(ui, "Tester", |ui| {
@@ -156,7 +157,7 @@ impl KiApp {
                         ui.label(
                             RichText::new("les autres ne t'entendent pas pendant l'essai")
                                 .color(WARN)
-                                .size(11.5),
+                                .size(texte::PETIT),
                         );
                     }
                     ui::precision(
@@ -166,7 +167,7 @@ impl KiApp {
                          retard la double et la fait paraître plus creuse qu'elle n'est. L'essai \
                          est privé — rien ne part vers le salon tant qu'il tourne.",
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(espace::M);
                     self.essai_voix_ui(ui, engine_up);
                 });
             },
@@ -245,7 +246,7 @@ impl KiApp {
                                     );
                                 }
                                 ki_voice::SILERO_CHARGEMENT if self.vad_neural => {
-                                    ui.label(RichText::new("chargement du réseau…").color(TEXT_DIM).size(11.5));
+                                    ui.label(RichText::new("chargement du réseau…").color(TEXT_DIM).size(texte::PETIT));
                                 }
                                 _ => {}
                             }
@@ -257,7 +258,7 @@ impl KiApp {
                                     self.vad_sens = pct / 100.0;
                                     *apply = true;
                                 }
-                                ui.add_space(4.0);
+                                ui.add_space(espace::XS);
                                 let prob = stats.vad_prob;
                                 let largeur = (ui.available_width() - 80.0).clamp(120.0, 300.0);
                                 ui.horizontal(|ui| {
@@ -271,7 +272,7 @@ impl KiApp {
                                     if engine_up {
                                         let (texte, couleur) =
                                             if stats.vad_ouvert { ("micro ouvert", SPEAK) } else { ("fermé", TEXT_DIM) };
-                                        ui.label(RichText::new(texte).color(couleur).size(11.5));
+                                        ui.label(RichText::new(texte).color(couleur).size(texte::PETIT));
                                     }
                                 });
                                 ui::precision(
@@ -320,7 +321,7 @@ impl KiApp {
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     ui.set_min_width(118.0);
-                                    ui.label(RichText::new(intitule).color(TEXT).size(12.5));
+                                    ui.label(RichText::new(intitule).color(TEXT).size(texte::COURANT));
                                 },
                             );
                             let actuel = choix.map(|k| k.label()).unwrap_or("aucun");
@@ -337,11 +338,11 @@ impl KiApp {
                                 ui.label(
                                     RichText::new("c'est la touche du push-to-talk")
                                         .color(WARN)
-                                        .size(11.5),
+                                        .size(texte::PETIT),
                                 );
                             }
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                     }
                     ui::precision(
                         ui,
@@ -433,7 +434,7 @@ impl KiApp {
                         *apply = true;
                     }
                     if self.agc {
-                        ui.add_space(6.0);
+                        ui.add_space(espace::S);
                         let mut pct = self.agc_target * 100.0;
                         if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
                             self.agc_target = pct / 100.0;
@@ -475,7 +476,7 @@ impl KiApp {
                              0 % la désactive.",
                         );
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     self.calibration_ui(ui, engine_up);
                 });
 
@@ -537,12 +538,12 @@ impl KiApp {
 
         // --- Avancé ---------------------------------------------------
         egui::CollapsingHeader::new(
-            RichText::new("Avancé — moteur et dépannage").color(TEXT_DIM).size(13.0),
+            RichText::new("Avancé — moteur et dépannage").color(TEXT_DIM).size(texte::CORPS),
         )
         .id_salt("reglages_audio_avance")
         .default_open(false)
         .show(ui, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
                 if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
                     engine.reset_audio_devices();
@@ -559,7 +560,7 @@ impl KiApp {
                  sans toucher au câble.",
             );
             if cfg!(windows) {
-                ui.add_space(12.0);
+                ui.add_space(espace::L);
                 if ui::interrupteur(ui, &mut self.native_audio, "Moteur audio natif (recommandé)")
                     .changed()
                 {
@@ -572,7 +573,7 @@ impl KiApp {
                      qu'avant.",
                 );
                 if self.native_audio {
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                     if ui::interrupteur(ui, &mut self.raw_mic, "Micro brut").changed() {
                         *restart = true;
                     }
@@ -581,7 +582,7 @@ impl KiApp {
                         "Court-circuite les effets du casque (Sonar, Nahimic, Synapse…) sur \
                          le micro. À essayer si le micro bugue quand un jeu se lance.",
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                     if ui::interrupteur(ui, &mut self.comms_mic, "Partager le micro avec la voix du jeu")
                         .changed()
                     {
@@ -593,7 +594,7 @@ impl KiApp {
                          Windows peut baisser les autres sons pendant le vocal (Panneau son → \
                          Communications → « Ne rien faire »).",
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                     if ui::interrupteur(ui, &mut self.robust_output, "Sortie audio robuste")
                         .changed()
                     {
@@ -654,7 +655,7 @@ impl KiApp {
                     ui.label(
                         RichText::new(format!("parle comme en partie… {reste:.0} s"))
                             .color(TEXT_DIM)
-                            .size(12.0),
+                            .size(texte::COURANT),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         geste = Some(Geste::Arreter);
@@ -752,7 +753,7 @@ impl KiApp {
             ui::precision(ui, "Pas assez de voix pour juger de ta clarté : parle pendant les 5 secondes.");
             return;
         };
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         courbe_de_voix(ui, &brute.ecarts_db(), &envoyee.ecarts_db());
         let (presence, graves) = (envoyee.presence_db(), envoyee.graves_db());
         let (mot, couleur) = if presence >= CLAIRE_DB {
@@ -763,14 +764,14 @@ impl KiApp {
             ("étouffée", DANGER)
         };
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Ta voix chez les autres :").color(TEXT_DIM).size(12.0));
-            ui.label(RichText::new(mot).color(couleur).size(12.0).strong());
+            ui.label(RichText::new("Ta voix chez les autres :").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(RichText::new(mot).color(couleur).size(texte::COURANT).strong());
             ui.label(
                 RichText::new(format!(
                     "aigus {presence:+.0} dB, graves {graves:+.0} dB par rapport à une voix moyenne"
                 ))
                 .color(TEXT_DIM)
-                .size(12.0),
+                .size(texte::COURANT),
             );
         });
         // Qui retire les aigus : le micro, l'égaliseur, ou le reste.
@@ -824,7 +825,7 @@ impl KiApp {
                  l'entendre.",
             );
         } else if a_corriger {
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             if ui::button(ui, Icon::Sliders, "Corriger ma voix")
                 .on_hover_text(
                     "règle l'égaliseur de ta voix sur cette mesure, à la place du réglage actuel",
@@ -841,7 +842,7 @@ impl KiApp {
                 ui.label(
                     RichText::new("Les deux versions sont gardées en WAV, remplacées au prochain essai.")
                         .color(TEXT_FAINT)
-                        .size(11.5),
+                        .size(texte::PETIT),
                 );
                 if ui::icon_button(ui, Icon::Download, "Ouvrir le dossier").clicked() {
                     crate::soundboard::ouvrir_dossier(&dossier);
@@ -891,7 +892,7 @@ impl KiApp {
                     ui.label(
                         RichText::new(format!("chut… ambiance {:.1} %", peak * 100.0))
                             .color(TEXT_DIM)
-                            .size(12.0),
+                            .size(texte::COURANT),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         self.calibrating = None;
@@ -915,7 +916,7 @@ fn courbe_de_voix(ui: &mut egui::Ui, brute: &[f32; NB_TIERS], envoyee: &[f32; NB
     let x = |f: f32| rect.left() + (f.log10() - fmin) / (fmax - fmin) * rect.width();
     let y = |db: f32| rect.bottom() - (db.clamp(dmin, dmax) - dmin) / (dmax - dmin) * rect.height();
     p.rect_filled(rect, 8.0, theme::BG_DEEP);
-    let police = egui::FontId::proportional(10.0);
+    let police = egui::FontId::proportional(texte::MINUSCULE);
     p.rect_filled(
         egui::Rect::from_x_y_ranges(x(2_000.0)..=x(6_300.0), rect.y_range()),
         0.0,
@@ -948,8 +949,8 @@ fn courbe_de_voix(ui: &mut egui::Ui, brute: &[f32; NB_TIERS], envoyee: &[f32; NB
     p.add(egui::Shape::line(points(brute), Stroke::new(1.5_f32, theme::alpha(INFO, 200))));
     p.add(egui::Shape::line(points(envoyee), Stroke::new(2.0_f32, ACCENT)));
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("— ton micro brut").color(INFO).size(11.5));
-        ui.label(RichText::new("— ce que les autres entendent").color(ACCENT).size(11.5));
+        ui.label(RichText::new("— ton micro brut").color(INFO).size(texte::PETIT));
+        ui.label(RichText::new("— ce que les autres entendent").color(ACCENT).size(texte::PETIT));
     });
 }
 
@@ -1001,7 +1002,7 @@ impl KiApp {
                  l'entendre.",
             ),
             _ => {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let libelle = if self.agc { "Mettre ma voix au niveau des autres" } else { "Rallumer le gain automatique" };
                 if ui::button(ui, Icon::Volume, libelle)
                     .on_hover_text(
@@ -1043,13 +1044,13 @@ fn volume_en_mots(ui: &mut egui::Ui, ecart_db: f32) {
         ("fort", WARN)
     };
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Le volume de ta voix chez les autres :").color(TEXT_DIM).size(12.0));
-        ui.label(RichText::new(mot).color(couleur).size(12.0).strong());
+        ui.label(RichText::new("Le volume de ta voix chez les autres :").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(RichText::new(mot).color(couleur).size(texte::COURANT).strong());
         if (-30.0..=-5.0).contains(&ecart_db) || ecart_db > 4.0 {
             ui.label(
                 RichText::new(format!("{ecart_db:+.0} dB par rapport à une voix réglée par défaut"))
                     .color(TEXT_DIM)
-                    .size(12.0),
+                    .size(texte::COURANT),
             );
         }
     });

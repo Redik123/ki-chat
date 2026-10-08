@@ -17,6 +17,7 @@
 //!
 //! La bande de gauche : un glissé règle le volume général.
 
+use ki_ui::jetons::texte;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1083,7 +1084,7 @@ impl KiApp {
         ui::interrupteur(ui, &mut self.loupedeck_etat.actif, "Activer le Loupedeck Live");
         if self.loupedeck_etat.actif {
             let (texte, couleur, detail) = self.statut_loupedeck();
-            let r = ui.label(RichText::new(texte).color(couleur).size(11.5));
+            let r = ui.label(RichText::new(texte).color(couleur).size(texte::PETIT));
             if let Some(e) = detail {
                 r.on_hover_text(e);
             }

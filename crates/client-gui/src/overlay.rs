@@ -12,6 +12,7 @@
 //! dans le jeu) et qu'on est en salon vocal ; elle se repeint quand ça
 //! change, à dix fois par seconde pendant qu'on parle, jamais plus.
 
+use ki_ui::jetons::{espace, rayon, texte};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -418,7 +419,7 @@ impl Overlay {
         // Sans pseudo : un rond par personne, rien d'autre. Avec : une
         // pilule ajustée à son pseudo — jamais un bloc.
         let avec_pseudo = self.pseudo;
-        let police = egui::FontId::proportional(12.5);
+        let police = egui::FontId::proportional(texte::COURANT);
         let largeurs: Vec<f32> = if avec_pseudo {
             affichees
                 .iter()
@@ -548,7 +549,7 @@ impl Overlay {
                     let voile = if *parle { 140 } else { 80 };
                     painter.rect_filled(
                         pilule,
-                        CornerRadius::same(14),
+                        CornerRadius::same(rayon::PILULE),
                         Color32::from_rgba_unmultiplied(0, 0, 0, voile),
                     );
                     let avatar = Rect::from_min_size(
@@ -584,7 +585,7 @@ impl Overlay {
                     );
                     painter.rect_filled(
                         pilule,
-                        CornerRadius::same(14),
+                        CornerRadius::same(rayon::PILULE),
                         Color32::from_rgba_unmultiplied(0, 0, 0, 150),
                     );
                     painter.text(
@@ -634,7 +635,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
     }
     if o.actif {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("position").color(TEXT_DIM).size(12.5));
+            ui.label(RichText::new("position").color(TEXT_DIM).size(texte::COURANT));
             egui::ComboBox::from_id_salt("overlay_coin")
                 .width(170.0)
                 .selected_text(RichText::new(o.coin.libelle()).color(TEXT))
@@ -666,7 +667,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
         }
     }
     if o.exclusif {
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         ui::banner(
             ui,
             Tone::Warn,

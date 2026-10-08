@@ -9,6 +9,7 @@
 //! force. L'ancre est rangée par micro : une autre carte son, c'est un autre
 //! niveau, et c'est à réapprendre.
 
+use ki_ui::jetons::{espace, texte};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -219,7 +220,7 @@ impl KiApp {
         if self.proximite_force == PROXIMITE_OFF {
             return;
         }
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
 
         // Ce que le moteur sait de sa voix.
         let cle = cle_micro(self.pref_input.as_deref());
@@ -237,8 +238,8 @@ impl KiApp {
             ),
             (true, _, None) => (TEXT_DIM, "en attente du micro".to_owned()),
         };
-        ui.label(RichText::new(etat_texte).color(etat_couleur).size(12.0));
-        ui.add_space(2.0);
+        ui.label(RichText::new(etat_texte).color(etat_couleur).size(texte::COURANT));
+        ui.add_space(espace::XXS);
         ui.horizontal(|ui| {
             let (couleur, mot) = if !engine_up || stats.prox_niveau_db <= JAUGE_MIN_DB + 5.0 {
                 (theme::BG_ACTIVE, "")
@@ -251,7 +252,7 @@ impl KiApp {
             };
             jauge_db(ui, stats.prox_niveau_db, stats.prox_seuil_db, stats.prox_reference_db, couleur);
             if !mot.is_empty() {
-                ui.label(RichText::new(mot).color(couleur).size(11.5).strong());
+                ui.label(RichText::new(mot).color(couleur).size(texte::PETIT).strong());
             }
         });
         ui::precision(
@@ -263,12 +264,12 @@ impl KiApp {
             ui.label(
                 RichText::new(format!("en ce moment : {:+.0} dB", 20.0 * stats.prox_gain.max(1e-4).log10()))
                     .color(TEXT_DIM)
-                    .size(11.5),
+                    .size(texte::PETIT),
             );
         }
 
         // Les deux mesures.
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         match self.mesure_prox.as_ref().map(|m| (m.quoi, m.debut)) {
             Some((quoi, debut)) => {
                 let progression = (debut.elapsed().as_secs_f32() / DUREE.as_secs_f32()).min(1.0);
@@ -281,7 +282,7 @@ impl KiApp {
                             Quoi::Elle => "tais-toi, elle parle…",
                         })
                         .color(TEXT_DIM)
-                        .size(12.0),
+                        .size(texte::COURANT),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         self.mesure_prox = None;
@@ -316,8 +317,8 @@ impl KiApp {
             }
         }
         if let Some(v) = &self.mesure_prox_verdict {
-            ui.add_space(4.0);
-            ui.label(RichText::new(v).color(TEXT_DIM).size(12.0));
+            ui.add_space(espace::XS);
+            ui.label(RichText::new(v).color(TEXT_DIM).size(texte::COURANT));
         }
         if ancre.is_none() {
             ui::precision(

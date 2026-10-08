@@ -7,6 +7,7 @@
 //! est fermé ; on l'entend aussi chez soi. Le protocole n'en sait rien,
 //! c'est de la voix — et le serveur le relaie et le coupe comme telle.
 
+use ki_ui::jetons::{espace, rayon, texte};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -166,8 +167,8 @@ impl Soundboard {
                         .show_separator_line(false)
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(m).color(TEXT_FAINT).size(11.0));
+                            ui.add_space(espace::XS);
+                            ui.label(RichText::new(m).color(TEXT_FAINT).size(texte::PETIT));
                         });
                 }
                 ui::hint(
@@ -176,7 +177,7 @@ impl Soundboard {
                      dans ton salon vocal, mixé à ta voix ou seul si ton micro est fermé. \
                      Tout le monde l'entend, toi aussi.",
                 );
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui.horizontal_wrapped(|ui| {
                     let mut pct = self.volume * 100.0;
                     if ui
@@ -207,7 +208,7 @@ impl Soundboard {
                     }
                 });
                 if !en_vocal {
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                     ui::banner(
                         ui,
                         Tone::Warn,
@@ -215,9 +216,9 @@ impl Soundboard {
                         false,
                     );
                 }
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 if self.en_cours {
-                    ui.label(RichText::new("chargement des sons…").color(TEXT_DIM).size(12.0));
+                    ui.label(RichText::new("chargement des sons…").color(TEXT_DIM).size(texte::COURANT));
                 } else if self.sons.is_empty() {
                     let dossier = Self::dossiers()
                         .into_iter()
@@ -227,13 +228,13 @@ impl Soundboard {
                     ui.label(
                         RichText::new("Aucun son. Dépose des .wav ou des .mp3 dans :")
                             .color(TEXT_DIM)
-                            .size(12.5),
+                            .size(texte::COURANT),
                     );
-                    ui.label(RichText::new(dossier).color(TEXT).size(11.5).monospace());
+                    ui.label(RichText::new(dossier).color(TEXT).size(texte::PETIT).monospace());
                     ui.label(
                         RichText::new("puis « Recharger ». Trente secondes au plus par son.")
                             .color(TEXT_FAINT)
-                            .size(11.5),
+                            .size(texte::PETIT),
                     );
                 } else {
                     // Les touches 1 à 9 : les neuf premiers sons, tant
@@ -268,11 +269,11 @@ impl Soundboard {
                                 } else {
                                     nom
                                 };
-                                let bouton = egui::Button::new(RichText::new(libelle).size(12.5).color(TEXT))
+                                let bouton = egui::Button::new(RichText::new(libelle).size(texte::COURANT).color(TEXT))
                                     .min_size(Vec2::new(124.0, 44.0))
                                     .fill(theme::BG_RAISED)
                                     .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                                    .corner_radius(egui::CornerRadius::same(9));
+                                    .corner_radius(egui::CornerRadius::same(rayon::L));
                                 let r = ui
                                     .add_enabled(en_vocal, bouton)
                                     .on_hover_text(format!("{} · {:.1} s", son.nom, son.duree_s()));

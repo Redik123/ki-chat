@@ -4,6 +4,7 @@
 //! ailleurs. Aujourd'hui : le Loupedeck Live, l'overlay en jeu, et le
 //! bouton de la soundboard (visible d'origine pour qui a déjà des sons).
 
+use ki_ui::jetons::{espace, texte};
 use eframe::egui::{self, RichText};
 
 use crate::icons::Icon;
@@ -20,9 +21,9 @@ impl KiApp {
                  peuvent changer d'une version à l'autre.",
             )
             .color(TEXT_FAINT)
-            .size(12.0),
+            .size(texte::COURANT),
         );
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::section(
             ui,

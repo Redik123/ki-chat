@@ -19,6 +19,7 @@
 //! (`ki_voice::journal`, lignes « clips : atelier … »), pour que le prochain
 //! rapport dise autre chose que « ça charge à l'infini ».
 
+use ki_ui::jetons::{espace, rayon, texte};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -577,13 +578,13 @@ impl Atelier {
                 );
                 {
                     let ui = &mut haut_ui;
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = espace::S;
                     ui::glyph(ui, Icon::Pencil, 16.0, TEXT_DIM);
-                    ui.label(RichText::new("Atelier").color(TEXT_DIM).size(13.0));
-                    ui.label(RichText::new(&p.nom).color(TEXT).size(14.0).strong());
+                    ui.label(RichText::new("Atelier").color(TEXT_DIM).size(texte::CORPS));
+                    ui.label(RichText::new(&p.nom).color(TEXT).size(texte::CORPS).strong());
                     if let Some((texte, _)) = &info {
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(texte).color(ACCENT).size(12.5));
+                        ui.add_space(espace::L);
+                        ui.label(RichText::new(texte).color(ACCENT).size(texte::COURANT));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
@@ -1467,7 +1468,7 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
             zone.center() + Vec2::new(0.0, 28.0),
             egui::Align2::CENTER_CENTER,
             "ouverture du clip…",
-            egui::FontId::proportional(13.0),
+            egui::FontId::proportional(texte::CORPS),
             TEXT_FAINT,
         );
         return;
@@ -1479,7 +1480,7 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     };
     let ajuste = (zone.width() / rapport).min(zone.height());
     let dest = Rect::from_center_size(zone.center(), Vec2::new(ajuste * rapport, ajuste));
-    painter.rect_filled(dest, CornerRadius::same(4), Color32::BLACK);
+    painter.rect_filled(dest, CornerRadius::same(rayon::S), Color32::BLACK);
     let position = p.lecture.as_ref().map(|l| l.position_ms()).unwrap_or(0);
     let fenetre = ((p.hauteur * 9 / 16) & !1) as f32;
     let libre = (l - fenetre).max(0.0);
@@ -1558,7 +1559,7 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     }
     painter.rect_stroke(
         dest,
-        CornerRadius::same(4),
+        CornerRadius::same(rayon::S),
         egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
         egui::StrokeKind::Outside,
     );
@@ -1629,7 +1630,7 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     );
     {
         let ui = &mut ui_c;
-        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.spacing_mut().item_spacing.x = espace::M;
         let icone = if en_lecture { Icon::Pause } else { Icon::Play };
         if ui::icon_button(ui, icone, "Lecture / pause (espace)").clicked() {
             basculer_lecture(p);
@@ -1637,10 +1638,10 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
         ui.label(
             RichText::new(format!("{} / {}", mmss(position), mmss(p.duree_ms)))
                 .color(TEXT_DIM)
-                .size(12.0)
+                .size(texte::COURANT)
                 .monospace(),
         );
-        ui.add_space(12.0);
+        ui.add_space(espace::L);
         ui.label(
             RichText::new(format!(
                 "coupe : {} → {}  ({:.1} s)",
@@ -1649,7 +1650,7 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
                 (p.fin_ms.saturating_sub(p.debut_ms)) as f32 / 1000.0
             ))
             .color(TEXT)
-            .size(12.0),
+            .size(texte::COURANT),
         );
         if ui
             .small_button("début ici")
@@ -1676,7 +1677,7 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     }
 
     // Les vignettes.
-    painter.rect_filled(bande, CornerRadius::same(4), theme::BG_DEEP);
+    painter.rect_filled(bande, CornerRadius::same(rayon::S), theme::BG_DEEP);
     if !p.textures_vignettes.is_empty() {
         let n = p.textures_vignettes.len() as f32;
         let largeur = bande.width() / n;
@@ -1744,7 +1745,7 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     ] {
         painter.rect_filled(
             rect.shrink2(Vec2::new(4.0, 0.0)),
-            CornerRadius::same(3),
+            CornerRadius::same(rayon::S),
             if actif { Color32::WHITE } else { ACCENT },
         );
     }
@@ -1794,7 +1795,7 @@ fn panneau_reglages(
     avis: &Arc<Mutex<Option<String>>>,
 ) -> Actions {
     let mut actions = Actions::default();
-    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.spacing_mut().item_spacing.y = espace::S;
 
     ui::section_label(ui, "Format");
     ui.horizontal(|ui| {
@@ -1802,7 +1803,7 @@ fn panneau_reglages(
         ui.selectable_value(&mut p.format, Format::Original, "Original 16:9");
     });
     if p.format == Format::Telephone {
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         ui::field_label(ui, "Mise en page");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut p.cadre, Cadre::Recadre, "Recadré");
@@ -1835,7 +1836,7 @@ fn panneau_reglages(
                         ui.label(
                             RichText::new("glisser l'aperçu déplace")
                                 .color(TEXT_FAINT)
-                                .size(11.5),
+                                .size(texte::PETIT),
                         );
                         ui.selectable_value(&mut p.glisse_fin, false, "le début");
                         ui.selectable_value(&mut p.glisse_fin, true, "la fin");
@@ -1884,7 +1885,7 @@ fn panneau_reglages(
         ui::hint(ui, "coupé, 1080p au plus, tel quel");
     }
 
-    ui.add_space(8.0);
+    ui.add_space(espace::M);
     ui::section_label(ui, "Titre");
     ui.add(
         egui::TextEdit::singleline(&mut p.titre)
@@ -1901,7 +1902,7 @@ fn panneau_reglages(
         });
     }
 
-    ui.add_space(8.0);
+    ui.add_space(espace::M);
     ui::section_label(ui, "Son");
     let pistes: Vec<String> = p
         .fiche
@@ -1929,7 +1930,7 @@ fn panneau_reglages(
         }
     }
 
-    ui.add_space(8.0);
+    ui.add_space(espace::M);
     ui::section_label(ui, "Cadence");
     ui.horizontal(|ui| {
         ui.selectable_value(&mut p.cadence, 0, "source");
@@ -1937,9 +1938,9 @@ fn panneau_reglages(
         ui.selectable_value(&mut p.cadence, 60, "60");
     });
 
-    ui.add_space(12.0);
+    ui.add_space(espace::L);
     ui::hairline(ui);
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     match &p.export {
         Export::EnCours(s) => {
             let s = s.lock().unwrap().clone();
@@ -1951,7 +1952,7 @@ fn panneau_reglages(
             ui.label(
                 RichText::new(format!("échec : {e}"))
                     .color(DANGER)
-                    .size(12.0),
+                    .size(texte::COURANT),
             );
         }
         _ => {}
@@ -1964,7 +1965,7 @@ fn panneau_reglages(
         ui.label(
             RichText::new("connecte-toi pour exporter")
                 .color(WARN)
-                .size(12.0),
+                .size(texte::COURANT),
         );
     }
     ui.add_enabled_ui(peut_exporter, |ui| {
@@ -1979,7 +1980,7 @@ fn panneau_reglages(
 
     if let Export::Pret { fichier, avance_ms } = &p.export {
         let (fichier, avance_ms) = (fichier.clone(), *avance_ms);
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
         ui::section_label(ui, "C'est prêt");
         ui::hint(
             ui,
@@ -2062,7 +2063,7 @@ fn panneau_reglages(
                     annuler_repartage = true;
                 }
                 if envoi {
-                    ui.label(RichText::new("envoi…").color(TEXT_DIM).size(12.0));
+                    ui.label(RichText::new("envoi…").color(TEXT_DIM).size(texte::COURANT));
                 }
             });
         }
@@ -2083,7 +2084,7 @@ fn panneau_reglages(
             let cote = 200.0;
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(cote), Sense::hover());
             ui.painter()
-                .rect_filled(rect, CornerRadius::same(6), Color32::WHITE);
+                .rect_filled(rect, CornerRadius::same(rayon::M), Color32::WHITE);
             ui.painter().image(
                 qr.texture.id(),
                 rect.shrink(8.0),

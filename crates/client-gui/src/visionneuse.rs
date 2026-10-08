@@ -13,6 +13,7 @@
 //! vers la carte. L'interface ne fait que prendre la dernière image et la
 //! peindre. Sans piste audio, l'horloge murale tient lieu de son.
 
+use ki_ui::jetons::{espace, rayon, texte};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -726,20 +727,20 @@ impl Visionneuse {
                 );
                 {
                     let ui = &mut haut_ui;
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = espace::S;
                     let icone = if est_video { Icon::Film } else { Icon::Copy };
                     ui::glyph(ui, icone, 16.0, TEXT_DIM);
-                    ui.label(RichText::new(cible.nom()).color(TEXT).size(14.0).strong());
+                    ui.label(RichText::new(cible.nom()).color(TEXT).size(texte::CORPS).strong());
                     if self.liste.len() > 1 {
                         ui.label(
                             RichText::new(format!("{} / {}", self.index + 1, self.liste.len()))
                                 .color(TEXT_FAINT)
-                                .size(12.0),
+                                .size(texte::COURANT),
                         );
                     }
                     if let Some((texte, _)) = &self.info {
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(texte).color(ACCENT).size(12.5));
+                        ui.add_space(espace::L);
+                        ui.label(RichText::new(texte).color(ACCENT).size(texte::COURANT));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
@@ -812,7 +813,7 @@ impl Visionneuse {
                             "molette : zoom · glisser : déplacer · double-clic : ajuster",
                         )
                         .color(TEXT_FAINT)
-                        .size(11.5),
+                        .size(texte::PETIT),
                     );
                     if gauche {
                         aller = -1;
@@ -857,7 +858,7 @@ impl Visionneuse {
                 contenu.center(),
                 egui::Align2::CENTER_CENTER,
                 "cette image ne vient pas de notre serveur",
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(texte::CORPS),
                 TEXT_DIM,
             );
             return contenu;
@@ -881,7 +882,7 @@ impl Visionneuse {
                     contenu.center(),
                     egui::Align2::CENTER_CENTER,
                     "image illisible",
-                    egui::FontId::proportional(13.0),
+                    egui::FontId::proportional(texte::CORPS),
                     TEXT_DIM,
                 );
                 return contenu;
@@ -921,7 +922,7 @@ impl Visionneuse {
                 egui::pos2(contenu.right() - 10.0, contenu.bottom() - 8.0),
                 egui::Align2::RIGHT_BOTTOM,
                 format!("{:.0} %", self.zoom * ajuste * 100.0),
-                egui::FontId::proportional(11.5),
+                egui::FontId::proportional(texte::PETIT),
                 TEXT_FAINT,
             );
         }
@@ -948,7 +949,7 @@ impl Visionneuse {
                 contenu.center(),
                 egui::Align2::CENTER_CENTER,
                 format!("lecture impossible : {e}"),
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(texte::CORPS),
                 DANGER,
             );
         } else if let Some(t) = &v.telechargement {
@@ -961,14 +962,14 @@ impl Visionneuse {
                 TEXT_FAINT,
             );
             let barre = Rect::from_center_size(centre + Vec2::new(0.0, 8.0), Vec2::new(240.0, 6.0));
-            painter.rect_filled(barre, CornerRadius::same(3), theme::BG_ACTIVE);
+            painter.rect_filled(barre, CornerRadius::same(rayon::S), theme::BG_ACTIVE);
             let texte = match t.avancement() {
                 Some(p) => {
                     let plein = Rect::from_min_size(
                         barre.min,
                         Vec2::new(barre.width() * p, barre.height()),
                     );
-                    painter.rect_filled(plein, CornerRadius::same(3), ACCENT);
+                    painter.rect_filled(plein, CornerRadius::same(rayon::S), ACCENT);
                     format!("téléchargement… {:.0} %", p * 100.0)
                 }
                 None => {
@@ -980,7 +981,7 @@ impl Visionneuse {
                 centre + Vec2::new(0.0, 28.0),
                 egui::Align2::CENTER_CENTER,
                 texte,
-                egui::FontId::proportional(12.5),
+                egui::FontId::proportional(texte::COURANT),
                 TEXT_DIM,
             );
             ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -994,7 +995,7 @@ impl Visionneuse {
     /// La barre de lecture : lire/pause, temps, curseur, volume, boucle.
     fn barre_video(&mut self, ui: &mut egui::Ui, espace: bool, gauche: bool, droite: bool) {
         let Some(v) = self.video.as_mut() else { return };
-        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.spacing_mut().item_spacing.x = espace::M;
         let (position, duree, en_lecture, prete) = match &v.lecture {
             Some(l) => (l.position_ms(), l.duree_ms(), l.en_lecture(), l.prete()),
             None => (0, 0, false, false),
@@ -1016,7 +1017,7 @@ impl Visionneuse {
         ui.label(
             RichText::new(format!("{} / {}", mmss(affichee), mmss(duree)))
                 .color(TEXT_DIM)
-                .size(12.0)
+                .size(texte::COURANT)
                 .monospace(),
         );
 
@@ -1027,13 +1028,13 @@ impl Visionneuse {
             ui.allocate_exact_size(Vec2::new(largeur, 24.0), Sense::click_and_drag());
         let piste = Rect::from_center_size(barre.center(), Vec2::new(barre.width(), 6.0));
         ui.painter()
-            .rect_filled(piste, CornerRadius::same(3), theme::BG_ACTIVE);
+            .rect_filled(piste, CornerRadius::same(rayon::S), theme::BG_ACTIVE);
         if duree > 0 {
             let p = (affichee as f32 / duree as f32).clamp(0.0, 1.0);
             let plein =
                 Rect::from_min_size(piste.min, Vec2::new(piste.width() * p, piste.height()));
             ui.painter()
-                .rect_filled(plein, CornerRadius::same(3), ACCENT);
+                .rect_filled(plein, CornerRadius::same(rayon::S), ACCENT);
             let poignee = egui::pos2(piste.left() + piste.width() * p, piste.center().y);
             let rayon = if reponse.hovered() || reponse.dragged() {
                 7.0

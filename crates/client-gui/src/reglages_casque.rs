@@ -7,6 +7,7 @@
 //! S'y ajoute ce que ki-chat fait lui-même : le retour de sa voix dans le
 //! casque, et l'égaliseur des voix qu'on entend.
 
+use ki_ui::jetons::{espace, marge, texte};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
@@ -223,10 +224,10 @@ impl KiApp {
                     "l'essentiel, en préréglages"
                 })
                 .color(TEXT_FAINT)
-                .size(11.5),
+                .size(texte::PETIT),
             );
         });
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         self.carte_casque(ui, voice, &etat);
 
@@ -278,7 +279,7 @@ impl KiApp {
                         } else {
                             format!("{crete_db:+.0} dB")
                         };
-                        ui.label(RichText::new(texte).color(TEXT_DIM).size(11.5));
+                        ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
                     });
                     ui::precision(
                         ui,
@@ -313,11 +314,11 @@ impl KiApp {
                         ),
                         false,
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                 }
                 if let Some(e) = &etat.derniere_erreur {
                     ui::banner(ui, Tone::Warn, e, false);
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                 }
                 // La position dans la plage de la carte : c'est elle qui dit
                 // « au maximum », pas le chiffre en dB.
@@ -388,7 +389,7 @@ impl KiApp {
                         ),
                         false,
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(espace::M);
                 }
                 ui::ligne(ui, "Calibrer", |ui| {
                     self.calibrage_ui(ui, voice, total, etat.topologie_lue);
@@ -466,7 +467,7 @@ impl KiApp {
                          demande de redémarrer), puis clique sur Actualiser.",
                         false,
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                     ui.horizontal(|ui| {
                         if ui::button(ui, Icon::Download, "Télécharger VB-Cable").clicked() {
                             ui.ctx().open_url(egui::OpenUrl::new_tab("https://vb-audio.com/Cable/"));
@@ -494,7 +495,7 @@ impl KiApp {
                         } else {
                             (WARN, "ouverture du câble…")
                         };
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                         ui.horizontal(|ui| ui::status_dot(ui, couleur, texte, 10.0));
                     }
                     ui::precision(
@@ -545,7 +546,7 @@ impl KiApp {
                     ui.label(
                         RichText::new(format!("Prends « {entree} » comme micro."))
                             .color(TEXT)
-                            .size(12.5),
+                            .size(texte::COURANT),
                     );
                     ui::precision(
                         ui,
@@ -614,7 +615,7 @@ impl KiApp {
                         *apply = true;
                     }
                     if self.retour_voix {
-                        ui.add_space(6.0);
+                        ui.add_space(espace::S);
                         let mut pct = self.retour_voix_volume * 100.0;
                         if curseur(ui, &mut pct, 0.0..=150.0, " %", Some(1.0)) {
                             self.retour_voix_volume = pct / 100.0;
@@ -624,7 +625,7 @@ impl KiApp {
                             ui.label(
                                 RichText::new("actif dès que tu es connecté à un serveur")
                                     .color(WARN)
-                                    .size(11.5),
+                                    .size(texte::PETIT),
                             );
                         }
                     }
@@ -752,9 +753,9 @@ impl KiApp {
         ui::card(ui, |ui| {
             ui.horizontal(|ui| {
                 dessiner_casque(ui, Vec2::new(190.0, 150.0), voix, micro, sature, coupe);
-                ui.add_space(14.0);
+                ui.add_space(espace::XL);
                 ui.vertical(|ui| {
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                     let defaut = etat
                         .sortie_nom
                         .as_deref()
@@ -764,26 +765,26 @@ impl KiApp {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.casque_nom)
                             .hint_text(RichText::new(defaut).color(TEXT_DIM))
-                            .font(egui::FontId::proportional(20.0))
+                            .font(egui::FontId::proportional(texte::GRAND))
                             .text_color(TEXT)
                             .desired_width(ui.available_width().min(240.0))
-                            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 2))),
+                            .frame(egui::Frame::new().inner_margin(marge::symetrique(espace::XS, espace::XXS))),
                     )
                     .on_hover_text("clique pour lui donner son nom");
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                     for (icone, nom) in [(Icon::Headphones, &etat.sortie_nom), (Icon::Mic, &etat.entree_nom)] {
                         if let Some(nom) = nom {
                             ui.horizontal_wrapped(|ui| {
                                 ui::glyph(ui, icone, 14.0, TEXT_DIM);
                                 let (point, carte) = scinder_nom(nom);
-                                ui.label(RichText::new(point).color(TEXT).size(12.5));
+                                ui.label(RichText::new(point).color(TEXT).size(texte::COURANT));
                                 if let Some(carte) = carte {
-                                    ui.label(RichText::new(format!("sur {carte}")).color(TEXT_FAINT).size(12.0));
+                                    ui.label(RichText::new(format!("sur {carte}")).color(TEXT_FAINT).size(texte::COURANT));
                                 }
                             });
                         }
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(espace::M);
                     let (couleur, texte) = if !voice.engine_up {
                         (TEXT_FAINT, "vocal inactif")
                     } else if coupe {
@@ -799,7 +800,7 @@ impl KiApp {
                 });
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(espace::L);
     }
 
     /// Le calibrage des gains : le bouton, sa progression, son verdict.
@@ -858,7 +859,7 @@ impl KiApp {
                     } else {
                         format!("parle fort… crête {:+.0} dB", en_db(crete))
                     };
-                    ui.label(RichText::new(texte).color(TEXT_DIM).size(12.0));
+                    ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::COURANT));
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         self.calibrage_micro = None;
                     }
@@ -867,7 +868,7 @@ impl KiApp {
         }
         if let Some((quand, texte)) = &self.calibrage_verdict {
             if quand.elapsed() < VERDICT {
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui::banner(ui, Tone::Info, texte, false);
             }
         }

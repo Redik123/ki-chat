@@ -17,6 +17,7 @@
 //! sort du plein écran, puis rattache ; F11 et le double-clic basculent le
 //! plein écran ; la croix quitte le visionnage, comme dans ki-chat.
 
+use ki_ui::jetons::{espace, texte};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -198,7 +199,7 @@ impl Etat {
                             dispo.center(),
                             egui::Align2::CENTER_CENTER,
                             "en attente de la première image…",
-                            egui::FontId::proportional(16.0),
+                            egui::FontId::proportional(texte::TITRE),
                             TEXT_DIM,
                         );
                     }
@@ -229,12 +230,12 @@ impl Etat {
                 {
                     d.basculer_plein = true;
                 }
-                ligne.add_space(8.0);
+                ligne.add_space(espace::M);
                 if self.meme_machine {
                     ligne.label(
                         RichText::new("son du jeu coupé : le streamer est sur ce PC")
                             .color(TEXT_FAINT)
-                            .size(11.5),
+                            .size(texte::PETIT),
                     );
                 } else {
                     let mut pct = self.volume * 100.0;
@@ -251,7 +252,7 @@ impl Etat {
                     }
                 }
                 if !etat.is_empty() {
-                    ligne.label(RichText::new(etat).color(TEXT_FAINT).size(11.0).monospace());
+                    ligne.label(RichText::new(etat).color(TEXT_FAINT).size(texte::PETIT).monospace());
                 }
             });
 

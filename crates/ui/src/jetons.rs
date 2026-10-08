@@ -112,6 +112,22 @@ pub mod espace {
     pub const XXL: f32 = 24.0;
 }
 
+/// Les marges intérieures (cadres, cartes, bulles), faites des
+/// espacements — egui les veut en entiers.
+pub mod marge {
+    use egui::Margin;
+
+    /// La même marge des quatre côtés.
+    pub fn egale(espace: f32) -> Margin {
+        Margin::same(espace as i8)
+    }
+
+    /// Une marge à gauche et à droite, une autre en haut et en bas.
+    pub fn symetrique(horizontale: f32, verticale: f32) -> Margin {
+        Margin::symmetric(horizontale as i8, verticale as i8)
+    }
+}
+
 /// Les rayons d'angle, en points (ceux d'egui sont des entiers).
 pub mod rayon {
     /// Pastilles, badges, petites cases.

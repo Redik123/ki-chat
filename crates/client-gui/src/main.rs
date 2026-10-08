@@ -16,6 +16,7 @@ mod loupedeck;
 mod loupedeck_config;
 mod loupedeck_page;
 mod loupedeck_ui;
+use ki_ui::jetons::{espace, marge, rayon, texte};
 use ki_core::markup;
 mod medailles;
 mod medias;
@@ -1817,9 +1818,9 @@ impl KiApp {
                 } else {
                     ui.label("démarrage de la capture…");
                 }
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui.label(
-                    RichText::new(self.labo_stats.summary()).weak().size(11.5).monospace(),
+                    RichText::new(self.labo_stats.summary()).weak().size(texte::PETIT).monospace(),
                 );
             });
         if !open {
@@ -2214,22 +2215,22 @@ impl KiApp {
 
         // --- La ligne ---
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.x = espace::M;
             ui.add_enabled_ui(peut, |ui| {
                 let (glyphe, aide) = if etat.lecture { ("⏸", "pause") } else { ("▶", "lecture") };
-                if ui.add(egui::Button::new(RichText::new(glyphe).size(15.0)).frame(false)).on_hover_text(aide).clicked() {
+                if ui.add(egui::Button::new(RichText::new(glyphe).size(texte::TITRE)).frame(false)).on_hover_text(aide).clicked() {
                     self.commander_musique(if etat.lecture { C::Pause } else { C::Lecture });
                 }
-                if ui.add(egui::Button::new(RichText::new("⏭").size(15.0)).frame(false)).on_hover_text("suivante").clicked() {
+                if ui.add(egui::Button::new(RichText::new("⏭").size(texte::TITRE)).frame(false)).on_hover_text("suivante").clicked() {
                     self.commander_musique(C::Suivant);
                 }
             });
             match &en_cours {
                 // Le bot n'est nulle part : on peut le faire venir.
                 None if etat.salon.is_none() => {
-                    ui.label(RichText::new("Musique").color(ACCENT).strong().size(13.0));
+                    ui.label(RichText::new("Musique").color(ACCENT).strong().size(texte::CORPS));
                     pastille_bot(ui);
-                    ui.label(RichText::new("le bot n'est dans aucun salon").color(TEXT_FAINT).size(12.0));
+                    ui.label(RichText::new("le bot n'est dans aucun salon").color(TEXT_FAINT).size(texte::COURANT));
                     if peut && ui.button("Venir dans mon salon").clicked() {
                         self.commander_musique(C::Rejoindre);
                     }
@@ -2245,11 +2246,11 @@ impl KiApp {
                     );
                     let painter = ui.painter();
                     let fine = egui::Rect::from_center_size(barre.center(), Vec2::new(barre.width(), 6.0));
-                    painter.rect_filled(fine, egui::CornerRadius::same(3), theme::BG_DEEP);
+                    painter.rect_filled(fine, egui::CornerRadius::same(rayon::S), theme::BG_DEEP);
                     if duree > 0 {
                         let part = (position as f32 / duree as f32).clamp(0.0, 1.0);
                         let plein = egui::Rect::from_min_size(fine.min, Vec2::new(fine.width() * part, fine.height()));
-                        painter.rect_filled(plein, egui::CornerRadius::same(3), ACCENT);
+                        painter.rect_filled(plein, egui::CornerRadius::same(rayon::S), ACCENT);
                         if let Some(pos) = reponse.hover_pos().filter(|_| peut) {
                             let vise = ((pos.x - fine.left()) / fine.width()).clamp(0.0, 1.0);
                             painter.circle_filled(egui::pos2(fine.left() + fine.width() * vise, fine.center().y), 4.0, TEXT);
@@ -2263,20 +2264,20 @@ impl KiApp {
                         }
                     }
                     let temps = if duree > 0 { format!("{} / {}", mmss(position), mmss(duree)) } else { mmss(position) };
-                    ui.label(RichText::new(temps).color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new(temps).color(TEXT_FAINT).size(texte::PETIT));
                     let titre = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
-                    ui.add(egui::Label::new(RichText::new(titre).color(TEXT).size(13.0)).truncate());
+                    ui.add(egui::Label::new(RichText::new(titre).color(TEXT).size(texte::CORPS)).truncate());
                     self.etoile_musique(ui, p, peut);
                 }
                 None => {
-                    ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(12.5));
+                    ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(texte::COURANT));
                     if !etat.file.is_empty() {
-                        ui.label(RichText::new(format!("{} en file", etat.longueur_file())).color(TEXT_FAINT).size(11.0));
+                        ui.label(RichText::new(format!("{} en file", etat.longueur_file())).color(TEXT_FAINT).size(texte::PETIT));
                     }
                 }
             }
             if let Some(e) = &etat.erreur {
-                ui.label(RichText::new(e).color(DANGER).size(11.0));
+                ui.label(RichText::new(e).color(DANGER).size(texte::PETIT));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let chevron = if self.musique_deroulee { Icon::ArrowUp } else { Icon::ArrowDown };
@@ -2290,7 +2291,7 @@ impl KiApp {
                 }
                 ui::glyph(ui, Icon::Volume, 14.0, TEXT_FAINT);
                 if ailleurs {
-                    ui.label(RichText::new(format!("dans #{salon_nom}")).color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new(format!("dans #{salon_nom}")).color(TEXT_FAINT).size(texte::PETIT));
                 }
             });
         });
@@ -2298,9 +2299,9 @@ impl KiApp {
         if !self.musique_deroulee {
             return;
         }
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::hairline(ui);
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         // --- Le détail, sur trois colonnes ---
         ui.columns(3, |cols| {
@@ -2314,23 +2315,23 @@ impl KiApp {
                                 ui.add(egui::Image::new(&tex).fit_to_exact_size(Vec2::new(200.0, 112.0)).corner_radius(6.0));
                             }
                         }
-                        ui.label(RichText::new(&p.titre).strong().size(13.0));
+                        ui.label(RichText::new(&p.titre).strong().size(texte::CORPS));
                         if !p.artiste.is_empty() {
-                            ui.label(RichText::new(&p.artiste).color(TEXT_DIM).size(12.0));
+                            ui.label(RichText::new(&p.artiste).color(TEXT_DIM).size(texte::COURANT));
                         }
                         let mut infos = p.source.clone();
                         if let Some(qui) = &p.ajoute_par {
                             infos.push_str(&format!(" · ajoutée par {qui}"));
                         }
-                        ui.label(RichText::new(infos).color(TEXT_FAINT).size(11.0));
+                        ui.label(RichText::new(infos).color(TEXT_FAINT).size(texte::PETIT));
                     }
                     None => {
                         ui.label(RichText::new("rien en cours").color(TEXT_FAINT));
                     }
                 }
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui.add_enabled_ui(peut, |ui| {
-                    ui.label(RichText::new("volume du bot").color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new("volume du bot").color(TEXT_FAINT).size(texte::PETIT));
                     let mut v = etat.volume as f32;
                     if ui.add(egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %").integer()).drag_stopped() {
                         self.commander_musique(C::Volume { pour_cent: v as u8 });
@@ -2349,21 +2350,21 @@ impl KiApp {
             {
                 let ui = &mut cols[1];
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("File d'attente · {}", etat.longueur_file())).strong().size(13.0));
+                    ui.label(RichText::new(format!("File d'attente · {}", etat.longueur_file())).strong().size(texte::CORPS));
                     if peut && !etat.file.is_empty() && ui.small_button("vider").clicked() {
                         self.commander_musique(C::Vider);
                     }
                 });
                 egui::ScrollArea::vertical().id_salt("musique_file").max_height(170.0).auto_shrink([false, true]).show(ui, |ui| {
                     if etat.file.is_empty() {
-                        ui.label(RichText::new("vide — cherche un morceau à droite").color(TEXT_FAINT).size(11.5));
+                        ui.label(RichText::new("vide — cherche un morceau à droite").color(TEXT_FAINT).size(texte::PETIT));
                     }
                     let n = etat.longueur_file();
                     for (i, p) in etat.file.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT).size(11.0));
+                            ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT).size(texte::PETIT));
                             let nom = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
-                            ui.add(egui::Label::new(RichText::new(nom).size(12.0)).truncate())
+                            ui.add(egui::Label::new(RichText::new(nom).size(texte::COURANT)).truncate())
                                 .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.ajoute_par.as_deref().unwrap_or("?")));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 self.etoile_musique(ui, p, peut);
@@ -2384,18 +2385,18 @@ impl KiApp {
                     // Le serveur n'envoie que le début d'une longue file.
                     let reste = n.saturating_sub(etat.file.len());
                     if reste > 0 {
-                        ui.label(RichText::new(format!("… et {reste} autre(s)")).color(TEXT_FAINT).size(11.0));
+                        ui.label(RichText::new(format!("… et {reste} autre(s)")).color(TEXT_FAINT).size(texte::PETIT));
                     }
                 });
             }
             // Les playlists du groupe, sous la file.
             {
                 let ui = &mut cols[1];
-                ui.add_space(6.0);
-                ui.label(RichText::new(format!("Playlists · {}", etat.playlists.len())).strong().size(13.0));
+                ui.add_space(espace::S);
+                ui.label(RichText::new(format!("Playlists · {}", etat.playlists.len())).strong().size(texte::CORPS));
                 for pl in &etat.playlists {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(RichText::new(&pl.nom).size(12.0)).truncate())
+                        ui.add(egui::Label::new(RichText::new(&pl.nom).size(texte::COURANT)).truncate())
                             .on_hover_text(format!("{} pistes · {}", pl.pistes, mmss(pl.duree_s as u64)));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_enabled_ui(peut, |ui| {
@@ -2409,7 +2410,7 @@ impl KiApp {
                                     self.commander_musique(C::PlaylistCharger { nom: pl.nom.clone(), remplacer: true });
                                 }
                             });
-                            ui.label(RichText::new(format!("{}", pl.pistes)).color(TEXT_FAINT).size(10.5));
+                            ui.label(RichText::new(format!("{}", pl.pistes)).color(TEXT_FAINT).size(texte::MINUSCULE));
                         });
                     });
                 }
@@ -2465,17 +2466,17 @@ impl KiApp {
                     }
                 });
                 if !peut_ajouter {
-                    ui.label(RichText::new("réservé aux modérateurs").color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new("réservé aux modérateurs").color(TEXT_FAINT).size(texte::PETIT));
                 }
                 if !self.musique_resultats.is_empty() {
-                    ui.label(RichText::new(format!("résultats pour « {} »", self.musique_resultats_pour)).color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new(format!("résultats pour « {} »", self.musique_resultats_pour)).color(TEXT_FAINT).size(texte::PETIT));
                 }
                 let resultats = self.musique_resultats.clone();
                 egui::ScrollArea::vertical().id_salt("musique_resultats").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
                     for p in &resultats {
                         ui.horizontal(|ui| {
                             let nom = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
-                            ui.add(egui::Label::new(RichText::new(nom).size(12.0)).truncate())
+                            ui.add(egui::Label::new(RichText::new(nom).size(texte::COURANT)).truncate())
                                 .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.url));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add_enabled_ui(peut, |ui| {
@@ -2489,7 +2490,7 @@ impl KiApp {
                                     }
                                 });
                                 self.etoile_musique(ui, p, peut);
-                                ui.label(RichText::new(mmss(p.duree_s as u64)).color(TEXT_FAINT).size(10.5));
+                                ui.label(RichText::new(mmss(p.duree_s as u64)).color(TEXT_FAINT).size(texte::MINUSCULE));
                             });
                         });
                     }
@@ -2519,11 +2520,11 @@ impl KiApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(titre).strong().size(16.0));
+                    ui.label(RichText::new(titre).strong().size(texte::TITRE));
                     pastille_bot(ui);
                 });
-                ui.label(RichText::new("Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe.").color(TEXT_DIM).size(12.0));
-                ui.add_space(8.0);
+                ui.label(RichText::new("Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe.").color(TEXT_DIM).size(texte::COURANT));
+                ui.add_space(espace::M);
                 if id == ki_protocol::MUSIQUE_ID {
                     ui.label(RichText::new("Ce qu'il fait").strong());
                     match &etat.en_cours {
@@ -2534,19 +2535,19 @@ impl KiApp {
                             ui.label(RichText::new("rien en ce moment").color(TEXT_DIM));
                         }
                     }
-                    ui.label(RichText::new(format!("{} en file · volume global {} %", etat.longueur_file(), etat.volume)).color(TEXT_DIM).size(12.0));
-                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!("{} en file · volume global {} %", etat.longueur_file(), etat.volume)).color(TEXT_DIM).size(texte::COURANT));
+                    ui.add_space(espace::M);
                     ui.label(RichText::new("Qui le pilote").strong());
-                    ui.label(RichText::new(if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }).color(TEXT_DIM).size(12.0));
-                    ui.add_space(8.0);
+                    ui.label(RichText::new(if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }).color(TEXT_DIM).size(texte::COURANT));
+                    ui.add_space(espace::M);
                     ui.label(RichText::new("Comment il marche").strong());
                     ui.label(RichText::new(
                         "Le serveur tire le flux audio de YouTube ou SoundCloud avec yt-dlp, le décode avec ffmpeg, \
                          l'encode en Opus et l'envoie dans le salon chiffré comme la voix de n'importe qui. Aucun fichier \
                          audio n'est écrit, aucun client ne télécharge rien, et le flux brut ne contient pas de publicité. \
                          Chacun le règle ou le coupe comme un membre.",
-                    ).color(TEXT_DIM).size(12.0));
-                    ui.add_space(8.0);
+                    ).color(TEXT_DIM).size(texte::COURANT));
+                    ui.add_space(espace::M);
                     ui.label(RichText::new("Depuis le démarrage du serveur").strong());
                     let c = &etat.compteurs;
                     ui.label(RichText::new(format!(
@@ -2554,13 +2555,13 @@ impl KiApp {
                         c.pistes_jouees, if c.pistes_jouees > 1 { "s" } else { "" }, if c.pistes_jouees > 1 { "s" } else { "" },
                         c.echecs, if c.echecs > 1 { "s" } else { "" },
                         c.premier_son_ms as f32 / 1000.0
-                    )).color(TEXT_DIM).size(12.0));
+                    )).color(TEXT_DIM).size(texte::COURANT));
                 } else {
                     ui.label(RichText::new("Ce qu'il fait").strong());
-                    ui.label(RichText::new("Il poste le fil de jeu : à chaque partie finie d'un membre qui a lié son compte Riot, le résultat, sa ligne et ses RR.").color(TEXT_DIM).size(12.0));
-                    ui.add_space(8.0);
+                    ui.label(RichText::new("Il poste le fil de jeu : à chaque partie finie d'un membre qui a lié son compte Riot, le résultat, sa ligne et ses RR.").color(TEXT_DIM).size(texte::COURANT));
+                    ui.add_space(espace::M);
                     ui.label(RichText::new("Comment il marche").strong());
-                    ui.label(RichText::new("Les données viennent de HenrikDev, à partir du Riot ID que chacun a lié lui-même. Le serveur ne garde que la ligne du membre dans ses matchs, jamais celles des adversaires, et délier efface tout.").color(TEXT_DIM).size(12.0));
+                    ui.label(RichText::new("Les données viennent de HenrikDev, à partir du Riot ID que chacun a lié lui-même. Le serveur ne garde que la ligne du membre dans ses matchs, jamais celles des adversaires, et délier efface tout.").color(TEXT_DIM).size(texte::COURANT));
                 }
             });
         if !open {
@@ -2803,10 +2804,10 @@ impl KiApp {
                                     e.secondes, e.megaoctets, e.encodeur, e.source
                                 ))
                                 .color(TEXT_DIM)
-                                .size(12.0),
+                                .size(texte::COURANT),
                             );
                             if e.ecriture_en_cours {
-                                ui.label(RichText::new("écriture…").color(ACCENT).size(12.0));
+                                ui.label(RichText::new("écriture…").color(ACCENT).size(texte::COURANT));
                             }
                         }
                         None => {
@@ -2846,7 +2847,7 @@ impl KiApp {
                         dossier.display()
                     ),
                 );
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     if liste.is_empty() {
                         ui.label(
@@ -2869,7 +2870,7 @@ impl KiApp {
                             if ui.is_rect_visible(rect) {
                                 let painter = ui.painter();
                                 let image = egui::Rect::from_min_size(rect.min, Vec2::new(LARGEUR, HAUTEUR_IMAGE));
-                                painter.rect_filled(image, egui::CornerRadius::same(6), theme::BG_DEEP);
+                                painter.rect_filled(image, egui::CornerRadius::same(rayon::M), theme::BG_DEEP);
                                 match vignettes.get(&c.chemin) {
                                     Some(Some(t)) => {
                                         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -2899,7 +2900,7 @@ impl KiApp {
                                 if r.hovered() {
                                     painter.rect_stroke(
                                         image,
-                                        egui::CornerRadius::same(6),
+                                        egui::CornerRadius::same(rayon::M),
                                         egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
                                         egui::StrokeKind::Inside,
                                     );
@@ -2909,7 +2910,7 @@ impl KiApp {
                                     egui::pos2(rect.left() + 2.0, image.bottom() + 6.0),
                                     egui::Align2::LEFT_TOP,
                                     nom,
-                                    egui::FontId::proportional(12.5),
+                                    egui::FontId::proportional(texte::COURANT),
                                     TEXT,
                                 );
                                 let date = chrono::DateTime::<chrono::Local>::from(c.modifie).format("%d/%m %H:%M");
@@ -2917,7 +2918,7 @@ impl KiApp {
                                     egui::pos2(rect.left() + 2.0, image.bottom() + 24.0),
                                     egui::Align2::LEFT_TOP,
                                     format!("{date} · {}", clips::taille_lisible(c.taille)),
-                                    egui::FontId::proportional(11.0),
+                                    egui::FontId::proportional(texte::PETIT),
                                     TEXT_FAINT,
                                 );
                             }
@@ -3102,7 +3103,7 @@ impl KiApp {
                     .map(|f| format!(" · {:.0} s", f.duree_s))
                     .unwrap_or_default();
                 ui::hint(ui, &format!("{}{duree}", clips::taille_lisible(p.taille)));
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui::field_label(ui, "Salon");
                 let nom_salon = salons
                     .iter()
@@ -3117,7 +3118,7 @@ impl KiApp {
                             ui.selectable_value(&mut p.salon, Some(*id), format!("#{nom}"));
                         }
                     });
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui::field_label(ui, "Légende");
                 ui.add(
                     egui::TextEdit::singleline(&mut p.legende)
@@ -3125,19 +3126,19 @@ impl KiApp {
                         .desired_width(f32::INFINITY),
                 );
                 if p.fiche.as_ref().is_some_and(|f| f.pistes.as_ref().is_some_and(|p| p.iter().any(|x| x == "copains"))) {
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                     ui.checkbox(&mut p.voix, "avec les voix des copains");
                     if !p.voix {
                         ui::hint(ui, "le serveur refait le son sans eux : leurs voix ne quittent pas ce PC");
                     }
                 }
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui::hint(
                     ui,
                     "l'original reste sur ce PC ; le serveur en prépare une copie pour le fil, avec une \
                      seule piste son, et poste le message en ton nom",
                 );
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 match &etat {
                     Some(EnvoiClip { fini: None, pour_cent }) => {
                         ui.add(
@@ -3146,14 +3147,14 @@ impl KiApp {
                         );
                     }
                     Some(EnvoiClip { fini: Some(Err(e)), .. }) => {
-                        ui.label(RichText::new(format!("échec : {e}")).color(DANGER).size(12.0));
+                        ui.label(RichText::new(format!("échec : {e}")).color(DANGER).size(texte::COURANT));
                     }
                     _ => {}
                 }
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui.horizontal(|ui| {
                     if en_cours {
-                        ui.label(RichText::new("envoi en cours…").color(TEXT_DIM).size(12.0));
+                        ui.label(RichText::new("envoi en cours…").color(TEXT_DIM).size(texte::COURANT));
                         return;
                     }
                     ui.add_enabled_ui(p.salon.is_some(), |ui| {
@@ -3298,7 +3299,7 @@ impl KiApp {
                     "la copie partagée et ses exports disparaissent du serveur ; le message du fil garde un \
                      lien mort. Ton clip reste sur ce PC.",
                 );
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui.horizontal(|ui| {
                     if ui::tinted_button(ui, Some(Icon::Trash), "Retirer", Tone::Danger).clicked() {
                         decision = Some(true);
@@ -3403,7 +3404,7 @@ impl KiApp {
                     "clic sur l'icône pour rouvrir, « Quitter » dans son menu pour partir ; \
                      réglable dans ⚙ Sons & notifications",
                 );
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui.horizontal(|ui| {
                     if ui::primary_button(ui, Some(Icon::Check), "Compris", None).clicked() {
                         decision = Some(true);
@@ -3439,7 +3440,7 @@ impl KiApp {
             .show(ctx, |ui| {
                 ui.label(RichText::new(&nom).color(TEXT).strong());
                 ui::hint(ui, "le fichier sera effacé de ce PC ; il n'y a pas de corbeille");
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui.horizontal(|ui| {
                     if ui::tinted_button(ui, Some(Icon::Trash), "Supprimer", Tone::Danger).clicked() {
                         decision = Some(true);
@@ -3499,7 +3500,7 @@ impl KiApp {
                 ),
             );
         }
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::field_label(ui, "Touche");
         ui.horizontal(|ui| {
@@ -3538,12 +3539,12 @@ impl KiApp {
                          ki-chat la lit quand même, mais pas au-dessus d'un jeu — choisis-en une autre",
                     )
                     .color(WARN)
-                    .size(11.5),
+                    .size(texte::PETIT),
                 );
             }
             _ => {}
         }
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::field_label(ui, "Durée gardée");
         ui.horizontal_wrapped(|ui| {
@@ -3576,7 +3577,7 @@ impl KiApp {
             "avec une carte NVIDIA, capture et encodage restent sur la carte (NVENC seul, sans ses cœurs \
              de calcul) : ni le processeur ni le jeu ne le sentent",
         );
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::field_label(ui, "Source");
         if self.sources.perimees() {
@@ -3608,7 +3609,7 @@ impl KiApp {
                 }
             });
         ui::hint(ui, "en automatique, l'enregistreur reconnaît VALORANT, CS2, Fortnite, Rocket League, Apex, LoL, Overwatch, R6, GTA V et Marvel Rivals");
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::field_label(ui, "Pistes audio");
         ui.checkbox(&mut self.clips_reglages.jeu, "Le son du jeu (tout le système, sauf ki-chat)");
@@ -3619,14 +3620,14 @@ impl KiApp {
             "chaque piste est gardée à part dans le fichier, plus un mélange en première piste \
              pour les lecteurs ordinaires ; le micro et les copains n'existent qu'en salon vocal",
         );
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::field_label(ui, "Dossier");
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(self.clips_reglages.dossier_effectif().display().to_string())
                     .color(TEXT_DIM)
-                    .size(12.0),
+                    .size(texte::COURANT),
             );
             if ui::button(ui, Icon::Pencil, "Changer…").clicked() {
                 let slot = self.clips_dossier_choisi.clone();
@@ -3644,7 +3645,7 @@ impl KiApp {
             self.clips_reglages.dossier = Some(d);
         }
         ui::hint(ui, "pointe-le sur un dossier synchronisé par Google Drive pour ordinateur, et les clips y montent tout seuls");
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         ui.checkbox(&mut self.clips_reglages.son, "Un son quand le clip est enregistré");
 
         // Ce qui change la capture relance l'enregistreur, sans rien perdre
@@ -6250,7 +6251,7 @@ impl KiApp {
                     let free = ui.available_height();
                     ui.add_space(((free - 620.0) * 0.40).max(16.0));
                     brand(ui);
-                    ui.add_space(22.0);
+                    ui.add_space(espace::XXL);
 
                     // Le parent centre ses enfants ; à l'intérieur de la carte
                     // on repasse en alignement à gauche pour les étiquettes.
@@ -6264,7 +6265,7 @@ impl KiApp {
                                     self.server_editor(ui, ctx);
                                 } else {
                                     self.server_picker(ui, ctx);
-                                    ui.add_space(18.0);
+                                    ui.add_space(espace::XL);
                                     go = self.credentials(ui, ready);
                                 }
                             });
@@ -6276,7 +6277,7 @@ impl KiApp {
                             if let Some(dans) = self.reprise_dans() {
                                 let essais =
                                     self.reprise.as_ref().map_or(0, |r| r.essais);
-                                ui.add_space(12.0);
+                                ui.add_space(espace::L);
                                 let quoi = if self.connecting {
                                     format!("Connexion perdue — tentative {essais}…")
                                 } else {
@@ -6287,7 +6288,7 @@ impl KiApp {
                                     )
                                 };
                                 ui::banner(ui, Tone::Warn, &quoi, false);
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
                                 ui.horizontal(|ui| {
                                     if ui::button(ui, Icon::Refresh, "Réessayer maintenant")
                                         .clicked()
@@ -6310,7 +6311,7 @@ impl KiApp {
                                     }
                                 });
                             } else if let Some(err) = self.error.clone() {
-                                ui.add_space(12.0);
+                                ui.add_space(espace::L);
                                 if ui::banner(ui, Tone::Danger, &err, true) {
                                     self.error = None;
                                 }
@@ -6320,7 +6321,7 @@ impl KiApp {
                             // Le client ne peut pas trancher — l'utilisateur,
                             // lui, sait si l'hébergeur a refait son serveur.
                             if let Some(address) = self.identity_alarm.clone() {
-                                ui.add_space(8.0);
+                                ui.add_space(espace::M);
                                 ui.label(
                                     RichText::new(
                                         "Si le serveur vient d'être réinstallé, c'est \
@@ -6328,9 +6329,9 @@ impl KiApp {
                                          son empreinte à l'hébergeur avant d'accepter.",
                                     )
                                     .color(TEXT_DIM)
-                                    .size(11.5),
+                                    .size(texte::PETIT),
                                 );
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
                                 if ui::button(
                                     ui,
                                     Icon::Key,
@@ -6352,11 +6353,11 @@ impl KiApp {
                         },
                     );
 
-                    ui.add_space(16.0);
+                    ui.add_space(espace::XL);
                     ui.label(
                         RichText::new(concat!("ki-chat ", env!("CARGO_PKG_VERSION")))
                             .color(theme::BORDER)
-                            .size(11.0),
+                            .size(texte::PETIT),
                     );
                 });
             });
@@ -6374,7 +6375,7 @@ impl KiApp {
                 ui.label(
                     RichText::new(self.book.len().to_string())
                         .color(theme::BORDER_STRONG)
-                        .size(11.0)
+                        .size(texte::PETIT)
                         .strong(),
                 );
             }
@@ -6392,27 +6393,27 @@ impl KiApp {
                 }
             });
         });
-        ui.add_space(2.0);
+        ui.add_space(espace::XXS);
 
         if self.book.is_empty() {
             let mut add = false;
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui.vertical_centered(|ui| {
                 ui::glyph(ui, Icon::Server, 30.0, theme::BORDER);
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui.label(
-                    RichText::new("Aucun serveur enregistré").color(TEXT_DIM).size(13.5),
+                    RichText::new("Aucun serveur enregistré").color(TEXT_DIM).size(texte::CORPS),
                 );
-                ui.add_space(2.0);
+                ui.add_space(espace::XXS);
                 ui::hint(ui, "Demande son adresse à l'admin du serveur.");
-                ui.add_space(12.0);
+                ui.add_space(espace::L);
                 add = ui::primary_button(ui, Some(Icon::Plus), "Ajouter un serveur", None)
                     .clicked();
             });
             if add {
                 self.draft = Some(ServerDraft::new());
             }
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             return;
         }
 
@@ -6444,13 +6445,13 @@ impl KiApp {
 
         ui::field_label(ui, "Adresse");
         ui.add(ui::text_field(&mut draft.address, "hôte ou hôte:port", false));
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         ui::hint(ui, "Port 9987 par défaut.");
 
-        ui.add_space(12.0);
+        ui.add_space(espace::L);
         ui::field_label(ui, "Alias local (facultatif)");
         ui.add(ui::text_field(&mut draft.name, "ex. Chez Kévin", false));
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         // Le nom et le logo appartiennent au serveur ; l'alias n'est qu'un
         // pense-bête local, et le logo n'est pas modifiable ici du tout.
         ui::hint(
@@ -6463,7 +6464,7 @@ impl KiApp {
         let submit = valid && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
 
-        ui.add_space(14.0);
+        ui.add_space(espace::XL);
         let mut close = false;
         ui.horizontal(|ui| {
             let save = ui
@@ -6507,7 +6508,7 @@ impl KiApp {
             let galley = ui.fonts_mut(|f| {
                 f.layout_no_wrap(
                     "ENREGISTRÉ".into(),
-                    egui::FontId::proportional(9.5),
+                    egui::FontId::proportional(texte::MINUSCULE),
                     theme::alpha(ACCENT, 190),
                 )
             });
@@ -6521,11 +6522,11 @@ impl KiApp {
                 ACCENT,
             );
         }
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         ui::field_label(ui, "Mot de passe");
         ui.add(ui::text_field(&mut self.password, "ton mot de passe", true));
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
 
         // Sans coffre natif, on ne propose pas de mémoriser : pas de repli
         // en clair, la case est simplement inerte.
@@ -6552,7 +6553,7 @@ impl KiApp {
                     open_invite = ui
                         .add(
                             egui::Label::new(
-                                RichText::new("Code d'invitation").color(INFO).size(12.0),
+                                RichText::new("Code d'invitation").color(INFO).size(texte::COURANT),
                             )
                             .sense(Sense::click()),
                         )
@@ -6566,13 +6567,13 @@ impl KiApp {
             self.show_invite = true;
         }
         if self.show_invite {
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             ui::field_label(ui, "Code d'invitation");
             ui.add(ui::text_field(&mut self.invite, "fourni par un admin", false));
             ui::hint(ui, "Nécessaire uniquement à la première connexion.");
         }
 
-        ui.add_space(16.0);
+        ui.add_space(espace::XL);
 
         // Pendant une tentative, le bouton devient une **annulation**.
         //
@@ -6591,7 +6592,7 @@ impl KiApp {
                 .add_sized(
                     [ui.available_width(), 38.0],
                     egui::Button::new(
-                        RichText::new(format!("Connexion…  ✕  ({reste} s)")).size(14.0),
+                        RichText::new(format!("Connexion…  ✕  ({reste} s)")).size(texte::CORPS),
                     ),
                 )
                 .on_hover_text("Annuler la connexion")
@@ -6704,13 +6705,13 @@ impl KiApp {
             .show(ctx, |ui| {
                 if wrong {
                     ui::banner(ui, Tone::Danger, "Mot de passe incorrect", false);
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                 }
                 ui::field_label(ui, "Mot de passe du salon");
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut prompt.password)
                         .password(true)
-                        .margin(egui::Margin::symmetric(10, 7))
+                        .margin(marge::symetrique(espace::L, espace::M))
                         .desired_width(f32::INFINITY),
                 );
                 menu_edition(&response, &mut prompt.password, true);
@@ -6718,7 +6719,7 @@ impl KiApp {
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     submit = true;
                 }
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui.horizontal(|ui| {
                     if ui::primary_button(ui, Some(Icon::Check), "Entrer", None).clicked() {
                         submit = true;
@@ -6767,7 +6768,7 @@ impl KiApp {
             .show(ctx, |ui| {
                 ui::field_label(ui, "Motif (visible par la personne bannie)");
                 ui.add(ui::text_field(&mut draft.reason, "ex. spam répété", false));
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
 
                 ui::field_label(ui, "Durée");
                 ui.horizontal_wrapped(|ui| {
@@ -6780,9 +6781,9 @@ impl KiApp {
                         }
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(espace::L);
                 ui::hairline(ui);
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
 
                 ui.horizontal(|ui| {
                     if ui::tinted_button(ui, Some(Icon::Ban), "Bannir", Tone::Danger).clicked() {
@@ -6813,7 +6814,7 @@ impl KiApp {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG_SIDE)
-                    .inner_margin(egui::Margin::symmetric(12, 9)),
+                    .inner_margin(marge::symetrique(espace::L, espace::M)),
             )
             .show(ui, |ui| {
                 // Périphérique disparu : le dire franchement. Sans ça, on
@@ -6843,7 +6844,7 @@ impl KiApp {
                         ),
                         false,
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                 }
                 // Le repli est une autre histoire : le son passe, simplement
                 // pas par le périphérique réglé. Annoncer une perte serait
@@ -6864,7 +6865,7 @@ impl KiApp {
                         ),
                         false,
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                 }
                 ui.horizontal(|ui| {
                     // --- Micro : gros bouton d'état ---
@@ -6922,10 +6923,10 @@ impl KiApp {
                             }
                         }
                     }
-                    ui.add_space(2.0);
+                    ui.add_space(espace::XXS);
                     ui.vertical(|ui| {
                         ui.add_space(1.0);
-                        ui.label(RichText::new(state).color(state_color).size(13.0).strong());
+                        ui.label(RichText::new(state).color(state_color).size(texte::CORPS).strong());
                         // Sous-titre : le salon vocal occupé, ou la touche.
                         let detail = match (self.voice_channel_name(), self.mode) {
                             (None, _) => "aucun salon vocal".to_string(),
@@ -6934,7 +6935,7 @@ impl KiApp {
                             }
                             (Some(name), _) => name.to_string(),
                         };
-                        ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.0));
+                        ui.label(RichText::new(detail).color(TEXT_FAINT).size(texte::PETIT));
                     });
 
                     // Sortir du vocal sans quitter le serveur.
@@ -6951,7 +6952,7 @@ impl KiApp {
                         self.leave_voice();
                     }
 
-                    ui.add_space(14.0);
+                    ui.add_space(espace::XL);
 
                     // --- Mode d'émission ---
                     let mode_before = self.mode;
@@ -6977,7 +6978,7 @@ impl KiApp {
                             });
                     }
 
-                    ui.add_space(6.0);
+                    ui.add_space(espace::S);
                     if self.loupedeck_etat.actif
                         && ui::button(ui, Icon::Sliders, "Loupedeck")
                             .on_hover_text("ce que font les boutons, les molettes et les écrans de ton Loupedeck Live")
@@ -7018,7 +7019,7 @@ impl KiApp {
                     if ui.is_rect_visible(rect) {
                         let p = ui.painter();
                         if r.hovered() {
-                            p.rect_filled(rect, egui::CornerRadius::same(8), theme::BG_HOVER);
+                            p.rect_filled(rect, egui::CornerRadius::same(rayon::L), theme::BG_HOVER);
                         }
                         let couleur = if rec { DANGER } else { TEXT_FAINT };
                         let pulse = if rec { 0.75 + 0.25 * (ui.input(|i| i.time) * 3.0).sin().abs() as f32 } else { 1.0 };
@@ -7027,7 +7028,7 @@ impl KiApp {
                             egui::pos2(rect.left() + 23.0, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             "REC",
-                            egui::FontId::proportional(11.5),
+                            egui::FontId::proportional(texte::PETIT),
                             couleur,
                         );
                     }
@@ -7071,9 +7072,9 @@ impl KiApp {
                             (false, false) => None,
                         };
                         if let Some(texte) = sanction {
-                            ui.add_space(6.0);
+                            ui.add_space(espace::S);
                             ui::glyph(ui, Icon::MicOff, 13.0, WARN);
-                            ui.label(RichText::new(texte).color(WARN).size(12.0)).on_hover_text(
+                            ui.label(RichText::new(texte).color(WARN).size(texte::COURANT)).on_hover_text(
                                 "ce n'est pas ton matériel : quelqu'un l'a décidé côté serveur",
                             );
                         }
@@ -7082,7 +7083,7 @@ impl KiApp {
                     // --- Télémétrie, alignée à droite ---
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !voice.engine_up {
-                            ui.label(RichText::new("vocal indisponible").color(WARN).size(12.0))
+                            ui.label(RichText::new("vocal indisponible").color(WARN).size(texte::COURANT))
                                 .on_hover_text(
                                     "aucun périphérique audio n'a pu être ouvert — \
                                  vérifie les réglages audio",
@@ -7099,7 +7100,7 @@ impl KiApp {
                         ui::meter(ui, level, Vec2::new(96.0, 7.0), color)
                             .on_hover_text("niveau du micro");
 
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                         ui::stat_row(
                             ui,
                             &[
@@ -7115,7 +7116,7 @@ impl KiApp {
                         )
                         .on_hover_text("paquets voix envoyés · reçus · perdus");
 
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                         match voice.ping {
                             Some(ping) => {
                                 let (lit, color) = if ping < 30 {
@@ -7160,7 +7161,7 @@ impl KiApp {
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_SIDE)
-                            .inner_margin(egui::Margin::symmetric(12, 11)),
+                            .inner_margin(marge::symetrique(espace::L, espace::L)),
                     )
                     .show(ui, |ui| {
                         // Le logo et le nom du serveur priment : avec
@@ -7188,13 +7189,13 @@ impl KiApp {
                                 |ui| {
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(&header_name).color(TEXT).size(15.0).strong(),
+                                            RichText::new(&header_name).color(TEXT).size(texte::TITRE).strong(),
                                         )
                                         .truncate(),
                                     );
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(self.url.trim()).color(TEXT_FAINT).size(11.0),
+                                            RichText::new(self.url.trim()).color(TEXT_FAINT).size(texte::PETIT),
                                         )
                                         .truncate(),
                                     );
@@ -7220,7 +7221,7 @@ impl KiApp {
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_SIDE)
-                            .inner_margin(egui::Margin::symmetric(10, 0)),
+                            .inner_margin(marge::symetrique(espace::L, 0.0)),
                     )
                     .show(ui, |ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -7259,7 +7260,7 @@ impl KiApp {
                                     egui::pos2(bloc.left(), bloc.top() + 9.0),
                                     egui::Align2::LEFT_CENTER,
                                     &me,
-                                    egui::FontId::proportional(13.0),
+                                    egui::FontId::proportional(texte::CORPS),
                                     color_for(&me),
                                 );
                                 let y = bloc.top() + 24.0;
@@ -7268,7 +7269,7 @@ impl KiApp {
                                     egui::pos2(bloc.left() + 12.0, y),
                                     egui::Align2::LEFT_CENTER,
                                     text,
-                                    egui::FontId::proportional(12.5),
+                                    egui::FontId::proportional(texte::COURANT),
                                     dot,
                                 );
                             }
@@ -7307,7 +7308,7 @@ impl KiApp {
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_SIDE)
-                            .inner_margin(egui::Margin::symmetric(8, 4)),
+                            .inner_margin(marge::symetrique(espace::M, espace::XS)),
                     )
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -7346,7 +7347,7 @@ impl KiApp {
                                     .filter(|&i| self.channels[i].expire_le.is_some())
                                     .collect();
                                 if !temporaires.is_empty() {
-                                    ui.add_space(10.0);
+                                    ui.add_space(espace::L);
                                     ui::section_label(ui, "Invités");
                                     let maintenant = porte_ui::maintenant_ms();
                                     let contexte = self.contexte_portes();
@@ -7390,7 +7391,7 @@ impl KiApp {
                                 }
 
                                 // --- Salons vocaux : on y entre ---
-                                ui.add_space(10.0);
+                                ui.add_space(espace::L);
                                 ui::section_label(ui, "Salons vocaux");
                                 for i in 0..self.channels.len() {
                                     let Some(ch) = self.channels.get(i) else { break };
@@ -7481,7 +7482,7 @@ impl KiApp {
             }
             self.member_menu(response, m, is_me);
         }
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         place
     }
 
@@ -7514,7 +7515,7 @@ impl KiApp {
         }
         ui.painter().rect_stroke(
             bloc,
-            egui::CornerRadius::same(9),
+            egui::CornerRadius::same(rayon::L),
             egui::Stroke::new(1.5_f32, ACCENT),
             egui::StrokeKind::Inside,
         );
@@ -7574,8 +7575,8 @@ impl KiApp {
                     Some(slug) => format!("entré par la porte « {slug} », sans compte"),
                     None => "entré par une porte web, sans compte".to_string(),
                 };
-                ui.label(RichText::new(quoi).color(TEXT_FAINT).size(11.0));
-                ui.add_space(4.0);
+                ui.label(RichText::new(quoi).color(TEXT_FAINT).size(texte::PETIT));
+                ui.add_space(espace::XS);
                 let mut pct = self.volume_of(m.user_id) * 100.0;
                 if ui
                     .add(egui::Slider::new(&mut pct, 0.0..=200.0).suffix(" %").integer().text("volume"))
@@ -7583,9 +7584,9 @@ impl KiApp {
                 {
                     self.set_volume(m.user_id, pct / 100.0);
                 }
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui::hairline(ui);
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let contexte = self.contexte_portes();
                 actions = self.portes.menu_invite(ui, m.user_id, m.voice, &contexte);
             });
@@ -7601,8 +7602,8 @@ impl KiApp {
                     ui.label(RichText::new(&m.username).color(ACCENT).strong());
                     pastille_bot(ui);
                 });
-                ui.label(RichText::new("le serveur, qui joue de la musique dans ce salon").color(TEXT_FAINT).size(11.0));
-                ui.add_space(4.0);
+                ui.label(RichText::new("le serveur, qui joue de la musique dans ce salon").color(TEXT_FAINT).size(texte::PETIT));
+                ui.add_space(espace::XS);
                 let mut pct = self.volume_of(m.user_id) * 100.0;
                 if ui
                     .add(egui::Slider::new(&mut pct, 0.0..=200.0).suffix(" %").integer().text("volume"))
@@ -7621,18 +7622,18 @@ impl KiApp {
             ui.set_width(228.0);
             ui.label(RichText::new(&m.username).color(self.color_of(m)).strong());
             if let Some(role) = self.top_role_name(m) {
-                ui.label(RichText::new(role).color(TEXT_FAINT).size(11.0));
+                ui.label(RichText::new(role).color(TEXT_FAINT).size(texte::PETIT));
             }
             if !m.online {
-                ui.label(RichText::new("hors ligne").color(TEXT_FAINT).size(11.0));
+                ui.label(RichText::new("hors ligne").color(TEXT_FAINT).size(texte::PETIT));
             }
             // Sa fiche VALORANT, s'il a lié son compte Riot : le serveur la
             // garde, l'ouvrir ne coûte aucune requête.
             if let Some(riot) = &m.riot_id {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let rang = m.rang_valorant.map(ki_protocol::nom_de_rang).unwrap_or_default();
                 let texte = if rang.is_empty() { riot.clone() } else { format!("{riot} · {rang}") };
-                ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.0));
+                ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT));
                 if ui::button(ui, Icon::Screen, "Fiche VALORANT").clicked() {
                     self.ouvrir_fiche(m.user_id, m.username.clone());
                 }
@@ -7647,7 +7648,7 @@ impl KiApp {
             }
             // Le volume ne concerne que quelqu'un qu'on peut entendre.
             if m.online {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let mut pct = self.volume_of(m.user_id) * 100.0;
                 if ui
                     .add(
@@ -7669,7 +7670,7 @@ impl KiApp {
             // un serveur antérieur répondrait « message invalide ». Grisé
             // avec le motif quand on sait d'avance que ça ne partira pas.
             if self.serveur_gere_lus {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let motif = self.poke_impossible(m);
                 ui.add_enabled_ui(motif.is_none(), |ui| {
                     let bouton = ui::button(ui, Icon::Send, "Poke");
@@ -7690,9 +7691,9 @@ impl KiApp {
                 && self.outranks(m.rank)
                 && !self.roles.is_empty();
             if can_roles {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui::hairline(ui);
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui.menu_button("Rôles", |ui| {
                     ui.set_width(200.0);
                     let mut roles_sorted = self.roles.clone();
@@ -7728,9 +7729,9 @@ impl KiApp {
                 self.outranks(m.rank) && self.can(ki_protocol::perm::MUTE_MEMBERS);
             let peut_deplacer = self.peut_deplacer(m);
             if peut_sanctionner || peut_deplacer {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui::hairline(ui);
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
             }
             if peut_sanctionner {
                 // L'intitulé dit ce que le clic va faire, pas l'état courant :
@@ -7809,7 +7810,7 @@ impl KiApp {
                         }
                         ui.close();
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                 }
             }
 
@@ -7820,9 +7821,9 @@ impl KiApp {
             let show_kick = can_moderate && self.can(ki_protocol::perm::KICK) && m.online;
             let show_ban = can_moderate && self.can(ki_protocol::perm::BAN);
             if show_kick || show_ban {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui::hairline(ui);
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
             }
             // Expulser met dehors ; la personne peut revenir aussitôt.
             if show_kick
@@ -7859,7 +7860,7 @@ impl KiApp {
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG_SIDE)
-                    .inner_margin(egui::Margin::symmetric(8, 10)),
+                    .inner_margin(marge::symetrique(espace::M, espace::L)),
             )
             .show(ui, |ui| {
                 // `take` et non `clone` : la liste est empruntée le temps du
@@ -7881,11 +7882,11 @@ impl KiApp {
                     ui.label(
                         RichText::new(online.len().to_string())
                             .color(theme::BORDER_STRONG)
-                            .size(11.0)
+                            .size(texte::PETIT)
                             .strong(),
                     );
                 });
-                ui.add_space(2.0);
+                ui.add_space(espace::XXS);
 
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     for m in &online {
@@ -7934,17 +7935,17 @@ impl KiApp {
                     // nôtres — ni rôle, ni rang, ni photo. Le vumètre, oui :
                     // l'hôte peut les mettre en vocal.
                     if !invites.is_empty() {
-                        ui.add_space(10.0);
+                        ui.add_space(espace::L);
                         ui.horizontal(|ui| {
                             ui::section_label(ui, "Invités");
                             ui.label(
                                 RichText::new(invites.len().to_string())
                                     .color(theme::BORDER_STRONG)
-                                    .size(11.0)
+                                    .size(texte::PETIT)
                                     .strong(),
                             );
                         });
-                        ui.add_space(2.0);
+                        ui.add_space(espace::XXS);
                         for m in &invites {
                             let audible = m.voice.is_some() && m.voice == self.voice_channel;
                             let level = if audible {
@@ -7974,17 +7975,17 @@ impl KiApp {
                     // hors-ligne en dessous, éteints mais bien là — et le
                     // clic droit (rôles, bannir…) marche aussi sur eux.
                     if !offline.is_empty() {
-                        ui.add_space(10.0);
+                        ui.add_space(espace::L);
                         ui.horizontal(|ui| {
                             ui::section_label(ui, "Hors ligne");
                             ui.label(
                                 RichText::new(offline.len().to_string())
                                     .color(theme::BORDER_STRONG)
-                                    .size(11.0)
+                                    .size(texte::PETIT)
                                     .strong(),
                             );
                         });
-                        ui.add_space(2.0);
+                        ui.add_space(espace::XXS);
                         for m in &offline {
                             if let Some(tier) = palier_de(m) {
                                 self.rangs.preparer(ui.ctx(), tier);
@@ -8041,12 +8042,12 @@ impl KiApp {
                     .frame(
                         egui::Frame::NONE
                             .fill(theme::BG_BASE)
-                            .inner_margin(egui::Margin::symmetric(16, 12)),
+                            .inner_margin(marge::symetrique(espace::XL, espace::L)),
                     )
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui::glyph(ui, Icon::Hash, 17.0, TEXT_FAINT);
-                            ui.label(RichText::new(&channel_name).color(TEXT).size(16.5).strong());
+                            ui.label(RichText::new(&channel_name).color(TEXT).size(texte::TITRE).strong());
                             // Plus de compteur ici : un salon textuel n'a pas
                             // de membres, et la colonne de droite dit déjà qui
                             // est connecté au serveur.
@@ -8057,17 +8058,17 @@ impl KiApp {
 
                         let status = self.upload_status.lock().unwrap().clone();
                         if let Some(status) = status {
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             ui::banner(ui, Tone::Info, &status, false);
                         }
                         if let Some(err) = self.error.clone() {
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             if ui::banner(ui, Tone::Warn, &err, true) {
                                 self.error = None;
                             }
                         }
                         if let Some(nom) = self.poke_en_cours() {
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             if ui::banner(ui, Tone::Accent, &format!("{nom} te poke"), true) {
                                 self.poke_recu = None;
                             }
@@ -8090,7 +8091,7 @@ impl KiApp {
                         .frame(
                             egui::Frame::NONE
                                 .fill(theme::BG_RAISED)
-                                .inner_margin(egui::Margin::symmetric(14, 8)),
+                                .inner_margin(marge::symetrique(espace::XL, espace::M)),
                         )
                         .show(ui, |ui| self.bandeau_musique(ui));
                 }
@@ -8133,7 +8134,7 @@ impl KiApp {
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         format!("Lâche pour envoyer dans #{channel_name}"),
-                        egui::FontId::proportional(20.0),
+                        egui::FontId::proportional(texte::GRAND),
                         TEXT,
                     );
                     ui.allocate_rect(rect, Sense::hover());
@@ -8150,13 +8151,13 @@ impl KiApp {
             egui::Frame::NONE
                 .fill(theme::BG_RAISED)
                 .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                .corner_radius(egui::CornerRadius::same(12))
-                .inner_margin(egui::Margin::symmetric(10, 10))
+                .corner_radius(egui::CornerRadius::same(rayon::XL))
+                .inner_margin(marge::symetrique(espace::L, espace::L))
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new("Tu n'as pas le droit d'écrire dans ce serveur.")
                             .color(TEXT_DIM)
-                            .size(12.0),
+                            .size(texte::COURANT),
                     );
                 });
             return;
@@ -8167,8 +8168,8 @@ impl KiApp {
         let cadre = egui::Frame::NONE
             .fill(theme::BG_RAISED)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-            .corner_radius(egui::CornerRadius::same(12))
-            .inner_margin(egui::Margin::symmetric(6, 5))
+            .corner_radius(egui::CornerRadius::same(rayon::XL))
+            .inner_margin(marge::symetrique(espace::S, espace::S))
             .show(ui, |ui| {
                 // Le trombone et l'envoi à leur taille, le champ prend tout ce qui
                 // reste — le flex fait le calcul qu'on faisait à la main.
@@ -8205,7 +8206,7 @@ impl KiApp {
                                 .id(egui::Id::new("saisie_du_chat"))
                                 .char_limit(ki_protocol::MAX_CHAT_TEXT)
                                 .desired_rows(lignes)
-                                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 4)))
+                                .frame(egui::Frame::new().inner_margin(marge::symetrique(espace::XS, espace::XS)))
                                 .hint_text(indice),
                         );
                         if menu_edition(&response, &mut self.input, false) {
@@ -8386,23 +8387,23 @@ impl KiApp {
                         egui::Label::new(
                             RichText::new(ki_protocol::excerpt_of(&msg.text))
                                 .color(TEXT_FAINT)
-                                .size(11.0),
+                                .size(texte::PETIT),
                         )
                         .truncate(),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     // Réagir : les emojis du protocole, d'un clic. Celui
                     // qu'on a déjà posé se retire.
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
+                        ui.spacing_mut().item_spacing.x = espace::XS;
                         for emoji in ki_protocol::REACTIONS {
                             let deja = msg
                                 .reactions
                                 .iter()
                                 .any(|r| r.emoji == *emoji && self.my_id.is_some_and(|me| r.users.contains(&me)));
-                            let bouton = egui::Button::new(RichText::new(*emoji).size(16.0))
+                            let bouton = egui::Button::new(RichText::new(*emoji).size(texte::TITRE))
                                 .fill(if deja { theme::alpha(ACCENT, 40) } else { theme::BG_RAISED })
-                                .corner_radius(egui::CornerRadius::same(6));
+                                .corner_radius(egui::CornerRadius::same(rayon::M));
                             if ui.add(bouton).clicked() {
                                 self.send(ClientMsg::React {
                                     message: menu.message,
@@ -8413,7 +8414,7 @@ impl KiApp {
                             }
                         }
                     });
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     if ui.button("⧉ Copier le texte").clicked() {
                         ctx.copy_text(msg.text.clone());
                         fermer = true;
@@ -8491,14 +8492,14 @@ impl KiApp {
         }
         egui::Frame::NONE
             .fill(theme::BG_RAISED)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(10, 4))
+            .corner_radius(egui::CornerRadius::same(rayon::L))
+            .inner_margin(marge::symetrique(espace::L, espace::XS))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("✎ Tu modifies ton message — Entrée pour enregistrer")
                             .color(TEXT_DIM)
-                            .size(12.0),
+                            .size(texte::COURANT),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
@@ -8511,7 +8512,7 @@ impl KiApp {
                     });
                 });
             });
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
     }
 
     /// Le rappel « en réponse à… » au-dessus de la zone de saisie, tant
@@ -8524,15 +8525,15 @@ impl KiApp {
         }
         egui::Frame::NONE
             .fill(theme::BG_RAISED)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(10, 4))
+            .corner_radius(egui::CornerRadius::same(rayon::L))
+            .inner_margin(marge::symetrique(espace::L, espace::XS))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::Label::new(
                             RichText::new(format!("↩ Réponse à {} — {}", r.username, r.excerpt))
                                 .color(TEXT_DIM)
-                                .size(12.0),
+                                .size(texte::COURANT),
                         )
                         .truncate(),
                     );
@@ -8547,7 +8548,7 @@ impl KiApp {
                     });
                 });
             });
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
     }
 
     fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
@@ -8612,28 +8613,28 @@ impl KiApp {
                         // conversation.
                         if history_pending {
                             ui.vertical_centered(|ui| {
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
                                 ui.label(
                                     RichText::new("Chargement des messages plus anciens…")
                                         .color(TEXT_FAINT)
-                                        .size(11.5),
+                                        .size(texte::PETIT),
                                 );
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
                             });
                         } else if history_more {
                             ui.vertical_centered(|ui| {
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
                                 if ui
                                     .button(
                                         RichText::new("Charger les messages plus anciens")
                                             .color(TEXT_DIM)
-                                            .size(11.5),
+                                            .size(texte::PETIT),
                                     )
                                     .clicked()
                                 {
                                     want_older = true;
                                 }
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
                             });
                         } else {
                             day_separator(ui, &format!("Début de #{channel_name}"));
@@ -8645,22 +8646,22 @@ impl KiApp {
                         // dans le passé, on croirait le salon mort depuis ce
                         // jour-là.
                         if retour {
-                            ui.add_space(6.0);
+                            ui.add_space(espace::S);
                             ui.vertical_centered(|ui| {
                                 ui.label(
                                     RichText::new("tu regardes un message retrouvé")
                                         .color(TEXT_FAINT)
-                                        .size(11.5),
+                                        .size(texte::PETIT),
                                 );
                                 if ui
-                                    .button(RichText::new("Revenir au présent").color(TEXT_DIM).size(11.5))
+                                    .button(RichText::new("Revenir au présent").color(TEXT_DIM).size(texte::PETIT))
                                     .clicked()
                                 {
                                     revenir = true;
                                 }
                             });
                         }
-                        ui.add_space(10.0);
+                        ui.add_space(espace::L);
                         return;
                     }
 
@@ -8891,12 +8892,12 @@ impl KiApp {
                 });
                 ui::hint(ui, "Entrée pour chercher — la casse et les accents majuscules sont ignorés");
 
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui::hairline(ui);
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
 
                 if self.search_envoyee.is_some() && self.search_hits.is_empty() {
-                    ui.label(RichText::new("Recherche en cours…").color(TEXT_FAINT).size(12.0));
+                    ui.label(RichText::new("Recherche en cours…").color(TEXT_FAINT).size(texte::COURANT));
                     return;
                 }
                 if self.search_hits.is_empty() {
@@ -8905,7 +8906,7 @@ impl KiApp {
                     } else {
                         "Aucun message ne contient ça."
                     };
-                    ui.label(RichText::new(quoi).color(TEXT_FAINT).size(12.0));
+                    ui.label(RichText::new(quoi).color(TEXT_FAINT).size(texte::COURANT));
                     return;
                 }
                 if self.search_more {
@@ -8931,15 +8932,15 @@ impl KiApp {
                         let bloc = ui.push_id(("hit", rang), |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(format!("#{nom}")).color(ACCENT).size(11.0),
+                                    RichText::new(format!("#{nom}")).color(ACCENT).size(texte::PETIT),
                                 );
                                 ui.label(
-                                    RichText::new(&hit.record.username).color(TEXT_DIM).size(11.0),
+                                    RichText::new(&hit.record.username).color(TEXT_DIM).size(texte::PETIT),
                                 );
                                 ui.label(
                                     RichText::new(day_label(hit.record.ts))
                                         .color(TEXT_FAINT)
-                                        .size(11.0),
+                                        .size(texte::PETIT),
                                 );
                             });
                             // Une seule ligne : un résultat sert à reconnaître
@@ -8953,7 +8954,7 @@ impl KiApp {
                                 .chars()
                                 .take(160)
                                 .collect();
-                            ui.label(RichText::new(apercu).color(TEXT).size(13.0));
+                            ui.label(RichText::new(apercu).color(TEXT).size(texte::CORPS));
                         });
                         if bloc
                             .response
@@ -8963,9 +8964,9 @@ impl KiApp {
                         {
                             saut = Some((hit.channel, hit.record.ts));
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                         ui::hairline(ui);
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                     }
                 });
             });
@@ -9022,7 +9023,7 @@ impl KiApp {
                         }
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 let onglet = self.reglages_onglet;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -9042,7 +9043,7 @@ impl KiApp {
                             // réouvertures) : les bugs « au lancement d'un jeu »
                             // varient d'un casque à l'autre, et ce journal
                             // remplace la divination — on se le fait copier-coller.
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             let label = if self.show_audio_journal {
                                 "Masquer le journal audio"
                             } else {
@@ -9066,7 +9067,7 @@ impl KiApp {
                                         ctx.copy_text(text);
                                         self.info = Some("journal audio copié".into());
                                     }
-                                    ui.add_space(4.0);
+                                    ui.add_space(espace::XS);
                                     // Les plus récents d'abord : c'est eux qu'on
                                     // vient voir quand ça vient de buguer.
                                     for (ts, msg) in events.iter().rev().take(12) {
@@ -9075,10 +9076,10 @@ impl KiApp {
                                                 RichText::new(format_time_secs(*ts))
                                                     .color(TEXT_DIM)
                                                     .monospace()
-                                                    .size(11.5),
+                                                    .size(texte::PETIT),
                                             );
                                             ui.label(
-                                                RichText::new(msg.as_str()).color(TEXT).size(11.5),
+                                                RichText::new(msg.as_str()).color(TEXT).size(texte::PETIT),
                                             );
                                         });
                                     }
@@ -9098,7 +9099,7 @@ impl KiApp {
                             // s'est passé sans rien demander à personne. Opt-in,
                             // et technique seulement : jamais les messages, jamais
                             // l'audio.
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             ui.checkbox(
                                 &mut self.diag_share,
                                 "Partager mes diagnostics avec l'admin du serveur",
@@ -9131,7 +9132,7 @@ impl KiApp {
                             // logiciel tient la voie de capture, on ne peut pas la
                             // lui reprendre — seulement le nommer, et dire le
                             // réglage qui rend la main.
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             let label = if self.show_docteur {
                                 "Masquer le docteur audio"
                             } else {
@@ -9161,7 +9162,7 @@ impl KiApp {
                                             ctx.copy_text(d.rapport());
                                             self.info = Some("diagnostic copié".into());
                                         }
-                                        ui.add_space(4.0);
+                                        ui.add_space(espace::XS);
                                         // Les conseils, numérotés, dans l'ordre où
                                         // ils valent la peine d'être essayés.
                                         for (i, conseil) in d.conseils().iter().enumerate() {
@@ -9170,15 +9171,15 @@ impl KiApp {
                                                     RichText::new(format!("{}.", i + 1))
                                                         .color(ACCENT)
                                                         .strong()
-                                                        .size(11.5),
+                                                        .size(texte::PETIT),
                                                 );
                                                 ui.label(
                                                     RichText::new(conseil.as_str())
                                                         .color(TEXT)
-                                                        .size(11.5),
+                                                        .size(texte::PETIT),
                                                 );
                                             });
-                                            ui.add_space(3.0);
+                                            ui.add_space(espace::XS);
                                         }
                                         ui::hint(
                                             ui,
@@ -9195,7 +9196,7 @@ impl KiApp {
                             // reproduit pas sur la machine de développement, et
                             // une moyenne noierait justement l'image lente qu'on
                             // vient chercher — d'où des quantiles.
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             let label = if self.show_perf {
                                 "Masquer le relevé de performance"
                             } else {
@@ -9228,17 +9229,17 @@ impl KiApp {
                                     ctx.copy_text(texte);
                                     self.info = Some("relevé copié".into());
                                 }
-                                ui.add_space(4.0);
+                                ui.add_space(espace::XS);
                                 for (quoi, valeur) in &lignes {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
-                                            RichText::new(quoi.as_str()).color(TEXT_DIM).size(11.5),
+                                            RichText::new(quoi.as_str()).color(TEXT_DIM).size(texte::PETIT),
                                         );
                                         ui.label(
                                             RichText::new(valeur.as_str())
                                                 .color(TEXT)
                                                 .monospace()
-                                                .size(11.5),
+                                                .size(texte::PETIT),
                                         );
                                     });
                                 }
@@ -9252,12 +9253,12 @@ impl KiApp {
                                     ("Carte son à sec (audio)", voice.stats.sortie_a_sec),
                                 ] {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.label(RichText::new(quoi).color(TEXT_DIM).size(11.5));
+                                        ui.label(RichText::new(quoi).color(TEXT_DIM).size(texte::PETIT));
                                         ui.label(
                                             RichText::new(combien.to_string())
                                                 .color(if combien == 0 { SPEAK } else { DANGER })
                                                 .monospace()
-                                                .size(11.5),
+                                                .size(texte::PETIT),
                                         );
                                     });
                                 }
@@ -9293,7 +9294,7 @@ impl KiApp {
                                 {
                                     self.sfx_volume = pct / 100.0;
                                 }
-                                ui.add_space(6.0);
+                                ui.add_space(espace::S);
 
                                 // Un réglage par événement : à couper, à écouter,
                                 // et l'étiquette dit si le son est personnalisé.
@@ -9323,7 +9324,7 @@ impl KiApp {
                                             ui.label(
                                                 RichText::new("perso")
                                                     .color(ACCENT)
-                                                    .size(10.5),
+                                                    .size(texte::MINUSCULE),
                                             );
                                         }
                                         if ui.small_button("▶").on_hover_text("écouter").clicked()
@@ -9345,7 +9346,7 @@ impl KiApp {
                                 }
                             }
 
-                            ui.add_space(6.0);
+                            ui.add_space(espace::S);
                             ui.horizontal(|ui| {
                                 if ui::button(ui, Icon::Paperclip, "Dossier des sons").clicked() {
                                     if let Some(dir) = sound_dirs().into_iter().nth(1) {
@@ -9371,10 +9372,10 @@ impl KiApp {
                             // Indépendant des sons : « rien » coupe aussi le
                             // clignotement, et « tout » ne rallume pas un son
                             // coupé plus haut. Les pastilles restent toujours.
-                            ui.add_space(12.0);
+                            ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Info, "Notifications");
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Notifications :").color(TEXT_DIM).size(12.5));
+                                ui.label(RichText::new("Notifications :").color(TEXT_DIM).size(texte::COURANT));
                                 for n in Notif::TOUS {
                                     ui.selectable_value(&mut self.notif, n, n.label());
                                 }
@@ -9401,7 +9402,7 @@ impl KiApp {
                             // appel personnel, pas un message, et il passe
                             // outre « rien » ci-dessus. Le serveur refuse
                             // pour nous quand on le décoche.
-                            ui.add_space(6.0);
+                            ui.add_space(espace::S);
                             ui.checkbox(&mut self.pokes_accepter, "Accepter les pokes");
                             ui::hint(
                                 ui,
@@ -9411,7 +9412,7 @@ impl KiApp {
                             );
 
                             // --- Fermeture ---
-                            ui.add_space(12.0);
+                            ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Info, "Fermeture");
                             ui.checkbox(
                                 &mut self.reduire_zone,
@@ -9429,7 +9430,7 @@ impl KiApp {
                             // --- Réseau & qualité ---
                             ui::group_title(ui, Icon::Info, "Réseau & qualité");
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("débit voix").color(TEXT_DIM).size(12.5));
+                                ui.label(RichText::new("débit voix").color(TEXT_DIM).size(texte::COURANT));
                                 let selected = if self.bitrate == 0 {
                                     format!("Auto ({} kbps)", self.auto_bitrate / 1000)
                                 } else {
@@ -9458,12 +9459,12 @@ impl KiApp {
                                     });
                             });
                             ui::hint(ui, "Auto : s'adapte aux pertes mesurées par le serveur.");
-                            ui.add_space(6.0);
+                            ui.add_space(espace::S);
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new("protection pertes (DRED)")
                                         .color(TEXT_DIM)
-                                        .size(12.5),
+                                        .size(texte::COURANT),
                                 );
                                 let dred_label = |m: u8| match m {
                                     0 => "Désactivée".to_string(),
@@ -9501,9 +9502,9 @@ impl KiApp {
                                     _ => "en veille : s'engage automatiquement dès 2 % de pertes",
                                 },
                             );
-                            ui.add_space(6.0);
+                            ui.add_space(espace::S);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("tampon de gigue").color(TEXT_DIM).size(12.5));
+                                ui.label(RichText::new("tampon de gigue").color(TEXT_DIM).size(texte::COURANT));
                                 let jitter_label = |frames: usize| match frames {
                                     0 => "Auto (adaptatif)".to_string(),
                                     f => format!("{} ms", f * 20),
@@ -9531,7 +9532,7 @@ impl KiApp {
                             ui::hint(ui, "Auto recommandé ; fixe si la voix est hachée.");
 
                             if engine_up {
-                                ui.add_space(10.0);
+                                ui.add_space(espace::L);
                                 let ping_txt = match voice.ping {
                                     Some(p) => format!("{p} ms"),
                                     None => "—".into(),
@@ -9565,11 +9566,11 @@ impl KiApp {
                             }
 
                             // --- Labo vidéo (S1a du partage d'écran) ---
-                            ui.add_space(10.0);
+                            ui.add_space(espace::L);
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("🧪 labo vidéo").color(TEXT_DIM).size(12.5),
+                                    RichText::new("🧪 labo vidéo").color(TEXT_DIM).size(texte::COURANT),
                                 );
                                 let running = self.labo.is_some();
                                 let label = if running { "Arrêter le test" } else { "Se voir (test local)" };
@@ -9610,13 +9611,13 @@ impl KiApp {
                                     Some(j) => valo_catalogue::ligne(&j),
                                 },
                             };
-                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
+                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(texte::PETIT));
 
                             // Le compte Riot : lié, le serveur tient la fiche
                             // par HenrikDev et la montre aux membres. Ce que le
                             // serveur en sait vient du roster, pas d'un état à
                             // part — délier chez l'admin s'y voit aussi.
-                            ui.add_space(12.0);
+                            ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Target, "Compte Riot");
                             let moi = self
                                 .my_id
@@ -9643,7 +9644,7 @@ impl KiApp {
                                             self.riot_message = None;
                                         }
                                     });
-                                    ui.add_space(4.0);
+                                    ui.add_space(espace::XS);
                                     ui.checkbox(&mut self.valorant_medailles, "Ajouter mes médailles à ma fiche").on_hover_text(
                                         "lues dans ton client Riot après chaque partie : MVP, top frag, aces, \
                                          clutchs, records de l'acte… Les tiennes seulement — celles des \
@@ -9692,16 +9693,16 @@ impl KiApp {
                             }
                             if let Some((ok, message)) = &self.riot_message {
                                 let teinte = if *ok { TEXT_DIM } else { DANGER };
-                                ui.label(RichText::new(message).color(teinte).size(11.5));
+                                ui.label(RichText::new(message).color(teinte).size(texte::PETIT));
                             }
 
-                            ui.add_space(8.0);
+                            ui.add_space(espace::M);
                             ui::hint(ui, "ta boutique du jour est dans la page Valorant, à côté de « Chercher »");
 
                             // Les autres jeux : un nom sous le pseudo, reconnu
                             // à la fenêtre — le contraire d'une lecture dans
                             // le jeu, et c'est pour ça qu'il est coché de base.
-                            ui.add_space(12.0);
+                            ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Play, "Les autres jeux");
                             ui.checkbox(&mut self.presence_jeux, "Dire aux membres à quoi je joue")
                                 .on_hover_text(
@@ -9715,7 +9716,7 @@ impl KiApp {
                                     None => "aucun jeu connu en cours".to_string(),
                                 },
                             };
-                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(11.5));
+                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(texte::PETIT));
                             ui::hint(
                                 ui,
                                 &format!(
@@ -9727,7 +9728,7 @@ impl KiApp {
                         }
 
                         if let Some(info) = self.info.clone() {
-                            ui.add_space(10.0);
+                            ui.add_space(espace::L);
                             if ui::banner(ui, Tone::Accent, &info, true) {
                                 self.info = None;
                             }
@@ -9796,25 +9797,25 @@ impl KiApp {
                 update::Status::Available(release) => {
                     ui.label(
                         RichText::new(format!("Version {} disponible", release.version))
-                            .size(16.0)
+                            .size(texte::TITRE)
                             .strong(),
                     );
                     ui::hint(ui, &format!("Version installée : {}", update::current()));
 
                     if !release.notes.is_empty() {
-                        ui.add_space(8.0);
+                        ui.add_space(espace::M);
                         egui::ScrollArea::vertical()
                             .max_height(160.0)
                             .show(ui, |ui| {
                                 ui.label(
                                     RichText::new(release.notes.as_str())
                                         .color(TEXT_DIM)
-                                        .size(13.0),
+                                        .size(texte::CORPS),
                                 );
                             });
                     }
 
-                    ui.add_space(12.0);
+                    ui.add_space(espace::L);
                     ui.horizontal(|ui| {
                         if ui::primary_button(ui, Some(Icon::ArrowDown), "Mettre à jour", None)
                             .clicked()
@@ -9831,8 +9832,8 @@ impl KiApp {
                     ui::hint(ui, "L'application redémarrera d'elle-même une fois à jour.");
                 }
                 update::Status::Downloading { done, total } => {
-                    ui.label(RichText::new("Téléchargement…").size(16.0).strong());
-                    ui.add_space(8.0);
+                    ui.label(RichText::new("Téléchargement…").size(texte::TITRE).strong());
+                    ui.add_space(espace::M);
                     let ratio = if total > 0 {
                         done as f32 / total as f32
                     } else {
@@ -9845,7 +9846,7 @@ impl KiApp {
                     );
                 }
                 update::Status::Ready => {
-                    ui.label(RichText::new("Mise à jour installée").size(16.0).strong());
+                    ui.label(RichText::new("Mise à jour installée").size(texte::TITRE).strong());
                     ui::hint(ui, "Redémarrage…");
                     // L'utilisateur a déjà dit oui : on ne lui redemande pas
                     // s'il veut bien relancer. La fenêtre se ferme, eframe
@@ -9857,14 +9858,14 @@ impl KiApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 update::Status::Failed(message) => {
-                    ui.label(RichText::new("Mise à jour impossible").size(16.0).strong());
-                    ui.label(RichText::new(message.as_str()).color(DANGER).size(13.0));
-                    ui.add_space(8.0);
+                    ui.label(RichText::new("Mise à jour impossible").size(texte::TITRE).strong());
+                    ui.label(RichText::new(message.as_str()).color(DANGER).size(texte::CORPS));
+                    ui.add_space(espace::M);
                     ui.hyperlink_to(
                         "Télécharger depuis GitHub",
                         update::Updater::releases_page(),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(espace::M);
                     if ui::button(ui, Icon::Close, "Fermer").clicked() {
                         self.updater.dismiss();
                     }
@@ -9910,9 +9911,9 @@ impl KiApp {
                 ui.horizontal(|ui| {
                     let me = self.username.clone();
                     ui::avatar(ui, &me, 56.0, false, shown.as_ref(), theme::BG_RAISED);
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(&me).color(color_for(&me)).size(16.0).strong());
+                        ui.label(RichText::new(&me).color(color_for(&me)).size(texte::TITRE).strong());
                         // Le rôle vaut mieux qu'un « administrateur/membre »
                         // binaire : c'est lui que les autres voient.
                         let role = self
@@ -9922,8 +9923,8 @@ impl KiApp {
                             .and_then(|m| self.top_role_name(m))
                             .unwrap_or("membre")
                             .to_string();
-                        ui.label(RichText::new(role).color(TEXT_FAINT).size(12.0));
-                        ui.add_space(6.0);
+                        ui.label(RichText::new(role).color(TEXT_FAINT).size(texte::COURANT));
+                        ui.add_space(espace::S);
                         ui.horizontal(|ui| {
                             if ui::button(ui, Icon::Pencil, "Photo").clicked() {
                                 self.pick_image(ctx, "Photo de profil", &self.picked_avatar);
@@ -9939,7 +9940,7 @@ impl KiApp {
 
                 let dirty = !matches!(self.account_avatar, IconChange::Keep);
                 if dirty {
-                    ui.add_space(8.0);
+                    ui.add_space(espace::M);
                     let clicked =
                         ui::primary_button(ui, Some(Icon::Check), "Enregistrer la photo", None)
                             .clicked();
@@ -9950,18 +9951,18 @@ impl KiApp {
                         self.preview_icons.remove(&Apercu::Avatar);
                     }
                 } else {
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     ui::hint(ui, "PNG ou JPG, réduit en vignette 64×64.");
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(espace::L);
                 ui::hairline(ui);
-                ui.add_space(10.0);
+                ui.add_space(espace::L);
 
                 ui::group_title(ui, Icon::Key, "Changer mon mot de passe");
                 ui::field_label(ui, "Mot de passe actuel");
                 ui.add(ui::text_field(&mut self.old_password, "", true));
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui::field_label(ui, "Nouveau mot de passe");
                 ui.add(ui::text_field(
                     &mut self.new_password,
@@ -9969,10 +9970,10 @@ impl KiApp {
                     true,
                 ));
                 if !self.new_password.is_empty() && self.new_password.len() < 6 {
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     ui::hint(ui, "6 caractères minimum");
                 }
-                ui.add_space(12.0);
+                ui.add_space(espace::L);
                 let ready = !self.old_password.is_empty() && self.new_password.len() >= 6;
                 let clicked = ui
                     .add_enabled_ui(ready, |ui| {
@@ -9994,7 +9995,7 @@ impl KiApp {
                     self.new_password.clear();
                 }
                 if let Some(info) = self.info.clone() {
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                     if ui::banner(ui, Tone::Accent, &info, true) {
                         self.info = None;
                     }
@@ -10092,11 +10093,11 @@ impl KiApp {
                 self.url.trim(),
                 preview.as_ref(),
             );
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             ui.vertical(|ui| {
                 ui::field_label(ui, "Nom du serveur");
                 ui.add(ui::text_field(&mut self.admin_name, "ex. Chez Kévin", false));
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui.horizontal(|ui| {
                     if ui::button(ui, Icon::Pencil, "Choisir un logo").clicked() {
                         self.pick_image(ctx, "Logo du serveur", &self.picked_icon);
@@ -10107,7 +10108,7 @@ impl KiApp {
                 });
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         ui::hint(
             ui,
             "PNG ou JPG, réduit en vignette 64×64. Nom et logo sont poussés à \
@@ -10118,14 +10119,14 @@ impl KiApp {
             || self.admin_name.trim() != self.server_info.name;
         let too_long = self.admin_name.trim().chars().count() > ki_protocol::MAX_SERVER_NAME;
         if too_long {
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             ui::hint(
                 ui,
                 &format!("{} caractères maximum", ki_protocol::MAX_SERVER_NAME),
             );
         }
 
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
         let clicked = ui
             .add_enabled_ui(dirty && !too_long, |ui| {
                 ui::primary_button(ui, Some(Icon::Check), "Appliquer au serveur", None)
@@ -10144,16 +10145,16 @@ impl KiApp {
         // derrière Docker ou une box, rien ne le lui dit : un admin le lui
         // apprend. Un serveur sans portes n'en a pas l'usage.
         if self.portes.disponible {
-            ui.add_space(14.0);
+            ui.add_space(espace::XL);
             ui::hairline(ui);
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui::field_label(ui, "Adresse web publique — la base des liens des portes");
             let auto = self.http_base();
             ui.add(ui::text_field(&mut self.admin_adresse_web, &format!("automatique : {auto}"), false));
             let normalisee = ki_protocol::normaliser_adresse_web(&self.admin_adresse_web);
             match &normalisee {
                 Err(e) => {
-                    ui.label(RichText::new(e.as_str()).color(DANGER).size(12.5));
+                    ui.label(RichText::new(e.as_str()).color(DANGER).size(texte::COURANT));
                 }
                 Ok(n) if n.is_empty() => {
                     ui::hint(ui, &format!("vide : automatique, les liens partent de l'adresse de connexion — {auto}/salon1"));
@@ -10165,7 +10166,7 @@ impl KiApp {
                 "comme dans la barre d'adresse du navigateur : ex. ts.baws.fun:8080. Le https:// est ajouté \
                  s'il manque — sans lui, le navigateur tenterait http:// et la page ne s'ouvrirait pas.",
             );
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             let change = normalisee.as_ref().is_ok_and(|n| *n != self.server_info.adresse_web);
             let enregistrer = ui
                 .add_enabled_ui(change, |ui| {
@@ -10185,9 +10186,9 @@ impl KiApp {
         // Le fil de jeu VALORANT : le salon où le serveur annonce les
         // parties finies des membres liés. Le choix part tout de suite, le
         // serveur le confirme en repoussant son identité à tout le monde.
-        ui.add_space(14.0);
+        ui.add_space(espace::XL);
         ui::hairline(ui);
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::field_label(ui, "Fil de jeu VALORANT");
         let actuel = self.server_info.fil_valorant;
         let nom_du_salon = |id: ChannelId| -> String {
@@ -10221,9 +10222,9 @@ impl KiApp {
         );
 
         // Le bot musique : qui peut y ajouter des morceaux.
-        ui.add_space(14.0);
+        ui.add_space(espace::XL);
         ui::hairline(ui);
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::field_label(ui, "Bot musique");
         let mut ajoutent = self.server_info.musique_membres_ajoutent;
         if ui.checkbox(&mut ajoutent, "Les membres peuvent chercher et ajouter des morceaux").changed() {
@@ -10654,7 +10655,7 @@ impl KiApp {
                     self.sources.rafraichir();
                 }
                 change = partage::reglages_ui(ui, &mut self.diffusion, &mut self.sources);
-                ui.add_space(10.0);
+                ui.add_space(espace::L);
                 ui.horizontal(|ui| {
                     if en_direct {
                         if ui::tinted_button(ui, Some(Icon::Close), "Arrêter la diffusion", Tone::Danger)
@@ -10672,7 +10673,7 @@ impl KiApp {
                         ui.label(
                             RichText::new("rejoins un salon vocal pour diffuser")
                                 .color(TEXT_DIM)
-                                .size(12.5),
+                                .size(texte::COURANT),
                         );
                     }
                 });
@@ -10827,12 +10828,12 @@ impl KiApp {
                                 .color(TEXT_DIM),
                         );
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     if let Some(qui) = &qui_regarde {
-                        ui.label(RichText::new(qui).color(TEXT).size(12.5));
+                        ui.label(RichText::new(qui).color(TEXT).size(texte::COURANT));
                     }
-                    ui.label(RichText::new(etat).color(TEXT_FAINT).size(11.0).monospace());
-                    ui.add_space(6.0);
+                    ui.label(RichText::new(etat).color(TEXT_FAINT).size(texte::PETIT).monospace());
+                    ui.add_space(espace::S);
                     ui.horizontal(|ui| {
                         if ui::button(ui, Icon::Close, "Arrêter").clicked() {
                             arreter = true;
@@ -10921,7 +10922,7 @@ impl KiApp {
                         RichText::new("en attente de la première image…").color(TEXT_DIM),
                     );
                 }
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui.horizontal_wrapped(|ui| {
                     if ui::button(ui, Icon::Close, "Quitter le visionnage").clicked() {
                         quitter = true;
@@ -10940,7 +10941,7 @@ impl KiApp {
                     {
                         plein_ecran = true;
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(espace::M);
                     // Le son du jeu du streamer, à son volume à soi —
                     // mixé par le moteur vocal, il suit aussi le volume
                     // général et la mise en sourdine.
@@ -10948,7 +10949,7 @@ impl KiApp {
                         ui.label(
                             RichText::new("son du jeu coupé : le streamer est sur ce PC")
                                 .color(TEXT_FAINT)
-                                .size(11.5),
+                                .size(texte::PETIT),
                         )
                         .on_hover_text(
                             "sa capture exclut son propre ki-chat, pas celui-ci : \
@@ -10971,7 +10972,7 @@ impl KiApp {
                         }
                     }
                     if !etat.is_empty() {
-                        ui.label(RichText::new(&etat).color(TEXT_FAINT).size(11.0).monospace());
+                        ui.label(RichText::new(&etat).color(TEXT_FAINT).size(texte::PETIT).monospace());
                     }
                 });
             });
@@ -11075,14 +11076,14 @@ impl KiApp {
                         ""
                     }
                 ));
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui.label(
                     "Le plus souvent, l'appareil est éteint ou en veille alors que son \
                      récepteur reste branché — casque sans fil, manette. Rallume-le : \
                      cette fenêtre se fermera d'elle-même quand le son reviendra. Si ce \
                      n'est pas ton micro, choisis le bon dans ⚙ Audio.",
                 );
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 ui.label(
                     "Sinon, un autre logiciel — la voix intégrée d'un jeu — tient \
                      peut-être la voie de capture. ki-chat peut demander la même voie \
@@ -11090,7 +11091,7 @@ impl KiApp {
                      Windows peut alors baisser le volume de tes autres sons — réglable \
                      dans Panneau son → Communications → « Ne rien faire ».",
                 );
-                ui.add_space(10.0);
+                ui.add_space(espace::L);
                 ui.horizontal(|ui| {
                     if ui::button(ui, Icon::Check, "Basculer (cette session)").clicked() {
                         reponse = Some(true);
@@ -11099,7 +11100,7 @@ impl KiApp {
                         reponse = Some(false);
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 ui::hint(
                     ui,
                     "pour le rendre permanent : ⚙ Audio → « Partager le micro avec \
@@ -11139,7 +11140,7 @@ impl KiApp {
              diagnostics » dans leurs réglages (Aide & diagnostics) ; les rapports de plantage, eux, \
              arrivent de tout le monde — technique seulement, jamais les messages ni la voix",
         );
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         if ui::button(ui, Icon::Refresh, "Récupérer tous les diagnostics").clicked() {
             let base = self.http_base();
             let agent = self.http_agent();
@@ -11211,7 +11212,7 @@ impl KiApp {
         // L'état des lieux avant le détail : le serveur compte, par version,
         // les joueurs et les marqueurs qui fâchent (sessions, réouvertures,
         // famines, erreurs, crashs) — un écran au lieu d'un défilement.
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         if ui::button(ui, Icon::Info, "Résumé par version").clicked() {
             let base = self.http_base();
             let agent = self.http_agent();
@@ -11249,7 +11250,7 @@ impl KiApp {
         // dépassée n'apprend plus rien, autant rendre la place.
         let versions = self.diag_versions.lock().unwrap().clone();
         if !versions.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             ui::field_label(ui, "purger les archives d'une version");
             ui.horizontal_wrapped(|ui| {
                 for version in &versions {
@@ -11281,12 +11282,12 @@ impl KiApp {
         }
         let contenu = self.diag_admin.lock().unwrap().clone();
         if let Some(texte) = contenu {
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             if ui::button(ui, Icon::Copy, "Tout copier").clicked() {
                 ctx.copy_text(texte.clone());
                 self.info = Some("diagnostics copiés — prêts à coller".into());
             }
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             // L'affichage est borné aux derniers caractères : des mégaoctets
             // de journal mettraient l'interface à genoux. La copie, elle,
             // emporte tout ce qui a été récupéré. Seule exception : le résumé
@@ -11305,11 +11306,11 @@ impl KiApp {
             egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                 if !tete.is_empty() {
                     ui.label(
-                        RichText::new(tete).monospace().size(11.0).color(TEXT),
+                        RichText::new(tete).monospace().size(texte::PETIT).color(TEXT),
                     );
                 }
                 ui.label(
-                    RichText::new(&reste[debut..]).monospace().size(11.0).color(TEXT),
+                    RichText::new(&reste[debut..]).monospace().size(texte::PETIT).color(TEXT),
                 );
             });
         }
@@ -11406,7 +11407,7 @@ impl KiApp {
                     ui.label(
                         RichText::new(format!("il y a {} s", t.elapsed().as_secs()))
                             .color(TEXT_FAINT)
-                            .size(11.0),
+                            .size(texte::PETIT),
                     );
                 }
             });
@@ -11415,7 +11416,7 @@ impl KiApp {
             self.tableau_demande = None;
             self.reseau_demande = None;
         }
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         let tableau = self.tableau_admin.lock().unwrap().clone();
         match tableau {
             None => ui::hint(ui, "récupération de l'état du serveur…"),
@@ -11445,17 +11446,17 @@ impl KiApp {
             };
             // Les deux mots en couleur servent de légende à la courbe.
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(RichText::new("entrant").color(INFO).size(12.5));
-                ui.label(RichText::new(debit_lisible(r.entrant_kbps)).color(TEXT).size(12.5).strong());
-                ui.label(RichText::new("·").color(TEXT_FAINT).size(12.5));
-                ui.label(RichText::new("sortant").color(ACCENT).size(12.5));
-                ui.label(RichText::new(debit_lisible(r.sortant_kbps)).color(TEXT).size(12.5).strong());
-                ui.label(RichText::new(format!("sur les {} dernières secondes", r.periode_s)).color(TEXT_FAINT).size(11.0));
+                ui.spacing_mut().item_spacing.x = espace::XS;
+                ui.label(RichText::new("entrant").color(INFO).size(texte::COURANT));
+                ui.label(RichText::new(debit_lisible(r.entrant_kbps)).color(TEXT).size(texte::COURANT).strong());
+                ui.label(RichText::new("·").color(TEXT_FAINT).size(texte::COURANT));
+                ui.label(RichText::new("sortant").color(ACCENT).size(texte::COURANT));
+                ui.label(RichText::new(debit_lisible(r.sortant_kbps)).color(TEXT).size(texte::COURANT).strong());
+                ui.label(RichText::new(format!("sur les {} dernières secondes", r.periode_s)).color(TEXT_FAINT).size(texte::PETIT));
             });
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             graphes::debits(ui, &r.historique, r.periode_s, 76.0, (INFO, ACCENT), debit_lisible);
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             let fenetre = if r.fenetre_s < 60 {
                 format!("{} s", r.fenetre_s)
             } else {
@@ -11470,7 +11471,7 @@ impl KiApp {
                     admin_fichiers::taille_lisible(r.total_sortant_octets),
                 ))
                 .color(TEXT_DIM)
-                .size(12.0),
+                .size(texte::COURANT),
             );
             ui::hint(ui, "le sortant porte les streams : chaque spectateur reçoit sa propre copie");
         });
@@ -11485,7 +11486,7 @@ impl KiApp {
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| format!("salon {id}"))
         };
-        let dim = |texte: String| RichText::new(texte).color(TEXT_DIM).size(12.0);
+        let dim = |texte: String| RichText::new(texte).color(TEXT_DIM).size(texte::COURANT);
 
         ui::card(ui, |ui| {
             ui::section_label(ui, "Serveur");
@@ -11505,8 +11506,8 @@ impl KiApp {
             if let Some(d) = t.disque_libre_octets {
                 ligne.push_str(&format!(" · disque libre {:.1} Go", d as f64 / 1e9));
             }
-            ui.label(RichText::new(ligne).color(TEXT).size(12.5));
-            ui.add_space(4.0);
+            ui.label(RichText::new(ligne).color(TEXT).size(texte::COURANT));
+            ui.add_space(espace::XS);
             ui::section_label(ui, "Connectés");
             if t.en_ligne.is_empty() {
                 ui::hint(ui, "personne");
@@ -11525,10 +11526,10 @@ impl KiApp {
                 ui.label(dim(mots.join(" · ")));
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         self.peindre_reseau(ui);
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         ui::card(ui, |ui| {
             ui::section_label(ui, "Vocal");
@@ -11544,7 +11545,7 @@ impl KiApp {
                 let verrou = if s.verrouille { " · verrouillé" } else { "" };
                 ui.label(dim(format!("{} : {occupants}{verrou}", ki_protocol::safe_display(&s.nom, 40))));
             }
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             ui::section_label(ui, "Diffusions");
             if t.diffusions.is_empty() {
                 ui::hint(ui, "aucune diffusion en cours");
@@ -11565,7 +11566,7 @@ impl KiApp {
                 )));
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         ui::card(ui, |ui| {
             ui::section_label(ui, "Stockage");
@@ -11585,7 +11586,7 @@ impl KiApp {
             };
             ui.label(dim(format!("fabrique : {} en file · {quoi}", f.en_file)));
         });
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         ui::card(ui, |ui| {
             ui::section_label(ui, "Musique");
@@ -11609,11 +11610,11 @@ impl KiApp {
                     m.pistes_jouees, m.echecs, m.premier_son_ms
                 )));
             }
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             ui::section_label(ui, "VALORANT");
             ui.label(dim(ki_protocol::safe_display(&t.valorant, 400)));
         });
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         ui::card(ui, |ui| {
             ui::section_label(ui, "Diagnostics des joueurs");
@@ -11626,16 +11627,16 @@ impl KiApp {
             }
             egui::Grid::new("tableau-diag").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
                 for entete in ["version", "joueurs", "sessions", "réouvertures", "famines", "erreurs", "crashs", "taille"] {
-                    ui.label(RichText::new(entete).color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new(entete).color(TEXT_FAINT).size(texte::PETIT));
                 }
                 ui.end_row();
                 for d in &t.diagnostics {
-                    ui.label(RichText::new(ki_protocol::safe_display(&d.version, 20)).color(TEXT).size(12.0));
+                    ui.label(RichText::new(ki_protocol::safe_display(&d.version, 20)).color(TEXT).size(texte::COURANT));
                     for v in [d.joueurs, d.sessions, d.reouvertures, d.famines, d.erreurs] {
                         ui.label(dim(v.to_string()));
                     }
                     let teinte = if d.crashs > 0 { DANGER } else { TEXT_DIM };
-                    ui.label(RichText::new(d.crashs.to_string()).color(teinte).size(12.0));
+                    ui.label(RichText::new(d.crashs.to_string()).color(teinte).size(texte::COURANT));
                     ui.label(dim(format!("{} Ko", d.taille_ko)));
                     ui.end_row();
                 }
@@ -11680,9 +11681,9 @@ impl KiApp {
                         }
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 ui::hairline(ui);
-                ui.add_space(10.0);
+                ui.add_space(espace::L);
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -11707,7 +11708,7 @@ impl KiApp {
                             AdminTab::Diagnostics => self.admin_diag_tab(ui, ctx),
                         }
                         if let Some(info) = self.info.clone() {
-                            ui.add_space(10.0);
+                            ui.add_space(espace::L);
                             if ui::banner(ui, Tone::Accent, &info, true) {
                                 self.info = None;
                             }
@@ -11753,9 +11754,9 @@ impl KiApp {
             self.channel_draft = None;
         }
 
-        ui.add_space(12.0);
+        ui.add_space(espace::L);
         ui::hairline(ui);
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
         ui::group_title(ui, Icon::Hash, "Salons existants");
         let channels = self.channels.clone();
         // L'ordre affiché **est** l'ordre du serveur : la liste arrive déjà
@@ -11771,12 +11772,12 @@ impl KiApp {
                     13.0,
                     TEXT_DIM,
                 );
-                ui.label(RichText::new(&ch.name).color(TEXT).size(13.0));
+                ui.label(RichText::new(&ch.name).color(TEXT).size(texte::CORPS));
                 if ch.allowed_roles.is_some() {
-                    ui.label(RichText::new("privé").color(ACCENT).size(11.0));
+                    ui.label(RichText::new("privé").color(ACCENT).size(texte::PETIT));
                 }
                 if ch.locked {
-                    ui.label(RichText::new("verrouillé").color(WARN).size(11.0));
+                    ui.label(RichText::new("verrouillé").color(WARN).size(texte::PETIT));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
@@ -11946,10 +11947,10 @@ impl KiApp {
             ui.horizontal(|ui| {
                 let color = theme::member_color(role.color, &role.name);
                 ui::status_dot(ui, color, "", 10.0);
-                ui.label(RichText::new(&role.name).color(color).size(13.0).strong());
-                ui.label(RichText::new(format!("rang {}", role.rank)).color(TEXT_FAINT).size(11.0));
+                ui.label(RichText::new(&role.name).color(color).size(texte::CORPS).strong());
+                ui.label(RichText::new(format!("rang {}", role.rank)).color(TEXT_FAINT).size(texte::PETIT));
                 if role.system {
-                    ui.label(RichText::new("système").color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new("système").color(TEXT_FAINT).size(texte::PETIT));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // On ne touche qu'à ce qui est strictement sous son
@@ -11983,7 +11984,7 @@ impl KiApp {
             });
         }
 
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
         if self.role_draft.is_none() && ui::button(ui, Icon::Plus, "Nouveau rôle").clicked() {
             self.role_draft = Some(RoleDraft {
                 id: None,
@@ -11999,9 +12000,9 @@ impl KiApp {
 
         let Some(mut draft) = self.role_draft.take() else { return };
         let mut keep = true;
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::hairline(ui);
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         // `@everyone` : ni nom ni rang ne se changent, le serveur les refuse.
         // On règle uniquement ce que reçoit tout le monde.
         let everyone = draft.id == Some(ki_protocol::ROLE_EVERYONE);
@@ -12009,14 +12010,14 @@ impl KiApp {
         ui.add_enabled_ui(!everyone, |ui| {
             ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
         });
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         ui.horizontal(|ui| {
             ui.checkbox(&mut draft.colored, "Couleur de pseudo");
             if draft.colored {
                 ui.color_edit_button_srgba(&mut draft.color);
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         if everyone {
             ui::hint(ui, "ce que reçoit tout le monde, y compris les comptes sans rôle");
         } else {
@@ -12024,7 +12025,7 @@ impl KiApp {
             ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
             ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
         }
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         ui::field_label(ui, "Permissions");
         for (bit, label, why) in ki_protocol::perm::ALL {
             // On n'accorde pas ce qu'on n'a pas soi-même : sans cette borne,
@@ -12049,7 +12050,7 @@ impl KiApp {
                 draft.perms &= !bit;
             }
         }
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui.horizontal(|ui| {
             let ready = !draft.name.trim().is_empty();
             let save = ui
@@ -12104,7 +12105,7 @@ impl KiApp {
         ui::group_title(ui, Icon::Plus, "Nouveau code");
         ui::field_label(ui, "Étiquette (pour s'y retrouver plus tard)");
         ui.add(ui::text_field(&mut self.invite_label, "ex. tournoi du samedi", false));
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
 
         ui::field_label(ui, "Nombre d'utilisations");
         ui.horizontal_wrapped(|ui| {
@@ -12119,7 +12120,7 @@ impl KiApp {
         if self.invite_uses.is_none() {
             ui::hint(ui, "lien permanent — chaque compte créé sera consigné au journal");
         }
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         if ui::button(ui, Icon::Plus, "Générer le code").clicked() {
             to_send.push(ClientMsg::AdminCreateInvite {
                 uses: self.invite_uses,
@@ -12130,16 +12131,16 @@ impl KiApp {
         }
 
         if let Some(code) = self.last_invite.clone() {
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             egui::Frame::NONE
                 .fill(theme::alpha(ACCENT, 24))
                 .stroke(egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 80)))
-                .corner_radius(egui::CornerRadius::same(9))
-                .inner_margin(egui::Margin::symmetric(10, 8))
+                .corner_radius(egui::CornerRadius::same(rayon::L))
+                .inner_margin(marge::symetrique(espace::L, espace::M))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(&code).color(ACCENT).strong().monospace().size(15.0),
+                            RichText::new(&code).color(ACCENT).strong().monospace().size(texte::TITRE),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui::icon_button(ui, Icon::Copy, "Copier « serveur + code »")
@@ -12160,14 +12161,14 @@ impl KiApp {
 
         let invites = self.admin_invites.clone();
         if !invites.is_empty() {
-            ui.add_space(12.0);
+            ui.add_space(espace::L);
             ui::hairline(ui);
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             ui::group_title(ui, Icon::Key, "Codes émis");
             for invite in &invites {
                 ui.horizontal(|ui| {
                     let color = if invite.revoked { TEXT_FAINT } else { TEXT_DIM };
-                    let mut code = RichText::new(&invite.code).color(color).monospace().size(13.0);
+                    let mut code = RichText::new(&invite.code).color(color).monospace().size(texte::CORPS);
                     if invite.revoked {
                         code = code.strikethrough();
                     }
@@ -12176,31 +12177,31 @@ impl KiApp {
                     // qui décide s'il faut le révoquer.
                     match invite.uses_left {
                         None if !invite.revoked => {
-                            ui.label(RichText::new("permanent").color(ACCENT).size(11.0));
+                            ui.label(RichText::new("permanent").color(ACCENT).size(texte::PETIT));
                         }
                         Some(left) if !invite.revoked => {
                             ui.label(
                                 RichText::new(format!("{left} restant(s)"))
                                     .color(TEXT_FAINT)
-                                    .size(11.0),
+                                    .size(texte::PETIT),
                             );
                         }
                         _ => {
-                            ui.label(RichText::new("révoqué").color(DANGER).size(11.0));
+                            ui.label(RichText::new("révoqué").color(DANGER).size(texte::PETIT));
                         }
                     }
                     if invite.uses > 0 {
                         ui.label(
                             RichText::new(format!("· {} compte(s) créé(s)", invite.uses))
                                 .color(TEXT_FAINT)
-                                .size(11.0),
+                                .size(texte::PETIT),
                         );
                     }
                     if !invite.label.is_empty() {
                         ui.label(
                             RichText::new(format!("· {}", invite.label))
                                 .color(TEXT_FAINT)
-                                .size(11.0),
+                                .size(texte::PETIT),
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -12253,7 +12254,7 @@ impl KiApp {
                     &account.username,
                 );
                 let mut name =
-                    RichText::new(&account.username).color(account_color).size(13.5);
+                    RichText::new(&account.username).color(account_color).size(texte::CORPS);
                 if account.banned {
                     name = name.strikethrough();
                 }
@@ -12265,11 +12266,11 @@ impl KiApp {
                     ui.label(
                         RichText::new(&role.name)
                             .color(theme::member_color(role.color, &role.name))
-                            .size(10.5),
+                            .size(texte::MINUSCULE),
                     );
                 }
                 if account.banned {
-                    ui.label(RichText::new(ban_summary(account)).color(DANGER).size(11.0));
+                    ui.label(RichText::new(ban_summary(account)).color(DANGER).size(texte::PETIT));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -12345,16 +12346,16 @@ impl KiApp {
                         }
                         detail.push_str(&format!("par {}", safe_name(&account.ban_by)));
                     }
-                    ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.0));
+                    ui.label(RichText::new(detail).color(TEXT_FAINT).size(texte::PETIT));
                 });
             }
         }
 
         // --- Attribution des rôles ---
         if let Some(target) = self.roles_target.clone() {
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             ui::hairline(ui);
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui::field_label(ui, &format!("Rôles de {target}"));
             let roles = self.roles.clone();
             let mine = self.my_rank;
@@ -12387,7 +12388,7 @@ impl KiApp {
             if assignable == 0 {
                 ui::hint(ui, "aucun rôle sous ton rang n'est attribuable");
             }
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             ui.horizontal(|ui| {
                 if ui::primary_button(ui, Some(Icon::Check), "Appliquer", None).clicked() {
                     to_send.push(ClientMsg::AdminSetUserRoles {
@@ -12406,15 +12407,15 @@ impl KiApp {
 
         // --- Formulaire de réinitialisation ---
         if let Some(target) = self.reset_target.clone() {
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             ui::hairline(ui);
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui::field_label(ui, &format!("Nouveau mot de passe pour {target}"));
             ui.horizontal(|ui| {
                 let champ = ui.add(
                     egui::TextEdit::singleline(&mut self.reset_password)
                         .password(true)
-                        .margin(egui::Margin::symmetric(10, 7))
+                        .margin(marge::symetrique(espace::L, espace::M))
                         .background_color(theme::BG_DEEP)
                         .desired_width(170.0),
                 );
@@ -12483,12 +12484,12 @@ impl KiApp {
                     RichText::new(format!("{} {}", day_label(record.ts), format_time(record.ts)))
                         .color(TEXT_FAINT)
                         .monospace()
-                        .size(11.0),
+                        .size(texte::PETIT),
                 );
                 ui.label(
                     RichText::new(audit_label(&record.action))
                         .color(audit_tone(&record.action))
-                        .size(12.5)
+                        .size(texte::COURANT)
                         .strong(),
                 );
                 let actor = if record.actor.is_empty() {
@@ -12496,23 +12497,23 @@ impl KiApp {
                 } else {
                     safe_name(&record.actor)
                 };
-                ui.label(RichText::new(format!("par {actor}")).color(TEXT_DIM).size(12.0));
+                ui.label(RichText::new(format!("par {actor}")).color(TEXT_DIM).size(texte::COURANT));
                 if !record.target.is_empty() {
                     ui.label(
                         RichText::new(format!("→ {}", safe_name(&record.target)))
                             .color(TEXT_DIM)
-                            .size(12.0),
+                            .size(texte::COURANT),
                     );
                 }
                 if !record.detail.is_empty() {
                     ui.label(
                         RichText::new(ki_protocol::safe_display(&record.detail, 200))
                             .color(TEXT_FAINT)
-                            .size(11.5),
+                            .size(texte::PETIT),
                     );
                 }
             });
-            ui.add_space(2.0);
+            ui.add_space(espace::XXS);
         }
     }
 
@@ -12781,11 +12782,11 @@ fn brand(ui: &mut egui::Ui) {
     ui.painter()
         .galley(egui::pos2(left + mark + 15.0, baseline), galley, ACCENT);
 
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     ui.label(
         RichText::new("chat & vocal basse latence — 100 % Rust")
             .color(TEXT_FAINT)
-            .size(13.0),
+            .size(texte::CORPS),
     );
 }
 
@@ -12835,7 +12836,7 @@ fn server_row(
         };
         painter.rect(
             rect,
-            egui::CornerRadius::same(10),
+            egui::CornerRadius::same(rayon::XL),
             bg,
             egui::Stroke::new(1.0_f32, if selected { ACCENT } else { theme::BORDER_SOFT }),
             egui::StrokeKind::Inside,
@@ -12845,7 +12846,7 @@ fn server_row(
                 egui::pos2(rect.left() + 4.0, rect.center().y - 11.0),
                 Vec2::new(3.0, 22.0),
             );
-            painter.rect_filled(bar, egui::CornerRadius::same(2), ACCENT);
+            painter.rect_filled(bar, egui::CornerRadius::same(rayon::S), ACCENT);
         }
 
         let badge = egui::Rect::from_min_size(
@@ -12864,7 +12865,7 @@ fn server_row(
                 egui::pos2(text_left, rect.center().y - 8.0),
                 egui::Align2::LEFT_CENTER,
                 server.label(),
-                egui::FontId::proportional(13.5),
+                egui::FontId::proportional(texte::CORPS),
                 title_color,
             );
             let mut address = server.address.trim().to_string();
@@ -12876,7 +12877,7 @@ fn server_row(
                 egui::pos2(text_left, rect.center().y + 9.0),
                 egui::Align2::LEFT_CENTER,
                 address,
-                egui::FontId::proportional(11.0),
+                egui::FontId::proportional(texte::PETIT),
                 TEXT_FAINT,
             );
         } else {
@@ -12884,7 +12885,7 @@ fn server_row(
                 egui::pos2(text_left, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 server.address.trim(),
-                egui::FontId::proportional(13.5),
+                egui::FontId::proportional(texte::CORPS),
                 title_color,
             );
         }
@@ -12903,9 +12904,9 @@ fn server_row(
             servers::Reach::Unknown => ("non testé".to_string(), TEXT_FAINT, None, false),
         };
         let font = if numeric {
-            egui::FontId::monospace(11.5)
+            egui::FontId::monospace(texte::PETIT)
         } else {
-            egui::FontId::proportional(12.0)
+            egui::FontId::proportional(texte::COURANT)
         };
         let galley = ui.fonts_mut(|f| f.layout_no_wrap(text, font, color));
         let value_left = rect.right() - EDIT - 14.0 - galley.size().x;
@@ -12931,7 +12932,7 @@ fn server_row(
                 } else {
                     theme::BG_HOVER
                 };
-                painter.rect_filled(edit_rect, egui::CornerRadius::same(7), bg);
+                painter.rect_filled(edit_rect, egui::CornerRadius::same(rayon::L), bg);
             }
             let fg = if edit.hovered() { TEXT } else { TEXT_FAINT };
             icons::draw(painter, edit_rect.shrink(EDIT * 0.24), Icon::Pencil, fg);
@@ -13004,14 +13005,14 @@ fn channel_row(
             Color32::TRANSPARENT
         };
         if bg != Color32::TRANSPARENT {
-            painter.rect_filled(rect, egui::CornerRadius::same(9), bg);
+            painter.rect_filled(rect, egui::CornerRadius::same(rayon::L), bg);
         }
         if selected {
             let bar = egui::Rect::from_min_size(
                 egui::pos2(rect.left() + 2.0, rect.center().y - 8.0),
                 Vec2::new(3.0, 16.0),
             );
-            painter.rect_filled(bar, egui::CornerRadius::same(2), ACCENT);
+            painter.rect_filled(bar, egui::CornerRadius::same(rayon::S), ACCENT);
         }
         let fg = if selected {
             ACCENT
@@ -13041,7 +13042,7 @@ fn channel_row(
             // Le badge « temporaire », à la couleur des invités : ce salon
             // s'effacera, et ce qui s'y dit avec.
             let galley = ui.fonts_mut(|f| {
-                f.layout_no_wrap("temporaire".into(), egui::FontId::proportional(9.5), theme::INVITE)
+                f.layout_no_wrap("temporaire".into(), egui::FontId::proportional(texte::MINUSCULE), theme::INVITE)
             });
             let taille = Vec2::new(galley.size().x + 8.0, 14.0);
             let badge = egui::Rect::from_min_size(
@@ -13050,7 +13051,7 @@ fn channel_row(
             );
             painter.rect_stroke(
                 badge,
-                egui::CornerRadius::same(4),
+                egui::CornerRadius::same(rayon::S),
                 egui::Stroke::new(1.0_f32, theme::alpha(theme::INVITE, 140)),
                 egui::StrokeKind::Inside,
             );
@@ -13064,7 +13065,7 @@ fn channel_row(
         if let Some(n) = non_lu {
             let texte = if n.nb > 99 { "99+".to_string() } else { n.nb.to_string() };
             let galley = ui.fonts_mut(|f| {
-                f.layout_no_wrap(texte, egui::FontId::proportional(10.5), theme::BG_DEEP)
+                f.layout_no_wrap(texte, egui::FontId::proportional(texte::MINUSCULE), theme::BG_DEEP)
             });
             let taille = Vec2::new(galley.size().x + 10.0, 16.0);
             let pastille = egui::Rect::from_min_size(
@@ -13072,7 +13073,7 @@ fn channel_row(
                 taille,
             );
             let fond = if n.mention { ACCENT } else { TEXT_DIM };
-            painter.rect_filled(pastille, egui::CornerRadius::same(8), fond);
+            painter.rect_filled(pastille, egui::CornerRadius::same(rayon::L), fond);
             painter.galley(
                 egui::pos2(pastille.center().x - galley.size().x / 2.0, pastille.center().y - galley.size().y / 2.0),
                 galley,
@@ -13083,7 +13084,7 @@ fn channel_row(
         // « En gras » au sens de l'application : `strong()` n'a pas de
         // graisse, c'est la couleur pleine — `TEXT` au lieu de `TEXT_DIM`.
         let galley =
-            ui.fonts_mut(|f| f.layout_no_wrap(name.to_owned(), egui::FontId::proportional(14.0), fg));
+            ui.fonts_mut(|f| f.layout_no_wrap(name.to_owned(), egui::FontId::proportional(texte::CORPS), fg));
         let gauche = rect.left() + 34.0;
         painter.with_clip_rect(egui::Rect::from_min_max(
             egui::pos2(gauche, rect.top()),
@@ -13191,10 +13192,10 @@ fn couleur_de_membre(m: &Member) -> Color32 {
 fn pastille_bot(ui: &mut egui::Ui) -> egui::Response {
     egui::Frame::new()
         .fill(ACCENT)
-        .corner_radius(egui::CornerRadius::same(4))
-        .inner_margin(egui::Margin::symmetric(4, 1))
+        .corner_radius(egui::CornerRadius::same(rayon::S))
+        .inner_margin(marge::symetrique(espace::XS, 1.0))
         .show(ui, |ui| {
-            ui.label(RichText::new("BOT").size(9.5).strong().color(theme::BG_DEEP));
+            ui.label(RichText::new("BOT").size(texte::MINUSCULE).strong().color(theme::BG_DEEP));
         })
         .response
 }
@@ -13326,7 +13327,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     }
     let painter = ui.painter();
     if response.hovered() {
-        painter.rect_filled(rect, egui::CornerRadius::same(9), theme::BG_HOVER);
+        painter.rect_filled(rect, egui::CornerRadius::same(rayon::L), theme::BG_HOVER);
     }
 
     let avatar_rect = egui::Rect::from_min_size(
@@ -13344,7 +13345,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
             avatar_rect.center(),
             egui::Align2::CENTER_CENTER,
             "♪",
-            egui::FontId::proportional(16.0),
+            egui::FontId::proportional(texte::TITRE),
             ACCENT,
         );
     } else {
@@ -13359,7 +13360,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     } else {
         couleur_de_membre(member).gamma_multiply(0.45)
     };
-    let font = egui::FontId::proportional(13.5);
+    let font = egui::FontId::proportional(texte::CORPS);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(member.username.clone(), font, color));
     let name_width = galley.size().x;
     let name_left = avatar_rect.right() + 9.0;
@@ -13378,7 +13379,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
             egui::pos2(name_left, rect.center().y + 8.0),
             egui::Align2::LEFT_CENTER,
             valo_catalogue::ligne(j),
-            egui::FontId::proportional(10.5),
+            egui::FontId::proportional(texte::MINUSCULE),
             teinte,
         );
     }
@@ -13386,12 +13387,12 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     let mut apres_nom = name_left + name_width + 5.0;
     if est_bot(member.user_id) {
         // La pastille BOT, franche : personne ne le prend pour un membre.
-        let galley = ui.fonts_mut(|f| f.layout_no_wrap("BOT".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap("BOT".into(), egui::FontId::proportional(texte::MINUSCULE), theme::BG_DEEP));
         let pastille = egui::Rect::from_min_size(
             egui::pos2(apres_nom + 1.0, name_y - 7.0),
             Vec2::new(galley.size().x + 8.0, 14.0),
         );
-        painter.rect_filled(pastille, egui::CornerRadius::same(4), ACCENT);
+        painter.rect_filled(pastille, egui::CornerRadius::same(rayon::S), ACCENT);
         painter.galley(
             egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
             galley,
@@ -13402,12 +13403,12 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
     if est_invite_membre(member) {
         // La pastille INVITÉ, même dessin que BOT, à la couleur des
         // invités : pas un compte, présent le temps d'une porte.
-        let galley = ui.fonts_mut(|f| f.layout_no_wrap("INVITÉ".into(), egui::FontId::proportional(9.5), theme::BG_DEEP));
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap("INVITÉ".into(), egui::FontId::proportional(texte::MINUSCULE), theme::BG_DEEP));
         let pastille = egui::Rect::from_min_size(
             egui::pos2(apres_nom + 1.0, name_y - 7.0),
             Vec2::new(galley.size().x + 8.0, 14.0),
         );
-        painter.rect_filled(pastille, egui::CornerRadius::same(4), theme::INVITE);
+        painter.rect_filled(pastille, egui::CornerRadius::same(rayon::S), theme::INVITE);
         painter.galley(
             egui::pos2(pastille.left() + 4.0, pastille.center().y - galley.size().y / 2.0),
             galley,
@@ -13443,7 +13444,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         let galley = ui.fonts_mut(|f| {
             f.layout_no_wrap(
                 ki_protocol::nom_de_rang(tier),
-                egui::FontId::proportional(10.0),
+                egui::FontId::proportional(texte::MINUSCULE),
                 graphes::couleur_de_rang(tier),
             )
         });
@@ -13469,7 +13470,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         // savoir d'un coup d'œil, et les autres aussi.
         let mut zone = badge;
         if spectateurs > 0 {
-            let g = painter.layout_no_wrap(spectateurs.to_string(), egui::FontId::proportional(11.0), TEXT_DIM);
+            let g = painter.layout_no_wrap(spectateurs.to_string(), egui::FontId::proportional(texte::PETIT), TEXT_DIM);
             let pos = egui::pos2(badge.right() + 3.0, name_y - g.size().y / 2.0);
             zone = zone.union(egui::Rect::from_min_size(pos, g.size()));
             painter.galley(pos, g, TEXT_DIM);
@@ -13528,7 +13529,7 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
 
 /// Séparateur de journée dans la conversation.
 fn day_separator(ui: &mut egui::Ui, label: &str) {
-    ui.add_space(14.0);
+    ui.add_space(espace::XL);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
@@ -13536,7 +13537,7 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
     let galley = ui.fonts_mut(|f| {
         f.layout_no_wrap(
             label.to_owned(),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(texte::PETIT),
             TEXT_FAINT,
         )
     });
@@ -13563,7 +13564,7 @@ fn day_separator(ui: &mut egui::Ui, label: &str) {
         galley,
         TEXT_FAINT,
     );
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
 }
 
 /// « — nouveaux messages — » : le même dessin qu'un changement de jour, à
@@ -13591,13 +13592,13 @@ enum CleFil {
 }
 
 fn separateur_nouveaux(ui: &mut egui::Ui) {
-    ui.add_space(10.0);
+    ui.add_space(espace::L);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
     }
     let galley = ui.fonts_mut(|f| {
-        f.layout_no_wrap("nouveaux messages".to_owned(), egui::FontId::proportional(11.0), ACCENT)
+        f.layout_no_wrap("nouveaux messages".to_owned(), egui::FontId::proportional(texte::PETIT), ACCENT)
     });
     let painter = ui.painter();
     let half = galley.size().x / 2.0;
@@ -13612,7 +13613,7 @@ fn separateur_nouveaux(ui: &mut egui::Ui) {
         stroke,
     );
     painter.galley(egui::pos2(rect.center().x - half, y - galley.size().y / 2.0), galley, ACCENT);
-    ui.add_space(4.0);
+    ui.add_space(espace::XS);
 }
 
 /// Un message : en-tête (avatar + pseudo + heure) si c'est le premier du
@@ -13652,22 +13653,22 @@ fn message_block(
     let inner = ui.vertical(|ui| {
         ui.add_space(if with_header { 7.0 } else { 1.0 });
         ui.horizontal_top(|ui| {
-            ui.add_space(14.0);
+            ui.add_space(espace::XL);
             if with_header {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(GUTTER), Sense::hover());
                 ui::paint_avatar(ui.painter(), rect, &msg.username, false, photo, theme::BG_BASE);
             } else {
                 ui.allocate_exact_size(Vec2::new(GUTTER, 1.0), Sense::hover());
             }
-            ui.add_space(11.0);
+            ui.add_space(espace::L);
             ui.vertical(|ui| {
                 if with_header {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 7.0;
+                        ui.spacing_mut().item_spacing.x = espace::M;
                         ui.label(
                             RichText::new(&msg.username)
                                 .color(color)
-                                .size(14.0)
+                                .size(texte::CORPS)
                                 .strong(),
                         );
                         if est_bot(msg.user_id) {
@@ -13680,7 +13681,7 @@ fn message_block(
                         ui.label(
                             RichText::new(format_time(msg.ts))
                                 .color(TEXT_FAINT)
-                                .size(11.0),
+                                .size(texte::PETIT),
                         );
                     });
                     ui.add_space(1.0);
@@ -13692,7 +13693,7 @@ fn message_block(
                         egui::Label::new(
                             RichText::new(format!("↩ {} — {}", r.username, r.excerpt))
                                 .color(TEXT_DIM)
-                                .size(11.5),
+                                .size(texte::PETIT),
                         )
                         .sense(Sense::click())
                         .truncate(),
@@ -13707,7 +13708,7 @@ fn message_block(
                 }
                 message_body(ui, &msg.text, membres, moi, (msg.user_id, msg.ts));
                 if msg.edited {
-                    ui.label(RichText::new("(modifié)").color(TEXT_FAINT).size(10.5));
+                    ui.label(RichText::new("(modifié)").color(TEXT_FAINT).size(texte::MINUSCULE));
                 }
                 // Les images partagées s'affichent sous le message.
                 for (is_link, chunk) in split_links(&msg.text) {
@@ -13726,16 +13727,16 @@ fn message_block(
                 // Les réactions, en pastilles : la sienne se distingue, et
                 // un clic la pose ou la retire.
                 if !msg.reactions.is_empty() {
-                    ui.add_space(3.0);
+                    ui.add_space(espace::XS);
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = espace::XS;
                         for r in &msg.reactions {
                             let mienne = moi_id.is_some_and(|me| r.users.contains(&me));
                             let texte = RichText::new(format!("{} {}", r.emoji, r.users.len()))
-                                .size(12.0)
+                                .size(texte::COURANT)
                                 .color(if mienne { ACCENT } else { TEXT_DIM });
                             let pastille = egui::Button::new(texte)
-                                .corner_radius(egui::CornerRadius::same(10))
+                                .corner_radius(egui::CornerRadius::same(rayon::XL))
                                 .fill(if mienne { theme::alpha(ACCENT, 40) } else { theme::BG_RAISED })
                                 .stroke(egui::Stroke::new(
                                     1.0_f32,
@@ -13749,7 +13750,7 @@ fn message_block(
                 }
             });
         });
-        ui.add_space(2.0);
+        ui.add_space(espace::XXS);
     });
 
     let row = egui::Rect::from_min_max(
@@ -13759,7 +13760,7 @@ fn message_block(
     if ui.rect_contains_pointer(row) {
         ui.painter().set(
             bg_slot,
-            egui::epaint::RectShape::filled(row, egui::CornerRadius::same(8), theme::BG_GHOST),
+            egui::epaint::RectShape::filled(row, egui::CornerRadius::same(rayon::L), theme::BG_GHOST),
         );
         // Clic droit n'importe où sur le message : son menu. Détecté à la
         // main plutôt que par un widget englobant, qui volerait les clics
@@ -13781,7 +13782,7 @@ fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) 
     const MAX_H: f32 = 320.0;
 
     let Some(state) = previews.get(ui.ctx(), url) else { return false };
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     match state {
         images::Preview::Loading => {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(180.0, 24.0), Sense::hover());
@@ -13791,7 +13792,7 @@ fn image_preview(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) 
                 egui::pos2(rect.left() + 24.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 "chargement de l'image…",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(texte::COURANT),
                 TEXT_FAINT,
             );
             false
@@ -13823,7 +13824,7 @@ fn vignette(ui: &mut egui::Ui, texture: &egui::TextureHandle, max_w: f32, max_h:
         if response.hovered() {
             ui.painter().rect_stroke(
                 rect,
-                egui::CornerRadius::same(6),
+                egui::CornerRadius::same(rayon::M),
                 egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
                 egui::StrokeKind::Inside,
             );
@@ -13840,7 +13841,7 @@ fn video_card(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) -> 
     const MAX_H: f32 = 240.0;
 
     let Some(etat) = previews.meta(ui.ctx(), url) else { return false };
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     let (poster, duree_s, dims): (Option<String>, f32, (u32, u32)) = match etat {
         images::EtatMeta::Chargement | images::EtatMeta::EnPreparation => {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(220.0, 24.0), Sense::hover());
@@ -13855,7 +13856,7 @@ fn video_card(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) -> 
                 egui::pos2(rect.left() + 24.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 texte,
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(texte::COURANT),
                 TEXT_FAINT,
             );
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -13879,7 +13880,7 @@ fn video_card(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) -> 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        painter.rect_filled(rect, egui::CornerRadius::same(6), theme::BG_DEEP);
+        painter.rect_filled(rect, egui::CornerRadius::same(rayon::M), theme::BG_DEEP);
         let texture = poster.and_then(|p| match previews.chez_nous(ui.ctx(), &p) {
             Some(images::Preview::Ready(t)) => Some(t),
             _ => None,
@@ -13900,16 +13901,16 @@ fn video_card(ui: &mut egui::Ui, url: &str, previews: &mut images::Previews) -> 
         icons::draw(painter, egui::Rect::from_center_size(c + Vec2::new(2.0, 0.0), Vec2::splat(22.0)), Icon::Play, TEXT);
         if duree_s > 0.0 {
             let texte = visionneuse::mmss((duree_s * 1000.0) as u64);
-            let galley = painter.layout_no_wrap(texte, egui::FontId::proportional(11.5), TEXT);
+            let galley = painter.layout_no_wrap(texte, egui::FontId::proportional(texte::PETIT), TEXT);
             let pos = egui::pos2(rect.right() - 8.0 - galley.size().x, rect.bottom() - 8.0 - galley.size().y);
             let fond = egui::Rect::from_min_size(pos, galley.size()).expand2(Vec2::new(5.0, 2.0));
-            painter.rect_filled(fond, egui::CornerRadius::same(4), Color32::from_black_alpha(170));
+            painter.rect_filled(fond, egui::CornerRadius::same(rayon::S), Color32::from_black_alpha(170));
             painter.galley(pos, galley, TEXT);
         }
         if response.hovered() {
             painter.rect_stroke(
                 rect,
-                egui::CornerRadius::same(6),
+                egui::CornerRadius::same(rayon::M),
                 egui::Stroke::new(1.0_f32, theme::alpha(ACCENT, 160)),
                 egui::StrokeKind::Inside,
             );
@@ -13976,7 +13977,7 @@ fn message_body(
     // widget par fragment.
     if let [markup::Bloc::Ligne(frags)] = blocs.as_slice() {
         if let [markup::Fragment::Texte(t)] = frags.as_slice() {
-            ui.label(RichText::new(*t).color(TEXT).size(14.0));
+            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS));
             return;
         }
     }
@@ -14004,17 +14005,17 @@ fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
     use markup::Fragment as F;
     match frag {
         F::Texte(t) => {
-            ui.label(RichText::new(*t).color(TEXT).size(14.0));
+            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS));
         }
         F::Lien(url) => {
-            ui.hyperlink_to(RichText::new(shorten(url)).size(14.0), *url)
+            ui.hyperlink_to(RichText::new(shorten(url)).size(texte::CORPS), *url)
                 .on_hover_text(*url);
         }
         F::Gras(t) => {
-            ui.label(RichText::new(*t).color(TEXT).size(14.0).strong());
+            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS).strong());
         }
         F::Italique(t) => {
-            ui.label(RichText::new(*t).color(TEXT).size(14.0).italics());
+            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS).italics());
         }
         F::Code(t) => {
             // Fond discret : ce qui distingue du code d'une phrase, c'est
@@ -14022,7 +14023,7 @@ fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
             ui.label(
                 RichText::new(*t)
                     .monospace()
-                    .size(13.0)
+                    .size(texte::CORPS)
                     .color(TEXT)
                     .background_color(theme::BG_RAISED),
             );
@@ -14039,7 +14040,7 @@ fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
             };
             ui.label(
                 RichText::new(format!("@{pseudo}"))
-                    .size(14.0)
+                    .size(texte::CORPS)
                     .color(couleur)
                     .background_color(fond),
             );
@@ -14051,21 +14052,21 @@ fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
 /// ligne automatique — un extrait de code coupé au milieu ne se lit plus. Il
 /// défile horizontalement dans son cadre.
 fn bloc_de_code(ui: &mut egui::Ui, code: &str, cle: ((UserId, u64), usize)) {
-    ui.add_space(3.0);
+    ui.add_space(espace::XS);
     egui::Frame::NONE
         .fill(theme::BG_RAISED)
         .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-        .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(egui::CornerRadius::same(rayon::M))
+        .inner_margin(marge::symetrique(espace::M, espace::S))
         .show(ui, |ui| {
             egui::ScrollArea::horizontal()
                 .id_salt(("bloc-code", cle))
                 .max_height(260.0)
                 .show(ui, |ui| {
-                    ui.label(RichText::new(code).monospace().size(13.0).color(TEXT));
+                    ui.label(RichText::new(code).monospace().size(texte::CORPS).color(TEXT));
                 });
         });
-    ui.add_space(3.0);
+    ui.add_space(espace::XS);
 }
 
 /// Salon vide : on n'affiche pas une page blanche.
@@ -14074,17 +14075,17 @@ fn empty_state(ui: &mut egui::Ui, channel: &str) {
         ui.add_space((ui.available_height() * 0.32).max(40.0));
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
         icons::draw(ui.painter(), rect, Icon::Chat, theme::BORDER);
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
         ui.label(
             RichText::new(format!("Personne n'a encore parlé dans #{channel}"))
                 .color(TEXT_DIM)
-                .size(14.0),
+                .size(texte::CORPS),
         );
-        ui.add_space(3.0);
+        ui.add_space(espace::XS);
         ui.label(
             RichText::new("Lance la conversation.")
                 .color(TEXT_FAINT)
-                .size(12.5),
+                .size(texte::COURANT),
         );
     });
 }
@@ -14359,7 +14360,7 @@ fn stock_ligne(ui: &mut egui::Ui, nom: &str, s: &ki_protocol::TableauStock) {
         ui.label(
             RichText::new(format!("{nom} : {} · {:.0} Mo · sans plafond · {age}", s.nombre, megabytes(s.octets)))
                 .color(TEXT_DIM)
-                .size(12.0),
+                .size(texte::COURANT),
         );
     }
 }

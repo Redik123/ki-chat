@@ -10,7 +10,7 @@ use egui::{
 use crate::flex::{Aligne, Case, Flex};
 use crate::icones::{self as icons, Icon};
 use crate::jetons::couleur as theme;
-use crate::jetons::{espace, rayon, texte};
+use crate::jetons::{espace, marge, rayon, texte};
 
 /// Ton d'un bandeau ou d'un bouton accentué.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -449,7 +449,7 @@ pub fn meter_with_threshold(
 
 /// Intitulé de section : capitales discrètes.
 pub fn section_label(ui: &mut Ui, text: &str) {
-    ui.add_space(3.0);
+    ui.add_space(espace::XS);
     ui.label(
         RichText::new(text.to_uppercase())
             .color(theme::TEXT_FAINT)
@@ -465,9 +465,9 @@ pub fn group_title(ui: &mut Ui, icon: Icon, text: &str) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
         icons::draw(ui.painter(), rect, icon, theme::ACCENT);
-        ui.label(RichText::new(text).color(theme::TEXT).size(14.5).strong());
+        ui.label(RichText::new(text).color(theme::TEXT).size(texte::TITRE).strong());
     });
-    ui.add_space(5.0);
+    ui.add_space(espace::S);
 }
 
 /// Filet de séparation d'un pixel, plus discret que `ui.separator()`.
@@ -480,8 +480,8 @@ pub fn hairline(ui: &mut Ui) {
 
 /// Petite étiquette au-dessus d'un champ de saisie.
 pub fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::TEXT_DIM).size(12.0));
-    ui.add_space(3.0);
+    ui.label(RichText::new(text).color(theme::TEXT_DIM).size(texte::COURANT));
+    ui.add_space(espace::XS);
 }
 
 /// Explication en petit sous un réglage.
@@ -497,8 +497,8 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
     egui::Frame::NONE
         .fill(theme::translucide(color, 26))
         .stroke(Stroke::new(1.0_f32, theme::translucide(color, 70)))
-        .corner_radius(CornerRadius::same(9))
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(CornerRadius::same(rayon::L))
+        .inner_margin(marge::symetrique(espace::L, espace::M))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
@@ -512,7 +512,7 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
                     Vec2::new(text_width, 0.0),
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| {
-                        ui.add(egui::Label::new(RichText::new(text).color(color).size(13.0)).wrap());
+                        ui.add(egui::Label::new(RichText::new(text).color(color).size(texte::CORPS)).wrap());
                     },
                 );
                 if closable {
@@ -550,7 +550,7 @@ pub fn section(
         .fill(theme::BG_RAISED)
         .stroke(Stroke::new(1.0_f32, theme::BORDER_SOFT))
         .corner_radius(CornerRadius::same(rayon::XL))
-        .inner_margin(egui::Margin::symmetric(16, 14))
+        .inner_margin(marge::symetrique(espace::XL, espace::XL))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -598,7 +598,7 @@ pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
                 ui.vertical(|ui| add(ui));
             });
         });
-    ui.add_space(10.0);
+    ui.add_space(espace::L);
 }
 
 /// Explication sous un contrôle, dans la colonne de la ligne.
@@ -638,7 +638,7 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
     if !ui.is_rect_visible(rect) {
         return false;
     }
-    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::BG_DEEP);
+    ui.painter().rect_filled(rect, CornerRadius::same(rayon::L), theme::BG_DEEP);
     let mut x = rect.left() + 3.0;
     for (i, ((v, _), galley)) in choix.iter().zip(textes).enumerate() {
         let seg = Rect::from_min_size(
@@ -657,13 +657,13 @@ pub fn segmente<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, &
         if actif {
             painter.rect(
                 seg,
-                CornerRadius::same(7),
+                CornerRadius::same(rayon::L),
                 theme::BG_ACTIVE,
                 Stroke::new(1.0_f32, theme::translucide(theme::ACCENT, 90)),
                 StrokeKind::Inside,
             );
         } else if reponse.hovered() {
-            painter.rect_filled(seg, CornerRadius::same(7), theme::BG_HOVER);
+            painter.rect_filled(seg, CornerRadius::same(rayon::L), theme::BG_HOVER);
         }
         let couleur = if actif { theme::TEXT } else { theme::TEXT_DIM };
         painter.galley(
@@ -682,7 +682,7 @@ pub fn pastilles<T: PartialEq + Copy>(ui: &mut Ui, valeur: &mut T, choix: &[(T, 
     let font = FontId::proportional(texte::COURANT);
     let mut change = false;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        ui.spacing_mut().item_spacing = Vec2::splat(espace::S);
         for (v, libelle) in choix {
             let galley = ui.fonts_mut(|f| f.layout_no_wrap((*libelle).to_owned(), font.clone(), theme::TEXT));
             let (rect, reponse) =
@@ -721,7 +721,7 @@ pub fn interrupteur(ui: &mut Ui, on: &mut bool, libelle: &str) -> Response {
         .horizontal(|ui| {
             let (rect, mut r) = ui.allocate_exact_size(taille, Sense::click());
             let texte = ui.add(
-                egui::Label::new(RichText::new(libelle).color(theme::TEXT).size(13.0))
+                egui::Label::new(RichText::new(libelle).color(theme::TEXT).size(texte::CORPS))
                     .sense(Sense::click()),
             );
             if r.clicked() || texte.clicked() {
@@ -763,7 +763,7 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         .fill(theme::BG_RAISED)
         .stroke(Stroke::new(1.0_f32, theme::BORDER))
         .corner_radius(CornerRadius::same(rayon::PILULE))
-        .inner_margin(egui::Margin::same(16))
+        .inner_margin(marge::egale(espace::XL))
         .shadow(egui::epaint::Shadow {
             offset: [0, 10],
             blur: 30,
@@ -870,7 +870,7 @@ pub fn text_field<'a>(text: &'a mut String, hint: &str, password: bool) -> egui:
     egui::TextEdit::singleline(text)
         .password(password)
         .hint_text(hint)
-        .margin(egui::Margin::symmetric(10, 7))
+        .margin(marge::symetrique(espace::L, espace::M))
         .background_color(theme::BG_DEEP)
         .desired_width(f32::INFINITY)
 }

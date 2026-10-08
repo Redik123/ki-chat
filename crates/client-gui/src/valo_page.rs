@@ -17,6 +17,7 @@
 //! bilan ni activité, donne une page calculée ici sur les cinq matchs et
 //! dix points qu'il envoie, avec un mot pour le dire.
 
+use ki_ui::jetons::{espace, rayon, texte};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -572,7 +573,7 @@ fn tuile(ui: &mut Ui, largeur: f32, hauteur: f32, t: Tuile, bas: impl FnOnce(&mu
     let interieur = largeur - 2.0 * MARGE_TUILE;
     let reponse = egui::Frame::new()
         .fill(theme::BG_RAISED)
-        .corner_radius(egui::CornerRadius::same(10))
+        .corner_radius(egui::CornerRadius::same(rayon::XL))
         .inner_margin(egui::Margin::same(MARGE_TUILE as i8))
         .show(ui, |ui| {
             // Le cadre hérite de la disposition du parent — une ligne qui
@@ -582,16 +583,16 @@ fn tuile(ui: &mut Ui, largeur: f32, hauteur: f32, t: Tuile, bas: impl FnOnce(&mu
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_min_size(Vec2::new(interieur, hauteur - 2.0 * MARGE_TUILE));
                 ui.set_max_width(interieur);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.add(egui::Label::new(RichText::new(t.titre).color(TEXT_FAINT).size(11.0)).truncate());
+                ui.spacing_mut().item_spacing.y = espace::XXS;
+                ui.add(egui::Label::new(RichText::new(t.titre).color(TEXT_FAINT).size(texte::PETIT)).truncate());
                 ui.horizontal(|ui| {
                     if let Some(icone) = t.icone {
                         ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(18.0)));
                     }
-                    ui.add(egui::Label::new(RichText::new(&t.valeur).color(t.teinte).strong().size(19.0)).truncate());
+                    ui.add(egui::Label::new(RichText::new(&t.valeur).color(t.teinte).strong().size(texte::GRAND)).truncate());
                 });
                 if !t.sous.is_empty() {
-                    ui.add(egui::Label::new(RichText::new(&t.sous).color(TEXT_DIM).size(11.5)).truncate());
+                    ui.add(egui::Label::new(RichText::new(&t.sous).color(TEXT_DIM).size(texte::PETIT)).truncate());
                 }
                 bas(ui);
             });
@@ -706,12 +707,12 @@ fn pastilles(ui: &mut Ui, avec: &[UserId], contre: &[UserId], noms: &Annuaire) -
 
 /// Un texte de cellule, en 11,5 — la taille des tables de la page.
 fn cellule(ui: &mut Ui, texte: impl Into<String>, couleur: Color32) -> Response {
-    ui.label(RichText::new(texte.into()).color(couleur).size(11.5))
+    ui.label(RichText::new(texte.into()).color(couleur).size(texte::PETIT))
 }
 
 /// L'en-tête d'une colonne, en petit et pâle.
 fn en_tete(ui: &mut Ui, titre: &str) {
-    ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.0));
+    ui.label(RichText::new(titre).color(TEXT_FAINT).size(texte::PETIT));
 }
 
 /// Le rang en une ligne : l'icône du palier si elle est là, puis le nom à
@@ -721,10 +722,10 @@ fn rang_court(ui: &mut Ui, tier: u8, rr: u16, taille: f32, rangs: &rangs::Rangs)
         ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(taille)));
     }
     if tier >= 3 {
-        ui.label(RichText::new(nom_de_rang(tier)).color(graphes::couleur_de_rang(tier)).strong().size(11.5));
-        ui.label(RichText::new(format!("{rr} RR")).color(TEXT_DIM).size(11.0));
+        ui.label(RichText::new(nom_de_rang(tier)).color(graphes::couleur_de_rang(tier)).strong().size(texte::PETIT));
+        ui.label(RichText::new(format!("{rr} RR")).color(TEXT_DIM).size(texte::PETIT));
     } else {
-        ui.label(RichText::new(nom_de_rang(0)).color(TEXT_FAINT).size(11.5));
+        ui.label(RichText::new(nom_de_rang(0)).color(TEXT_FAINT).size(texte::PETIT));
     }
 }
 
@@ -732,7 +733,7 @@ fn rang_court(ui: &mut Ui, tier: u8, rr: u16, taille: f32, rangs: &rangs::Rangs)
 /// nom — le nom seul tant que l'image n'est pas là.
 fn agent_cellule(ui: &mut Ui, agent: &str, catalogue: &Catalogue) -> Response {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = espace::XS;
         if let Some(portrait) = catalogue.agent(agent).filter(|_| !agent.is_empty()) {
             ui.add(egui::Image::new(portrait).fit_to_exact_size(Vec2::splat(PORTRAIT)));
         }
@@ -761,7 +762,7 @@ fn pastille_carte(ui: &mut Ui, texte: &str, bandeau: &egui::TextureHandle, haute
             .uv(graphes::uv_couvrant(bandeau.size_vec2(), rect.size()))
             .corner_radius(4)
             .paint_at(ui, rect);
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), Color32::from_black_alpha(120));
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(rayon::S), Color32::from_black_alpha(120));
         ui.painter().galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
     }
     reponse
@@ -822,13 +823,13 @@ fn medailles_cellule(ui: &mut Ui, md: Option<&MedaillesDuMatch>) -> Response {
         .collect::<Vec<_>>()
         .join("\n");
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().item_spacing.x = espace::XS;
         for g in liste.iter().take(3) {
             let texte = if g.record { format!("{}★", nom_court(g.medaille)) } else { nom_court(g.medaille).to_string() };
             badge(ui, &texte, teinte_de_medaille(g.medaille)).on_hover_text(&detail);
         }
         if liste.len() > 3 {
-            ui.label(RichText::new(format!("+{}", liste.len() - 3)).color(TEXT_FAINT).size(10.5)).on_hover_text(&detail);
+            ui.label(RichText::new(format!("+{}", liste.len() - 3)).color(TEXT_FAINT).size(texte::MINUSCULE)).on_hover_text(&detail);
         }
     })
     .response
@@ -836,10 +837,10 @@ fn medailles_cellule(ui: &mut Ui, md: Option<&MedaillesDuMatch>) -> Response {
 
 /// Une étiquette en capitales sur un fond de sa couleur : « EN PARTIE ».
 fn badge(ui: &mut Ui, texte: &str, couleur: Color32) -> Response {
-    let galley = ui.fonts_mut(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(9.5), couleur));
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(texte.to_string(), FontId::proportional(texte::MINUSCULE), couleur));
     let (rect, reponse) = ui.allocate_exact_size(Vec2::new(galley.size().x + 10.0, 16.0), Sense::hover());
     if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(couleur, 36));
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(rayon::S), theme::alpha(couleur, 36));
         ui.painter().galley(Pos2::new(rect.left() + 5.0, rect.center().y - galley.size().y / 2.0), galley, couleur);
     }
     reponse
@@ -947,7 +948,7 @@ fn en_direct(
     let en_partie = joueurs.iter().filter(|(_, j)| j.etat == JeuEtat::EnJeu).count();
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("En direct").strong().size(13.5));
+        ui.label(RichText::new("En direct").strong().size(texte::CORPS));
         if !joueurs.is_empty() {
             let (point, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
             icons::dot(ui.painter(), point.center(), 3.5, if en_partie > 0 { SPEAK } else { TEXT_FAINT });
@@ -956,19 +957,19 @@ fn en_direct(
                 (n, p) if p == n => format!("{} en partie", pluriel(n as u32, "membre")),
                 (n, p) => format!("{} sur VALORANT, {p} en partie", pluriel(n as u32, "membre")),
             };
-            ui.label(RichText::new(texte).color(TEXT_DIM).size(11.5));
+            ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
         }
     });
     if joueurs.is_empty() {
         ui::hint(ui, "personne sur VALORANT en ce moment — chacun peut partager sa partie dans ⚙ → Jeu");
         return;
     }
-    ui.add_space(4.0);
+    ui.add_space(espace::XS);
     let statuts: Vec<&JeuStatut> = joueurs.iter().map(|(_, j)| j.as_ref()).collect();
     for ligne in regrouper_en_direct(&statuts) {
         let j = statuts[ligne[0]];
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = espace::S;
             // Le bandeau de la carte en tête, ou sa place vide : les noms
             // s'alignent d'une ligne à l'autre.
             let carte = if j.etat == JeuEtat::Menus { "" } else { j.carte.as_str() };
@@ -978,12 +979,12 @@ fn en_direct(
                 }
                 None if !carte.is_empty() => {
                     let (rect, _) = ui.allocate_exact_size(Vec2::new(LARGEUR_PASTILLE_MIN + 24.0, 24.0), Sense::hover());
-                    ui.painter().rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(TEXT, 10));
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(rayon::S), theme::alpha(TEXT, 10));
                     ui.painter().text(
                         Pos2::new(rect.left() + 8.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         carte,
-                        FontId::proportional(12.0),
+                        FontId::proportional(texte::COURANT),
                         TEXT,
                     );
                 }
@@ -998,7 +999,7 @@ fn en_direct(
                 if n > 0 {
                     ui.label(RichText::new("·").color(TEXT_FAINT));
                 }
-                let mut pseudo = RichText::new(&m.username).color(noms.couleur(m.user_id)).size(12.5);
+                let mut pseudo = RichText::new(&m.username).color(noms.couleur(m.user_id)).size(texte::COURANT);
                 if my_id == Some(m.user_id) {
                     pseudo = pseudo.strong();
                 }
@@ -1015,13 +1016,13 @@ fn en_direct(
             }
             let (texte, score) = etat_en_direct(j);
             if let Some((score, teinte)) = score {
-                ui.label(RichText::new(score).color(teinte).strong().size(12.5));
+                ui.label(RichText::new(score).color(teinte).strong().size(texte::COURANT));
             }
             if !texte.is_empty() {
-                ui.label(RichText::new(texte).color(TEXT_DIM).size(11.5));
+                ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
             }
         });
-        ui.add_space(2.0);
+        ui.add_space(espace::XXS);
     }
 }
 
@@ -1075,14 +1076,14 @@ impl PageValo {
             .max_height(max_h)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Le groupe sur VALORANT").strong().size(17.0));
+                    ui.label(RichText::new("Le groupe sur VALORANT").strong().size(texte::GRAND));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui::button(ui, icons::Icon::Refresh, "Actualiser").clicked() {
                             demandes.push(Demande::Actualiser);
                         }
                         let n = stats.len();
                         let s = if n > 1 { "s" } else { "" };
-                        ui.label(RichText::new(format!("{n} joueur{s} lié{s}")).color(TEXT_FAINT).size(11.5));
+                        ui.label(RichText::new(format!("{n} joueur{s} lié{s}")).color(TEXT_FAINT).size(texte::PETIT));
                     });
                 });
                 ui::hint(
@@ -1090,7 +1091,7 @@ impl PageValo {
                     "d'après les fiches que le serveur tient à jour par HenrikDev — la ligne de \
                      chacun dans ses matchs, jamais celles des adversaires",
                 );
-                ui.add_space(6.0);
+                ui.add_space(espace::S);
                 // Les onglets à gauche, la période à droite — elle vaut
                 // pour les agrégats du groupe et l'en-tête du fil.
                 ui.horizontal(|ui| {
@@ -1110,7 +1111,7 @@ impl PageValo {
                         });
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(espace::M);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.onglet {
                     Onglet::Groupe | Onglet::Matchs => {
                         // Qui joue en ce moment : ça vient du roster, pas des
@@ -1118,7 +1119,7 @@ impl PageValo {
                         // même si personne n'a lié de compte.
                         if self.onglet == Onglet::Groupe {
                             en_direct(ui, membres, &noms, rangs, catalogue, my_id, &mut demandes);
-                            ui.add_space(14.0);
+                            ui.add_space(espace::XL);
                         }
                         if !recu {
                             ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
@@ -1132,7 +1133,7 @@ impl PageValo {
                         }
                         if local {
                             ui::hint(ui, "serveur d'avant : statistiques sur les cinq derniers matchs");
-                            ui.add_space(4.0);
+                            ui.add_space(espace::XS);
                         }
                         if self.onglet == Onglet::Groupe {
                             self.onglet_groupe(ui, &lignes, &noms, activite, my_id, rangs, &mut demandes);
@@ -1142,13 +1143,13 @@ impl PageValo {
                     }
                     Onglet::Esport => esports_ui(ui, esports),
                     Onglet::Boutique => {
-                        ui.label(RichText::new("Ma boutique du jour").strong().size(13.5));
+                        ui.label(RichText::new("Ma boutique du jour").strong().size(texte::CORPS));
                         ui::hint(
                             ui,
                             "lue dans ton client Riot, sur ce PC, pour toi seul — rien ne part vers le \
                              serveur ; il faut VALORANT ouvert",
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                         boutique.ui(ui);
                     }
                 });
@@ -1174,7 +1175,7 @@ impl PageValo {
         demandes: &mut Vec<Demande>,
     ) {
         records(ui, lignes, self.periode, rangs);
-        ui.add_space(14.0);
+        ui.add_space(espace::XL);
         self.classement(ui, lignes, noms, my_id, rangs, demandes);
         medailles_du_groupe(ui, lignes, noms, my_id, demandes);
         duos(ui, lignes, noms);
@@ -1202,8 +1203,8 @@ impl PageValo {
         let (tri, desc) = (self.tri, self.tri_desc);
         let mut nouveau_tri: Option<Tri> = None;
 
-        ui.label(RichText::new("Classement").strong().size(13.5));
-        ui.add_space(4.0);
+        ui.label(RichText::new("Classement").strong().size(texte::CORPS));
+        ui.add_space(espace::XS);
         egui::ScrollArea::horizontal().id_salt("valo_classement").show(ui, |ui| {
             egui::Grid::new("stats_classement").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
                 for (titre, cle, masquable) in COLONNES {
@@ -1289,7 +1290,7 @@ impl PageValo {
                     }
                     let matchs = if b.matchs > 0 { format!("{}", b.matchs) } else { TIRET.to_string() };
                     cellule(ui, matchs, dim);
-                    if ui.add(egui::Button::new(RichText::new("fiche").size(11.0)).small()).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("fiche").size(texte::PETIT)).small()).clicked() {
                         demandes.push(Demande::OuvrirFiche(f.user_id, f.username.clone()));
                     }
                     ui.end_row();
@@ -1343,7 +1344,7 @@ impl PageValo {
             if total.duree_s > 0 {
                 texte.push_str(&format!(" · {}", duree_texte(total.duree_s)));
             }
-            ui.label(RichText::new(texte).strong().size(13.0));
+            ui.label(RichText::new(texte).strong().size(texte::CORPS));
             graphes::barre_vd(
                 ui,
                 u32::from(total.victoires),
@@ -1352,7 +1353,7 @@ impl PageValo {
                 ui.available_width(),
             )
             .on_hover_text(format!("le groupe sur {}, en classé", periode.titre()));
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
         }
 
         // Tout ce qu'on sait, sur la période, du plus récent au plus ancien.
@@ -1378,7 +1379,7 @@ impl PageValo {
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
 
         let mut tous: Vec<(UserId, &MatchResume)> = lignes
             .iter()
@@ -1432,7 +1433,7 @@ impl PageValo {
                         // sur sa ligne.
                         let (_, m) = tous[bloc[0]];
                         cellule(ui, crate::il_y_a(m.date), TEXT_FAINT);
-                        ui.label(RichText::new(format!("ENSEMBLE ×{}", bloc.len())).color(ACCENT).strong().size(11.0));
+                        ui.label(RichText::new(format!("ENSEMBLE ×{}", bloc.len())).color(ACCENT).strong().size(texte::PETIT));
                         cellule(ui, &m.mode, TEXT);
                         carte_cellule(ui, &m.carte, catalogue);
                         for _ in 0..6 {
@@ -1441,7 +1442,7 @@ impl PageValo {
                         let score = RichText::new(format!("{}-{}", m.manches.0, m.manches.1))
                             .color(teinte_de_score(m.gagne))
                             .strong()
-                            .size(11.5);
+                            .size(texte::PETIT);
                         ui.label(score);
                         ui.end_row();
                     }
@@ -1488,10 +1489,10 @@ fn en_tete_triable(ui: &mut Ui, titre: &str, cle: Option<Tri>, actif: Tri, desc:
         return false;
     };
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = espace::XXS;
         let couleur = if actif == t { TEXT } else { TEXT_FAINT };
         let r = ui
-            .add(egui::Label::new(RichText::new(titre).color(couleur).size(11.0)).sense(Sense::click()))
+            .add(egui::Label::new(RichText::new(titre).color(couleur).size(texte::PETIT)).sense(Sense::click()))
             .on_hover_text("trier par cette colonne");
         if actif == t {
             triangle(ui, if desc { Sens::Bas } else { Sens::Haut }, TEXT_DIM);
@@ -1662,9 +1663,9 @@ fn medailles_du_groupe(
         .filter(|(_, m)| !m.cet_acte.is_empty() || !m.carriere.is_empty())
         .collect();
     let acte = acte_du_groupe(avec.iter().map(|(_, m)| *m));
-    ui.add_space(14.0);
+    ui.add_space(espace::XL);
     let titre = if acte.is_empty() { "Médailles de l'acte".to_string() } else { format!("Médailles — {acte}") };
-    ui.label(RichText::new(titre).strong().size(13.5));
+    ui.label(RichText::new(titre).strong().size(texte::CORPS));
     if avec.is_empty() {
         ui::hint(
             ui,
@@ -1682,7 +1683,7 @@ fn medailles_du_groupe(
     ordre.sort_by_key(|(l, m)| {
         (std::cmp::Reverse(fois(m, Medaille::Mvp)), std::cmp::Reverse(total(m)), l.f.username.to_lowercase())
     });
-    ui.add_space(4.0);
+    ui.add_space(espace::XS);
     egui::ScrollArea::horizontal().id_salt("valo_medailles").show(ui, |ui| {
         egui::Grid::new("stats_medailles").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
             en_tete(ui, "Joueur");
@@ -1707,7 +1708,7 @@ fn medailles_du_groupe(
                         continue;
                     }
                     let couleur = if matches!(m, Medaille::Mvp | Medaille::Distinction) { theme::WARN } else { TEXT };
-                    let reponse = ui.label(RichText::new(n.to_string()).color(couleur).strong().size(11.5));
+                    let reponse = ui.label(RichText::new(n.to_string()).color(couleur).strong().size(texte::PETIT));
                     if let Some(c) = md.cet_acte.iter().find(|c| c.medaille == m) {
                         reponse.on_hover_text(format!("record de l'acte : {}", m.valeur(c.meilleur)));
                     }
@@ -1747,19 +1748,19 @@ fn duos(ui: &mut Ui, lignes: &[Ligne], noms: &Annuaire) {
     if paires.is_empty() {
         return;
     }
-    ui.add_space(14.0);
+    ui.add_space(espace::XL);
     ui::section_label(ui, "Duos");
     ui::hint(ui, "les parties jouées dans le même camp sur 30 jours");
     for (a, b, parties, victoires) in paires {
         let pct = if parties > 0 { format!(" ({} %)", u32::from(victoires) * 100 / u32::from(parties)) } else { String::new() };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(noms.nom(a)).color(noms.couleur(a)).strong().size(12.5));
-            ui.label(RichText::new("&").color(TEXT_FAINT).size(12.5));
-            ui.label(RichText::new(noms.nom(b)).color(noms.couleur(b)).strong().size(12.5));
+            ui.label(RichText::new(noms.nom(a)).color(noms.couleur(a)).strong().size(texte::COURANT));
+            ui.label(RichText::new("&").color(TEXT_FAINT).size(texte::COURANT));
+            ui.label(RichText::new(noms.nom(b)).color(noms.couleur(b)).strong().size(texte::COURANT));
             ui.label(
                 RichText::new(format!("— {} · {} V{pct}", pluriel(u32::from(parties), "partie"), victoires))
                     .color(TEXT_DIM)
-                    .size(12.0),
+                    .size(texte::COURANT),
             );
         });
     }
@@ -1792,7 +1793,7 @@ fn quand_le_groupe_joue(ui: &mut Ui, activite: &[u16]) {
     }
     let decalage = chrono::Local::now().offset().local_minus_utc() / 3600;
     let locale = activite_locale(activite, decalage);
-    ui.add_space(14.0);
+    ui.add_space(espace::XL);
     ui::section_label(ui, "Quand le groupe joue");
     ui::hint(ui, "les parties commencées sur 30 jours, tous modes, à l'heure locale");
     graphes::heatmap_semaine(ui, &locale, |jour, heure| {
@@ -1851,7 +1852,7 @@ fn ligne_du_fil(
     }
     let mut pseudo = RichText::new(format!("{}{}", if dans_bloc { "    " } else { "" }, noms.nom(qui)))
         .color(noms.couleur(qui))
-        .size(11.5);
+        .size(texte::PETIT);
     if my_id == Some(qui) {
         pseudo = pseudo.strong();
     }
@@ -1873,7 +1874,7 @@ fn ligne_du_fil(
     let fk = m.manches_detail.as_ref().map(|d| d.premiers_sangs.to_string()).unwrap_or_else(|| TIRET.to_string());
     cellule(ui, fk, TEXT_DIM);
     ui.label(
-        RichText::new(format!("{}-{}", m.manches.0, m.manches.1)).color(teinte_de_score(m.gagne)).strong().size(11.5),
+        RichText::new(format!("{}-{}", m.manches.0, m.manches.1)).color(teinte_de_score(m.gagne)).strong().size(texte::PETIT),
     );
     match point {
         Some(p) => {
@@ -1894,8 +1895,8 @@ fn ligne_du_fil(
 /// Les prochains matchs d'esport, tels que le serveur les a lus chez
 /// HenrikDev — un mot si le serveur n'en a pas.
 fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
-    ui.label(RichText::new("Esports — prochains matchs").strong().size(13.5));
-    ui.add_space(4.0);
+    ui.label(RichText::new("Esports — prochains matchs").strong().size(texte::CORPS));
+    ui.add_space(espace::XS);
     if matchs.is_empty() {
         ui.label(RichText::new("rien de prévu chez HenrikDev pour l'instant").color(TEXT_DIM));
         return;
@@ -1907,18 +1908,18 @@ fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
         ui.end_row();
         for m in matchs {
             let quand = if m.etat == "inProgress" {
-                RichText::new("en cours").color(SPEAK).strong().size(11.5)
+                RichText::new("en cours").color(SPEAK).strong().size(texte::PETIT)
             } else {
                 RichText::new(format!("{} · {}", crate::day_label(m.date), crate::format_time(m.date)))
                     .color(TEXT_DIM)
-                    .size(11.5)
+                    .size(texte::PETIT)
             };
             ui.label(quand);
             ui.label(RichText::new(m.equipes.join("  vs  ")).strong());
             let ligue = if m.region.is_empty() { m.ligue.clone() } else { format!("{} · {}", m.ligue, m.region) };
             ui.label(RichText::new(ligue).color(TEXT_DIM));
-            ui.label(RichText::new(&m.tournoi).color(TEXT_FAINT).size(11.5));
-            ui.label(RichText::new(&m.format).color(TEXT_FAINT).size(11.5));
+            ui.label(RichText::new(&m.tournoi).color(TEXT_FAINT).size(texte::PETIT));
+            ui.label(RichText::new(&m.format).color(TEXT_FAINT).size(texte::PETIT));
             ui.end_row();
         }
     });
@@ -2095,7 +2096,7 @@ impl PageValo {
         // dépassent les 640 px de la fenêtre, et un `right_to_left` ne se
         // replie pas : il se dessinait par-dessus « EU · PC · niveau … ».
         identite(ui, fiche, catalogue);
-        ui.add_space(2.0);
+        ui.add_space(espace::XXS);
         ui.horizontal(|ui| {
             for p in PeriodeFiche::TOUTES {
                 if ui.selectable_label(self.fiche_periode == p, p.label()).clicked() {
@@ -2113,7 +2114,7 @@ impl PageValo {
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
 
         let vue = Vue::new(
             username,
@@ -2128,21 +2129,21 @@ impl PageValo {
         );
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             en_tete_fiche(ui, &vue);
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             self.courbe(ui, &vue);
             forme(ui, &vue);
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             tuiles(ui, &vue);
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             medailles_fiche(ui, &vue);
             agents_et_cartes(ui, &vue);
             mes_heures(ui, &vue);
-            ui.add_space(10.0);
+            ui.add_space(espace::L);
             self.table(ui, &vue);
             actes(ui, &vue);
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui.label(
-                RichText::new(format!("mis à jour {} · HenrikDev", crate::il_y_a(fiche.maj))).color(TEXT_FAINT).size(10.5),
+                RichText::new(format!("mis à jour {} · HenrikDev", crate::il_y_a(fiche.maj))).color(TEXT_FAINT).size(texte::MINUSCULE),
             );
         });
     }
@@ -2156,18 +2157,18 @@ impl PageValo {
             p => p.titre().to_string(),
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("RR — {quoi}")).color(TEXT_DIM).size(11.5));
+            ui.label(RichText::new(format!("RR — {quoi}")).color(TEXT_DIM).size(texte::PETIT));
             if !vue.p.is_empty() {
-                ui.label(RichText::new(format!("· {rr}")).color(teinte).size(11.5).strong());
+                ui.label(RichText::new(format!("· {rr}")).color(teinte).size(texte::PETIT).strong());
             }
         });
         if vue.p.is_empty() {
-            ui.label(RichText::new("Aucun match classé connu.").color(TEXT_FAINT).size(11.5));
+            ui.label(RichText::new("Aucun match classé connu.").color(TEXT_FAINT).size(texte::PETIT));
             self.survol = None;
             return;
         }
         if vue.p.len() < 2 {
-            ui.label(RichText::new("Pas encore assez de classés pour une courbe.").color(TEXT_FAINT).size(11.5));
+            ui.label(RichText::new("Pas encore assez de classés pour une courbe.").color(TEXT_FAINT).size(texte::PETIT));
             self.survol = None;
             return;
         }
@@ -2199,9 +2200,9 @@ impl PageValo {
 
     /// La table des matchs retenus, une ligne dépliable par match.
     fn table(&mut self, ui: &mut Ui, vue: &Vue) {
-        ui.label(RichText::new("Matchs").color(TEXT_DIM).size(11.5));
+        ui.label(RichText::new("Matchs").color(TEXT_DIM).size(texte::PETIT));
         if vue.e.is_empty() {
-            ui.label(RichText::new("Aucun match sur cette période.").color(TEXT_FAINT).size(11.5));
+            ui.label(RichText::new("Aucun match sur cette période.").color(TEXT_FAINT).size(texte::PETIT));
             return;
         }
         let largeur_page = ui.available_width();
@@ -2269,7 +2270,7 @@ impl PageValo {
                         RichText::new(format!("{}-{}", m.manches.0, m.manches.1))
                             .color(teinte_de_score(m.gagne))
                             .strong()
-                            .size(11.5),
+                            .size(texte::PETIT),
                     );
                     match vue.point_de(&m.id) {
                         Some(p) => {
@@ -2287,7 +2288,7 @@ impl PageValo {
                         }
                         None => {
                             let rang = if m.tier >= 3 { nom_de_rang(m.tier) } else { String::new() };
-                            ui.label(RichText::new(rang).color(graphes::couleur_de_rang(m.tier)).size(11.0));
+                            ui.label(RichText::new(rang).color(graphes::couleur_de_rang(m.tier)).size(texte::PETIT));
                         }
                     }
                     if pastilles(ui, &m.avec, &m.contre, &vue.noms).is_none() {
@@ -2307,9 +2308,9 @@ impl PageValo {
                     );
                     ui.data_mut(|d| d.insert_temp(id_ligne, (rect.top() - haut_ligne, rect.size())));
                     if survole {
-                        ui.painter().set(fond, egui::Shape::rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(ACCENT, 24)));
+                        ui.painter().set(fond, egui::Shape::rect_filled(rect, egui::CornerRadius::same(rayon::S), theme::alpha(ACCENT, 24)));
                     } else if reponse.hovered() {
-                        ui.painter().set(fond, egui::Shape::rect_filled(rect, egui::CornerRadius::same(4), theme::alpha(TEXT, 10)));
+                        ui.painter().set(fond, egui::Shape::rect_filled(rect, egui::CornerRadius::same(rayon::S), theme::alpha(TEXT, 10)));
                     }
                     if reponse.clicked() && !m.id.is_empty() {
                         basculer = Some(m.id.clone());
@@ -2354,10 +2355,10 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
     let titre = catalogue.titre(&fiche.titre_joueur).map(|t| format!("« {t} »"));
     if fiche.carte_joueur.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&fiche.riot_id).strong().size(16.0));
-            ui.label(RichText::new(&detail).color(TEXT_DIM).size(11.5));
+            ui.label(RichText::new(&fiche.riot_id).strong().size(texte::TITRE));
+            ui.label(RichText::new(&detail).color(TEXT_DIM).size(texte::PETIT));
             if let Some(titre) = &titre {
-                ui.label(RichText::new(titre).color(TEXT_FAINT).size(11.5));
+                ui.label(RichText::new(titre).color(TEXT_FAINT).size(texte::PETIT));
             }
         });
         return;
@@ -2380,7 +2381,7 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
             }
         }
         None => {
-            ui.painter().rect_filled(rect, egui::CornerRadius::same(6), theme::alpha(TEXT, 10));
+            ui.painter().rect_filled(rect, egui::CornerRadius::same(rayon::M), theme::alpha(TEXT, 10));
         }
     }
     let (fort, doux) = if image.is_some() {
@@ -2388,10 +2389,10 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
     } else {
         (TEXT, TEXT_DIM)
     };
-    let mut lignes = vec![ui.fonts_mut(|f| f.layout_no_wrap(fiche.riot_id.clone(), FontId::proportional(19.0), fort))];
-    lignes.push(ui.fonts_mut(|f| f.layout_no_wrap(detail, FontId::proportional(11.5), doux)));
+    let mut lignes = vec![ui.fonts_mut(|f| f.layout_no_wrap(fiche.riot_id.clone(), FontId::proportional(texte::GRAND), fort))];
+    lignes.push(ui.fonts_mut(|f| f.layout_no_wrap(detail, FontId::proportional(texte::PETIT), doux)));
     if let Some(titre) = titre {
-        lignes.push(ui.fonts_mut(|f| f.layout_no_wrap(titre, FontId::proportional(11.5), doux)));
+        lignes.push(ui.fonts_mut(|f| f.layout_no_wrap(titre, FontId::proportional(texte::PETIT), doux)));
     }
     let hauteur: f32 = lignes.iter().map(|g| g.size().y).sum::<f32>() + 2.0 * (lignes.len() as f32 - 1.0);
     let mut y = rect.center().y - hauteur / 2.0;
@@ -2414,23 +2415,23 @@ fn en_tete_fiche(ui: &mut Ui, vue: &Vue) {
             ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(40.0)));
         }
         if r.tier >= 3 {
-            ui.label(RichText::new(nom_de_rang(r.tier)).color(couleur).strong().size(20.0));
-            ui.label(RichText::new(format!("{} RR", r.rr)).color(TEXT_DIM).size(15.0));
+            ui.label(RichText::new(nom_de_rang(r.tier)).color(couleur).strong().size(texte::GRAND));
+            ui.label(RichText::new(format!("{} RR", r.rr)).color(TEXT_DIM).size(texte::TITRE));
             if r.delta != 0 {
                 let (texte, teinte) = signe(r.delta);
-                ui.label(RichText::new(format!("{texte} au dernier match")).color(teinte).size(11.5));
+                ui.label(RichText::new(format!("{texte} au dernier match")).color(teinte).size(texte::PETIT));
             }
         } else {
-            ui.label(RichText::new("Non classé").color(TEXT_FAINT).strong().size(20.0));
+            ui.label(RichText::new("Non classé").color(TEXT_FAINT).strong().size(texte::GRAND));
         }
     });
     if (3..24).contains(&r.tier) {
         ui.horizontal(|ui| {
             graphes::jauge(ui, f32::from(r.rr) / 100.0, None, 200.0, couleur);
-            ui.label(RichText::new(format!("{} / 100 vers {}", r.rr, nom_de_rang(r.tier + 1))).color(TEXT_FAINT).size(11.0));
+            ui.label(RichText::new(format!("{} / 100 vers {}", r.rr, nom_de_rang(r.tier + 1))).color(TEXT_FAINT).size(texte::PETIT));
         });
     } else if r.tier >= 24 && r.classement > 0 {
-        ui.label(RichText::new(format!("#{} du classement", milliers(r.classement))).color(TEXT_DIM).size(11.5));
+        ui.label(RichText::new(format!("#{} du classement", milliers(r.classement))).color(TEXT_DIM).size(texte::PETIT));
     }
     ligne_mmr(ui, fiche);
     // L'acte en cours, les placements, les boucliers.
@@ -2446,14 +2447,14 @@ fn en_tete_fiche(ui: &mut Ui, vue: &Vue) {
         parts.push(pluriel(u32::from(r.boucliers), "bouclier"));
     }
     if !parts.is_empty() {
-        ui.label(RichText::new(parts.join(" · ")).color(TEXT_DIM).size(11.5));
+        ui.label(RichText::new(parts.join(" · ")).color(TEXT_DIM).size(texte::PETIT));
     }
     if let Some(pic) = fiche.pic.as_ref().filter(|p| p.tier >= 3) {
         let mut texte = format!("pic : {} · {} RR", nom_de_rang(pic.tier), pic.rr);
         if !pic.saison.is_empty() {
             texte.push_str(&format!(" · {}", pic.saison.to_uppercase()));
         }
-        ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.5));
+        ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT));
     }
 }
 
@@ -2473,14 +2474,14 @@ fn ligne_mmr(ui: &mut Ui, fiche: &FicheValorant) {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = espace::XS;
         let Some(e) = fiche.mmr_estime() else {
             let texte = if r.placements_restants > 0 {
                 "MMR caché : après les placements"
             } else {
                 "MMR caché : pas assez de classés"
             };
-            ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.5)).on_hover_text(POURQUOI_MMR);
+            ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT)).on_hover_text(POURQUOI_MMR);
             return;
         };
         let (ou, teinte) = match e.position {
@@ -2488,7 +2489,7 @@ fn ligne_mmr(ui: &mut Ui, fiche: &FicheValorant) {
             PositionMmr::AuNiveau => ("au niveau du rang", TEXT_DIM),
             PositionMmr::EnDessous => ("en dessous du rang", DANGER),
         };
-        ui.label(RichText::new(format!("MMR caché : {ou}")).color(teinte).strong().size(11.5))
+        ui.label(RichText::new(format!("MMR caché : {ou}")).color(teinte).strong().size(texte::PETIT))
             .on_hover_text(POURQUOI_MMR);
         let mut detail = format!(
             "· +{} par victoire, −{} par défaite sur {}",
@@ -2503,7 +2504,7 @@ fn ligne_mmr(ui: &mut Ui, fiche: &FicheValorant) {
             let n = (restant / e.gain_moyen).ceil().max(1.0) as u32;
             detail.push_str(&format!(" · ~{} vers {}", pluriel(n, "victoire"), nom_de_rang(r.tier + 1)));
         }
-        ui.label(RichText::new(detail).color(TEXT_FAINT).size(11.5)).on_hover_text(POURQUOI_MMR);
+        ui.label(RichText::new(detail).color(TEXT_FAINT).size(texte::PETIT)).on_hover_text(POURQUOI_MMR);
     });
 }
 
@@ -2523,7 +2524,7 @@ fn forme(ui: &mut Ui, vue: &Vue) {
     if classes.is_empty() {
         return;
     }
-    ui.add_space(8.0);
+    ui.add_space(espace::M);
     let recents: Vec<&MatchResume> = classes.iter().copied().take(20).collect();
     let resultats: Vec<i8> = recents
         .iter()
@@ -2553,9 +2554,9 @@ fn forme(ui: &mut Ui, vue: &Vue) {
             .unwrap_or_default()
     };
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Forme").color(TEXT_DIM).size(11.5));
+        ui.label(RichText::new("Forme").color(TEXT_DIM).size(texte::PETIT));
         graphes::bande_forme(ui, &resultats, Vec2::new(8.0, 12.0), Some(&info));
-        ui.label(RichText::new(format!("{v} V · {d} D · {serie_texte}")).color(TEXT_DIM).size(11.5));
+        ui.label(RichText::new(format!("{v} V · {d} D · {serie_texte}")).color(TEXT_DIM).size(texte::PETIT));
     });
 }
 
@@ -2565,14 +2566,14 @@ fn tuiles(ui: &mut Ui, vue: &Vue) {
     let (w, h) = (TUILE_FICHE, 88.0);
     let nuls = b.matchs.saturating_sub(b.victoires).saturating_sub(b.defaites);
     let bilan_de = |ui: &mut Ui| {
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         graphes::barre_vd(ui, u32::from(b.victoires), u32::from(b.defaites), u32::from(nuls), w - 2.0 * MARGE_TUILE);
     };
     // Sous un taux : la jauge contre la médiane du groupe, s'il y en a.
     let repere = |ui: &mut Ui, valeur: fn(&Bilan) -> Option<f32>, moi: Option<f32>, decimales: usize, unite: &str| {
         let Some(moi) = moi else { return };
         let Some((mediane, max)) = vue.repere(valeur, moi) else { return };
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         let teinte = if moi >= mediane { SPEAK } else { DANGER };
         graphes::jauge(ui, moi / max, Some(mediane / max), w - 2.0 * MARGE_TUILE, teinte).on_hover_text(format!(
             "médiane du groupe sur 30 jours : {}{unite} · {} : {}{unite}",
@@ -2730,8 +2731,8 @@ fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
     }
     connues.sort_by_key(|c| c.medaille.ordre());
     ui.horizontal(|ui| {
-        ui.label(RichText::new(titre).color(TEXT_DIM).size(11.5));
-        ui.label(RichText::new(format!("· lues dans son client Riot {}", crate::il_y_a(md.maj))).color(TEXT_FAINT).size(10.5));
+        ui.label(RichText::new(titre).color(TEXT_DIM).size(texte::PETIT));
+        ui.label(RichText::new(format!("· lues dans son client Riot {}", crate::il_y_a(md.maj))).color(TEXT_FAINT).size(texte::MINUSCULE));
     });
     let mut grille = Grille::new(TUILE_FICHE, 70.0);
     for c in connues {
@@ -2748,17 +2749,17 @@ fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
         carriere.sort_by_key(|c| c.medaille.ordre());
         if !carriere.is_empty() {
             let texte = carriere.iter().map(|c| format!("{} ×{}", c.medaille.nom(), c.fois)).collect::<Vec<_>>().join(" · ");
-            ui.label(RichText::new(format!("en carrière : {texte}")).color(TEXT_FAINT).size(11.0));
+            ui.label(RichText::new(format!("en carrière : {texte}")).color(TEXT_FAINT).size(texte::PETIT));
         }
     }
-    ui.add_space(10.0);
+    ui.add_space(espace::L);
 }
 
 fn agents_et_cartes(ui: &mut Ui, vue: &Vue) {
     let agents = vue.ventiler(|m| m.agent.as_str());
     let cartes = vue.ventiler(|m| m.carte.as_str());
     ui.columns(2, |cols| {
-        cols[0].label(RichText::new("Agents").color(TEXT_DIM).size(11.5));
+        cols[0].label(RichText::new("Agents").color(TEXT_DIM).size(texte::PETIT));
         if agents.is_empty() {
             cols[0].label(RichText::new(TIRET).color(TEXT_FAINT));
         } else {
@@ -2786,7 +2787,7 @@ fn agents_et_cartes(ui: &mut Ui, vue: &Vue) {
             // La colonne du libellé prend le portrait en plus du nom.
             graphes::barres(&mut cols[0], &lignes, 94.0, 22.0);
         }
-        cols[1].label(RichText::new("Cartes").color(TEXT_DIM).size(11.5));
+        cols[1].label(RichText::new("Cartes").color(TEXT_DIM).size(texte::PETIT));
         if cartes.is_empty() {
             cols[1].label(RichText::new(TIRET).color(TEXT_FAINT));
         } else {
@@ -2837,8 +2838,8 @@ fn mes_heures(ui: &mut Ui, vue: &Vue) {
         return;
     }
     let cases = cases_des_heures(vue.e.iter().map(|m| m.date));
-    ui.add_space(10.0);
-    ui.label(RichText::new("Mes heures").color(TEXT_DIM).size(11.5));
+    ui.add_space(espace::L);
+    ui.label(RichText::new("Mes heures").color(TEXT_DIM).size(texte::PETIT));
     graphes::heatmap_semaine(ui, &cases, |jour, heure| {
         let n = cases.get(jour * 24 + heure).copied().unwrap_or(0);
         format!("{} {heure}h–{}h · {}", JOURS_LONGS.get(jour).copied().unwrap_or("?"), heure + 1, pluriel(u32::from(n), "partie"))
@@ -2920,7 +2921,7 @@ fn recit_du_match(m: &MatchResume, noms: &Annuaire) -> String {
 /// un enfant qui ne pèse pas sur les colonnes.
 fn detail_du_match(ui: &mut Ui, m: &MatchResume, vue: &Vue, largeur_page: f32) {
     let texte = recit_du_match(m, &vue.noms);
-    let police = egui::FontId::proportional(11.5);
+    let police = egui::FontId::proportional(texte::PETIT);
     let largeur = (largeur_page - 16.0).max(80.0);
     let galley = ui.fonts_mut(|f| f.layout(texte, police, TEXT_DIM, largeur));
     let deroule = m.manches_detail.as_ref().map(|d| d.deroule.as_str()).unwrap_or("");
@@ -2934,7 +2935,7 @@ fn detail_du_match(ui: &mut Ui, m: &MatchResume, vue: &Vue, largeur_page: f32) {
     let mut enfant = ui.new_child(egui::UiBuilder::new().max_rect(zone).layout(egui::Layout::top_down(egui::Align::Min)));
     if !deroule.is_empty() {
         graphes::cases_manches(&mut enfant, deroule);
-        enfant.add_space(4.0);
+        enfant.add_space(espace::XS);
     }
     let pos = enfant.cursor().min;
     enfant.painter().galley(pos, galley, TEXT_DIM);
@@ -2946,8 +2947,8 @@ fn actes(ui: &mut Ui, vue: &Vue) {
     if saisons.is_empty() {
         return;
     }
-    ui.add_space(10.0);
-    ui.label(RichText::new("Actes").color(TEXT_DIM).size(11.5));
+    ui.add_space(espace::L);
+    ui.label(RichText::new("Actes").color(TEXT_DIM).size(texte::PETIT));
     let dernier = saisons.len() - 1;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
@@ -2955,7 +2956,7 @@ fn actes(ui: &mut Ui, vue: &Vue) {
             let couleur = graphes::couleur_de_rang(s.tier_fin);
             let mut texte = RichText::new(format!("{} · {} · {} V / {}", s.saison, nom_de_rang(s.tier_fin), s.victoires, s.parties))
                 .color(couleur)
-                .size(11.0);
+                .size(texte::PETIT);
             if i == dernier {
                 texte = texte.strong();
             }
@@ -2968,7 +2969,7 @@ fn actes(ui: &mut Ui, vue: &Vue) {
                     .sense(Sense::hover())
                     .fill(theme::alpha(couleur, 28))
                     .stroke(egui::Stroke::NONE)
-                    .corner_radius(egui::CornerRadius::same(6))
+                    .corner_radius(egui::CornerRadius::same(rayon::M))
                     .min_size(Vec2::ZERO),
             )
             .on_hover_text(format!(

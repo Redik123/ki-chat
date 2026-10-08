@@ -17,6 +17,7 @@
 //! et aucun de ces messages n'arrive : le panneau ne se montre pas, et
 //! rien de nouveau ne part.
 
+use ki_ui::jetons::{espace, marge, rayon, texte};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
@@ -311,7 +312,7 @@ impl Portes {
         let mut actions = Vec::new();
         let mut reponse: Option<(usize, bool)> = None;
         for (i, d) in self.demandes.iter().enumerate() {
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             let texte = format!(
                 "{} veut rejoindre par le web (porte {}) · {}",
                 d.nom,
@@ -399,12 +400,12 @@ impl Portes {
                         "une porte est un lien vers un salon temporaire : qui l'ouvre dans son navigateur \
                          donne un nom et frappe, un membre le fait entrer — sans compte, sans installation",
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(espace::L);
                     if contexte.peut_ouvrir {
                         self.formulaire(ui, contexte, &mut actions);
-                        ui.add_space(12.0);
+                        ui.add_space(espace::L);
                         ui::hairline(ui);
-                        ui.add_space(10.0);
+                        ui.add_space(espace::L);
                     }
                     if self.portes.is_empty() {
                         ui::group_title(ui, Icon::Key, "Portes ouvertes");
@@ -412,11 +413,11 @@ impl Portes {
                     } else {
                         for porte in &mut self.portes {
                             carte_porte(ui, ctx, porte, contexte, maintenant, &mut actions);
-                            ui.add_space(10.0);
+                            ui.add_space(espace::L);
                         }
                     }
                     if let Some(message) = self.message.clone() {
-                        ui.add_space(8.0);
+                        ui.add_space(espace::M);
                         if ui::banner(ui, Tone::Info, &message, true) {
                             self.message = None;
                         }
@@ -453,10 +454,10 @@ impl Portes {
             let exemple = if self.slug.is_empty() { "salon1" } else { self.slug.as_str() };
             ui::hint(ui, &format!("le lien : {}/{exemple} — un mot qu'on dicte en vocal", contexte.base_web));
         }
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::field_label(ui, "Nom du salon temporaire (facultatif)");
         ui.add(ui::text_field(&mut self.nom_salon, "sinon, celui de la porte", false));
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::field_label(ui, "Durée");
         ui.horizontal_wrapped(|ui| {
             for (minutes, label) in DUREES {
@@ -466,7 +467,7 @@ impl Portes {
             }
         });
         ui::hint(ui, "la porte ferme d'elle-même au bout de ce temps, ou dix minutes après le départ du dernier invité ; le salon est alors effacé");
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         if plafond {
             ui::hint(ui, &format!("{} portes ouvertes, c'est le maximum", ki_protocol::PORTES_MAX));
         }
@@ -511,25 +512,25 @@ fn carte_porte(
     ui::card(ui, |ui| {
         ui.horizontal(|ui| {
             ui::glyph(ui, Icon::Key, 16.0, WARN);
-            ui.label(RichText::new(format!("porte « {} »", porte.slug)).color(TEXT).size(15.0).strong());
+            ui.label(RichText::new(format!("porte « {} »", porte.slug)).color(TEXT).size(texte::TITRE).strong());
             ui.label(
                 RichText::new(format!("· #{}", contexte.nom_salon(porte.salon)))
                     .color(TEXT_DIM)
-                    .size(12.5),
+                    .size(texte::COURANT),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new(reste_texte(porte.expire_le, maintenant)).color(TEXT_FAINT).size(11.5),
+                    RichText::new(reste_texte(porte.expire_le, maintenant)).color(TEXT_FAINT).size(texte::PETIT),
                 );
             });
         });
 
         // Le lien complet : à copier, à dicter, ou à scanner.
         if let Some(url) = porte.url.clone() {
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::Label::new(RichText::new(&url).color(ACCENT).monospace().size(13.0))
+                    egui::Label::new(RichText::new(&url).color(ACCENT).monospace().size(texte::CORPS))
                         .truncate(),
                 );
                 if ui::icon_button_ex(ui, Icon::Copy, 24.0, "Copier le lien", None).clicked() {
@@ -546,9 +547,9 @@ fn carte_porte(
                 }
             }
             if let Some(qr) = &porte.qr {
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(COTE_QR), Sense::hover());
-                ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::WHITE);
+                ui.painter().rect_filled(rect, CornerRadius::same(rayon::M), Color32::WHITE);
                 ui.painter().image(
                     qr.id(),
                     rect.shrink(6.0),
@@ -560,7 +561,7 @@ fn carte_porte(
         }
 
         // Les invités présents.
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui.label(
             RichText::new(match porte.invites.len() {
                 0 => "aucun invité pour l'instant".to_string(),
@@ -568,7 +569,7 @@ fn carte_porte(
                 n => format!("{n} invités"),
             })
             .color(TEXT_DIM)
-            .size(12.0),
+            .size(texte::COURANT),
         );
         let invites = porte.invites.clone();
         for invite in &invites {
@@ -579,14 +580,14 @@ fn carte_porte(
                     ui.label(
                         RichText::new(format!("entré {}", crate::il_y_a(invite.depuis)))
                             .color(TEXT_FAINT)
-                            .size(11.0),
+                            .size(texte::PETIT),
                     );
                 }
                 if let Some(v) = invite.vocal {
                     ui.label(
                         RichText::new(format!("· en vocal dans {}", contexte.nom_salon(v)))
                             .color(ACCENT)
-                            .size(11.0),
+                            .size(texte::PETIT),
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -600,14 +601,14 @@ fn carte_porte(
 
         // Ceux qui attendent derrière.
         if !porte.demandes.is_empty() {
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui.label(
                 RichText::new(match porte.demandes.len() {
                     1 => "1 demande en attente".to_string(),
                     n => format!("{n} demandes en attente"),
                 })
                 .color(WARN)
-                .size(12.0),
+                .size(texte::COURANT),
             );
             for demande in &porte.demandes {
                 ui.horizontal(|ui| {
@@ -616,7 +617,7 @@ fn carte_porte(
                         ui.label(
                             RichText::new(format!("a frappé {}", crate::il_y_a(demande.depuis)))
                                 .color(TEXT_FAINT)
-                                .size(11.0),
+                                .size(texte::PETIT),
                         );
                     }
                     if droits.agir {
@@ -642,7 +643,7 @@ fn carte_porte(
             }
         }
 
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui.horizontal(|ui| {
             if ui::button(ui, Icon::Chat, "Ouvrir le salon").clicked() {
                 actions.push(Action::Lire(porte.salon));
@@ -722,13 +723,13 @@ fn banniere_demande(ui: &mut egui::Ui, texte: &str, survol: &str) -> Option<bool
     egui::Frame::NONE
         .fill(theme::alpha(color, 26))
         .stroke(Stroke::new(1.0_f32, theme::alpha(color, 70)))
-        .corner_radius(CornerRadius::same(9))
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(CornerRadius::same(rayon::L))
+        .inner_margin(marge::symetrique(espace::L, espace::M))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, Icon::User, color);
-                ui.add_space(2.0);
+                ui.add_space(espace::XXS);
                 // Les boutons d'abord, à droite ; le texte prend le reste
                 // et se tronque plutôt que de les pousser hors du cadre.
                 let boutons = 190.0;
@@ -737,7 +738,7 @@ fn banniere_demande(ui: &mut egui::Ui, texte: &str, survol: &str) -> Option<bool
                     Vec2::new(largeur, 0.0),
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| {
-                        ui.add(egui::Label::new(RichText::new(texte).color(color).size(13.0)).truncate())
+                        ui.add(egui::Label::new(RichText::new(texte).color(color).size(texte::CORPS)).truncate())
                             .on_hover_text(survol);
                     },
                 );
@@ -758,10 +759,10 @@ fn banniere_demande(ui: &mut egui::Ui, texte: &str, survol: &str) -> Option<bool
 pub fn pastille_invite(ui: &mut egui::Ui) -> egui::Response {
     egui::Frame::new()
         .fill(theme::INVITE)
-        .corner_radius(CornerRadius::same(4))
-        .inner_margin(egui::Margin::symmetric(4, 1))
+        .corner_radius(CornerRadius::same(rayon::S))
+        .inner_margin(marge::symetrique(espace::XS, 1.0))
         .show(ui, |ui| {
-            ui.label(RichText::new("INVITÉ").size(9.5).strong().color(theme::BG_DEEP));
+            ui.label(RichText::new("INVITÉ").size(texte::MINUSCULE).strong().color(theme::BG_DEEP));
         })
         .response
         .on_hover_text("vient du web par une porte, sans compte — il ne voit que ce salon")

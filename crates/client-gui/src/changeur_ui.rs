@@ -2,6 +2,7 @@
 //! personnages, où part la voix changée, un raccourci pour basculer — et, en
 //! mode studio, chaque réglage à la main.
 
+use ki_ui::jetons::{espace, texte};
 use std::time::Duration;
 
 use eframe::egui::{self, RichText, Vec2};
@@ -116,7 +117,7 @@ impl KiApp {
                     }
                     if self.changeur_actif {
                         let nom = personnage_de(&self.changeur).map(|i| PERSONNAGES[i].0).unwrap_or("réglage perso");
-                        ui.add_space(4.0);
+                        ui.add_space(espace::XS);
                         ui.horizontal(|ui| ui::status_dot(ui, SPEAK, &format!("allumé : {nom}"), 10.0));
                     }
                 });
@@ -167,7 +168,7 @@ impl KiApp {
                     let prise = [self.hotkey_micro, self.hotkey_sourd].contains(&self.hotkey_changeur)
                         || (self.hotkey_changeur.is_some() && self.hotkey_changeur == Some(self.ptt_key));
                     if self.hotkey_changeur.is_some() && prise {
-                        ui.label(RichText::new("cette touche sert déjà ailleurs").color(WARN).size(11.5));
+                        ui.label(RichText::new("cette touche sert déjà ailleurs").color(WARN).size(texte::PETIT));
                     }
                     ui::precision(ui, "Une pression allume ou coupe le changeur, même en jeu.");
                 });
@@ -176,12 +177,12 @@ impl KiApp {
                     return;
                 }
                 // --- Le détail, en mode studio ---
-                ui.add_space(4.0);
-                ui.label(RichText::new("Réglages").color(TEXT).size(13.0).strong());
+                ui.add_space(espace::XS);
+                ui.label(RichText::new("Réglages").color(TEXT).size(texte::CORPS).strong());
                 ui.label(
-                    RichText::new("Toucher un réglage fait ton propre personnage.").color(TEXT_FAINT).size(11.5),
+                    RichText::new("Toucher un réglage fait ton propre personnage.").color(TEXT_FAINT).size(texte::PETIT),
                 );
-                ui.add_space(4.0);
+                ui.add_space(espace::XS);
                 let montrer = self.explications;
                 let avant = self.changeur;
                 let r = &mut self.changeur;
@@ -319,7 +320,7 @@ impl KiApp {
                     ui.label(
                         RichText::new("Le changeur est coupé : allume-le pour entendre ces réglages.")
                             .color(TEXT_DIM)
-                            .size(11.5),
+                            .size(texte::PETIT),
                     );
                 }
             },
@@ -353,7 +354,7 @@ impl KiApp {
             if self.imitation_calcul.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("analyse de l'extrait…").color(TEXT_DIM).size(12.0));
+                    ui.label(RichText::new("analyse de l'extrait…").color(TEXT_DIM).size(texte::COURANT));
                 });
             } else {
                 let libelle =
@@ -379,7 +380,7 @@ impl KiApp {
                 }
             }
             if let Some(erreur) = &self.imitation_erreur {
-                ui.label(RichText::new(erreur).color(WARN).size(11.5));
+                ui.label(RichText::new(erreur).color(WARN).size(texte::PETIT));
             }
             let Some((nom, cible)) = self.imitation_cible.clone() else {
                 ui::precision(
@@ -404,7 +405,7 @@ impl KiApp {
                     ui.horizontal(|ui| {
                         ui::meter(ui, avancement, Vec2::new(150.0, 8.0), DANGER);
                         let reste = ((1.0 - avancement) * ESSAI_SECONDES as f32).ceil().max(1.0);
-                        ui.label(RichText::new(format!("parle normalement… {reste:.0} s")).color(TEXT_DIM).size(12.0));
+                        ui.label(RichText::new(format!("parle normalement… {reste:.0} s")).color(TEXT_DIM).size(texte::COURANT));
                     });
                     return;
                 }
@@ -428,7 +429,7 @@ impl KiApp {
             // 3. Le rapprochement.
             let r = rapprocher(&moi, &cible);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Pour t'en rapprocher :").color(TEXT_DIM).size(12.0));
+                ui.label(RichText::new("Pour t'en rapprocher :").color(TEXT_DIM).size(texte::COURANT));
                 ui.label(
                     RichText::new(format!(
                         "hauteur {:+.1} demi-tons, timbre {:+.0} %",
@@ -436,7 +437,7 @@ impl KiApp {
                         (r.formants - 1.0) * 100.0
                     ))
                     .color(ACCENT)
-                    .size(12.0)
+                    .size(texte::COURANT)
                     .strong(),
                 );
             });

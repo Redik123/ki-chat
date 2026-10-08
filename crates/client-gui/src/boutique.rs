@@ -14,6 +14,7 @@
 //! Rien de tout cela n'est supporté par Riot : un jour ça casse, et ce
 //! jour-là la section dit « indisponible », sans plus.
 
+use ki_ui::jetons::{espace, marge, rayon, texte};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -120,10 +121,10 @@ impl Lecteur {
         let mut etat = self.etat.lock().unwrap();
         match &mut *etat {
             Etat::Vide | Etat::EnCours => {
-                ui.label(RichText::new("lecture dans ton client Riot…").color(TEXT_DIM).size(11.5));
+                ui.label(RichText::new("lecture dans ton client Riot…").color(TEXT_DIM).size(texte::PETIT));
             }
             Etat::Erreur(e, _) => {
-                ui.label(RichText::new(format!("indisponible : {e}")).color(TEXT_DIM).size(11.5));
+                ui.label(RichText::new(format!("indisponible : {e}")).color(TEXT_DIM).size(texte::PETIT));
                 ui.ctx().request_repaint_after(NOUVEL_ESSAI);
                 if ui.button("Réessayer").clicked() {
                     *etat = Etat::Vide;
@@ -144,8 +145,8 @@ impl Lecteur {
                         }
                         egui::Frame::new()
                             .fill(crate::theme::BG_RAISED)
-                            .corner_radius(egui::CornerRadius::same(8))
-                            .inner_margin(egui::Margin::same(8))
+                            .corner_radius(egui::CornerRadius::same(rayon::L))
+                            .inner_margin(marge::egale(espace::M))
                             .show(ui, |ui| {
                                 ui.set_width(150.0);
                                 ui.vertical(|ui| {
@@ -157,8 +158,8 @@ impl Lecteur {
                                             ui.add_space(44.0);
                                         }
                                     }
-                                    ui.add(egui::Label::new(RichText::new(&offre.nom).size(11.5)).truncate());
-                                    ui.label(RichText::new(format!("{} VP", offre.prix)).color(ACCENT).strong().size(12.0));
+                                    ui.add(egui::Label::new(RichText::new(&offre.nom).size(texte::PETIT)).truncate());
+                                    ui.label(RichText::new(format!("{} VP", offre.prix)).color(ACCENT).strong().size(texte::COURANT));
                                 });
                             });
                     }
@@ -167,7 +168,7 @@ impl Lecteur {
                 ui.label(
                     RichText::new(format!("se renouvelle dans {} h {:02} min", reste / 3600, (reste % 3600) / 60))
                         .color(TEXT_FAINT)
-                        .size(10.5),
+                        .size(texte::MINUSCULE),
                 );
                 if ui.button("Relire").clicked() {
                     *etat = Etat::Vide;

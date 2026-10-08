@@ -7,6 +7,7 @@
 //! chiffre près. Et « Comparer » coupe l'égaliseur le temps d'entendre la
 //! différence — ce qui manquait pour savoir ce qu'on change.
 
+use ki_ui::jetons::{espace, rayon, texte};
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2};
@@ -223,7 +224,7 @@ pub(crate) fn editeur(
             change = true;
         }
     });
-    ui.add_space(8.0);
+    ui.add_space(espace::M);
 
     // --- Le graphe ---
     let largeur = ui.available_width().max(260.0);
@@ -336,7 +337,7 @@ pub(crate) fn editeur(
     if ui.is_rect_visible(rect) {
         dessiner(ui, &axes, rect, bandes, etat);
     }
-    ui.add_space(8.0);
+    ui.add_space(espace::M);
 
     // --- La bande choisie, au chiffre près ---
     match etat.selection.filter(|&i| i < bandes.len()) {
@@ -362,7 +363,7 @@ pub(crate) fn editeur(
                          clic droit : forme, retirer",
                     )
                     .color(TEXT_FAINT)
-                    .size(11.5),
+                    .size(texte::PETIT),
                 );
             });
         }
@@ -388,7 +389,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
                     }
                 }
             });
-        ui.label(RichText::new("fréquence").color(TEXT_DIM).size(12.0));
+        ui.label(RichText::new("fréquence").color(TEXT_DIM).size(texte::COURANT));
         let vitesse = b.frequence as f64 * 0.005;
         change |= ui
             .add(
@@ -406,7 +407,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
             )
             .changed();
         if b.forme.a_un_gain() {
-            ui.label(RichText::new("gain").color(TEXT_DIM).size(12.0));
+            ui.label(RichText::new("gain").color(TEXT_DIM).size(texte::COURANT));
             change |= ui
                 .add(
                     egui::DragValue::new(&mut b.gain_db)
@@ -418,7 +419,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
                 .changed();
         }
         if !(b.forme.a_une_pente() && b.raide) {
-            ui.label(RichText::new("largeur (Q)").color(TEXT_DIM).size(12.0));
+            ui.label(RichText::new("largeur (Q)").color(TEXT_DIM).size(texte::COURANT));
             change |= ui
                 .add(egui::DragValue::new(&mut b.q).speed(0.01).range(Q_MIN..=Q_MAX).fixed_decimals(2))
                 .changed();
@@ -441,9 +442,9 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
 /// Le graphe : grille, spectre, courbe, points.
 fn dessiner(ui: &egui::Ui, axes: &Axes, rect: Rect, bandes: &[Bande], etat: &EditeurEq) {
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(10), theme::BG_DEEP);
+    p.rect_filled(rect, CornerRadius::same(rayon::XL), theme::BG_DEEP);
     let grille = theme::alpha(Color32::WHITE, 14);
-    let police = egui::FontId::proportional(10.0);
+    let police = egui::FontId::proportional(texte::MINUSCULE);
     for f in [50.0, 100.0, 200.0, 500.0, 1_000.0, 2_000.0, 5_000.0, 10_000.0] {
         let x = axes.x(f);
         p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0_f32, grille));
@@ -533,7 +534,7 @@ fn dessiner(ui: &egui::Ui, axes: &Axes, rect: Rect, bandes: &[Bande], etat: &Edi
             c,
             egui::Align2::CENTER_CENTER,
             format!("{}", i + 1),
-            egui::FontId::proportional(9.5),
+            egui::FontId::proportional(texte::MINUSCULE),
             if b.active { theme::BG_DEEP } else { couleur },
         );
     }
@@ -542,7 +543,7 @@ fn dessiner(ui: &egui::Ui, axes: &Axes, rect: Rect, bandes: &[Bande], etat: &Edi
             rect.center_top() + Vec2::new(0.0, 8.0),
             egui::Align2::CENTER_TOP,
             "comparaison : égaliseur coupé",
-            egui::FontId::proportional(11.5),
+            egui::FontId::proportional(texte::PETIT),
             WARN,
         );
     }

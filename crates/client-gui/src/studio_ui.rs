@@ -6,6 +6,7 @@
 //! Le mode simple règle les mêmes choses, en moins de gestes : ce qu'on règle
 //! ici reste actif quand on y revient.
 
+use ki_ui::jetons::{espace, texte};
 use eframe::egui::{self, RichText, Vec2};
 use ki_voice::dynamique::{
     ReglagesCompresseur, ReglagesDeesser, ReglagesPorte, ReglagesStudio, COMPRESSION_AUCUNE, COMPRESSION_DOUCE,
@@ -123,7 +124,7 @@ fn parametre(ui: &mut egui::Ui, nom: &str, aide: &str, montrer: bool, add: impl 
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.set_min_width(LARGEUR_NOM);
-                ui.label(RichText::new(nom).color(TEXT_DIM).size(12.0)).on_hover_text(aide);
+                ui.label(RichText::new(nom).color(TEXT_DIM).size(texte::COURANT)).on_hover_text(aide);
             },
         );
         add(ui);
@@ -138,10 +139,10 @@ fn explication(ui: &mut egui::Ui, texte: &str) {
     ui.horizontal_top(|ui| {
         ui.add_space(LARGEUR_NOM + ui.spacing().item_spacing.x);
         ui.vertical(|ui| {
-            ui.add(egui::Label::new(RichText::new(texte).color(TEXT_FAINT).size(11.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT)).wrap());
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(espace::XS);
 }
 
 /// L'aiguille d'un bloc : une jauge et sa valeur.
@@ -151,19 +152,19 @@ fn aiguille(ui: &mut egui::Ui, niveau: f32, couleur: egui::Color32, texte: &str)
             ui.set_min_width(LARGEUR_NOM);
         });
         ui::meter(ui, niveau, Vec2::new(160.0, 6.0), couleur);
-        ui.label(RichText::new(texte).color(TEXT_FAINT).size(11.0));
+        ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT));
     });
 }
 
 /// Le titre d'un bloc, et ce qu'il fait quand les explications sont montrées.
 fn titre_bloc(ui: &mut egui::Ui, numero: usize, titre: &str, description: &str, montrer: bool) {
-    ui.add_space(8.0);
-    ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(13.0).strong())
+    ui.add_space(espace::M);
+    ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(texte::CORPS).strong())
         .on_hover_text(description);
     if montrer {
-        ui.add(egui::Label::new(RichText::new(description).color(TEXT_DIM).size(11.5)).wrap());
+        ui.add(egui::Label::new(RichText::new(description).color(TEXT_DIM).size(texte::PETIT)).wrap());
     }
-    ui.add_space(4.0);
+    ui.add_space(espace::XS);
 }
 
 impl KiApp {
@@ -242,7 +243,7 @@ impl KiApp {
                             }
                         }
                     });
-                    ui.add_space(4.0);
+                    ui.add_space(espace::XS);
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.profil_nom)

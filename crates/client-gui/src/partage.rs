@@ -10,6 +10,7 @@
 //!   flux QUIC, dans le désordre) ; le fil de ce module déchiffre, remet en
 //!   ordre par numéro de séquence, décode, et dépose l'image pour l'UI.
 
+use ki_ui::jetons::{espace, texte};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -278,7 +279,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
                 }
                 if !sources.fenetres.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new("Fenêtres").color(TEXT_DIM).size(11.5));
+                    ui.label(RichText::new("Fenêtres").color(TEXT_DIM).size(texte::PETIT));
                 }
                 for f in &sources.fenetres {
                     let s = CaptureSource::Window(f.title.clone());
@@ -303,9 +304,9 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
         ui::hint(ui, "une fenêtre réduite dans la barre des tâches ne se capture plus");
     }
 
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("résolution").color(TEXT_DIM).size(12.5));
+        ui.label(RichText::new("résolution").color(TEXT_DIM).size(texte::COURANT));
         let actuel = HAUTEURS
             .iter()
             .find(|(h, _)| *h == r.max_height)
@@ -322,8 +323,8 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
                     }
                 }
             });
-        ui.add_space(8.0);
-        ui.label(RichText::new("images/s").color(TEXT_DIM).size(12.5));
+        ui.add_space(espace::M);
+        ui.label(RichText::new("images/s").color(TEXT_DIM).size(texte::COURANT));
         egui::ComboBox::from_id_salt("stream_fps")
             .width(64.0)
             .selected_text(RichText::new(r.fps.to_string()).color(TEXT))
@@ -337,9 +338,9 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
             });
     });
 
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("encodeur").color(TEXT_DIM).size(12.5));
+        ui.label(RichText::new("encodeur").color(TEXT_DIM).size(texte::COURANT));
         let actuel = ENCODEURS
             .iter()
             .find(|(e, _, _)| *e == r.encodeur)
@@ -371,13 +372,13 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
         ui.label(
             RichText::new(etat)
                 .color(if vieux { WARN } else { TEXT_DIM })
-                .size(11.5),
+                .size(texte::PETIT),
         );
     }
 
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("débit").color(TEXT_DIM).size(12.5));
+        ui.label(RichText::new("débit").color(TEXT_DIM).size(texte::COURANT));
         let mut mbit = r.kbps as f32 / 1000.0;
         if ui
             .add(
@@ -400,12 +401,12 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
          autres",
     );
 
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     ui.horizontal(|ui| {
         if ui.checkbox(&mut r.cursor, "Curseur de la souris").changed() {
             change = true;
         }
-        ui.add_space(10.0);
+        ui.add_space(espace::L);
         if ui
             .checkbox(&mut r.preview, "Fenêtre d'aperçu")
             .on_hover_text("voir ce que les autres reçoivent — coûte un décodage par image")
@@ -414,7 +415,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
             change = true;
         }
     });
-    ui.add_space(6.0);
+    ui.add_space(espace::S);
     if ui
         .checkbox(&mut r.son, "Son du jeu dans le stream")
         .on_hover_text(

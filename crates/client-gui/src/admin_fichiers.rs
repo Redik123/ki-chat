@@ -10,6 +10,7 @@
 //! Tout ce qu'il sait vient du serveur (`AdminFichiers`) ; la permission
 //! est « Supprimer les messages » — c'est de la modération.
 
+use ki_ui::jetons::{espace, texte};
 use std::cmp::Reverse;
 use std::collections::HashSet;
 
@@ -189,20 +190,20 @@ impl Fichiers {
         }
         ui::hint(ui, &resume);
         if self.en_attente && self.liste.is_empty() {
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui::hint(ui, "lecture du stock…");
             return actions;
         }
         if self.liste.is_empty() {
-            ui.add_space(8.0);
+            ui.add_space(espace::M);
             ui::hint(ui, "aucun fichier partagé sur le serveur");
             return actions;
         }
 
         // Les filtres : qui, quoi, dans quel ordre.
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Envoyé par").color(TEXT_DIM).size(12.5));
+            ui.label(RichText::new("Envoyé par").color(TEXT_DIM).size(texte::COURANT));
             let choisi = match &self.auteur {
                 None => "tout le monde".to_string(),
                 Some(a) => nom_affiche(a),
@@ -236,7 +237,7 @@ impl Fichiers {
 
         // La sélection.
         let visibles = self.visibles();
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         ui.horizontal_wrapped(|ui| {
             if ui.small_button(format!("Tout cocher ({})", visibles.len())).clicked() {
                 self.selection.extend(visibles.iter().map(|f| f.id.clone()));
@@ -246,16 +247,16 @@ impl Fichiers {
                 self.confirmer = false;
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         ui::hairline(ui);
 
         // La liste.
         if visibles.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(espace::S);
             ui::hint(ui, "rien ne correspond à ces filtres");
         }
         for f in &visibles {
-            ui.add_space(4.0);
+            ui.add_space(espace::XS);
             ui.horizontal(|ui| {
                 let mut coche = self.selection.contains(&f.id);
                 if ui.checkbox(&mut coche, "").changed() {
@@ -276,11 +277,11 @@ impl Fichiers {
                         let nom = if f.nom.is_empty() { f.id.as_str() } else { f.nom.as_str() };
                         ui.add(
                             egui::Label::new(
-                                RichText::new(ki_protocol::safe_display(nom, 80)).color(TEXT).size(13.0).strong(),
+                                RichText::new(ki_protocol::safe_display(nom, 80)).color(TEXT).size(texte::CORPS).strong(),
                             )
                             .truncate(),
                         );
-                        ui.label(RichText::new(taille_lisible(f.octets)).color(TEXT_DIM).size(12.0));
+                        ui.label(RichText::new(taille_lisible(f.octets)).color(TEXT_DIM).size(texte::COURANT));
                     });
                     ui.horizontal_wrapped(|ui| {
                         let qui = if f.auteur.is_empty() {
@@ -288,7 +289,7 @@ impl Fichiers {
                         } else {
                             RichText::new(nom_affiche(&f.auteur)).color(theme::color_for(&f.auteur))
                         };
-                        ui.label(qui.size(11.5));
+                        ui.label(qui.size(texte::PETIT));
                         let mut details: Vec<String> = f.salons.iter().map(|s| format!("#{}", ki_protocol::safe_display(s, 40))).collect();
                         if f.date_ms > 0 {
                             details.push(crate::il_y_a(f.date_ms));
@@ -298,7 +299,7 @@ impl Fichiers {
                             1 => "1 message".to_string(),
                             n => format!("{n} messages"),
                         });
-                        ui.label(RichText::new(format!("· {}", details.join(" · "))).color(TEXT_FAINT).size(11.5));
+                        ui.label(RichText::new(format!("· {}", details.join(" · "))).color(TEXT_FAINT).size(texte::PETIT));
                         if !f.chemin.is_empty() {
                             if (f.genre == "video" || f.genre == "image") && ui.small_button("voir").clicked() {
                                 actions.push(Action::Voir { chemin: f.chemin.clone(), video: f.genre == "video" });
@@ -313,9 +314,9 @@ impl Fichiers {
         }
 
         // La suppression, avec sa confirmation.
-        ui.add_space(8.0);
+        ui.add_space(espace::M);
         ui::hairline(ui);
-        ui.add_space(6.0);
+        ui.add_space(espace::S);
         let choisis: Vec<&FichierPartage> = self.liste.iter().filter(|f| self.selection.contains(&f.id)).collect();
         let (n, octets) = (choisis.len(), choisis.iter().map(|f| f.octets).sum::<u64>());
         let messages: u32 = choisis.iter().map(|f| f.messages).sum();
@@ -327,7 +328,7 @@ impl Fichiers {
         ui.label(
             RichText::new(format!("{} sélectionné(s) · {}", n, taille_lisible(octets)))
                 .color(TEXT)
-                .size(13.0),
+                .size(texte::CORPS),
         );
         ui.checkbox(
             &mut self.avec_messages,
@@ -336,7 +337,7 @@ impl Fichiers {
                 m => format!("retirer aussi les {m} message(s) qui les partagent"),
             },
         );
-        ui.add_space(4.0);
+        ui.add_space(espace::XS);
         if !self.confirmer {
             if ui::tinted_button(ui, Some(Icon::Trash), "Supprimer la sélection", Tone::Danger).clicked() {
                 self.confirmer = true;
@@ -350,7 +351,7 @@ impl Fichiers {
                     if self.avec_messages && messages > 0 { ", messages compris" } else { "" }
                 ))
                 .color(DANGER)
-                .size(12.5),
+                .size(texte::COURANT),
             );
             ui.horizontal(|ui| {
                 if ui::tinted_button(ui, Some(Icon::Trash), "Oui, supprimer", Tone::Danger).clicked() {

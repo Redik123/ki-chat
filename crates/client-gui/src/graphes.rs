@@ -17,6 +17,7 @@
 //! points : une série se trie ici, du plus ancien au plus récent, et le
 //! survol rend l'indice du point **dans la tranche reçue**.
 
+use ki_ui::jetons::{rayon, texte};
 use chrono::{Datelike, TimeZone, Timelike};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, Ui,
@@ -336,7 +337,7 @@ pub fn courbe_temps(
             return None;
         }
         let painter = ui.painter().with_clip_rect(rect);
-        painter.rect_filled(rect, CornerRadius::same(6), BG_DEEP);
+        painter.rect_filled(rect, CornerRadius::same(rayon::M), BG_DEEP);
         // La zone de la courbe : la marge, et sous elle la ligne des dates.
         let interieur = rect.shrink2(MARGE);
         let zone = Rect::from_min_max(
@@ -564,7 +565,7 @@ pub fn debits(
         return reponse;
     }
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, CornerRadius::same(6), BG_DEEP);
+    painter.rect_filled(rect, CornerRadius::same(rayon::M), BG_DEEP);
     let n = releves.len();
     if n < 2 {
         return reponse;
@@ -676,14 +677,14 @@ pub fn bande_forme(ui: &mut Ui, resultats: &[i8], case: Vec2, info: Option<&dyn 
     for colonne in 0..n {
         let x = rect.left() + colonne as f32 * (case.x + ECART_CASES);
         let r = Rect::from_min_size(Pos2::new(x, rect.top()), case);
-        painter.rect_filled(r, CornerRadius::same(2), teinte_de_resultat(resultats[indice(colonne)]));
+        painter.rect_filled(r, CornerRadius::same(rayon::S), teinte_de_resultat(resultats[indice(colonne)]));
     }
     if let (Some(info), Some(souris)) = (info, reponse.hover_pos()) {
         if let Some(colonne) = case_sous(souris.x - rect.left(), case.x, ECART_CASES, n) {
             let i = indice(colonne);
             let x = rect.left() + colonne as f32 * (case.x + ECART_CASES);
             let r = Rect::from_min_size(Pos2::new(x, rect.top()), case);
-            painter.rect_stroke(r.expand(1.0), CornerRadius::same(3), Stroke::new(1.0_f32, TEXT), egui::StrokeKind::Outside);
+            painter.rect_stroke(r.expand(1.0), CornerRadius::same(rayon::S), Stroke::new(1.0_f32, TEXT), egui::StrokeKind::Outside);
             let texte = info(i);
             if !texte.is_empty() {
                 reponse.clone().on_hover_text(texte);
@@ -721,7 +722,7 @@ const ICONE_LARGE: f32 = 2.4;
 /// rail creusé, le `fond` gris (BG_ACTIVE) derrière la `part` colorée, le
 /// texte à droite ; `info` en tooltip. Sans ligne, rien n'est dessiné.
 pub fn barres(ui: &mut Ui, lignes: &[Barre], largeur_label: f32, hauteur_ligne: f32) {
-    let police = FontId::proportional(12.0);
+    let police = FontId::proportional(texte::COURANT);
     let largeur = ui.available_width();
     for ligne in lignes {
         let (rect, reponse) = ui.allocate_exact_size(Vec2::new(largeur, hauteur_ligne), Sense::hover());
@@ -816,7 +817,7 @@ pub fn barre_vd(ui: &mut Ui, v: u32, d: u32, nuls: u32, largeur: f32) -> Respons
         return reponse;
     }
     let painter = ui.painter();
-    let arrondi = CornerRadius::same(4);
+    let arrondi = CornerRadius::same(rayon::S);
     painter.rect_filled(rect, arrondi, BG_DEEP);
     let total = v as u64 + d as u64 + nuls as u64;
     if total == 0 {
@@ -897,7 +898,7 @@ pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], info: impl Fn(usize, usize) -
         return;
     }
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, CornerRadius::same(6), BG_DEEP);
+    painter.rect_filled(rect, CornerRadius::same(rayon::M), BG_DEEP);
     let origine = Pos2::new(rect.left() + MARGE.x + LARGEUR_JOURS, rect.top() + MARGE.y + HAUTEUR_HEURES);
     let valeur = |jour: usize, heure: usize| cases.get(jour * 24 + heure).copied().unwrap_or(0);
     let max = cases.iter().copied().max().unwrap_or(0);
@@ -914,7 +915,7 @@ pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], info: impl Fn(usize, usize) -
         for heure in 0..24 {
             let x = origine.x + heure as f32 * (w + pas);
             let case = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
-            painter.rect_filled(case, CornerRadius::same(2), teinte_de_case(valeur(jour, heure), max));
+            painter.rect_filled(case, CornerRadius::same(rayon::S), teinte_de_case(valeur(jour, heure), max));
         }
     }
     for heure in (0..24).step_by(6) {
@@ -938,7 +939,7 @@ pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], info: impl Fn(usize, usize) -
                 Pos2::new(origine.x + heure as f32 * (w + pas), origine.y + jour as f32 * (h + pas)),
                 Vec2::new(w, h),
             );
-            painter.rect_stroke(case, CornerRadius::same(2), Stroke::new(1.0_f32, TEXT), egui::StrokeKind::Outside);
+            painter.rect_stroke(case, CornerRadius::same(rayon::S), Stroke::new(1.0_f32, TEXT), egui::StrokeKind::Outside);
             let texte = info(jour, heure);
             if !texte.is_empty() {
                 reponse.on_hover_text(texte);
@@ -994,11 +995,11 @@ pub fn cases_manches(ui: &mut Ui, deroule: &str) {
     };
     for (i, &c) in manches.iter().enumerate() {
         let case = Rect::from_min_size(Pos2::new(rect.left() + x_de_manche(i), rect.top()), CASE_MANCHE);
-        painter.rect_filled(case, CornerRadius::same(2), teinte(c));
+        painter.rect_filled(case, CornerRadius::same(rayon::S), teinte(c));
     }
     if let Some(i) = reponse.hover_pos().and_then(|souris| manche_sous(souris.x - rect.left(), n)) {
         let case = Rect::from_min_size(Pos2::new(rect.left() + x_de_manche(i), rect.top()), CASE_MANCHE);
-        painter.rect_stroke(case.expand(1.0), CornerRadius::same(3), Stroke::new(1.0_f32, TEXT), egui::StrokeKind::Outside);
+        painter.rect_stroke(case.expand(1.0), CornerRadius::same(rayon::S), Stroke::new(1.0_f32, TEXT), egui::StrokeKind::Outside);
         let issue = match manches[i].to_ascii_uppercase() {
             'V' => "gagnée",
             'D' => "perdue",
