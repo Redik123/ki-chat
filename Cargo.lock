@@ -2924,6 +2924,8 @@ version = "0.1.60"
 dependencies = [
  "egui",
  "egui_taffy",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

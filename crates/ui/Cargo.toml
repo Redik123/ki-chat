@@ -15,7 +15,11 @@ egui = { version = "0.36", default-features = false }
 # si egui_taffy prend du retard sur egui, on le remplace sans toucher aux
 # écrans.
 egui_taffy = "0.14"
+# Le mouchard des mises en page instables (versions de développement).
+tracing.workspace = true
 
 [dev-dependencies]
 # Les polices d'egui, pour les tests qui mesurent du texte.
 egui = { version = "0.36", features = ["default_fonts"] }
+# Pour voir parler le mouchard dans les tests.
+tracing-subscriber.workspace = true

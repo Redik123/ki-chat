@@ -162,6 +162,8 @@ impl Flex {
         id: impl egui::AsIdSalt,
         contenu: impl FnOnce(&mut Contenu<'_>) -> R,
     ) -> R {
+        #[cfg(debug_assertions)]
+        let etiquette = format!("{id:?}");
         let id = ui.id().with(id);
         let en_ligne = self.en_ligne();
         // Toute la largeur : sans elle, la racine se contente de celle de
@@ -177,13 +179,25 @@ impl Flex {
             ui.available_rect_before_wrap().min,
             egui::vec2(ui.available_width(), HAUTEUR_D_ACCUEIL),
         );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(accueil), |ui| {
-            egui_taffy::tui(ui, id)
-                .reserve_available_width()
-                .style(style)
-                .show(|tui| contenu(&mut Contenu { tui, en_ligne }))
-        })
-        .inner
+        #[cfg(debug_assertions)]
+        let avant = ui.ctx().will_discard();
+        let rendu = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(accueil), |ui| {
+                egui_taffy::tui(ui, id).reserve_available_width().style(style).show(|tui| {
+                    contenu(&mut Contenu {
+                        tui,
+                        en_ligne,
+                        #[cfg(debug_assertions)]
+                        etiquette: etiquette.clone(),
+                        #[cfg(debug_assertions)]
+                        rang: 0,
+                    })
+                })
+            })
+            .inner;
+        #[cfg(debug_assertions)]
+        crate::mouchard::conteneur(ui, &etiquette, avant);
+        rendu
     }
 
     fn en_ligne(&self) -> bool {
@@ -305,6 +319,11 @@ pub struct Contenu<'a> {
     tui: &'a mut Tui,
     /// Le conteneur est une rangée (sinon, une colonne).
     en_ligne: bool,
+    /// Pour le mouchard : le conteneur, et le rang de la dernière case.
+    #[cfg(debug_assertions)]
+    etiquette: String,
+    #[cfg(debug_assertions)]
+    rang: usize,
 }
 
 impl Contenu<'_> {
@@ -331,6 +350,11 @@ impl Contenu<'_> {
             case.largeur_imposee || (self.en_ligne && case.grandit()),
             case.hauteur_imposee || (!self.en_ligne && case.grandit()),
         );
+        #[cfg(debug_assertions)]
+        let (etiquette, rang) = {
+            self.rang += 1;
+            (self.etiquette.clone(), self.rang)
+        };
         (&mut *self.tui).style(case.style).ui_manual(|ui, _| {
             let inner = ajout(ui);
             let mut taille = ui.min_size();
@@ -340,6 +364,8 @@ impl Contenu<'_> {
             if ignorer_hauteur {
                 taille.y = 0.0;
             }
+            #[cfg(debug_assertions)]
+            crate::mouchard::case(ui, &etiquette, rang, taille);
             TuiContainerResponse {
                 inner,
                 min_size: taille,
@@ -364,7 +390,21 @@ impl Contenu<'_> {
         contenu: impl FnOnce(&mut Contenu<'_>) -> R,
     ) -> R {
         let en_ligne = flex.en_ligne();
-        (&mut *self.tui).style(case.avec_conteneur(flex)).add(|tui| contenu(&mut Contenu { tui, en_ligne }))
+        #[cfg(debug_assertions)]
+        let etiquette = {
+            self.rang += 1;
+            format!("{} › {}", self.etiquette, self.rang)
+        };
+        (&mut *self.tui).style(case.avec_conteneur(flex)).add(|tui| {
+            contenu(&mut Contenu {
+                tui,
+                en_ligne,
+                #[cfg(debug_assertions)]
+                etiquette,
+                #[cfg(debug_assertions)]
+                rang: 0,
+            })
+        })
     }
 
     /// Un vide qui prend toute la place qui reste : ce qui le suit est
@@ -580,6 +620,23 @@ mod stabilite {
             ligne(ui, 0);
         });
         assert!(p[2..].iter().all(|&n| n == 1), "{p:?}");
+    }
+
+    /// Une case à sa taille naturelle dont le contenu change de largeur à
+    /// chaque image : instable par nature. Le mouchard le dit au journal.
+    #[test]
+    fn le_mouchard_signale_une_case_instable() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let mut image = 0u32;
+        let p = passes(14, |ui| {
+            image += 1;
+            Flex::ligne().show(ui, "instable", |f| {
+                f.ui(|ui| {
+                    ui.allocate_exact_size(vec2(if image.is_multiple_of(2) { 40.0 } else { 90.0 }, 20.0), egui::Sense::hover());
+                });
+            });
+        });
+        assert!(p[2..].iter().all(|&n| n == 2), "instable : {p:?}");
     }
 
     #[test]

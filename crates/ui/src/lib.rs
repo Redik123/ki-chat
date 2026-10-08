@@ -12,5 +12,7 @@
 
 pub mod flex;
 pub mod jetons;
+#[cfg(debug_assertions)]
+mod mouchard;
 
 pub use egui;
