@@ -25,3 +25,5 @@ serde.workspace = true
 egui = { version = "0.36", features = ["default_fonts"] }
 # Pour voir parler le mouchard dans les tests.
 tracing-subscriber.workspace = true
+# La vitrine (examples/vitrine.rs) : une fenêtre, comme ki-chat.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }

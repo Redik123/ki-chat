@@ -2922,6 +2922,7 @@ dependencies = [
 name = "ki-ui"
 version = "0.1.60"
 dependencies = [
+ "eframe",
  "egui",
  "egui_taffy",
  "serde",
