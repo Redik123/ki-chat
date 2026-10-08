@@ -582,7 +582,7 @@ pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
         .ecarts(espace::M, espace::XS)
         .passer_a_la_ligne()
         .show(ui, ("ligne", libelle), |f| {
-            f.case(Case::new().base(LIBELLE_W).rigide(), |ui| {
+            f.case(Case::new().largeur(LIBELLE_W).rigide(), |ui| {
                 // Centré sur la hauteur d'un contrôle : en face de sa
                 // première ligne.
                 ui.allocate_ui_with_layout(

@@ -185,6 +185,7 @@ impl Flex {
         let etiquette = format!("{id:?}");
         let id = identifiant(ui, ui.id().with(id));
         let en_ligne = self.en_ligne();
+        let etire = self.etire();
         // Toute la largeur : sans elle, la racine se contente de celle de
         // son contenu, et rien n'a de place à prendre ni à répartir.
         let style = taffy::Style { size: taffy::Size { width: percent(1.0_f32), ..self.style.size }, ..self.style };
@@ -206,6 +207,7 @@ impl Flex {
                     contenu(&mut Contenu {
                         tui,
                         en_ligne,
+                        etire,
                         #[cfg(debug_assertions)]
                         cle: id,
                         #[cfg(debug_assertions)]
@@ -224,6 +226,12 @@ impl Flex {
     fn en_ligne(&self) -> bool {
         matches!(self.style.flex_direction, taffy::FlexDirection::Row | taffy::FlexDirection::RowReverse)
     }
+
+    /// Ses éléments prennent-ils toute sa largeur (dans une colonne) ou toute
+    /// sa hauteur (dans une rangée) ?
+    fn etire(&self) -> bool {
+        matches!(self.style.align_items, None | Some(taffy::AlignItems::Stretch))
+    }
 }
 
 /// Comment un élément se comporte dans son conteneur : sa taille, et sa
@@ -236,6 +244,8 @@ pub struct Case {
     /// fixée, ou donnée par le partage.
     largeur_imposee: bool,
     hauteur_imposee: bool,
+    /// Son alignement propre, s'il en a un (`s_aligner`).
+    alignement: Option<Aligne>,
 }
 
 impl Default for Case {
@@ -255,6 +265,7 @@ impl Case {
             },
             largeur_imposee: false,
             hauteur_imposee: false,
+            alignement: None,
         }
     }
 
@@ -314,6 +325,7 @@ impl Case {
     /// Son propre alignement, à la place de celui du conteneur.
     pub fn s_aligner(mut self, aligne: Aligne) -> Self {
         self.style.align_self = Some(aligne.taffy());
+        self.alignement = Some(aligne);
         self
     }
 
@@ -340,6 +352,8 @@ pub struct Contenu<'a> {
     tui: &'a mut Tui,
     /// Le conteneur est une rangée (sinon, une colonne).
     en_ligne: bool,
+    /// Le conteneur étire ses éléments sur l'axe transversal.
+    etire: bool,
     /// Pour le mouchard : le conteneur, et le rang de la dernière case.
     #[cfg(debug_assertions)]
     cle: egui::Id,
@@ -373,12 +387,27 @@ impl Contenu<'_> {
             case.largeur_imposee || (self.en_ligne && case.grandit()),
             case.hauteur_imposee || (!self.en_ligne && case.grandit()),
         );
+        // Sa largeur vient-elle de son contenu ? Dans une rangée, s'il ne
+        // grandit pas ; dans une colonne, s'il n'est pas étiré.
+        let largeur_du_contenu = !case.largeur_imposee
+            && if self.en_ligne {
+                !case.grandit()
+            } else {
+                !case.alignement.map_or(self.etire, |a| a == Aligne::Etire)
+            };
         #[cfg(debug_assertions)]
         let (cle, etiquette, rang) = {
             self.rang += 1;
             (self.cle, self.etiquette.clone(), self.rang)
         };
         (&mut *self.tui).style(case.style).ui_manual(|ui, _| {
+            if largeur_du_contenu {
+                // Le texte ne s'y replie pas : mesuré sans largeur (la première
+                // fois) ou à la largeur qu'il avait, il se repliait à un
+                // caractère par ligne, et c'est cette colonne de lettres qui
+                // passait pour sa taille naturelle.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            }
             let inner = ajout(ui);
             let mut taille = ui.min_size();
             if ignorer_largeur {
@@ -413,6 +442,7 @@ impl Contenu<'_> {
         contenu: impl FnOnce(&mut Contenu<'_>) -> R,
     ) -> R {
         let en_ligne = flex.en_ligne();
+        let etire = flex.etire();
         #[cfg(debug_assertions)]
         let (cle, etiquette) = {
             self.rang += 1;
@@ -422,6 +452,7 @@ impl Contenu<'_> {
             contenu(&mut Contenu {
                 tui,
                 en_ligne,
+                etire,
                 #[cfg(debug_assertions)]
                 cle,
                 #[cfg(debug_assertions)]
@@ -478,6 +509,39 @@ mod tests {
 
     fn proche(a: f32, b: f32) -> bool {
         (a - b).abs() <= 1.0
+    }
+
+    /// Un texte dans une case à sa taille naturelle reste sur une ligne :
+    /// la première mesure, faite sans largeur, le repliait à un caractère
+    /// par ligne (« page 2 / 5 » en colonne de lettres, dans la vitrine).
+    #[test]
+    fn un_texte_a_sa_taille_naturelle_ne_se_replie_pas() {
+        let r = mesurer(500.0, |ui, rel| {
+            Flex::ligne().repartir(Repartit::Entre).show(ui, "t", |f| {
+                f.ui(|ui| bloc(ui, rel, 60.0, 20.0));
+                f.ui(|ui| {
+                    let rep = ui.label("page 2 / 5");
+                    rel.push(rep.rect);
+                });
+                f.ui(|ui| bloc(ui, rel, 60.0, 20.0));
+            });
+        });
+        assert!(r[1].width() > 40.0 && r[1].height() < 25.0, "replié : {r:?}");
+    }
+
+    /// Dans une case qui grandit, la largeur est connue : le texte s'y replie.
+    #[test]
+    fn un_texte_dans_une_case_qui_grandit_se_replie() {
+        let r = mesurer(300.0, |ui, rel| {
+            Flex::ligne().show(ui, "t", |f| {
+                f.ui(|ui| bloc(ui, rel, 200.0, 20.0));
+                f.grandit(|ui| {
+                    let rep = ui.add(egui::Label::new("un texte bien trop long pour cent points de large").wrap());
+                    rel.push(rep.rect);
+                });
+            });
+        });
+        assert!(r[1].width() <= 101.0 && r[1].height() > 25.0, "pas replié : {r:?}");
     }
 
     #[test]
