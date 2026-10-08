@@ -785,6 +785,9 @@ pub struct Regard {
     /// Le dernier saut à une trame clé parce que le décodage ne suivait pas
     /// (millisecondes depuis l'époque Unix ; 0 : jamais).
     pub saut: Arc<AtomicU64>,
+    /// Le stream est dans sa propre fenêtre (`regard_detache`) : c'est elle
+    /// que le décodeur réveille à chaque image, plus la fenêtre principale.
+    pub detache: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     /// Le fil du son du jeu, s'il a pu démarrer.
@@ -809,15 +812,17 @@ impl Regard {
         let images = Arc::new(AtomicU64::new(0));
         let basse = Arc::new(AtomicBool::new(false));
         let saut = Arc::new(AtomicU64::new(0));
+        let detache = Arc::new(AtomicBool::new(false));
         // L'horloge du son : le fil du son y note où en est la lecture, le
         // fil de l'image retient chaque image jusqu'à cet instant-là.
         let horloge: Horloge = Arc::new(Mutex::new(None));
         let worker = {
             let (stop, image, images, horloge, basse, saut) =
                 (stop.clone(), image.clone(), images.clone(), horloge.clone(), basse.clone(), saut.clone());
+            let reveil = Reveil { ctx, detache: detache.clone() };
             std::thread::Builder::new()
                 .name("video-regard".into())
-                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, ctx, horloge, basse, saut))
+                .spawn(move || fil_decodeur(stream_id, key, rx, image, images, stop, reveil, horloge, basse, saut))
                 .ok()
         };
         let audio_worker = {
@@ -827,7 +832,7 @@ impl Regard {
                 .spawn(move || fil_audio(stream_id, key, audio_rx, engine, stop, horloge))
                 .ok()
         };
-        Self { stream_id, streamer, image, images, basse, saut, stop, worker, audio_worker }
+        Self { stream_id, streamer, image, images, basse, saut, detache, stop, worker, audio_worker }
     }
 
     pub fn arreter(mut self) {
@@ -1161,6 +1166,24 @@ fn image_egui(largeur: usize, hauteur: usize, rgba: Vec<u32>) -> Option<egui::Co
     })
 }
 
+/// Qui réveiller quand une image est prête : la fenêtre principale, ou la
+/// fenêtre détachée du stream — qui se dessine alors seule, sans repeindre
+/// toute l'interface de ki-chat à chaque image.
+struct Reveil {
+    ctx: egui::Context,
+    detache: Arc<AtomicBool>,
+}
+
+impl Reveil {
+    fn image_prete(&self) {
+        if self.detache.load(Ordering::Relaxed) {
+            self.ctx.request_repaint_of(crate::regard_detache::id());
+        } else {
+            self.ctx.request_repaint();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fil_decodeur(
     stream_id: u32,
@@ -1169,7 +1192,7 @@ fn fil_decodeur(
     image: Arc<Mutex<Option<egui::ColorImage>>>,
     images: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    ctx: egui::Context,
+    reveil: Reveil,
     horloge: Horloge,
     basse: Arc<AtomicBool>,
     saut: Arc<AtomicU64>,
@@ -1374,7 +1397,7 @@ fn fil_decodeur(
             bilan.affichees += 1;
             // Seul moyen de peindre au rythme du stream : la boucle de
             // repeint de l'application est plafonnée à 20 fps sinon.
-            ctx.request_repaint();
+            reveil.image_prete();
         }
     }
 }
