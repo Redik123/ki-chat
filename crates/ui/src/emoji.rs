@@ -43,7 +43,11 @@ pub const FAMILLE: &str = "ki-emoji";
 
 /// La résolution des images, en pixels par em : de quoi rester net jusqu'à
 /// un emoji de 48 points sur un écran à 150 %.
-const RESOLUTION: f64 = 96.0;
+const RESOLUTION: u16 = 96;
+
+/// Celle des vignettes du sélecteur : il en montre des centaines, autant
+/// qu'elles pèsent quatre fois moins.
+const RESOLUTION_VIGNETTE: u16 = 48;
 
 /// Le dessin d'un emoji de Segoe UI Emoji fait un em de haut dans une case
 /// de 1,37 em de large : à côté du texte, il paraît petit et flotte. Il est
@@ -265,6 +269,7 @@ pub fn peindre(painter: &Painter, galley_pos: Pos2, galley: &Galley) {
     };
     let cache = cache(painter.ctx());
     let mut caractere = 0;
+    let resolution = RESOLUTION;
     for rangee in &galley.rows {
         let glyphes = &rangee.row.glyphs;
         // La ligne de base du texte de la rangée : celle de la police emoji
@@ -277,7 +282,7 @@ pub fn peindre(painter: &Painter, galley_pos: Pos2, galley: &Galley) {
             .map(|(_, g)| g.pos.y);
         for (i, g) in glyphes.iter().enumerate() {
             let Ok(k) = emoji.binary_search_by_key(&(caractere + i), |&(n, _, _)| n) else { continue };
-            let Some(rendu) = rendu(&cache, painter.ctx(), emoji[k].2) else { continue };
+            let Some(rendu) = rendu(&cache, painter.ctx(), emoji[k].2, resolution) else { continue };
             if rendu.avance <= 0.0 || g.advance_width <= 0.0 {
                 continue;
             }
@@ -358,8 +363,29 @@ pub fn mise_en_page(ui: &Ui, texte: &str, police: egui::FontId, largeur: f32) ->
 /// pour un emoji qu'elle ne connaît pas.
 pub fn image(ctx: &Context, emoji: &str) -> Option<egui::Image<'static>> {
     let id = glyphe(emoji)?;
-    let rendu = rendu(&cache(ctx), ctx, id)?;
+    let rendu = rendu(&cache(ctx), ctx, id, RESOLUTION)?;
     Some(egui::Image::new(&rendu.texture))
+}
+
+/// Cet emoji se peint-il en couleur sur cette machine ?
+pub(crate) fn peignable(emoji: &str) -> bool {
+    police().is_some() && glyphe(emoji).is_some()
+}
+
+/// Peint un emoji en vignette, centré dans `rect` sans le déformer. Rend
+/// faux s'il ne se peint pas en couleur ici.
+pub(crate) fn peindre_vignette(painter: &Painter, rect: Rect, emoji: &str) -> bool {
+    let Some(id) = glyphe(emoji) else { return false };
+    let Some(rendu) = rendu(&cache(painter.ctx()), painter.ctx(), id, RESOLUTION_VIGNETTE) else { return false };
+    let taille = rendu.texture.size_vec2();
+    let echelle = (rect.width() / taille.x).min(rect.height() / taille.y);
+    painter.image(
+        rendu.texture.id(),
+        Rect::from_center_size(rect.center(), taille * echelle),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    true
 }
 
 // ---------------------------------------------------------------------
@@ -376,32 +402,32 @@ struct Rendu {
     avance: f32,
 }
 
-type Cache = Arc<Mutex<HashMap<GlyphId, Option<Rendu>>>>;
+type Cache = Arc<Mutex<HashMap<(GlyphId, u16), Option<Rendu>>>>;
 
 fn cache(ctx: &Context) -> Cache {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Cache>(egui::Id::new("ki-ui-emoji")).clone())
 }
 
-fn rendu(cache: &Cache, ctx: &Context, id: GlyphId) -> Option<Rendu> {
-    if let Some(connu) = cache.lock().ok()?.get(&id) {
+fn rendu(cache: &Cache, ctx: &Context, id: GlyphId, resolution: u16) -> Option<Rendu> {
+    if let Some(connu) = cache.lock().ok()?.get(&(id, resolution)) {
         return connu.clone();
     }
-    let rendu = peindre_glyphe(id).map(|(image, bornes, avance)| Rendu {
+    let rendu = peindre_glyphe(id, resolution).map(|(image, bornes, avance)| Rendu {
         texture: ctx.load_texture(
-            format!("emoji-{}", id.to_u32()),
+            format!("emoji-{}-{resolution}", id.to_u32()),
             image,
             TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..TextureOptions::LINEAR },
         ),
         bornes,
         avance,
     });
-    cache.lock().ok()?.insert(id, rendu.clone());
+    cache.lock().ok()?.insert((id, resolution), rendu.clone());
     rendu
 }
 
-/// Peint les calques d'un emoji : l'image, ses bornes en unités de la police
-/// (y vers le bas), l'avance du glyphe.
-fn peindre_glyphe(id: GlyphId) -> Option<(ColorImage, Rect, f32)> {
+/// Peint les calques d'un emoji à `resolution` pixels par em : l'image, ses
+/// bornes en unités de la police (y vers le bas), l'avance du glyphe.
+fn peindre_glyphe(id: GlyphId, resolution: u16) -> Option<(ColorImage, Rect, f32)> {
     let police = FontRef::new(police()?).ok()?;
     let glyphe = police.color_glyphs().get_with_format(id, ColorGlyphFormat::ColrV0)?;
     let mut calques = Calques::default();
@@ -429,7 +455,7 @@ fn peindre_glyphe(id: GlyphId) -> Option<(ColorImage, Rect, f32)> {
         peints.push((chemin, color::AlphaColor::<color::Srgb>::from_rgba8(c[0], c[1], c[2], a)));
     }
     let bornes = bornes?;
-    let par_em = RESOLUTION / f64::from(police.head().ok()?.units_per_em());
+    let par_em = f64::from(resolution) / f64::from(police.head().ok()?.units_per_em());
     // Un pixel de marge autour, pour l'anticrénelage.
     let marge = 1.0 / par_em;
     let bornes = bornes.inflate(marge, marge);
@@ -595,7 +621,7 @@ mod tests {
         assert!(glyphe("🇫🇷").is_none());
         for e in ["😂", "🔥", "👍🏽", "👨‍💻", "❤️"] {
             let id = glyphe(e).unwrap_or_else(|| panic!("{e} : pas de glyphe couleur"));
-            let (image, bornes, avance) = peindre_glyphe(id).expect("rendu");
+            let (image, bornes, avance) = peindre_glyphe(id, RESOLUTION).expect("rendu");
             assert!(avance > 0.0 && bornes.width() > 0.0 && bornes.height() > 0.0);
             let colores = image
                 .pixels

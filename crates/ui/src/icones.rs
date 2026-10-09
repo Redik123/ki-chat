@@ -59,18 +59,21 @@ pub enum Icon {
     Film,
     /// Un téléphone : le membre est sur l'appli mobile.
     Telephone,
+    /// Un visage qui sourit : le sélecteur d'emoji.
+    Sourire,
 }
 
 impl Icon {
     /// Toutes, dans l'ordre de l'énumération : le choix d'une icône pour une
     /// touche du Loupedeck.
-    pub const TOUTES: [Icon; 40] = [
+    pub const TOUTES: [Icon; 41] = [
         Icon::Star, Icon::Mic, Icon::MicOff, Icon::Headphones, Icon::Gear, Icon::Sliders, Icon::Crown,
         Icon::Paperclip, Icon::Copy, Icon::Plus, Icon::Refresh, Icon::Play, Icon::Target, Icon::Logout,
         Icon::Hash, Icon::User, Icon::Close, Icon::ArrowUp, Icon::ArrowDown, Icon::Ban, Icon::Key,
         Icon::Volume, Icon::Send, Icon::Check, Icon::Warning, Icon::Info, Icon::Chat, Icon::Pencil,
         Icon::Trash, Icon::Server, Icon::Loupe, Icon::HeadphonesOff, Icon::Screen, Icon::Pause,
         Icon::Download, Icon::ChevronLeft, Icon::ChevronRight, Icon::Repeat, Icon::Film, Icon::Telephone,
+        Icon::Sourire,
     ];
 }
 
@@ -225,6 +228,12 @@ impl Pen<'_> {
             Icon::Telephone => {
                 self.rrect(6.5, 2.5, 17.5, 21.5, 2.5, false);
                 self.seg((10.5, 18.0), (13.5, 18.0));
+            }
+            Icon::Sourire => {
+                self.ring((12.0, 12.0), 9.0);
+                self.disc((8.9, 9.6), 1.3);
+                self.disc((15.1, 9.6), 1.3);
+                self.arc((12.0, 12.2), 5.2, 25.0, 155.0);
             }
             Icon::Screen => {
                 self.rrect(2.5, 4.0, 21.5, 16.5, 2.0, false);

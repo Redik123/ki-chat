@@ -28,6 +28,8 @@ harfrust = "0.12"
 vello_cpu = { version = "0.1", default-features = false, features = ["std", "u8_pipeline"] }
 unicode-segmentation = "1.13"
 unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
+# Le sélecteur d'emoji : la liste des emoji, leurs groupes, noms et teintes.
+emojis = "0.9"
 
 [dev-dependencies]
 # Les polices d'egui, pour les tests qui mesurent du texte.

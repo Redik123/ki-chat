@@ -13,6 +13,8 @@
 //!   d'icônes vectorielles qu'ils emploient.
 //! - [`emoji`] : les emoji en couleur, peints avec la police emoji du
 //!   système, par-dessus le texte qu'egui met en page.
+//! - [`selecteur_emoji`] : le bouton sourire et son panneau — recherche
+//!   en français, récents, catégories, teintes de peau.
 //! - [`liste`] : la liste virtualisée, qui ne construit que ce qui se voit
 //!   et garde immobile la ligne qu'on lit quand le reste bouge.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
@@ -27,6 +29,7 @@ pub mod flex;
 pub mod icones;
 pub mod jetons;
 pub mod liste;
+pub mod selecteur_emoji;
 pub mod style;
 #[cfg(debug_assertions)]
 mod mouchard;

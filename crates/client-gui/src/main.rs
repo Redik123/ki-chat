@@ -8138,6 +8138,7 @@ impl KiApp {
         let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
         self.edition_bar(ui);
         self.reply_bar(ui);
+        let mut emoji_choisi: Option<String> = None;
         let cadre = egui::Frame::NONE
             .fill(theme::BG_RAISED)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
@@ -8238,6 +8239,11 @@ impl KiApp {
                         }
                     });
 
+                    // Les emoji, sans passer par le sélecteur de Windows.
+                    f.ui(|ui| {
+                        emoji_choisi = ki_ui::selecteur_emoji::bouton(ui, "Emoji");
+                    });
+
                     f.ui(|ui| {
                         // En attente de cadence, le bouton passe à l'ambre et le
                         // dit : le message reste écrit, il partira dans un instant.
@@ -8260,6 +8266,9 @@ impl KiApp {
                     });
                 });
             });
+        if let Some(emoji) = emoji_choisi {
+            self.inserer_dans_la_saisie(ui.ctx(), &emoji);
+        }
         // Sur une ligne, la barre donne sa hauteur au pied de la colonne des
         // salons (voir `PIED_MARGE`) ; sur plusieurs, elle grandit vers le
         // haut et la garde.
@@ -8484,6 +8493,32 @@ impl KiApp {
             self.annuler_edition();
         }
         ui.add_space(espace::XS);
+    }
+
+    /// Insère `texte` dans la saisie, au curseur — à la place de la
+    /// sélection s'il y en a une —, et y remet le curseur juste après : on
+    /// continue d'écrire comme si on l'avait tapé.
+    fn inserer_dans_la_saisie(&mut self, ctx: &egui::Context, texte: &str) {
+        let id = egui::Id::new("saisie_du_chat");
+        let mut etat = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let total = self.input.chars().count();
+        let (debut, fin) = match etat.cursor.char_range() {
+            Some(r) => {
+                let (a, b) = (r.primary.index.0.min(total), r.secondary.index.0.min(total));
+                (a.min(b), a.max(b))
+            }
+            None => (total, total),
+        };
+        if total - (fin - debut) + texte.chars().count() > ki_protocol::MAX_CHAT_TEXT {
+            return;
+        }
+        let octet = |n: usize| self.input.char_indices().nth(n).map_or(self.input.len(), |(o, _)| o);
+        let (a, b) = (octet(debut), octet(fin));
+        self.input.replace_range(a..b, texte);
+        let apres = egui::text::CCursor::new(debut + texte.chars().count());
+        etat.cursor.set_char_range(Some(egui::text::CCursorRange::one(apres)));
+        etat.store(ctx, id);
+        self.focus_input = true;
     }
 
     /// Le rappel « en réponse à… » au-dessus de la zone de saisie, tant

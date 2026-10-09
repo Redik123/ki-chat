@@ -332,6 +332,19 @@ impl Vitrine {
                 .desired_width(f32::INFINITY)
                 .show(ui);
             ki_ui::emoji::peindre(&ui.painter().with_clip_rect(sortie.text_clip_rect), sortie.galley_pos, &sortie.galley);
+            ui.add_space(espace::M);
+            c::section_label(ui, "sélecteur");
+            ui.horizontal(|ui| {
+                if let Some(e) = ki_ui::selecteur_emoji::bouton(ui, "Emoji") {
+                    self.message.push_str(&e);
+                }
+                c::hint(ui, "le bouton ouvre ce panneau au-dessus de lui");
+            });
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                if let Some(e) = ki_ui::selecteur_emoji::panneau(ui) {
+                    self.message.push_str(&e);
+                }
+            });
         });
     }
 
