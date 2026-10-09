@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ki-chat",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "identifier": "fun.baws.kichat",
   "build": {
     "frontendDist": "ui"
