@@ -1648,8 +1648,9 @@ fn acte_du_groupe<'a>(medailles: impl Iterator<Item = &'a Medailles>) -> String 
     comptes.into_iter().max_by_key(|(acte, n)| (*n, *acte)).map(|(acte, _)| acte.to_string()).unwrap_or_default()
 }
 
-/// Les médailles de l'acte, membre par membre, le MVP d'abord — lues par
-/// le client de chacun. Une ligne d'aide tant que personne ne les partage.
+/// Les médailles de l'acte, membre par membre, le MVP d'abord — lues chez
+/// HenrikDev par le serveur, ou par le client de chacun. Une ligne d'aide
+/// tant qu'on n'en connaît aucune.
 fn medailles_du_groupe(
     ui: &mut Ui,
     lignes: &[Ligne],
@@ -1669,8 +1670,8 @@ fn medailles_du_groupe(
     if avec.is_empty() {
         ui::hint(
             ui,
-            "personne ne les partage encore : ⚙ → Jeu → « Ajouter mes médailles à ma fiche », \
-             avec « Partager mon activité Valorant »",
+            "aucune médaille connue pour l'instant : le serveur les lit chez HenrikDev à chaque \
+             rafraîchissement des fiches, pour qui garde « Ajouter mes médailles à ma fiche » (⚙ → Jeu)",
         );
         return;
     }
@@ -2189,6 +2190,12 @@ impl PageValo {
                 x.rr,
                 crate::il_y_a(x.date)
             );
+            if x.bonus != 0 {
+                texte.push_str(&format!(" · dont {} de bonus de performance", signe(x.bonus).0));
+            }
+            if x.placement {
+                texte.push_str(" · placement");
+            }
             if x.protege {
                 texte.push_str(" · descente protégée");
             }
@@ -2275,7 +2282,20 @@ impl PageValo {
                     match vue.point_de(&m.id) {
                         Some(p) => {
                             let (t, c) = signe(p.delta);
-                            cellule(ui, t, c);
+                            let reponse = cellule(ui, t, c);
+                            let mut details = Vec::new();
+                            if p.bonus != 0 {
+                                details.push(format!("dont {} de bonus de performance", signe(p.bonus).0));
+                            }
+                            if p.placement {
+                                details.push("match de placement".to_string());
+                            }
+                            if p.protege {
+                                details.push("descente protégée".to_string());
+                            }
+                            if !details.is_empty() {
+                                reponse.on_hover_text(details.join(" · "));
+                            }
                         }
                         None => {
                             ui.label("");
@@ -2714,8 +2734,8 @@ fn multi_kills(triples: u16, quadruples: u16, aces: u16) -> String {
 
 /// Agents et cartes en barres, côte à côte.
 /// Ses médailles de l'acte en tuiles — combien de fois, et son record —,
-/// puis la carrière en une ligne quand elle en dit plus. Rien si son
-/// ki-chat ne les a jamais envoyées.
+/// puis la carrière en une ligne quand elle en dit plus. Rien tant qu'on
+/// ne lui en connaît aucune.
 fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
     let Some(md) = vue.fiche.medailles.as_ref() else { return };
     let (liste, titre) = if md.cet_acte.is_empty() {
@@ -2732,7 +2752,7 @@ fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
     connues.sort_by_key(|c| c.medaille.ordre());
     ui.horizontal(|ui| {
         ui.label(RichText::new(titre).color(TEXT_DIM).size(texte::PETIT));
-        ui.label(RichText::new(format!("· lues dans son client Riot {}", crate::il_y_a(md.maj))).color(TEXT_FAINT).size(texte::MINUSCULE));
+        ui.label(RichText::new(format!("· mises à jour {}", crate::il_y_a(md.maj))).color(TEXT_FAINT).size(texte::MINUSCULE));
     });
     let mut grille = Grille::new(TUILE_FICHE, 70.0);
     for c in connues {
@@ -2849,6 +2869,14 @@ fn mes_heures(ui: &mut Ui, vue: &Vue) {
 /// Ce que dit une ligne dépliée : les cases des manches puis le récit.
 fn recit_du_match(m: &MatchResume, noms: &Annuaire) -> String {
     let mut parts: Vec<String> = Vec::new();
+    match m.mvp {
+        ki_protocol::MVP_DU_MATCH => parts.push("MVP du match".to_string()),
+        ki_protocol::MVP_D_EQUIPE => parts.push("MVP de son équipe".to_string()),
+        _ => {}
+    }
+    if m.perf > 0 {
+        parts.push(format!("note de performance {}", m.perf));
+    }
     match &m.manches_detail {
         Some(d) => {
             if d.manches > 0 {

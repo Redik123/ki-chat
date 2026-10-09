@@ -456,6 +456,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         portes: true,
         // Et avant d'envoyer ses médailles VALORANT.
         medailles: true,
+        // Et son choix pour elles : ce serveur les lit chez HenrikDev.
+        choix_medailles: true,
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
@@ -1588,7 +1590,7 @@ fn handle_msg(
             );
         }
         ClientMsg::LierRiot { riot_id } => {
-            // Une liaison coûte six requêtes à HenrikDev : même budget
+            // Une liaison coûte sept requêtes à HenrikDev : même budget
             // qu'un message, un client modifié ne fait pas cliquer le fil
             // en rafale. (Et le service refuse de lui-même une seconde
             // liaison du même membre tant que la première attend.)
@@ -1681,6 +1683,29 @@ fn handle_msg(
             tokio::task::spawn_blocking(move || {
                 if state.valorant.medailles(user_id, &medailles) {
                     tracing::debug!("VALORANT : médailles de {user_id} rangées ({} matchs)", medailles.matchs.len());
+                }
+            });
+        }
+        ClientMsg::ChoixMedailles { oui } => {
+            // Son choix pour ses médailles : non, celles de sa fiche
+            // s'effacent et le serveur ne les lit plus chez HenrikDev. Le
+            // même choix revient à chaque connexion et ne coûte rien ; un
+            // changement écrit sur le disque, à côté du fil réseau — au
+            // budget d'un message, qu'un client modifié ne le fasse pas
+            // réécrire en rafale.
+            let permis = state
+                .users
+                .lock()
+                .unwrap()
+                .get_mut(&user_id)
+                .is_some_and(|u| u.chat_budget.take());
+            if !permis {
+                return;
+            }
+            let state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                if state.valorant.choix_medailles(user_id, oui) {
+                    tracing::debug!("VALORANT : médailles de {user_id} {}", if oui { "voulues" } else { "refusées" });
                 }
             });
         }

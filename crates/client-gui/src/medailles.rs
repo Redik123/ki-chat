@@ -28,23 +28,6 @@ use serde_json::Value;
 
 use crate::{valo_catalogue, valorant};
 
-/// Les goldstars par leur uuid. Ce sont nos noms, d'après ce que mesure la
-/// valeur (recoupée avec les matchs par la doc communautaire, puis sur la
-/// réponse réelle du 2026-09-27).
-const GOLDSTARS: [(&str, Medaille); 12] = [
-    ("745b27f0-4bc2-13a4-4ee7-77be323155c2", Medaille::Mvp),
-    ("4815a8a2-4649-9bfe-afd2-38ae9cc22898", Medaille::Distinction),
-    ("1c926cba-48cb-8aeb-c68d-a1ba2d012784", Medaille::TopFrag),
-    ("6dc31cfd-41da-895f-9246-a8b63558cdb8", Medaille::Degats),
-    ("2c8b6129-4384-230d-c7e5-cda12019533c", Medaille::Tetes),
-    ("1b13755f-4d5a-2c9e-6a39-bea7e6c53e7f", Medaille::Kills),
-    ("e43f9acb-448c-4aa1-1591-6db72c0b8dae", Medaille::Assists),
-    ("352a3ac8-4b2c-db6a-1f36-c0a67b428e65", Medaille::Poses),
-    ("bfe96c47-44d0-e473-585d-749146d2d05e", Medaille::PremiersSangs),
-    ("244cf4ab-4c27-cc59-3323-c985858d6ddb", Medaille::Aces),
-    ("0497d585-42ad-61a7-42bc-189571f40e2c", Medaille::Clutchs),
-    ("3bc0563a-4fe9-a15c-0078-23a3408d64b5", Medaille::Echanges),
-];
 
 /// L'« acte » tout à zéro de la réponse : la carrière.
 const CARRIERE: &str = "00000000-0000-0000-0000-000000000000";
@@ -56,8 +39,10 @@ const AU_LANCEMENT: Duration = Duration::from_secs(20);
 /// Jamais deux lectures plus près que ça.
 const ECART_MIN: Duration = Duration::from_secs(30);
 
+/// Les goldstars par leur uuid : la table est celle du protocole, que le
+/// serveur partage pour les accolades de HenrikDev.
 fn medaille_de(uuid: &str) -> Option<Medaille> {
-    GOLDSTARS.iter().find(|(id, _)| id.eq_ignore_ascii_case(uuid.trim())).map(|(_, m)| *m)
+    Medaille::depuis_uuid(uuid)
 }
 
 /// Une entrée d'objet JSON par sa clé, sans tenir compte de la casse : les

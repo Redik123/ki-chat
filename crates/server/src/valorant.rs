@@ -11,10 +11,12 @@
 //! tout le groupe. Un fil unique sert les demandes l'une après l'autre et
 //! s'arrête de lui-même à vingt par minute glissante — les dix restantes
 //! sont la marge. Ouvrir une fiche ne coûte rien : elle vient du cache.
-//! Seules une liaison (six requêtes : le compte, la fiche, et deux de
-//! rattrapage dans les archives de HenrikDev) et un rafraîchissement
-//! (trois) touchent l'API, et les rafraîchissements s'espacent d'une
-//! demi-heure par membre, en ligne seulement.
+//! Seules une liaison (sept requêtes : le compte, la fiche, ses médailles,
+//! et deux de rattrapage dans les archives de HenrikDev) et un
+//! rafraîchissement (trois, et une quatrième pour les médailles quand un
+//! match est nouveau ou qu'elles ont vieilli) touchent l'API, et les
+//! rafraîchissements s'espacent d'une demi-heure par membre, en ligne
+//! seulement.
 //!
 //! **Ce qu'on garde.** La ligne du membre dans chaque match — jamais celles
 //! des neuf autres, qui ne sont pas du serveur. Depuis 0.1.40 la fiche
@@ -63,8 +65,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ki_protocol::{
-    BilanMembre, DetailManches, FicheMembre, FicheValorant, MatchEsport, MatchResume, Medaille,
-    MedailleGagnee, Medailles, PointRR, RangValorant, ServerMsg, StatsSaison, UserId,
+    BilanMembre, CompteMedaille, DetailManches, FicheMembre, FicheValorant, MatchEsport, MatchResume,
+    Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, PointRR, RangValorant, ServerMsg, StatsSaison, UserId,
     STATS_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
@@ -87,6 +89,18 @@ const POINTS_RESUME: usize = 10;
 /// archivé de lui (`stored-matches`, `stored-mmr-history`).
 const RATTRAPAGE_MATCHS: usize = 60;
 const RATTRAPAGE_POINTS: usize = 100;
+/// Les médailles (accolades de HenrikDev) se relisent quand un match est
+/// nouveau, ou à défaut quand elles ont cet âge : elles ne bougent qu'en
+/// jouant, et chaque lecture coûte une requête du budget du groupe.
+const MEDAILLES_FRAICHEUR: Duration = Duration::from_secs(12 * 3600);
+/// Des médailles lues moins de dix minutes après la fin du dernier match
+/// se relisent une fois passé ce délai : HenrikDev (son cache, ou Riot qui
+/// tarde) n'avait peut-être pas encore celles de ce match.
+const MEDAILLES_MARGE: Duration = Duration::from_secs(10 * 60);
+/// Après une lecture de médailles ratée — HenrikDev qui ne les sert pas,
+/// ou pas pour ce compte —, le rafraîchissement n'en retente pas avant ce
+/// délai : sinon chacun coûterait une requête de plus pour rien.
+const MEDAILLES_REPIT: Duration = Duration::from_secs(2 * 3600);
 /// Fenêtre d'échange du KAST : ma mort vengée dans les 5 s compte.
 const ECHANGE_MS: u64 = 5_000;
 /// Un jour, en millisecondes.
@@ -246,6 +260,7 @@ enum PointApi {
     Account,
     Stored,
     Esports,
+    Medailles,
     Autre,
 }
 
@@ -266,6 +281,7 @@ impl PointApi {
             "account" => PointApi::Account,
             "stored-matches" | "stored-mmr-history" => PointApi::Stored,
             "esports" => PointApi::Esports,
+            "accolades" => PointApi::Medailles,
             _ => PointApi::Autre,
         }
     }
@@ -278,11 +294,13 @@ impl PointApi {
             PointApi::Account => 3,
             PointApi::Stored => 4,
             PointApi::Esports => 5,
-            PointApi::Autre => 6,
+            PointApi::Medailles => 6,
+            PointApi::Autre => 7,
         }
     }
 
-    const NOMS: [&'static str; 7] = ["mmr", "history", "matches", "account", "stored", "esports", "autre"];
+    const NOMS: [&'static str; 8] =
+        ["mmr", "history", "matches", "account", "stored", "esports", "accolades", "autre"];
 
     fn nom(self) -> &'static str {
         Self::NOMS[self.indice()]
@@ -312,7 +330,7 @@ struct Compteurs {
     erreurs: AtomicU64,
     derniere_ms: AtomicU64,
     par_motif: [AtomicU64; 5],
-    par_point: [AtomicU64; 7],
+    par_point: [AtomicU64; 8],
     journal: Mutex<VecDeque<Requete>>,
     /// Par minute Unix : combien de requêtes — soixante minutes gardées.
     par_minute: Mutex<VecDeque<(u64, u32)>>,
@@ -448,6 +466,14 @@ struct Etat {
     /// contient. `en_cours` évite deux lectures à la fois.
     esports: Mutex<(u64, Vec<MatchEsport>)>,
     esports_en_cours: std::sync::atomic::AtomicBool,
+    /// Les membres qui ont décoché « Ajouter mes médailles à ma fiche »,
+    /// et depuis quand : le serveur n'en lit pas chez HenrikDev et n'en
+    /// garde aucune. Le choix tient sans compte lié — il vaut pour la
+    /// liaison à venir. `data/valorant/sans_medailles.json`.
+    sans_medailles: Mutex<BTreeMap<UserId, u64>>,
+    /// La dernière lecture de médailles ratée de chaque membre (ms Unix),
+    /// pour [`MEDAILLES_REPIT`]. En mémoire seulement.
+    medailles_ratees: Mutex<HashMap<UserId, u64>>,
 }
 
 pub struct Valorant {
@@ -470,6 +496,7 @@ impl Valorant {
         let dossier = PathBuf::from(data_dir).join("valorant");
         let comptes = lire(&dossier.join("comptes.json"));
         let fiches: BTreeMap<UserId, FicheValorant> = lire(&dossier.join("fiches.json"));
+        let sans_medailles: BTreeMap<UserId, u64> = lire(&dossier.join("sans_medailles.json"));
         // Sans fil.json (première fois), tout ce que les fiches contiennent
         // est réputé déjà annoncé : le fil commence aux parties à venir.
         let chemin_fil = dossier.join("fil.json");
@@ -497,6 +524,8 @@ impl Valorant {
             compteurs: Arc::default(),
             esports: Mutex::new((0, Vec::new())),
             esports_en_cours: std::sync::atomic::AtomicBool::new(false),
+            sans_medailles: Mutex::new(sans_medailles),
+            medailles_ratees: Mutex::default(),
         });
         let (tx_res, rx_res) = mpsc::channel();
         let cle = cle_henrik(data_dir);
@@ -536,7 +565,7 @@ impl Valorant {
             }
             recues.insert(user_id, Instant::now());
         }
-        if !self.etat.comptes.lock().unwrap().contains_key(&user_id) {
+        if !self.etat.comptes.lock().unwrap().contains_key(&user_id) || !self.etat.veut_medailles(user_id) {
             return false;
         }
         let mut propres = medailles.nettoyer();
@@ -546,9 +575,44 @@ impl Valorant {
             let Some(fiche) = fiches.get_mut(&user_id) else {
                 return false;
             };
-            fiche.medailles = Some(propres);
+            fiche.medailles = unir_medailles(Some(propres), fiche.medailles.take());
         }
         self.etat.sauver_fiches();
+        true
+    }
+
+    /// Son choix pour ses médailles (« Ajouter mes médailles à ma
+    /// fiche ») : non, celles de sa fiche s'effacent et le serveur cesse de
+    /// les lire chez HenrikDev ; oui, le prochain rafraîchissement les
+    /// relit. Écrit sur le disque : à appeler hors du fil réseau. `true` si
+    /// le choix a changé — le même, renvoyé à chaque connexion, ne coûte
+    /// rien.
+    pub fn choix_medailles(&self, user_id: UserId, oui: bool) -> bool {
+        let change = {
+            let mut sans = self.etat.sans_medailles.lock().unwrap();
+            if oui {
+                sans.remove(&user_id).is_some()
+            } else {
+                sans.insert(user_id, maintenant_ms()).is_none()
+            }
+        };
+        if !change {
+            return false;
+        }
+        self.etat.sauver_sans_medailles();
+        if !oui {
+            let retirees = self
+                .etat
+                .fiches
+                .lock()
+                .unwrap()
+                .get_mut(&user_id)
+                .and_then(|f| f.medailles.take())
+                .is_some();
+            if retirees {
+                self.etat.sauver_fiches();
+            }
+        }
         true
     }
 
@@ -598,7 +662,7 @@ impl Valorant {
 
     /// Met la liaison en file. Refuse sans clé, si ce Riot ID est déjà
     /// celui d'un autre membre, ou si une liaison de ce membre attend
-    /// déjà : six requêtes par clic, pas par double clic.
+    /// déjà : sept requêtes par clic, pas par double clic.
     pub fn lier(&self, user_id: UserId, nom: String, tag: String) -> Result<(), String> {
         let Some(travaux) = &self.travaux else {
             return Err("le serveur n'a pas de clé HenrikDev : demande à l'admin".into());
@@ -905,6 +969,27 @@ impl Etat {
     fn sauver_fil(&self) {
         let annonces = self.fil.annonces.lock().unwrap().clone();
         ecrire(&self.dossier.join("fil.json"), &annonces);
+    }
+
+    fn sauver_sans_medailles(&self) {
+        let sans = self.sans_medailles.lock().unwrap().clone();
+        ecrire(&self.dossier.join("sans_medailles.json"), &sans);
+    }
+
+    /// Le membre veut-il ses médailles sur sa fiche ? Oui tant qu'il n'a
+    /// pas décoché.
+    fn veut_medailles(&self, user_id: UserId) -> bool {
+        !self.sans_medailles.lock().unwrap().contains_key(&user_id)
+    }
+
+    /// Sa dernière lecture de médailles a-t-elle raté il y a moins de
+    /// [`MEDAILLES_REPIT`] ?
+    fn medailles_au_repit(&self, user_id: UserId, maintenant: u64) -> bool {
+        self.medailles_ratees
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .is_some_and(|t| maintenant.saturating_sub(*t) < MEDAILLES_REPIT.as_millis() as u64)
     }
 
     /// Les puuid des membres liés — pour reconnaître les coéquipiers du
@@ -1702,7 +1787,7 @@ fn fil(
                 api.motif = Motif::Liaison;
                 let resultat = lier(&mut api, &etat, user_id, &nom, &tag);
                 // La place en file se rend une fois répondu : pendant les
-                // six requêtes, un second clic est refusé.
+                // sept requêtes, un second clic est refusé.
                 etat.fil.liaisons_en_file.lock().unwrap().remove(&user_id);
                 let (ok, message, riot_id) = match resultat {
                     Ok(fiche) => {
@@ -1791,7 +1876,19 @@ fn fil(
                 }
                 api.motif = motif;
                 let lies = etat.lies();
-                let resultat = construire(&mut api, &compte, None, &lies);
+                let resultat = construire(&mut api, &compte, None, &lies).map(|(mut fiche, co)| {
+                    // Ses médailles, si un match est nouveau ou qu'elles ont
+                    // vieilli — et s'il les veut.
+                    let maintenant = maintenant_ms();
+                    let relire = etat.veut_medailles(user_id) && !etat.medailles_au_repit(user_id, maintenant) && {
+                        let fiches = etat.fiches.lock().unwrap();
+                        medailles_a_relire(fiches.get(&user_id), &fiche, maintenant)
+                    };
+                    if relire {
+                        fiche.medailles = lire_medailles(&mut api, &etat, user_id, &compte, &acte_courant(&fiche));
+                    }
+                    (fiche, co)
+                });
                 if let Some(r) = apres_lecture(&etat, user_id, &compte, motif, resultat, &travaux) {
                     let _ = tx.send(r);
                 }
@@ -1841,11 +1938,16 @@ fn apres_lecture(
                 etat.sauver_fil();
             }
             {
+                // Refusées pendant la lecture : elle ne les remet pas.
+                let veut = etat.veut_medailles(user_id);
                 let mut fiches = etat.fiches.lock().unwrap();
-                let fiche = match fiches.remove(&user_id) {
+                let mut fiche = match fiches.remove(&user_id) {
                     Some(ancienne) => fusionner(ancienne, fiche),
                     None => fiche,
                 };
+                if !veut {
+                    fiche.medailles = None;
+                }
                 fiches.insert(user_id, fiche);
             }
             etat.sauver_fiches();
@@ -1932,6 +2034,11 @@ fn lier(
     if let Some(titre) = d["title"].as_str().and_then(ki_protocol::uuid_valorant) {
         fiche.titre_joueur = titre;
     }
+    // Ses médailles aussi, sans attendre que son ki-chat les lise dans
+    // son client Riot — s'il les veut.
+    if etat.veut_medailles(user_id) {
+        fiche.medailles = lire_medailles(api, etat, user_id, &compte, &acte_courant(&fiche));
+    }
     // Si le membre relie le même compte (ou se renomme : même puuid), sa
     // fiche accumulée reste ; un autre compte repart de zéro. Ça se lit
     // avant d'écrire le nouveau compte — et avant le rattrapage, parce
@@ -1942,7 +2049,10 @@ fn lier(
     let ancien_puuid = etat.comptes.lock().unwrap().get(&user_id).map(|c| c.puuid.clone());
     let ancienne = etat.fiches.lock().unwrap().get(&user_id).map(|f| (ancien_puuid.unwrap_or_default(), f.clone()));
     let archive = rattraper(api, &compte);
-    let fiche = empiler_a_la_liaison(ancienne, &compte.puuid, fiche, archive);
+    let mut fiche = empiler_a_la_liaison(ancienne, &compte.puuid, fiche, archive);
+    if !etat.veut_medailles(user_id) {
+        fiche.medailles = None;
+    }
     etat.comptes.lock().unwrap().insert(user_id, compte.clone());
     etat.fiches.lock().unwrap().insert(user_id, fiche.clone());
     // Ses matchs d'avant la liaison — rattrapés compris — ne s'annoncent
@@ -1952,6 +2062,208 @@ fn lier(
     etat.sauver_fiches();
     etat.sauver_fil();
     Ok(fiche)
+}
+
+/// Les médailles d'un compte chez HenrikDev (`/valorant/v1/accolades/…`,
+/// depuis sa v4.10) : les mêmes que le client Riot donne à son joueur, pour
+/// tout compte lié — plus besoin que le membre ait VALORANT ouvert avec
+/// ki-chat. `acte` : l'acte en cours, au format court de HenrikDev
+/// ([`acte_courant`]). Une absence n'est pas une erreur : `None`, et la
+/// fiche garde les siennes.
+fn lire_medailles(api: &mut Api, etat: &Etat, user_id: UserId, compte: &CompteRiot, acte: &str) -> Option<Medailles> {
+    let maintenant = maintenant_ms();
+    let lues = api
+        .get(&format!(
+            "/valorant/v1/accolades/{}/{}/{}/{}",
+            compte.region,
+            compte.plateforme,
+            enc(&compte.nom),
+            enc(&compte.tag)
+        ))
+        .ok()
+        // Le même compte, au puuid : un Riot ID repris par un autre joueur
+        // ne lui donne pas les médailles de celui-ci.
+        .filter(|r| r["data"]["account"]["puuid"].as_str().is_some_and(|p| p.eq_ignore_ascii_case(&compte.puuid)))
+        .and_then(|r| medailles_de(&r, acte, maintenant));
+    let mut ratees = etat.medailles_ratees.lock().unwrap();
+    if lues.is_some() {
+        ratees.remove(&user_id);
+    } else {
+        ratees.insert(user_id, maintenant);
+    }
+    lues
+}
+
+/// L'acte en cours d'après la fiche, au format court de HenrikDev
+/// (« e9a2 ») : celui de son match le plus récent, sinon de son dernier
+/// point de RR. Vide s'il n'a rien joué.
+fn acte_courant(fiche: &FicheValorant) -> String {
+    let par_match = fiche.matchs.iter().filter(|m| !m.saison.is_empty()).max_by_key(|m| m.date).map(|m| &m.saison);
+    let par_point = || fiche.historique_rr.iter().filter(|p| !p.saison.is_empty()).max_by_key(|p| p.date).map(|p| &p.saison);
+    par_match.or_else(par_point).cloned().unwrap_or_default()
+}
+
+/// Faut-il relire les médailles ? Quand on n'en a pas ; quand la fiche
+/// fraîche porte un match que l'ancienne n'avait pas — il a pu en
+/// rapporter ; quand elles ont plus de [`MEDAILLES_FRAICHEUR`] ; et une
+/// fois de plus quand elles ont été lues trop tôt après la fin du dernier
+/// match ([`MEDAILLES_MARGE`]).
+fn medailles_a_relire(ancienne: Option<&FicheValorant>, neuve: &FicheValorant, maintenant: u64) -> bool {
+    let Some(ancienne) = ancienne else { return true };
+    let Some(medailles) = &ancienne.medailles else { return true };
+    let nouveau_match = neuve
+        .matchs
+        .iter()
+        .any(|m| !m.id.is_empty() && !ancienne.matchs.iter().any(|a| a.id == m.id));
+    let vieillies = maintenant.saturating_sub(medailles.maj) > MEDAILLES_FRAICHEUR.as_millis() as u64;
+    let marge = MEDAILLES_MARGE.as_millis() as u64;
+    let trop_tot = neuve
+        .matchs
+        .iter()
+        .chain(&ancienne.matchs)
+        .map(|m| m.date.saturating_add(u64::from(m.duree_s) * 1000))
+        .max()
+        .is_some_and(|fin| medailles.maj < fin.saturating_add(marge) && maintenant >= fin.saturating_add(marge));
+    nouveau_match || vieillies || trop_tot
+}
+
+/// Les médailles d'une réponse d'accolades. Seule la ligne du membre (son
+/// puuid) compte dans les matchs : HenrikDev y met les dix joueurs. Une
+/// médaille se reconnaît à son type, sinon à son uuid (celui de Riot).
+/// L'acte en cours est celui de `acte` (« e9a2 ») dans le résumé, sinon
+/// le plus récent qu'il contienne. `None` si la réponse ne dit rien : ni
+/// résumé ni match.
+fn medailles_de(reponse: &Value, acte: &str, maintenant: u64) -> Option<Medailles> {
+    let data = &reponse["data"];
+    let puuid = data["account"]["puuid"].as_str()?;
+    let medaille = |m: &Value| {
+        m["type"]
+            .as_str()
+            .and_then(Medaille::depuis_henrik)
+            .or_else(|| m["id"].as_str().and_then(Medaille::depuis_uuid))
+    };
+    let comptes = |liste: &Value| -> Vec<CompteMedaille> {
+        liste
+            .as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|m| {
+                        Some(CompteMedaille {
+                            medaille: medaille(m)?,
+                            fois: u32::try_from(m["count"].as_u64()?).unwrap_or(u32::MAX),
+                            meilleur: m["best_value"].as_f64().unwrap_or(0.0) as f32,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let resume = &data["summary"];
+    let actes = resume["seasons"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let court = |a: &Value| a["season"]["short"].as_str().unwrap_or("").to_string();
+    let cet_acte = if acte.is_empty() {
+        actes.iter().max_by_key(|a| ordre_d_acte(&court(a)))
+    } else {
+        actes.iter().find(|a| court(a).eq_ignore_ascii_case(acte))
+    };
+    let matchs: Vec<MedaillesDuMatch> = data["matches"]
+        .as_array()
+        .map(|liste| {
+            liste
+                .iter()
+                .filter_map(|m| {
+                    let id = m["match_id"].as_str().filter(|id| !id.is_empty())?;
+                    let joueur = m["players"].as_array()?.iter().find(|p| p["puuid"].as_str() == Some(puuid))?;
+                    let medailles = joueur["accolades"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|a| {
+                            Some(MedailleGagnee {
+                                medaille: medaille(a)?,
+                                valeur: a["value"].as_f64()? as f32,
+                                record: a["is_act_record"].as_bool().unwrap_or(false),
+                            })
+                        })
+                        .collect();
+                    Some(MedaillesDuMatch {
+                        id: id.to_string(),
+                        debut: iso_vers_ms(m["started_at"].as_str().unwrap_or("")),
+                        medailles,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !resume.is_object() && matchs.is_empty() {
+        return None;
+    }
+    let nom = match cet_acte {
+        Some(a) => acte_en_clair(&court(a)),
+        None => acte_en_clair(acte),
+    };
+    Some(
+        Medailles {
+            maj: maintenant,
+            acte: nom,
+            cet_acte: cet_acte.map(|a| comptes(&a["accolades"])).unwrap_or_default(),
+            carriere: comptes(&resume["all_time"]),
+            matchs,
+        }
+        .nettoyer(),
+    )
+}
+
+/// Le nom court d'un acte chez HenrikDev, découpé : la lettre (`e` des
+/// épisodes, `v` des saisons annuelles), le numéro, l'acte. « e9a2 » →
+/// ('e', 9, 2) ; « v26a5 » → ('v', 26, 5).
+fn decouper_acte(court: &str) -> Option<(char, u32, usize)> {
+    let court = court.trim().to_ascii_lowercase();
+    let mut lettres = court.chars();
+    let lettre = lettres.next().filter(|c| matches!(c, 'e' | 'v'))?;
+    let (numero, acte) = lettres.as_str().split_once('a')?;
+    Some((lettre, numero.parse().ok()?, acte.parse().ok()?))
+}
+
+/// Pour ranger les actes dans le temps : les saisons annuelles ont pris la
+/// suite des épisodes en 2025 — V25 est l'épisode 10, V26 le 11.
+fn ordre_d_acte(court: &str) -> (u32, usize) {
+    match decouper_acte(court) {
+        Some(('v', annee, acte)) => (annee.saturating_sub(15), acte),
+        Some((_, episode, acte)) => (episode, acte),
+        None => (0, 0),
+    }
+}
+
+/// Le nom d'un acte comme le client l'écrit d'après le catalogue :
+/// « V26 · ACTE V ». Les épisodes 10 et suivants sont devenus les saisons
+/// V25, V26… : « e11a5 » s'écrit aussi « V26 · ACTE V ». Avant :
+/// « E9 · ACTE II ». Vide si le nom court ne se lit pas.
+fn acte_en_clair(court: &str) -> String {
+    const ROMAINS: [&str; 6] = ["I", "II", "III", "IV", "V", "VI"];
+    let Some((lettre, numero, acte)) = decouper_acte(court) else { return String::new() };
+    let acte = ROMAINS.get(acte.wrapping_sub(1)).map_or_else(|| acte.to_string(), |r| (*r).to_string());
+    match lettre {
+        'v' => format!("V{numero} · ACTE {acte}"),
+        _ if numero >= 10 => format!("V{} · ACTE {acte}", numero + 15),
+        _ => format!("E{numero} · ACTE {acte}"),
+    }
+}
+
+/// Des médailles neuves sur des anciennes : les neuves l'emportent —
+/// l'acte, la carrière, la date —, et les matchs qu'elles ne couvrent plus
+/// gardent les leurs, dans la limite des vingt plus récents.
+fn unir_medailles(neuves: Option<Medailles>, anciennes: Option<Medailles>) -> Option<Medailles> {
+    match (neuves, anciennes) {
+        (Some(mut neuves), Some(anciennes)) => {
+            for m in anciennes.matchs {
+                if neuves.du_match(&m.id).is_none() {
+                    neuves.matchs.push(m);
+                }
+            }
+            Some(neuves.nettoyer())
+        }
+        (neuves, anciennes) => neuves.or(anciennes),
+    }
 }
 
 /// À la liaison, l'ancienne fiche n'est gardée que si c'est le même
@@ -2067,11 +2379,10 @@ fn fusionner(ancienne: FicheValorant, neuve: FicheValorant) -> FicheValorant {
     if fiche.titre_joueur.is_empty() {
         fiche.titre_joueur = ancienne.titre_joueur;
     }
-    // Les médailles viennent du client du membre, jamais de HenrikDev :
-    // une relecture ne les connaît pas, celles d'avant restent.
-    if fiche.medailles.is_none() {
-        fiche.medailles = ancienne.medailles;
-    }
+    // Les médailles : les neuves l'emportent, celles d'avant comblent les
+    // matchs qu'elles ne couvrent plus ; une relecture sans médailles
+    // (pas de match nouveau, ou HenrikDev muet) garde celles d'avant.
+    fiche.medailles = unir_medailles(fiche.medailles.take(), ancienne.medailles);
     // Un match d'id vide n'est comparable à rien : il reste des deux côtés.
     let connus: BTreeSet<String> = fiche
         .matchs
@@ -2426,6 +2737,8 @@ fn point_rr(p: &Value) -> PointRR {
         carte: p["map"]["name"].as_str().unwrap_or("").to_string(),
         saison: p["season"]["short"].as_str().unwrap_or("").to_string(),
         protege: p["was_derank_protected"].as_bool().unwrap_or(false),
+        bonus: p["rr_performance_bonus"].as_i64().unwrap_or(0).clamp(-1000, 1000) as i32,
+        placement: p["is_placement_match"].as_bool().unwrap_or(false),
     }
 }
 
@@ -2491,6 +2804,20 @@ fn resumer_match(m: &Value, puuid: &str, lies: &[(UserId, String)]) -> Option<Ma
         .map(|mien| joueurs.iter().filter(|p| p["party_id"].as_str() == Some(mien)).count())
         .map(|n| n.min(usize::from(u8::MAX)) as u8)
         .unwrap_or(0);
+    // Le MVP du match, sinon celui de son équipe (HenrikDev 4.10).
+    let est_moi = |v: &Value| v["puuid"].as_str() == Some(puuid);
+    let mvp = if est_moi(&meta["mvp"]) {
+        ki_protocol::MVP_DU_MATCH
+    } else if camp.is_some_and(|t| est_moi(&t["mvp"])) {
+        ki_protocol::MVP_D_EQUIPE
+    } else {
+        0
+    };
+    let perf = joueur["performance"]["score"]
+        .as_f64()
+        .filter(|s| s.is_finite())
+        .map(|s| s.round().clamp(0.0, f64::from(u16::MAX)) as u16)
+        .unwrap_or(0);
     let mut avec = Vec::new();
     let mut contre = Vec::new();
     for (id, autre) in lies.iter().filter(|(_, autre)| autre != puuid) {
@@ -2527,6 +2854,8 @@ fn resumer_match(m: &Value, puuid: &str, lies: &[(UserId, String)]) -> Option<Ma
         avec,
         contre,
         manches_detail: detailler_manches(m, puuid, equipe),
+        perf,
+        mvp,
     })
 }
 
@@ -2583,6 +2912,8 @@ fn resumer_match_stocke(m: &Value) -> Option<MatchResume> {
         avec: Vec::new(),
         contre: Vec::new(),
         manches_detail: None,
+        perf: 0,
+        mvp: 0,
     })
 }
 
@@ -2988,6 +3319,55 @@ mod tests {
         let mut en_cours = m.clone();
         en_cours["metadata"]["is_completed"] = serde_json::json!(false);
         assert!(resumer_match(&en_cours, "moi", &lies).is_none());
+        // Un match d'avant la 4.10 n'a ni note ni MVP.
+        assert_eq!((r.perf, r.mvp), (0, 0));
+    }
+
+    /// HenrikDev 4.10 : sa note de performance, et le MVP — du match ou de
+    /// son équipe, le sien seulement.
+    #[test]
+    fn la_note_et_le_mvp_se_lisent() {
+        let mut m = serde_json::json!({
+            "metadata": {
+                "match_id": "abc", "started_at": "2026-10-08T20:00:00.000Z", "queue": {"id": "competitive"}, "is_completed": true,
+                "mvp": {"puuid": "autre", "name": "Inconnu", "tag": "X", "team": "Blue"}
+            },
+            "players": [
+                {"puuid": "moi", "team_id": "Red", "stats": {"kills": 20},
+                 "performance": {"score": 312.6, "breakdown": {}, "ratings": {"grade": "A"}}},
+                {"puuid": "autre", "team_id": "Blue", "stats": {"kills": 30}, "performance": {"score": 480.0, "breakdown": {}}}
+            ],
+            "teams": [
+                {"team_id": "Red", "rounds": {"won": 9, "lost": 13}, "won": false,
+                 "mvp": {"puuid": "moi", "name": "Redik", "tag": "KI", "team": "Red"}},
+                {"team_id": "Blue", "rounds": {"won": 13, "lost": 9}, "won": true,
+                 "mvp": {"puuid": "autre", "name": "Inconnu", "tag": "X", "team": "Blue"}}
+            ]
+        });
+        let r = resumer_match(&m, "moi", &[]).unwrap();
+        assert_eq!((r.perf, r.mvp), (313, ki_protocol::MVP_D_EQUIPE));
+        m["metadata"]["mvp"]["puuid"] = serde_json::json!("moi");
+        assert_eq!(resumer_match(&m, "moi", &[]).unwrap().mvp, ki_protocol::MVP_DU_MATCH);
+        // Nuls, comme HenrikDev les rend quand il ne sait pas : rien.
+        m["metadata"]["mvp"] = Value::Null;
+        m["teams"][0]["mvp"] = Value::Null;
+        m["players"][0]["performance"] = Value::Null;
+        let r = resumer_match(&m, "moi", &[]).unwrap();
+        assert_eq!((r.perf, r.mvp), (0, 0));
+    }
+
+    /// HenrikDev 4.10 : le bonus de performance et le placement d'un point
+    /// de RR ; absents, rien.
+    #[test]
+    fn le_bonus_de_performance_se_lit() {
+        let p = point_rr(&serde_json::json!({
+            "match_id": "m1", "date": "2026-10-08T20:00:00.000Z", "tier": {"id": 16}, "rr": 57, "last_change": 21,
+            "map": {"name": "Ascent"}, "season": {"short": "e11a5"}, "was_derank_protected": false,
+            "rr_performance_bonus": 3, "is_placement_match": true, "afk_penalty": null, "rr_penalty": null
+        }));
+        assert_eq!((p.delta, p.bonus, p.placement), (21, 3, true));
+        let ancien = point_rr(&serde_json::json!({"match_id": "m1", "last_change": -15}));
+        assert_eq!((ancien.bonus, ancien.placement), (0, false));
     }
 
     /// La carte et le titre viennent du match le plus récent où le membre
@@ -3809,6 +4189,220 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Décoché, ses médailles s'effacent et ne reviennent ni de son client,
+    /// ni d'une lecture partie avant ; le choix tient sur le disque, même
+    /// sans compte lié, et le même choix renvoyé ne coûte rien.
+    #[test]
+    fn le_choix_des_medailles_se_respecte() {
+        let (v, _rx, dir) = service_a_l_arret("choix-medailles");
+        let recues = Medailles {
+            matchs: vec![MedaillesDuMatch {
+                id: "8f1c0a2e-0000-4000-8000-000000000001".into(),
+                debut: 1,
+                medailles: vec![MedailleGagnee { medaille: Medaille::Mvp, valeur: 400.0, record: true }],
+            }],
+            ..Medailles::default()
+        };
+        compte(8, &v);
+        v.etat.fiches.lock().unwrap().insert(8, FicheValorant::default());
+        assert!(v.medailles(8, &recues));
+        assert!(v.choix_medailles(8, false));
+        assert!(!v.choix_medailles(8, false), "le même choix ne change rien");
+        assert_eq!(v.fiche(8).and_then(|f| f.medailles), None, "effacées");
+        // Refusées avant de lier : son client ne les range pas non plus.
+        assert!(v.choix_medailles(9, false));
+        compte(9, &v);
+        v.etat.fiches.lock().unwrap().insert(9, FicheValorant::default());
+        assert!(!v.medailles(9, &recues));
+        // Une lecture partie avant le refus ne les remet pas.
+        let (tx, _rx_travaux) = mpsc::channel();
+        let lue = FicheValorant { medailles: Some(recues.clone()), ..FicheValorant::default() };
+        let compte8 = v.etat.comptes.lock().unwrap()[&8].clone();
+        apres_lecture(&v.etat, 8, &compte8, Motif::Periodique, Ok((lue, Vec::new())), &tx);
+        assert_eq!(v.fiche(8).and_then(|f| f.medailles), None);
+        // Le choix est sur le disque, pour le prochain démarrage.
+        let relu: BTreeMap<UserId, u64> = lire(&dir.join("sans_medailles.json"));
+        assert!(relu.contains_key(&8) && relu.contains_key(&9));
+        // Recoché : il les veut de nouveau.
+        assert!(v.choix_medailles(8, true));
+        assert!(v.etat.veut_medailles(8) && !v.etat.veut_medailles(9));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Les accolades de HenrikDev (4.10) deviennent nos médailles : la
+    /// ligne du membre seulement, l'acte en cours d'après sa fiche, la
+    /// carrière ; un type absent se rattrape par l'uuid de Riot, une
+    /// médaille inconnue tombe.
+    #[test]
+    fn les_accolades_deviennent_des_medailles() {
+        let reponse = serde_json::json!({"status": 200, "data": {
+            "account": {"name": "Redik", "tag": "KI", "puuid": "moi"},
+            "matches": [
+                {"match_id": "8f1c0a2e-0000-4000-8000-000000000001", "started_at": "2026-10-08T20:00:00.000Z", "players": [
+                    {"puuid": "autre", "accolades": [
+                        {"id": "745b27f0-4bc2-13a4-4ee7-77be323155c2", "value": 480.5, "is_act_record": true, "type": "mvp"}
+                    ]},
+                    {"puuid": "moi", "accolades": [
+                        {"id": "6dc31cfd-41da-895f-9246-a8b63558cdb8", "value": 185.2, "is_act_record": true, "type": "damage_per_round"},
+                        {"id": "bfe96c47-44d0-e473-585d-749146d2d05e", "value": 4.0, "is_act_record": false, "type": null},
+                        {"id": "00000000-0000-0000-0000-000000000000", "value": 1.0, "is_act_record": false}
+                    ]}
+                ]},
+                {"match_id": null, "started_at": null, "players": [
+                    {"puuid": "moi", "accolades": [
+                        {"id": "1b13755f-4d5a-2c9e-6a39-bea7e6c53e7f", "value": 30.0, "is_act_record": false, "type": "kills"}
+                    ]}
+                ]},
+                {"match_id": "8f1c0a2e-0000-4000-8000-000000000002", "started_at": "2026-10-07T20:00:00.000Z", "players": [
+                    {"puuid": "autre", "accolades": []}
+                ]}
+            ],
+            "summary": {
+                "all_time": [
+                    {"id": "745b27f0-4bc2-13a4-4ee7-77be323155c2", "count": 12, "best_value": 498.2, "type": "mvp"},
+                    {"id": "inconnue", "count": 3, "best_value": 1.0, "type": null}
+                ],
+                "seasons": [
+                    {"season": {"id": "a", "short": "e11a5"}, "accolades": [
+                        {"id": "745b27f0-4bc2-13a4-4ee7-77be323155c2", "count": 2, "best_value": 482.8, "type": "mvp"},
+                        {"id": "1c926cba-48cb-8aeb-c68d-a1ba2d012784", "count": 4, "best_value": 31.0, "type": null}
+                    ]},
+                    {"season": {"id": "b", "short": "e11a4"}, "accolades": [
+                        {"id": "745b27f0-4bc2-13a4-4ee7-77be323155c2", "count": 5, "best_value": 470.0, "type": "mvp"}
+                    ]}
+                ]
+            }
+        }});
+        let md = medailles_de(&reponse, "e11a5", 42).expect("des médailles");
+        assert_eq!(md.maj, 42);
+        assert_eq!(md.acte, "V26 · ACTE V");
+        assert_eq!((md.fois(Medaille::Mvp, false), md.fois(Medaille::TopFrag, false)), (2, 4));
+        assert_eq!(md.fois(Medaille::Mvp, true), 12);
+        assert_eq!(md.carriere.len(), 1, "l'inconnue tombe");
+        assert_eq!(md.matchs.len(), 1, "ni le match sans id, ni celui où il n'est pas");
+        let m = &md.matchs[0];
+        assert_eq!(m.debut, iso_vers_ms("2026-10-08T20:00:00.000Z"));
+        let gagnees: Vec<(Medaille, bool)> = m.medailles.iter().map(|g| (g.medaille, g.record)).collect();
+        assert!(gagnees.contains(&(Medaille::Degats, true)));
+        assert!(gagnees.contains(&(Medaille::PremiersSangs, false)), "par l'uuid, sans type");
+        assert_eq!(gagnees.len(), 2, "le MVP d'un autre n'est pas le sien : {gagnees:?}");
+        let json = serde_json::to_string(&md).unwrap();
+        assert!(!json.contains("autre") && !json.contains("Redik"), "{json}");
+
+        // Sans acte connu : le plus récent du résumé, quel que soit l'ordre.
+        assert_eq!(medailles_de(&reponse, "", 42).unwrap().fois(Medaille::Mvp, false), 2);
+        // Un acte où il n'a rien gagné : rien pour l'acte, la carrière reste.
+        let rien = medailles_de(&reponse, "e11a6", 42).unwrap();
+        assert!(rien.cet_acte.is_empty());
+        assert_eq!((rien.acte.as_str(), rien.fois(Medaille::Mvp, true)), ("V26 · ACTE VI", 12));
+
+        // Une réponse qui ne dit rien ne remplace rien ; un résumé vide, si.
+        let muette = serde_json::json!({"data": {"account": {"puuid": "moi"}, "matches": [], "summary": null}});
+        assert!(medailles_de(&muette, "", 1).is_none());
+        assert!(medailles_de(&serde_json::json!({"errors": [{"code": 0}]}), "", 1).is_none());
+        let vide = serde_json::json!({"data": {"account": {"puuid": "moi"}, "matches": [], "summary": {"all_time": [], "seasons": []}}});
+        assert_eq!(medailles_de(&vide, "", 1).map(|m| m.carriere.len()), Some(0));
+    }
+
+    /// Les neuves l'emportent, les matchs qu'elles ne couvrent plus gardent
+    /// les leurs ; sans neuves, celles d'avant restent.
+    #[test]
+    fn les_medailles_s_unissent() {
+        let du_match = |n: u64, medaille: Medaille| MedaillesDuMatch {
+            id: format!("8f1c0a2e-0000-4000-8000-{n:012}"),
+            debut: n,
+            medailles: vec![MedailleGagnee { medaille, valeur: 1.0, record: false }],
+        };
+        let anciennes = Medailles {
+            maj: 1,
+            acte: "V26 · ACTE IV".into(),
+            matchs: vec![du_match(1, Medaille::Kills), du_match(2, Medaille::Aces)],
+            ..Medailles::default()
+        };
+        let neuves = Medailles {
+            maj: 2,
+            acte: "V26 · ACTE V".into(),
+            matchs: vec![du_match(2, Medaille::Mvp), du_match(3, Medaille::Clutchs)],
+            ..Medailles::default()
+        };
+        let unies = unir_medailles(Some(neuves.clone()), Some(anciennes.clone())).unwrap();
+        assert_eq!((unies.maj, unies.acte.as_str()), (2, "V26 · ACTE V"));
+        let ids: Vec<u64> = unies.matchs.iter().map(|m| m.debut).collect();
+        assert_eq!(ids, vec![3, 2, 1], "les plus récentes d'abord, sans doublon");
+        assert_eq!(unies.matchs[1].medailles[0].medaille, Medaille::Mvp, "le match 2 tel que les neuves le disent");
+        assert_eq!(unir_medailles(None, Some(anciennes.clone())), Some(anciennes));
+        assert_eq!(unir_medailles(Some(neuves.clone()), None), Some(neuves));
+        assert_eq!(unir_medailles(None, None), None);
+    }
+
+    /// Un raté met les médailles du membre au répit ; une lecture réussie
+    /// l'en sort.
+    #[test]
+    fn un_rate_met_les_medailles_au_repit() {
+        let (v, _rx, dir) = service_a_l_arret("repit-medailles");
+        assert!(!v.etat.medailles_au_repit(8, 1_000));
+        v.etat.medailles_ratees.lock().unwrap().insert(8, 1_000);
+        assert!(v.etat.medailles_au_repit(8, 1_000 + 60_000));
+        assert!(!v.etat.medailles_au_repit(8, 1_000 + MEDAILLES_REPIT.as_millis() as u64));
+        assert!(!v.etat.medailles_au_repit(9, 1_000), "les autres membres n'y sont pas");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Les noms d'acte s'écrivent comme le client les écrit d'après le
+    /// catalogue, épisodes devenus saisons compris ; l'acte en cours vient
+    /// de la fiche.
+    #[test]
+    fn les_actes_se_nomment_comme_dans_le_client() {
+        assert_eq!(acte_en_clair("e9a2"), "E9 · ACTE II");
+        assert_eq!(acte_en_clair("e10a6"), "V25 · ACTE VI");
+        assert_eq!(acte_en_clair("e11a5"), "V26 · ACTE V");
+        assert_eq!(acte_en_clair("V26A5"), "V26 · ACTE V");
+        assert_eq!(acte_en_clair("e9a7"), "E9 · ACTE 7");
+        for douteux in ["", "e9", "x1a1", "ea2", "e9a", "e9a2b"] {
+            assert_eq!(acte_en_clair(douteux), "", "{douteux}");
+        }
+        assert!(ordre_d_acte("v26a1") > ordre_d_acte("e10a6"));
+        assert!(ordre_d_acte("e11a2") > ordre_d_acte("e11a1"));
+        assert_eq!(ordre_d_acte("v26a1"), ordre_d_acte("e11a1"));
+
+        let mut f = FicheValorant::default();
+        assert_eq!(acte_courant(&f), "");
+        f.historique_rr.push(PointRR { date: 5, saison: "e11a4".into(), ..PointRR::default() });
+        assert_eq!(acte_courant(&f), "e11a4", "sans match, le dernier point");
+        f.matchs.push(MatchResume { date: 1, saison: "e11a3".into(), ..MatchResume::default() });
+        f.matchs.push(MatchResume { date: 9, saison: "e11a5".into(), ..MatchResume::default() });
+        f.matchs.push(MatchResume { date: 10, ..MatchResume::default() });
+        assert_eq!(acte_courant(&f), "e11a5", "le match le plus récent qui dit son acte");
+    }
+
+    /// Les médailles se relisent quand il y a de quoi : jamais lues, un
+    /// match nouveau, une lecture vieillie, ou faite trop tôt après la fin
+    /// du dernier match — une fois la marge passée, pas avant.
+    #[test]
+    fn les_medailles_se_relisent_a_bon_escient() {
+        let heure = 3_600_000u64;
+        let fin_du_match = 100 * heure;
+        let un_match = MatchResume { id: "m1".into(), date: fin_du_match - 2_400_000, duree_s: 2_400, ..MatchResume::default() };
+        let fiche = |maj: Option<u64>| FicheValorant {
+            matchs: vec![un_match.clone()],
+            medailles: maj.map(|maj| Medailles { maj, ..Medailles::default() }),
+            ..FicheValorant::default()
+        };
+        let neuve = fiche(None);
+        let marge = MEDAILLES_MARGE.as_millis() as u64;
+        let apres = fin_du_match + marge + 60_000;
+        assert!(medailles_a_relire(None, &neuve, apres), "jamais lues");
+        assert!(medailles_a_relire(Some(&fiche(None)), &neuve, apres), "pas de médailles");
+        assert!(!medailles_a_relire(Some(&fiche(Some(apres))), &neuve, apres + heure), "fraîches, rien de neuf");
+        let mut avec_nouveau = neuve.clone();
+        avec_nouveau.matchs.push(MatchResume { id: "m2".into(), date: 1, ..MatchResume::default() });
+        assert!(medailles_a_relire(Some(&fiche(Some(apres))), &avec_nouveau, apres + heure), "un match nouveau");
+        assert!(medailles_a_relire(Some(&fiche(Some(apres))), &neuve, apres + 13 * heure), "vieillies");
+        let tot = fiche(Some(fin_du_match + 120_000));
+        assert!(!medailles_a_relire(Some(&tot), &neuve, fin_du_match + 300_000), "dans la marge : on attend");
+        assert!(medailles_a_relire(Some(&tot), &neuve, fin_du_match + marge), "la marge passée : une relecture");
+    }
+
     /// L'annonce d'une victoire à deux : le résultat en tête, le meilleur
     /// score d'abord, les RR en classé.
     #[test]
@@ -3988,6 +4582,8 @@ mod tests {
             compteurs: Arc::default(),
             esports: Mutex::new((0, Vec::new())),
             esports_en_cours: std::sync::atomic::AtomicBool::new(false),
+            sans_medailles: Mutex::default(),
+            medailles_ratees: Mutex::default(),
         });
         let v = Valorant {
             etat,
@@ -4328,6 +4924,7 @@ mod tests {
         assert_eq!(PointApi::de("/valorant/v1/stored-matches/eu/a/b"), PointApi::Stored);
         assert_eq!(PointApi::de("/valorant/v2/stored-mmr-history/eu/pc/a/b"), PointApi::Stored);
         assert_eq!(PointApi::de("/valorant/v1/esports/schedule"), PointApi::Esports);
+        assert_eq!(PointApi::de("/valorant/v1/accolades/eu/pc/a/b"), PointApi::Medailles);
         assert_eq!(PointApi::de("/valorant/v2/esports/vlr/events/1/matches"), PointApi::Esports);
         assert_eq!(PointApi::de("/valorant/v2/esports/vlr/events?type=upcoming"), PointApi::Esports);
         // Un membre au nom piégé ne déplace pas le compteur : c'est le
@@ -4351,7 +4948,7 @@ mod tests {
         let motifs: Vec<u64> = c.par_motif.iter().map(|n| n.load(Ordering::Relaxed)).collect();
         assert_eq!(motifs, vec![3, 1, 1, 1, 1]);
         let points: Vec<u64> = c.par_point.iter().map(|n| n.load(Ordering::Relaxed)).collect();
-        assert_eq!(points, vec![3, 1, 1, 1, 0, 1, 0]);
+        assert_eq!(points, vec![3, 1, 1, 1, 0, 1, 0, 0]);
         // Le 404 n'est pas une erreur ; le 500 et le réseau muet le sont.
         assert_eq!(c.erreurs.load(Ordering::Relaxed), 2);
         assert_eq!(c.pic(ms + 60_000), 4);

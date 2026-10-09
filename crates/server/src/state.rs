@@ -304,7 +304,7 @@ pub struct ConnectedUser {
     /// Une recherche de ce membre est-elle en cours ? Chacune relit les
     /// journaux de tous ses salons : une à la fois.
     pub recherche_en_cours: Arc<std::sync::atomic::AtomicBool>,
-    /// Les liaisons de compte Riot : chacune coûte six requêtes à HenrikDev,
+    /// Les liaisons de compte Riot : chacune coûte sept requêtes à HenrikDev,
     /// sur vingt par minute pour tout le serveur.
     pub riot_budget: TokenBucket,
 }
@@ -1595,6 +1595,7 @@ mod tests {
             },
             portes: true,
             medailles: true,
+            choix_medailles: true,
             protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");

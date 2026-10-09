@@ -882,16 +882,22 @@ struct KiApp {
     /// Partager son activité VALORANT (lue dans son propre client Riot).
     /// Désactivé de base : personne ne partage sans l'avoir choisi.
     valorant_presence: bool,
-    /// Ajouter ses médailles à sa fiche, lues après chaque partie dans son
-    /// client Riot — sous « Partager mon activité », qui dit quand une
-    /// partie finit. Coché de base : lier son compte, c'est déjà montrer
-    /// ses statistiques au groupe.
+    /// Ajouter ses médailles à sa fiche : le serveur les lit chez HenrikDev
+    /// (0.1.63), et son client Riot les donne dès la fin de chaque partie —
+    /// sous « Partager mon activité », qui dit quand une partie finit.
+    /// Décoché, le serveur l'apprend et les efface. Coché de base : lier
+    /// son compte, c'est déjà montrer ses statistiques au groupe.
     valorant_medailles: bool,
     /// Les lectures de médailles prévues, et la dernière.
     medailles: medailles::Lecteur,
     /// Le serveur garde les médailles (`Welcome.medailles`) : sans cette
     /// preuve, rien ne lui part.
     serveur_medailles: bool,
+    /// Le serveur lit lui-même les médailles chez HenrikDev, et veut
+    /// savoir si on les accepte (`Welcome.choix_medailles`).
+    serveur_choix_medailles: bool,
+    /// Le choix déjà dit à ce serveur depuis la connexion.
+    choix_medailles_dit: Option<bool>,
     /// L'état VALORANT du tour d'avant, pour voir une partie finir.
     valorant_avant: Option<ki_protocol::JeuEtat>,
     /// Le dernier ennui des médailles consigné : on ne le répète pas.
@@ -1485,6 +1491,8 @@ impl KiApp {
             valorant_medailles: get("valorant_medailles", "on") == "on",
             medailles: medailles::Lecteur::new(),
             serveur_medailles: false,
+            serveur_choix_medailles: false,
+            choix_medailles_dit: None,
             valorant_avant: None,
             medailles_ennui: String::new(),
             riot_saisie: String::new(),
@@ -4694,6 +4702,13 @@ impl KiApp {
     /// ou la présence n'est pas partagée).
     fn tick_medailles(&mut self, etat: Option<ki_protocol::JeuEtat>) {
         use ki_protocol::JeuEtat;
+        // Le choix d'abord, compte lié ou pas encore : il vaut aussi pour
+        // la liaison à venir, et pour les médailles que le serveur lit
+        // lui-même chez HenrikDev.
+        if self.serveur_choix_medailles && self.choix_medailles_dit != Some(self.valorant_medailles) {
+            self.send(ClientMsg::ChoixMedailles { oui: self.valorant_medailles });
+            self.choix_medailles_dit = Some(self.valorant_medailles);
+        }
         // À chaque image : rien n'est copié tant qu'aucune lecture n'arrive.
         let lie_existe = self
             .my_id
@@ -5073,6 +5088,7 @@ impl KiApp {
                 server,
                 portes,
                 medailles,
+                choix_medailles,
                 protocole,
                 ..
             } => {
@@ -5097,6 +5113,10 @@ impl KiApp {
                 self.portes.disponible = portes;
                 // Même preuve pour les médailles VALORANT.
                 self.serveur_medailles = medailles;
+                // Et pour le choix de les montrer, que le serveur apprend
+                // une fois par connexion, puis à chaque changement.
+                self.serveur_choix_medailles = choix_medailles;
+                self.choix_medailles_dit = None;
                 self.connecting = false;
                 self.connect_started = None;
                 self.error = None;
@@ -9623,11 +9643,15 @@ impl KiApp {
                                     });
                                     ui.add_space(espace::XS);
                                     ui.checkbox(&mut self.valorant_medailles, "Ajouter mes médailles à ma fiche").on_hover_text(
-                                        "lues dans ton client Riot après chaque partie : MVP, top frag, aces, \
-                                         clutchs, records de l'acte… Les tiennes seulement — celles des \
-                                         autres joueurs du match ne partent jamais.",
+                                        "MVP, top frag, aces, clutchs, records de l'acte… Le serveur les lit \
+                                         chez HenrikDev ; avec « Partager mon activité Valorant », ton client \
+                                         Riot les donne dès la fin de chaque partie. Les tiennes seulement — \
+                                         celles des autres joueurs du match ne partent jamais. Décoche, et \
+                                         elles s'effacent de ta fiche.",
                                     );
-                                    let pourquoi_pas = if !self.valorant_medailles {
+                                    let pourquoi_pas = if !self.valorant_medailles || self.serveur_choix_medailles {
+                                        // Un serveur qui les lit chez HenrikDev n'a
+                                        // besoin de rien : la présence les avance.
                                         None
                                     } else if !self.valorant_presence {
                                         Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui dit quand une partie finit")

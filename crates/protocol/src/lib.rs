@@ -264,6 +264,12 @@ pub enum ClientMsg {
     /// dit les connaître (`Welcome.medailles`), et seulement pour le compte
     /// lié.
     Medailles { medailles: Medailles },
+    /// Son choix pour ses médailles VALORANT (« Ajouter mes médailles à ma
+    /// fiche ») : non, le serveur efface celles de sa fiche et ne les lit
+    /// plus chez HenrikDev ; oui, il les relit au prochain rafraîchissement.
+    /// À la connexion et à chaque changement, lié ou pas encore — seulement
+    /// vers un serveur qui le comprend (`Welcome.choix_medailles`).
+    ChoixMedailles { oui: bool },
     /// Toutes les fiches des membres liés, pour la page de stats.
     StatsValorant,
     /// Une commande au bot musique (permission « Contrôler la musique »).
@@ -586,6 +592,12 @@ pub enum ServerMsg {
         /// serveur antérieur prendrait pour un message invalide.
         #[serde(default)]
         medailles: bool,
+        /// Ce serveur lit lui-même les médailles chez HenrikDev pour chaque
+        /// compte lié, et comprend `ClientMsg::ChoixMedailles` (depuis
+        /// 0.1.63) ; un serveur antérieur le prendrait pour un message
+        /// invalide.
+        #[serde(default)]
+        choix_medailles: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -2198,8 +2210,9 @@ pub struct FicheValorant {
     /// le catalogue). Vide s'il n'en porte pas.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub titre_joueur: String,
-    /// Ses médailles, telles que son ki-chat les a lues dans son client
-    /// Riot (0.1.49 et après) ; `None` tant qu'il ne les a pas envoyées.
+    /// Ses médailles : lues chez HenrikDev par le serveur (0.1.63), ou dans
+    /// son client Riot par son ki-chat (0.1.49) ; `None` tant qu'on n'en
+    /// connaît pas, ou s'il a décoché « Ajouter mes médailles à ma fiche ».
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medailles: Option<Medailles>,
 }
@@ -2268,6 +2281,17 @@ pub struct PointRR {
     /// Descente évitée grâce à un bouclier (was_derank_protected).
     #[serde(default)]
     pub protege: bool,
+    /// Le bonus de performance compris dans `delta`
+    /// (rr_performance_bonus, HenrikDev 4.10) ; 0 sans bonus, ou lu avant.
+    #[serde(default, skip_serializing_if = "est_nul")]
+    pub bonus: i32,
+    /// Un match de placement (is_placement_match, HenrikDev 4.10).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub placement: bool,
+}
+
+fn est_nul<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2323,7 +2347,21 @@ pub struct MatchResume {
     /// (match d'avant 0.1.40, combat à mort, JSON sans `rounds`/`kills`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manches_detail: Option<DetailManches>,
+    /// Sa note de performance (performance.score, HenrikDev 4.10) : celle
+    /// qui désigne le MVP, sur 500 environ. 0 : inconnue — un match lu
+    /// avant, ou archivé.
+    #[serde(default, skip_serializing_if = "est_nul")]
+    pub perf: u16,
+    /// MVP du match ([`MVP_DU_MATCH`]), de son équipe ([`MVP_D_EQUIPE`]),
+    /// ou rien (0) — d'après `metadata.mvp` et `teams[].mvp`.
+    #[serde(default, skip_serializing_if = "est_nul")]
+    pub mvp: u8,
 }
+
+/// [`MatchResume::mvp`] : le meilleur de son équipe.
+pub const MVP_D_EQUIPE: u8 = 1;
+/// [`MatchResume::mvp`] : le meilleur des dix.
+pub const MVP_DU_MATCH: u8 = 2;
 
 /// La ligne du membre manche par manche : rien des neuf autres.
 /// Tous les compteurs sont des `u8` : un match compte au plus 30 manches.
@@ -2399,6 +2437,50 @@ pub enum Medaille {
 }
 
 impl Medaille {
+    /// Les médailles de Riot par leur uuid — celui des goldstars du client
+    /// et des accolades de HenrikDev. Ce sont nos noms, d'après ce que
+    /// mesure la valeur (recoupée avec les matchs par la doc communautaire,
+    /// puis sur la réponse réelle du 2026-09-27).
+    pub const UUIDS: [(&'static str, Medaille); 12] = [
+        ("745b27f0-4bc2-13a4-4ee7-77be323155c2", Medaille::Mvp),
+        ("4815a8a2-4649-9bfe-afd2-38ae9cc22898", Medaille::Distinction),
+        ("1c926cba-48cb-8aeb-c68d-a1ba2d012784", Medaille::TopFrag),
+        ("6dc31cfd-41da-895f-9246-a8b63558cdb8", Medaille::Degats),
+        ("2c8b6129-4384-230d-c7e5-cda12019533c", Medaille::Tetes),
+        ("1b13755f-4d5a-2c9e-6a39-bea7e6c53e7f", Medaille::Kills),
+        ("e43f9acb-448c-4aa1-1591-6db72c0b8dae", Medaille::Assists),
+        ("352a3ac8-4b2c-db6a-1f36-c0a67b428e65", Medaille::Poses),
+        ("bfe96c47-44d0-e473-585d-749146d2d05e", Medaille::PremiersSangs),
+        ("244cf4ab-4c27-cc59-3323-c985858d6ddb", Medaille::Aces),
+        ("0497d585-42ad-61a7-42bc-189571f40e2c", Medaille::Clutchs),
+        ("3bc0563a-4fe9-a15c-0078-23a3408d64b5", Medaille::Echanges),
+    ];
+
+    /// La médaille d'un uuid de Riot.
+    pub fn depuis_uuid(uuid: &str) -> Option<Medaille> {
+        Self::UUIDS.iter().find(|(id, _)| id.eq_ignore_ascii_case(uuid.trim())).map(|(_, m)| *m)
+    }
+
+    /// La médaille d'un type d'accolade de HenrikDev (`kills`,
+    /// `first_blood`…, depuis sa v4.10).
+    pub fn depuis_henrik(genre: &str) -> Option<Medaille> {
+        Some(match genre {
+            "mvp" => Medaille::Mvp,
+            "distinction" => Medaille::Distinction,
+            "top_frag" => Medaille::TopFrag,
+            "damage_per_round" => Medaille::Degats,
+            "headshot_percentage" => Medaille::Tetes,
+            "kills" => Medaille::Kills,
+            "assists" => Medaille::Assists,
+            "plants" => Medaille::Poses,
+            "first_blood" => Medaille::PremiersSangs,
+            "aces" => Medaille::Aces,
+            "clutches" => Medaille::Clutchs,
+            "trades" => Medaille::Echanges,
+            _ => return None,
+        })
+    }
+
     /// Toutes les médailles connues, dans l'ordre où on les montre.
     pub const TOUTES: [Medaille; 12] = [
         Medaille::Mvp,
@@ -2497,11 +2579,13 @@ pub struct MedaillesDuMatch {
     pub medailles: Vec<MedailleGagnee>,
 }
 
-/// Les médailles VALORANT d'un membre, lues par son **propre** client Riot
-/// et envoyées par son ki-chat (`goldstars/v1/players/{puuid}`) : l'acte en
-/// cours, la carrière, et ses derniers matchs médaille par médaille. Rien
-/// des autres joueurs : la réponse de Riot en contient, le client les
-/// jette avant d'envoyer.
+/// Les médailles VALORANT d'un membre : l'acte en cours, la carrière, et
+/// ses derniers matchs médaille par médaille. Elles viennent de deux
+/// côtés, la plus récente l'emporte : son **propre** client Riot, lu et
+/// envoyé par son ki-chat (`goldstars/v1/players/{puuid}`), et HenrikDev
+/// (`/valorant/v1/accolades/…`, depuis sa v4.10), que le serveur lit pour
+/// chaque compte lié. Rien des autres joueurs : les deux réponses en
+/// contiennent, on les jette.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Medailles {
     /// Quand le serveur les a reçues, en millisecondes Unix.
@@ -4193,10 +4277,38 @@ mod tests {
         assert_eq!(Medaille::Aces.valeur(f32::NAN), "0 ace");
         assert_eq!(Medaille::Mvp.ordre(), 0);
         assert!(Medaille::Inconnue.ordre() > Medaille::Poses.ordre());
-        // Un serveur d'avant n'annonce pas les médailles.
+        // Un serveur d'avant n'annonce pas les médailles, ni le choix.
         let welcome = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"00","channels":[]}"#;
-        let ServerMsg::Welcome { medailles, .. } = serde_json::from_str(welcome).unwrap() else { panic!() };
-        assert!(!medailles);
+        let ServerMsg::Welcome { medailles, choix_medailles, .. } = serde_json::from_str(welcome).unwrap() else { panic!() };
+        assert!(!medailles && !choix_medailles);
+        let choix = serde_json::to_string(&ClientMsg::ChoixMedailles { oui: false }).unwrap();
+        assert_eq!(choix, r#"{"type":"choix_medailles","oui":false}"#);
+        assert!(matches!(serde_json::from_str(&choix), Ok(ClientMsg::ChoixMedailles { oui: false })));
+    }
+
+    /// Les deux noms d'une médaille — l'uuid de Riot, le type de
+    /// HenrikDev — mènent au même endroit, chacun une seule fois.
+    #[test]
+    fn les_uuid_et_les_types_de_henrikdev_concordent() {
+        let types = [
+            "mvp", "distinction", "top_frag", "damage_per_round", "headshot_percentage", "kills",
+            "assists", "plants", "first_blood", "aces", "clutches", "trades",
+        ];
+        let par_type: Vec<Medaille> = types.iter().map(|t| Medaille::depuis_henrik(t).expect(t)).collect();
+        let par_uuid: Vec<Medaille> = Medaille::UUIDS.iter().map(|(_, m)| *m).collect();
+        let mut a = par_type.clone();
+        let mut b = par_uuid.clone();
+        a.sort();
+        a.dedup();
+        b.sort();
+        b.dedup();
+        assert_eq!((a.len(), b.len()), (12, 12), "douze médailles, sans doublon");
+        assert_eq!(a, b);
+        for (uuid, m) in Medaille::UUIDS {
+            assert_eq!(Medaille::depuis_uuid(&uuid.to_uppercase()), Some(m));
+        }
+        assert_eq!(Medaille::depuis_henrik("danse"), None);
+        assert_eq!(Medaille::depuis_uuid(""), None);
     }
 
     /// Le résumé pour la page du groupe garde les sommes, et les médailles
@@ -4449,6 +4561,8 @@ mod tests {
                 carte: "Ascent".into(),
                 saison: "e9a2".into(),
                 protege: true,
+                bonus: 3,
+                placement: true,
             }],
             matchs: vec![MatchResume {
                 saison: "e9a2".into(),
@@ -4458,6 +4572,8 @@ mod tests {
                 avec: vec![2, 3],
                 contre: vec![4],
                 manches_detail: Some(detail),
+                perf: 312,
+                mvp: MVP_D_EQUIPE,
                 ..match_de_test("m1", 1_700_000_000_000, "Compétitif", Some(true))
             }],
             maj: 1_700_000_001_000,
@@ -4487,8 +4603,12 @@ mod tests {
         assert_eq!(relu, pleine);
 
         let nu = serde_json::to_string(&MatchResume::default()).unwrap();
-        for champ in ["manches_detail", "avec", "contre", "saison"] {
+        for champ in ["manches_detail", "avec", "contre", "saison", "perf", "mvp"] {
             assert!(!nu.contains(champ), "un match sans {champ} ne l'écrit pas : {nu}");
+        }
+        let point = serde_json::to_string(&PointRR::default()).unwrap();
+        for champ in ["bonus", "placement"] {
+            assert!(!point.contains(champ), "un point sans {champ} ne l'écrit pas : {point}");
         }
         let membre = serde_json::to_string(&FicheMembre::default()).unwrap();
         assert!(!membre.contains("bilan"), "une fiche de membre sans bilan ne l'écrit pas : {membre}");
