@@ -219,7 +219,7 @@ impl Flex {
             })
             .inner;
         #[cfg(debug_assertions)]
-        crate::mouchard::conteneur(ui, id, &etiquette, avant);
+        crate::mouchard::conteneur(ui, id, &etiquette, avant, accueil.width());
         rendu
     }
 
@@ -716,6 +716,7 @@ mod stabilite {
     #[test]
     fn le_mouchard_signale_une_case_instable() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let dits = crate::mouchard::DITS.with(|d| d.get());
         let mut image = 0u32;
         let p = passes(14, |ui| {
             image += 1;
@@ -726,6 +727,43 @@ mod stabilite {
             });
         });
         assert!(p[2..].iter().all(|&n| n == 2), "instable : {p:?}");
+        assert!(crate::mouchard::DITS.with(|d| d.get()) > dits, "le mouchard devait parler");
+    }
+
+    /// La barre de saisie du chat pendant qu'on tire le bord de la fenêtre
+    /// (ou d'une colonne) : sa largeur change à chaque image, egui_taffy
+    /// refait la mise en page et rejoue l'image — c'est voulu, sans quoi la
+    /// rangée aurait une image de retard sur le bord. Rien n'est instable :
+    /// le mouchard se tait.
+    #[test]
+    fn redimensionner_ne_fait_pas_crier_le_mouchard() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let dits = crate::mouchard::DITS.with(|d| d.get());
+        let ctx = egui::Context::default();
+        let mut passes = Vec::new();
+        for i in 0..20 {
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0 - 7.0 * i as f32, 500.0))),
+                ..Default::default()
+            };
+            let sortie = ctx.run_ui(entree, |ui| {
+                Flex::ligne().ecart(8.0).show(ui, "saisie", |f| {
+                    f.ui(|ui| {
+                        ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::click());
+                    });
+                    f.grandit(|ui| {
+                        ui.allocate_exact_size(vec2(ui.available_width(), 26.0), egui::Sense::click());
+                    });
+                    f.ui(|ui| {
+                        ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::click());
+                    });
+                });
+            });
+            passes.push(sortie.platform_output.num_completed_passes);
+            sortie.drop_without_applying_deltas();
+        }
+        assert!(passes[2..].iter().all(|&n| n == 2), "chaque largeur se refait : {passes:?}");
+        assert_eq!(crate::mouchard::DITS.with(|d| d.get()), dits, "le mouchard a crié pendant un redimensionnement");
     }
 
     /// Deux conteneurs du même nom dans deux zones sœurs (deux sections) :
