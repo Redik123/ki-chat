@@ -2925,6 +2925,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_taffy",
+ "png",
  "serde",
  "tracing",
  "tracing-subscriber",
