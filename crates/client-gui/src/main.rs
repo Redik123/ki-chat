@@ -2265,7 +2265,7 @@ impl KiApp {
                         }
                     }
                     let temps = if duree > 0 { format!("{} / {}", mmss(position), mmss(duree)) } else { mmss(position) };
-                    ui.label(RichText::new(temps).color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, temps);
                     let titre = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
                     ui.add(egui::Label::new(RichText::new(titre).color(TEXT).size(texte::CORPS)).truncate());
                     self.etoile_musique(ui, p, peut);
@@ -2292,7 +2292,7 @@ impl KiApp {
                 }
                 ui::glyph(ui, Icon::Volume, 14.0, TEXT_FAINT);
                 if ailleurs {
-                    ui.label(RichText::new(format!("dans #{salon_nom}")).color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, format!("dans #{salon_nom}"));
                 }
             });
         });
@@ -2324,7 +2324,7 @@ impl KiApp {
                         if let Some(qui) = &p.ajoute_par {
                             infos.push_str(&format!(" · ajoutée par {qui}"));
                         }
-                        ui.label(RichText::new(infos).color(TEXT_FAINT).size(texte::PETIT));
+                        ui::hint(ui, infos);
                     }
                     None => {
                         ui.label(RichText::new("rien en cours").color(TEXT_FAINT));
@@ -2332,7 +2332,7 @@ impl KiApp {
                 }
                 ui.add_space(espace::M);
                 ui.add_enabled_ui(peut, |ui| {
-                    ui.label(RichText::new("volume du bot").color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, "volume du bot");
                     let mut v = etat.volume as f32;
                     if ui.add(egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %").integer()).drag_stopped() {
                         self.commander_musique(C::Volume { pour_cent: v as u8 });
@@ -2358,12 +2358,12 @@ impl KiApp {
                 });
                 egui::ScrollArea::vertical().id_salt("musique_file").max_height(170.0).auto_shrink([false, true]).show(ui, |ui| {
                     if etat.file.is_empty() {
-                        ui.label(RichText::new("vide — cherche un morceau à droite").color(TEXT_FAINT).size(texte::PETIT));
+                        ui::hint(ui, "vide — cherche un morceau à droite");
                     }
                     let n = etat.longueur_file();
                     for (i, p) in etat.file.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}", i + 1)).color(TEXT_FAINT).size(texte::PETIT));
+                            ui::hint(ui, format!("{}", i + 1));
                             let nom = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
                             ui.add(egui::Label::new(RichText::new(nom).size(texte::COURANT)).truncate())
                                 .on_hover_text(format!("{} · {}", mmss(p.duree_s as u64), p.ajoute_par.as_deref().unwrap_or("?")));
@@ -2467,10 +2467,10 @@ impl KiApp {
                     }
                 });
                 if !peut_ajouter {
-                    ui.label(RichText::new("réservé aux modérateurs").color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, "réservé aux modérateurs");
                 }
                 if !self.musique_resultats.is_empty() {
-                    ui.label(RichText::new(format!("résultats pour « {} »", self.musique_resultats_pour)).color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, format!("résultats pour « {} »", self.musique_resultats_pour));
                 }
                 let resultats = self.musique_resultats.clone();
                 egui::ScrollArea::vertical().id_salt("musique_resultats").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -2840,7 +2840,7 @@ impl KiApp {
                 });
                 ui::hint(
                     ui,
-                    &format!(
+                    format!(
                         "{} clip{} · {} · {}",
                         liste.len(),
                         if liste.len() > 1 { "s" } else { "" },
@@ -3103,7 +3103,7 @@ impl KiApp {
                     .filter(|f| f.duree_s > 0.0)
                     .map(|f| format!(" · {:.0} s", f.duree_s))
                     .unwrap_or_default();
-                ui::hint(ui, &format!("{}{duree}", clips::taille_lisible(p.taille)));
+                ui::hint(ui, format!("{}{duree}", clips::taille_lisible(p.taille)));
                 ui.add_space(espace::M);
                 ui::field_label(ui, "Salon");
                 let nom_salon = salons
@@ -3491,7 +3491,7 @@ impl KiApp {
         if let Some(e) = self.enregistreur.as_ref().map(|e| e.etat()) {
             ui::hint(
                 ui,
-                &format!(
+                format!(
                     "{:.0} s en mémoire · {:.0} Mo · encodeur {} · {}",
                     e.secondes, e.megaoctets, e.encodeur, e.source
                 ),
@@ -6909,7 +6909,7 @@ impl KiApp {
                             }
                             (Some(name), _) => name.to_string(),
                         };
-                        ui.label(RichText::new(detail).color(TEXT_FAINT).size(texte::PETIT));
+                        ui::hint(ui, detail);
                     });
 
                     // Sortir du vocal sans quitter le serveur.
@@ -7548,7 +7548,7 @@ impl KiApp {
                     Some(slug) => format!("entré par la porte « {slug} », sans compte"),
                     None => "entré par une porte web, sans compte".to_string(),
                 };
-                ui.label(RichText::new(quoi).color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, quoi);
                 ui.add_space(espace::XS);
                 let mut pct = self.volume_of(m.user_id) * 100.0;
                 if ui
@@ -7575,7 +7575,7 @@ impl KiApp {
                     ui.label(RichText::new(&m.username).color(ACCENT).strong());
                     pastille_bot(ui);
                 });
-                ui.label(RichText::new("le serveur, qui joue de la musique dans ce salon").color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, "le serveur, qui joue de la musique dans ce salon");
                 ui.add_space(espace::XS);
                 let mut pct = self.volume_of(m.user_id) * 100.0;
                 if ui
@@ -7595,10 +7595,10 @@ impl KiApp {
             ui.set_width(228.0);
             ui.label(RichText::new(&m.username).color(self.color_of(m)).strong());
             if let Some(role) = self.top_role_name(m) {
-                ui.label(RichText::new(role).color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, role);
             }
             if !m.online {
-                ui.label(RichText::new("hors ligne").color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, "hors ligne");
             }
             // Sa fiche VALORANT, s'il a lié son compte Riot : le serveur la
             // garde, l'ouvrir ne coûte aucune requête.
@@ -7606,7 +7606,7 @@ impl KiApp {
                 ui.add_space(espace::XS);
                 let rang = m.rang_valorant.map(ki_protocol::nom_de_rang).unwrap_or_default();
                 let texte = if rang.is_empty() { riot.clone() } else { format!("{riot} · {rang}") };
-                ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, texte);
                 if ui::button(ui, Icon::Screen, "Fiche VALORANT").clicked() {
                     self.ouvrir_fiche(m.user_id, m.username.clone());
                 }
@@ -9198,7 +9198,7 @@ impl KiApp {
                             let engine_ok = self.link.engine.lock().unwrap().is_some();
                             ui::hint(
                                 ui,
-                                &format!(
+                                format!(
                                     "{} sons chargés ({} perso) · sortie audio {}",
                                     self.sounds.len(),
                                     self.custom_sfx.len(),
@@ -9468,7 +9468,7 @@ impl KiApp {
                                 };
                                 ui::hint(
                                     ui,
-                                    &format!(
+                                    format!(
                                         "ping {ping_txt} · gigue max {:.1} ms · perdus {} \
                                      (récupérés FEC : {}) · rejetés {}{upstream}",
                                         stats.worst_jitter_ms,
@@ -9644,7 +9644,7 @@ impl KiApp {
                             ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(texte::PETIT));
                             ui::hint(
                                 ui,
-                                &format!(
+                                format!(
                                     "{} jeux reconnus, de VALORANT à Dofus en passant par Rocket League — \
                                      un jeu qui manque s'ajoute d'une ligne dans le code (jeux.rs)",
                                     jeux::JEUX.len()
@@ -9725,7 +9725,7 @@ impl KiApp {
                             .size(texte::TITRE)
                             .strong(),
                     );
-                    ui::hint(ui, &format!("Version installée : {}", update::current()));
+                    ui::hint(ui, format!("Version installée : {}", update::current()));
 
                     if !release.notes.is_empty() {
                         ui.add_space(espace::M);
@@ -9767,7 +9767,7 @@ impl KiApp {
                     ui::meter(ui, ratio, Vec2::new(ui.available_width(), 8.0), theme::ACCENT);
                     ui::hint(
                         ui,
-                        &format!("{:.1} Mo sur {:.1} Mo", megabytes(done), megabytes(total)),
+                        format!("{:.1} Mo sur {:.1} Mo", megabytes(done), megabytes(total)),
                     );
                 }
                 update::Status::Ready => {
@@ -10047,7 +10047,7 @@ impl KiApp {
             ui.add_space(espace::XS);
             ui::hint(
                 ui,
-                &format!("{} caractères maximum", ki_protocol::MAX_SERVER_NAME),
+                format!("{} caractères maximum", ki_protocol::MAX_SERVER_NAME),
             );
         }
 
@@ -10082,9 +10082,9 @@ impl KiApp {
                     ui.label(RichText::new(e.as_str()).color(DANGER).size(texte::COURANT));
                 }
                 Ok(n) if n.is_empty() => {
-                    ui::hint(ui, &format!("vide : automatique, les liens partent de l'adresse de connexion — {auto}/salon1"));
+                    ui::hint(ui, format!("vide : automatique, les liens partent de l'adresse de connexion — {auto}/salon1"));
                 }
-                Ok(n) => ui::hint(ui, &format!("les liens des portes : {n}/salon1")),
+                Ok(n) => ui::hint(ui, format!("les liens des portes : {n}/salon1")),
             }
             ui::hint(
                 ui,
@@ -11360,7 +11360,7 @@ impl KiApp {
             ui::section_label(ui, "Réseau");
             let r = match recu {
                 None => return ui::hint(ui, "relevé du débit…"),
-                Some(Err(e)) => return ui::hint(ui, &format!("débit indisponible : {e}")),
+                Some(Err(e)) => return ui::hint(ui, format!("débit indisponible : {e}")),
                 Some(Ok(None)) => {
                     return ui::hint(
                         ui,
@@ -11377,7 +11377,7 @@ impl KiApp {
                 ui.label(RichText::new("·").color(TEXT_FAINT).size(texte::COURANT));
                 ui.label(RichText::new("sortant").color(ACCENT).size(texte::COURANT));
                 ui.label(RichText::new(debit_lisible(r.sortant_kbps)).color(TEXT).size(texte::COURANT).strong());
-                ui.label(RichText::new(format!("sur les {} dernières secondes", r.periode_s)).color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, format!("sur les {} dernières secondes", r.periode_s));
             });
             ui.add_space(espace::XS);
             graphes::debits(ui, &r.historique, r.periode_s, 76.0, (INFO, ACCENT), debit_lisible);
@@ -11552,7 +11552,7 @@ impl KiApp {
             }
             egui::Grid::new("tableau-diag").striped(true).spacing([14.0, 3.0]).show(ui, |ui| {
                 for entete in ["version", "joueurs", "sessions", "réouvertures", "famines", "erreurs", "crashs", "taille"] {
-                    ui.label(RichText::new(entete).color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, entete);
                 }
                 ui.end_row();
                 for d in &t.diagnostics {
@@ -11875,9 +11875,9 @@ impl KiApp {
                 let color = theme::member_color(role.color, &role.name);
                 ui::status_dot(ui, color, "", 10.0);
                 ui.label(RichText::new(&role.name).color(color).size(texte::CORPS).strong());
-                ui.label(RichText::new(format!("rang {}", role.rank)).color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, format!("rang {}", role.rank));
                 if role.system {
-                    ui.label(RichText::new("système").color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, "système");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // On ne touche qu'à ce qui est strictement sous son
@@ -12264,7 +12264,7 @@ impl KiApp {
                         }
                         detail.push_str(&format!("par {}", safe_name(&account.ban_by)));
                     }
-                    ui.label(RichText::new(detail).color(TEXT_FAINT).size(texte::PETIT));
+                    ui::hint(ui, detail);
                 });
             }
         }

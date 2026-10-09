@@ -152,7 +152,7 @@ fn aiguille(ui: &mut egui::Ui, niveau: f32, couleur: egui::Color32, texte: &str)
             ui.set_min_width(LARGEUR_NOM);
         });
         ui::meter(ui, niveau, Vec2::new(160.0, 6.0), couleur);
-        ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT));
+        ui::hint(ui, texte);
     });
 }
 

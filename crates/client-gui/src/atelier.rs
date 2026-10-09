@@ -1980,7 +1980,7 @@ fn panneau_reglages(
         ui::section_label(ui, "C'est prêt");
         ui::hint(
             ui,
-            &format!(
+            format!(
                 "{} · {}",
                 if fichier == "telephone.mp4" {
                     "1080×1920, pour TikTok et Instagram"
@@ -1995,7 +1995,7 @@ fn panneau_reglages(
         if let Some(a) = avance_ms.filter(|a| *a >= 50) {
             ui::hint(
                 ui,
-                &format!(
+                format!(
                     "commence {} s avant ton début : coupée sans réencodage, la vidéo part de l'image clé qui précède",
                     format!("{:.1}", a as f32 / 1000.0).replace('.', ",")
                 ),
@@ -2090,7 +2090,7 @@ fn panneau_reglages(
                 / 60;
             ui::hint(
                 ui,
-                &format!(
+                format!(
                     "scanne avec l'appareil photo du téléphone, puis partage la vidéo sur TikTok ou Instagram — \
                      valable {reste} min ; le navigateur avertira une fois du certificat du serveur, continue ; \
                      serveur sur ce PC : le téléphone doit être sur le même Wi-Fi"

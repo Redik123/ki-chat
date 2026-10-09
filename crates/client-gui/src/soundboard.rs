@@ -168,7 +168,7 @@ impl Soundboard {
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| {
                             ui.add_space(espace::XS);
-                            ui.label(RichText::new(m).color(TEXT_FAINT).size(texte::PETIT));
+                            ui::hint(ui, m);
                         });
                 }
                 ui::hint(

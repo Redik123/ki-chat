@@ -485,7 +485,7 @@ pub fn field_label(ui: &mut Ui, text: &str) {
 }
 
 /// Explication en petit sous un réglage.
-pub fn hint(ui: &mut Ui, text: &str) {
+pub fn hint(ui: &mut Ui, text: impl Into<String>) {
     ui.label(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT));
 }
 

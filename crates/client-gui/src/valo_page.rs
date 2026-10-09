@@ -712,7 +712,7 @@ fn cellule(ui: &mut Ui, texte: impl Into<String>, couleur: Color32) -> Response 
 
 /// L'en-tête d'une colonne, en petit et pâle.
 fn en_tete(ui: &mut Ui, titre: &str) {
-    ui.label(RichText::new(titre).color(TEXT_FAINT).size(texte::PETIT));
+    ui::hint(ui, titre);
 }
 
 /// Le rang en une ligne : l'icône du palier si elle est là, puis le nom à
@@ -725,7 +725,7 @@ fn rang_court(ui: &mut Ui, tier: u8, rr: u16, taille: f32, rangs: &rangs::Rangs)
         ui.label(RichText::new(nom_de_rang(tier)).color(graphes::couleur_de_rang(tier)).strong().size(texte::PETIT));
         ui.label(RichText::new(format!("{rr} RR")).color(TEXT_DIM).size(texte::PETIT));
     } else {
-        ui.label(RichText::new(nom_de_rang(0)).color(TEXT_FAINT).size(texte::PETIT));
+        ui::hint(ui, nom_de_rang(0));
     }
 }
 
@@ -1083,7 +1083,7 @@ impl PageValo {
                         }
                         let n = stats.len();
                         let s = if n > 1 { "s" } else { "" };
-                        ui.label(RichText::new(format!("{n} joueur{s} lié{s}")).color(TEXT_FAINT).size(texte::PETIT));
+                        ui::hint(ui, format!("{n} joueur{s} lié{s}"));
                     });
                 });
                 ui::hint(
@@ -1918,8 +1918,8 @@ fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
             ui.label(RichText::new(m.equipes.join("  vs  ")).strong());
             let ligue = if m.region.is_empty() { m.ligue.clone() } else { format!("{} · {}", m.ligue, m.region) };
             ui.label(RichText::new(ligue).color(TEXT_DIM));
-            ui.label(RichText::new(&m.tournoi).color(TEXT_FAINT).size(texte::PETIT));
-            ui.label(RichText::new(&m.format).color(TEXT_FAINT).size(texte::PETIT));
+            ui::hint(ui, &m.tournoi);
+            ui::hint(ui, &m.format);
             ui.end_row();
         }
     });
@@ -2163,12 +2163,12 @@ impl PageValo {
             }
         });
         if vue.p.is_empty() {
-            ui.label(RichText::new("Aucun match classé connu.").color(TEXT_FAINT).size(texte::PETIT));
+            ui::hint(ui, "Aucun match classé connu.");
             self.survol = None;
             return;
         }
         if vue.p.len() < 2 {
-            ui.label(RichText::new("Pas encore assez de classés pour une courbe.").color(TEXT_FAINT).size(texte::PETIT));
+            ui::hint(ui, "Pas encore assez de classés pour une courbe.");
             self.survol = None;
             return;
         }
@@ -2202,7 +2202,7 @@ impl PageValo {
     fn table(&mut self, ui: &mut Ui, vue: &Vue) {
         ui.label(RichText::new("Matchs").color(TEXT_DIM).size(texte::PETIT));
         if vue.e.is_empty() {
-            ui.label(RichText::new("Aucun match sur cette période.").color(TEXT_FAINT).size(texte::PETIT));
+            ui::hint(ui, "Aucun match sur cette période.");
             return;
         }
         let largeur_page = ui.available_width();
@@ -2358,7 +2358,7 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
             ui.label(RichText::new(&fiche.riot_id).strong().size(texte::TITRE));
             ui.label(RichText::new(&detail).color(TEXT_DIM).size(texte::PETIT));
             if let Some(titre) = &titre {
-                ui.label(RichText::new(titre).color(TEXT_FAINT).size(texte::PETIT));
+                ui::hint(ui, titre);
             }
         });
         return;
@@ -2454,7 +2454,7 @@ fn en_tete_fiche(ui: &mut Ui, vue: &Vue) {
         if !pic.saison.is_empty() {
             texte.push_str(&format!(" · {}", pic.saison.to_uppercase()));
         }
-        ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT));
+        ui::hint(ui, texte);
     }
 }
 
@@ -2749,7 +2749,7 @@ fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
         carriere.sort_by_key(|c| c.medaille.ordre());
         if !carriere.is_empty() {
             let texte = carriere.iter().map(|c| format!("{} ×{}", c.medaille.nom(), c.fois)).collect::<Vec<_>>().join(" · ");
-            ui.label(RichText::new(format!("en carrière : {texte}")).color(TEXT_FAINT).size(texte::PETIT));
+            ui::hint(ui, format!("en carrière : {texte}"));
         }
     }
     ui.add_space(espace::L);

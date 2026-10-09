@@ -137,27 +137,8 @@ impl Vitrine {
 
     fn palette(&mut self, ui: &mut egui::Ui) {
         c::section(ui, Icon::Star, "Palette", Some("ki_ui::jetons::couleur"), |ui| {
-            let teintes = [
-                ("BG_DEEP", couleur::BG_DEEP),
-                ("BG_SIDE", couleur::BG_SIDE),
-                ("BG_BASE", couleur::BG_BASE),
-                ("BG_RAISED", couleur::BG_RAISED),
-                ("BG_HOVER", couleur::BG_HOVER),
-                ("BG_ACTIVE", couleur::BG_ACTIVE),
-                ("BORDER", couleur::BORDER),
-                ("BORDER_STRONG", couleur::BORDER_STRONG),
-                ("TEXT", couleur::TEXT),
-                ("TEXT_DIM", couleur::TEXT_DIM),
-                ("TEXT_FAINT", couleur::TEXT_FAINT),
-                ("ACCENT", couleur::ACCENT),
-                ("SPEAK", couleur::SPEAK),
-                ("DANGER", couleur::DANGER),
-                ("WARN", couleur::WARN),
-                ("INFO", couleur::INFO),
-                ("INVITE", couleur::INVITE),
-            ];
             Flex::ligne().ecart(espace::M).passer_a_la_ligne().show(ui, "teintes", |f| {
-                for (nom, teinte) in teintes {
+                for (nom, teinte) in couleur::NOMMEES {
                     f.ui(|ui| {
                         ui.vertical(|ui| {
                             let (rect, _) = ui.allocate_exact_size(vec2(110.0, 34.0), Sense::hover());
@@ -422,7 +403,7 @@ impl Vitrine {
                 .inner;
             c::hint(
                 ui,
-                &format!(
+                format!(
                     "{} éléments, {} construits à cette image, {} mesurés d'avance — {}",
                     self.elements.len(),
                     sortie.dessines,

@@ -443,7 +443,7 @@ impl Portes {
         if !self.slug.is_empty() && !valide {
             ui::hint(
                 ui,
-                &format!(
+                format!(
                     "de {} à {} caractères : minuscules, chiffres et tirets — un mot qu'on dicte en vocal",
                     ki_protocol::PORTE_SLUG_MIN,
                     ki_protocol::PORTE_SLUG_MAX
@@ -453,7 +453,7 @@ impl Portes {
             ui::hint(ui, "cette porte est déjà ouverte");
         } else {
             let exemple = if self.slug.is_empty() { "salon1" } else { self.slug.as_str() };
-            ui::hint(ui, &format!("le lien : {}/{exemple} — un mot qu'on dicte en vocal", contexte.base_web));
+            ui::hint(ui, format!("le lien : {}/{exemple} — un mot qu'on dicte en vocal", contexte.base_web));
         }
         ui.add_space(espace::M);
         ui::field_label(ui, "Nom du salon temporaire (facultatif)");
@@ -464,7 +464,7 @@ impl Portes {
         ui::hint(ui, "la porte ferme d'elle-même au bout de ce temps, ou dix minutes après le départ du dernier invité ; le salon est alors effacé");
         ui.add_space(espace::M);
         if plafond {
-            ui::hint(ui, &format!("{} portes ouvertes, c'est le maximum", ki_protocol::PORTES_MAX));
+            ui::hint(ui, format!("{} portes ouvertes, c'est le maximum", ki_protocol::PORTES_MAX));
         }
         ui.add_enabled_ui(valide && !deja && !plafond, |ui| {
             if ui::primary_button(ui, Some(Icon::Key), "Ouvrir la porte", None).clicked() {
