@@ -46,6 +46,8 @@ struct Vitrine {
     pseudo: String,
     volume: f32,
     onglet: u8,
+    /// Le champ de la section emoji.
+    message: String,
     bandeau_ferme: bool,
     /// Les clés des éléments de la liste virtualisée, et la prochaine à
     /// donner à ce qu'on ajoute au-dessus.
@@ -87,6 +89,7 @@ impl eframe::App for Vitrine {
                 self.icones(ui);
                 self.reglages(ui);
                 self.bandeaux(ui);
+                self.emoji(ui);
                 self.mesures(ui, niveau, temps);
                 self.flex(ui);
                 self.liste(ui);
@@ -292,6 +295,43 @@ impl Vitrine {
             c::card(ui, |ui| {
                 ui.label("Une carte : une surface relevée pour regrouper.");
             });
+        });
+    }
+
+    fn emoji(&mut self, ui: &mut egui::Ui) {
+        if self.message.is_empty() {
+            self.message = "Un champ aussi : 😂👍🏽🔥 — tape ou colle des emoji".to_owned();
+        }
+        c::section(ui, Icon::Chat, "Emoji en couleur", Some("ki_ui::emoji — la police emoji du système, en aplats"), |ui| {
+            let phrase = "gg 🔥🔥 on a gagné 😂👍🏽 bravo l'équipe 👨‍💻❤️ à demain 🎉 (drapeaux : 🇫🇷)";
+            c::section_label(ui, "ki-ui");
+            ki_ui::emoji::label(ui, RichText::new(phrase).size(texte::CORPS).color(couleur::TEXT));
+            c::section_label(ui, "egui seul");
+            ui.label(RichText::new(phrase).size(texte::CORPS).color(couleur::TEXT));
+            ui.add_space(espace::M);
+            c::section_label(ui, "en grand");
+            ki_ui::emoji::label(ui, RichText::new("🔥😂🎉👀").size(40.0));
+            ui.add_space(espace::M);
+            c::section_label(ui, "réactions");
+            ui.horizontal(|ui| {
+                for (e, n) in [("👍", 3), ("❤️", 2), ("😂", 5), ("🔥", 1), ("🎉", 4)] {
+                    match ki_ui::emoji::image(ui.ctx(), e) {
+                        Some(image) => ui.add(egui::Button::image_and_text(image.fit_to_exact_size(vec2(18.0, 18.0)), n.to_string())),
+                        None => ui.button(format!("{e} {n}")),
+                    };
+                }
+            });
+            ui.add_space(espace::M);
+            c::section_label(ui, "champ de saisie");
+            let mut mise_en_page = |ui: &egui::Ui, tampon: &dyn egui::TextBuffer, largeur: f32| {
+                ki_ui::emoji::mise_en_page(ui, tampon.as_str(), egui::FontId::proportional(texte::CORPS), largeur)
+            };
+            let sortie = egui::TextEdit::multiline(&mut self.message)
+                .layouter(&mut mise_en_page)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .show(ui);
+            ki_ui::emoji::peindre(&ui.painter().with_clip_rect(sortie.text_clip_rect), sortie.galley_pos, &sortie.galley);
         });
     }
 

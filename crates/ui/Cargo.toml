@@ -20,6 +20,15 @@ tracing.workspace = true
 # Une icône se retient (la touche d'un Loupedeck retient la sienne).
 serde.workspace = true
 
+# Les emoji en couleur (emoji.rs) : les outils mêmes d'egui pour lire une
+# police (skrifa), façonner un texte (harfrust) et peindre (vello_cpu), aux
+# mêmes versions ; unicode-properties dit ce qui s'affiche en emoji.
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+harfrust = "0.12"
+vello_cpu = { version = "0.1", default-features = false, features = ["std", "u8_pipeline"] }
+unicode-segmentation = "1.13"
+unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
+
 [dev-dependencies]
 # Les polices d'egui, pour les tests qui mesurent du texte.
 egui = { version = "0.36", features = ["default_fonts"] }

@@ -78,6 +78,8 @@ fn install_fonts(ctx: &egui::Context) {
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
         family.push("Hack".to_owned());
     }
+    // Les emoji en couleur : la police emoji du système, dans sa famille.
+    crate::emoji::installer(&mut fonts);
     ctx.set_fonts(fonts);
 }
 

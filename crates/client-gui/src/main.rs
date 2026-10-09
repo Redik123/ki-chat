@@ -8173,15 +8173,32 @@ impl KiApp {
                         format!("Message dans #{channel_name}")
                     };
                     f.grandit(|ui| {
-                        let response = ui.add_sized(
-                            Vec2::new(ui.available_width(), 18.0 * lignes as f32 + 8.0),
-                            egui::TextEdit::multiline(&mut self.input)
-                                .id(egui::Id::new("saisie_du_chat"))
-                                .char_limit(ki_protocol::MAX_CHAT_TEXT)
-                                .desired_rows(lignes)
-                                .frame(egui::Frame::new().inner_margin(marge::symetrique(espace::XS, espace::XS)))
-                                .hint_text(indice),
+                        // Les emoji en couleur : la mise en page de ki-ui, puis
+                        // leurs images posées sur le texte.
+                        let mut mise_en_page = |ui: &egui::Ui, tampon: &dyn egui::TextBuffer, largeur: f32| {
+                            let police = egui::FontSelection::Default.resolve(ui.style());
+                            ki_ui::emoji::mise_en_page(ui, tampon.as_str(), police, largeur)
+                        };
+                        let taille = Vec2::new(ui.available_width(), 18.0 * lignes as f32 + 8.0);
+                        let disposition = egui::Layout::centered_and_justified(ui.layout().main_dir());
+                        let sortie = ui
+                            .allocate_ui_with_layout(taille, disposition, |ui| {
+                                egui::TextEdit::multiline(&mut self.input)
+                                    .id(egui::Id::new("saisie_du_chat"))
+                                    .char_limit(ki_protocol::MAX_CHAT_TEXT)
+                                    .desired_rows(lignes)
+                                    .frame(egui::Frame::new().inner_margin(marge::symetrique(espace::XS, espace::XS)))
+                                    .hint_text(indice)
+                                    .layouter(&mut mise_en_page)
+                                    .show(ui)
+                            })
+                            .inner;
+                        ki_ui::emoji::peindre(
+                            &ui.painter().with_clip_rect(sortie.text_clip_rect),
+                            sortie.galley_pos,
+                            &sortie.galley,
                         );
+                        let response = sortie.response.response;
                         if menu_edition(&response, &mut self.input, false) {
                             self.focus_input = true;
                         }
@@ -8356,13 +8373,9 @@ impl KiApp {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(232.0);
                     ui.label(RichText::new(&msg.username).strong());
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(ki_protocol::excerpt_of(&msg.text))
-                                .color(TEXT_FAINT)
-                                .size(texte::PETIT),
-                        )
-                        .truncate(),
+                    ki_ui::emoji::label_tronque(
+                        ui,
+                        RichText::new(ki_protocol::excerpt_of(&msg.text)).color(TEXT_FAINT).size(texte::PETIT),
                     );
                     ui.add_space(espace::XS);
                     // Réagir : les emojis du protocole, d'un clic. Celui
@@ -8374,7 +8387,11 @@ impl KiApp {
                                 .reactions
                                 .iter()
                                 .any(|r| r.emoji == *emoji && self.my_id.is_some_and(|me| r.users.contains(&me)));
-                            let bouton = egui::Button::new(RichText::new(*emoji).size(texte::TITRE))
+                            let bouton = match ki_ui::emoji::image(ui.ctx(), emoji) {
+                                Some(image) => egui::Button::image(image.fit_to_exact_size(Vec2::splat(22.0))),
+                                None => egui::Button::new(RichText::new(*emoji).size(texte::TITRE)),
+                            };
+                            let bouton = bouton
                                 .fill(if deja { theme::alpha(ACCENT, 40) } else { theme::BG_RAISED })
                                 .corner_radius(egui::CornerRadius::same(rayon::M));
                             if ui.add(bouton).clicked() {
@@ -8885,7 +8902,7 @@ impl KiApp {
                                 .chars()
                                 .take(160)
                                 .collect();
-                            ui.label(RichText::new(apercu).color(TEXT).size(texte::CORPS));
+                            ki_ui::emoji::label(ui, RichText::new(apercu).color(TEXT).size(texte::CORPS));
                         });
                         if bloc
                             .response
@@ -13581,14 +13598,12 @@ fn message_block(
                 // En réponse à… : le rappel de l'original, cliquable pour y
                 // aller.
                 if let Some(r) = &msg.reply_to {
-                    let rappel = ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("↩ {} — {}", r.username, r.excerpt))
-                                .color(TEXT_DIM)
-                                .size(texte::PETIT),
-                        )
-                        .sense(Sense::click())
-                        .truncate(),
+                    let rappel = ki_ui::emoji::label_avec(
+                        ui,
+                        RichText::new(format!("↩ {} — {}", r.username, r.excerpt))
+                            .color(TEXT_DIM)
+                            .size(texte::PETIT),
+                        |l| l.sense(Sense::click()).truncate(),
                     );
                     if rappel
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13624,10 +13639,19 @@ fn message_block(
                         ui.spacing_mut().item_spacing.x = espace::XS;
                         for r in &msg.reactions {
                             let mienne = moi_id.is_some_and(|me| r.users.contains(&me));
-                            let texte = RichText::new(format!("{} {}", r.emoji, r.users.len()))
-                                .size(texte::COURANT)
-                                .color(if mienne { ACCENT } else { TEXT_DIM });
-                            let pastille = egui::Button::new(texte)
+                            let encre = if mienne { ACCENT } else { TEXT_DIM };
+                            let pastille = match ki_ui::emoji::image(ui.ctx(), &r.emoji) {
+                                Some(image) => egui::Button::image_and_text(
+                                    image.fit_to_exact_size(Vec2::splat(16.0)),
+                                    RichText::new(r.users.len().to_string()).size(texte::COURANT).color(encre),
+                                ),
+                                None => egui::Button::new(
+                                    RichText::new(format!("{} {}", r.emoji, r.users.len()))
+                                        .size(texte::COURANT)
+                                        .color(encre),
+                                ),
+                            };
+                            let pastille = pastille
                                 .corner_radius(egui::CornerRadius::same(rayon::XL))
                                 .fill(if mienne { theme::alpha(ACCENT, 40) } else { theme::BG_RAISED })
                                 .stroke(egui::Stroke::new(
@@ -13869,7 +13893,7 @@ fn message_body(
     // widget par fragment.
     if let [markup::Bloc::Ligne(frags)] = blocs.as_slice() {
         if let [markup::Fragment::Texte(t)] = frags.as_slice() {
-            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS));
+            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS));
             return;
         }
     }
@@ -13897,17 +13921,17 @@ fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
     use markup::Fragment as F;
     match frag {
         F::Texte(t) => {
-            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS));
+            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS));
         }
         F::Lien(url) => {
             ui.hyperlink_to(RichText::new(shorten(url)).size(texte::CORPS), *url)
                 .on_hover_text(*url);
         }
         F::Gras(t) => {
-            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS).strong());
+            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS).strong());
         }
         F::Italique(t) => {
-            ui.label(RichText::new(*t).color(TEXT).size(texte::CORPS).italics());
+            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS).italics());
         }
         F::Code(t) => {
             // Fond discret : ce qui distingue du code d'une phrase, c'est

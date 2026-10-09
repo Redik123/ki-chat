@@ -11,6 +11,8 @@
 //!   pastilles, interrupteurs, curseurs, champs, bandeaux, encarts,
 //!   rappels, étiquettes, vumètres, avatars —, et [`icones`], le jeu
 //!   d'icônes vectorielles qu'ils emploient.
+//! - [`emoji`] : les emoji en couleur, peints avec la police emoji du
+//!   système, par-dessus le texte qu'egui met en page.
 //! - [`liste`] : la liste virtualisée, qui ne construit que ce qui se voit
 //!   et garde immobile la ligne qu'on lit quand le reste bouge.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
@@ -20,6 +22,7 @@
 //! s'écrire en egui ordinaire, et ki-ui s'y mêle sans rien imposer.
 
 pub mod composants;
+pub mod emoji;
 pub mod flex;
 pub mod icones;
 pub mod jetons;

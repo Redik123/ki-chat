@@ -540,11 +540,9 @@ pub fn rappel(ui: &mut Ui, texte_rappel: &str, bulle: &str) -> bool {
         .show(ui, |ui| {
             Flex::ligne().ecart(espace::S).show(ui, "rappel", |f| {
                 f.grandit(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(texte_rappel).color(theme::TEXT_DIM).size(texte::COURANT),
-                        )
-                        .truncate(),
+                    crate::emoji::label_tronque(
+                        ui,
+                        RichText::new(texte_rappel).color(theme::TEXT_DIM).size(texte::COURANT),
                     );
                 });
                 f.ui(|ui| {
