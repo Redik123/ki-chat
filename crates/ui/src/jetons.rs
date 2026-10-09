@@ -45,8 +45,9 @@ pub mod couleur {
     /// ni une couleur de rôle — « pas des nôtres, le temps d'une porte ».
     pub const INVITE: Color32 = Color32::from_rgb(0xf0, 0xb8, 0x6c);
 
-    /// Couleurs de pseudos, stables par hachage du nom.
-    const PALETTE: [Color32; 8] = [
+    /// Les huit teintes des pseudos, dans l'ordre du hachage : le même sur
+    /// le PC, dans ki-core et dans l'appli mobile.
+    pub const PSEUDOS: [Color32; 8] = [
         Color32::from_rgb(0x2d, 0xd4, 0x8f),
         Color32::from_rgb(0x62, 0xa8, 0xff),
         Color32::from_rgb(0xff, 0xa9, 0x5c),
@@ -57,11 +58,35 @@ pub mod couleur {
         Color32::from_rgb(0xff, 0x7d, 0x7d),
     ];
 
+    /// La palette, nommée : pour la montrer (la vitrine) et pour vérifier
+    /// que ses copies hors de Rust la suivent.
+    pub const NOMMEES: [(&str, Color32); 19] = [
+        ("BG_DEEP", BG_DEEP),
+        ("BG_SIDE", BG_SIDE),
+        ("BG_BASE", BG_BASE),
+        ("BG_RAISED", BG_RAISED),
+        ("BG_HOVER", BG_HOVER),
+        ("BG_ACTIVE", BG_ACTIVE),
+        ("BG_GHOST", BG_GHOST),
+        ("BORDER", BORDER),
+        ("BORDER_SOFT", BORDER_SOFT),
+        ("BORDER_STRONG", BORDER_STRONG),
+        ("TEXT", TEXT),
+        ("TEXT_DIM", TEXT_DIM),
+        ("TEXT_FAINT", TEXT_FAINT),
+        ("ACCENT", ACCENT),
+        ("SPEAK", SPEAK),
+        ("DANGER", DANGER),
+        ("WARN", WARN),
+        ("INFO", INFO),
+        ("INVITE", INVITE),
+    ];
+
     /// Les couleurs d'une série — bandes d'un égaliseur, courbes d'un
     /// graphe : l'accent, l'info, l'alerte, puis des teintes des pseudos,
     /// franchement distinctes les unes des autres.
     pub const SERIES: [Color32; 8] = [
-        ACCENT, INFO, WARN, PALETTE[4], PALETTE[3], PALETTE[6], PALETTE[5], PALETTE[7],
+        ACCENT, INFO, WARN, PSEUDOS[4], PSEUDOS[3], PSEUDOS[6], PSEUDOS[5], PSEUDOS[7],
     ];
 
     /// Couleur attribuée à un pseudo — même pseudo, même couleur, partout
@@ -71,7 +96,7 @@ pub mod couleur {
     /// de discussion, mieux vaut peu de couleurs mais franchement distinctes.
     pub fn pour_pseudo(nom: &str) -> Color32 {
         let h = nom.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-        PALETTE[(h % PALETTE.len() as u32) as usize]
+        PSEUDOS[(h % PSEUDOS.len() as u32) as usize]
     }
 
     /// Couleur d'identité d'un serveur : teinte **continue** dérivée du nom.

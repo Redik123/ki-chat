@@ -62,9 +62,9 @@ pub fn hex(c: u32) -> String {
 mod tests {
     use super::*;
 
-    /// Les mêmes couleurs que le PC : la palette et le hachage n'ont pas le
-    /// droit de diverger, sinon une même personne change de couleur selon
-    /// l'appareil.
+    /// Le hachage, tel que le PC le fait. La comparaison avec le PC —
+    /// palette, ordre des teintes, rangs, invités — est dans ki-chat
+    /// (`theme.rs`, `copies`) : ki-core ne voit pas ki-ui.
     #[test]
     fn meme_hachage_que_le_pc() {
         let h = "Redik_".bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
