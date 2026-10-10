@@ -2186,6 +2186,7 @@ dependencies = [
  "ed25519-dalek",
  "ki-client-quic",
  "ki-protocol",
+ "ki-ui-base",
  "ki-voice",
  "sha2",
  "tokio",
@@ -2239,6 +2240,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "ki-ui-base"
+version = "0.1.63"
 
 [[package]]
 name = "ki-voice"

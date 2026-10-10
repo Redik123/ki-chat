@@ -10,6 +10,9 @@ license.workspace = true
 
 [dependencies]
 ki-protocol = { path = "../protocol" }
+# La palette commune aux applis ki-* : les couleurs des pseudos et des
+# invités, sans egui.
+ki-ui-base = { path = "../ui-base" }
 ki-client-quic = { path = "../client-quic" }
 ki-voice = { path = "../voice" }
 tokio.workspace = true

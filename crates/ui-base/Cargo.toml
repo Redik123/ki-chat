@@ -1,0 +1,13 @@
+[package]
+name = "ki-ui-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Ce que les applis ki-* partagent sans dépendre d'un moteur d'interface :
+# la palette, et les échelles des espacements, des rayons d'angle et des
+# tailles de texte. ki-ui la traduit pour egui (ki-chat), ki-core s'en sert
+# tel quel (l'appli mobile), ki-studio la traduit pour iced — par son chemin,
+# depuis son propre dépôt. Aucune dépendance, exprès.
+
+[dependencies]

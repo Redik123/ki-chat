@@ -1,102 +1,91 @@
 //! Les jetons de design : la palette, et les échelles des espacements, des
 //! rayons d'angle et des tailles de texte.
 //!
+//! Ils viennent de [`ki_ui_base`], commune aux applis ki-* : ki-studio en
+//! tire les mêmes couleurs pour iced, ki-core pour l'appli mobile. Ici, ils
+//! prennent les types d'egui — à la compilation, sans rien coûter.
+//!
 //! Les nouveaux écrans s'en tiennent à ces valeurs ; les anciens y viennent
-//! à mesure qu'on les reprend. Une valeur qui manque se discute ici, pas
-//! au coin d'un écran.
+//! à mesure qu'on les reprend. Une valeur qui manque se discute dans
+//! ki-ui-base, pas au coin d'un écran.
 
 use egui::Color32;
+use ki_ui_base::Couleur;
+
+pub use ki_ui_base::{espace, rayon, texte};
+
+/// Une couleur de la base, en egui. La palette est opaque, et une couleur
+/// translucide ne passe pas par ici : refusée à la compilation pour une
+/// constante (egui prémultiplie l'alpha, la base non).
+pub const fn en_egui(c: Couleur) -> Color32 {
+    assert!(c.a == 255, "en_egui : couleur translucide");
+    Color32::from_rgb(c.r, c.g, c.b)
+}
+
+const fn serie<const N: usize>(base: [Couleur; N]) -> [Color32; N] {
+    let mut sortie = [Color32::TRANSPARENT; N];
+    let mut i = 0;
+    while i < N {
+        sortie[i] = en_egui(base[i]);
+        i += 1;
+    }
+    sortie
+}
+
+const fn nommees<const N: usize>(base: [(&'static str, Couleur); N]) -> [(&'static str, Color32); N] {
+    let mut sortie = [("", Color32::TRANSPARENT); N];
+    let mut i = 0;
+    while i < N {
+        sortie[i] = (base[i].0, en_egui(base[i].1));
+        i += 1;
+    }
+    sortie
+}
 
 /// La palette : un gris-bleu profond façon poste de jeu, un unique accent
-/// vert.
+/// vert. Les rôles sont décrits dans [`ki_ui_base::couleur`].
 pub mod couleur {
-    use super::Color32;
+    use super::{en_egui, nommees, serie, Color32};
+    use ki_ui_base::couleur as base;
 
-    /// Fond le plus profond : zone de conversation, champs « creusés ».
-    pub const BG_DEEP: Color32 = Color32::from_rgb(0x0c, 0x0f, 0x14);
-    /// Colonne de gauche (salons, membres).
-    pub const BG_SIDE: Color32 = Color32::from_rgb(0x11, 0x15, 0x1b);
-    /// Fond général des panneaux.
-    pub const BG_BASE: Color32 = Color32::from_rgb(0x15, 0x1a, 0x21);
-    /// Surfaces en relief : fenêtres, cartes, boutons.
-    pub const BG_RAISED: Color32 = Color32::from_rgb(0x1b, 0x21, 0x2a);
-    pub const BG_HOVER: Color32 = Color32::from_rgb(0x24, 0x2c, 0x37);
-    pub const BG_ACTIVE: Color32 = Color32::from_rgb(0x2d, 0x37, 0x44);
-    /// Survol très discret (lignes de message).
-    pub const BG_GHOST: Color32 = Color32::from_rgb(0x1a, 0x20, 0x28);
+    pub const BG_DEEP: Color32 = en_egui(base::BG_DEEP);
+    pub const BG_SIDE: Color32 = en_egui(base::BG_SIDE);
+    pub const BG_BASE: Color32 = en_egui(base::BG_BASE);
+    pub const BG_RAISED: Color32 = en_egui(base::BG_RAISED);
+    pub const BG_HOVER: Color32 = en_egui(base::BG_HOVER);
+    pub const BG_ACTIVE: Color32 = en_egui(base::BG_ACTIVE);
+    pub const BG_GHOST: Color32 = en_egui(base::BG_GHOST);
 
-    pub const BORDER: Color32 = Color32::from_rgb(0x28, 0x31, 0x3c);
-    pub const BORDER_SOFT: Color32 = Color32::from_rgb(0x1e, 0x25, 0x2e);
-    /// Trait ou texte très en retrait, mais encore lisible.
-    pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x44, 0x51, 0x60);
+    pub const BORDER: Color32 = en_egui(base::BORDER);
+    pub const BORDER_SOFT: Color32 = en_egui(base::BORDER_SOFT);
+    pub const BORDER_STRONG: Color32 = en_egui(base::BORDER_STRONG);
 
-    pub const TEXT: Color32 = Color32::from_rgb(0xe7, 0xed, 0xf4);
-    pub const TEXT_DIM: Color32 = Color32::from_rgb(0x94, 0xa2, 0xb2);
-    pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x63, 0x70, 0x7f);
+    pub const TEXT: Color32 = en_egui(base::TEXT);
+    pub const TEXT_DIM: Color32 = en_egui(base::TEXT_DIM);
+    pub const TEXT_FAINT: Color32 = en_egui(base::TEXT_FAINT);
 
-    /// Accent de la marque (vert ki-chat).
-    pub const ACCENT: Color32 = Color32::from_rgb(0x00, 0xd2, 0x6a);
-    /// Vert « quelqu'un parle ».
-    pub const SPEAK: Color32 = Color32::from_rgb(0x00, 0xe6, 0x76);
-    pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
-    pub const WARN: Color32 = Color32::from_rgb(0xff, 0xa1, 0x57);
-    pub const INFO: Color32 = Color32::from_rgb(0x58, 0xa6, 0xff);
-    /// Les invités web : un ambre à part, ni l'accent (le bot, le serveur)
-    /// ni une couleur de rôle — « pas des nôtres, le temps d'une porte ».
-    pub const INVITE: Color32 = Color32::from_rgb(0xf0, 0xb8, 0x6c);
+    pub const ACCENT: Color32 = en_egui(base::ACCENT);
+    pub const SPEAK: Color32 = en_egui(base::SPEAK);
+    pub const DANGER: Color32 = en_egui(base::DANGER);
+    pub const WARN: Color32 = en_egui(base::WARN);
+    pub const INFO: Color32 = en_egui(base::INFO);
+    pub const INVITE: Color32 = en_egui(base::INVITE);
 
-    /// Les huit teintes des pseudos, dans l'ordre du hachage : le même sur
-    /// le PC, dans ki-core et dans l'appli mobile.
-    pub const PSEUDOS: [Color32; 8] = [
-        Color32::from_rgb(0x2d, 0xd4, 0x8f),
-        Color32::from_rgb(0x62, 0xa8, 0xff),
-        Color32::from_rgb(0xff, 0xa9, 0x5c),
-        Color32::from_rgb(0xff, 0x8a, 0xc4),
-        Color32::from_rgb(0xba, 0x92, 0xff),
-        Color32::from_rgb(0x2a, 0xd3, 0xdd),
-        Color32::from_rgb(0xff, 0xd8, 0x63),
-        Color32::from_rgb(0xff, 0x7d, 0x7d),
-    ];
+    /// Les huit teintes des pseudos, dans l'ordre du hachage.
+    pub const PSEUDOS: [Color32; 8] = serie(base::PSEUDOS);
 
     /// La palette, nommée : pour la montrer (la vitrine) et pour vérifier
     /// que ses copies hors de Rust la suivent.
-    pub const NOMMEES: [(&str, Color32); 19] = [
-        ("BG_DEEP", BG_DEEP),
-        ("BG_SIDE", BG_SIDE),
-        ("BG_BASE", BG_BASE),
-        ("BG_RAISED", BG_RAISED),
-        ("BG_HOVER", BG_HOVER),
-        ("BG_ACTIVE", BG_ACTIVE),
-        ("BG_GHOST", BG_GHOST),
-        ("BORDER", BORDER),
-        ("BORDER_SOFT", BORDER_SOFT),
-        ("BORDER_STRONG", BORDER_STRONG),
-        ("TEXT", TEXT),
-        ("TEXT_DIM", TEXT_DIM),
-        ("TEXT_FAINT", TEXT_FAINT),
-        ("ACCENT", ACCENT),
-        ("SPEAK", SPEAK),
-        ("DANGER", DANGER),
-        ("WARN", WARN),
-        ("INFO", INFO),
-        ("INVITE", INVITE),
-    ];
+    pub const NOMMEES: [(&str, Color32); 19] = nommees(base::NOMMEES);
 
     /// Les couleurs d'une série — bandes d'un égaliseur, courbes d'un
-    /// graphe : l'accent, l'info, l'alerte, puis des teintes des pseudos,
-    /// franchement distinctes les unes des autres.
-    pub const SERIES: [Color32; 8] = [
-        ACCENT, INFO, WARN, PSEUDOS[4], PSEUDOS[3], PSEUDOS[6], PSEUDOS[5], PSEUDOS[7],
-    ];
+    /// graphe.
+    pub const SERIES: [Color32; 8] = serie(base::SERIES);
 
     /// Couleur attribuée à un pseudo — même pseudo, même couleur, partout
-    /// (et d'une appli ki-* à l'autre).
-    ///
-    /// Une palette fermée de huit teintes : les pseudos se lisent dans le fil
-    /// de discussion, mieux vaut peu de couleurs mais franchement distinctes.
+    /// (et d'une appli ki-* à l'autre) : [`base::pour_pseudo`].
     pub fn pour_pseudo(nom: &str) -> Color32 {
-        let h = nom.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-        PSEUDOS[(h % PSEUDOS.len() as u32) as usize]
+        en_egui(base::pour_pseudo(nom))
     }
 
     /// Couleur d'identité d'un serveur : teinte **continue** dérivée du nom.
@@ -126,24 +115,6 @@ pub mod couleur {
     }
 }
 
-/// Les espacements, en points : entre deux éléments, dans une marge.
-pub mod espace {
-    /// Entre une icône et son texte collé.
-    pub const XXS: f32 = 2.0;
-    /// Entre un titre et sa précision.
-    pub const XS: f32 = 4.0;
-    /// Entre deux contrôles d'une même rangée.
-    pub const S: f32 = 6.0;
-    /// L'écart courant.
-    pub const M: f32 = 8.0;
-    /// Entre deux blocs d'une même section ; marge d'une carte.
-    pub const L: f32 = 12.0;
-    /// Marge d'une section, d'une fenêtre.
-    pub const XL: f32 = 16.0;
-    /// Entre deux sections qui n'ont rien à voir.
-    pub const XXL: f32 = 24.0;
-}
-
 /// Les marges intérieures (cadres, cartes, bulles), faites des
 /// espacements — egui les veut en entiers.
 pub mod marge {
@@ -160,33 +131,24 @@ pub mod marge {
     }
 }
 
-/// Les rayons d'angle, en points (ceux d'egui sont des entiers).
-pub mod rayon {
-    /// Pastilles, badges, petites cases.
-    pub const S: u8 = 4;
-    /// Boutons, champs, menus.
-    pub const M: u8 = 6;
-    /// Encarts, vignettes.
-    pub const L: u8 = 8;
-    /// Cartes, sections, barre de saisie.
-    pub const XL: u8 = 12;
-    /// Pilules : de bout en bout arrondies à leur hauteur courante.
-    pub const PILULE: u8 = 14;
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Les tailles de texte, en points — celles d'egui pour le corps (14) et
-/// le petit (11,5) en font partie.
-pub mod texte {
-    /// Étiquettes en capitales au-dessus d'un groupe.
-    pub const MINUSCULE: f32 = 10.5;
-    /// Précisions, aides, horodatages.
-    pub const PETIT: f32 = 11.5;
-    /// Libellés, lignes de réglage, texte secondaire.
-    pub const COURANT: f32 = 12.5;
-    /// Le corps : messages, boutons.
-    pub const CORPS: f32 = 14.0;
-    /// Titre d'une section.
-    pub const TITRE: f32 = 15.0;
-    /// Titre d'une page, d'une fenêtre.
-    pub const GRAND: f32 = 19.0;
+    /// La base et sa traduction egui disent la même chose, couleur par
+    /// couleur — et le hachage des pseudos aussi.
+    #[test]
+    fn la_palette_egui_suit_la_base() {
+        for ((nom, ici), (nom_base, base)) in couleur::NOMMEES.iter().zip(ki_ui_base::couleur::NOMMEES) {
+            assert_eq!(*nom, nom_base);
+            assert_eq!(ici.to_array(), [base.r, base.g, base.b, base.a], "{nom}");
+        }
+        for nom in ["Redik_", "drion", "mg4230", ""] {
+            let base = ki_ui_base::couleur::pour_pseudo(nom);
+            assert_eq!(couleur::pour_pseudo(nom), Color32::from_rgb(base.r, base.g, base.b));
+        }
+        assert_eq!(couleur::SERIES[0], couleur::ACCENT);
+        assert_eq!(espace::M, 8.0);
+        assert_eq!(rayon::XL, 12);
+    }
 }

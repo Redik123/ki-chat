@@ -9,6 +9,9 @@ license.workspace = true
 # flexbox. Faite pour servir aussi aux futures applis ki-* (ki-studio).
 
 [dependencies]
+# La palette et les échelles, communes aux applis ki-* (ki-studio les prend
+# pour iced) : jetons.rs les traduit en types egui.
+ki-ui-base = { path = "../ui-base" }
 # La version d'eframe dans ki-chat : déjà dans l'arbre.
 egui = { version = "0.36", default-features = false }
 # Flexbox, grille et block CSS, calculés par taffy. Caché derrière `flex` :

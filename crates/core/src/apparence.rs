@@ -1,22 +1,18 @@
 //! Les couleurs de ki-chat, sans egui : celle d'un pseudo, celle d'un rang
-//! VALORANT. Les mêmes règles que le client PC (`theme::member_color`,
-//! `graphes::couleur_de_rang`), pour que l'appli mobile montre les mêmes
-//! couleurs aux mêmes personnes. Les couleurs sont en `0xRRGGBB`.
+//! VALORANT. Les pseudos et les invités viennent de ki-ui-base, comme sur
+//! le PC ; les rangs suivent `graphes::couleur_de_rang` du client PC. Pour
+//! que l'appli mobile montre les mêmes couleurs aux mêmes personnes. Les
+//! couleurs sont en `0xRRGGBB`.
 
 use ki_protocol::Member;
+use ki_ui_base::couleur as base;
 
-/// Les huit teintes des pseudos, stables par hachage du nom.
-const PALETTE: [u32; 8] = [
-    0x2dd48f, 0x62a8ff, 0xffa95c, 0xff8ac4, 0xba92ff, 0x2ad3dd, 0xffd863, 0xff7d7d,
-];
-
-/// La couleur des invités web (`theme::INVITE`).
-pub const INVITE: u32 = 0xf0b86c;
+/// La couleur des invités web.
+pub const INVITE: u32 = base::INVITE.en_u32();
 
 /// Couleur attribuée à un pseudo — même pseudo, même couleur, partout.
 pub fn couleur_pseudo(nom: &str) -> u32 {
-    let h = nom.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-    PALETTE[(h % PALETTE.len() as u32) as usize]
+    base::pour_pseudo(nom).en_u32()
 }
 
 /// Couleur d'un membre : celle de son rôle, sinon celle de son pseudo ; les
@@ -62,13 +58,13 @@ pub fn hex(c: u32) -> String {
 mod tests {
     use super::*;
 
-    /// Le hachage, tel que le PC le fait. La comparaison avec le PC —
-    /// palette, ordre des teintes, rangs, invités — est dans ki-chat
-    /// (`theme.rs`, `copies`) : ki-core ne voit pas ki-ui.
+    /// Les teintes de ki-ui-base, en `0xRRGGBB`. La comparaison avec le PC
+    /// — rangs compris — est dans ki-chat (`theme.rs`, `copies`).
     #[test]
-    fn meme_hachage_que_le_pc() {
-        let h = "Redik_".bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-        assert_eq!(couleur_pseudo("Redik_"), PALETTE[(h % 8) as usize]);
+    fn meme_couleurs_que_le_pc() {
+        assert_eq!(couleur_pseudo("Redik_"), 0xba92ff);
+        assert_eq!(couleur_pseudo("drion"), 0xffa95c);
+        assert_eq!(INVITE, 0xf0b86c);
         assert_eq!(hex(0x2dd48f), "#2dd48f");
     }
 }

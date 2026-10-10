@@ -2821,6 +2821,7 @@ dependencies = [
  "ed25519-dalek",
  "ki-client-quic",
  "ki-protocol",
+ "ki-ui-base",
  "ki-voice",
  "serde_json",
  "sha2",
@@ -2936,6 +2937,7 @@ dependencies = [
  "egui_taffy",
  "emojis",
  "harfrust",
+ "ki-ui-base",
  "png",
  "serde",
  "skrifa",
@@ -2945,6 +2947,10 @@ dependencies = [
  "unicode-segmentation",
  "vello_cpu",
 ]
+
+[[package]]
+name = "ki-ui-base"
+version = "0.1.63"
 
 [[package]]
 name = "ki-video"
