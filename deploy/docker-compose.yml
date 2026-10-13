@@ -88,6 +88,9 @@ services:
       # web et certificat public ») : en lecture seule, ki-chat ne fait que
       # le lire. À décommenter avec le service certbot ci-dessous.
       # - ki-chat-tls:/data/tls:ro
+      # Ou celui que l'add-on Let's Encrypt de Jelastic range sur le nœud
+      # Docker (guide, route A) — l'un ou l'autre, pas les deux.
+      # - /var/lib/jelastic/keys:/data/tls:ro
 
     labels:
       # Seuls les conteneurs portant ce label sont mis à jour par Watchtower.

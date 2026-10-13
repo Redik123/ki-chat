@@ -86,28 +86,42 @@ minutes de lire le certificat. Dans le `docker-compose.yml`, le mappage
 
 Deux façons d'obtenir le certificat :
 
-**A. L'add-on « Let's Encrypt Free SSL » de Jelastic.** Sur l'environnement,
-*Add-ons* du conteneur ki-chat → *Let's Encrypt Free SSL* → domaine
-`ts.baws.fun` → *Install*. L'add-on obtient le certificat (le nœud a une IP
-publique, le défi HTTP-01 sur le port 80 passe), le renouvelle tout seul et
-dépose les fichiers **dans le conteneur** — le chemin exact est dans le
-message de fin d'installation et dans le journal de l'add-on (chez
-Jelastic, `/var/lib/jelastic/SSL/fullchain.pem` et `privkey.pem`). Pose
-alors dans les variables de la stack :
+**A. L'add-on « Let's Encrypt Free SSL » de Jelastic** — la route de
+`ts.baws.fun`, sur un nœud *Docker Engine CE* (Jelastic d'Infomaniak).
+L'add-on s'installe sur le **nœud Docker** lui-même (*Engine Node* →
+*Add-ons*), pas dans le conteneur ki-chat : *Let's Encrypt Free SSL* →
+*Install*, puis *Configure* → *External Domain(s)* : `ts.baws.fun`. Il
+obtient le certificat (défi HTTP-01 : le port 80 du nœud doit être
+joignable), le renouvelle tout seul trente jours avant l'échéance et, sur
+ce type de nœud, ne le branche nulle part : il le range sur la machine,
+dans `/var/lib/jelastic/keys/` (`fullchain.pem`, `privkey.pem`). Deux
+gestes, une seule fois.
+
+La clé, lisible par l'utilisateur 10001 du conteneur (Web SSH du nœud) —
+les renouvellements réécrivent le même fichier, le réglage tient :
 
 ```
-KI_TLS_CERT=/var/lib/jelastic/SSL/fullchain.pem
-KI_TLS_KEY=/var/lib/jelastic/SSL/privkey.pem
-KI_PUBLIC_URL=https://ts.baws.fun
+chmod 644 /var/lib/jelastic/keys/privkey.pem
 ```
 
-décommente `"443:${KI_TLS_PORT:-8443}/tcp"` dans les ports, redéploie, et
-vérifie que l'utilisateur 10001 peut lire les deux fichiers (`docker exec
-ki-chat cat /var/lib/jelastic/SSL/privkey.pem >/dev/null`). Deux réserves :
-l'add-on installe ses scripts dans le conteneur, qu'une mise à jour
-Watchtower recrée — il faut alors le réinstaller (ou le déclencher depuis
-le panneau) ; et le chemin peut différer selon la version de la plateforme.
-C'est la route sans rien à écrire, à essayer d'abord.
+Le service ki-chat de la stack, qui lit le dossier et publie le 443 :
+
+```yaml
+    environment:
+      KI_TLS_CERT: /data/tls/fullchain.pem
+      KI_TLS_KEY: /data/tls/privkey.pem
+    ports:
+      - "443:${KI_TLS_PORT:-8443}/tcp"
+    volumes:
+      - /var/lib/jelastic/keys:/data/tls:ro
+```
+
+Les deux chemins s'écrivent **dans** `environment:`. Une stack collée avant
+la 0.1.44 n'y a pas les lignes `KI_TLS_CERT: ${KI_TLS_CERT:-}` : des
+variables posées dans le panneau de Portainer n'arrivent alors pas au
+conteneur, et le serveur ne dit rien — ni écoute publique, ni erreur. Une
+mise à jour Watchtower ne touche à rien de tout ça : l'add-on vit sur le
+nœud, pas dans le conteneur.
 
 **B. Un sidecar certbot.** Un second conteneur, dans la même stack, obtient
 le certificat et le copie dans un volume que ki-chat lit. Le service est
