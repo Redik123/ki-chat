@@ -618,6 +618,8 @@ pub struct AppState {
     /// compte, qui attend derrière et qui est entré. **En mémoire
     /// seulement** — une porte ne survit pas au redémarrage.
     pub portes: crate::porte::Portes,
+    /// Les tables de cartes, une par salon vocal. En mémoire seulement.
+    pub cartes: crate::cartes::Cartes,
     /// Les jetons des hachages Argon2id : voir [`ARGON2_SIMULTANES`].
     pub argon2: Arc<tokio::sync::Semaphore>,
     /// Les comptes expulsés il y a peu, tenus dehors jusqu'à l'échéance.
@@ -678,6 +680,7 @@ impl AppState {
             lus: crate::lus::Lus::open(data_dir),
             pokes: Default::default(),
             portes: Default::default(),
+            cartes: Default::default(),
             argon2: Arc::new(tokio::sync::Semaphore::new(ARGON2_SIMULTANES)),
             expulsions: Mutex::new(HashMap::new()),
             envois_http: Arc::new(tokio::sync::Semaphore::new(
@@ -805,6 +808,9 @@ impl AppState {
         // Les invités web à l'écoute d'un salon vocal : qui y est a peut-être
         // changé, et c'est tout ce qu'ils savent du salon.
         crate::porte::annoncer_occupants(self);
+        // Les tables de cartes suivent leur salon : le nouveau venu la
+        // reçoit, le partant se lève, un salon vide ferme la sienne.
+        crate::cartes::accorder(self);
     }
 
     /// Vrai si le salon existe **et** est de la nature attendue : on ne
@@ -1596,6 +1602,7 @@ mod tests {
             portes: true,
             medailles: true,
             choix_medailles: true,
+            cartes: true,
             protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");

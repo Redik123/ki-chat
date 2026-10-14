@@ -458,6 +458,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         medailles: true,
         // Et son choix pour elles : ce serveur les lit chez HenrikDev.
         choix_medailles: true,
+        // Et ses tables de cartes.
+        cartes: true,
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
@@ -625,6 +627,7 @@ fn classe_de(msg: &ClientMsg) -> Classe {
         | ClientMsg::Watch { .. }
         | ClientMsg::SetAvatar { .. }
         | ClientMsg::Musique { .. }
+        | ClientMsg::Cartes { .. }
         | ClientMsg::DeleteMessage { .. }
         | ClientMsg::Join { .. }
         | ClientMsg::Leave => Classe::Diffusion,
@@ -1866,6 +1869,11 @@ fn handle_msg(
                     });
                 }
             });
+        }
+        ClientMsg::Cartes { action } => {
+            if let Err(message) = crate::cartes::agir(state, user_id, action) {
+                let _ = tx.send(ServerMsg::CartesRefus { message: message.into() });
+            }
         }
         ClientMsg::Musique { commande } => {
             use ki_protocol::CommandeMusique as C;

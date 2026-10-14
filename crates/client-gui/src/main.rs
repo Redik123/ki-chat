@@ -6,6 +6,7 @@ mod appicon;
 mod admin_fichiers;
 mod atelier;
 mod beta_ui;
+mod cartes;
 mod clips;
 mod graphes;
 mod icons;
@@ -896,6 +897,11 @@ struct KiApp {
     /// Le serveur lit lui-même les médailles chez HenrikDev, et veut
     /// savoir si on les accepte (`Welcome.choix_medailles`).
     serveur_choix_medailles: bool,
+    /// Le serveur tient les tables de cartes (`Welcome.cartes`) : sans
+    /// cette preuve, ni bouton ni geste.
+    serveur_cartes: bool,
+    /// La table de cartes de mon salon vocal, et sa fenêtre.
+    cartes: cartes::Cartes,
     /// Le choix déjà dit à ce serveur depuis la connexion.
     choix_medailles_dit: Option<bool>,
     /// L'état VALORANT du tour d'avant, pour voir une partie finir.
@@ -1492,6 +1498,8 @@ impl KiApp {
             medailles: medailles::Lecteur::new(),
             serveur_medailles: false,
             serveur_choix_medailles: false,
+            serveur_cartes: false,
+            cartes: cartes::Cartes::default(),
             choix_medailles_dit: None,
             valorant_avant: None,
             medailles_ennui: String::new(),
@@ -3708,6 +3716,28 @@ impl KiApp {
 
     /// Le soundboard : la fenêtre, et ce qu'elle demande au moteur vocal.
     /// Sans moteur (hors connexion), rien ne joue — la fenêtre le dit.
+    /// La table de cartes de mon salon vocal, et mes gestes vers le serveur.
+    fn cartes_window(&mut self, ctx: &egui::Context) {
+        if !self.serveur_cartes {
+            return;
+        }
+        let en_vocal = self.voice_channel.is_some();
+        let membres = &self.members;
+        let avatars = &self.avatars;
+        let qui = |id: UserId| {
+            let m = membres.iter().find(|m| m.user_id == id);
+            cartes::Identite {
+                nom: m.map(|m| ki_protocol::safe_display(&m.username, 32)).unwrap_or_else(|| "quelqu'un".into()),
+                couleur: m.map(couleur_de_membre).unwrap_or(TEXT_DIM),
+                photo: avatars.get(&id).map(|(_, t)| t.clone()),
+            }
+        };
+        let actions = self.cartes.fenetre(ctx, self.my_id, en_vocal, &qui);
+        for action in actions {
+            self.send(ClientMsg::Cartes { action });
+        }
+    }
+
     fn soundboard_window(&mut self, ctx: &egui::Context) {
         // Bouton caché (onglet Bêta) : la fenêtre se ferme avec lui.
         if !self.soundboard_visible {
@@ -4466,6 +4496,9 @@ impl KiApp {
         self.stats.clear();
         self.stats_recu = false;
         self.musique = ki_protocol::EtatMusique::default();
+        // La table de cartes : celle d'un salon de ce serveur.
+        self.cartes.effacer();
+        self.serveur_cartes = false;
         // Le partage d'un clip visait un salon de ce serveur : sur le
         // suivant, ce numéro désignerait un autre salon.
         self.clips_partage = None;
@@ -5089,6 +5122,7 @@ impl KiApp {
                 portes,
                 medailles,
                 choix_medailles,
+                cartes,
                 protocole,
                 ..
             } => {
@@ -5117,6 +5151,8 @@ impl KiApp {
                 // une fois par connexion, puis à chaque changement.
                 self.serveur_choix_medailles = choix_medailles;
                 self.choix_medailles_dit = None;
+                // Et pour les tables de cartes.
+                self.serveur_cartes = cartes;
                 self.connecting = false;
                 self.connect_started = None;
                 self.error = None;
@@ -5578,6 +5614,19 @@ impl KiApp {
             ServerMsg::MusiqueResultats { texte, pistes } => {
                 self.musique_resultats = pistes;
                 self.musique_resultats_pour = texte;
+            }
+            ServerMsg::Cartes { table } => {
+                for son in self.cartes.recevoir(table, self.my_id) {
+                    self.play_sfx(match son {
+                        cartes::Son::MonTour => sfx::CARTES_TOUR,
+                        cartes::Son::FinDeManche => sfx::CARTES_FIN,
+                        cartes::Son::Annonce => sfx::CARTES_DERNIERE,
+                        cartes::Son::Contre => sfx::CARTES_CONTRE,
+                    });
+                }
+            }
+            ServerMsg::CartesRefus { message } => {
+                self.cartes.refuser(ki_protocol::safe_display(&message, 200));
             }
             ServerMsg::StatsValorant { fiches, esports, activite } => {
                 self.stats = fiches;
@@ -6648,6 +6697,7 @@ impl KiApp {
         self.fiche_bot_window(ctx);
         self.clips_window(ctx);
         self.soundboard_window(ctx);
+        self.cartes_window(ctx);
         self.portes_window(ctx);
         self.loupedeck_window(ctx, voice);
         self.partage_clip_window(ctx);
@@ -6985,6 +7035,21 @@ impl KiApp {
                     }
                     if ui::button(ui, Icon::Film, "Clips").clicked() {
                         self.ouvrir_clips();
+                    }
+                    // La table de cartes du salon : « À toi ! » quand on
+                    // attend après moi.
+                    if self.serveur_cartes {
+                        let bouton = if self.cartes.mon_tour(self.my_id) {
+                            ui::tinted_button(ui, Some(Icon::Cartes), "À toi !", Tone::Accent)
+                        } else {
+                            ui::button(ui, Icon::Cartes, "Cartes")
+                        };
+                        if bouton
+                            .on_hover_text("Dernière carte : un jeu de cartes avec ceux de ton salon vocal")
+                            .clicked()
+                        {
+                            self.cartes.ouvert = !self.cartes.ouvert;
+                        }
                     }
                     if self.soundboard_visible
                         && ui::button(ui, Icon::Volume, "Soundboard")
@@ -8087,6 +8152,58 @@ impl KiApp {
                                 .inner_margin(marge::symetrique(espace::XL, espace::M)),
                         )
                         .show(ui, |ui| self.bandeau_musique(ui));
+                }
+
+                // --- Cartes : une table dans mon salon, fenêtre fermée ---
+                let table_cartes = if self.cartes.ouvert {
+                    None
+                } else {
+                    self.cartes.table().map(|t| (t.phase, t.joueurs.len()))
+                };
+                if let Some((phase, assis)) = table_cartes {
+                    let mon_tour = self.cartes.mon_tour(self.my_id);
+                    let place_libre = self.cartes.place_libre(self.my_id);
+                    let au_bot = self.cartes.ma_place_au_bot(self.my_id);
+                    egui::Panel::top("chat_cartes")
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(theme::BG_RAISED)
+                                .inner_margin(marge::symetrique(espace::XL, espace::M)),
+                        )
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui::glyph(ui, Icon::Cartes, 16.0, if mon_tour { ACCENT } else { TEXT_DIM });
+                                let phrase = if mon_tour {
+                                    "À toi de jouer aux cartes !".to_string()
+                                } else if au_bot {
+                                    "Un bot joue ta main à la table de cartes : reprends ta place quand tu veux".to_string()
+                                } else if place_libre {
+                                    "Un bot tient une place à la table de cartes de ton salon : prends-la !".to_string()
+                                } else {
+                                    match phase {
+                                        ki_protocol::PhaseCartes::Attente => {
+                                            format!("Une table de cartes est ouverte dans ton salon · {assis} assis")
+                                        }
+                                        ki_protocol::PhaseCartes::EnCours => {
+                                            format!("Une manche de cartes est en cours dans ton salon · {assis} joueurs")
+                                        }
+                                        ki_protocol::PhaseCartes::Finie => {
+                                            "La manche de cartes de ton salon est finie".to_string()
+                                        }
+                                    }
+                                };
+                                ui.label(
+                                    RichText::new(phrase)
+                                        .color(if mon_tour { ACCENT } else { TEXT })
+                                        .size(texte::COURANT),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui::button(ui, Icon::Cartes, "Voir la table").clicked() {
+                                        self.cartes.ouvert = true;
+                                    }
+                                });
+                            });
+                        });
                 }
 
                 // --- Saisie ---
@@ -9303,6 +9420,10 @@ impl KiApp {
                                     (sfx::PEER_JOIN, "Quelqu'un arrive dans mon vocal"),
                                     (sfx::PEER_LEAVE, "Quelqu'un quitte mon vocal"),
                                     (sfx::DIFFUSION, "Quelqu'un de mon vocal lance un stream"),
+                                    (sfx::CARTES_TOUR, "À moi de jouer aux cartes"),
+                                    (sfx::CARTES_FIN, "Une manche de cartes est gagnée"),
+                                    (sfx::CARTES_DERNIERE, "Quelqu'un dit « Dernière carte ! »"),
+                                    (sfx::CARTES_CONTRE, "Quelqu'un se fait contrer aux cartes"),
                                     (sfx::SELF_JOIN, "Je rejoins un vocal"),
                                     (sfx::SELF_LEAVE, "Je quitte le vocal"),
                                     (sfx::MUTE, "Micro coupé"),
@@ -12540,6 +12661,14 @@ mod sfx {
     pub const PORTE: &str = "porte";
     /// Quelqu'un de mon salon vocal lance un stream : on peut aller voir.
     pub const DIFFUSION: &str = "diffusion";
+    /// À moi de jouer aux cartes.
+    pub const CARTES_TOUR: &str = "cartes-tour";
+    /// Une manche de cartes est gagnée.
+    pub const CARTES_FIN: &str = "cartes-fin";
+    /// Quelqu'un dit « Dernière carte ! ».
+    pub const CARTES_DERNIERE: &str = "cartes-derniere";
+    /// Quelqu'un se fait contrer.
+    pub const CARTES_CONTRE: &str = "cartes-contre";
     pub const MUTE: &str = "micro-coupe";
     pub const UNMUTE: &str = "micro-actif";
 }

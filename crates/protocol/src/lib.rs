@@ -32,6 +32,10 @@ fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
 
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
+}
+
 pub mod perm {
     pub const VIEW_CHANNEL: u64 = 1 << 0;
     pub const SEND_MESSAGE: u64 = 1 << 1;
@@ -274,6 +278,9 @@ pub enum ClientMsg {
     StatsValorant,
     /// Une commande au bot musique (permission « Contrôler la musique »).
     Musique { commande: CommandeMusique },
+    /// Un geste à la table de cartes de son salon vocal — seulement vers un
+    /// serveur qui l'a dit (`Welcome.cartes`).
+    Cartes { action: ActionCartes },
     /// Le client annonce son état vocal : émission en cours, et micro coupé
     /// volontairement — pour que les autres distinguent « muet » de « parti ».
     VoiceState {
@@ -598,6 +605,11 @@ pub enum ServerMsg {
         /// invalide.
         #[serde(default)]
         choix_medailles: bool,
+        /// Ce serveur tient les tables de cartes des salons vocaux et
+        /// comprend `ClientMsg::Cartes` ; un serveur antérieur le prendrait
+        /// pour un message invalide.
+        #[serde(default)]
+        cartes: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -695,6 +707,15 @@ pub enum ServerMsg {
     MusiqueEtat { etat: EtatMusique },
     /// Les résultats d'une recherche du bot, au demandeur.
     MusiqueResultats { texte: String, pistes: Vec<Piste> },
+    /// La table de cartes de mon salon vocal, vue de ma place : à l'arrivée
+    /// dans le salon et à chaque coup. `None` : plus de table pour moi
+    /// (fermée, ou j'ai quitté le salon).
+    Cartes {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table: Option<TableCartes>,
+    },
+    /// Un geste refusé à la table, et pourquoi — à celui qui l'a fait.
+    CartesRefus { message: String },
     /// Toutes les fiches du groupe, pour la page de stats — et les
     /// prochains matchs d'esport, si le serveur les a.
     ///
@@ -3716,6 +3737,366 @@ pub fn url_musique_valide(url: &str) -> bool {
     HOTES.contains(&hote)
 }
 
+// --- La table de cartes : « Dernière carte » ---
+//
+// Un jeu de défausse à la manière du huit américain, entre les membres d'un
+// salon vocal. Le serveur arbitre : il mélange, garde la pioche et les
+// mains, et n'envoie à chacun que la sienne — des autres, seulement le
+// nombre de cartes. La règle de ce qui se pose est ici, partagée : le client
+// grise exactement ce que le serveur refuserait.
+
+/// Les cartes du jeu, numérotées de 0 à 107.
+pub const CARTES_DU_JEU: u8 = 108;
+/// Ce que chacun reçoit en début de manche.
+pub const CARTES_EN_MAIN: usize = 7;
+/// Joueurs à une table, au plus.
+pub const MAX_JOUEURS_CARTES: usize = 10;
+/// Le temps d'un tour, en secondes : au-delà, le serveur pioche pour le
+/// joueur et passe au suivant.
+pub const TOUR_CARTES_S: u64 = 30;
+/// Ce que pioche celui qu'on contre : il est tombé à une carte sans dire
+/// « Dernière carte ! ».
+pub const PENALITE_ANNONCE: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouleurCarte {
+    Rouge,
+    Jaune,
+    Vert,
+    Bleu,
+}
+
+impl CouleurCarte {
+    pub const TOUTES: [CouleurCarte; 4] =
+        [CouleurCarte::Rouge, CouleurCarte::Jaune, CouleurCarte::Vert, CouleurCarte::Bleu];
+
+    pub fn nom(self) -> &'static str {
+        match self {
+            CouleurCarte::Rouge => "rouge",
+            CouleurCarte::Jaune => "jaune",
+            CouleurCarte::Vert => "vert",
+            CouleurCarte::Bleu => "bleu",
+        }
+    }
+}
+
+/// Ce que vaut une carte. Elle ne voyage pas : elle se lit du numéro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValeurCarte {
+    Chiffre(u8),
+    /// Le suivant ne joue pas.
+    Passe,
+    /// Le sens du jeu s'inverse ; à deux, c'est un « passe ».
+    Inverse,
+    PlusDeux,
+    /// Se pose sur tout ; on choisit la couleur.
+    Joker,
+    /// Le joker qui fait piocher quatre.
+    PlusQuatre,
+}
+
+impl ValeurCarte {
+    /// Ce que la carte fait piocher au suivant, s'il ne renchérit pas.
+    pub fn penalite(self) -> u8 {
+        match self {
+            ValeurCarte::PlusDeux => 2,
+            ValeurCarte::PlusQuatre => 4,
+            _ => 0,
+        }
+    }
+}
+
+/// Une carte, par son numéro dans le jeu : deux cartes de même valeur
+/// restent distinctes — on dit au serveur *laquelle* on pose. Par couleur,
+/// 25 cartes : un 0, deux de chaque chiffre de 1 à 9, deux « passe », deux
+/// « inverse », deux +2 ; puis quatre jokers (100 à 103) et quatre +4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Carte(pub u8);
+
+impl Carte {
+    pub fn valide(self) -> bool {
+        self.0 < CARTES_DU_JEU
+    }
+
+    /// `None` pour un joker ou un +4 : c'est le joueur qui choisit.
+    pub fn couleur(self) -> Option<CouleurCarte> {
+        (self.0 < 100).then(|| CouleurCarte::TOUTES[(self.0 / 25) as usize])
+    }
+
+    pub fn valeur(self) -> ValeurCarte {
+        match self.0 {
+            n if n < 100 => match n % 25 {
+                0 => ValeurCarte::Chiffre(0),
+                k @ 1..=18 => ValeurCarte::Chiffre(k.div_ceil(2)),
+                19 | 20 => ValeurCarte::Passe,
+                21 | 22 => ValeurCarte::Inverse,
+                _ => ValeurCarte::PlusDeux,
+            },
+            100..=103 => ValeurCarte::Joker,
+            _ => ValeurCarte::PlusQuatre,
+        }
+    }
+
+    /// Un joker ou un +4 : sans couleur, il en faut une en la posant.
+    pub fn sauvage(self) -> bool {
+        self.couleur().is_none()
+    }
+
+    /// « 7 rouge », « +2 bleu », « joker », « +4 ».
+    pub fn nom(self) -> String {
+        let valeur = match self.valeur() {
+            ValeurCarte::Chiffre(n) => n.to_string(),
+            ValeurCarte::Passe => "passe".into(),
+            ValeurCarte::Inverse => "inverse".into(),
+            ValeurCarte::PlusDeux => "+2".into(),
+            ValeurCarte::Joker => "joker".into(),
+            ValeurCarte::PlusQuatre => "+4".into(),
+        };
+        match self.couleur() {
+            Some(c) => format!("{valeur} {}", c.nom()),
+            None => valeur,
+        }
+    }
+
+    /// L'ordre d'une main bien rangée : par couleur, puis par valeur, les
+    /// sauvages au bout.
+    pub fn rang(self) -> (u8, u8) {
+        let couleur = self.couleur().map(|c| c as u8).unwrap_or(4);
+        let valeur = match self.valeur() {
+            ValeurCarte::Chiffre(n) => n,
+            ValeurCarte::Passe => 10,
+            ValeurCarte::Inverse => 11,
+            ValeurCarte::PlusDeux => 12,
+            ValeurCarte::Joker => 13,
+            ValeurCarte::PlusQuatre => 14,
+        };
+        (couleur, valeur)
+    }
+}
+
+/// Ce qui peut se poser sur `dessus`, quand la couleur demandée est
+/// `couleur` (celle du dessus, ou celle choisie sur un joker) et que
+/// `cumul` cartes attendent d'être piochées.
+///
+/// Le cumul se renchérit : un +2 sur un +2, un +4 sur tout. Sinon, la même
+/// couleur, la même valeur, ou un joker.
+pub fn carte_jouable(carte: Carte, dessus: Carte, couleur: CouleurCarte, cumul: u8) -> bool {
+    if cumul > 0 {
+        return match carte.valeur() {
+            ValeurCarte::PlusQuatre => true,
+            ValeurCarte::PlusDeux => dessus.valeur() == ValeurCarte::PlusDeux,
+            _ => false,
+        };
+    }
+    carte.sauvage() || carte.couleur() == Some(couleur) || carte.valeur() == dessus.valeur()
+}
+
+/// Un geste à la table de son salon vocal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ActionCartes {
+    /// Ouvrir une table dans mon salon, et m'y asseoir. S'il y en a déjà
+    /// une, c'est s'y asseoir.
+    Ouvrir,
+    /// M'asseoir pour la prochaine manche.
+    Rejoindre,
+    /// Me lever. En pleine manche, j'abandonne : mes cartes repartent sous
+    /// la pioche.
+    Quitter,
+    /// Distribuer — à l'hôte, à deux joueurs au moins.
+    Lancer,
+    /// Poser une carte de ma main ; `couleur` pour un joker ou un +4.
+    Jouer {
+        carte: Carte,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        couleur: Option<CouleurCarte>,
+    },
+    /// Piocher une carte — ou encaisser le cumul en attente.
+    Piocher,
+    /// Garder la carte que je viens de piocher, et finir mon tour.
+    Passer,
+    /// « Dernière carte ! », à deux cartes ou moins.
+    Annoncer,
+    /// Contrer qui est tombé à une carte sans l'annoncer.
+    Contrer,
+    /// En pleine manche, prendre une place que tient un bot — la sienne,
+    /// ou celle d'un parti : on récupère sa main telle quelle. `place` est
+    /// le joueur qu'on voit à cette place.
+    Reprendre { place: UserId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseCartes {
+    /// On s'assoit ; l'hôte distribue quand il veut.
+    #[default]
+    Attente,
+    EnCours,
+    /// La manche est gagnée ; l'hôte peut redistribuer.
+    Finie,
+}
+
+/// Un joueur assis, vu de la table.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JoueurCartes {
+    pub user_id: UserId,
+    /// Le nombre de cartes en main.
+    #[serde(default)]
+    pub cartes: u8,
+    /// Il a dit « Dernière carte ! ».
+    #[serde(default)]
+    pub annonce: bool,
+    /// Il a quitté le salon : sa place l'attend une minute.
+    #[serde(default)]
+    pub absent: bool,
+    /// Le serveur joue cette place : son joueur est parti, a abandonné, ou
+    /// a laissé passer trois tours. Quelqu'un peut la reprendre.
+    #[serde(default)]
+    pub bot: bool,
+    /// Ses manches gagnées depuis l'ouverture de la table.
+    #[serde(default)]
+    pub victoires: u32,
+}
+
+/// Ce qui vient de se passer à la table — le fil des coups, et de quoi
+/// jouer un son ou une animation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "quoi", rename_all = "snake_case")]
+pub enum EvenementCartes {
+    Assis { par: UserId },
+    Leve { par: UserId },
+    /// Une nouvelle manche est distribuée.
+    Manche,
+    Joue {
+        par: UserId,
+        carte: Carte,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        couleur: Option<CouleurCarte>,
+    },
+    /// `n` cartes tirées ; `manque`, celles qu'il devait encore et que le
+    /// jeu, tout entier en main, n'avait plus.
+    Pioche {
+        par: UserId,
+        n: u8,
+        #[serde(default, skip_serializing_if = "is_zero_u8")]
+        manque: u8,
+    },
+    /// Il garde la carte piochée.
+    Passe { par: UserId },
+    Annonce { par: UserId },
+    /// `n` : les cartes que la cible a vraiment piochées — moins que la
+    /// pénalité si le jeu est épuisé.
+    Contre {
+        par: UserId,
+        cible: UserId,
+        #[serde(default)]
+        n: u8,
+    },
+    /// Son temps est écoulé : le serveur a joué pour lui.
+    Temps { par: UserId },
+    /// La défausse, mélangée, refait la pioche.
+    Melange,
+    /// Sorti de la manche : abandon, absence trop longue, ou trois tours
+    /// passés sans jouer.
+    Sorti { par: UserId },
+    /// Un bot prend la place de `par`, avec sa main.
+    Remplace { par: UserId },
+    /// `par` prend la place que tenait le bot de `place` — la sienne si
+    /// c'est le même.
+    Reprend { par: UserId, place: UserId },
+    /// `bot` : c'est le bot qui tenait la place de `par` qui a gagné.
+    Gagne {
+        par: UserId,
+        #[serde(default, skip_serializing_if = "is_false")]
+        bot: bool,
+    },
+}
+
+/// La table de mon salon vocal, vue de ma place.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TableCartes {
+    pub salon: ChannelId,
+    pub hote: UserId,
+    #[serde(default)]
+    pub phase: PhaseCartes,
+    /// Les joueurs, dans l'ordre des places.
+    #[serde(default)]
+    pub joueurs: Vec<JoueurCartes>,
+    /// Ma main — vide pour qui regarde.
+    #[serde(default)]
+    pub main: Vec<Carte>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dessus: Option<Carte>,
+    /// La couleur demandée : celle du dessus, ou celle choisie sur un joker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub couleur: Option<CouleurCarte>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tour: Option<UserId>,
+    #[serde(default = "default_true")]
+    pub horaire: bool,
+    /// Les cartes que le joueur du tour piochera s'il ne renchérit pas.
+    #[serde(default)]
+    pub cumul: u8,
+    /// Ce qui reste dans la pioche.
+    #[serde(default)]
+    pub pioche: u8,
+    /// Le temps qui reste au joueur du tour, à l'envoi.
+    #[serde(default)]
+    pub reste_ms: u32,
+    /// La carte que je viens de piocher et que je peux poser — seulement
+    /// elle, ou je passe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub piochee: Option<Carte>,
+    /// Qui est tombé à une carte sans l'annoncer : on peut le contrer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expose: Option<UserId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gagnant: Option<UserId>,
+    /// La manche a été gagnée par le bot qui tenait la place de `gagnant`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gagnant_bot: bool,
+    /// Ma place a été prise par quelqu'un d'autre pendant cette manche : je
+    /// ne rejoue qu'à la suivante, même si un bot en tient une autre.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub en_attente: bool,
+    /// Le numéro de la manche, depuis l'ouverture de la table.
+    #[serde(default)]
+    pub manche: u32,
+    /// Les derniers événements, du plus ancien au plus récent.
+    #[serde(default)]
+    pub journal: Vec<EvenementCartes>,
+    /// Le nombre d'événements depuis l'ouverture : ce qui dépasse le
+    /// dernier numéro vu est neuf.
+    #[serde(default)]
+    pub numero: u32,
+}
+
+impl TableCartes {
+    pub fn joueur(&self, id: UserId) -> Option<&JoueurCartes> {
+        self.joueurs.iter().find(|j| j.user_id == id)
+    }
+
+    /// Ce que je peux poser maintenant — rien hors de mon tour.
+    pub fn jouable(&self, moi: UserId, carte: Carte) -> bool {
+        if self.phase != PhaseCartes::EnCours || self.tour != Some(moi) {
+            return false;
+        }
+        // Ma place tenue par un bot : c'est lui qui joue.
+        if self.joueur(moi).is_some_and(|j| j.bot) {
+            return false;
+        }
+        if self.piochee.is_some_and(|p| p != carte) {
+            return false;
+        }
+        match (self.dessus, self.couleur) {
+            (Some(dessus), Some(couleur)) => carte_jouable(carte, dessus, couleur, self.cumul),
+            _ => false,
+        }
+    }
+}
+
 /// --- Protocole voix (datagrammes), version 2 ---
 ///
 /// Chaque paquet voix a un en-tête binaire fixe suivi de la trame Opus
@@ -5703,5 +6084,110 @@ mod tests {
         assert_eq!(hex_decode(&hex).unwrap(), bytes);
         assert!(hex_decode("xyz").is_none());
         assert!(hex_decode("abc").is_none());
+    }
+
+    #[test]
+    fn le_jeu_de_cartes_est_complet() {
+        let jeu: Vec<Carte> = (0..CARTES_DU_JEU).map(Carte).collect();
+        let compte = |v: ValeurCarte| jeu.iter().filter(|c| c.valeur() == v).count();
+        assert_eq!(compte(ValeurCarte::Chiffre(0)), 4);
+        for n in 1..=9 {
+            assert_eq!(compte(ValeurCarte::Chiffre(n)), 8, "les {n}");
+        }
+        assert_eq!(compte(ValeurCarte::Passe), 8);
+        assert_eq!(compte(ValeurCarte::Inverse), 8);
+        assert_eq!(compte(ValeurCarte::PlusDeux), 8);
+        assert_eq!(compte(ValeurCarte::Joker), 4);
+        assert_eq!(compte(ValeurCarte::PlusQuatre), 4);
+        for c in CouleurCarte::TOUTES {
+            assert_eq!(jeu.iter().filter(|x| x.couleur() == Some(c)).count(), 25);
+        }
+        assert_eq!(Carte(0).nom(), "0 rouge");
+        assert_eq!(Carte(49).nom(), "+2 jaune");
+        assert_eq!(Carte(107).nom(), "+4");
+        assert!(!Carte(CARTES_DU_JEU).valide());
+    }
+
+    #[test]
+    fn ce_qui_se_pose() {
+        use CouleurCarte::*;
+        let sept_rouge = Carte(13);
+        let sept_bleu = Carte(75 + 13);
+        let trois_rouge = Carte(5);
+        let plus_deux_vert = Carte(50 + 23);
+        let plus_deux_rouge = Carte(23);
+        let joker = Carte(100);
+        let plus_quatre = Carte(104);
+        assert_eq!(sept_rouge.valeur(), ValeurCarte::Chiffre(7));
+        assert_eq!(sept_bleu.valeur(), ValeurCarte::Chiffre(7));
+        // Même couleur, même valeur, ou sauvage.
+        assert!(carte_jouable(trois_rouge, sept_rouge, Rouge, 0));
+        assert!(carte_jouable(sept_bleu, sept_rouge, Rouge, 0));
+        assert!(carte_jouable(joker, sept_rouge, Rouge, 0));
+        assert!(!carte_jouable(plus_deux_vert, sept_rouge, Rouge, 0));
+        // Sur un joker, c'est la couleur choisie qui compte.
+        assert!(carte_jouable(sept_bleu, joker, Bleu, 0));
+        assert!(!carte_jouable(trois_rouge, joker, Bleu, 0));
+        // Le cumul se renchérit : +2 sur +2, +4 sur tout, rien d'autre.
+        assert!(carte_jouable(plus_deux_vert, plus_deux_rouge, Rouge, 2));
+        assert!(carte_jouable(plus_quatre, plus_deux_rouge, Rouge, 2));
+        assert!(carte_jouable(plus_quatre, plus_quatre, Vert, 4));
+        assert!(!carte_jouable(plus_deux_vert, plus_quatre, Vert, 4));
+        assert!(!carte_jouable(trois_rouge, plus_deux_rouge, Rouge, 2));
+        assert!(!carte_jouable(joker, plus_deux_rouge, Rouge, 2));
+    }
+
+    #[test]
+    fn la_table_de_cartes_voyage() {
+        let action = ClientMsg::Cartes {
+            action: ActionCartes::Jouer { carte: Carte(104), couleur: Some(CouleurCarte::Vert) },
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"type":"cartes","action":{"op":"jouer","carte":104,"couleur":"vert"}}"#);
+        let relu: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(relu, ClientMsg::Cartes { action: ActionCartes::Jouer { carte: Carte(104), .. } }));
+
+        let table = TableCartes {
+            salon: 3,
+            hote: 1,
+            phase: PhaseCartes::EnCours,
+            joueurs: vec![JoueurCartes { user_id: 1, cartes: 7, ..Default::default() }],
+            main: vec![Carte(4), Carte(100)],
+            journal: vec![EvenementCartes::Pioche { par: 1, n: 2, manque: 0 }],
+            horaire: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&ServerMsg::Cartes { table: Some(table.clone()) }).unwrap();
+        let ServerMsg::Cartes { table: Some(relue) } = serde_json::from_str(&json).unwrap() else {
+            panic!("ce n'est pas une table")
+        };
+        assert_eq!(relue, table);
+        // Sans table : le champ ne part pas, et se relit `None`.
+        let json = serde_json::to_string(&ServerMsg::Cartes { table: None }).unwrap();
+        assert_eq!(json, r#"{"type":"cartes"}"#);
+    }
+
+    #[test]
+    fn un_serveur_d_avant_les_cartes_ne_les_sert_pas() {
+        let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
+        let ServerMsg::Welcome { cartes, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        assert!(!cartes);
+    }
+
+    #[test]
+    fn on_ne_joue_qu_a_son_tour() {
+        let table = TableCartes {
+            phase: PhaseCartes::EnCours,
+            tour: Some(1),
+            dessus: Some(Carte(13)),
+            couleur: Some(CouleurCarte::Rouge),
+            ..Default::default()
+        };
+        assert!(table.jouable(1, Carte(5)));
+        assert!(!table.jouable(2, Carte(5)));
+        // Après avoir pioché, seule la carte piochée se pose.
+        let apres = TableCartes { piochee: Some(Carte(100)), ..table };
+        assert!(apres.jouable(1, Carte(100)));
+        assert!(!apres.jouable(1, Carte(5)));
     }
 }

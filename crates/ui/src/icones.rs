@@ -61,19 +61,21 @@ pub enum Icon {
     Telephone,
     /// Un visage qui sourit : le sélecteur d'emoji.
     Sourire,
+    /// Deux cartes en éventail : la table de cartes du salon.
+    Cartes,
 }
 
 impl Icon {
     /// Toutes, dans l'ordre de l'énumération : le choix d'une icône pour une
     /// touche du Loupedeck.
-    pub const TOUTES: [Icon; 41] = [
+    pub const TOUTES: [Icon; 42] = [
         Icon::Star, Icon::Mic, Icon::MicOff, Icon::Headphones, Icon::Gear, Icon::Sliders, Icon::Crown,
         Icon::Paperclip, Icon::Copy, Icon::Plus, Icon::Refresh, Icon::Play, Icon::Target, Icon::Logout,
         Icon::Hash, Icon::User, Icon::Close, Icon::ArrowUp, Icon::ArrowDown, Icon::Ban, Icon::Key,
         Icon::Volume, Icon::Send, Icon::Check, Icon::Warning, Icon::Info, Icon::Chat, Icon::Pencil,
         Icon::Trash, Icon::Server, Icon::Loupe, Icon::HeadphonesOff, Icon::Screen, Icon::Pause,
         Icon::Download, Icon::ChevronLeft, Icon::ChevronRight, Icon::Repeat, Icon::Film, Icon::Telephone,
-        Icon::Sourire,
+        Icon::Sourire, Icon::Cartes,
     ];
 }
 
@@ -234,6 +236,13 @@ impl Pen<'_> {
                 self.disc((8.9, 9.6), 1.3);
                 self.disc((15.1, 9.6), 1.3);
                 self.arc((12.0, 12.2), 5.2, 25.0, 155.0);
+            }
+            Icon::Cartes => {
+                // Celle de devant entière ; celle de derrière, inclinée, ne
+                // dépasse qu'à gauche.
+                self.rrect(10.0, 4.5, 20.5, 19.5, 2.0, false);
+                self.path(&[(10.0, 6.6), (4.6, 8.0), (8.0, 20.6), (10.0, 20.1)]);
+                self.solid(&[(15.25, 8.9), (17.6, 12.0), (15.25, 15.1), (12.9, 12.0)]);
             }
             Icon::Screen => {
                 self.rrect(2.5, 4.0, 21.5, 16.5, 2.0, false);

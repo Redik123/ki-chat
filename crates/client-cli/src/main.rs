@@ -165,7 +165,9 @@ async fn main() -> anyhow::Result<()> {
                 ServerMsg::FicheValorant { .. }
                 | ServerMsg::StatsValorant { .. }
                 | ServerMsg::MusiqueEtat { .. }
-                | ServerMsg::MusiqueResultats { .. } => {}
+                | ServerMsg::MusiqueResultats { .. }
+                | ServerMsg::Cartes { .. }
+                | ServerMsg::CartesRefus { .. } => {}
                 ServerMsg::History { messages } => {
                     for m in messages {
                         println!("  [ancien] <{}> {}", m.username, m.text);

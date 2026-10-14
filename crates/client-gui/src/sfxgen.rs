@@ -46,6 +46,20 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     // brèves puis la quinte tenue — « ta-ta-taa », l'appel « venez voir »,
     // qu'aucun autre son ne rythme ainsi.
     sounds.insert("diffusion".into(), seq(&[(659.3, 70), (659.3, 70), (987.8, 240)], 0.4));
+    // À moi de jouer aux cartes : une carte qu'on retourne — deux notes
+    // brèves qui montent d'une tierce, plus douces qu'une mention.
+    sounds.insert("cartes-tour".into(), seq(&[(587.3, 60), (740.0, 120)], 0.34));
+    // Une manche gagnée : quatre notes qui grimpent l'accord, la dernière
+    // tenue — la petite victoire.
+    sounds.insert(
+        "cartes-fin".into(),
+        seq(&[(523.3, 80), (659.3, 80), (784.0, 80), (1046.5, 260)], 0.38),
+    );
+    // « Dernière carte ! » : trois notes vives qui montent d'un trait, la
+    // dernière tenue et haute — l'alerte de la table, impossible à rater.
+    sounds.insert("cartes-derniere".into(), seq(&[(880.0, 60), (1174.7, 60), (1568.0, 220)], 0.4));
+    // Contré : deux notes qui tombent, la seconde traînée — « raté ! ».
+    sounds.insert("cartes-contre".into(), seq(&[(493.9, 90), (329.6, 260)], 0.42));
     sounds
 }
 
@@ -95,6 +109,10 @@ mod tests {
             "poke",
             "porte",
             "diffusion",
+            "cartes-tour",
+            "cartes-fin",
+            "cartes-derniere",
+            "cartes-contre",
         ] {
             let pcm = sounds.get(name).unwrap_or_else(|| panic!("son manquant : {name}"));
             assert!(!pcm.is_empty());

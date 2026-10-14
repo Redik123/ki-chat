@@ -40,6 +40,7 @@
 
 mod accounts;
 mod audit;
+mod cartes;
 mod channels;
 mod clips;
 mod diag;
@@ -194,6 +195,9 @@ async fn main() -> anyhow::Result<()> {
     // congédiées.
     tokio::spawn(porte::boucle(state.clone()));
     tokio::spawn(stream::boucle(state.clone()));
+    // Les tables de cartes des salons vocaux : le tour qui expire, l'absent
+    // qui ne revient pas.
+    tokio::spawn(cartes::boucle(state.clone()));
     // Le débit réseau du tableau de bord : un petit fichier du noyau relu
     // toutes les cinq secondes, rien sur le chemin des paquets.
     tokio::spawn(reseau::boucle(state.clone()));
