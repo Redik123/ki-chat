@@ -16,7 +16,7 @@
 //! l'application. Tout le reste demeure un lien cliquable, que l'utilisateur
 //! ouvre s'il le décide.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -133,6 +133,8 @@ pub struct Previews {
     incoming: Arc<Mutex<Vec<Delivery>>>,
     /// Les fiches de vidéos, par adresse de fiche, et l'heure de la lecture.
     metas: HashMap<String, (EtatMeta, Instant)>,
+    /// Les fiches redemandées dont la réponse n'est pas encore là.
+    metas_en_vol: HashSet<String>,
     incoming_metas: Arc<Mutex<Vec<LivraisonMeta>>>,
     /// Racine HTTP du serveur courant : seule origine autorisée.
     origin: Option<String>,
@@ -158,6 +160,7 @@ impl Previews {
         self.cache.clear();
         self.order.clear();
         self.metas.clear();
+        self.metas_en_vol.clear();
     }
 
     /// Vrai si cette adresse est servie par notre serveur.
@@ -262,6 +265,11 @@ impl Previews {
         }
         let metas = std::mem::take(&mut *self.incoming_metas.lock().unwrap());
         for (url, meta) in metas {
+            // Une fiche qu'on n'attendait plus : on a changé de serveur
+            // pendant la requête.
+            if !self.metas_en_vol.remove(&url) {
+                continue;
+            }
             let etat = match meta {
                 Some(m) if m.prete() => EtatMeta::Prete(m),
                 Some(m) if m.en_erreur() => {
@@ -333,19 +341,24 @@ impl Previews {
         let target = self.to_pinned(&url)?;
         if let Some((etat, depuis)) = self.metas.get(&url) {
             let definitif = matches!(etat, EtatMeta::Prete(_) | EtatMeta::Erreur(_));
-            if definitif || depuis.elapsed() < RELANCE_META {
-                return Some(etat.clone());
-            }
-            if matches!(etat, EtatMeta::Chargement) {
+            if definitif || self.metas_en_vol.contains(&url) || depuis.elapsed() < RELANCE_META {
                 return Some(etat.clone());
             }
         }
         let Some(agent) = self.agent.clone() else {
             return Some(EtatMeta::Chargement);
         };
-        let ancien = self.metas.get(&url).map(|(e, _)| e.clone());
-        self.metas
-            .insert(url.clone(), (EtatMeta::Chargement, Instant::now()));
+        // Redemandée, la fiche garde ce qu'on en savait jusqu'à la réponse.
+        // Elle repassait par « Chargement » : la carte d'une vidéo sans
+        // fiche fondait à 24 points le temps d'un aller-retour, toutes les
+        // trois secondes, et le fil tremblait avec elle.
+        let ancien = self
+            .metas
+            .entry(url.clone())
+            .or_insert((EtatMeta::Chargement, Instant::now()))
+            .0
+            .clone();
+        self.metas_en_vol.insert(url.clone());
         let slot = self.incoming_metas.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -362,8 +375,7 @@ impl Previews {
             slot.lock().unwrap().push((url, meta));
             ctx.request_repaint();
         });
-        // Le temps de la réponse, on montre ce qu'on savait.
-        Some(ancien.unwrap_or(EtatMeta::Chargement))
+        Some(ancien)
     }
 }
 
@@ -667,6 +679,47 @@ mod tests {
         assert!(previews
             .meta(&ctx, "https://ailleurs:8080/files/ab/clip.mp4")
             .is_none());
+    }
+
+    /// Une vidéo sans fiche se redemande toutes les trois secondes : le
+    /// temps de la réponse, elle garde sa carte, au lieu de fondre en « vidéo… »
+    /// et de faire sauter le fil.
+    #[test]
+    fn une_fiche_redemandee_garde_ce_qu_on_savait() {
+        // Un serveur qui raccroche aussitôt : pas de fiche.
+        let ecoute = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for flux in ecoute.incoming() {
+                drop(flux);
+            }
+        });
+        let mut previews = Previews::default();
+        let ctx = egui::Context::default();
+        previews.set_origin(format!("https://127.0.0.1:{port}"));
+        previews.set_agent(ureq::agent());
+        let video = format!("https://127.0.0.1:{port}/files/ab/clip.mp4");
+        let fiche = medias::url_meta(&video).unwrap();
+        let attendre = |previews: &mut Previews| {
+            let debut = Instant::now();
+            while previews.metas_en_vol.contains(&fiche) {
+                assert!(debut.elapsed() < Duration::from_secs(20), "pas de réponse");
+                std::thread::sleep(Duration::from_millis(10));
+                previews.mount(&ctx);
+            }
+        };
+
+        assert!(matches!(previews.meta(&ctx, &video), Some(EtatMeta::Chargement)));
+        attendre(&mut previews);
+        assert!(matches!(previews.meta(&ctx, &video), Some(EtatMeta::Absente)));
+
+        // Trois secondes plus tard : redemandée, et toujours « absente ».
+        previews.metas.get_mut(&fiche).unwrap().1 -= RELANCE_META * 2;
+        assert!(matches!(previews.meta(&ctx, &video), Some(EtatMeta::Absente)));
+        assert!(previews.metas_en_vol.contains(&fiche));
+        assert!(matches!(previews.meta(&ctx, &video), Some(EtatMeta::Absente)));
+        attendre(&mut previews);
+        assert!(matches!(previews.meta(&ctx, &video), Some(EtatMeta::Absente)));
     }
 
     /// Un GIF de deux images (2×2 px), écrit à la main : assez pour prouver
