@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run -p ki-load --example bots_cartes -- <serveur> --invite CODE
 //!       [--bots 3] [--salon 101] [--ouvrir] [--joueurs N] [--manches 1]
-//!       [--depart] [--renfort]
+//!       [--depart] [--renfort] [--sept] [--zero]
 //! ```
 //!
 //! Les bots entrent dans le salon vocal et s'assoient à la table qu'on y a
@@ -20,6 +20,9 @@
 //! quinze secondes après ce départ (une minute après le lancement, sans
 //! `--depart`), et prend la place que tient ce bot, cartes comprises.
 //!
+//! `--sept` et `--zero` : le bot qui tient la table y met les règles en
+//! plus — le 7 qui échange, le 0 qui fait tourner — avant de distribuer.
+//!
 //! Ils jouent sans finesse — la première carte qui va, la couleur qu'ils ont
 //! le plus — prennent leur temps comme des humains, contrent qui oublie
 //! d'annoncer, et oublient eux-mêmes une fois sur quatre.
@@ -28,7 +31,8 @@ use std::time::Duration;
 
 use ki_client_quic::QuicClient;
 use ki_protocol::{
-    ActionCartes, Carte, ClientMsg, CouleurCarte, EvenementCartes, PhaseCartes, ServerMsg, TableCartes, UserId,
+    ActionCartes, Carte, ClientMsg, CouleurCarte, EvenementCartes, PhaseCartes, ReglesCartes, ServerMsg, TableCartes,
+    UserId,
 };
 use tokio::time::Instant;
 
@@ -42,6 +46,8 @@ struct Options {
     manches: u32,
     depart: bool,
     renfort: bool,
+    /// Les règles en plus que met le bot hôte, si on en a demandé.
+    regles: Option<ReglesCartes>,
 }
 
 fn options() -> anyhow::Result<Options> {
@@ -55,7 +61,7 @@ fn options() -> anyhow::Result<Options> {
         .enumerate()
         .find(|(i, a)| {
             !a.starts_with("--")
-                && (*i == 0 || !args[i - 1].starts_with("--") || ["--ouvrir", "--depart", "--renfort"].contains(&args[i - 1].as_str()))
+                && (*i == 0 || !args[i - 1].starts_with("--") || ["--ouvrir", "--depart", "--renfort", "--sept", "--zero"].contains(&args[i - 1].as_str()))
         })
         .map(|(_, a)| a.clone())
         .ok_or_else(|| anyhow::anyhow!("usage : bots_cartes <serveur> --invite CODE [--bots 3] [--salon 101]"))?;
@@ -72,6 +78,13 @@ fn options() -> anyhow::Result<Options> {
         manches: nombre("--manches", 1)?.max(1) as u32,
         depart: args.iter().any(|a| a == "--depart"),
         renfort: args.iter().any(|a| a == "--renfort"),
+        regles: {
+            let regles = ReglesCartes {
+                sept: args.iter().any(|a| a == "--sept"),
+                zero: args.iter().any(|a| a == "--zero"),
+            };
+            (regles != ReglesCartes::default()).then_some(regles)
+        },
     })
 }
 
@@ -198,6 +211,9 @@ async fn un_bot(
                                     // Une fois, par le premier bot : qui est remplacé, qui reprend.
                                     EvenementCartes::Remplace { par } if hote => println!("{nom} : un bot prend la place de {par}"),
                                     EvenementCartes::Reprend { par, place } if hote => println!("{nom} : {par} prend la place de {place}"),
+                                    EvenementCartes::Echange { par, avec } if hote => println!("{nom} : {par} échange sa main avec {avec}"),
+                                    EvenementCartes::Tourne { par } if hote => println!("{nom} : le 0 de {par} fait tourner les mains"),
+                                    EvenementCartes::Regles { regles, .. } if hote => println!("{nom} : règles en plus {regles:?}"),
                                     _ => {}
                                 }
                             }
@@ -260,6 +276,9 @@ fn decider(t: &TableCartes, moi: UserId, opts: &Options, de: &mut De) -> Option<
             if assis.is_none() && t.joueurs.len() < ki_protocol::MAX_JOUEURS_CARTES {
                 return Some((ActionCartes::Rejoindre, ms(de, 200, 800)));
             }
+            if let Some(regles) = opts.regles.filter(|r| t.hote == moi && *r != t.regles) {
+                return Some((ActionCartes::Regler { regles }, ms(de, 200, 500)));
+            }
             let pret = t.joueurs.len() >= opts.joueurs;
             if t.hote == moi && pret {
                 let attente = if t.phase == PhaseCartes::Finie { (3000, 5000) } else { (800, 1500) };
@@ -290,7 +309,7 @@ fn decider(t: &TableCartes, moi: UserId, opts: &Options, de: &mut De) -> Option<
             let delai = ms(de, 800, 2000);
             if let Some(p) = t.piochee {
                 return Some(if t.jouable(moi, p) {
-                    (ActionCartes::Jouer { carte: p, couleur: p.sauvage().then(|| couleur_preferee(&t.main)) }, delai)
+                    (jouer(t, moi, p), delai)
                 } else {
                     (ActionCartes::Passer, delai)
                 });
@@ -299,13 +318,22 @@ fn decider(t: &TableCartes, moi: UserId, opts: &Options, de: &mut De) -> Option<
             let mut jouables: Vec<Carte> = t.main.iter().copied().filter(|c| t.jouable(moi, *c)).collect();
             jouables.sort_by_key(|c| c.sauvage());
             Some(match jouables.first() {
-                Some(&carte) => {
-                    (ActionCartes::Jouer { carte, couleur: carte.sauvage().then(|| couleur_preferee(&t.main)) }, delai)
-                }
+                Some(&carte) => (jouer(t, moi, carte), delai),
                 None => (ActionCartes::Piocher, delai),
             })
         }
     }
+}
+
+/// Poser `carte` : la couleur dont on a le plus pour un joker, et pour un 7
+/// qui échange, la plus petite main de la table.
+fn jouer(t: &TableCartes, moi: UserId, carte: Carte) -> ActionCartes {
+    let cible = t
+        .regles
+        .echange_au_sept(carte, t.main.len() - 1)
+        .then(|| t.joueurs.iter().filter(|j| j.user_id != moi).min_by_key(|j| j.cartes).map(|j| j.user_id))
+        .flatten();
+    ActionCartes::Jouer { carte, couleur: carte.sauvage().then(|| couleur_preferee(&t.main)), cible }
 }
 
 /// La couleur dont on a le plus.

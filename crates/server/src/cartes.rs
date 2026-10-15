@@ -21,6 +21,16 @@
 //!   le premier qui contre fait piocher deux cartes, jusqu'au coup suivant ;
 //! - trente secondes par tour, puis le serveur pioche pour le joueur.
 //!
+//! Et celles en plus, que l'hôte choisit entre deux manches
+//! ([`ReglesCartes`]) :
+//! - le 7 : qui le pose échange sa main avec le joueur de son choix ;
+//! - le 0 : qui le pose fait passer toutes les mains au voisin, dans le sens
+//!   du jeu.
+//!
+//! Une main reçue ainsi ne se reproche à personne : qui se retrouve à une
+//! carte est tenu pour l'avoir annoncée, et le contre en cours tombe si
+//! l'exposé n'est plus à une carte.
+//!
 //! [`Table`] ne connaît ni le réseau ni l'horloge : on lui passe l'instant,
 //! et ses tests jouent des manches entières sans attendre. Le reste du
 //! module la relie aux salons — qui est où, qui reçoit quoi.
@@ -32,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use ki_protocol::{
     carte_jouable, ActionCartes, Carte, ChannelId, CouleurCarte, EvenementCartes, JoueurCartes, PhaseCartes,
-    ServerMsg, TableCartes, UserId, ValeurCarte, CARTES_DU_JEU, CARTES_EN_MAIN, MAX_JOUEURS_CARTES,
+    ReglesCartes, ServerMsg, TableCartes, UserId, ValeurCarte, CARTES_DU_JEU, CARTES_EN_MAIN, MAX_JOUEURS_CARTES,
     PENALITE_ANNONCE, TOUR_CARTES_S,
 };
 use rand::rngs::StdRng;
@@ -81,6 +91,7 @@ pub struct Table {
     salon: ChannelId,
     hote: UserId,
     phase: PhaseCartes,
+    regles: ReglesCartes,
     places: Vec<Place>,
     /// Le dessus est à la fin.
     pioche: Vec<Carte>,
@@ -116,6 +127,7 @@ impl Table {
             salon,
             hote,
             phase: PhaseCartes::Attente,
+            regles: ReglesCartes::default(),
             places: vec![Place::new(hote)],
             pioche: Vec::new(),
             defausse: Vec::new(),
@@ -283,6 +295,22 @@ impl Table {
         Ok(())
     }
 
+    /// Les règles en plus : à l'hôte, entre deux manches — on ne change pas
+    /// la règle d'une partie en train de se jouer.
+    pub fn regler(&mut self, id: UserId, regles: ReglesCartes) -> Result<(), Refus> {
+        if id != self.hote {
+            return Err("seul l'hôte choisit les règles");
+        }
+        if self.phase == PhaseCartes::EnCours {
+            return Err("les règles se changent entre deux manches");
+        }
+        if regles != self.regles {
+            self.regles = regles;
+            self.noter(EvenementCartes::Regles { par: id, regles });
+        }
+        Ok(())
+    }
+
     /// Le temps de la place `i` : trente secondes pour un joueur, le temps
     /// de voir passer le coup pour un bot.
     fn delai(&self, i: usize) -> Duration {
@@ -343,15 +371,24 @@ impl Table {
         id: UserId,
         carte: Carte,
         couleur: Option<CouleurCarte>,
+        cible: Option<UserId>,
         now: Instant,
     ) -> Result<(), Refus> {
         let i = self.mon_tour(id)?;
-        self.poser(i, carte, couleur, now)
+        self.poser(i, carte, couleur, cible, now)
     }
 
     /// La place du tour pose `carte` : les règles, sans demander qui joue —
-    /// un joueur, ou le bot qui tient sa place.
-    fn poser(&mut self, i: usize, carte: Carte, couleur: Option<CouleurCarte>, now: Instant) -> Result<(), Refus> {
+    /// un joueur, ou le bot qui tient sa place. `cible` : avec qui échanger
+    /// sa main, pour un 7 quand la règle est en jeu.
+    fn poser(
+        &mut self,
+        i: usize,
+        carte: Carte,
+        couleur: Option<CouleurCarte>,
+        cible: Option<UserId>,
+        now: Instant,
+    ) -> Result<(), Refus> {
         if self.piochee.is_some_and(|p| p != carte) {
             return Err("après une pioche, seule la carte piochée se pose");
         }
@@ -372,6 +409,20 @@ impl Table {
             Some(c) => c,
             None => couleur.ok_or("choisis une couleur")?,
         };
+        // Tout se vérifie avant de toucher à la table : un geste refusé ne
+        // laisse rien derrière lui.
+        let garde = self.places[i].main.len() - 1;
+        let echange = if self.regles.echange_au_sept(carte, garde) {
+            // Sans cible — un ki-chat d'avant les règles en plus, qui ne sait
+            // pas la demander —, la plus petite main, comme le ferait un bot.
+            let j = match cible {
+                Some(c) => self.place(c).filter(|&j| j != i).ok_or("choisis avec qui échanger ta main")?,
+                None => self.plus_petite_main_sauf(i),
+            };
+            Some(j)
+        } else {
+            None
+        };
         let id = self.places[i].id;
         self.fermer_contre(id);
         let place = &mut self.places[i];
@@ -389,6 +440,11 @@ impl Table {
         if reste == 1 && !annonce {
             self.expose = Some(id);
         }
+        if let Some(j) = echange {
+            self.echanger(i, j);
+        } else if self.regles.tourne_au_zero(carte, reste) {
+            self.tourner(id);
+        }
         let pas = match carte.valeur() {
             ValeurCarte::Passe => 2,
             // À deux, inverser le sens revient à sauter l'autre.
@@ -404,6 +460,58 @@ impl Table {
         };
         self.passer_la_main(pas, now);
         Ok(())
+    }
+
+    /// La place qui a le moins de cartes, hors la place `i` — la première
+    /// dans l'ordre du jeu à égalité.
+    fn plus_petite_main_sauf(&self, i: usize) -> usize {
+        (0..self.places.len())
+            .filter(|&j| j != i)
+            .min_by_key(|&j| self.places[j].main.len())
+            .expect("une manche se joue à deux au moins")
+    }
+
+    /// Le 7 : les places `i` et `j` échangent leurs mains.
+    fn echanger(&mut self, i: usize, j: usize) {
+        let main_i = std::mem::take(&mut self.places[i].main);
+        self.places[i].main = std::mem::replace(&mut self.places[j].main, main_i);
+        let (par, avec) = (self.places[i].id, self.places[j].id);
+        self.noter(EvenementCartes::Echange { par, avec });
+        self.mains_changees(&[i, j]);
+    }
+
+    /// Le 0 : chaque main passe au voisin, dans le sens du jeu.
+    fn tourner(&mut self, par: UserId) {
+        let mut mains: Vec<Vec<Carte>> = self.places.iter_mut().map(|p| std::mem::take(&mut p.main)).collect();
+        // Dans le sens horaire, la main de la place k va à k + 1, et celle
+        // de la dernière revient à la première.
+        if self.horaire {
+            mains.rotate_right(1);
+        } else {
+            mains.rotate_left(1);
+        }
+        for (p, main) in self.places.iter_mut().zip(mains) {
+            p.main = main;
+        }
+        self.noter(EvenementCartes::Tourne { par });
+        let toutes: Vec<usize> = (0..self.places.len()).collect();
+        self.mains_changees(&toutes);
+    }
+
+    /// Les places `changees` ont reçu une autre main : l'annonce suit la
+    /// main qu'on tient. À une carte, elle est faite — on n'a pas choisi
+    /// cette main ; à deux ou plus, elle ne vaut plus. L'exposé qui n'est
+    /// plus à une carte n'est plus à contrer.
+    fn mains_changees(&mut self, changees: &[usize]) {
+        for &k in changees {
+            let p = &mut self.places[k];
+            p.annonce = p.main.len() == 1;
+        }
+        if let Some(e) = self.expose {
+            if self.place(e).is_none_or(|j| self.places[j].main.len() != 1) {
+                self.expose = None;
+            }
+        }
     }
 
     /// La manche est gagnée. Les places que tenait un bot pour quelqu'un de
@@ -606,7 +714,7 @@ impl Table {
     /// Le coup d'un bot, sans finesse : la première carte de couleur qui
     /// va, un joker en dernier recours avec la couleur dont il a le plus,
     /// sinon la pioche. Il annonce toujours sa dernière carte et ne contre
-    /// personne.
+    /// personne. Sur un 7 qui échange, il prend la plus petite main.
     fn jouer_bot(&mut self, now: Instant) {
         let i = self.tour;
         let candidates: Vec<Carte> = match self.piochee {
@@ -629,7 +737,7 @@ impl Table {
                     self.annoncer_en(i);
                 }
                 let couleur = couleur_preferee(&self.places[i].main, carte);
-                if self.poser(i, carte, Some(couleur), now).is_err() {
+                if self.poser(i, carte, Some(couleur), None, now).is_err() {
                     // Ne devrait pas arriver : la carte a été choisie parmi
                     // celles qui vont. Le tour passe plutôt que de bloquer.
                     let id = self.places[i].id;
@@ -766,6 +874,7 @@ impl Table {
             couleur: (!self.defausse.is_empty()).then_some(self.couleur),
             tour: en_cours.then(|| self.places[self.tour].id),
             horaire: self.horaire,
+            regles: self.regles,
             cumul: self.cumul,
             pioche: self.pioche.len().min(u8::MAX as usize) as u8,
             reste_ms: self
@@ -842,12 +951,31 @@ fn occupants(state: &AppState) -> HashMap<ChannelId, HashSet<UserId>> {
 /// Les « plus de table » d'abord : qui passe d'un salon à table à un autre
 /// doit recevoir la fin de l'ancienne avant la nouvelle, sinon le `None`
 /// arrivé second effaçait la table où il vient d'entrer.
+///
+/// Un client d'avant les règles en plus reçoit le fil sans les événements
+/// qu'il ne saurait pas lire : sans cela, toute la table lui devenait
+/// illisible tant qu'un échange restait au fil.
 fn envoyer(state: &AppState, mut envois: Envois) {
     envois.sort_by_key(|(_, msg)| !matches!(msg, ServerMsg::Cartes { table: None }));
     for (id, msg) in envois {
-        state.send_to(id, &msg);
+        let ancienne = match &msg {
+            ServerMsg::Cartes { table: Some(t) } => t.pour_protocole(PROTOCOLE_SANS_REGLES),
+            _ => None,
+        };
+        match ancienne {
+            Some(t) => state.send_to_selon_protocole(
+                id,
+                PROTOCOLE_SANS_REGLES + 1,
+                &msg,
+                &ServerMsg::Cartes { table: Some(t) },
+            ),
+            None => state.send_to(id, &msg),
+        }
     }
 }
+
+/// Le dernier protocole qui ne connaît pas les règles en plus.
+const PROTOCOLE_SANS_REGLES: u32 = 1;
 
 /// Un geste à la table du salon vocal de `user_id`.
 pub fn agir(state: &AppState, user_id: UserId, action: ActionCartes) -> Result<(), Refus> {
@@ -876,12 +1004,13 @@ pub fn agir(state: &AppState, user_id: UserId, action: ActionCartes) -> Result<(
             ActionCartes::Ouvrir | ActionCartes::Rejoindre => t.rejoindre(user_id)?,
             ActionCartes::Quitter => t.quitter(user_id, now),
             ActionCartes::Lancer => t.lancer(user_id, now)?,
-            ActionCartes::Jouer { carte, couleur } => t.jouer(user_id, carte, couleur, now)?,
+            ActionCartes::Jouer { carte, couleur, cible } => t.jouer(user_id, carte, couleur, cible, now)?,
             ActionCartes::Piocher => t.piocher(user_id, now)?,
             ActionCartes::Passer => t.passer(user_id, now)?,
             ActionCartes::Annoncer => t.annoncer(user_id)?,
             ActionCartes::Contrer => t.contrer(user_id)?,
             ActionCartes::Reprendre { place } => t.reprendre(user_id, place, now)?,
+            ActionCartes::Regler { regles } => t.regler(user_id, regles)?,
         }
         salle.diffuser(&presents, now, true, &mut envois);
     }
@@ -1009,15 +1138,15 @@ mod tests {
         let now = Instant::now();
         // 13 = 7 rouge ; 19 = passe rouge ; 21 = inverse rouge.
         let mut t = manche(&[(A, &[19, 2, 3]), (B, &[4, 6]), (C, &[8, 10])], 13, now);
-        t.jouer(A, Carte(19), None, now).unwrap();
+        t.jouer(A, Carte(19), None, None, now).unwrap();
         assert_eq!(t.places[t.tour].id, C, "B est sauté");
         let mut t = manche(&[(A, &[21, 2, 3]), (B, &[4, 6]), (C, &[8, 10])], 13, now);
-        t.jouer(A, Carte(21), None, now).unwrap();
+        t.jouer(A, Carte(21), None, None, now).unwrap();
         assert!(!t.horaire);
         assert_eq!(t.places[t.tour].id, C, "le sens s'inverse");
         // À deux, l'inverse rejoue.
         let mut t = manche(&[(A, &[21, 2, 3]), (B, &[4, 6])], 13, now);
-        t.jouer(A, Carte(21), None, now).unwrap();
+        t.jouer(A, Carte(21), None, None, now).unwrap();
         assert_eq!(t.places[t.tour].id, A);
     }
 
@@ -1026,10 +1155,10 @@ mod tests {
         let now = Instant::now();
         // 23 = +2 rouge ; 73 = +2 vert ; 104 = +4.
         let mut t = manche(&[(A, &[23, 2]), (B, &[73, 4]), (C, &[104, 6, 8])], 13, now);
-        t.jouer(A, Carte(23), None, now).unwrap();
-        assert_eq!(t.jouer(B, Carte(4), None, now), Err("renchéris avec un +2 ou un +4, ou pioche"));
-        t.jouer(B, Carte(73), None, now).unwrap();
-        t.jouer(C, Carte(104), Some(CouleurCarte::Bleu), now).unwrap();
+        t.jouer(A, Carte(23), None, None, now).unwrap();
+        assert_eq!(t.jouer(B, Carte(4), None, None, now), Err("renchéris avec un +2 ou un +4, ou pioche"));
+        t.jouer(B, Carte(73), None, None, now).unwrap();
+        t.jouer(C, Carte(104), Some(CouleurCarte::Bleu), None, now).unwrap();
         assert_eq!(t.cumul, 8);
         assert_eq!(t.couleur, CouleurCarte::Bleu);
         t.piocher(A, now).unwrap();
@@ -1042,8 +1171,8 @@ mod tests {
     fn le_joker_demande_une_couleur() {
         let now = Instant::now();
         let mut t = manche(&[(A, &[100, 2]), (B, &[4, 6])], 13, now);
-        assert_eq!(t.jouer(A, Carte(100), None, now), Err("choisis une couleur"));
-        t.jouer(A, Carte(100), Some(CouleurCarte::Vert), now).unwrap();
+        assert_eq!(t.jouer(A, Carte(100), None, None, now), Err("choisis une couleur"));
+        t.jouer(A, Carte(100), Some(CouleurCarte::Vert), None, now).unwrap();
         assert_eq!(t.vue(B, now).couleur, Some(CouleurCarte::Vert));
     }
 
@@ -1057,7 +1186,7 @@ mod tests {
         t.piocher(B, now).unwrap();
         assert_eq!(t.vue(B, now).piochee, Some(Carte(5)));
         assert_eq!(t.piocher(B, now), Err("tu as déjà pioché : pose la carte piochée ou passe"));
-        assert_eq!(t.jouer(B, Carte(54), None, now), Err("après une pioche, seule la carte piochée se pose"));
+        assert_eq!(t.jouer(B, Carte(54), None, None, now), Err("après une pioche, seule la carte piochée se pose"));
         t.passer(B, now).unwrap();
         assert_eq!(t.places[t.tour].id, A);
         // Une pioche qui ne va pas : le tour passe tout seul.
@@ -1072,7 +1201,7 @@ mod tests {
     fn derniere_carte_contre_et_annonce() {
         let now = Instant::now();
         let mut t = manche(&[(A, &[2, 3]), (B, &[4, 6, 8])], 13, now);
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         assert_eq!(t.expose, Some(A), "à une carte sans l'avoir dit");
         t.contrer(B).unwrap();
         assert_eq!(main_de(&t, A), 1 + PENALITE_ANNONCE);
@@ -1084,17 +1213,17 @@ mod tests {
         // Annoncé avant de poser : rien à contrer.
         let mut t = manche(&[(A, &[2, 3]), (B, &[4, 6, 8])], 13, now);
         t.annoncer(A).unwrap();
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         assert_eq!(t.expose, None);
         // Annoncé après coup, avant d'être contré : sauvé aussi.
         let mut t = manche(&[(A, &[2, 3]), (B, &[4, 6, 8])], 13, now);
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         t.annoncer(A).unwrap();
         t.contrer(B).unwrap();
         assert_eq!(main_de(&t, A), 1);
         // Le coup suivant ferme la fenêtre.
         let mut t = manche(&[(A, &[2, 3]), (B, &[4, 6, 8])], 13, now);
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         t.piocher(B, now).unwrap();
         assert_eq!(t.expose, None);
         assert_eq!(t.annoncer(B), Err("ça s'annonce à deux cartes ou moins"));
@@ -1104,7 +1233,7 @@ mod tests {
     fn la_derniere_carte_gagne() {
         let now = Instant::now();
         let mut t = manche(&[(A, &[2]), (B, &[4, 6])], 13, now);
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         assert_eq!(t.phase, PhaseCartes::Finie);
         assert_eq!(t.gagnant, Some(A));
         assert!(!t.gagnant_bot);
@@ -1143,7 +1272,7 @@ mod tests {
         assert!(t.places[0].bot, "trois tours manqués : un bot joue sa main");
         assert_eq!(t.places[0].id, A, "la place reste la sienne");
         assert!(t.journal.contains(&EvenementCartes::Remplace { par: A }));
-        assert_eq!(t.jouer(A, Carte(54), None, now), Err("un bot joue à ta place : reprends-la d'abord"));
+        assert_eq!(t.jouer(A, Carte(54), None, None, now), Err("un bot joue à ta place : reprends-la d'abord"));
         assert_eq!(t.annoncer(A), Err("un bot joue à ta place : reprends-la d'abord"));
         // Il clique « Reprendre ma place ».
         t.reprendre(A, A, now).unwrap();
@@ -1201,7 +1330,7 @@ mod tests {
         assert!(t.place(A).is_none());
         // D gagne pour lui, pas pour A.
         t.places[0].main = vec![Carte(2)];
-        t.jouer(D, Carte(2), None, now).unwrap();
+        t.jouer(D, Carte(2), None, None, now).unwrap();
         assert_eq!(t.victoires.get(&D), Some(&1));
         assert_eq!(t.victoires.get(&A), None);
     }
@@ -1213,7 +1342,7 @@ mod tests {
         // rien de jouable, pioche : trop tard pour contrer A.
         let mut t = manche(&[(A, &[2, 3]), (B, &[54, 56]), (C, &[8, 10])], 13, now);
         t.accorder(&HashSet::from([A, C]), now);
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         assert_eq!(t.expose, Some(A));
         t.pioche.retain(|c| *c != Carte(60));
         t.pioche.push(Carte(60));
@@ -1239,7 +1368,7 @@ mod tests {
         // La manche suivante, il se rassoit.
         t.places[0].main = vec![Carte(2)];
         t.tour = 0;
-        t.jouer(D, Carte(2), None, now).unwrap();
+        t.jouer(D, Carte(2), None, None, now).unwrap();
         assert!(!t.vue(A, now).en_attente);
         t.rejoindre(A).unwrap();
     }
@@ -1259,7 +1388,7 @@ mod tests {
         let now = Instant::now();
         // 23 = +2 rouge : A le pose ; B, qui le doit, abandonne.
         let mut t = manche(&[(A, &[23, 2]), (B, &[4, 6]), (C, &[8, 10])], 13, now);
-        t.jouer(A, Carte(23), None, now).unwrap();
+        t.jouer(A, Carte(23), None, None, now).unwrap();
         t.quitter(B, now);
         let b = t.place(B).expect("sa place reste, tenue par un bot");
         assert!(t.places[b].bot);
@@ -1295,7 +1424,7 @@ mod tests {
         t.accorder(&HashSet::from([A, B, C]), now);
         // B, resté là, a laissé passer trois tours.
         t.places[1].bot = true;
-        t.jouer(A, Carte(2), None, now).unwrap();
+        t.jouer(A, Carte(2), None, None, now).unwrap();
         assert!(t.place(C).is_none() && t.place(D).is_none(), "les places des partis se libèrent");
         let b = t.place(B).unwrap();
         assert!(!t.places[b].bot, "B rejouera la prochaine manche lui-même");
@@ -1356,20 +1485,150 @@ mod tests {
         // rend qu'une carte (le 7 rouge), le dessus reste.
         let reste = std::mem::take(&mut t.pioche);
         t.places[1].main.extend(reste);
-        t.jouer(A, Carte(23), None, now).unwrap();
+        t.jouer(A, Carte(23), None, None, now).unwrap();
         t.piocher(B, now).unwrap();
         assert_eq!(t.journal.back(), Some(&EvenementCartes::Pioche { par: B, n: 1, manque: 1 }));
         assert_eq!(t.cumul, 0);
         assert_eq!(total(&t), CARTES_DU_JEU as usize);
     }
 
+    fn mains(t: &Table) -> Vec<Vec<u8>> {
+        t.places.iter().map(|p| p.main.iter().map(|c| c.0).collect()).collect()
+    }
+
+    #[test]
+    fn seul_l_hote_regle_et_entre_deux_manches() {
+        let now = Instant::now();
+        let sept = ReglesCartes { sept: true, zero: false };
+        let mut t = table(&[A, B], 1);
+        assert_eq!(t.regler(B, sept), Err("seul l'hôte choisit les règles"));
+        t.regler(A, sept).unwrap();
+        assert_eq!(t.vue(B, now).regles, sept, "tout le monde voit les règles");
+        assert_eq!(t.journal.back(), Some(&EvenementCartes::Regles { par: A, regles: sept }));
+        // Les mêmes règles : rien de neuf au fil.
+        let numero = t.numero;
+        t.regler(A, sept).unwrap();
+        assert_eq!(t.numero, numero);
+        t.lancer(A, now).unwrap();
+        assert_eq!(t.regler(A, ReglesCartes::default()), Err("les règles se changent entre deux manches"));
+        assert_eq!(t.regles, sept, "elles tiennent d'une manche à l'autre");
+    }
+
+    #[test]
+    fn le_sept_echange_les_mains() {
+        let now = Instant::now();
+        // 14 = 7 rouge ; 13 = 7 rouge aussi, le dessus.
+        let mut t = manche(&[(A, &[14, 2, 3]), (B, &[54, 56, 58, 60]), (C, &[8, 10])], 13, now);
+        t.regles.sept = true;
+        assert_eq!(t.jouer(A, Carte(14), None, Some(A), now), Err("choisis avec qui échanger ta main"));
+        assert_eq!(t.jouer(A, Carte(14), None, Some(99), now), Err("choisis avec qui échanger ta main"));
+        assert_eq!(main_de(&t, A), 3, "un geste refusé ne laisse rien");
+        t.jouer(A, Carte(14), None, Some(B), now).unwrap();
+        assert_eq!(mains(&t), vec![vec![54, 56, 58, 60], vec![2, 3], vec![8, 10]]);
+        let fin: Vec<&EvenementCartes> = t.journal.iter().rev().take(2).collect();
+        assert_eq!(fin[0], &EvenementCartes::Echange { par: A, avec: B });
+        assert!(matches!(fin[1], EvenementCartes::Joue { par: A, carte: Carte(14), .. }));
+        assert_eq!(t.places[t.tour].id, B, "le tour passe comme après un 7");
+        assert_eq!(t.vue(A, now).main.len(), 4, "chacun voit sa nouvelle main");
+        assert_eq!(total(&t), CARTES_DU_JEU as usize);
+
+        // Sans cible, d'un ki-chat qui ne sait pas la demander : la plus
+        // petite main.
+        let mut t = manche(&[(A, &[14, 2, 3]), (B, &[54, 56, 58, 60]), (C, &[8, 10])], 13, now);
+        t.regles.sept = true;
+        t.jouer(A, Carte(14), None, None, now).unwrap();
+        assert_eq!(t.journal.back(), Some(&EvenementCartes::Echange { par: A, avec: C }));
+
+        // Sans la règle, le 7 est un chiffre comme un autre.
+        let mut t = manche(&[(A, &[14, 2, 3]), (B, &[54, 56])], 13, now);
+        t.jouer(A, Carte(14), None, Some(B), now).unwrap();
+        assert_eq!(mains(&t), vec![vec![2, 3], vec![54, 56]]);
+    }
+
+    #[test]
+    fn le_dernier_sept_gagne_sans_echange() {
+        let now = Instant::now();
+        let mut t = manche(&[(A, &[14]), (B, &[54, 56])], 13, now);
+        t.regles.sept = true;
+        t.jouer(A, Carte(14), None, None, now).unwrap();
+        assert_eq!(t.gagnant, Some(A));
+    }
+
+    #[test]
+    fn la_main_d_une_carte_recue_n_est_pas_a_contrer() {
+        let now = Instant::now();
+        // A pose son 7 sans avoir annoncé, et garde une carte : exposé…
+        let mut t = manche(&[(A, &[14, 2]), (B, &[54, 56, 58]), (C, &[8])], 13, now);
+        t.regles.sept = true;
+        t.places[2].annonce = true;
+        t.jouer(A, Carte(14), None, Some(B), now).unwrap();
+        // … mais il a maintenant les trois cartes de B : plus rien à contrer.
+        assert_eq!(t.expose, None);
+        assert!(!t.places[0].annonce);
+        // B reçoit une carte qu'il n'a pas choisie : elle compte pour dite.
+        assert!(t.places[1].annonce);
+        t.contrer(C).unwrap();
+        assert_eq!(main_de(&t, B), 1);
+
+        // Échanger avec qui est à une carte : on la reçoit annoncée.
+        let mut t = manche(&[(A, &[14, 2, 3]), (B, &[54, 56]), (C, &[8])], 13, now);
+        t.regles.sept = true;
+        t.places[2].annonce = true;
+        t.jouer(A, Carte(14), None, Some(C), now).unwrap();
+        assert_eq!(mains(&t), vec![vec![8], vec![54, 56], vec![2, 3]]);
+        assert!(t.places[0].annonce && !t.places[2].annonce);
+    }
+
+    #[test]
+    fn le_zero_fait_tourner_les_mains_dans_le_sens_du_jeu() {
+        let now = Instant::now();
+        // 0 = 0 rouge, sur un 1 rouge (2).
+        let mut t = manche(&[(A, &[0, 3]), (B, &[54, 56]), (C, &[8, 10, 12])], 2, now);
+        t.regles.zero = true;
+        t.jouer(A, Carte(0), None, None, now).unwrap();
+        // Chaque main passe au suivant : A → B → C → A.
+        assert_eq!(mains(&t), vec![vec![8, 10, 12], vec![3], vec![54, 56]]);
+        assert_eq!(t.journal.back(), Some(&EvenementCartes::Tourne { par: A }));
+        assert!(t.places[1].annonce, "B se retrouve à une carte : c'est dit");
+        assert_eq!(t.places[t.tour].id, B);
+        assert_eq!(total(&t), CARTES_DU_JEU as usize);
+
+        // Dans l'autre sens : A → C → B → A.
+        let mut t = manche(&[(A, &[0, 3]), (B, &[54, 56]), (C, &[8, 10, 12])], 2, now);
+        t.regles.zero = true;
+        t.horaire = false;
+        t.jouer(A, Carte(0), None, None, now).unwrap();
+        assert_eq!(mains(&t), vec![vec![54, 56], vec![8, 10, 12], vec![3]]);
+        assert_eq!(t.places[t.tour].id, C);
+
+        // Sans la règle, rien ne tourne.
+        let mut t = manche(&[(A, &[0, 3]), (B, &[54, 56])], 2, now);
+        t.jouer(A, Carte(0), None, None, now).unwrap();
+        assert_eq!(mains(&t), vec![vec![3], vec![54, 56]]);
+    }
+
+    #[test]
+    fn le_bot_echange_avec_la_plus_petite_main() {
+        let now = Instant::now();
+        let mut t = manche(&[(A, &[14, 2, 3, 5]), (B, &[54, 56, 58]), (C, &[8, 10])], 13, now);
+        t.regles.sept = true;
+        t.quitter(A, now);
+        // Sa main : le 7 rouge, et deux verts qui ne vont pas.
+        t.places[0].main = vec![Carte(14), Carte(60), Carte(62)];
+        assert!(t.tic(now + BOT_DELAI));
+        assert_eq!(t.journal.back(), Some(&EvenementCartes::Echange { par: A, avec: C }));
+        assert_eq!(mains(&t)[0], vec![8, 10]);
+    }
+
     /// Des manches entières jouées au hasard, coups permis seulement, avec
     /// des allées et venues : absences, retours, abandons, places reprises
     /// par des spectateurs. Le jeu garde ses 108 cartes tant que la manche
-    /// dure, et chaque manche finit par un gagnant.
+    /// dure, et chaque manche finit par un gagnant — avec ou sans les
+    /// règles en plus.
     #[test]
     fn des_manches_au_hasard_restent_justes() {
         let mut now = Instant::now();
+        let (mut echanges, mut tours) = (0, 0);
         for graine in 0..300u64 {
             let joueurs: Vec<UserId> = (1..=2 + graine % 5).collect();
             let spectateurs: Vec<UserId> = vec![100, 101, 102];
@@ -1377,6 +1636,7 @@ mod tests {
             let mut presents: HashSet<UserId> = tous.iter().copied().collect();
             let mut t = table(&joueurs, graine);
             let mut de = StdRng::seed_from_u64(graine ^ 0x5eed);
+            t.regler(joueurs[0], ReglesCartes { sept: graine % 2 == 0, zero: graine % 3 != 1 }).unwrap();
             t.lancer(joueurs[0], now).unwrap();
             let mut coups = 0;
             while t.phase == PhaseCartes::EnCours {
@@ -1427,7 +1687,14 @@ mod tests {
                 }
                 if let Some(&carte) = jouables.get(de.random_range(0..jouables.len().max(1))) {
                     let couleur = CouleurCarte::TOUTES[de.random_range(0..4)];
-                    t.jouer(id, carte, Some(couleur), now).unwrap();
+                    let autres: Vec<UserId> = vue.joueurs.iter().map(|j| j.user_id).filter(|j| *j != id).collect();
+                    let cible = autres[de.random_range(0..autres.len())];
+                    t.jouer(id, carte, Some(couleur), Some(cible), now).unwrap();
+                    match t.journal.back() {
+                        Some(EvenementCartes::Echange { .. }) => echanges += 1,
+                        Some(EvenementCartes::Tourne { .. }) => tours += 1,
+                        _ => {}
+                    }
                 } else if vue.piochee.is_some() {
                     t.passer(id, now).unwrap();
                 } else if de.random_bool(0.05) {
@@ -1445,5 +1712,6 @@ mod tests {
             }
             assert!(t.gagnant.is_some());
         }
+        assert!(echanges > 50 && tours > 50, "{echanges} échanges, {tours} tours de mains");
     }
 }

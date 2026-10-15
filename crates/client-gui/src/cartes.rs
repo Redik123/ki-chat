@@ -22,8 +22,8 @@ use eframe::egui::{
     StrokeKind, Vec2,
 };
 use ki_protocol::{
-    ActionCartes, Carte, CouleurCarte, EvenementCartes, JoueurCartes, PhaseCartes, TableCartes, UserId,
-    ValeurCarte, MAX_JOUEURS_CARTES, PENALITE_ANNONCE, TOUR_CARTES_S,
+    ActionCartes, Carte, CouleurCarte, EvenementCartes, JoueurCartes, PhaseCartes, ReglesCartes, TableCartes,
+    UserId, ValeurCarte, MAX_JOUEURS_CARTES, PENALITE_ANNONCE, TOUR_CARTES_S,
 };
 use ki_ui::composants::{self as ui, Tone};
 use ki_ui::icones::{self, Icon};
@@ -53,6 +53,8 @@ pub enum Son {
     Annonce,
     /// Quelqu'un se fait contrer.
     Contre,
+    /// Des mains changent de place : un 7 qui échange, un 0 qui tourne.
+    Echange,
 }
 
 #[derive(Default)]
@@ -62,6 +64,11 @@ pub struct Cartes {
     recue: Option<Instant>,
     /// Le joker posé qui attend sa couleur.
     choix_couleur: Option<Carte>,
+    /// Le 7 posé qui attend avec qui échanger.
+    choix_cible: Option<Carte>,
+    /// Le serveur connaît les règles en plus (protocole 2) : sans lui,
+    /// l'hôte n'a rien à régler.
+    pub regles_disponibles: bool,
     refus: Option<(String, Instant)>,
     /// Les effets en cours : cartes qui volent, annonce, contre, victoire.
     anims: Vec<Anim>,
@@ -134,6 +141,9 @@ impl Cartes {
                             EvenementCartes::Gagne { .. } => sons.push(Son::FinDeManche),
                             EvenementCartes::Annonce { .. } => sons.push(Son::Annonce),
                             EvenementCartes::Contre { .. } => sons.push(Son::Contre),
+                            EvenementCartes::Echange { .. } | EvenementCartes::Tourne { .. } => {
+                                sons.push(Son::Echange)
+                            }
                             _ => {}
                         }
                     }
@@ -158,9 +168,13 @@ impl Cartes {
                 if self.choix_couleur.is_some_and(|j| !a_moi || !t.main.contains(&j)) {
                     self.choix_couleur = None;
                 }
+                if self.choix_cible.is_some_and(|k| !a_moi || !t.main.contains(&k)) {
+                    self.choix_cible = None;
+                }
             }
             None => {
                 self.choix_couleur = None;
+                self.choix_cible = None;
                 self.anims.clear();
             }
         }
@@ -282,68 +296,76 @@ impl Cartes {
         actions: &mut Vec<ActionCartes>,
     ) {
         let colonne = Rect::from_center_size(zone.center(), vec2(zone.width().min(560.0), zone.height()));
-        let mut ui = colonne_centree(ui, colonne);
-        ui.add_space((zone.height() * 0.06).max(espace::L));
-        let hote = qui(t.hote);
-        ui.label(RichText::new(format!("La table de {}", hote.nom)).size(texte::GRAND).color(c::TEXT).strong());
-        ui.add_space(espace::S);
-        let n = t.joueurs.len();
-        ui::hint(&mut ui, format!("{n} joueur{} assis sur {MAX_JOUEURS_CARTES} places", if n > 1 { "s" } else { "" }));
-        ui.add_space(espace::L);
+        let regles_ok = self.regles_disponibles;
+        // Ce qu'il y a sous les places ne tient pas toujours dans la
+        // fenêtre : la colonne défile.
+        colonne_defilante(ui, colonne, "attente", |ui| {
+            ui.add_space((zone.height() * 0.06).max(espace::L));
+            let hote = qui(t.hote);
+            ui.label(RichText::new(format!("La table de {}", hote.nom)).size(texte::GRAND).color(c::TEXT).strong());
+            ui.add_space(espace::S);
+            let n = t.joueurs.len();
+            ui::hint(ui, format!("{n} joueur{} assis sur {MAX_JOUEURS_CARTES} places", if n > 1 { "s" } else { "" }));
+            ui.add_space(espace::L);
 
-        // Les places : une pastille par joueur, l'hôte couronné.
-        let case = vec2(84.0, 78.0);
-        let par_ligne = ((colonne.width() / case.x).floor() as usize).max(1);
-        for ligne in t.joueurs.chunks(par_ligne) {
-            let (r, _) = ui.allocate_exact_size(vec2(case.x * ligne.len() as f32, case.y), Sense::hover());
-            for (i, j) in ligne.iter().enumerate() {
-                let cr = Rect::from_min_size(r.min + vec2(i as f32 * case.x, 0.0), case);
-                let id = qui(j.user_id);
-                let av = Rect::from_center_size(pos2(cr.center().x, cr.top() + 26.0), Vec2::splat(44.0));
-                ui::paint_avatar(ui.painter(), av, &id.nom, false, id.photo.as_ref(), c::BG_DEEP);
-                if j.user_id == t.hote {
-                    let couronne = Rect::from_center_size(av.right_top() + vec2(-4.0, 4.0), Vec2::splat(16.0));
-                    icones::draw(ui.painter(), couronne, Icon::Crown, c::WARN);
+            // Les places : une pastille par joueur, l'hôte couronné.
+            let case = vec2(84.0, 78.0);
+            let par_ligne = ((colonne.width() / case.x).floor() as usize).max(1);
+            for ligne in t.joueurs.chunks(par_ligne) {
+                let (r, _) = ui.allocate_exact_size(vec2(case.x * ligne.len() as f32, case.y), Sense::hover());
+                for (i, j) in ligne.iter().enumerate() {
+                    let cr = Rect::from_min_size(r.min + vec2(i as f32 * case.x, 0.0), case);
+                    let id = qui(j.user_id);
+                    let av = Rect::from_center_size(pos2(cr.center().x, cr.top() + 26.0), Vec2::splat(44.0));
+                    ui::paint_avatar(ui.painter(), av, &id.nom, false, id.photo.as_ref(), c::BG_DEEP);
+                    if j.user_id == t.hote {
+                        let couronne = Rect::from_center_size(av.right_top() + vec2(-4.0, 4.0), Vec2::splat(16.0));
+                        icones::draw(ui.painter(), couronne, Icon::Crown, c::WARN);
+                    }
+                    ui.painter().text(
+                        pos2(cr.center().x, cr.top() + 54.0),
+                        Align2::CENTER_TOP,
+                        abreger(&id.nom, 11),
+                        FontId::proportional(texte::COURANT),
+                        id.couleur,
+                    );
                 }
-                ui.painter().text(
-                    pos2(cr.center().x, cr.top() + 54.0),
-                    Align2::CENTER_TOP,
-                    abreger(&id.nom, 11),
-                    FontId::proportional(texte::COURANT),
-                    id.couleur,
-                );
             }
-        }
-        ui.add_space(espace::L);
+            ui.add_space(espace::L);
 
-        let assis = t.joueur(moi).is_some();
-        ui.horizontal(|ui| {
-            // Centrer une rangée de boutons : sa largeur se devine d'abord.
-            let largeur = if assis && moi == t.hote { 300.0 } else { 180.0 };
-            ui.add_space(((ui.available_width() - largeur) / 2.0).max(0.0));
-            if moi == t.hote && assis {
-                let libelle = if t.manche == 0 { "Distribuer" } else { "Redistribuer" };
-                let pret = n >= 2;
-                if ui.add_enabled_ui(pret, |ui| ui::primary_button(ui, Some(Icon::Play), libelle, None)).inner.clicked() {
-                    actions.push(ActionCartes::Lancer);
+            let assis = t.joueur(moi).is_some();
+            ui.horizontal(|ui| {
+                // Centrer une rangée de boutons : sa largeur se devine d'abord.
+                let largeur = if assis && moi == t.hote { 300.0 } else { 180.0 };
+                ui.add_space(((ui.available_width() - largeur) / 2.0).max(0.0));
+                if moi == t.hote && assis {
+                    let libelle = if t.manche == 0 { "Distribuer" } else { "Redistribuer" };
+                    let pret = n >= 2;
+                    if ui.add_enabled_ui(pret, |ui| ui::primary_button(ui, Some(Icon::Play), libelle, None)).inner.clicked() {
+                        actions.push(ActionCartes::Lancer);
+                    }
                 }
-            }
-            if assis {
-                if ui::button(ui, Icon::Logout, "Me lever").clicked() {
-                    actions.push(ActionCartes::Quitter);
+                if assis {
+                    if ui::button(ui, Icon::Logout, "Me lever").clicked() {
+                        actions.push(ActionCartes::Quitter);
+                    }
+                } else if n < MAX_JOUEURS_CARTES && ui::primary_button(ui, Some(Icon::Plus), "M'asseoir", None).clicked() {
+                    actions.push(ActionCartes::Rejoindre);
                 }
-            } else if n < MAX_JOUEURS_CARTES && ui::primary_button(ui, Some(Icon::Plus), "M'asseoir", None).clicked() {
-                actions.push(ActionCartes::Rejoindre);
+            });
+            ui.add_space(espace::S);
+            if moi == t.hote && n < 2 {
+                ui::hint(ui, "Il faut un deuxième joueur : ceux du salon peuvent s'asseoir.");
+            } else if moi != t.hote {
+                ui::hint(ui, format!("{} distribue quand tout le monde est assis.", hote.nom));
             }
+            ui.add_space(espace::XL);
+            if regles_ok {
+                regles_en_plus(ui, t, moi, &hote.nom, actions);
+                ui.add_space(espace::M);
+            }
+            regles(ui);
         });
-        ui.add_space(espace::S);
-        if moi == t.hote && n < 2 {
-            ui::hint(&mut ui, "Il faut un deuxième joueur : ceux du salon peuvent s'asseoir.");
-        } else if moi != t.hote {
-            ui::hint(&mut ui, format!("{} distribue quand tout le monde est assis.", hote.nom));
-        }
-        ui.add_space(espace::XXL);
-        regles(&mut ui);
     }
 
     // --- La partie ---
@@ -391,6 +413,9 @@ impl Cartes {
         self.peindre_effets(ui, &p, zone, milieu, moi, qui);
         if let Some(carte) = self.choix_couleur {
             self.choisir_couleur(ui, &p, milieu, carte, actions);
+        }
+        if let Some(carte) = self.choix_cible {
+            self.choisir_cible(ui, &p, zone, t, moi, carte, qui, actions);
         }
     }
 
@@ -530,6 +555,16 @@ impl Cartes {
         self.reperes.pioche = Some(pioche);
         self.reperes.defausse = Some(defausse);
 
+        // Les règles en plus, rappelées dans un coin de la table : on les
+        // oublie vite d'une manche à l'autre.
+        let mut y = rect.top() + 12.0;
+        for (en_jeu, mot) in [(t.regles.sept, "7 : ÉCHANGE"), (t.regles.zero, "0 : ÇA TOURNE")] {
+            if en_jeu {
+                pastille(p, pos2(rect.left() + 52.0, y), mot, c::ACCENT);
+                y += 20.0;
+            }
+        }
+
         // Le sens du jeu, en arc autour des deux tas ; quand il s'inverse,
         // les flèches font un demi-tour.
         let cle = ui.id().with(("sens_du_jeu", t.manche));
@@ -636,57 +671,66 @@ impl Cartes {
         qui: &dyn Fn(UserId) -> Identite,
         actions: &mut Vec<ActionCartes>,
     ) {
-        let mut ui = colonne_centree(ui, Rect::from_center_size(rect.center(), vec2(rect.width().min(460.0), rect.height())));
-        ui.add_space((rect.height() * 0.08).max(espace::M));
-        let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
-        icones::draw(ui.painter(), r, Icon::Crown, c::WARN);
-        if let Some(g) = t.gagnant {
-            let titre = if t.gagnant_bot {
-                format!("Le bot de {} gagne la manche !", qui(g).nom)
-            } else if g == moi {
-                "Tu gagnes la manche !".to_string()
-            } else {
-                format!("{} gagne la manche !", qui(g).nom)
-            };
-            ui.label(RichText::new(titre).size(texte::GRAND).color(c::TEXT).strong());
-        }
-        ui.add_space(espace::M);
-        let mut scores: Vec<&JoueurCartes> = t.joueurs.iter().collect();
-        scores.sort_by_key(|j| std::cmp::Reverse(j.victoires));
-        for j in scores {
-            let id = qui(j.user_id);
-            let reste = if j.cartes > 0 { format!(" · {} en main", j.cartes) } else { String::new() };
-            ui.label(
-                RichText::new(format!("{} — {} manche{} gagnée{}{reste}", id.nom, j.victoires, pluriel(j.victoires), pluriel(j.victoires)))
-                    .color(id.couleur)
-                    .size(texte::COURANT),
-            );
-        }
-        ui.add_space(espace::L);
-        let assis = t.joueur(moi).is_some();
-        ui.horizontal(|ui| {
-            ui.add_space(((ui.available_width() - 260.0) / 2.0).max(0.0));
-            if moi == t.hote
-                && assis
-                && ui
-                    .add_enabled_ui(t.joueurs.len() >= 2, |ui| ui::primary_button(ui, Some(Icon::Repeat), "Redistribuer", None))
-                    .inner
-                    .clicked()
-            {
-                actions.push(ActionCartes::Lancer);
+        let regles_ok = self.regles_disponibles;
+        let colonne = Rect::from_center_size(rect.center(), vec2(rect.width().min(460.0), rect.height()));
+        // Les scores et les règles en plus ne tiennent pas toujours dans la
+        // fenêtre : la colonne défile.
+        colonne_defilante(ui, colonne, "fin", |ui| {
+            ui.add_space((rect.height() * 0.08).max(espace::M));
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+            icones::draw(ui.painter(), r, Icon::Crown, c::WARN);
+            if let Some(g) = t.gagnant {
+                let titre = if t.gagnant_bot {
+                    format!("Le bot de {} gagne la manche !", qui(g).nom)
+                } else if g == moi {
+                    "Tu gagnes la manche !".to_string()
+                } else {
+                    format!("{} gagne la manche !", qui(g).nom)
+                };
+                ui.label(RichText::new(titre).size(texte::GRAND).color(c::TEXT).strong());
             }
-            if assis {
-                if ui::button(ui, Icon::Logout, "Me lever").clicked() {
-                    actions.push(ActionCartes::Quitter);
+            ui.add_space(espace::M);
+            let mut scores: Vec<&JoueurCartes> = t.joueurs.iter().collect();
+            scores.sort_by_key(|j| std::cmp::Reverse(j.victoires));
+            for j in scores {
+                let id = qui(j.user_id);
+                let reste = if j.cartes > 0 { format!(" · {} en main", j.cartes) } else { String::new() };
+                ui.label(
+                    RichText::new(format!("{} — {} manche{} gagnée{}{reste}", id.nom, j.victoires, pluriel(j.victoires), pluriel(j.victoires)))
+                        .color(id.couleur)
+                        .size(texte::COURANT),
+                );
+            }
+            ui.add_space(espace::L);
+            let assis = t.joueur(moi).is_some();
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - 260.0) / 2.0).max(0.0));
+                if moi == t.hote
+                    && assis
+                    && ui
+                        .add_enabled_ui(t.joueurs.len() >= 2, |ui| ui::primary_button(ui, Some(Icon::Repeat), "Redistribuer", None))
+                        .inner
+                        .clicked()
+                {
+                    actions.push(ActionCartes::Lancer);
                 }
-            } else if t.joueurs.len() < MAX_JOUEURS_CARTES && ui::primary_button(ui, Some(Icon::Plus), "M'asseoir", None).clicked() {
-                actions.push(ActionCartes::Rejoindre);
+                if assis {
+                    if ui::button(ui, Icon::Logout, "Me lever").clicked() {
+                        actions.push(ActionCartes::Quitter);
+                    }
+                } else if t.joueurs.len() < MAX_JOUEURS_CARTES && ui::primary_button(ui, Some(Icon::Plus), "M'asseoir", None).clicked() {
+                    actions.push(ActionCartes::Rejoindre);
+                }
+            });
+            if moi != t.hote {
+                ui.add_space(espace::S);
+                ui::hint(ui, format!("{} redistribue quand il veut.", qui(t.hote).nom));
+            }
+            if regles_ok {
+                ui.add_space(espace::L);
+                regles_en_plus(ui, t, moi, &qui(t.hote).nom, actions);
             }
         });
-        if moi != t.hote {
-            ui.add_space(espace::S);
-            ui::hint(&mut ui, format!("{} redistribue quand il veut.", qui(t.hote).nom));
-        }
     }
 
     /// Ma place : mes gestes, puis ma main.
@@ -880,13 +924,24 @@ impl Cartes {
         }
         if reponse.clicked() {
             if let Some(i) = survol.filter(|&i| jouables[i]) {
-                let carte = t.main[i];
-                if carte.sauvage() {
-                    self.choix_couleur = Some(carte);
-                } else {
-                    actions.push(ActionCartes::Jouer { carte, couleur: None });
-                }
+                self.jouer_carte(t, moi, t.main[i], actions);
             }
+        }
+    }
+
+    /// Je pose `carte` : un joker attend sa couleur, un 7 qui échange
+    /// attend avec qui — à deux, pas de choix à faire —, le reste part.
+    pub fn jouer_carte(&mut self, t: &TableCartes, moi: UserId, carte: Carte, actions: &mut Vec<ActionCartes>) {
+        if carte.sauvage() {
+            self.choix_couleur = Some(carte);
+        } else if t.regles.echange_au_sept(carte, t.main.len().saturating_sub(1)) {
+            let autres: Vec<UserId> = t.joueurs.iter().map(|j| j.user_id).filter(|j| *j != moi).collect();
+            match autres.as_slice() {
+                [seul] => actions.push(ActionCartes::Jouer { carte, couleur: None, cible: Some(*seul) }),
+                _ => self.choix_cible = Some(carte),
+            }
+        } else {
+            actions.push(ActionCartes::Jouer { carte, couleur: None, cible: None });
         }
     }
 
@@ -911,7 +966,7 @@ impl Cartes {
             p.circle_stroke(pos, r, Stroke::new(2.0, Color32::from_white_alpha(if clic.hovered() { 230 } else { 120 })));
             p.text(pos + vec2(0.0, r + 12.0), Align2::CENTER_CENTER, couleur.nom(), FontId::proportional(texte::COURANT), c::TEXT_DIM);
             if clic.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                actions.push(ActionCartes::Jouer { carte, couleur: Some(couleur) });
+                actions.push(ActionCartes::Jouer { carte, couleur: Some(couleur), cible: None });
                 self.choix_couleur = None;
             }
         }
@@ -919,6 +974,69 @@ impl Cartes {
         let mut sous = ui.new_child(egui::UiBuilder::new().max_rect(annuler).layout(egui::Layout::top_down(egui::Align::Center)));
         if ui::button(&mut sous, Icon::Close, "Annuler").clicked() {
             self.choix_couleur = None;
+        }
+    }
+
+    /// Le 7 posé attend avec qui échanger : un portrait par joueur, et ce
+    /// qu'il a en main. Par-dessus toute la table — à dix, il faut la place.
+    #[allow(clippy::too_many_arguments)]
+    fn choisir_cible(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Painter,
+        rect: Rect,
+        t: &TableCartes,
+        moi: UserId,
+        carte: Carte,
+        qui: &dyn Fn(UserId) -> Identite,
+        actions: &mut Vec<ActionCartes>,
+    ) {
+        p.rect_filled(rect, rayon::XL, Color32::from_black_alpha(190));
+        // Le voile prend les clics : rien de ce qu'il couvre ne se joue.
+        let _ = ui.interact(rect, ui.id().with("voile_cible"), Sense::click());
+        let autres: Vec<&JoueurCartes> = t.joueurs.iter().filter(|j| j.user_id != moi).collect();
+        let case = vec2(96.0, 104.0);
+        let par_ligne = ((rect.width() - 40.0) / case.x).floor().max(1.0) as usize;
+        let lignes = autres.len().div_ceil(par_ligne).max(1);
+        let haut = rect.center().y - lignes as f32 * case.y / 2.0;
+        p.text(
+            pos2(rect.center().x, haut - 34.0),
+            Align2::CENTER_CENTER,
+            format!("{} : avec qui échanges-tu ta main ?", carte.nom()),
+            FontId::proportional(texte::GRAND),
+            c::TEXT,
+        );
+        for (l, ligne) in autres.chunks(par_ligne).enumerate() {
+            let x0 = rect.center().x - case.x * ligne.len() as f32 / 2.0;
+            for (k, j) in ligne.iter().enumerate() {
+                let zone = Rect::from_min_size(pos2(x0 + k as f32 * case.x, haut + l as f32 * case.y), case).shrink(3.0);
+                let clic = ui.interact(zone, ui.id().with(("cible", j.user_id)), Sense::click());
+                if clic.hovered() {
+                    p.rect_filled(zone, rayon::L, c::translucide(c::ACCENT, 45));
+                }
+                let id = qui(j.user_id);
+                let centre = pos2(zone.center().x, zone.top() + 30.0);
+                let r = if clic.hovered() { 26.0 } else { 24.0 };
+                ui::paint_avatar(p, Rect::from_center_size(centre, Vec2::splat(r * 2.0)), &id.nom, false, id.photo.as_ref(), c::BG_DEEP);
+                p.text(pos2(centre.x, zone.top() + 62.0), Align2::CENTER_TOP, abreger(&id.nom, 11), FontId::proportional(texte::COURANT), id.couleur);
+                let n = u32::from(j.cartes);
+                p.text(
+                    pos2(centre.x, zone.top() + 80.0),
+                    Align2::CENTER_TOP,
+                    format!("{n} carte{}", pluriel(n)),
+                    FontId::proportional(texte::PETIT),
+                    if n <= 2 { c::WARN } else { c::TEXT_DIM },
+                );
+                if clic.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    actions.push(ActionCartes::Jouer { carte, couleur: None, cible: Some(j.user_id) });
+                    self.choix_cible = None;
+                }
+            }
+        }
+        let annuler = Rect::from_center_size(pos2(rect.center().x, haut + lignes as f32 * case.y + 22.0), vec2(120.0, 30.0));
+        let mut sous = ui.new_child(egui::UiBuilder::new().max_rect(annuler).layout(egui::Layout::top_down(egui::Align::Center)));
+        if ui::button(&mut sous, Icon::Close, "Annuler").clicked() {
+            self.choix_cible = None;
         }
     }
 
@@ -932,6 +1050,9 @@ impl Cartes {
         );
         sous.set_clip_rect(rect);
         sous.label(RichText::new(format!("Manche {}", t.manche.max(1))).color(c::TEXT_FAINT).size(texte::PETIT).strong());
+        if let Some(liste) = liste_des_regles(t.regles) {
+            sous.label(RichText::new(format!("En plus : {liste}")).color(c::TEXT_FAINT).size(texte::PETIT));
+        }
         sous.add_space(espace::XS);
         let nom = |id: UserId| qui(id).nom;
         let n = t.journal.len();
@@ -964,6 +1085,11 @@ const ANNONCE: f32 = 1.9;
 const CONTRE: f32 = 1.3;
 /// Les confettis de la victoire.
 const VICTOIRE: f32 = 3.5;
+/// La bannière d'un échange de mains.
+const ECHANGE: f32 = 1.6;
+/// Les cartes que je reçois volent toutes jusqu'à ma main, jusqu'à ce
+/// nombre : au-delà, elles y sont déjà.
+const VOLS_MOI_MAX: usize = 26;
 /// Entre deux cartes de la donne.
 const DONNE_PAS: f32 = 0.035;
 /// Au-delà, une pioche ne fait voler que ce nombre de cartes : le compte,
@@ -994,6 +1120,10 @@ enum Effet {
     Annonce { qui: UserId },
     /// « Contré ! » : `cible` pioche `n` cartes.
     Contre { cible: UserId, n: u8 },
+    /// Le 7 : `par` et `avec` échangent leurs mains.
+    Echange { par: UserId, avec: UserId },
+    /// Le 0 : toutes les mains tournent.
+    Tourne { par: UserId },
     Victoire,
 }
 
@@ -1048,6 +1178,17 @@ fn effets_de(
     } else {
         apres.main.iter().copied().filter(|c| !avant.main.contains(c)).collect()
     };
+    // Mes cartes parties autrement qu'à la défausse : données dans un
+    // échange, ou passées au voisin.
+    let posees: Vec<Carte> = neufs
+        .iter()
+        .filter_map(|e| match e {
+            EvenementCartes::Joue { carte, .. } => Some(*carte),
+            _ => None,
+        })
+        .collect();
+    let mut parties: Vec<Carte> =
+        avant.main.iter().copied().filter(|c| !apres.main.contains(c) && !posees.contains(c)).collect();
     let mut sortie = Vec::new();
     let mut retard = 0.0;
     let mut dessus = avant.dessus;
@@ -1081,6 +1222,30 @@ fn effets_de(
                 tirage(*cible, *n, &mut retard, &mut sortie, &mut neuves);
             }
             EvenementCartes::Annonce { par } => sortie.push((Effet::Annonce { qui: *par }, retard, ANNONCE)),
+            EvenementCartes::Echange { par, avec } => {
+                sortie.push((Effet::Echange { par: *par, avec: *avec }, retard, ECHANGE));
+                retard += 0.15;
+                let depart = retard;
+                for (de, vers) in [(*par, *avec), (*avec, *par)] {
+                    let mut r = depart;
+                    passer_une_main(de, vers, apres, moi, cases, &mut neuves, &mut parties, &mut r, &mut sortie);
+                    retard = f32::max(retard, r);
+                }
+            }
+            EvenementCartes::Tourne { par } => {
+                sortie.push((Effet::Tourne { par: *par }, retard, ECHANGE));
+                retard += 0.15;
+                // Toutes ensemble, chacune vers le voisin dans le sens du jeu.
+                let n = apres.joueurs.len();
+                let depart = retard;
+                for k in 0..n {
+                    let suivant = if apres.horaire { (k + 1) % n } else { (k + n - 1) % n };
+                    let (de, vers) = (apres.joueurs[k].user_id, apres.joueurs[suivant].user_id);
+                    let mut r = depart;
+                    passer_une_main(de, vers, apres, moi, cases, &mut neuves, &mut parties, &mut r, &mut sortie);
+                    retard = f32::max(retard, r);
+                }
+            }
             EvenementCartes::Gagne { .. } => sortie.push((Effet::Victoire, retard + 0.2, VICTOIRE)),
             EvenementCartes::Manche => {
                 // La donne : une carte à chacun, tour après tour.
@@ -1099,6 +1264,44 @@ fn effets_de(
         }
     }
     sortie
+}
+
+/// Une main entière qui passe de la place `de` à la place `vers` : de dos
+/// entre deux autres, face visible quand c'est la mienne qui part, et vers
+/// leurs cases quand c'est moi qui la reçois.
+#[allow(clippy::too_many_arguments)]
+fn passer_une_main(
+    de: UserId,
+    vers: UserId,
+    apres: &TableCartes,
+    moi: Option<UserId>,
+    cases: &HashMap<Carte, Rect>,
+    neuves: &mut std::collections::VecDeque<Carte>,
+    parties: &mut Vec<Carte>,
+    retard: &mut f32,
+    sortie: &mut Vec<(Effet, f32, f32)>,
+) {
+    let mut voler = |carte: Option<Carte>, de: Lieu, vers: Lieu, retard: &mut f32| {
+        sortie.push((Effet::Vol { carte, de, vers, sous: None }, *retard, VOL));
+        *retard += 0.04;
+    };
+    if Some(vers) == moi {
+        for c in neuves.drain(..).take(VOLS_MOI_MAX) {
+            voler(None, Lieu::Siege(de), Lieu::MaCarte(c), retard);
+        }
+    } else if Some(de) == moi {
+        for c in parties.drain(..).take(VOLS_MOI_MAX) {
+            let depuis = cases.get(&c).map_or(Lieu::Siege(de), |r| Lieu::Fixe(*r));
+            voler(Some(c), depuis, Lieu::Siege(vers), retard);
+        }
+    } else {
+        // `vers` tient maintenant la main de `de` : son compte est celui
+        // qui a voyagé.
+        let n = apres.joueur(vers).map_or(0, |j| j.cartes).min(VOLS_MAX);
+        for _ in 0..n {
+            voler(None, Lieu::Siege(de), Lieu::Siege(vers), retard);
+        }
+    }
 }
 
 impl Cartes {
@@ -1154,6 +1357,15 @@ impl Cartes {
                             c::DANGER.gamma_multiply(alpha),
                         );
                     }
+                }
+                Effet::Echange { par, avec } => {
+                    let nom = |id: UserId| if id == moi { "toi".to_string() } else { qui(id).nom };
+                    let sous_titre = format!("{} et {}", nom(*par), nom(*avec));
+                    banniere(&p.with_clip_rect(milieu), milieu, x, "ÉCHANGE !", &sous_titre, c::ACCENT);
+                }
+                Effet::Tourne { par } => {
+                    let sous_titre = if *par == moi { "ton 0".to_string() } else { format!("le 0 de {}", qui(*par).nom) };
+                    banniere(&p.with_clip_rect(milieu), milieu, x, "ÇA TOURNE !", &sous_titre, teinte(CouleurCarte::Bleu));
                 }
                 Effet::Victoire => confettis(p, zone, x),
             }
@@ -1389,6 +1601,7 @@ fn disposer_main(n: usize, rect: Rect) -> Vec<Rect> {
 /// Les règles de la maison, en quatre lignes.
 fn regles(ui: &mut egui::Ui) {
     ui::card(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         // La colonne qui l'accueille centre tout : les règles se lisent
         // mieux alignées à gauche.
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -1405,6 +1618,70 @@ fn regles(ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+/// Les règles en plus : l'hôte les allume et les éteint, entre deux
+/// manches ; les autres voient lesquelles sont en jeu.
+fn regles_en_plus(ui: &mut egui::Ui, t: &TableCartes, moi: UserId, nom_hote: &str, actions: &mut Vec<ActionCartes>) {
+    let hote = moi == t.hote && t.joueur(moi).is_some();
+    ui::card(ui, |ui| {
+        // Toute la largeur, comme les règles de la maison en dessous.
+        ui.set_min_width(ui.available_width());
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.label(RichText::new("Les règles en plus").color(c::TEXT).strong());
+            ui.add_space(espace::XS);
+            if hote {
+                let mut regles = t.regles;
+                let mut change = false;
+                for (en_jeu, titre, detail) in [
+                    (&mut regles.sept, "Le 7 échange", "Qui pose un 7 échange sa main avec le joueur de son choix."),
+                    (
+                        &mut regles.zero,
+                        "Le 0 fait tourner",
+                        "Qui pose un 0 fait passer toutes les mains au voisin, dans le sens du jeu.",
+                    ),
+                ] {
+                    change |= ui::interrupteur(ui, en_jeu, titre).changed();
+                    ui.label(RichText::new(detail).color(c::TEXT_DIM).size(texte::COURANT));
+                    ui.add_space(espace::XS);
+                }
+                if change {
+                    actions.push(ActionCartes::Regler { regles });
+                }
+            } else {
+                let texte = match liste_des_regles(t.regles) {
+                    Some(liste) => format!("En jeu : {liste}."),
+                    None => "Aucune : les règles de la maison, rien de plus.".to_string(),
+                };
+                ui.label(RichText::new(texte).color(c::TEXT_DIM).size(texte::COURANT));
+                ui::hint(ui, format!("{nom_hote} les choisit entre deux manches."));
+            }
+        });
+    });
+}
+
+/// « le 7 échange, le 0 fait tourner » — `None` sans règle en plus.
+fn liste_des_regles(regles: ReglesCartes) -> Option<String> {
+    let mut liste = Vec::new();
+    if regles.sept {
+        liste.push("le 7 échange");
+    }
+    if regles.zero {
+        liste.push("le 0 fait tourner");
+    }
+    (!liste.is_empty()).then(|| liste.join(", "))
+}
+
+/// Comme [`colonne_centree`], mais qui défile quand ce qu'elle tient
+/// dépasse.
+fn colonne_defilante(ui: &mut egui::Ui, rect: Rect, cle: &str, contenu: impl FnOnce(&mut egui::Ui)) {
+    let mut sous = colonne_centree(ui, rect);
+    egui::ScrollArea::vertical()
+        .id_salt(("colonne_cartes", cle))
+        .auto_shrink([false, false])
+        .show(&mut sous, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Center), contenu);
+        });
 }
 
 /// Une colonne de widgets centrés dans `rect`, sans prendre de place au
@@ -1456,6 +1733,13 @@ pub fn raconter(e: &EvenementCartes, nom: &dyn Fn(UserId) -> String) -> String {
         }
         EvenementCartes::Gagne { par, bot: true } => format!("Le bot de {} gagne la manche !", nom(*par)),
         EvenementCartes::Gagne { par, .. } => format!("{} gagne la manche !", nom(*par)),
+        EvenementCartes::Echange { par, avec } => format!("{} échange sa main avec {}", nom(*par), nom(*avec)),
+        EvenementCartes::Tourne { .. } => "Chaque main passe au voisin".into(),
+        EvenementCartes::Regles { par, regles } => match liste_des_regles(*regles) {
+            Some(liste) => format!("{} règle la table : {liste}", nom(*par)),
+            None => format!("{} enlève les règles en plus", nom(*par)),
+        },
+        EvenementCartes::Inconnu => "Un coup que cette version ne sait pas raconter".into(),
     }
 }
 
@@ -1752,6 +2036,81 @@ mod tests {
         assert!(matches!(effets[0].0, Effet::Annonce { qui: 2 }));
         assert!(matches!(effets[1].0, Effet::Contre { cible: 2, n: 2 }));
         assert!(matches!(effets.last().unwrap().0, Effet::Victoire));
+    }
+
+    /// Le 7 de Kevin (2) échange sa main avec la mienne : ma main s'envole
+    /// vers sa place, face visible, et la sienne arrive dans mes cases.
+    #[test]
+    fn un_echange_fait_voler_les_deux_mains() {
+        let avant = table_de_test(&[5, 13, 40], 2);
+        let mut apres = table_de_test(&[60, 62], 14);
+        apres.joueurs[0].cartes = 2;
+        apres.joueurs[1].cartes = 3;
+        let case = Rect::from_min_size(pos2(10.0, 400.0), vec2(60.0, 90.0));
+        let cases = HashMap::from([(Carte(5), case)]);
+        let neufs = [
+            EvenementCartes::Joue { par: 2, carte: Carte(14), couleur: None },
+            EvenementCartes::Echange { par: 2, avec: 1 },
+        ];
+        let effets = effets_de(&neufs, &avant, &apres, Some(1), &cases);
+        assert!(effets.iter().any(|(e, _, _)| *e == Effet::Echange { par: 2, avec: 1 }));
+        let mes_cartes_parties: Vec<&Effet> = effets
+            .iter()
+            .map(|(e, _, _)| e)
+            .filter(|e| matches!(e, Effet::Vol { carte: Some(_), vers: Lieu::Siege(2), .. }))
+            .collect();
+        assert_eq!(mes_cartes_parties.len(), 3, "mes trois cartes partent chez Kevin");
+        assert!(mes_cartes_parties.contains(&&Effet::Vol { carte: Some(Carte(5)), de: Lieu::Fixe(case), vers: Lieu::Siege(2), sous: None }));
+        let arrivees: Vec<Lieu> = effets
+            .iter()
+            .filter_map(|(e, _, _)| match e {
+                Effet::Vol { de: Lieu::Siege(2), vers: v @ Lieu::MaCarte(_), .. } => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arrivees, vec![Lieu::MaCarte(Carte(60)), Lieu::MaCarte(Carte(62))]);
+
+        // Vu d'ailleurs : des dos qui se croisent entre Kevin et moi.
+        let effets = effets_de(&neufs, &avant, &apres, Some(3), &HashMap::new());
+        assert!(effets.iter().any(|(e, _, _)| matches!(e, Effet::Vol { carte: None, de: Lieu::Siege(2), vers: Lieu::Siege(1), .. })));
+        assert!(effets.iter().any(|(e, _, _)| matches!(e, Effet::Vol { carte: None, de: Lieu::Siege(1), vers: Lieu::Siege(2), .. })));
+    }
+
+    /// Le 0 : chaque main part chez le voisin, dans le sens du jeu.
+    #[test]
+    fn le_zero_fait_voler_chaque_main_au_voisin() {
+        let avant = table_de_test(&[5, 13], 2);
+        let apres = TableCartes { horaire: false, ..table_de_test(&[40, 41, 42], 0) };
+        let neufs = [EvenementCartes::Joue { par: 2, carte: Carte(0), couleur: None }, EvenementCartes::Tourne { par: 2 }];
+        let effets = effets_de(&neufs, &avant, &apres, Some(1), &HashMap::new());
+        assert!(effets.iter().any(|(e, _, _)| *e == Effet::Tourne { par: 2 }));
+        // Sens inverse : ma main va à 3, je reçois celle de 2.
+        let vols: Vec<(Option<Carte>, Lieu, Lieu)> = effets
+            .iter()
+            .filter_map(|(e, _, _)| match e {
+                Effet::Vol { carte, de, vers, .. } if *vers != Lieu::Defausse => Some((*carte, *de, *vers)),
+                _ => None,
+            })
+            .collect();
+        assert!(vols.contains(&(Some(Carte(5)), Lieu::Siege(1), Lieu::Siege(3))));
+        assert!(vols.contains(&(None, Lieu::Siege(2), Lieu::MaCarte(Carte(40)))));
+        assert!(vols.iter().any(|(_, de, vers)| *de == Lieu::Siege(3) && *vers == Lieu::Siege(2)));
+        assert!(!vols.iter().any(|(_, de, vers)| *de == Lieu::Siege(1) && *vers == Lieu::Siege(2)));
+    }
+
+    #[test]
+    fn un_echange_se_raconte_et_se_fait_entendre() {
+        let nom = |id: UserId| ["", "drion", "Kevin", "Lina"][id as usize].to_string();
+        assert_eq!(raconter(&EvenementCartes::Echange { par: 2, avec: 3 }, &nom), "Kevin échange sa main avec Lina");
+        let regles = ReglesCartes { sept: true, zero: true };
+        assert_eq!(
+            raconter(&EvenementCartes::Regles { par: 1, regles }, &nom),
+            "drion règle la table : le 7 échange, le 0 fait tourner"
+        );
+        let mut cartes = Cartes::default();
+        cartes.recevoir(Some(TableCartes { numero: 3, ..table_de_test(&[13], 2) }), Some(1));
+        let t = TableCartes { numero: 4, journal: vec![EvenementCartes::Tourne { par: 2 }], ..table_de_test(&[40], 2) };
+        assert_eq!(cartes.recevoir(Some(t), Some(1)), vec![Son::Echange]);
     }
 
     #[test]

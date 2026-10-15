@@ -356,6 +356,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     let (force_muted, force_deafened) = state.accounts.voice_sanctions(&username);
     let lien = crate::state::Lien {
         appareil,
+        protocole,
         jeton: voice_token,
         tx: tx.clone(),
         conn: conn.clone(),

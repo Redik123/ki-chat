@@ -222,6 +222,10 @@ fn router<C>(monde: Vec<Voix<C>>) -> Routes<C> {
 /// (rôles, vocal, sanctions, budgets anti-spam) reste dans `ConnectedUser`.
 pub struct Lien {
     pub appareil: ki_protocol::Appareil,
+    /// La version du protocole que parle ce client (`Auth::protocole`) :
+    /// ce qu'un client plus ancien ne lirait pas lui part sous une forme
+    /// qu'il connaît.
+    pub protocole: u32,
     /// Jeton de session : identifie la connexion, et authentifie les envois
     /// HTTP de fichiers.
     pub jeton: u64,
@@ -1170,6 +1174,24 @@ impl AppState {
         let users = self.users.lock().unwrap();
         if let Some(u) = users.get(&user_id) {
             u.envoyer_ligne(&line);
+        }
+    }
+
+    /// Un message en deux versions : `recent` aux connexions qui parlent le
+    /// protocole `depuis` ou plus, `ancien` aux autres.
+    pub fn send_to_selon_protocole(&self, user_id: UserId, depuis: u32, recent: &ServerMsg, ancien: &ServerMsg) {
+        let users = self.users.lock().unwrap();
+        let Some(u) = users.get(&user_id) else { return };
+        let (mut ligne_recente, mut ligne_ancienne) = (None, None);
+        for l in &u.liens {
+            let (ligne, msg) =
+                if l.protocole >= depuis { (&mut ligne_recente, recent) } else { (&mut ligne_ancienne, ancien) };
+            if ligne.is_none() {
+                *ligne = Some(encode(msg));
+            }
+            if let Some(Some(ligne)) = ligne {
+                let _ = l.tx.send_line(ligne);
+            }
         }
     }
 

@@ -18,7 +18,7 @@ mod cartes;
 
 use eframe::egui;
 use ki_protocol::{
-    Carte, CouleurCarte, EvenementCartes, JoueurCartes, PhaseCartes, TableCartes, UserId,
+    Carte, CouleurCarte, EvenementCartes, JoueurCartes, PhaseCartes, ReglesCartes, TableCartes, UserId,
 };
 
 const MOI: UserId = 1;
@@ -68,7 +68,10 @@ struct Banc {
 }
 
 /// Le nombre de scènes.
-const SCENES: usize = 16;
+const SCENES: usize = 21;
+
+/// Les deux règles en plus.
+const SEPT_ET_ZERO: ReglesCartes = ReglesCartes { sept: true, zero: true };
 
 /// Une table en pleine manche, à mon tour.
 fn en_cours() -> TableCartes {
@@ -146,6 +149,27 @@ fn suite(n: usize) -> Option<(TableCartes, f32)> {
             t.joueurs[2].victoires = 1;
             (t, 0.9)
         }
+        // Mon 7 rouge, et j'échange ma main avec celle de Kevin.
+        19 => {
+            let mut t = apres(regle(base), EvenementCartes::Joue { par: MOI, carte: Carte(13), couleur: None });
+            t = apres(t, EvenementCartes::Echange { par: MOI, avec: 2 });
+            t.main = [30u8, 31, 55, 80, 101].into_iter().map(Carte).collect();
+            t.joueurs[0].cartes = 5;
+            t.joueurs[1].cartes = 7;
+            t.tour = Some(2);
+            (t, 0.45)
+        }
+        // Le 0 de Kevin : chaque main passe au voisin.
+        20 => {
+            let mut t = apres(regle(base), EvenementCartes::Joue { par: 2, carte: Carte(25), couleur: None });
+            t = apres(t, EvenementCartes::Tourne { par: 2 });
+            t.dessus = Some(Carte(25));
+            t.main = [26u8, 27, 51, 76].into_iter().map(Carte).collect();
+            let comptes = [4, 8, 4, 2, 9];
+            t.joueurs.iter_mut().zip(comptes).for_each(|(j, n)| j.cartes = n);
+            t.tour = Some(3);
+            (t, 0.45)
+        }
         // La donne d'une nouvelle manche, carte par carte.
         15 => {
             let mut t = en_cours();
@@ -160,6 +184,11 @@ fn suite(n: usize) -> Option<(TableCartes, f32)> {
         }
         _ => return None,
     })
+}
+
+/// La même table, avec les deux règles en plus.
+fn regle(t: TableCartes) -> TableCartes {
+    TableCartes { regles: SEPT_ET_ZERO, ..t }
 }
 
 fn joueur(user_id: UserId, cartes: u8) -> JoueurCartes {
@@ -242,6 +271,22 @@ fn scene(n: usize) -> Option<Option<TableCartes>> {
             Some(TableCartes { joueurs, journal, tour, main, numero: 14, ..en_cours })
         }
         10..=14 => Some(en_cours),
+        // Les règles en plus, avant de distribuer : vues de l'hôte (16),
+        // puis d'un joueur assis (17).
+        16 | 17 => Some(TableCartes {
+            salon: 3,
+            hote: if n == 16 { MOI } else { 2 },
+            phase: PhaseCartes::Attente,
+            joueurs: vec![joueur(1, 0), joueur(2, 0), joueur(3, 0), joueur(4, 0)],
+            horaire: true,
+            regles: ReglesCartes { sept: true, zero: false },
+            journal: vec![EvenementCartes::Assis { par: 4 }],
+            numero: 5,
+            ..Default::default()
+        }),
+        // Je pose mon 7 rouge : avec qui échanger ? (18) ; puis l'échange
+        // (19) et le 0 qui fait tourner (20), animés.
+        18..=20 => Some(regle(en_cours)),
         _ => return None,
     })
 }
@@ -254,6 +299,11 @@ impl Banc {
             let moi = if matches!(self.scene, 5 | 8) { 9 } else { MOI };
             self.cartes.recevoir(table, Some(moi));
             self.cartes.ouvert = true;
+            self.cartes.regles_disponibles = true;
+            if self.scene == 18 {
+                let t = self.cartes.table().cloned().expect("une table");
+                self.cartes.jouer_carte(&t, MOI, Carte(13), &mut Vec::new());
+            }
         }
         self.images = 0;
         self.demandee = false;

@@ -1512,10 +1512,13 @@ pub const MAX_LINE: usize = 160 * 1024;
 /// La version du protocole, échangée dans `Auth` et `Welcome`. Elle monte
 /// quand un message change d'une façon qu'un pair plus ancien ne lirait pas.
 /// 1 : la première numérotée (0.1.52).
+/// 2 : les règles en plus de la table de cartes — le 7 qui échange, le 0
+/// qui fait tourner — et leurs événements (0.1.65). Un client plus ancien
+/// reçoit le fil des coups sans eux (`TableCartes::pour_protocole`).
 ///
 /// Elle n'a pas monté avec les appareils multiples (`Auth::appareil`,
 /// `Member::mobile`) : deux champs facultatifs, qu'un pair ancien ignore.
-pub const PROTOCOLE: u32 = 1;
+pub const PROTOCOLE: u32 = 2;
 
 /// Codes de fermeture de la connexion QUIC (« application close ») : ce que
 /// le serveur dit en raccrochant. Un client qui les connaît sait qu'il ne
@@ -3893,6 +3896,33 @@ pub fn carte_jouable(carte: Carte, dessus: Carte, couleur: CouleurCarte, cumul: 
     carte.sauvage() || carte.couleur() == Some(couleur) || carte.valeur() == dessus.valeur()
 }
 
+/// Les règles en plus, que l'hôte choisit entre deux manches — celles des
+/// tables dites « 7-0 ». Toutes éteintes par défaut : une table s'ouvre
+/// avec les règles de la maison, rien de plus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReglesCartes {
+    /// Qui pose un 7 échange sa main avec le joueur de son choix.
+    #[serde(default)]
+    pub sept: bool,
+    /// Qui pose un 0 fait passer toutes les mains au voisin, dans le sens
+    /// du jeu.
+    #[serde(default)]
+    pub zero: bool,
+}
+
+impl ReglesCartes {
+    /// Poser `carte` en gardant `reste` cartes en main : faut-il dire avec
+    /// qui échanger ? Pas pour la dernière carte, qui gagne la manche.
+    pub fn echange_au_sept(self, carte: Carte, reste: usize) -> bool {
+        self.sept && reste > 0 && carte.valeur() == ValeurCarte::Chiffre(7)
+    }
+
+    /// Poser `carte` en gardant `reste` cartes : les mains tournent-elles ?
+    pub fn tourne_au_zero(self, carte: Carte, reste: usize) -> bool {
+        self.zero && reste > 0 && carte.valeur() == ValeurCarte::Chiffre(0)
+    }
+}
+
 /// Un geste à la table de son salon vocal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -3907,11 +3937,16 @@ pub enum ActionCartes {
     Quitter,
     /// Distribuer — à l'hôte, à deux joueurs au moins.
     Lancer,
-    /// Poser une carte de ma main ; `couleur` pour un joker ou un +4.
+    /// Poser une carte de ma main ; `couleur` pour un joker ou un +4,
+    /// `cible` pour un 7 quand la règle de l'échange est en jeu : le joueur
+    /// avec qui j'échange ma main — sans elle, le serveur prend la plus
+    /// petite main. Ignorée hors de cette règle.
     Jouer {
         carte: Carte,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         couleur: Option<CouleurCarte>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cible: Option<UserId>,
     },
     /// Piocher une carte — ou encaisser le cumul en attente.
     Piocher,
@@ -3925,6 +3960,9 @@ pub enum ActionCartes {
     /// ou celle d'un parti : on récupère sa main telle quelle. `place` est
     /// le joueur qu'on voit à cette place.
     Reprendre { place: UserId },
+    /// Changer les règles en plus — à l'hôte, entre deux manches. Seulement
+    /// vers un serveur au protocole 2 ou plus.
+    Regler { regles: ReglesCartes },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -4012,6 +4050,31 @@ pub enum EvenementCartes {
         #[serde(default, skip_serializing_if = "is_false")]
         bot: bool,
     },
+    /// Le 7 : `par` a échangé sa main avec celle de `avec`.
+    Echange { par: UserId, avec: UserId },
+    /// Le 0 : `par` l'a posé, et chaque main est passée au voisin, dans le
+    /// sens du jeu.
+    Tourne { par: UserId },
+    /// L'hôte a changé les règles en plus.
+    Regles { par: UserId, regles: ReglesCartes },
+    /// Un événement d'un serveur plus récent : on ne sait pas le raconter,
+    /// mais le reste de la table se lit.
+    #[serde(other)]
+    Inconnu,
+}
+
+impl EvenementCartes {
+    /// La version du protocole qui l'a apporté : un client plus ancien ne
+    /// le lirait pas — ni, avec lui, la table entière.
+    pub fn protocole(&self) -> u32 {
+        match self {
+            EvenementCartes::Echange { .. }
+            | EvenementCartes::Tourne { .. }
+            | EvenementCartes::Regles { .. }
+            | EvenementCartes::Inconnu => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// La table de mon salon vocal, vue de ma place.
@@ -4036,6 +4099,9 @@ pub struct TableCartes {
     pub tour: Option<UserId>,
     #[serde(default = "default_true")]
     pub horaire: bool,
+    /// Les règles en plus, choisies par l'hôte.
+    #[serde(default)]
+    pub regles: ReglesCartes,
     /// Les cartes que le joueur du tour piochera s'il ne renchérit pas.
     #[serde(default)]
     pub cumul: u8,
@@ -4094,6 +4160,18 @@ impl TableCartes {
             (Some(dessus), Some(couleur)) => carte_jouable(carte, dessus, couleur, self.cumul),
             _ => false,
         }
+    }
+
+    /// La table telle qu'un client au protocole `protocole` sait la lire :
+    /// le fil des coups sans les événements venus après lui. `None` quand
+    /// il la lit telle quelle.
+    pub fn pour_protocole(&self, protocole: u32) -> Option<TableCartes> {
+        if self.journal.iter().all(|e| e.protocole() <= protocole) {
+            return None;
+        }
+        let mut t = self.clone();
+        t.journal.retain(|e| e.protocole() <= protocole);
+        Some(t)
     }
 }
 
@@ -6140,9 +6218,11 @@ mod tests {
     #[test]
     fn la_table_de_cartes_voyage() {
         let action = ClientMsg::Cartes {
-            action: ActionCartes::Jouer { carte: Carte(104), couleur: Some(CouleurCarte::Vert) },
+            action: ActionCartes::Jouer { carte: Carte(104), couleur: Some(CouleurCarte::Vert), cible: None },
         };
         let json = serde_json::to_string(&action).unwrap();
+        // Sans cible, le geste s'écrit comme avant les règles en plus : un
+        // serveur antérieur le lit.
         assert_eq!(json, r#"{"type":"cartes","action":{"op":"jouer","carte":104,"couleur":"vert"}}"#);
         let relu: ClientMsg = serde_json::from_str(&json).unwrap();
         assert!(matches!(relu, ClientMsg::Cartes { action: ActionCartes::Jouer { carte: Carte(104), .. } }));
@@ -6165,6 +6245,57 @@ mod tests {
         // Sans table : le champ ne part pas, et se relit `None`.
         let json = serde_json::to_string(&ServerMsg::Cartes { table: None }).unwrap();
         assert_eq!(json, r#"{"type":"cartes"}"#);
+    }
+
+    #[test]
+    fn les_regles_en_plus_voyagent() {
+        let action = ClientMsg::Cartes { action: ActionCartes::Regler { regles: ReglesCartes { sept: true, zero: false } } };
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"type":"cartes","action":{"op":"regler","regles":{"sept":true,"zero":false}}}"#);
+        let action = ClientMsg::Cartes { action: ActionCartes::Jouer { carte: Carte(13), couleur: None, cible: Some(4) } };
+        let relu: ClientMsg = serde_json::from_str(&serde_json::to_string(&action).unwrap()).unwrap();
+        assert!(matches!(relu, ClientMsg::Cartes { action: ActionCartes::Jouer { cible: Some(4), .. } }));
+
+        // Une table d'avant les règles se relit sans elles.
+        let ancienne = r#"{"salon":3,"hote":1,"phase":"attente"}"#;
+        let t: TableCartes = serde_json::from_str(ancienne).unwrap();
+        assert_eq!(t.regles, ReglesCartes::default());
+
+        // 13 = 7 rouge, 0 = 0 rouge.
+        let r = ReglesCartes { sept: true, zero: true };
+        assert!(r.echange_au_sept(Carte(13), 3));
+        assert!(!r.echange_au_sept(Carte(13), 0), "le dernier 7 gagne, sans échange");
+        assert!(!ReglesCartes::default().echange_au_sept(Carte(13), 3));
+        assert!(r.tourne_au_zero(Carte(0), 2));
+        assert!(!r.tourne_au_zero(Carte(13), 2));
+    }
+
+    /// Le fil d'une table qui joue les règles en plus : un client au
+    /// protocole 1 le reçoit sans ce qu'il ne saurait pas lire, et un
+    /// événement inconnu ne rend plus la table illisible.
+    #[test]
+    fn un_client_ancien_lit_la_table_sans_les_evenements_neufs() {
+        let table = TableCartes {
+            salon: 3,
+            hote: 1,
+            journal: vec![
+                EvenementCartes::Joue { par: 1, carte: Carte(13), couleur: None },
+                EvenementCartes::Echange { par: 1, avec: 2 },
+                EvenementCartes::Pioche { par: 2, n: 1, manque: 0 },
+            ],
+            regles: ReglesCartes { sept: true, zero: false },
+            numero: 9,
+            ..Default::default()
+        };
+        assert!(table.pour_protocole(PROTOCOLE).is_none());
+        let ancienne = table.pour_protocole(1).expect("il y a de quoi retirer");
+        assert_eq!(ancienne.journal.len(), 2);
+        assert!(ancienne.journal.iter().all(|e| e.protocole() == 1));
+        assert_eq!(ancienne.numero, 9);
+
+        let json = r#"{"salon":3,"hote":1,"journal":[{"quoi":"manche"},{"quoi":"un_coup_de_demain","par":4}]}"#;
+        let t: TableCartes = serde_json::from_str(json).unwrap();
+        assert_eq!(t.journal, vec![EvenementCartes::Manche, EvenementCartes::Inconnu]);
     }
 
     #[test]

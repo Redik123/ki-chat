@@ -60,6 +60,9 @@ pub fn defaults() -> HashMap<String, Vec<f32>> {
     sounds.insert("cartes-derniere".into(), seq(&[(880.0, 60), (1174.7, 60), (1568.0, 220)], 0.4));
     // Contré : deux notes qui tombent, la seconde traînée — « raté ! ».
     sounds.insert("cartes-contre".into(), seq(&[(493.9, 90), (329.6, 260)], 0.42));
+    // Des mains qui changent de place : quatre notes qui vont et viennent
+    // entre deux hauteurs — l'aller-retour de l'échange.
+    sounds.insert("cartes-echange".into(), seq(&[(784.0, 55), (587.3, 55), (784.0, 55), (587.3, 150)], 0.36));
     sounds
 }
 
@@ -113,6 +116,7 @@ mod tests {
             "cartes-fin",
             "cartes-derniere",
             "cartes-contre",
+            "cartes-echange",
         ] {
             let pcm = sounds.get(name).unwrap_or_else(|| panic!("son manquant : {name}"));
             assert!(!pcm.is_empty());

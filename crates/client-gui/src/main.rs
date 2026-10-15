@@ -5151,8 +5151,11 @@ impl KiApp {
                 // une fois par connexion, puis à chaque changement.
                 self.serveur_choix_medailles = choix_medailles;
                 self.choix_medailles_dit = None;
-                // Et pour les tables de cartes.
+                // Et pour les tables de cartes — et leurs règles en plus,
+                // qu'un serveur au protocole 1 prendrait pour un geste
+                // invalide.
                 self.serveur_cartes = cartes;
+                self.cartes.regles_disponibles = protocole >= 2;
                 self.connecting = false;
                 self.connect_started = None;
                 self.error = None;
@@ -5622,6 +5625,7 @@ impl KiApp {
                         cartes::Son::FinDeManche => sfx::CARTES_FIN,
                         cartes::Son::Annonce => sfx::CARTES_DERNIERE,
                         cartes::Son::Contre => sfx::CARTES_CONTRE,
+                        cartes::Son::Echange => sfx::CARTES_ECHANGE,
                     });
                 }
             }
@@ -9424,6 +9428,7 @@ impl KiApp {
                                     (sfx::CARTES_FIN, "Une manche de cartes est gagnée"),
                                     (sfx::CARTES_DERNIERE, "Quelqu'un dit « Dernière carte ! »"),
                                     (sfx::CARTES_CONTRE, "Quelqu'un se fait contrer aux cartes"),
+                                    (sfx::CARTES_ECHANGE, "Des mains s'échangent aux cartes (le 7, le 0)"),
                                     (sfx::SELF_JOIN, "Je rejoins un vocal"),
                                     (sfx::SELF_LEAVE, "Je quitte le vocal"),
                                     (sfx::MUTE, "Micro coupé"),
@@ -12669,6 +12674,8 @@ mod sfx {
     pub const CARTES_DERNIERE: &str = "cartes-derniere";
     /// Quelqu'un se fait contrer.
     pub const CARTES_CONTRE: &str = "cartes-contre";
+    /// Des mains changent de place : un 7 qui échange, un 0 qui tourne.
+    pub const CARTES_ECHANGE: &str = "cartes-echange";
     pub const MUTE: &str = "micro-coupe";
     pub const UNMUTE: &str = "micro-actif";
 }
