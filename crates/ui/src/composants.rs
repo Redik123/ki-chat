@@ -239,10 +239,6 @@ pub fn paint_avatar(
     let color = theme::pour_pseudo(name);
     let center = rect.center();
     let radius = rect.width().min(rect.height()) / 2.0;
-
-    if speaking {
-        p.circle_stroke(center, radius - 1.0, Stroke::new(2.0_f32, theme::SPEAK));
-    }
     let inner = if speaking { radius - 3.0 } else { radius };
 
     if let Some(photo) = photo {
@@ -252,38 +248,44 @@ pub fn paint_avatar(
         let square = Rect::from_center_size(center, Vec2::splat(inner * 2.0));
         let full = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         p.image(photo.id(), square, full, Color32::WHITE);
-        round_off(p, center, inner, backdrop);
+        round_off(&p.with_clip_rect(square), center, inner, backdrop);
         p.circle_stroke(
             center,
             inner - 0.5,
             Stroke::new(1.0_f32, theme::translucide(color, 90)),
         );
-        return;
+    } else {
+        p.circle_filled(center, inner, theme::melanger(theme::BG_RAISED, color, 0.22));
+        p.circle_stroke(
+            center,
+            inner - 0.5,
+            Stroke::new(1.0_f32, theme::translucide(color, 110)),
+        );
+
+        let initial = name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".into());
+        p.text(
+            center,
+            Align2::CENTER_CENTER,
+            initial,
+            FontId::proportional(inner * 0.95),
+            color,
+        );
     }
 
-    p.circle_filled(center, inner, theme::melanger(theme::BG_RAISED, color, 0.22));
-    p.circle_stroke(
-        center,
-        inner - 0.5,
-        Stroke::new(1.0_f32, theme::translucide(color, 110)),
-    );
-
-    let initial = name
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".into());
-    p.text(
-        center,
-        Align2::CENTER_CENTER,
-        initial,
-        FontId::proportional(inner * 0.95),
-        color,
-    );
+    // L'anneau vient en dernier : peint avant la photo, le détourage de
+    // celle-ci le recouvrait, et seuls les monogrammes s'allumaient.
+    if speaking {
+        p.circle_stroke(center, radius - 1.0, Stroke::new(2.0_f32, theme::SPEAK));
+    }
 }
 
 /// Rogne les coins d'une image carrée pour n'en garder qu'un disque : un
-/// anneau plein de la couleur du fond, peint par-dessus.
+/// anneau plein de la couleur du fond, peint par-dessus. Le peintre doit être
+/// limité au carré de l'image, sinon l'anneau mord sur les voisins.
 fn round_off(p: &Painter, center: egui::Pos2, radius: f32, backdrop: Color32) {
     const STEPS: usize = 64;
     // Le carré inscrit déborde du disque de r·√2 : 1,45 couvre les coins.
