@@ -212,6 +212,9 @@ remonter ses propres statistiques avec ses propres jetons, en lecture.
 
 ## Jalons
 
+La suite — V8 (sur quel compte on joue), V9 (le nouveau tableau de bord)
+et V10 (la carte tactique) — est dans [`PLAN-VALORANT-2.md`](PLAN-VALORANT-2.md).
+
 ### V1 — Statut en jeu — livrée en 0.1.31 (2026-09-10)
 Livré tel que prévu, à deux écarts près : sondage HTTP toutes les deux
 secondes plutôt qu'une WebSocket (plus simple, coût nul), et la case dans
