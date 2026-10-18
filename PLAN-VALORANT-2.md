@@ -6,7 +6,7 @@ sur valorant-api.com et sur la spécification de HenrikDev. Il prend la
 suite de [`PLAN-VALORANT.md`](PLAN-VALORANT.md) (V1 à V7) et en garde
 toutes les lignes rouges. Ce qui a été lu dans le code ou sondé est
 marqué **vérifié** ; le reste est à vérifier au jalon qui le concerne.
-Les questions pour drion sont à la fin.
+Les décisions de drion sont à la fin.
 
 ## Ce qu'on veut
 
@@ -332,7 +332,7 @@ n'envoie rien : le champ reste `Inconnu`, et rien ne change pour lui.
     de `MAX_LINE`.
 - **Le groupe :**
   - Le classement prend une ligne par membre, avec son compte principal
-    (voir les questions).
+    (voir les décisions).
   - Le fil de jeu annonce les parties d'un compte visible, avec « (sur
     Smurf#EUW) ».
   - `Etat::lies` rend tous les comptes visibles, pour la détection des
@@ -675,7 +675,7 @@ ServerMsg::TactiqueEtat { carte: Option<CarteTactique> } // à l'arrivée
   pourra y passer plus tard, si le flux fiable ne suffit pas.
 - **Qui peut dessiner** : quiconque est dans le salon vocal, comme pour
   les cartes. Un membre rendu muet par un modérateur peut regarder, pas
-  dessiner (voir les questions).
+  dessiner (voir les décisions).
 - **Durée de vie** : un crochet dans `rebuild_voice_routes`, comme
   `cartes::accorder`. Qui quitte le salon quitte la carte, et ses traits
   s'éteignent. Un salon vide efface la carte.
@@ -770,29 +770,26 @@ validation en soirée, comme d'habitude.
   pas d'overlay. Les statistiques restent celles du membre, avec son
   accord, comme depuis la V1.
 
-## Questions pour drion
+## Décisions (drion, 2026-10-18 : « tes recos pour tout »)
 
 1. **Seconds comptes** : privés tant que leur propriétaire ne dit pas le
-   contraire (ma recommandation), ou visibles d'office ?
-2. **« Sur un autre compte »** : quand quelqu'un joue sur un compte non lié
-   ou privé, le groupe voit-il cette étiquette, sans nom ? Ma
-   recommandation : oui. Sinon, le badge de rang ment (Immortel affiché
-   dans une partie Argent).
-3. **Le journal des parties** : case décochée, que l'on propose une fois
-   par une bannière (ma recommandation, fidèle à la promesse de la V1),
-   ou cochée d'office ?
-4. **Le classement** : par compte principal (ma recommandation), ou par
-   meilleur compte ?
+   contraire.
+2. **« Autre compte »** : le groupe voit l'étiquette, sans nom, quand
+   quelqu'un joue sur un compte non lié ou privé ; sinon le badge de rang
+   mentirait.
+3. **Le journal des parties** : case décochée, proposée une fois par une
+   bannière, fidèle à la promesse de la V1.
+4. **Le classement** : par compte principal.
 5. **La page VALORANT** : elle prend la place du chat, avec un bouton pour
-   la détacher (ma recommandation), ou elle reste une fenêtre flottante,
-   en plus grand ?
-6. **La carte tactique** : 15 s pour tout, ou aussi une épingle pour
-   garder un trait plus longtemps (un plan de base qu'on reprend à chaque
-   manche) ?
-7. **L'overlay** : rien du tout (ma recommandation), ou une seule ligne
-   de texte « drion dessine sur la carte » ?
-8. **Un membre rendu muet** par un modérateur : peut-il dessiner ? Ma
-   recommandation : non, le dessin est une parole.
+   la détacher dans sa propre fenêtre.
+6. **La carte tactique** : 15 s pour tout, comme demandé au départ.
+   L'épingle reste une idée pour plus tard, si l'usage la réclame.
+7. **L'overlay** : rien de la carte tactique, pas même une ligne.
+8. **Un membre rendu muet** par un modérateur regarde la carte, mais ne
+   dessine pas : le dessin est une parole.
+
+La maquette de la nouvelle page (trois propositions pour l'accueil, le
+profil et la carte tactique) attend l'avis de drion avant V9.0.
 
 Sources consultées le 2026-10-18 :
 [politique développeur VALORANT de Riot](https://developer.riotgames.com/docs/valorant),
