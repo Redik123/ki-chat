@@ -392,5 +392,6 @@ Les binaires publiés n'embarquent pas encore les notices des bibliothèques tie
 
 ### Perspectives & Prochains jalons
 
+- [ ] **V8–V10** — VALORANT, saison 2 ([`PLAN-VALORANT-2.md`](PLAN-VALORANT-2.md)) : savoir sur quel compte Riot chacun joue (plusieurs comptes par membre, journal des parties), un nouveau tableau de bord (accueil, soirée du groupe, profil en page, comparaison), et une carte tactique partagée en salon vocal dont les traits s'effacent au bout de 15 secondes.
 - [ ] **C4** — Encodeur AMD/Intel, et une seule capture pour la diffusion et les clips (le chemin tout-GPU sert aux deux depuis 0.1.51).
 - [ ] **Général** — Résolution et cadence comme crans du débit adaptatif côté spectateur (le débit s'adapte déjà au spectateur qui ne suit pas, l'encodeur au streamer qui ne tient pas la cadence, et le son du jeu arrive en stéréo).
