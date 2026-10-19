@@ -5558,7 +5558,8 @@ mod tests {
             plateforme: "pc".into(),
             depuis: 0,
         };
-        println!("compte : {} → {} ({})", riot, compte.puuid, compte.par_puuid());
+        // Le puuid ne s'affiche pas : c'est l'identifiant durable du compte.
+        println!("compte : {riot} trouvé, région {}", compte.region);
         let (fiche, _) = construire(&mut api, &compte, None, &[]).unwrap_or_else(|e| panic!("{}", e.message()));
         println!("fiche : {} · {} · {} matchs · {} points", fiche.riot_id, resume_rang(&fiche.rang), fiche.matchs.len(), fiche.historique_rr.len());
         assert!(fiche.riot_id.eq_ignore_ascii_case(&riot), "le rang dit le même Riot ID");
