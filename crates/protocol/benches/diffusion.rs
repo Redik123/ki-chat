@@ -30,6 +30,7 @@ fn roster(n: usize) -> Vec<Member> {
             jeu: None,
             riot_id: None,
             rang_valorant: None,
+            compte_joue: None,
             force_muted: false,
             force_deafened: false,
             admin: i == 0,

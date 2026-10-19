@@ -274,6 +274,11 @@ pub enum ClientMsg {
     /// À la connexion et à chaque changement, lié ou pas encore — seulement
     /// vers un serveur qui le comprend (`Welcome.choix_medailles`).
     ChoixMedailles { oui: bool },
+    /// Garder l'historique de ses parties (durée, mode, carte, compte),
+    /// écrit par le serveur à chaque fin de partie que sa présence montre.
+    /// Non : l'historique s'efface. À la connexion et à chaque changement —
+    /// seulement vers un serveur qui le comprend (`Welcome.journal_parties`).
+    ChoixJournal { oui: bool },
     /// Toutes les fiches des membres liés, pour la page de stats.
     StatsValorant,
     /// Une commande au bot musique (permission « Contrôler la musique »).
@@ -610,6 +615,17 @@ pub enum ServerMsg {
         /// pour un message invalide.
         #[serde(default)]
         cartes: bool,
+        /// Ce serveur envoie à chacun ses comptes Riot liés
+        /// ([`ServerMsg::MesComptes`]) et lit le compte ouvert dans
+        /// `JeuStatut::compte` (depuis V8.1). Un serveur antérieur ignore le
+        /// champ : le client n'a alors rien à classer.
+        #[serde(default)]
+        comptes_joues: bool,
+        /// Ce serveur tient l'historique des parties de qui le veut et
+        /// comprend `ClientMsg::ChoixJournal` (depuis V8.4) ; un serveur
+        /// antérieur le prendrait pour un message invalide.
+        #[serde(default)]
+        journal_parties: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -697,6 +713,11 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         riot_id: Option<String>,
     },
+    /// Ses propres comptes Riot liés, envoyés **à lui seul** : à la
+    /// connexion, après une liaison ou une déliaison. Son client y compare
+    /// le compte ouvert dans le client Riot, sur sa machine. Vide : rien de
+    /// lié.
+    MesComptes { comptes: Vec<MonCompte> },
     /// La fiche d'un membre (`None` : pas lié, ou rien encore).
     FicheValorant {
         user_id: UserId,
@@ -1991,6 +2012,11 @@ pub struct Member {
     pub riot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rang_valorant: Option<u8>,
+    /// Sur quel compte il joue, quand son client l'a dit et que `jeu` est
+    /// une partie de VALORANT (voir [`CompteJoue`]). Absent d'un serveur ou
+    /// d'un client antérieur : on n'en sait rien.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compte_joue: Option<CompteJoue>,
     #[serde(default)]
     pub roles: Vec<RoleId>,
     /// Vrai si la personne est connectée au serveur. Le roster liste AUSSI
@@ -2193,6 +2219,72 @@ pub struct JeuStatut {
     /// c'est ce qu'un client d'avant envoie, et ce qu'il lit.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub nom: String,
+    /// Le compte Riot ouvert, tel que le client du membre l'a classé
+    /// parmi ses comptes liés (voir [`CompteLocal`]). Du client au serveur
+    /// seulement : le serveur l'efface avant de relayer le statut, et
+    /// donne aux autres [`Member::compte_joue`].
+    #[serde(default, skip_serializing_if = "CompteLocal::est_inconnu")]
+    pub compte: CompteLocal,
+}
+
+/// Le compte Riot ouvert dans le client du membre, comparé par son propre
+/// client ki-chat aux comptes qu'il a liés ([`MonCompte`]). Un compte que
+/// le membre n'a pas lié ne quitte jamais sa machine : il devient
+/// `Autre`, sans Riot ID ni puuid.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompteLocal {
+    /// Un de ses comptes liés, par son numéro ([`MonCompte::n`]).
+    Lie { n: u8 },
+    /// Un compte qu'il n'a pas lié.
+    Autre,
+    /// Pas dit : un client d'avant, un autre jeu, une session pas encore
+    /// lue — ou une forme qu'une version plus récente connaît.
+    #[default]
+    #[serde(other)]
+    Inconnu,
+}
+
+impl CompteLocal {
+    pub fn est_inconnu(&self) -> bool {
+        matches!(self, CompteLocal::Inconnu)
+    }
+}
+
+/// Sur quel compte un membre joue, tel que le serveur le relaie à tout le
+/// monde ([`Member::compte_joue`]) : il a vérifié le numéro envoyé par le
+/// client, et il ne nomme un second compte que si son propriétaire l'a
+/// rendu visible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompteJoue {
+    /// Son compte principal, celui de sa fiche.
+    Principal,
+    /// Un autre de ses comptes liés ; son Riot ID s'il est visible.
+    Second {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        riot_id: Option<String>,
+    },
+    /// Un compte qu'il n'a pas lié, ou qu'il garde privé.
+    Autre,
+    /// Une forme qu'une version plus récente connaît : comme `Autre`.
+    #[serde(other)]
+    Inconnu,
+}
+
+/// Un compte Riot lié, tel que le serveur le décrit **à son seul
+/// propriétaire** ([`ServerMsg::MesComptes`]) : de quoi reconnaître, sur
+/// sa machine, le compte ouvert dans son client Riot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonCompte {
+    /// Le numéro que le client renvoie dans [`CompteLocal::Lie`].
+    pub n: u8,
+    pub riot_id: String,
+    pub puuid: String,
+    #[serde(default)]
+    pub principal: bool,
+    #[serde(default)]
+    pub visible: bool,
 }
 
 /// La fiche VALORANT d'un membre, telle que le serveur la garde d'après
@@ -3324,6 +3416,7 @@ impl JeuStatut {
             niveau: self.niveau.min(9999),
             custom: self.custom,
             nom: safe_display(&self.nom, MAX_JEU_TEXTE),
+            compte: self.compte,
         }
     }
 
@@ -4619,6 +4712,7 @@ mod tests {
             niveau: 120,
             custom: false,
             nom: String::new(),
+            compte: CompteLocal::Inconnu,
         };
         assert_eq!(s.ligne(), "compétitive · Ascent · 7-5 · party 3/5");
         let relu: JeuStatut = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -6301,8 +6395,50 @@ mod tests {
     #[test]
     fn un_serveur_d_avant_les_cartes_ne_les_sert_pas() {
         let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
-        let ServerMsg::Welcome { cartes, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, .. } = serde_json::from_str(json).unwrap() else { panic!() };
         assert!(!cartes);
+        assert!(!comptes_joues, "un serveur d'avant V8.1 ne lit pas le compte joué");
+        assert!(!journal_parties, "ni ne tient le journal des parties");
+    }
+
+    /// Le compte joué : absent, il ne coûte rien sur le fil et un statut
+    /// d'avant se relit ; dit, il fait l'aller-retour ; une forme d'une
+    /// version future ne casse rien.
+    #[test]
+    fn le_compte_joue_traverse_les_versions() {
+        let avant: JeuStatut = serde_json::from_str(r#"{"etat":"en_jeu","file":"competitive"}"#).unwrap();
+        assert_eq!(avant.compte, CompteLocal::Inconnu);
+        let json = serde_json::to_string(&avant).unwrap();
+        assert!(!json.contains("compte"), "inconnu : pas sur le fil ({json})");
+
+        let lie = JeuStatut { compte: CompteLocal::Lie { n: 2 }, ..avant.clone() };
+        let json = serde_json::to_string(&lie).unwrap();
+        assert!(json.contains(r#""compte":{"type":"lie","n":2}"#), "{json}");
+        assert_eq!(serde_json::from_str::<JeuStatut>(&json).unwrap(), lie);
+        assert_eq!(lie.nettoyer().compte, CompteLocal::Lie { n: 2 }, "le nettoyage le garde");
+        let autre = JeuStatut { compte: CompteLocal::Autre, ..avant.clone() };
+        assert_eq!(serde_json::from_str::<JeuStatut>(&serde_json::to_string(&autre).unwrap()).unwrap(), autre);
+        let futur: JeuStatut = serde_json::from_str(r#"{"etat":"menus","compte":{"type":"emprunte","de":3}}"#).unwrap();
+        assert_eq!(futur.compte, CompteLocal::Inconnu);
+
+        for c in [CompteJoue::Principal, CompteJoue::Second { riot_id: Some("Smurf#EUW".into()) }, CompteJoue::Second { riot_id: None }, CompteJoue::Autre] {
+            let json = serde_json::to_string(&c).unwrap();
+            assert_eq!(serde_json::from_str::<CompteJoue>(&json).unwrap(), c, "{json}");
+        }
+        assert_eq!(serde_json::from_str::<CompteJoue>(r#"{"type":"prete"}"#).unwrap(), CompteJoue::Inconnu);
+
+        let m: Member = serde_json::from_str(r#"{"user_id":1,"username":"a","speaking":false}"#).unwrap();
+        assert!(m.compte_joue.is_none(), "un serveur d'avant n'en dit rien");
+        assert!(!serde_json::to_string(&m).unwrap().contains("compte_joue"));
+
+        let mes = ServerMsg::MesComptes {
+            comptes: vec![MonCompte { n: 0, riot_id: "drion#EUW".into(), puuid: "p-1".into(), principal: true, visible: true }],
+        };
+        let json = serde_json::to_string(&mes).unwrap();
+        assert!(json.starts_with(r#"{"type":"mes_comptes""#), "{json}");
+        let ServerMsg::MesComptes { comptes } = serde_json::from_str(&json).unwrap() else { panic!() };
+        assert_eq!(comptes.len(), 1);
+        assert!(comptes[0].principal && comptes[0].puuid == "p-1");
     }
 
     #[test]

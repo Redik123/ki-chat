@@ -116,6 +116,11 @@ const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 /// l'autre ; ce qui ne tiendrait pas dans une colonne étroite est coupé à
 /// son bord, jamais par-dessus la conversation.
 const SIDEBAR_WIDTH: f32 = 248.0;
+/// Combien de comptes Riot d'un membre on garde de `MesComptes` : le
+/// serveur en lie trois au plus, la marge couvre une version future.
+const MES_COMPTES_MAX: usize = 8;
+/// Combien de comptes non liés « à taire » on retient, les plus récents.
+const COMPTES_TUS_MAX: usize = 32;
 const SIDEBAR_LARGEURS: std::ops::RangeInclusive<f32> = 200.0..=360.0;
 const ROSTER_WIDTH: f32 = 210.0;
 const ROSTER_LARGEURS: std::ops::RangeInclusive<f32> = 180.0..=340.0;
@@ -900,6 +905,24 @@ struct KiApp {
     /// Le serveur tient les tables de cartes (`Welcome.cartes`) : sans
     /// cette preuve, ni bouton ni geste.
     serveur_cartes: bool,
+    /// Le serveur nous dit nos comptes Riot et lit lequel est ouvert
+    /// (`Welcome.comptes_joues`) : sans lui, rien à classer.
+    serveur_comptes_joues: bool,
+    /// Nos comptes Riot liés, d'après le serveur (`MesComptes`) : de quoi
+    /// reconnaître, ici, celui qui est ouvert dans le client Riot.
+    mes_comptes: Vec<ki_protocol::MonCompte>,
+    /// Les comptes non liés dont on ne veut plus entendre parler : des
+    /// empreintes de puuid ([`empreinte_compte`]), gardées sur cette
+    /// machine seulement.
+    comptes_tus: Vec<String>,
+    /// « Garder l'historique de mes parties » : décoché d'origine.
+    journal_parties: bool,
+    /// La bannière qui le propose a déjà eu sa réponse.
+    journal_propose: bool,
+    /// Le serveur tient ce journal (`Welcome.journal_parties`).
+    serveur_journal: bool,
+    /// Le choix déjà dit à ce serveur depuis la connexion.
+    choix_journal_dit: Option<bool>,
     /// La table de cartes de mon salon vocal, et sa fenêtre.
     cartes: cartes::Cartes,
     /// Le choix déjà dit à ce serveur depuis la connexion.
@@ -1499,6 +1522,13 @@ impl KiApp {
             serveur_medailles: false,
             serveur_choix_medailles: false,
             serveur_cartes: false,
+            serveur_comptes_joues: false,
+            mes_comptes: Vec::new(),
+            comptes_tus: get("comptes_tus", "").split(',').filter(|e| !e.is_empty()).map(str::to_string).collect(),
+            journal_parties: get("journal_parties", "off") == "on",
+            journal_propose: get("journal_propose", "non") == "oui",
+            serveur_journal: false,
+            choix_journal_dit: None,
             cartes: cartes::Cartes::default(),
             choix_medailles_dit: None,
             valorant_avant: None,
@@ -4499,6 +4529,10 @@ impl KiApp {
         // La table de cartes : celle d'un salon de ce serveur.
         self.cartes.effacer();
         self.serveur_cartes = false;
+        // Nos comptes Riot : ceux de ce serveur.
+        self.serveur_comptes_joues = false;
+        self.mes_comptes.clear();
+        self.serveur_journal = false;
         // Le partage d'un clip visait un salon de ce serveur : sur le
         // suivant, ce numéro désignerait un autre salon.
         self.clips_partage = None;
@@ -4700,7 +4734,15 @@ impl KiApp {
             return;
         }
         // VALORANT d'abord : sa présence dit plus qu'un nom de fenêtre.
-        let valorant = self.veilleur_valorant.as_ref().and_then(|v| v.releve().1);
+        let mut valorant = self.veilleur_valorant.as_ref().and_then(|v| v.releve().1);
+        // Et sur quel compte : classé ici parmi nos comptes liés — un compte
+        // qu'on n'a pas lié ne part jamais, ni son nom ni son puuid.
+        if self.serveur_comptes_joues {
+            if let Some(j) = valorant.as_mut() {
+                let session = self.veilleur_valorant.as_ref().and_then(|v| v.session());
+                j.compte = valorant::classer_compte(session.as_ref(), &self.mes_comptes);
+            }
+        }
         self.tick_medailles(valorant.as_ref().map(|j| j.etat));
         let voulu = valorant.or_else(|| {
             self.veilleur_jeux
@@ -4720,6 +4762,19 @@ impl KiApp {
             self.send(ClientMsg::AccepterPokes { accepter: self.pokes_accepter });
             self.pokes_envoye = Some(self.pokes_accepter);
         }
+    }
+
+    /// Le compte ouvert dans le client Riot quand il n'est pas lié — et
+    /// qu'il faut le dire : un serveur qui comprend, une partie de
+    /// VALORANT partagée, un compte qu'on n'a pas demandé à taire. Rien
+    /// de tout ça ne part au serveur : c'est pour nos yeux seuls.
+    fn compte_non_lie(&self) -> Option<valorant::SessionLocale> {
+        if !self.serveur_comptes_joues || !self.jeu_envoye.as_ref().is_some_and(|j| j.est_valorant()) {
+            return None;
+        }
+        let session = self.veilleur_valorant.as_ref()?.session()?;
+        let autre = valorant::classer_compte(Some(&session), &self.mes_comptes) == ki_protocol::CompteLocal::Autre;
+        (autre && !self.comptes_tus.contains(&empreinte_compte(&session.puuid))).then_some(session)
     }
 
     /// Mon Riot ID lié, d'après le roster.
@@ -4742,6 +4797,11 @@ impl KiApp {
             self.send(ClientMsg::ChoixMedailles { oui: self.valorant_medailles });
             self.choix_medailles_dit = Some(self.valorant_medailles);
         }
+        // Le journal de nos parties, sur le même modèle.
+        if self.serveur_journal && self.choix_journal_dit != Some(self.journal_parties) {
+            self.send(ClientMsg::ChoixJournal { oui: self.journal_parties });
+            self.choix_journal_dit = Some(self.journal_parties);
+        }
         // À chaque image : rien n'est copié tant qu'aucune lecture n'arrive.
         let lie_existe = self
             .my_id
@@ -4760,9 +4820,16 @@ impl KiApp {
         self.valorant_avant = etat;
         let Some(resultat) = self.medailles.tick(&self.app_ctx) else { return };
         let lie = self.mon_riot_id();
+        // Le compte principal, au puuid quand le serveur nous l'a dit : un
+        // Riot ID se renomme, un puuid jamais.
+        let principal = self.mes_comptes.iter().find(|c| c.principal).map(|c| c.puuid.clone());
+        let meme_compte = |lecture: &medailles::Lecture, lie: &str| match &principal {
+            Some(p) => p.eq_ignore_ascii_case(&lecture.puuid),
+            None => medailles::meme_riot_id(lie, &lecture.riot_id),
+        };
         let ennui = match (resultat, lie) {
             (Err(e), _) => format!("médailles VALORANT : {e}"),
-            (Ok(lecture), Some(lie)) if voulu && medailles::meme_riot_id(&lie, &lecture.riot_id) => {
+            (Ok(lecture), Some(lie)) if voulu && meme_compte(&lecture, &lie) => {
                 let n = lecture.medailles.matchs.len();
                 self.send(ClientMsg::Medailles { medailles: lecture.medailles });
                 ki_voice::journal(format!("médailles VALORANT envoyées ({n} matchs médaillés)"));
@@ -5123,6 +5190,8 @@ impl KiApp {
                 medailles,
                 choix_medailles,
                 cartes,
+                comptes_joues,
+                journal_parties,
                 protocole,
                 ..
             } => {
@@ -5156,6 +5225,13 @@ impl KiApp {
                 // invalide.
                 self.serveur_cartes = cartes;
                 self.cartes.regles_disponibles = protocole >= 2;
+                // Et pour nos comptes Riot, qu'il envoie juste après.
+                self.serveur_comptes_joues = comptes_joues;
+                self.mes_comptes.clear();
+                // Et pour le journal de nos parties, dont il apprendra notre
+                // choix au prochain tour.
+                self.serveur_journal = journal_parties;
+                self.choix_journal_dit = None;
                 self.connecting = false;
                 self.connect_started = None;
                 self.error = None;
@@ -5601,6 +5677,10 @@ impl KiApp {
             }
             ServerMsg::LiaisonRiot { ok, message, .. } => {
                 self.riot_message = Some((ok, message));
+            }
+            ServerMsg::MesComptes { mut comptes } => {
+                comptes.truncate(MES_COMPTES_MAX);
+                self.mes_comptes = comptes;
             }
             ServerMsg::FicheValorant { user_id, fiche } => {
                 if let Some(f) = &mut self.fiche {
@@ -8210,6 +8290,94 @@ impl KiApp {
                         });
                 }
 
+                // --- Le journal des parties, proposé une fois ---
+                if self.serveur_journal
+                    && !self.journal_propose
+                    && !self.journal_parties
+                    && self.jeu_envoye.as_ref().is_some_and(|j| j.est_valorant())
+                {
+                    egui::Panel::top("chat_journal")
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(theme::BG_RAISED)
+                                .inner_margin(marge::symetrique(espace::XL, espace::M)),
+                        )
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui::glyph(ui, Icon::Target, 16.0, theme::INFO);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(
+                                            "Garder l'historique de tes parties pour tes statistiques ? Durée, mode, carte, compte — rien d'autre",
+                                        )
+                                        .color(TEXT)
+                                        .size(texte::COURANT),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui::button(ui, Icon::Close, "Non merci").clicked() {
+                                        self.journal_propose = true;
+                                    }
+                                    if ui::primary_button(ui, Some(Icon::Check), "Oui", None)
+                                        .on_hover_text("ça se décoche quand tu veux : ⚙ → Jeu")
+                                        .clicked()
+                                    {
+                                        self.journal_parties = true;
+                                        self.journal_propose = true;
+                                    }
+                                });
+                            });
+                        });
+                }
+
+                // --- Un compte Riot non lié ---
+                // Pour soi seul : on joue sur un compte que ki-chat ne
+                // connaît pas. Sans compte lié, on propose de le lier ;
+                // sinon on le dit, une fois par compte si l'on veut.
+                if let Some(session) = self.compte_non_lie() {
+                    let rien_de_lie = self.mes_comptes.is_empty();
+                    egui::Panel::top("chat_compte_riot")
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(theme::BG_RAISED)
+                                .inner_margin(marge::symetrique(espace::XL, espace::M)),
+                        )
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui::glyph(ui, Icon::Target, 16.0, theme::WARN);
+                                let phrase = if rien_de_lie {
+                                    format!("Tu joues sur {} : le lier à ki-chat pour avoir ta fiche VALORANT ?", session.riot_id)
+                                } else {
+                                    format!(
+                                        "Tu joues sur {}, qui n'est pas lié à ki-chat : ses parties ne vont pas dans ta fiche",
+                                        session.riot_id
+                                    )
+                                };
+                                ui.add(egui::Label::new(RichText::new(phrase).color(TEXT).size(texte::COURANT)).truncate());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let taire = if rien_de_lie { "Non merci" } else { "Ne plus me le dire" };
+                                    if ui::button(ui, Icon::Close, taire)
+                                        .on_hover_text("ki-chat ne t'en reparlera plus pour ce compte, sur cet ordinateur")
+                                        .clicked()
+                                    {
+                                        self.comptes_tus.push(empreinte_compte(&session.puuid));
+                                        // Les plus anciens s'oublient : la liste reste courte.
+                                        let trop = self.comptes_tus.len().saturating_sub(COMPTES_TUS_MAX);
+                                        self.comptes_tus.drain(..trop);
+                                    }
+                                    if rien_de_lie
+                                        && ui::primary_button(ui, Some(Icon::Check), "Lier ce compte", None)
+                                            .on_hover_text("le serveur le retrouve chez HenrikDev et ouvre ta fiche")
+                                            .clicked()
+                                    {
+                                        self.send(ClientMsg::LierRiot { riot_id: session.riot_id.clone() });
+                                    }
+                                });
+                            });
+                        });
+                }
+
                 // --- Saisie ---
                 egui::Panel::bottom("chat_input")
                     .frame(
@@ -9735,6 +9903,31 @@ impl KiApp {
                                 },
                             };
                             ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(texte::PETIT));
+                            ui.add_space(espace::S);
+                            if ui
+                                .checkbox(&mut self.journal_parties, "Garder l'historique de mes parties (durée, mode, carte)")
+                                .on_hover_text(
+                                    "pour tes statistiques de demain : le temps de jeu par mode, par compte, par \
+                                     soirée. Le serveur note chaque partie que ta présence montre — le début, la \
+                                     durée, la file, la carte, le dernier score vu, la taille de la party et si \
+                                     c'était ton compte principal. Ni Riot ID, ni adversaires.",
+                                )
+                                .changed()
+                            {
+                                self.journal_propose = true;
+                            }
+                            let pourquoi_pas = if !self.journal_parties {
+                                Some("décoché, le serveur n'en garde rien — et efface ce qu'il avait")
+                            } else if !self.valorant_presence {
+                                Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui montre les parties")
+                            } else if self.welcomed && !self.serveur_journal {
+                                Some("le serveur ne le tient pas encore : il doit être mis à jour")
+                            } else {
+                                None
+                            };
+                            if let Some(pourquoi) = pourquoi_pas {
+                                ui::hint(ui, pourquoi);
+                            }
 
                             // Le compte Riot : lié, le serveur tient la fiche
                             // par HenrikDev et la montre aux membres. Ce que le
@@ -13266,10 +13459,43 @@ struct DeplacementVocal {
 /// Le palier à montrer pour un membre : sa fiche s'il a lié son compte,
 /// sinon ce que sa présence dit — s'il la partage et qu'il est là.
 fn palier_de(member: &Member) -> Option<u8> {
-    member
-        .rang_valorant
-        .or_else(|| member.jeu.as_ref().filter(|_| member.online).map(|j| j.rang))
-        .filter(|t| *t >= 3)
+    let presence = member.jeu.as_ref().filter(|_| member.online).map(|j| j.rang);
+    // Sur un autre compte que celui de sa fiche, le rang de la fiche
+    // mentirait : celui de la présence est celui du compte joué.
+    let fiche = member.rang_valorant.filter(|_| !sur_un_autre_compte(member));
+    fiche.or(presence).filter(|t| *t >= 3)
+}
+
+/// Joue-t-il sur un autre compte que celui de sa fiche ? Seulement quand
+/// le serveur le dit (`Member::compte_joue`).
+fn sur_un_autre_compte(member: &Member) -> bool {
+    matches!(
+        member.compte_joue,
+        Some(ki_protocol::CompteJoue::Autre | ki_protocol::CompteJoue::Second { .. } | ki_protocol::CompteJoue::Inconnu)
+    )
+}
+
+/// Ce qui suit la partie sous le pseudo quand il joue sur un autre compte
+/// que celui de sa fiche : son nom s'il l'a rendu visible, sinon rien de
+/// plus que le fait.
+fn mention_du_compte(member: &Member) -> Option<String> {
+    match member.compte_joue.as_ref()? {
+        ki_protocol::CompteJoue::Principal => None,
+        ki_protocol::CompteJoue::Second { riot_id: Some(r) } => Some(format!("sur {r}")),
+        ki_protocol::CompteJoue::Second { riot_id: None } => Some("2ᵉ compte".into()),
+        ki_protocol::CompteJoue::Autre | ki_protocol::CompteJoue::Inconnu => Some("autre compte".into()),
+    }
+}
+
+/// L'empreinte d'un puuid, pour se souvenir d'un compte sans garder son
+/// identifiant : FNV-1a sur 64 bits, en hexadécimal, sans la casse.
+fn empreinte_compte(puuid: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for o in puuid.to_ascii_lowercase().bytes() {
+        h ^= u64::from(o);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 impl<'a> MemberRow<'a> {
@@ -13501,7 +13727,10 @@ fn member_row(ui: &mut egui::Ui, row: MemberRow<'_>) -> (egui::Response, bool) {
         painter.text(
             egui::pos2(name_left, rect.center().y + 8.0),
             egui::Align2::LEFT_CENTER,
-            valo_catalogue::ligne(j),
+            match mention_du_compte(member) {
+                Some(mention) if j.est_valorant() => format!("{} · {mention}", valo_catalogue::ligne(j)),
+                _ => valo_catalogue::ligne(j),
+            },
             egui::FontId::proportional(texte::MINUSCULE),
             teinte,
         );
@@ -14905,6 +15134,9 @@ impl KiApp {
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
         storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
         storage.set_string("valorant_medailles", if self.valorant_medailles { "on" } else { "off" }.into());
+        storage.set_string("comptes_tus", self.comptes_tus.join(","));
+        storage.set_string("journal_parties", if self.journal_parties { "on" } else { "off" }.into());
+        storage.set_string("journal_propose", if self.journal_propose { "oui" } else { "non" }.into());
         storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
         self.soundboard.save(storage);
         self.valo.save(storage);
@@ -15031,6 +15263,36 @@ impl KiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sur un autre compte que celui de sa fiche, le badge prend le palier
+    /// de la présence et la ligne de partie le dit ; un compte principal ou
+    /// non dit ne change rien. L'empreinte d'un puuid est stable, sans la
+    /// casse, et ne le contient pas.
+    #[test]
+    fn le_compte_joue_se_voit_sous_le_pseudo() {
+        let mut m: Member = serde_json::from_value(serde_json::json!({
+            "user_id": 4, "username": "Kayou", "speaking": false, "rang_valorant": 21,
+            "jeu": {"etat": "en_jeu", "file": "competitive", "rang": 12},
+        }))
+        .unwrap();
+        assert_eq!(palier_de(&m), Some(21), "la fiche d'abord");
+        assert_eq!(mention_du_compte(&m), None);
+        m.compte_joue = Some(ki_protocol::CompteJoue::Principal);
+        assert_eq!((palier_de(&m), mention_du_compte(&m)), (Some(21), None));
+        m.compte_joue = Some(ki_protocol::CompteJoue::Autre);
+        assert_eq!(palier_de(&m), Some(12), "le palier du compte joué");
+        assert_eq!(mention_du_compte(&m).as_deref(), Some("autre compte"));
+        m.compte_joue = Some(ki_protocol::CompteJoue::Second { riot_id: Some("Smurf#EUW".into()) });
+        assert_eq!(mention_du_compte(&m).as_deref(), Some("sur Smurf#EUW"));
+        m.compte_joue = Some(ki_protocol::CompteJoue::Second { riot_id: None });
+        assert_eq!(mention_du_compte(&m).as_deref(), Some("2ᵉ compte"));
+
+        let e = empreinte_compte("AbC-123");
+        assert_eq!(e, empreinte_compte("abc-123"));
+        assert_ne!(e, empreinte_compte("abc-124"));
+        assert_eq!(e.len(), 16);
+        assert!(!e.contains("abc"));
+    }
 
     /// Une pastille compte, retient si l'on y est nommé, et fixe le repère
     /// du séparateur au **premier** non-lu — pas au dernier.

@@ -164,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
                 ServerMsg::LiaisonRiot { message, .. } => println!("[Riot] {message}"),
                 ServerMsg::FicheValorant { .. }
                 | ServerMsg::StatsValorant { .. }
+                | ServerMsg::MesComptes { .. }
                 | ServerMsg::MusiqueEtat { .. }
                 | ServerMsg::MusiqueResultats { .. }
                 | ServerMsg::Cartes { .. }

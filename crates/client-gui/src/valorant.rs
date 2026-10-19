@@ -16,23 +16,68 @@
 //!
 //! La lecture se fait par sondage toutes les deux secondes : assez réactif
 //! pour un score qui change, dérisoire pour le client Riot, et bien plus
-//! simple qu'une WebSocket TLS vers un certificat auto-signé.
+//! simple qu'une WebSocket TLS vers un certificat auto-signé. La session
+//! (qui est connecté) se lit à l'ouverture du client Riot, puis se relit
+//! après dix secondes sans présence : un autre compte ouvert dans le même
+//! client est suivi sans relancer quoi que ce soit.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use eframe::egui;
-use ki_protocol::{JeuEtat, JeuStatut};
+use ki_protocol::{CompteLocal, JeuEtat, JeuStatut, MonCompte};
 use serde::Deserialize;
 
 /// Cadence de lecture.
 const PERIODE: Duration = Duration::from_secs(2);
 
+/// Sans présence VALORANT pour le compte gardé depuis ce temps, la
+/// session se relit : changer de compte dans le client Riot (se
+/// déconnecter, en ouvrir un autre) ne réécrit pas le lockfile.
+const RELECTURE_SESSION: Duration = Duration::from_secs(10);
+
+/// Faut-il relire la session ? Oui quand le compte gardé est muet depuis
+/// [`RELECTURE_SESSION`] — pas avant, pour ne pas la relire à chaque
+/// tour quand on joue simplement à autre chose.
+fn session_a_relire(muet_depuis: Option<Instant>, maintenant: Instant) -> bool {
+    muet_depuis.is_some_and(|depuis| maintenant.saturating_duration_since(depuis) >= RELECTURE_SESSION)
+}
+
+/// Le compte ouvert dans le client Riot. Il reste sur la machine : seul
+/// son classement parmi les comptes liés part au serveur
+/// ([`classer_compte`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLocale {
+    pub puuid: String,
+    /// « Pseudo#TAG », pour le dire au membre lui-même.
+    pub riot_id: String,
+}
+
+impl SessionLocale {
+    fn de(s: &Session) -> Self {
+        let riot_id = if s.game_tag.is_empty() { s.game_name.clone() } else { format!("{}#{}", s.game_name, s.game_tag) };
+        Self { puuid: s.puuid.clone(), riot_id }
+    }
+}
+
+/// Le compte ouvert, classé parmi ceux que le membre a liés : leur numéro
+/// s'il en est un (au puuid, sans la casse), `Autre` sinon, `Inconnu` sans
+/// session lue. Un compte non lié n'est jamais nommé.
+pub fn classer_compte(session: Option<&SessionLocale>, mes: &[MonCompte]) -> CompteLocal {
+    let Some(s) = session else { return CompteLocal::Inconnu };
+    mes.iter()
+        .find(|c| !c.puuid.is_empty() && c.puuid.eq_ignore_ascii_case(&s.puuid))
+        .map_or(CompteLocal::Autre, |c| CompteLocal::Lie { n: c.n })
+}
+
 /// Le fil qui surveille le client Riot et publie le statut aux changements.
 pub struct Veilleur {
     statut: Arc<Mutex<Option<JeuStatut>>>,
+    /// Le compte ouvert dans le client Riot, `None` tant qu'aucune session
+    /// n'est lue.
+    session: Arc<Mutex<Option<SessionLocale>>>,
     /// Incrémentée à chaque statut différent : l'interface compare.
     version: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -42,16 +87,22 @@ pub struct Veilleur {
 impl Veilleur {
     pub fn demarrer(ctx: egui::Context) -> Self {
         let statut = Arc::new(Mutex::new(None));
+        let session = Arc::new(Mutex::new(None));
         let version = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = std::thread::Builder::new()
             .name("ki-valorant".into())
             .spawn({
-                let (statut, version, stop) = (statut.clone(), version.clone(), stop.clone());
-                move || boucle(ctx, statut, version, stop)
+                let (statut, session, version, stop) = (statut.clone(), session.clone(), version.clone(), stop.clone());
+                move || boucle(ctx, statut, session, version, stop)
             })
             .ok();
-        Self { statut, version, stop, thread }
+        Self { statut, session, version, stop, thread }
+    }
+
+    /// Le compte ouvert dans le client Riot, s'il y en a un.
+    pub fn session(&self) -> Option<SessionLocale> {
+        self.session.lock().unwrap().clone()
     }
 
     /// La version et le statut courant. La version ne bouge qu'aux
@@ -476,6 +527,8 @@ pub(crate) fn normaliser(p: &Prive) -> Option<JeuStatut> {
             niveau: niveau.min(9999),
             custom,
             nom: String::new(),
+            // Le compte se classe plus haut, contre nos comptes liés.
+            compte: CompteLocal::Inconnu,
         }
         .nettoyer(),
     )
@@ -484,9 +537,18 @@ pub(crate) fn normaliser(p: &Prive) -> Option<JeuStatut> {
 fn boucle(
     ctx: egui::Context,
     statut: Arc<Mutex<Option<JeuStatut>>>,
+    session: Arc<Mutex<Option<SessionLocale>>>,
     version: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 ) {
+    let noter_session = |s: Option<SessionLocale>| {
+        let mut courante = session.lock().unwrap();
+        if *courante != s {
+            *courante = s;
+            version.fetch_add(1, Ordering::Relaxed);
+            ctx.request_repaint();
+        }
+    };
     let publier = |nouveau: Option<JeuStatut>| {
         let mut courant = statut.lock().unwrap();
         if *courant != nouveau {
@@ -499,6 +561,9 @@ fn boucle(
     // PUUID de la personne — pour reconnaître sa propre présence parmi
     // celles de ses amis.
     let mut client: Option<(Lockfile, Client, String)> = None;
+    // Depuis quand ce PUUID n'a plus de présence VALORANT, le lockfile
+    // restant le même (voir [`session_a_relire`]).
+    let mut muet_depuis: Option<Instant> = None;
     // Le dernier ennui consigné : on ne le répète pas à chaque tour, mais un
     // ennui différent se dit — c'est ce qui fera comprendre, à distance,
     // pourquoi le statut reste vide.
@@ -516,6 +581,7 @@ fn boucle(
             // Client Riot fermé.
             client = None;
             publier(None);
+            noter_session(None);
             continue;
         };
         if client.as_ref().is_none_or(|(ouvert, _, _)| *ouvert != lf) {
@@ -523,12 +589,14 @@ fn boucle(
             match c.get::<Session>("/chat/v1/session") {
                 Ok(s) if !s.puuid.is_empty() => {
                     ennui("client Riot joint, session lue".into());
+                    noter_session(Some(SessionLocale::de(&s)));
                     client = Some((lf, c, s.puuid));
                 }
                 Ok(_) => {
                     ennui("session sans identifiant (le client démarre ?)".into());
                     client = None;
                     publier(None);
+                    noter_session(None);
                     continue;
                 }
                 Err(e) => {
@@ -537,6 +605,7 @@ fn boucle(
                     ennui(format!("session locale injoignable : {e}"));
                     client = None;
                     publier(None);
+                    noter_session(None);
                     continue;
                 }
             }
@@ -545,6 +614,11 @@ fn boucle(
         let nouveau = match c.get::<Presences>("/chat/v4/presences") {
             Ok(p) => {
                 let mienne = p.presences.iter().find(|x| x.puuid == *puuid && x.product == "valorant");
+                if mienne.is_some() {
+                    muet_depuis = None;
+                } else {
+                    muet_depuis.get_or_insert_with(Instant::now);
+                }
                 match mienne.and_then(|x| x.private.as_deref()) {
                     None => None,
                     Some(prive) => match decoder_prive(prive) {
@@ -564,12 +638,58 @@ fn boucle(
             }
         };
         publier(nouveau);
+        // Un autre compte ouvert dans le même client Riot : sa session le
+        // dit, la présence suivante sera la sienne.
+        if session_a_relire(muet_depuis, Instant::now()) {
+            muet_depuis = None;
+            if let Some((_, c, puuid)) = client.as_mut() {
+                if let Ok(s) = c.get::<Session>("/chat/v1/session") {
+                    if !s.puuid.is_empty() && s.puuid != *puuid {
+                        ennui("un autre compte est ouvert dans le client Riot".into());
+                        noter_session(Some(SessionLocale::de(&s)));
+                        *puuid = s.puuid;
+                    }
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le compte ouvert se reconnaît au puuid parmi les comptes liés ; un
+    /// compte non lié est « un autre », sans nom ; pas de session, rien à
+    /// dire.
+    #[test]
+    fn le_compte_ouvert_se_classe() {
+        let mes = vec![
+            MonCompte { n: 0, riot_id: "drion#EUW".into(), puuid: "AA-1".into(), principal: true, visible: true },
+            MonCompte { n: 2, riot_id: "Smurf#EUW".into(), puuid: "bb-2".into(), principal: false, visible: false },
+        ];
+        let ouvert = |puuid: &str| SessionLocale { puuid: puuid.into(), riot_id: "x#y".into() };
+        assert_eq!(classer_compte(None, &mes), CompteLocal::Inconnu);
+        assert_eq!(classer_compte(Some(&ouvert("aa-1")), &mes), CompteLocal::Lie { n: 0 }, "la casse ne compte pas");
+        assert_eq!(classer_compte(Some(&ouvert("bb-2")), &mes), CompteLocal::Lie { n: 2 });
+        assert_eq!(classer_compte(Some(&ouvert("cc-3")), &mes), CompteLocal::Autre);
+        assert_eq!(classer_compte(Some(&ouvert("cc-3")), &[]), CompteLocal::Autre, "rien de lié");
+        assert_eq!(classer_compte(Some(&ouvert("")), &[MonCompte { puuid: String::new(), ..mes[0].clone() }]), CompteLocal::Autre);
+        let s = Session { puuid: "p".into(), game_name: "Redik".into(), game_tag: "6162".into() };
+        assert_eq!(SessionLocale::de(&s).riot_id, "Redik#6162");
+    }
+
+    /// La session ne se relit qu'après dix secondes sans présence, jamais
+    /// tant que la présence répond.
+    #[test]
+    fn la_session_se_relit_apres_un_silence() {
+        let t0 = Instant::now();
+        assert!(!session_a_relire(None, t0 + Duration::from_secs(60)), "présence là : rien à relire");
+        assert!(!session_a_relire(Some(t0), t0 + Duration::from_secs(9)));
+        assert!(session_a_relire(Some(t0), t0 + RELECTURE_SESSION));
+        assert!(session_a_relire(Some(t0), t0 + Duration::from_secs(30)));
+        assert!(!session_a_relire(Some(t0 + Duration::from_secs(5)), t0), "horloge en arrière : pas de panique");
+    }
 
     /// Le lockfile a cinq champs séparés par des deux-points ; il faut le
     /// port et le mot de passe, le reste ne nous regarde pas.

@@ -67,9 +67,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ki_protocol::{
-    BilanMembre, CompteMedaille, DetailManches, FicheMembre, FicheValorant, MatchEsport, MatchResume,
-    Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, PointRR, RangValorant, ServerMsg, StatsSaison, UserId,
-    STATS_MAX_BYTES,
+    BilanMembre, CompteJoue, CompteLocal, CompteMedaille, DetailManches, FicheMembre, FicheValorant, MatchEsport,
+    MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, MonCompte, PointRR, RangValorant, ServerMsg,
+    StatsSaison, UserId, STATS_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -509,6 +509,9 @@ struct Etat {
     /// La dernière lecture de médailles ratée de chaque membre (ms Unix),
     /// pour [`MEDAILLES_REPIT`]. En mémoire seulement.
     medailles_ratees: Mutex<HashMap<UserId, u64>>,
+    /// Une écriture du journal des parties à la fois : chacune relit le
+    /// fichier, ajoute sa ligne et le réécrit.
+    journal: Mutex<()>,
 }
 
 pub struct Valorant {
@@ -561,6 +564,7 @@ impl Valorant {
             esports_en_cours: std::sync::atomic::AtomicBool::new(false),
             sans_medailles: Mutex::new(sans_medailles),
             medailles_ratees: Mutex::default(),
+            journal: Mutex::default(),
         });
         let (tx_res, rx_res) = mpsc::channel();
         let cle = cle_henrik(data_dir);
@@ -658,6 +662,98 @@ impl Valorant {
             .unwrap()
             .get(&user_id)
             .map(CompteRiot::riot_id)
+    }
+
+    /// Ses comptes liés, pour lui seul ([`ServerMsg::MesComptes`]) : de
+    /// quoi reconnaître, sur sa machine, le compte ouvert dans son client
+    /// Riot. Un seul, le numéro 0, principal et visible, tant qu'un membre
+    /// n'en lie qu'un (V8.2 en ouvrira d'autres).
+    pub fn mes_comptes(&self, user_id: UserId) -> Vec<MonCompte> {
+        self.etat
+            .comptes
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .map(|c| {
+                vec![MonCompte {
+                    n: 0,
+                    riot_id: c.riot_id(),
+                    puuid: c.puuid.clone(),
+                    principal: true,
+                    visible: true,
+                }]
+            })
+            .unwrap_or_default()
+    }
+
+    /// Le compte joué tel que les autres le verront : le numéro envoyé par
+    /// son client, vérifié contre ses comptes liés — un numéro qu'il n'a
+    /// pas est un autre compte. `None` quand son client n'a rien dit.
+    pub fn compte_joue(&self, user_id: UserId, local: CompteLocal) -> Option<CompteJoue> {
+        match local {
+            CompteLocal::Inconnu => None,
+            CompteLocal::Autre => Some(CompteJoue::Autre),
+            CompteLocal::Lie { n } => {
+                let lie = self.etat.comptes.lock().unwrap().contains_key(&user_id);
+                Some(if lie && n == 0 { CompteJoue::Principal } else { CompteJoue::Autre })
+            }
+        }
+    }
+
+    fn chemin_du_journal(&self, user_id: UserId) -> PathBuf {
+        self.etat.dossier.join("parties").join(format!("{user_id}.jsonl"))
+    }
+
+    /// Note une partie finie au journal du membre, qui l'a voulu
+    /// (`ClientMsg::ChoixJournal`) : début, durée, file, carte, dernier
+    /// score vu, party, et sur quel compte. Rien pour un autre jeu, une
+    /// durée inconnue ou une partie de moins d'une minute. Écrit sur le
+    /// disque : à appeler hors du fil réseau.
+    pub fn noter_partie(&self, user_id: UserId, statut: &ki_protocol::JeuStatut, duree: Duration, compte: Option<&CompteJoue>) {
+        if !statut.est_valorant() || duree == Duration::MAX || duree < JOURNAL_DUREE_MIN {
+            return;
+        }
+        let maintenant = maintenant_ms();
+        let ligne = LignePartie {
+            debut: maintenant.saturating_sub(u64::try_from(duree.as_millis()).unwrap_or(u64::MAX)),
+            duree_s: u32::try_from(duree.as_secs()).unwrap_or(u32::MAX),
+            file: statut.file.clone(),
+            carte: statut.carte.clone(),
+            score: [statut.score_allie, statut.score_adverse],
+            party: statut.party_taille,
+            compte: nom_du_compte(compte).to_string(),
+        };
+        let _verrou = self.etat.journal.lock().unwrap();
+        let chemin = self.chemin_du_journal(user_id);
+        let lignes: Vec<LignePartie> = std::fs::read_to_string(&chemin)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let lignes = journal_avec(lignes, ligne, maintenant);
+        let mut texte = String::new();
+        for l in &lignes {
+            if let Ok(json) = serde_json::to_string(l) {
+                texte.push_str(&json);
+                texte.push('\n');
+            }
+        }
+        if let Some(parent) = chemin.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = crate::store::write_atomic(&chemin, texte.as_bytes()) {
+            tracing::warn!("VALORANT : journal des parties de {user_id} non écrit : {e}");
+        }
+    }
+
+    /// Efface le journal des parties du membre : il n'en veut plus.
+    pub fn effacer_journal(&self, user_id: UserId) {
+        let _verrou = self.etat.journal.lock().unwrap();
+        match std::fs::remove_file(self.chemin_du_journal(user_id)) {
+            Ok(()) => tracing::info!("VALORANT : journal des parties de {user_id} effacé, à sa demande"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("VALORANT : journal des parties de {user_id} non effacé : {e}"),
+        }
     }
 
     pub fn rang(&self, user_id: UserId) -> Option<u8> {
@@ -1106,6 +1202,73 @@ pub struct TransitionJeu {
 /// Sans cela, un hoquet ou une reconnexion dans les trois dernières
 /// minutes d'une classée en ferait une partie « trop courte » pour une
 /// relance, et l'annonce attendrait le périodique.
+/// Le journal des parties d'un membre garde au plus ces jours et ces
+/// lignes ; au-delà, les plus anciennes partent.
+const JOURNAL_JOURS: u64 = 400;
+const JOURNAL_LIGNES: usize = 5000;
+/// Une partie plus courte ne s'y note pas : un hoquet, un remake.
+const JOURNAL_DUREE_MIN: Duration = Duration::from_secs(60);
+/// Deux fins de partie au même début, à ce temps près : la même partie,
+/// revue après un hoquet de présence — la seconde remplace la première.
+const JOURNAL_MEME_PARTIE_MS: u64 = 5_000;
+
+/// Une partie du journal (`data/valorant/parties/<membre>.jsonl`) : ce que
+/// la présence du membre a montré, rien qui vienne de HenrikDev.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LignePartie {
+    /// Début, en millisecondes Unix.
+    debut: u64,
+    duree_s: u32,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    carte: String,
+    /// Le dernier score vu, son camp d'abord.
+    #[serde(default)]
+    score: [u8; 2],
+    #[serde(default)]
+    party: u8,
+    /// « principal », « second », « autre » ou « inconnu » : jamais un
+    /// Riot ID, jamais un puuid.
+    #[serde(default)]
+    compte: String,
+}
+
+/// Le compte d'une partie, tel que le journal l'écrit.
+fn nom_du_compte(compte: Option<&CompteJoue>) -> &'static str {
+    match compte {
+        Some(CompteJoue::Principal) => "principal",
+        Some(CompteJoue::Second { .. }) => "second",
+        Some(CompteJoue::Autre) => "autre",
+        Some(CompteJoue::Inconnu) | None => "inconnu",
+    }
+}
+
+/// Le journal, `ligne` ajoutée : la même partie revue remplace la
+/// dernière, les lignes de plus de [`JOURNAL_JOURS`] partent, et il en
+/// reste [`JOURNAL_LIGNES`] au plus, les plus récentes. Pure : testée sans
+/// disque.
+fn journal_avec(mut lignes: Vec<LignePartie>, ligne: LignePartie, maintenant: u64) -> Vec<LignePartie> {
+    if lignes.last().is_some_and(|d| d.debut.abs_diff(ligne.debut) <= JOURNAL_MEME_PARTIE_MS) {
+        lignes.pop();
+    }
+    lignes.push(ligne);
+    let limite = maintenant.saturating_sub(JOURNAL_JOURS * 24 * 3600 * 1000);
+    lignes.retain(|l| l.debut >= limite);
+    let trop = lignes.len().saturating_sub(JOURNAL_LIGNES);
+    lignes.drain(..trop);
+    lignes
+}
+
+/// Une fin de partie vaut-elle une relecture de la fiche ? Pas quand elle
+/// s'est jouée sur un compte qu'il n'a pas lié (ou qu'une version plus
+/// récente nomme autrement) : le match n'arrivera jamais dans sa fiche, et
+/// trois relances coûteraient neuf requêtes pour rien. Un compte inconnu
+/// (client d'avant) se relit comme avant.
+pub fn compte_a_relire(compte: Option<&CompteJoue>) -> bool {
+    !matches!(compte, Some(CompteJoue::Autre | CompteJoue::Inconnu))
+}
+
 pub fn transition_de_jeu(
     ancien: Option<ki_protocol::JeuStatut>,
     nouveau: &Option<ki_protocol::JeuStatut>,
@@ -4635,6 +4798,7 @@ mod tests {
             esports_en_cours: std::sync::atomic::AtomicBool::new(false),
             sans_medailles: Mutex::default(),
             medailles_ratees: Mutex::default(),
+            journal: Mutex::default(),
         });
         let v = Valorant {
             etat,
@@ -4962,6 +5126,80 @@ mod tests {
         assert!(v.delier(1));
         assert!(!v.etat.fil.derniere_tentative.lock().unwrap().contains_key(&1));
         let _ = std::fs::remove_dir_all(_dir);
+    }
+
+    /// Le journal des parties : la même partie revue remplace sa ligne, les
+    /// vieilles et le trop-plein partent ; le fichier s'écrit sans Riot ID
+    /// ni puuid, et s'efface ; rien pour une partie trop courte, d'un autre
+    /// jeu ou de durée inconnue.
+    #[test]
+    fn le_journal_des_parties_se_tient() {
+        let jour = 24 * 3600 * 1000;
+        let l = |debut| LignePartie {
+            debut,
+            duree_s: 1800,
+            file: "competitive".into(),
+            carte: "Ascent".into(),
+            score: [13, 9],
+            party: 2,
+            compte: "principal".into(),
+        };
+        let maintenant = 500 * jour;
+        let j = journal_avec(vec![l(maintenant - 10 * jour)], l(maintenant - 3_600_000), maintenant);
+        assert_eq!(j.len(), 2);
+        let j = journal_avec(j, LignePartie { score: [13, 11], ..l(maintenant - 3_600_000 + 2_000) }, maintenant);
+        assert_eq!(j.len(), 2, "revue après un hoquet : remplacée");
+        assert_eq!(j[1].score, [13, 11]);
+        let j = journal_avec(vec![l(maintenant - 401 * jour), l(maintenant - 399 * jour)], l(maintenant), maintenant);
+        assert_eq!(j.iter().map(|x| x.debut).collect::<Vec<_>>(), vec![maintenant - 399 * jour, maintenant]);
+        let plein: Vec<_> = (0..JOURNAL_LIGNES as u64).map(|i| l(maintenant - jour + i * 10_000)).collect();
+        let j = journal_avec(plein, l(maintenant), maintenant);
+        assert_eq!(j.len(), JOURNAL_LIGNES);
+        assert_eq!(j.last().map(|x| x.debut), Some(maintenant));
+        assert_eq!(nom_du_compte(None), "inconnu");
+        assert_eq!(nom_du_compte(Some(&CompteJoue::Second { riot_id: Some("Smurf#EUW".into()) })), "second");
+
+        let (v, _rx, dir) = service_a_l_arret("journal");
+        let classee = partie("competitive", false);
+        v.noter_partie(1, &classee, Duration::from_secs(1800), Some(&CompteJoue::Principal));
+        v.noter_partie(1, &classee, Duration::from_secs(30), None);
+        v.noter_partie(1, &ki_protocol::JeuStatut::autre_jeu("Rocket League"), Duration::from_secs(1800), None);
+        v.noter_partie(1, &classee, Duration::MAX, None);
+        let chemin = dir.join("parties").join("1.jsonl");
+        let texte = std::fs::read_to_string(&chemin).unwrap();
+        assert_eq!(texte.lines().count(), 1, "{texte}");
+        let lue: LignePartie = serde_json::from_str(texte.lines().next().unwrap()).unwrap();
+        assert_eq!((lue.duree_s, lue.compte.as_str(), lue.file.as_str()), (1800, "principal", "competitive"));
+        assert!(!texte.contains("puuid") && !texte.contains('#'), "ni puuid ni Riot ID : {texte}");
+        v.effacer_journal(1);
+        assert!(!chemin.exists());
+        v.effacer_journal(1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Le numéro envoyé par le client se vérifie contre ses comptes liés :
+    /// un numéro qu'il n'a pas, ou rien de lié, c'est un autre compte. Ses
+    /// comptes ne partent qu'à lui, avec leur puuid ; une partie sur un
+    /// autre compte ne se relit pas.
+    #[test]
+    fn le_compte_joue_se_verifie() {
+        let (v, _rx, dir) = service_a_l_arret("compte-joue");
+        assert_eq!(v.compte_joue(1, CompteLocal::Inconnu), None);
+        assert_eq!(v.compte_joue(1, CompteLocal::Lie { n: 0 }), Some(CompteJoue::Autre), "rien de lié");
+        assert!(v.mes_comptes(1).is_empty());
+        compte(1, &v);
+        assert_eq!(v.compte_joue(1, CompteLocal::Lie { n: 0 }), Some(CompteJoue::Principal));
+        assert_eq!(v.compte_joue(1, CompteLocal::Lie { n: 3 }), Some(CompteJoue::Autre), "un numéro qu'il n'a pas");
+        assert_eq!(v.compte_joue(1, CompteLocal::Autre), Some(CompteJoue::Autre));
+        let mes = v.mes_comptes(1);
+        assert_eq!(mes.len(), 1);
+        assert_eq!((mes[0].n, mes[0].puuid.as_str(), mes[0].riot_id.as_str()), (0, "puuid-1", "m1#KI"));
+        assert!(mes[0].principal && mes[0].visible);
+        assert!(compte_a_relire(None), "client d'avant : comme avant");
+        assert!(compte_a_relire(Some(&CompteJoue::Principal)));
+        assert!(!compte_a_relire(Some(&CompteJoue::Autre)));
+        assert!(!compte_a_relire(Some(&CompteJoue::Inconnu)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Par puuid, la fin du chemin désigne le compte quel que soit son

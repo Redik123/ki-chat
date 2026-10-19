@@ -279,9 +279,21 @@ async fn main() -> anyhow::Result<()> {
                                     riot_id,
                                 },
                             );
+                            state.send_to(
+                                user_id,
+                                &ki_protocol::ServerMsg::MesComptes { comptes: state.valorant.mes_comptes(user_id) },
+                            );
                             state.broadcast_member(user_id);
                         }
-                        valorant::Resultat::Fiche { user_id } => state.broadcast_member(user_id),
+                        valorant::Resultat::Fiche { user_id } => {
+                            // Un renommage chez Riot passe aussi par ici : son
+                            // client garde le bon Riot ID de ses comptes.
+                            state.send_to(
+                                user_id,
+                                &ki_protocol::ServerMsg::MesComptes { comptes: state.valorant.mes_comptes(user_id) },
+                            );
+                            state.broadcast_member(user_id);
+                        }
                     }
                 }
                 // Le fil de jeu : relances après une fin de partie, les
