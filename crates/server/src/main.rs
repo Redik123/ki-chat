@@ -61,6 +61,7 @@ mod roles;
 mod state;
 mod store;
 mod stream;
+mod tactique;
 mod tableau;
 mod throttle;
 mod valorant;

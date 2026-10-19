@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, pos2, vec2, Pos2};
 use ki_protocol::UserId;
 use ki_ui::jetons::couleur::pour_pseudo;
-use tactique::{Camp, Outil, Plan, Tactique, Trait};
+use ki_protocol::{CarteTactique, EvenementTactique, OutilTactique};
+use tactique::{Camp, Lien, Outil, Plan, Tactique, Trait};
 
 const MOI: UserId = 1;
 const NOMS: [&str; 4] = ["", "drion", "Kevin", "Lina"];
@@ -132,7 +133,7 @@ struct Banc {
 }
 
 /// Le nombre de scènes.
-const SCENES: usize = 7;
+const SCENES: usize = 8;
 
 impl Banc {
     /// Un point d'une zone nommée du plan choisi, décalé ; le milieu de la
@@ -170,6 +171,7 @@ impl Banc {
             outil,
             points,
             fini_le: age.map(|a| Instant::now() - a),
+            maj: Instant::now(),
         }
     }
 
@@ -252,7 +254,34 @@ impl Banc {
             }
             // La molette, puis un trait à la souris : voir `raw_input_hook`.
             5 => self.traits_d_ascent(),
-            _ => self.tactique.outil = Outil::Fleche,
+            6 => self.tactique.outil = Outil::Fleche,
+            // La carte du salon, telle que le serveur la raconte : son état,
+            // puis les traits des autres par le fil — et moi, rendu muet,
+            // qui regarde.
+            _ => {
+                self.tactique.relier(Lien::Salon);
+                self.tactique.recevoir_etat(Some(CarteTactique { salon: 1, carte: carte.clone(), par: 2 }));
+                self.tactique.muet = true;
+                let fil = |points: Vec<Pos2>| -> Vec<[u16; 2]> {
+                    points.iter().map(|p| [(p.x.clamp(0.0, 1.0) * 65535.0) as u16, (p.y.clamp(0.0, 1.0) * 65535.0) as u16]).collect()
+                };
+                let recus = [
+                    (2, OutilTactique::Fleche, fil(self.chemin(&[("Attacker Spawn", (0.0, 0.0)), ("B Lobby", (0.0, 0.0)), ("B Main", (0.0, 0.0)), ("B Site", (0.0, 0.0))])), Some(9_000)),
+                    (3, OutilTactique::Zone, fil(vec![self.ou("B Site", (0.0, 0.0)), self.ou("B Site", (0.04, 0.0))]), Some(2_000)),
+                    (2, OutilTactique::Crayon, fil(self.chemin(&[("Mid Top", (0.0, 0.0)), ("Mid Courtyard", (0.0, 0.0))])), None),
+                ];
+                for (k, (auteur, outil, points, reste_ms)) in recus.into_iter().enumerate() {
+                    // En deux morceaux, chacun à sa place, comme sur le fil.
+                    let moitie = points.len() / 2;
+                    let (debut, suite) = if outil == OutilTactique::Zone { (points.clone(), points) } else { (points[..moitie].to_vec(), points[moitie..].to_vec()) };
+                    let depuis = if outil == OutilTactique::Zone { 0 } else { moitie as u32 };
+                    let couleur = |id: UserId| pour_pseudo(NOMS[id as usize]);
+                    let id = k as u32 + 1;
+                    let morceau = |depuis, points, fin, reste_ms| EvenementTactique::Trait { auteur, id, outil, depuis, points, fin, reste_ms };
+                    self.tactique.recevoir(morceau(0, debut, false, None), MOI, &couleur);
+                    self.tactique.recevoir(morceau(depuis, suite, reste_ms.is_some(), reste_ms), MOI, &couleur);
+                }
+            }
         }
         self.images = 0;
         self.demandee = false;
@@ -315,6 +344,8 @@ impl eframe::App for Banc {
         let choisi = self.tactique.choisi(plans);
         let minimap = choisi.and_then(|p| self.minimaps.get(&p.nom)).filter(|_| !self.sans_minimap);
         self.tactique.fenetre(&ctx, plans, minimap, MOI, pour_pseudo(NOMS[MOI as usize]));
+        // Personne pour les recevoir : les gestes du banc restent ici.
+        let _ = self.tactique.a_envoyer();
 
         let Some(dossier) = self.capture.clone() else {
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) {

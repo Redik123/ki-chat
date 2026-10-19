@@ -631,6 +631,8 @@ pub struct AppState {
     pub portes: crate::porte::Portes,
     /// Les tables de cartes, une par salon vocal. En mémoire seulement.
     pub cartes: crate::cartes::Cartes,
+    /// Les cartes tactiques, une par salon vocal. En mémoire seulement.
+    pub tactique: crate::tactique::Tactiques,
     /// Les jetons des hachages Argon2id : voir [`ARGON2_SIMULTANES`].
     pub argon2: Arc<tokio::sync::Semaphore>,
     /// Les comptes expulsés il y a peu, tenus dehors jusqu'à l'échéance.
@@ -692,6 +694,7 @@ impl AppState {
             pokes: Default::default(),
             portes: Default::default(),
             cartes: Default::default(),
+            tactique: Default::default(),
             argon2: Arc::new(tokio::sync::Semaphore::new(ARGON2_SIMULTANES)),
             expulsions: Mutex::new(HashMap::new()),
             envois_http: Arc::new(tokio::sync::Semaphore::new(
@@ -822,6 +825,8 @@ impl AppState {
         // Les tables de cartes suivent leur salon : le nouveau venu la
         // reçoit, le partant se lève, un salon vide ferme la sienne.
         crate::cartes::accorder(self);
+        // Et la carte tactique de même : ses traits suivent leurs auteurs.
+        crate::tactique::accorder(self);
     }
 
     /// Vrai si le salon existe **et** est de la nature attendue : on ne
@@ -1638,6 +1643,7 @@ mod tests {
             cartes: true,
             comptes_joues: true,
             journal_parties: true,
+            tactique: true,
             protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");

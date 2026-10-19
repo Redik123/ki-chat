@@ -467,6 +467,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         comptes_joues: true,
         // Et le journal de ses parties, s'il le veut.
         journal_parties: true,
+        // Et la carte tactique de son salon vocal.
+        tactique: true,
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
@@ -562,6 +564,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     // traitait une recherche dans tous les journaux comme un `Ping`.
     let mut budget_diffusion = crate::state::TokenBucket::new(10.0, 20.0);
     let mut budget_couteux = crate::state::TokenBucket::new(2.0, 10.0);
+    let mut budget_dessin = crate::state::TokenBucket::new(30.0, 60.0);
     while let Ok(Some(line)) = read_line(&mut lines).await {
         let Ok(msg) = serde_json::from_str::<ClientMsg>(&line) else {
             let _ = tx.send(ServerMsg::Error {
@@ -574,6 +577,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 Classe::Leger => true,
                 Classe::Diffusion => budget_diffusion.take(),
                 Classe::Couteux => budget_couteux.take(),
+                Classe::Dessin => budget_dessin.take(),
             };
         if !admis {
             tracing::debug!("{username} dépasse le débit du flux de contrôle : requête ignorée");
@@ -615,6 +619,11 @@ enum Classe {
     /// le cache VALORANT, lister des comptes ou des fichiers. Deux par
     /// seconde, rafale de dix — de quoi remonter un fil sans attendre.
     Couteux,
+    /// Un morceau de trait sur la carte tactique, rediffusé au salon : un
+    /// client en envoie vingt par seconde pendant qu'il dessine. Trente par
+    /// seconde, rafale de soixante, à part de `Diffusion` pour que dessiner
+    /// ne prive pas du chat.
+    Dessin,
 }
 
 /// La classe de coût de chaque message. Les **sorties** — du vocal, d'une
@@ -633,6 +642,7 @@ fn classe_de(msg: &ClientMsg) -> Classe {
         | ClientMsg::AdminListFichiers
         | ClientMsg::AdminListRoles
         | ClientMsg::PorteOuvrir { .. } => Classe::Couteux,
+        ClientMsg::Tactique { .. } => Classe::Dessin,
         ClientMsg::GameStatus { .. }
         | ClientMsg::VoiceState { .. }
         | ClientMsg::StreamStart { .. }
@@ -1905,6 +1915,11 @@ fn handle_msg(
         ClientMsg::Cartes { action } => {
             if let Err(message) = crate::cartes::agir(state, user_id, action) {
                 let _ = tx.send(ServerMsg::CartesRefus { message: message.into() });
+            }
+        }
+        ClientMsg::Tactique { action } => {
+            if let Err(message) = crate::tactique::agir(state, user_id, action) {
+                let _ = tx.send(ServerMsg::TactiqueRefus { message: message.into() });
             }
         }
         ClientMsg::Musique { commande } => {

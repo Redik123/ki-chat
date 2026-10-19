@@ -937,7 +937,7 @@ pub struct Cartes {
 }
 
 /// Qui est dans quel salon vocal.
-fn occupants(state: &AppState) -> HashMap<ChannelId, HashSet<UserId>> {
+pub(crate) fn occupants(state: &AppState) -> HashMap<ChannelId, HashSet<UserId>> {
     let users = state.users.lock().unwrap();
     let mut salons: HashMap<ChannelId, HashSet<UserId>> = HashMap::new();
     for (id, u) in users.iter() {
