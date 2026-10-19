@@ -1068,11 +1068,12 @@ pub struct Kpi<'a> {
     ecart: Option<Ecart>,
     precision: Option<&'a str>,
     serie: &'a [f32],
+    jauge: Option<(f32, Option<f32>, Color32)>,
 }
 
 impl<'a> Kpi<'a> {
     pub fn new(intitule: &'a str, valeur: impl Into<String>) -> Self {
-        Self { intitule, valeur: valeur.into(), couleur: theme::TEXT, ecart: None, precision: None, serie: &[] }
+        Self { intitule, valeur: valeur.into(), couleur: theme::TEXT, ecart: None, precision: None, serie: &[], jauge: None }
     }
 
     /// La couleur de la valeur (un rang, un résultat).
@@ -1098,6 +1099,14 @@ impl<'a> Kpi<'a> {
         self
     }
 
+    /// Une jauge au bas de la tuile, à la place de la courbe : la part
+    /// `part` (de 0 à 1) en `couleur`, et un trait blanc au `repere` — la
+    /// médiane du groupe, par exemple.
+    pub fn jauge(mut self, part: f32, repere: Option<f32>, couleur: Color32) -> Self {
+        self.jauge = Some((part, repere, couleur));
+        self
+    }
+
     /// La tuile, à la largeur qu'on lui laisse, [`Kpi::HAUTEUR`] de haut.
     pub fn show(self, ui: &mut Ui) -> Response {
         let largeur = ui.available_width().max(crate::jetons::largeur::TUILE_MIN * 0.6);
@@ -1108,7 +1117,17 @@ impl<'a> Kpi<'a> {
         let p = ui.painter_at(rect);
         p.rect(rect, CornerRadius::same(rayon::XL), theme::BG_RAISED, Stroke::new(1.0_f32, theme::BORDER_SOFT), StrokeKind::Inside);
         let dedans = rect.shrink(espace::L);
-        if self.serie.len() >= 2 {
+        if let Some((part, repere, couleur)) = self.jauge {
+            let fond = Rect::from_min_max(egui::pos2(dedans.left(), dedans.bottom() - 4.0), dedans.right_bottom());
+            p.rect_filled(fond, CornerRadius::same(2), theme::BG_ACTIVE);
+            let part = if part.is_finite() { part.clamp(0.0, 1.0) } else { 0.0 };
+            let plein = Rect::from_min_max(fond.min, egui::pos2(fond.left() + fond.width() * part, fond.bottom()));
+            p.rect_filled(plein, CornerRadius::same(2), couleur);
+            if let Some(r) = repere.filter(|r| r.is_finite()) {
+                let x = fond.left() + fond.width() * r.clamp(0.0, 1.0);
+                p.line_segment([egui::pos2(x, fond.top() - 3.0), egui::pos2(x, fond.bottom() + 3.0)], Stroke::new(2.0_f32, theme::TEXT));
+            }
+        } else if self.serie.len() >= 2 {
             // Sous l'écart et la précision, au ras de la tuile.
             courbe_discrete(&p, Rect::from_min_max(egui::pos2(dedans.left(), dedans.bottom() - 10.0), dedans.right_bottom()), self.serie);
         }

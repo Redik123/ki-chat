@@ -63,5 +63,22 @@ impl KiApp {
                 });
             },
         );
+
+        ui::section(
+            ui,
+            Icon::Target,
+            "Profil VALORANT",
+            Some("La nouvelle page d'un membre, à la place du chat plutôt que dans une fenêtre."),
+            |ui| {
+                ui::ligne(ui, "Profil", |ui| {
+                    ui::interrupteur(ui, &mut self.profil_au_centre, "Ouvrir le profil à la place du chat");
+                    ui::precision(
+                        ui,
+                        "Clic droit sur un membre → sa fiche : elle s'ouvre en grand, au centre. Échap ou « Retour au \
+                         chat » la referme. Coupé, la fiche reste la fenêtre d'avant.",
+                    );
+                });
+            },
+        );
     }
 }

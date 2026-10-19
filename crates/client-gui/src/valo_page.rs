@@ -36,6 +36,10 @@ use crate::ui;
 use crate::valo_catalogue::Catalogue;
 use crate::{boutique, rangs, FicheOuverte};
 
+#[cfg(debug_assertions)]
+pub(crate) mod banc;
+mod profil;
+
 // ---------------------------------------------------------------------
 // Constantes
 // ---------------------------------------------------------------------
@@ -264,6 +268,8 @@ pub struct PageValo {
     survol: Option<String>,
     /// « voir les N autres » a été cliqué : toute la table.
     fiche_plus: bool,
+    /// La vue du profil, quand la fiche prend la place du chat.
+    vue_profil: profil::VueProfil,
 }
 
 impl PageValo {
@@ -284,6 +290,7 @@ impl PageValo {
             deplie: None,
             survol: None,
             fiche_plus: false,
+            vue_profil: profil::VueProfil::Ensemble,
         }
     }
 
@@ -299,6 +306,7 @@ impl PageValo {
         self.deplie = None;
         self.survol = None;
         self.fiche_plus = false;
+        self.vue_profil = profil::VueProfil::Ensemble;
     }
 }
 
@@ -2136,6 +2144,12 @@ impl PageValo {
                 ui.label(RichText::new(format!("· {rr}")).color(teinte).size(texte::PETIT).strong());
             }
         });
+        self.courbe_rr(ui, vue, HAUTEUR_COURBE);
+    }
+
+    /// La courbe seule, sur `hauteur` : ou un mot quand il n'y a pas de
+    /// quoi la tracer.
+    fn courbe_rr(&mut self, ui: &mut Ui, vue: &Vue, hauteur: f32) {
         if vue.p.is_empty() {
             ui::hint(ui, "Aucun match classé connu.");
             self.survol = None;
@@ -2174,7 +2188,7 @@ impl PageValo {
             }
             texte
         };
-        let survole = graphes::courbe_temps(ui, egui::Id::new("fiche_courbe"), &points, HAUTEUR_COURBE, true, &frontieres, pic, info);
+        let survole = graphes::courbe_temps(ui, egui::Id::new("fiche_courbe"), &points, hauteur, true, &frontieres, pic, info);
         self.survol = survole.and_then(|i| vue.p.get(i)).map(|x| x.match_id.clone()).filter(|id| !id.is_empty());
     }
 
@@ -2341,10 +2355,16 @@ fn frontieres_d_acte(chrono: &[&PointRR]) -> Vec<(u64, String)> {
 /// dernier match quand le serveur la connaît (0.1.49 et après), en une
 /// ligne de texte sinon.
 fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
-    let mut detail = format!("{} · {}", fiche.region.to_uppercase(), fiche.plateforme.to_uppercase());
+    // Ce qu'on sait, sans séparateur pendu quand la région manque.
+    let mut parts: Vec<String> = [&fiche.region, &fiche.plateforme]
+        .iter()
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
     if fiche.niveau > 0 {
-        detail.push_str(&format!(" · niveau {}", fiche.niveau));
+        parts.push(format!("niveau {}", fiche.niveau));
     }
+    let detail = parts.join(" · ");
     let titre = catalogue.titre(&fiche.titre_joueur).map(|t| format!("« {t} »"));
     if fiche.carte_joueur.is_empty() {
         ui.horizontal_wrapped(|ui| {
@@ -2976,9 +2996,13 @@ fn actes(ui: &mut Ui, vue: &Vue) {
     ui.add_space(espace::L);
     ui.label(RichText::new("Actes").color(TEXT_DIM).size(texte::PETIT));
     ui::hint(ui, "le rang de fin de chaque acte, du plus ancien au plus récent");
-    // Une barre par acte, à la hauteur de son rang de fin : de Fer 1 (3)
-    // à Radiant (27).
-    let barres: Vec<graphes::BarreV> = saisons
+    graphes::barres_verticales(ui, egui::Id::new("fiche_actes"), &barres_d_actes(saisons), 96.0, Some(26.0));
+}
+
+/// Une barre par acte, à la hauteur de son rang de fin : de Fer 1 (3) à
+/// Radiant (27).
+fn barres_d_actes(saisons: &[ki_protocol::StatsSaison]) -> Vec<graphes::BarreV> {
+    saisons
         .iter()
         .map(|s| graphes::BarreV {
             valeur: f32::from(s.tier_fin.saturating_sub(2)) + f32::from(s.rr_fin.min(100)) / 100.0,
@@ -2993,8 +3017,7 @@ fn actes(ui: &mut Ui, vue: &Vue) {
                 pluriel(u32::from(s.parties), "partie")
             ),
         })
-        .collect();
-    graphes::barres_verticales(ui, egui::Id::new("fiche_actes"), &barres, 96.0, Some(26.0));
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -3479,6 +3502,21 @@ mod tests {
             }
             page.fermer_fiche();
             assert!(page.deplie.is_none() && page.survol.is_none() && !page.fiche_plus);
+
+            // Le profil au centre : toutes ses vues, sur les mêmes fiches,
+            // une ligne de match dépliée ; il reste ouvert sans Échap.
+            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue };
+            for ouverte in [&attente, &sans, &vide, &pauvre, &riche] {
+                for vue in [profil::VueProfil::Ensemble, profil::VueProfil::Matchs, profil::VueProfil::Agents, profil::VueProfil::Cartes, profil::VueProfil::Medailles] {
+                    page.vue_profil = vue;
+                    page.deplie = Some("m1".into());
+                    for souris in [None, Some(Pos2::new(300.0, 500.0))] {
+                        dessiner(&ctx, souris, |ui| assert!(page.profil(ui, ouverte, &cx)));
+                    }
+                }
+            }
+            page.fermer_fiche();
+            assert_eq!(page.vue_profil, profil::VueProfil::Ensemble, "refermé, il rouvrira sur la vue d'ensemble");
         }
     }
 

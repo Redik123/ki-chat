@@ -658,7 +658,7 @@ sorts y sont déjà, venues avec V10.1.
     ki-ui, du protocole, de `graphes` et d'un trait `Images` pour les
     textures, comme la carte tactique.
 
-### V9.1 — Le profil (taille L)
+### V9.1 — Le profil (taille L) — première version le 2026-10-19
 
 La fiche devient une page.
 
@@ -698,6 +698,48 @@ La fiche devient une page.
   le déroulé « VDVV… », on obtient le pourcentage de manches gagnées en
   attaque et en défense, par carte. La règle qui le permet (l'équipe Red
   attaque en première mi-temps) est à vérifier sur deux matchs réels.
+
+**Ce qui est fait (2026-10-19), première version :**
+- **Où.** ⚙ → Bêta → « Profil VALORANT » : la fiche d'un membre s'ouvre
+  à la place du chat, et non plus dans une fenêtre. Les salons, les
+  membres et la barre vocale restent autour. « Retour au chat » ou Échap
+  la referme. Coupé, rien ne change.
+- **Le code.** `valo_page/profil.rs`, un module enfant de `valo_page` :
+  il reprend la `Vue`, les bilans et les petits dessins de la fiche sans
+  rien rendre public. L'ancienne fiche reste telle quelle jusqu'à la
+  bascule.
+- **La page, de haut en bas :**
+  - l'en-tête : le rang en grand, la jauge, « ≈ N victoires pour … », le
+    pic, le MMR estimé et sa phrase ;
+  - les vues en pastilles (Vue d'ensemble, Matchs, Agents, Cartes,
+    Médailles), la période, Compétitif / Tous ;
+  - Mes chiffres : huit `Kpi`. La flèche compare les dix derniers matchs
+    aux dix d'avant, et la jauge porte un trait blanc à la médiane du
+    groupe (échelle : le meilleur du groupe, plus un quart) ;
+  - la courbe de RR sur 220 px ;
+  - la forme (le plus récent à droite, l'anneau, la série, les gains et
+    pertes moyens) à côté de Mes heures (le groupe en contour, l'heure
+    encadrée, le pic). L'un sous l'autre sous 860 px ;
+  - les agents en cartes (portrait, rôle, parties, K/D, victoires) et les
+    cartes sur leur bandeau ;
+  - les douze médailles, même celles qu'on n'a pas encore ;
+  - les derniers matchs dans un `Tableau` (note, MVP, médailles, RR). Un
+    clic montre les manches et le récit dessous ;
+  - les actes en barres.
+  - Un compte sans aucune partie n'a qu'un message.
+- **Le catalogue** (`FORME` 4) donne le rôle des agents, en français.
+  **Écart :** pas de `largeIcon`, la petite icône de rang fait déjà
+  256 px.
+- **Le banc** est dans ki-chat même, en debug seulement :
+  `KI_BANC_VALO=dossier ki-chat`. Il photographie sept scènes (riche à
+  980, 720 et 1 440 px, matchs, médailles, pauvre, vide), rognées à la
+  page entière. Les images viennent du cache du catalogue sur le disque.
+- **Pas encore :**
+  - l'attaque et la défense par carte : il faut d'abord vérifier la règle
+    sur deux vrais matchs (avec une clé HenrikDev) ;
+  - la maîtrise des agents : une requête de plus par compte, à peser ;
+  - le choix du compte, qui vient avec V8.2 ;
+  - les vues Progression et Comparer, en V9.4.
 
 ### V9.2 — L'accueil et la soirée (taille M)
 
