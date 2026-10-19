@@ -12,7 +12,7 @@
 use egui::Color32;
 use ki_ui_base::Couleur;
 
-pub use ki_ui_base::{espace, rayon, texte};
+pub use ki_ui_base::{espace, largeur, rayon, texte};
 
 /// Une couleur de la base, en egui. La palette est opaque, et une couleur
 /// translucide ne passe pas par ici : refusée à la compilation pour une
@@ -112,6 +112,35 @@ pub mod couleur {
     /// Même couleur, translucide (utile pour les fonds teintés).
     pub fn translucide(c: Color32, a: u8) -> Color32 {
         Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+    }
+}
+
+/// Les ombres, de la plus discrète à la plus haute : ce qui se pose sur
+/// la page, ce qui flotte au-dessus d'elle.
+pub mod ombre {
+    use egui::epaint::Shadow;
+    use egui::Color32;
+
+    /// Une carte posée sur la page.
+    pub const DOUCE: Shadow = Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(90) };
+    /// Un menu, une bulle : juste au-dessus.
+    pub const MENU: Shadow = Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(120) };
+    /// Une fenêtre, au-dessus de tout.
+    pub const LEVEE: Shadow = Shadow { offset: [0, 14], blur: 40, spread: 0, color: Color32::from_black_alpha(140) };
+}
+
+/// Les polices au-delà du corps d'egui (Ubuntu Light).
+pub mod police {
+    use egui::{FontFamily, FontId};
+
+    /// La famille d'Ubuntu Medium, installée par [`crate::style::installer`].
+    pub const MOYENNE: &str = "ki-moyenne";
+
+    /// Du texte qui pèse : un chiffre clé, un titre. egui n'a pas de
+    /// graisse — `.strong()` n'y change que la couleur —, d'où une famille
+    /// à part.
+    pub fn moyenne(taille: f32) -> FontId {
+        FontId::new(taille, FontFamily::Name(MOYENNE.into()))
     }
 }
 
