@@ -469,6 +469,10 @@ struct RoleDraft {
     color: egui::Color32,
     colored: bool,
     rank: u16,
+    /// Le rang enregistré du rôle modifié, `None` à la création. Le serveur
+    /// n'exige un rang libre que de celui qui change : une égalité ancienne
+    /// ne doit pas empêcher de renommer le rôle.
+    rank_saved: Option<u16>,
     perms: ki_protocol::Perms,
 }
 
@@ -4350,7 +4354,7 @@ impl KiApp {
     /// permission : c'est ce qui empêche un second administrateur de bannir
     /// le propriétaire.
     fn outranks(&self, member_rank: u16) -> bool {
-        member_rank < self.my_rank
+        ki_protocol::perm::outranks(self.my_rank, member_rank)
     }
 
     /// Ai-je de quoi ouvrir le panneau d'administration ?
@@ -4372,6 +4376,14 @@ impl KiApp {
         ]
         .iter()
         .any(|p| self.can(*p))
+    }
+
+    /// Ai-je de quoi agir sur un autre membre, si le rang le permet ?
+    fn moderation_power(&self) -> bool {
+        use ki_protocol::perm::*;
+        [MUTE_MEMBERS, MOVE_MEMBERS, KICK, BAN, MANAGE_ROLES]
+            .iter()
+            .any(|p| self.can(*p))
     }
 
     /// Couleur d'un membre : celle de son rôle, sinon son pseudo.
@@ -8123,6 +8135,20 @@ impl KiApp {
                         ui.close();
                     }
                 });
+            }
+
+            // Ce que le rang masque se dit, chiffres à l'appui : sans ce mot,
+            // un modérateur face à un égal voyait le menu d'un simple membre
+            // et croyait ses permissions cassées.
+            if !self.outranks(m.rank) && self.moderation_power() {
+                ui.add_space(espace::XS);
+                ui::hint(
+                    ui,
+                    format!(
+                        "rang {}, le tien {} : on n'agit que sur plus bas que soi",
+                        m.rank, self.my_rank
+                    ),
+                );
             }
 
             // Attribution de rôles : cocher/décocher, borné par son propre
@@ -12575,7 +12601,7 @@ impl KiApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // On ne touche qu'à ce qui est strictement sous son
                     // propre rang : sinon on se donnerait des pouvoirs.
-                    if role.rank < self.my_rank
+                    if self.outranks(role.rank)
                         && !role.system
                         && ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked()
                     {
@@ -12588,7 +12614,7 @@ impl KiApp {
                     // l'administrateur y touche, pour la même raison.
                     let everyone = role.id == ki_protocol::ROLE_EVERYONE
                         && self.can(ki_protocol::perm::ADMINISTRATOR);
-                    if ((role.rank < self.my_rank && !role.system) || everyone)
+                    if ((self.outranks(role.rank) && !role.system) || everyone)
                         && ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked()
                     {
                         self.role_draft = Some(RoleDraft {
@@ -12597,6 +12623,7 @@ impl KiApp {
                             color: theme::member_color(role.color, &role.name),
                             colored: role.color.is_some(),
                             rank: role.rank,
+                            rank_saved: Some(role.rank),
                             perms: role.perms,
                         });
                     }
@@ -12611,9 +12638,13 @@ impl KiApp {
                 name: String::new(),
                 color: ACCENT,
                 colored: true,
-                // Par défaut juste en dessous de soi : un rôle créé au même
-                // rang serait immédiatement hors de portée de son auteur.
-                rank: self.my_rank.saturating_sub(1),
+                // Par défaut le plus haut rang **libre** sous soi : un rôle
+                // créé au même rang serait immédiatement hors de portée de
+                // son auteur, et le rang juste en dessous, pris d'office,
+                // mettait tous les rôles qu'il créait à égalité.
+                rank: ki_protocol::free_rank_below(&self.roles, self.my_rank.saturating_sub(1))
+                    .unwrap_or_else(|| self.my_rank.saturating_sub(1)),
+                rank_saved: None,
                 perms: ki_protocol::perm::DEFAULT,
             });
         }
@@ -12638,12 +12669,30 @@ impl KiApp {
             }
         });
         ui.add_space(espace::S);
+        // Le rôle qui occupe déjà le rang choisi : le serveur refuse que deux
+        // rôles le partagent, autant le dire avant d'enregistrer.
+        let mut taken = None;
         if everyone {
             ui::hint(ui, "ce que reçoit tout le monde, y compris les comptes sans rôle");
         } else {
             let ceiling = self.my_rank.saturating_sub(1);
             ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
             ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+            if Some(draft.rank) != draft.rank_saved {
+                taken = ki_protocol::rank_holder(&self.roles, draft.rank, draft.id)
+                    .map(|r| r.name.clone());
+            }
+            if let Some(other) = &taken {
+                ui.label(
+                    RichText::new(format!(
+                        "rang déjà pris par « {} » : à rang égal, aucun des deux ne \
+                         pourrait agir sur l'autre",
+                        safe_name(other)
+                    ))
+                    .color(DANGER)
+                    .size(texte::PETIT),
+                );
+            }
         }
         ui.add_space(espace::S);
         ui::field_label(ui, "Permissions");
@@ -12672,7 +12721,7 @@ impl KiApp {
         }
         ui.add_space(espace::M);
         ui.horizontal(|ui| {
-            let ready = !draft.name.trim().is_empty();
+            let ready = !draft.name.trim().is_empty() && taken.is_none();
             let save = ui
                 .add_enabled_ui(ready, |ui| {
                     ui::primary_button(ui, Some(Icon::Check), "Enregistrer", None)
@@ -12969,7 +13018,6 @@ impl KiApp {
             ui.add_space(espace::M);
             ui::field_label(ui, &format!("Rôles de {target}"));
             let roles = self.roles.clone();
-            let mine = self.my_rank;
             let mut assignable = 0;
             for role in &roles {
                 // `@everyone` est implicite : il n'est jamais stocké sur un
@@ -12981,7 +13029,7 @@ impl KiApp {
                 // On n'attribue qu'un rôle strictement sous son propre rang :
                 // sinon on se donnerait, par personne interposée, un pouvoir
                 // qu'on n'a pas.
-                if role.rank >= mine {
+                if !self.outranks(role.rank) {
                     continue;
                 }
                 assignable += 1;

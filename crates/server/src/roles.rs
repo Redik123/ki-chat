@@ -100,6 +100,60 @@ pub fn known_perms() -> Perms {
 /// protocole, pour que l'interface cesse de proposer ce qu'on refuse ici.
 use ki_protocol::perm::NOT_FOR_EVERYONE;
 
+/// Le refus d'un rang déjà occupé par un autre rôle.
+fn rank_taken(roles: &[RoleInfo], rank: u16, except: Option<RoleId>) -> Result<(), String> {
+    match ki_protocol::rank_holder(roles, rank, except) {
+        Some(other) => Err(format!(
+            "le rang {rank} est déjà celui du rôle « {} » : à rang égal, \
+             aucun des deux ne pourrait agir sur l'autre",
+            other.name
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Lève les égalités de rang laissées par les versions précédentes, dans
+/// l'ordre où la liste des rôles les affiche : à rang égal, le plus ancien
+/// reste au-dessus, et chaque suivant passe juste en dessous — en poussant
+/// d'un cran ceux qu'il rattrape. Renvoie (nom, avant, après) de chaque rôle
+/// déplacé.
+///
+/// Le formulaire de création proposait d'office le rang juste sous son
+/// auteur : tous les rôles qu'un même compte créait sans toucher au curseur
+/// tombaient sur le même rang, 65534 pour le propriétaire. La liste les
+/// montrait pourtant l'un sous l'autre, et c'était la hiérarchie que l'on
+/// croyait avoir : un administrateur ne pouvait ni déplacer ni faire taire
+/// un collègue affiché en dessous de lui, ni personne qui portait un rôle
+/// créé de la même façon.
+///
+/// L'ordre de la liste ne change jamais : un rôle ne descend que pour passer
+/// sous celui qui le précède. Les rôles système ne bougent pas, le plancher
+/// non plus : un rôle qui n'aurait plus que le rang 0 pour passer sous
+/// l'autre garde son égalité, plutôt que de perdre toute autorité sur les
+/// membres sans rôle.
+fn untie(roles: &mut [RoleInfo]) -> Vec<(String, u16, u16)> {
+    let mut order: Vec<usize> = (0..roles.len()).collect();
+    order.sort_by(|&a, &b| {
+        roles[b]
+            .rank
+            .cmp(&roles[a].rank)
+            .then(roles[a].id.cmp(&roles[b].id))
+    });
+    let mut moved = Vec::new();
+    let mut above: Option<u16> = None;
+    for i in order {
+        let role = &mut roles[i];
+        if let Some(limit) = above.filter(|l| !role.system && role.rank != 0 && role.rank >= *l) {
+            if let Some(rank) = limit.checked_sub(1).filter(|r| *r >= 1) {
+                moved.push((role.name.clone(), role.rank, rank));
+                role.rank = rank;
+            }
+        }
+        above = Some(role.rank);
+    }
+    moved
+}
+
 fn clean_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -125,7 +179,7 @@ impl Roles {
     /// ce qu'il restait à réparer.
     pub fn open(data_dir: &str) -> anyhow::Result<Self> {
         let path = PathBuf::from(data_dir).join("roles.json");
-        let (inner, fresh) = match std::fs::read_to_string(&path) {
+        let (mut inner, fresh): (RolesFile, bool) = match std::fs::read_to_string(&path) {
             Ok(json) => (
                 serde_json::from_str(&json).context("lecture de roles.json")?,
                 false,
@@ -133,6 +187,10 @@ impl Roles {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (initial_roles(), true),
             Err(e) => return Err(e).context("lecture de roles.json"),
         };
+        let untied = untie(&mut inner.roles);
+        for (name, before, after) in &untied {
+            tracing::warn!("rôle « {name} » : rang {before} → {after}, il en partageait un");
+        }
         let store = Self {
             path,
             inner: Mutex::new(inner),
@@ -148,6 +206,11 @@ impl Roles {
             store
                 .save(&store.inner.lock().unwrap())
                 .map_err(|e| anyhow::anyhow!(e))?;
+        } else if !untied.is_empty() {
+            // Réécrit pour que les rangs affichés soient ceux du fichier. Un
+            // refus ici n'empêche pas de démarrer : le même calcul refera la
+            // même chose au prochain lancement, et `save` l'a déjà tracé.
+            let _ = store.save(&store.inner.lock().unwrap());
         }
         Ok(store)
     }
@@ -236,11 +299,13 @@ impl Roles {
         if inner.roles.len() >= MAX_ROLES {
             return Err(format!("trop de rôles ({MAX_ROLES} au plus)"));
         }
+        let rank = rank.min(MAX_RANK);
+        rank_taken(&inner.roles, rank, None)?;
         let role = RoleInfo {
             id: inner.next_id,
             name,
             color,
-            rank: rank.min(MAX_RANK),
+            rank,
             perms: perms & known_perms(),
             // Un rôle créé n'est jamais système : sinon n'importe qui pouvant
             // gérer les rôles se fabriquerait un rôle indestructible.
@@ -276,6 +341,17 @@ impl Roles {
     pub fn edit(&self, role: RoleInfo) -> Result<(), String> {
         let name = clean_name(&role.name)?;
         let mut inner = self.inner.lock().unwrap();
+        // Seul un rang qui **change** doit être libre : une égalité que le
+        // chargement n'a pas pu lever (au ras du plancher) ne doit pas
+        // empêcher de renommer le rôle ou de lui changer sa couleur.
+        let rank = role.rank.min(MAX_RANK);
+        let moves = inner
+            .roles
+            .iter()
+            .any(|r| r.id == role.id && !r.system && r.rank != rank);
+        if moves {
+            rank_taken(&inner.roles, rank, Some(role.id))?;
+        }
         let Some(current) = inner.roles.iter_mut().find(|r| r.id == role.id) else {
             return Err("rôle inconnu".into());
         };
@@ -301,7 +377,7 @@ impl Roles {
         } else {
             current.name = name;
             current.color = role.color;
-            current.rank = role.rank.min(MAX_RANK);
+            current.rank = rank;
             current.perms = role.perms & known_perms();
         }
         self.save(&inner)?;
@@ -528,7 +604,7 @@ mod tests {
         // Et le compteur survit au redémarrage, sinon un rôle recréé
         // hériterait des attributions de l'ancien.
         let roles = Roles::open(&dir).unwrap();
-        assert_eq!(roles.create("Encore", None, 5, 0).unwrap().id, 6);
+        assert_eq!(roles.create("Encore", None, 6, 0).unwrap().id, 6);
         assert!(roles.get(first.id).is_none());
     }
 
@@ -562,5 +638,145 @@ mod tests {
             roles.create("Ambitieux", None, u16::MAX, 0).unwrap().rank,
             MAX_RANK
         );
+    }
+
+    /// Propriétaire > admin haut > admin bas > membre, sur des comptes réels :
+    /// chacun peut déplacer et faire taire tout ce qui est en dessous de lui,
+    /// un autre administrateur compris, et rien de ce qui est à son niveau ou
+    /// au-dessus.
+    #[test]
+    fn each_admin_acts_on_everyone_below_including_a_lower_admin() {
+        let roles = Roles::open(&scratch("hierarchie")).unwrap();
+        let haut = roles
+            .create("Admin", None, 200, perm::ADMINISTRATOR)
+            .unwrap();
+        let bas = roles
+            .create("Admin bas", None, 150, perm::ADMINISTRATOR)
+            .unwrap();
+        // Un rôle de couleur, au plancher : il ne protège personne.
+        let couleur = roles.create("Turquoise", Some(0x00_ce_d1), 0, 0).unwrap();
+
+        let proprietaire = vec![ROLE_OWNER];
+        let admin_haut = vec![haut.id];
+        let admin_bas = vec![bas.id, couleur.id];
+        let membre = vec![couleur.id];
+        let echelle = [&proprietaire, &admin_haut, &admin_bas, &membre];
+        for (i, acteur) in echelle.iter().enumerate() {
+            // Les deux administrateurs ont bien de quoi déplacer et faire
+            // taire : ADMINISTRATOR ouvre tout, il ne manque que le rang.
+            if i < 3 {
+                let held = roles.perms_of(acteur);
+                assert!(perm::has(held, perm::MUTE_MEMBERS | perm::MOVE_MEMBERS));
+            }
+            for (j, cible) in echelle.iter().enumerate() {
+                assert_eq!(
+                    perm::outranks(roles.rank_of(acteur), roles.rank_of(cible)),
+                    i < j,
+                    "{acteur:?} sur {cible:?}"
+                );
+            }
+        }
+        // Deux comptes qui portent le même rôle restent des pairs.
+        assert!(!perm::outranks(roles.rank_of(&admin_bas), roles.rank_of(&[bas.id])));
+    }
+
+    /// Deux rôles ne partagent plus un rang : à égalité, aucun de leurs
+    /// membres ne pouvait agir sur l'autre, alors que la liste les montrait
+    /// l'un au-dessus de l'autre. Le plancher reste partagé.
+    #[test]
+    fn two_roles_never_share_a_rank_except_the_floor() {
+        let roles = Roles::open(&scratch("rang-unique")).unwrap();
+        let admin = roles
+            .create("Admin", None, 200, perm::ADMINISTRATOR)
+            .unwrap();
+        let refus = roles.create("Admin bas", None, 200, perm::ADMINISTRATOR);
+        assert!(refus.unwrap_err().contains("« Admin »"));
+        // Le rang du modérateur d'origine est pris aussi.
+        assert!(roles.create("Renfort", None, 100, perm::KICK).is_err());
+        // Plafonné au rang du dessous du propriétaire, puis refusé s'il y a
+        // déjà quelqu'un.
+        roles.create("Sommet", None, u16::MAX, 0).unwrap();
+        assert!(roles.create("Sommet bis", None, u16::MAX, 0).is_err());
+        // Au plancher, autant qu'on veut.
+        roles.create("Rouge", Some(0xff_00_00), 0, 0).unwrap();
+        roles.create("Bleu", Some(0x00_00_ff), 0, 0).unwrap();
+
+        // Changer de rang pour un rang pris : refusé.
+        let mut bas = roles
+            .create("Admin bas", None, 150, perm::ADMINISTRATOR)
+            .unwrap();
+        bas.rank = 200;
+        assert!(roles.edit(bas.clone()).is_err());
+        // Garder le sien, ou en prendre un libre : permis.
+        bas.rank = 150;
+        bas.name = "Admin junior".into();
+        roles.edit(bas.clone()).unwrap();
+        bas.rank = 160;
+        roles.edit(bas).unwrap();
+        assert_eq!(roles.get(admin.id).unwrap().rank, 200);
+    }
+
+    /// Le cas rapporté : des rôles créés au rang proposé d'office, tous à
+    /// 65534. Au chargement, ils prennent l'ordre où la liste les montrait,
+    /// et l'administrateur du dessus peut enfin agir sur celui du dessous.
+    #[test]
+    fn ties_left_by_older_versions_follow_the_order_the_list_showed() {
+        let dir = scratch("egalites");
+        let role = |id: RoleId, name: &str, rank: u16, perms: Perms| RoleInfo {
+            id,
+            name: name.into(),
+            color: None,
+            rank,
+            perms,
+            system: false,
+        };
+        let mut initial = initial_roles();
+        initial.next_id = 12;
+        initial.roles.extend([
+            role(4, "Admin", 65_534, perm::ADMINISTRATOR),
+            role(5, "Admin bas", 65_534, perm::ADMINISTRATOR),
+            role(6, "Ami", 65_534, 0),
+            // Juste sous le paquet : poussé d'un cran pour rester dessous.
+            role(7, "Habitué", 65_533, 0),
+            // Créé au sommet avant que le plafond n'existe : à égalité avec
+            // le propriétaire, il passe sous lui.
+            role(8, "Ancien", u16::MAX, perm::KICK),
+            // Au ras du plancher : descendre l'un ferait tomber l'autre à 0.
+            role(9, "Rouge", 1, 0),
+            role(10, "Bleu", 1, 0),
+            role(11, "Vert", 0, 0),
+        ]);
+        let json = serde_json::to_string_pretty(&initial).unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("roles.json"), json).unwrap();
+
+        let before: Vec<RoleId> = {
+            let mut sorted = initial.roles.clone();
+            sorted.sort_by(|a, b| b.rank.cmp(&a.rank).then(a.id.cmp(&b.id)));
+            sorted.iter().map(|r| r.id).collect()
+        };
+        let roles = Roles::open(&dir).unwrap();
+        let listed = roles.list();
+        // L'ordre affiché n'a pas bougé : c'est lui qui devient la hiérarchie.
+        assert_eq!(listed.iter().map(|r| r.id).collect::<Vec<_>>(), before);
+        let rank = |id: RoleId| roles.get(id).unwrap().rank;
+        assert_eq!(rank(ROLE_OWNER), u16::MAX);
+        assert_eq!(
+            [rank(8), rank(4), rank(5), rank(6), rank(7)],
+            [65_534, 65_533, 65_532, 65_531, 65_530]
+        );
+        assert_eq!(rank(3), 100, "déjà seul à son rang, le modérateur reste");
+        assert_eq!((rank(9), rank(10), rank(11)), (1, 1, 0));
+        assert_eq!(rank(ROLE_EVERYONE), 0);
+
+        // L'administrateur du dessus agit maintenant sur celui du dessous, et
+        // sur qui porte un rôle créé de la même façon ; pas l'inverse.
+        assert!(perm::outranks(roles.rank_of(&[4]), roles.rank_of(&[5])));
+        assert!(perm::outranks(roles.rank_of(&[5]), roles.rank_of(&[6])));
+        assert!(!perm::outranks(roles.rank_of(&[5]), roles.rank_of(&[4])));
+        assert!(perm::outranks(roles.rank_of(&[ROLE_OWNER]), roles.rank_of(&[8])));
+
+        // Écrit sur le disque : relu, rien ne bouge plus.
+        let reread = Roles::open(&dir).unwrap();
+        assert_eq!(reread.list(), listed);
     }
 }
