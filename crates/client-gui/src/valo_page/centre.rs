@@ -3,8 +3,8 @@
 //! Profil · Carte tactique · Esport · Boutique), et sous elle l'onglet
 //! choisi ; les salons, les membres et la barre vocale restent autour.
 //!
-//! L'accueil et le profil sont les pages neuves ; le classement et les
-//! matchs reprennent ceux de la fenêtre d'aujourd'hui, en attendant V9.3.
+//! L'accueil, le classement, les matchs et le profil sont les pages
+//! neuves ; l'esport et la boutique reprennent ceux de la fenêtre.
 
 use ki_ui::jetons::police;
 
@@ -123,19 +123,8 @@ impl PageValo {
                         OngletCentre::Classement | OngletCentre::Matchs if !cx.recu => {
                             ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
                         }
-                        OngletCentre::Classement => {
-                            self.choix_de_periode(ui);
-                            ui.add_space(espace::S);
-                            records(ui, &lignes, self.periode, cx.rangs);
-                            ui.add_space(espace::XL);
-                            self.classement(ui, &lignes, &noms, cx.moi, cx.rangs, &mut demandes);
-                            medailles_du_groupe(ui, &lignes, &noms, cx.moi, &mut demandes, &Medaille::TOUTES);
-                        }
-                        OngletCentre::Matchs => {
-                            self.choix_de_periode(ui);
-                            ui.add_space(espace::S);
-                            self.onglet_matchs(ui, &lignes, &noms, cx.moi, maintenant, cx.catalogue, &mut demandes);
-                        }
+                        OngletCentre::Classement => self.onglet_classement(ui, cx, &lignes, &noms, &mut demandes),
+                        OngletCentre::Matchs => self.matchs_du_groupe(ui, &lignes, &noms, cx, maintenant, &mut demandes),
                         OngletCentre::Esport => esports_ui(ui, cx.esports),
                         OngletCentre::Boutique => {
                             ui.label(RichText::new("Ma boutique du jour").strong().size(texte::CORPS));
@@ -153,6 +142,23 @@ impl PageValo {
             }
         }
         (ouvert, demandes)
+    }
+
+    /// L'onglet Classement : la période, le tableau et les douze médailles
+    /// du groupe, puis les records.
+    fn onglet_classement(&mut self, ui: &mut Ui, cx: &Contexte<'_>, lignes: &[Ligne], noms: &Annuaire, demandes: &mut Vec<Demande>) {
+        let aide = format!(
+            "sur {} · un clic sur un en-tête change le tri, sur une ligne ouvre la fiche",
+            self.periode.titre()
+        );
+        ui::section(ui, Icon::Crown, "Classement", Some(&aide), |ui| {
+            self.choix_de_periode(ui);
+            ui.add_space(espace::S);
+            self.classement_tableau(ui, lignes, noms, cx, demandes);
+            medailles_du_groupe(ui, lignes, noms, cx.moi, demandes, &Medaille::TOUTES);
+        });
+        let aide = format!("sur {}, {ASSEZ} classés au moins", self.periode.titre());
+        ui::section(ui, Icon::Star, "Les records", Some(&aide), |ui| records(ui, lignes, self.periode, cx.rangs));
     }
 
     /// La période des agrégats du groupe : 7 ou 30 jours.

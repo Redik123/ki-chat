@@ -819,7 +819,7 @@ L'accueil de la maquette, dans l'ordre décrit plus haut.
   - le bouton ⤢ détacher, pour un second écran ;
   - le classement en `ui::Tableau`, c'est V9.3.
 
-### V9.3 — Classement et Matchs (taille M)
+### V9.3 — Classement et Matchs (taille M) — première version le 2026-10-19
 
 - **Le classement**, sur l'accueil et dans son onglet :
   - passe sur `ui::Tableau`, avec avatar, icône de rang, sparkline,
@@ -834,9 +834,51 @@ L'accueil de la maquette, dans l'ordre décrit plus haut.
   - une partie jouée ensemble fait une seule carte ;
   - les filtres passent sur `ui::pastilles`.
 
+**Ce qui est fait (2026-10-19), et ce qui diffère :**
+- **Le classement** (`valo_page/classement.rs`), sur l'accueil et dans
+  son onglet, est un `ui::Tableau` :
+  - l'avatar (la photo du membre, ou son initiale), l'icône de rang, la
+    tendance, la forme et les 7 jours ne partent jamais ;
+  - les autres colonnes se masquent par priorité. À 980 px partent la
+    tête, le KAST et l'ADR ; à 720 px il reste le rang, la tendance, les
+    7 jours, la forme et le K/D. Plus de défilement de côté ;
+  - le tri par défaut est les 7 jours, le même sur l'accueil et dans
+    l'onglet. Un clic sur une ligne ouvre la fiche ;
+  - ki-ui : `Colonne::chiffre()`, pour une colonne à gauche qui se trie
+    comme un chiffre (le rang).
+  - **Écart :** pas encore de case « comparer ». Elle viendra avec la
+    vue Comparer, en V9.4 : seule, elle ne servirait à rien.
+- **Une seule carte de partie** (`valo_page/matchs.rs`), pour l'onglet
+  Matchs et pour le fil de la soirée :
+  - le bandeau de la carte à gauche, avec son nom, et un liseré à la
+    couleur du résultat (bleu pour un face-à-face, des membres de chaque
+    côté) ;
+  - l'heure, l'issue et le score, le mode s'il n'est pas classé, la
+    durée, « N du groupe » ; puis les manches case par case ;
+  - une pastille par membre : le portrait de son agent, son nom, ses RR,
+    son K/D/A, son ACS, le MVP et deux médailles. Les vainqueurs d'abord,
+    puis le meilleur score. La mienne est entourée de vert, et un clic
+    ouvre la fiche.
+  - Elle lit une `PartieSoiree` comme les `MatchResume` des fiches.
+- **L'onglet Matchs :**
+  - la période, le mode et le membre en `ui::pastilles` ;
+  - le bilan du groupe, une partie jouée ensemble comptée une fois ;
+  - les cartes rangées par soirée (« aujourd'hui », « hier », « samedi
+    17 octobre », coupées à 6 h du matin), vingt par vingt.
+- **Le serveur envoie plus de matchs à la page du groupe.** Jusqu'ici,
+  cinq par membre : trop peu pour un onglet Matchs sur 30 jours. Les
+  paliers vont maintenant de (30 matchs, 30 points) à (0, 0), et le
+  premier qui tient sous `STATS_MAX_BYTES` part. Cinq fiches pleines en
+  ont trente, dix en ont dix, quarante trois. Un client d'avant affiche
+  simplement plus de lignes.
+- **Le banc** photographie le classement à 980, 720 et 1 440 px, et les
+  matchs à 980 et 720 px. Ses fiches jouent ensemble et une fois en face.
+- **Pas encore :** le classement des médailles reste l'ancienne grille.
+
 ### V9.4 — Comparer et Progression (taille M)
 
-- **Comparer deux membres** (c'était le bonus V5.1) : tuiles côte à côte,
+- **Comparer deux membres** (c'était le bonus V5.1), choisis par la case
+  « comparer » du classement (reportée de V9.3) : tuiles côte à côte,
   courbes de RR superposées, agents et cartes en commun, bilan quand ils
   jouent ensemble.
 - **Progression :**

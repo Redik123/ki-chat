@@ -85,8 +85,12 @@ const MATCHS_MAX: usize = 5;
 /// Ce que la fiche accumule au fil des rafraîchissements.
 const MATCHS_GARDES: usize = 60;
 const HISTORIQUE_GARDES: usize = 100;
-/// Points du résumé envoyé à la page du groupe (les matchs : `MATCHS_MAX`).
-const POINTS_RESUME: usize = 10;
+/// Matchs et points par membre du résumé envoyé à la page du groupe, du
+/// plus riche au plus maigre : part le premier palier dont la ligne tient
+/// sous le budget. Cinq fiches pleines ont ainsi leurs trente derniers
+/// matchs pour l'onglet Matchs, dix en ont dix, quarante trois ; (5, 10)
+/// était le seul palier avant V9.3.
+const PALIERS_RESUME: [(usize, usize); 7] = [(30, 30), (20, 20), (10, 10), (MATCHS_MAX, 10), (3, 6), (1, 3), (0, 0)];
 /// Le rattrapage à la liaison, une fois par membre : ce que HenrikDev a
 /// archivé de lui (`stored-matches`, `stored-mmr-history`).
 const RATTRAPAGE_MATCHS: usize = 60;
@@ -1829,8 +1833,7 @@ pub fn message_stats(
     esports: Vec<MatchEsport>,
     activite: Vec<u16>,
 ) -> ServerMsg {
-    const PALIERS: [(usize, usize); 4] = [(MATCHS_MAX, POINTS_RESUME), (3, 6), (1, 3), (0, 0)];
-    for (n_m, n_p) in PALIERS {
+    for (n_m, n_p) in PALIERS_RESUME {
         let candidat = ServerMsg::StatsValorant {
             fiches: resumes(n_m, n_p),
             esports: esports.clone(),
@@ -4338,8 +4341,8 @@ mod tests {
     }
 
     /// Quarante fiches pleines — soixante matchs détaillés, cent points —
-    /// tiennent dans une ligne : le serveur descend d'un palier ; trois
-    /// fiches passent au premier.
+    /// tiennent dans une ligne : le serveur descend de quelques paliers ;
+    /// cinq fiches passent au premier, dix au troisième.
     #[test]
     fn la_page_du_groupe_tient_dans_une_ligne() {
         let maintenant = 1_800_000_000_000u64;
@@ -4441,22 +4444,44 @@ mod tests {
         assert!(envoyees.iter().all(|f| f.fiche.matchs.iter().all(|m| m.manches_detail.is_none() && !m.id.is_empty())));
         assert_eq!(esports.len(), 20);
         assert_eq!(activite.len(), 168);
-        // Trois fiches : le premier palier, cinq matchs et dix points.
-        let trois: Vec<(UserId, FicheValorant)> = fiches.iter().take(3).cloned().collect();
+        // Cinq fiches pleines, l'esport et l'activité : le premier palier,
+        // trente matchs et trente points.
+        let cinq: Vec<(UserId, FicheValorant)> = fiches.iter().take(5).cloned().collect();
         let msg = message_stats(
             |n_m, n_p| {
-                trois
-                    .iter()
-                    .map(|(id, f)| FicheMembre { user_id: *id, username: "x".into(), fiche: f.resume(n_m, n_p), bilan: None })
+                cinq.iter()
+                    .map(|(id, f)| FicheMembre {
+                        user_id: *id,
+                        username: format!("membre-numero-{id}"),
+                        fiche: f.resume(n_m, n_p),
+                        bilan: Some(bilan_membre(f, maintenant)),
+                    })
                     .collect()
             },
-            Vec::new(),
-            Vec::new(),
+            esports.clone(),
+            activite.clone(),
         );
         let ServerMsg::StatsValorant { fiches: envoyees, .. } = &msg else {
             panic!("pas le bon message");
         };
-        assert!(envoyees.iter().all(|f| f.fiche.matchs.len() == MATCHS_MAX && f.fiche.historique_rr.len() == POINTS_RESUME));
+        assert!(envoyees.iter().all(|f| f.fiche.matchs.len() == PALIERS_RESUME[0].0 && f.fiche.historique_rr.len() == PALIERS_RESUME[0].1));
+        // Dix fiches pleines : dix matchs chacun au moins pour l'onglet
+        // Matchs (une fiche pleine pèse 29 Ko à trente matchs, 11 Ko à dix).
+        let dix: Vec<(UserId, FicheValorant)> = fiches.iter().take(10).cloned().collect();
+        let msg = message_stats(
+            |n_m, n_p| {
+                dix.iter()
+                    .map(|(id, f)| FicheMembre { user_id: *id, username: "x".into(), fiche: f.resume(n_m, n_p), bilan: Some(bilan_membre(f, maintenant)) })
+                    .collect()
+            },
+            Vec::new(),
+            vec![3u16; 168],
+        );
+        let ServerMsg::StatsValorant { fiches: envoyees, .. } = &msg else {
+            panic!("pas le bon message");
+        };
+        assert!(envoyees.iter().all(|f| f.fiche.matchs.len() >= 10), "{}", envoyees[0].fiche.matchs.len());
+        assert!(serde_json::to_vec(&msg).unwrap().len() <= STATS_MAX_BYTES);
     }
 
     /// Les pseudos avec espace ou accent passent dans l'URL.
