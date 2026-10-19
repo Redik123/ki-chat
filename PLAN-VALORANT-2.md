@@ -845,13 +845,43 @@ ServerMsg::TactiqueEtat { carte: Option<CarteTactique> } // à l'arrivée
 
 ### Les jalons
 
-- **V10.1 — La carte, seul (taille M)**. Tout côté client, sans serveur.
+- **V10.1 — La carte, seul (taille M) — fait le 2026-10-19**. Tout côté
+  client, sans serveur.
   - Le catalogue apprend les minimaps, leurs facteurs, leurs zones et les
     icônes de sorts (`FORME` passe de 2 à 3).
   - Le choix du plan, la minimap, les noms des zones, le crayon, la flèche
     et la zone, le fondu de 15 s, le zoom.
   - Ça sert à **régler la sensation** (épaisseur, lissage, fondu) avant de
     toucher au réseau.
+  - **Ce qui est fait, et ce qui diffère :**
+    - `tactique.rs` : `Plan` et `plan_depuis` (une entrée de `/v1/maps`
+      devient un plan), `Tactique` avec `contenu(ui)` à part de la
+      fenêtre, et des traits qui portent déjà `(auteur, id)` pour V10.2.
+    - **Chaque plan a son sens.** Les minimaps de valorant-api.com ne sont
+      pas toutes tournées pareil (Ascent, Haven, Split ont l'attaque à
+      droite, Icebox à gauche). Le plan garde les quarts de tour qui
+      mettent le spawn d'attaque en bas, calculés d'après les deux spawns.
+      « Attaque » montre donc toujours son spawn en bas, et « Défense » le
+      demi-tour.
+    - Les noms des zones suivent la taille de la carte à l'écran : une
+      petite fenêtre n'est pas noyée sous les noms.
+    - `FORME` 3 : le catalogue garde les 13 plans de compétition, triés
+      par nom. **Écart :** une minimap ne se télécharge que pour le plan
+      choisi, pas les treize d'un coup.
+    - **Écart :** les icônes de sorts attendent V10.3, avec l'outil Icône
+      qui s'en sert.
+    - Touches 1 à 3 pour les outils, N pour les noms, Ctrl+Z ; molette,
+      clic du milieu, double-clic. Le trait se termine au relâcher, même
+      hors de la carte : il ne reste jamais « en cours ».
+    - Les repeints : un seul au début du fondu, puis à chaque image
+      pendant les 3 s. Une carte sans fondu ne coûte rien.
+    - Le bouton **« Tactique »** de la barre vocale ouvre la carte, pour
+      soi seul en attendant V10.2.
+    - Le banc `examples/banc_tactique.rs` : `BANC_CARTES` (la réponse de
+      `/v1/maps`) et `BANC_MINIMAPS` (un PNG par plan). Sept scènes :
+      Ascent en attaque et en défense, Lotus, sans les noms, sans minimap,
+      puis la molette et un trait tirés par de faux gestes. Avec
+      `BANC_PETIT`, la fenêtre à sa taille minimale.
 - **V10.2 — La carte partagée (taille M)**. Le protocole, le serveur, la
   synchronisation, l'arrivée en cours de route et les bornes. Des tests
   serveur comme ceux des cartes : expiration, bornes, auteur forcé,

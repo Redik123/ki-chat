@@ -44,6 +44,7 @@ mod secret;
 mod servers;
 mod sfxgen;
 mod soundboard;
+mod tactique;
 mod theme;
 mod ui;
 mod update;
@@ -925,6 +926,9 @@ struct KiApp {
     choix_journal_dit: Option<bool>,
     /// La table de cartes de mon salon vocal, et sa fenêtre.
     cartes: cartes::Cartes,
+    /// La carte tactique : un plan de VALORANT où dessiner la manche
+    /// suivante (V10.1 : chacun la sienne, rien ne part au serveur).
+    tactique: tactique::Tactique,
     /// Le choix déjà dit à ce serveur depuis la connexion.
     choix_medailles_dit: Option<bool>,
     /// L'état VALORANT du tour d'avant, pour voir une partie finir.
@@ -1530,6 +1534,7 @@ impl KiApp {
             serveur_journal: false,
             choix_journal_dit: None,
             cartes: cartes::Cartes::default(),
+            tactique: tactique::Tactique::default(),
             choix_medailles_dit: None,
             valorant_avant: None,
             medailles_ennui: String::new(),
@@ -3766,6 +3771,20 @@ impl KiApp {
         for action in actions {
             self.send(ClientMsg::Cartes { action });
         }
+    }
+
+    /// La carte tactique, si elle est ouverte : le plan choisi et sa
+    /// minimap viennent du catalogue, mes traits ont la couleur de mon
+    /// pseudo.
+    fn tactique_window(&mut self, ctx: &egui::Context) {
+        if !self.tactique.ouvert {
+            return;
+        }
+        let moi = self.my_id.unwrap_or(0);
+        let couleur = self.members.iter().find(|m| Some(m.user_id) == self.my_id).map_or(ACCENT, couleur_de_membre);
+        let plans = self.catalogue.plans();
+        let minimap = self.tactique.choisi(plans).and_then(|p| self.catalogue.minimap(p));
+        self.tactique.fenetre(ctx, plans, minimap, moi, couleur);
     }
 
     fn soundboard_window(&mut self, ctx: &egui::Context) {
@@ -6782,6 +6801,7 @@ impl KiApp {
         self.clips_window(ctx);
         self.soundboard_window(ctx);
         self.cartes_window(ctx);
+        self.tactique_window(ctx);
         self.portes_window(ctx);
         self.loupedeck_window(ctx, voice);
         self.partage_clip_window(ctx);
@@ -7134,6 +7154,13 @@ impl KiApp {
                         {
                             self.cartes.ouvert = !self.cartes.ouvert;
                         }
+                    }
+                    if ui::button(ui, Icon::Pencil, "Tactique")
+                        .on_hover_text("une carte de VALORANT où dessiner la prochaine manche ; chaque trait s'efface 15 s après")
+                        .clicked()
+                    {
+                        self.tactique.ouvert = !self.tactique.ouvert;
+                        self.catalogue.demarrer();
                     }
                     if self.soundboard_visible
                         && ui::button(ui, Icon::Volume, "Soundboard")

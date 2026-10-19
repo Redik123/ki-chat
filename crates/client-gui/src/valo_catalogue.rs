@@ -1,7 +1,8 @@
 //! Le catalogue VALORANT de valorant-api.com : les noms (files, cartes,
 //! titres) et les images (portraits d'agents, bandeaux de cartes, cartes
 //! de joueur) que la page du groupe, la fiche et la liste des membres
-//! montrent.
+//! montrent ; et les plans des cartes de compétition (minimap, zones) sur
+//! lesquels la carte tactique se dessine.
 //!
 //! Sur le patron des icônes de rang ([`crate::rangs`]) : rien ne bloque,
 //! rien ne clignote — tant qu'une image n'est pas là, le texte tient la
@@ -30,17 +31,19 @@ use ki_protocol::JeuStatut;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::tactique::{self, Plan};
+
 const API: &str = "https://valorant-api.com/v1/";
 const MEDIA: &str = "https://media.valorant-api.com/";
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// Les listes pèsent une centaine de Ko chacune ; au-delà, on ne lit pas.
 const JSON_MAX: u64 = 4 * 1024 * 1024;
 /// Un portrait de minimap fait 6 Ko, un bandeau de carte 70, une carte de
-/// joueur 100.
+/// joueur 100, une minimap de carte 30.
 const IMAGE_MAX: u64 = 1024 * 1024;
 /// La forme de `catalogue.json` : la changer invalide celui du disque.
-/// 2 : les actes (pour les médailles).
-const FORME: u32 = 2;
+/// 2 : les actes (pour les médailles). 3 : les plans de la carte tactique.
+const FORME: u32 = 3;
 
 // ---------------------------------------------------------------------
 // Les noms
@@ -69,6 +72,9 @@ struct Liste {
     /// (uuid, « V26 · ACTE V », début, fin en millisecondes Unix).
     #[serde(default)]
     actes: Vec<(String, String, u64, u64)>,
+    /// Les cartes de compétition, par nom.
+    #[serde(default)]
+    plans: Vec<Plan>,
 }
 
 /// Une table cherchée telle quelle d'abord — c'est le cas courant, sans
@@ -104,6 +110,7 @@ pub struct Index {
     files: Table<String>,
     titres: HashMap<String, String>,
     actes: Vec<(String, String, u64, u64)>,
+    plans: Vec<Plan>,
 }
 
 impl Index {
@@ -124,6 +131,7 @@ impl Index {
             index.titres.insert(uuid.to_lowercase(), titre);
         }
         index.actes = liste.actes;
+        index.plans = liste.plans;
         index
     }
 
@@ -261,10 +269,11 @@ fn charger_index(dossier: Option<&Path>) -> Option<Index> {
                     }
                 }
                 ki_voice::journal(format!(
-                    "VALORANT : catalogue {} lu ({} agents, {} cartes, {} files)",
+                    "VALORANT : catalogue {} lu ({} agents, {} cartes dont {} plans, {} files)",
                     liste.version,
                     liste.agents.len(),
                     liste.cartes.len(),
+                    liste.plans.len(),
                     liste.files.len()
                 ));
                 Some(Index::depuis(liste))
@@ -316,7 +325,13 @@ fn liste_depuis(version: String, agents: &Value, cartes: &Value, files: &Value, 
         if !interne.is_empty() && !nom.trim().is_empty() {
             liste.cartes.push((interne.to_string(), nom.trim().to_string(), bandeau.to_string()));
         }
+        if let Some(plan) = tactique::plan_depuis(&c).filter(|p| p.minimap.starts_with(MEDIA)) {
+            if !liste.plans.iter().any(|p| p.nom == plan.nom) {
+                liste.plans.push(plan);
+            }
+        }
     }
+    liste.plans.sort_by(|a, b| a.nom.cmp(&b.nom));
     for f in donnees(files) {
         if let (Some(id), Some(nom)) = (f["queueId"].as_str(), f["displayName"].as_str()) {
             if !id.is_empty() && !nom.trim().is_empty() {
@@ -495,6 +510,17 @@ impl Catalogue {
         self.texture(&format!("{MEDIA}playercards/{uuid}/wideart.png"))
     }
 
+    /// Les plans des cartes de compétition, par nom ; aucun tant que le
+    /// catalogue n'est pas là.
+    pub fn plans(&self) -> &[Plan] {
+        self.index.as_deref().map_or(&[], |i| i.plans.as_slice())
+    }
+
+    /// La minimap d'un plan, demandée au passage si elle n'est pas là.
+    pub fn minimap(&self, plan: &Plan) -> Option<&egui::TextureHandle> {
+        self.texture(&plan.minimap)
+    }
+
     /// Le texte d'un titre de joueur, par son uuid.
     pub fn titre(&self, uuid: &str) -> Option<&str> {
         let uuid = ki_protocol::uuid_valorant(uuid)?;
@@ -621,9 +647,21 @@ mod tests {
             {"displayName": "KAY/O", "minimapPortrait": "https://media.valorant-api.com/agents/601dbbe7/minimapportrait.png"},
             {"displayName": "Pirate", "minimapPortrait": "https://ailleurs.example/x.png"}
         ]});
+        let plan = |nom: &str, icone: &str| {
+            serde_json::json!({
+                "mapUrl": format!("/Game/Maps/{nom}/{nom}"), "displayName": nom, "listViewIcon": null,
+                "tacticalDescription": "A/B Sites", "displayIcon": icone,
+                "xMultiplier": 7e-05, "yMultiplier": -7e-05, "xScalarToAdd": 0.81, "yScalarToAdd": 0.57,
+                "callouts": [{"regionName": "Site", "superRegionName": "A", "location": {"x": 6153.5, "y": -6626.2}}]
+            })
+        };
         let cartes = serde_json::json!({"data": [
             {"mapUrl": "/Game/Maps/Plummet/Plummet", "displayName": "Summit", "listViewIcon": "https://media.valorant-api.com/maps/756d/listviewicon.png"},
-            {"mapUrl": "/Game/Maps/HURM/HURM_Bowl/HURM_Bowl", "displayName": "Kasbah", "listViewIcon": null}
+            {"mapUrl": "/Game/Maps/HURM/HURM_Bowl/HURM_Bowl", "displayName": "Kasbah", "listViewIcon": null,
+             "tacticalDescription": null, "displayIcon": "https://media.valorant-api.com/maps/kasbah/displayicon.png"},
+            plan("Lotus", "https://media.valorant-api.com/maps/lotus/displayicon.png"),
+            plan("Bind", "https://media.valorant-api.com/maps/bind/displayicon.png"),
+            plan("Pirate", "https://ailleurs.example/displayicon.png")
         ]});
         let files = serde_json::json!({"data": [
             {"queueId": "abilitydraftarena", "displayName": "Gauntlet: Glitched"},
@@ -645,6 +683,9 @@ mod tests {
         assert_eq!(l.agents.len(), 1);
         assert_eq!(l.cartes[0], ("Plummet".into(), "Summit".into(), "https://media.valorant-api.com/maps/756d/listviewicon.png".into()));
         assert_eq!(l.cartes[1].2, "");
+        let plans: Vec<&str> = l.plans.iter().map(|p| p.nom.as_str()).collect();
+        assert_eq!(plans, ["Bind", "Lotus"], "les cartes de compétition seules, par nom, et pas d'image d'ailleurs");
+        assert_eq!(l.plans[0].zones.len(), 1);
         assert_eq!(l.titres, vec![("48d870a2-4493-ebf8-7d6f-979be914dc43".to_string(), "Fortune".to_string())]);
         // Et le disque les relit telles quelles.
         let relue: Liste = serde_json::from_slice(&serde_json::to_vec(&l).unwrap()).unwrap();
@@ -690,6 +731,18 @@ mod tests {
         assert_eq!(index.nom_de_carte("HURM_Alley"), Some("District"));
         assert!(index.files.chercher("abilitydraftarena").is_some());
         assert!(!index.titres.is_empty());
+        let plans: Vec<&str> = index.plans.iter().map(|p| p.nom.as_str()).collect();
+        for carte in ["Ascent", "Bind", "Haven", "Lotus", "Summit"] {
+            assert!(plans.contains(&carte), "{carte} dans {plans:?}");
+        }
+        assert!(!plans.contains(&"Kasbah") && !plans.contains(&"The Range"), "{plans:?}");
+        for plan in &index.plans {
+            assert!(plan.zones.len() >= 10, "{} : {} zones", plan.nom, plan.zones.len());
+            assert!(plan.zones.iter().any(|(n, ..)| n == "Attacker Spawn"), "{}", plan.nom);
+        }
+        let ascent = index.plans.iter().find(|p| p.nom == "Ascent").unwrap();
+        let minimap = charger_image(&ascent.minimap, Some(&dossier)).expect("la minimap se télécharge");
+        assert!(minimap.size[0] >= 512 && minimap.size[0] == minimap.size[1], "{:?}", minimap.size);
         // Le 27 septembre 2026, c'est l'acte V de V26.
         assert_eq!(
             index.acte_en_cours(1_790_467_200_000),
