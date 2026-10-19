@@ -268,6 +268,13 @@ pub struct ConnectedUser {
     /// une session qui reprend en pleine partie ; pour qu'une fin de
     /// partie se mesure (voir `valorant::transition_de_jeu`).
     pub en_jeu_depuis: Option<Instant>,
+    /// Sur quel compte Riot il joue, vérifié contre ses comptes liés (voir
+    /// `Valorant::compte_joue`) ; relayé à part de `jeu`, qui ne porte plus
+    /// le numéro de compte envoyé par son client.
+    pub compte_joue: Option<ki_protocol::CompteJoue>,
+    /// Il veut l'historique de ses parties (`ClientMsg::ChoixJournal`) :
+    /// dit par son client à chaque connexion, faux tant qu'il n'a rien dit.
+    pub journal_oui: bool,
     /// Sanctions vocales posées par un modérateur, relues du compte à la
     /// connexion. Elles ne sont **pas** annoncées par le client et ne peuvent
     /// donc pas être désavouées par lui.
@@ -1275,6 +1282,7 @@ impl AppState {
             jeu: u.jeu.clone(),
             riot_id: self.valorant.riot_id(user_id),
             rang_valorant: self.valorant.rang(user_id),
+            compte_joue: u.compte_joue.clone(),
             force_muted: u.force_muted,
             force_deafened: u.force_deafened,
             admin: u.admin,
@@ -1363,6 +1371,7 @@ impl AppState {
                 jeu: u.jeu.clone(),
                 riot_id: self.valorant.riot_id(*id),
                 rang_valorant: self.valorant.rang(*id),
+                compte_joue: u.compte_joue.clone(),
                 force_muted: u.force_muted,
                 force_deafened: u.force_deafened,
                 admin: u.admin,
@@ -1394,6 +1403,7 @@ impl AppState {
                 jeu: None,
                 riot_id: self.valorant.riot_id(account.user_id),
                 rang_valorant: self.valorant.rang(account.user_id),
+                compte_joue: None,
                 // Les sanctions d'un compte hors ligne se lisent quand même :
                 // elles l'attendent au retour, et le modérateur doit pouvoir
                 // les lever sans attendre qu'il revienne.
@@ -1428,6 +1438,7 @@ impl AppState {
                 jeu: None,
                 riot_id: None,
                 rang_valorant: None,
+                compte_joue: None,
                 force_muted: false,
                 force_deafened: false,
                 admin: false,
@@ -1625,6 +1636,8 @@ mod tests {
             medailles: true,
             choix_medailles: true,
             cartes: true,
+            comptes_joues: true,
+            journal_parties: true,
             protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");

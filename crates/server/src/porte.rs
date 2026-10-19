@@ -918,6 +918,7 @@ impl Portes {
                 jeu: None,
                 riot_id: None,
                 rang_valorant: None,
+                compte_joue: None,
                 roles: Vec::new(),
                 online: true,
                 color: None,

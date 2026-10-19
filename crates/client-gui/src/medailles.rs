@@ -143,9 +143,12 @@ pub(crate) fn lire_brut(avec_catalogue: bool) -> anyhow::Result<Brut> {
 }
 
 /// Ce qu'une lecture rapporte : le compte ouvert dans le client Riot
-/// (pour le comparer au compte lié) et ses médailles.
+/// (pour le comparer au compte lié — au puuid quand le serveur nous l'a
+/// dit, au Riot ID sinon) et ses médailles. Le puuid reste sur la
+/// machine.
 pub struct Lecture {
     pub riot_id: String,
+    pub puuid: String,
     pub medailles: Medailles,
 }
 
@@ -167,7 +170,7 @@ fn lire() -> anyhow::Result<Lecture> {
         .unwrap_or(0);
     let acte = index.as_deref().and_then(|i| i.acte_en_cours(maintenant));
     let medailles = normaliser(&brut.joueur, &brut.puuid, acte);
-    Ok(Lecture { riot_id: brut.riot_id, medailles })
+    Ok(Lecture { riot_id: brut.riot_id, puuid: brut.puuid, medailles })
 }
 
 enum Etat {

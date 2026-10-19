@@ -253,7 +253,7 @@ Les décisions de drion sont à la fin.
   `KI_HENRIK_KEY=… KI_SONDE_RIOT='Pseudo#TAG' cargo test -p ki-server
   sonde_par_puuid -- --ignored --nocapture`.
 
-### V8.1 — Le compte joué (taille M)
+### V8.1 — Le compte joué (taille M) — fait le 2026-10-19
 
 **Le serveur donne au membre ses propres comptes**, et à lui seul :
 `ServerMsg::MesComptes { comptes: Vec<MonCompte> }`, envoyé par `send_to`
@@ -306,6 +306,40 @@ n'envoie rien : le champ reste `Inconnu`, et rien ne change pour lui.
 - Les autres voient l'étiquette.
 - Le compte principal n'est pas relu à la fin de la partie (on le
   vérifie aux motifs de `/diag-resume`).
+
+**Ce qui est fait, et ce qui diffère du texte ci-dessus :**
+- **Protocole.** `CompteLocal` (`lie`, `autre`, `inconnu`) et
+  `CompteJoue` (`principal`, `second`, `autre`, `inconnu`) sont
+  étiquetés par `type`, avec `#[serde(other)]` pour une forme future.
+  `JeuStatut::compte` ne part pas tant qu'il est inconnu : un statut
+  d'avant pèse le même poids sur le fil. `MonCompte`,
+  `ServerMsg::MesComptes`, `Welcome::comptes_joues`,
+  `Member::compte_joue`. Le test `le_compte_joue_traverse_les_versions`
+  couvre tout ça.
+- **Serveur.**
+  - `Valorant::mes_comptes` et `Valorant::compte_joue`.
+  - `MesComptes` part à la connexion, après une liaison, une déliaison et
+    chaque fiche relue (un renommage y passe).
+  - `GameStatus` classe le compte, le garde sur le connecté et l'efface
+    du statut relayé : le numéro ne quitte pas le serveur.
+  - `compte_a_relire` : pas de relance pour une partie jouée sur un autre
+    compte.
+- **Client.**
+  - Le Veilleur expose la session locale (`SessionLocale`), qui ne part
+    jamais au serveur ; `classer_compte` la compare aux comptes liés, au
+    puuid.
+  - La bannière « compte non lié » s'affiche au-dessus du chat. **Écart
+    avec le plan :** sans aucun compte lié, elle propose **« Lier ce
+    compte »** d'un clic, avec le Riot ID que le client Riot vient de
+    donner. Avec un compte déjà lié, elle se contente de le dire, en
+    attendant V8.2.
+  - « Ne plus me le dire » garde une empreinte FNV-1a du puuid, sur la
+    machine, et au plus 32 comptes.
+  - La liste des membres ajoute « · autre compte » à la ligne de partie ;
+    le badge de rang prend alors le palier de la présence, sans le « ≈ »
+    prévu pour l'instant.
+  - Les médailles se comparent au puuid du compte principal quand le
+    serveur l'a dit (ce qui était prévu en V8.0).
 
 ### V8.2 — Plusieurs comptes par membre (taille L)
 
@@ -364,7 +398,7 @@ n'envoie rien : le champ reste `Inconnu`, et rien ne change pour lui.
 requête par jour et par compte près. Les soirées sur un second compte
 coûtent **moins** qu'aujourd'hui.
 
-### V8.4 — Le journal des parties (taille S, à démarrer tôt)
+### V8.4 — Le journal des parties (taille S, à démarrer tôt) — écriture faite le 2026-10-19
 
 C'est la réponse à « intéressant pour les stats futures ». Chaque partie
 finie que la présence a vue ajoute une ligne à
@@ -392,6 +426,26 @@ finie que la présence a vue ajoute une ligne à
 - **On commence par l'écriture seule.** L'affichage viendra avec V9.4
   (Progression). Chaque semaine sans journal est une semaine de
   statistiques perdue : c'est pour ça qu'il faut le démarrer tôt.
+
+**Ce qui est fait :**
+- **Protocole.** `ClientMsg::ChoixJournal { oui }` et
+  `Welcome::journal_parties`.
+- **Serveur.**
+  - Le choix vit sur le connecté (`journal_oui`) : le client le redit à
+    chaque connexion, rien à garder entre deux.
+  - Non : `effacer_journal` supprime le fichier, au budget d'un message.
+  - À chaque fin de partie montrée par la présence, `noter_partie` écrit,
+    hors du fil réseau, une ligne `LignePartie` : début, durée, file,
+    carte, dernier score vu, party, compte (« principal », « second »,
+    « autre » ou « inconnu »).
+  - Rien pour un autre jeu, une durée inconnue ou moins d'une minute.
+  - La même partie revue après un hoquet de présence (même début à 5 s
+    près) remplace sa ligne. 400 jours et 5 000 lignes au plus
+    (`journal_avec`, pure et testée).
+- **Client.**
+  - La case « Garder l'historique de mes parties (durée, mode, carte) »
+    dans ⚙ → Jeu, décochée d'origine, avec ce qui l'empêche de servir.
+  - Une bannière la propose une fois, pendant une partie de VALORANT.
 
 ---
 

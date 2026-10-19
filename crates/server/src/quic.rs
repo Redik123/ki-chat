@@ -387,6 +387,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 streaming: None,
                 jeu: None,
                 en_jeu_depuis: None,
+                compte_joue: None,
+                journal_oui: false,
                 force_muted,
                 force_deafened,
                 roles: auth.roles.clone(),
@@ -461,9 +463,19 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         choix_medailles: true,
         // Et ses tables de cartes.
         cartes: true,
+        // Et ses comptes Riot : il les reçoit, il dit lequel est ouvert.
+        comptes_joues: true,
+        // Et le journal de ses parties, s'il le veut.
+        journal_parties: true,
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
+    // Ses comptes Riot, à lui seul : son client y reconnaîtra celui qu'il
+    // a ouvert. Rien de lié, rien à envoyer.
+    let mes_comptes = state.valorant.mes_comptes(user_id);
+    if !mes_comptes.is_empty() {
+        let _ = tx.send(ServerMsg::MesComptes { comptes: mes_comptes });
+    }
     tracing::info!("connexion : {username} (id {user_id}, protocole {protocole})");
     // La liste du serveur vient de changer, pour tout le monde — sauf si le
     // compte était déjà là, sur un autre appareil.
@@ -1669,6 +1681,7 @@ fn handle_msg(
                 riot_id: None,
             });
             if ok {
+                state.send_to(cible, &ServerMsg::MesComptes { comptes: state.valorant.mes_comptes(cible) });
                 state.broadcast_member(cible);
             }
         }
@@ -1712,6 +1725,24 @@ fn handle_msg(
                     tracing::debug!("VALORANT : médailles de {user_id} {}", if oui { "voulues" } else { "refusées" });
                 }
             });
+        }
+        ClientMsg::ChoixJournal { oui } => {
+            // Son choix pour l'historique de ses parties, que son client
+            // redit à chaque connexion. Non : ce qui était écrit s'efface,
+            // au budget d'un message, qu'un client modifié ne fasse pas
+            // effacer en rafale.
+            let permis = {
+                let mut users = state.users.lock().unwrap();
+                let Some(u) = users.get_mut(&user_id) else {
+                    return;
+                };
+                u.journal_oui = oui;
+                oui || u.chat_budget.take()
+            };
+            if !oui && permis {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || state.valorant.effacer_journal(user_id));
+            }
         }
         ClientMsg::AdminSetMusique { membres_ajoutent } => {
             if !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
@@ -2399,36 +2430,66 @@ fn handle_msg(
             // relayé à tout le monde seulement s'il change — la liste des
             // membres l'affiche sous le pseudo.
             let jeu = jeu.map(|j| j.nettoyer());
+            // Le compte Riot ouvert : le numéro de son client, vérifié
+            // contre ses comptes liés et gardé à part ; le statut relayé ne
+            // le porte plus.
+            let compte = jeu
+                .as_ref()
+                .filter(|j| j.est_valorant())
+                .and_then(|j| state.valorant.compte_joue(user_id, j.compte));
+            let jeu = jeu.map(|j| ki_protocol::JeuStatut { compte: ki_protocol::CompteLocal::Inconnu, ..j });
             // Ce que la transition dit au fil de jeu — une partie de
             // VALORANT qui finit (et depuis quand elle durait), ou qui
             // reprend : voir `valorant::transition_de_jeu`, qui sait
             // qu'une présence perdue n'est pas un menu ni une session
             // neuve une entrée en partie.
             let mut transition = crate::valorant::TransitionJeu::default();
+            let mut compte_avant = None;
+            let journal;
             let changed = {
                 let mut users = state.users.lock().unwrap();
                 let Some(u) = users.get_mut(&user_id) else {
                     return;
                 };
-                if u.jeu == jeu {
+                journal = u.journal_oui;
+                if u.jeu == jeu && u.compte_joue == compte {
                     false
                 } else {
-                    transition = crate::valorant::transition_de_jeu(
-                        u.jeu.take(),
-                        &jeu,
-                        u.en_jeu_depuis,
-                        Instant::now(),
-                    );
-                    u.en_jeu_depuis = transition.en_jeu_depuis;
-                    u.jeu = jeu;
+                    if u.jeu != jeu {
+                        transition = crate::valorant::transition_de_jeu(
+                            u.jeu.take(),
+                            &jeu,
+                            u.en_jeu_depuis,
+                            Instant::now(),
+                        );
+                        u.en_jeu_depuis = transition.en_jeu_depuis;
+                        u.jeu = jeu;
+                    }
+                    compte_avant = std::mem::replace(&mut u.compte_joue, compte);
                     true
                 }
             };
             if changed {
                 state.broadcast_member(user_id);
             }
+            if let Some((ancien, duree)) = transition.fin.clone() {
+                // Au journal de ses parties, s'il le veut — sur le disque,
+                // à côté du fil réseau.
+                if journal {
+                    let (state, compte) = (state.clone(), compte_avant.clone());
+                    tokio::task::spawn_blocking(move || {
+                        state.valorant.noter_partie(user_id, &ancien, duree, compte.as_ref());
+                    });
+                }
+            }
             if let Some((ancien, duree)) = transition.fin {
-                state.valorant.fin_de_partie(user_id, &ancien, duree);
+                // Une partie sur un compte qu'il n'a pas lié n'arrivera
+                // jamais dans sa fiche : rien à relire.
+                if crate::valorant::compte_a_relire(compte_avant.as_ref()) {
+                    state.valorant.fin_de_partie(user_id, &ancien, duree);
+                } else {
+                    tracing::debug!("VALORANT : fin de partie de {user_id} sur un autre compte, pas de relance");
+                }
             }
             if transition.reprise {
                 state.valorant.reprise_de_partie(user_id);

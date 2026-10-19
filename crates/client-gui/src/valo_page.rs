@@ -1008,7 +1008,9 @@ fn en_direct(
                 if lie && reponse.on_hover_text("ouvrir sa fiche").clicked() {
                     demandes.push(Demande::OuvrirFiche(m.user_id, m.username.clone()));
                 }
-                let palier = m.rang_valorant.unwrap_or(statut.rang);
+                // Sur un autre compte que celui de sa fiche, le palier est
+                // celui de la présence.
+                let palier = if crate::sur_un_autre_compte(m) { statut.rang } else { m.rang_valorant.unwrap_or(statut.rang) };
                 if let Some(icone) = rangs.texture(palier).filter(|_| palier >= 3) {
                     ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(16.0)))
                         .on_hover_text(nom_de_rang(palier));
@@ -3386,6 +3388,7 @@ mod tests {
                 jeu: None,
                 riot_id: None,
                 rang_valorant: None,
+                compte_joue: None,
                 roles: Vec::new(),
                 online: true,
                 color: None,
