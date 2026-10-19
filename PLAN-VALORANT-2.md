@@ -221,27 +221,37 @@ Les décisions de drion sont à la fin.
 
 ## V8 — Sur quel compte il joue
 
-### V8.0 — Le ménage, sans rien de visible (taille S)
+### V8.0 — Le ménage, sans rien de visible (taille S) — fait le 2026-10-18
 
-- **HenrikDev par puuid.**
-  - Fonctions concernées : `construire`, `lire_medailles`, `rattraper`.
-  - À chaque relecture, `data.account` de `v3/mmr` redonne `nom` et `tag` :
-    un compte renommé est suivi de lui-même. `comptes.json` et le roster
-    se mettent à jour.
-  - Une réponse dont `data.account.puuid` n'est pas celui du compte est
-    une erreur, jamais une fiche. C'est vrai aussi pour le MMR.
-- **Le changement de compte dans le client Riot.**
-  - Si le puuid gardé en mémoire n'a plus de présence VALORANT pendant
-    10 s alors que le lockfile n'a pas changé, on relit
-    `/chat/v1/session`.
-  - À reproduire d'abord en vrai : se déconnecter et se reconnecter sur un
-    autre compte sans fermer le client Riot.
-- **Les médailles comparent des puuid**, plus des Riot ID.
+- **HenrikDev par puuid** (`server/valorant.rs`).
+  - `construire`, `lire_medailles` et `rattraper` passent par
+    `/by-puuid/` (`CompteRiot::par_puuid`). Seule la liaison résout encore
+    un Riot ID, celui que le membre tape.
+  - Le Riot ID de la fiche est celui que `v3/mmr` donne au compte
+    (`data.account`, `riot_id_lu`, borné et sans caractère de contrôle).
+    S'il a changé pour le même puuid, `apres_lecture` met le lien à jour
+    (`Etat::renommer`) et écrit `comptes.json` ; le roster suit à la
+    diffusion de la fiche.
+  - Un rang qui parle d'un autre compte (`autre_compte`) est une erreur,
+    jamais une fiche ; un historique qui le fait est ignoré. Une réponse
+    muette sur son compte n'est pas suspecte.
+  - Le diagnostic range les chemins `/by-puuid/` sous le bon point d'API
+    (`PointApi::de` lit le segment d'après).
+- **Le changement de compte dans le client Riot** (`client-gui/valorant.rs`).
+  Si le puuid gardé n'a plus de présence VALORANT depuis 10 s
+  (`RELECTURE_SESSION`), la boucle relit `/chat/v1/session` et suit le
+  nouveau compte. À reproduire en vrai : se déconnecter et se reconnecter
+  sur un autre compte sans fermer le client Riot.
+- **Les médailles comparent des puuid** : repoussé à V8.1, qui donne au
+  client le puuid de ses comptes. D'ici là, le Riot ID comparé reste juste,
+  puisqu'il suit les renommages.
 - **Coût** : aucune requête de plus.
-- **Validation** : un test qui relit une fiche d'un compte renommé (nom
-  neuf repris, historique gardé) ; un autre où le puuid ne correspond pas
-  (erreur, fiche intacte) ; la sonde ignorée (`#[ignore]`) des appels par
-  puuid, sur le compte de drion.
+- **Validation** : `le_compte_se_reconnait_a_son_puuid`,
+  `un_compte_renomme_est_suivi`, `le_motif_se_compte` (chemins par puuid)
+  et `la_session_se_relit_apres_un_silence`. La sonde
+  `sonde_par_puuid`, ignorée d'office, interroge le vrai HenrikDev :
+  `KI_HENRIK_KEY=… KI_SONDE_RIOT='Pseudo#TAG' cargo test -p ki-server
+  sonde_par_puuid -- --ignored --nocapture`.
 
 ### V8.1 — Le compte joué (taille M)
 
@@ -387,34 +397,96 @@ finie que la présence a vue ajoute une ligne à
 
 ## V9 — Le nouveau tableau de bord
 
-### L'idée
+### L'idée — maquette validée par drion le 2026-10-18
 
-On ouvre VALORANT, et l'on sait tout de suite trois choses : **qui joue
-en ce moment, comment se passe la soirée, où j'en suis.** Ensuite, on
+On ouvre VALORANT, et l'on sait tout de suite trois choses : **comment se
+passe la soirée, qui joue en ce moment, où en est chacun.** Ensuite, on
 creuse. La page cesse d'être une fenêtre flottante de 860 px. **Elle prend
-la place du chat**, en gardant la liste des salons et celle des membres
-(Échap, ou un clic sur un salon, la referme). Un bouton **⤢ détacher**
-l'envoie dans sa propre fenêtre, pour un second écran (sur le modèle de
-`regard_detache`).
+la place du chat**, en gardant la colonne des salons, la liste des membres
+et la barre vocale (Échap, ou un clic sur un salon, la referme). Un bouton
+**⤢ détacher** l'envoie dans sa propre fenêtre, pour un second écran (sur
+le modèle de `regard_detache`).
+
+Trois pistes ont été dessinées (A « Cockpit », B « Vestiaire », C « Le fil
+de la soirée »). drion a gardé **B et C**, avec deux remarques qui font
+la règle de V9 :
+
+- **La page doit ressembler à ki-chat.** La première maquette prenait
+  d'autres polices et d'autres avatars. Celle qui est validée reprend ce
+  que la vitrine de ki-ui montre (photographiée sous Xvfb le 2026-10-18) :
+  - Ubuntu Light partout, la police par défaut d'egui ;
+  - des sections relevées, chacune avec son icône verte, un titre de
+    15 px et une aide de 11,5 px en gris discret ;
+  - des intitulés en petites capitales discrètes (10,5 px) ;
+  - des onglets soulignés de vert, des pastilles et des segments ;
+  - les avatars de ki-chat : un disque sombre teinté, l'initiale à la
+    couleur du pseudo, le liseré vert de qui parle.
+- **Rien de ce qu'on aime ne disparaît.** La carte de chaleur « Quand le
+  groupe joue » reste, avec sa phrase d'aujourd'hui (« les parties
+  commencées sur 30 jours, tous modes, à l'heure locale »). « Mes heures »
+  reste dans le profil. Les records, les duos, le classement, les médailles
+  du groupe, l'esport et la boutique restent aussi.
 
 ```
 ┌─ VALORANT ─────────────────────────────────────────────────────── ⤢  ✕ ┐
-│ Accueil · Classement · Matchs · Profil · Tactique · Esport · Boutique  │
+│ Accueil · Classement · Matchs · Profil · Carte tactique · Esport · …   │
 ├────────────────────────────────────────────────────────────────────────┤
-│ EN DIRECT  [Ascent ▓▓ 7-5 · compétitive · drion, Jerem]  [Lotus 2-1]   │
-│                                                                        │
-│ CE SOIR  4 V – 1 D · +61 RR à nous tous · MVP : Jerem (ACS 287)        │
-│                                                                        │
-│ ┌ MOI ────────────────┐ ┌ K/D ──┐ ┌ ACS ──┐ ┌ KAST ─┐ ┌ VICT. ─┐       │
-│ │ ◆ Platine 2 · 64 RR │ │ 1,21  │ │ 231   │ │ 74 %  │ │ 58 %   │       │
-│ │ ▓▓▓▓▓▓░░░ → Plat. 3 │ │ ▲0,08 │ │ ▼12   │ │ ▲3    │ │ ▲5     │       │
-│ │ MMR ≈ Plat. 3 (+)   │ │ ~~~~  │ │ ~~~~  │ │ ~~~~  │ │ ~~~~   │       │
-│ └─────────────────────┘ └───────┘ └───────┘ └───────┘ └────────┘       │
-│                                                                        │
-│ PODIUM DE LA SEMAINE   1. Jerem +142   2. drion +88   3. Max +40       │
-│ RECORDS · DUOS · QUAND LE GROUPE JOUE                                  │
+│ SAMEDI 18 OCTOBRE · LA SOIRÉE              ● en direct  Sunset  7 – 5  │
+│ 3 – 1   +47 RR à nous tous                   MVP de la soirée : drion  │
+├────────────────────────────────────────────────────────────────────────┤
+│ LE VESTIAIRE   #1 Jerem +142 · #2 drion +88 · #3 Pandora +40 · …       │
+├────────────────────────────────────────────────────────────────────────┤
+│ LE FIL DE LA SOIRÉE                       │ RECORDS (six tuiles)       │
+│ 23:40 en cours · Sunset 7-5               │                            │
+│ 23:31 Victoire 13-6 · Bind  ▮▮▯▮▮▮…       │ DUOS                       │
+│ 22:48 Jerem passe Diamant 1               │ drion + Jerem   14 V – 8 D │
+├────────────────────────────────────────────────────────────────────────┤
+│ QUAND LE GROUPE JOUE   [Le groupe] [Moi] [Moi et le groupe]            │
+│ lun ▪▪▪▪······▪···▪▪▪▪▪▪▪▪   le rendez-vous : dimanche, 1 h – 3 h      │
+├────────────────────────────────────────────────────────────────────────┤
+│ CLASSEMENT (trié par 7 jours)  ·  MÉDAILLES DU GROUPE (les douze)      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+**L'accueil, de haut en bas :**
+
+1. **L'affiche de la soirée** (B) : le score du groupe en grand
+   (« 3 – 1 »), les RR gagnés à tous, les parties et le temps de jeu ; à
+   droite, la partie en direct et le MVP de la soirée. Le bandeau de la
+   carte jouée en fond.
+2. **Le vestiaire** (B) : une carte par membre lié, rangée par RR gagnés
+   sur 7 jours. Chaque carte montre la place, le statut (en partie, en
+   file, au menu), l'icône de rang, le pseudo à sa couleur, le rang et les
+   RR, les RR de la semaine, la forme des cinq derniers matchs et l'agent
+   favori. La sienne est entourée de vert.
+3. **Le fil de la soirée** (C), à côté des **records** (six tuiles) et
+   des **duos** :
+   - une ligne par partie depuis 18 h, une carte par partie jouée
+     ensemble, et la partie en cours en tête ;
+   - pour chaque partie, les manches case par case, et chaque membre avec
+     son agent, son K/D/A, son ACS, ses médailles et ses RR ;
+   - entre les parties, les événements : « Jerem passe Diamant 1 », « la
+     soirée commence ».
+4. **Quand le groupe joue** : la carte de chaleur d'aujourd'hui.
+   - Nouveau : un choix « Le groupe / Moi / Moi et le groupe », et la case
+     de l'heure actuelle encadrée.
+   - Trois repères à côté : le grand rendez-vous, la semaine, maintenant.
+5. **Le classement**, trié par 7 jours (30 jours au choix), puis les
+   **médailles du groupe**, avec les douze médailles et non plus six.
+
+**Le profil** (V9.1) reprend toute la fiche d'aujourd'hui, dans le même
+style :
+
+- l'identité, avec le choix du compte ;
+- les vues en pastilles et les filtres en segments ;
+- « Mes chiffres » : huit tuiles, avec l'écart et la médiane du groupe ;
+- la courbe de RR, des segments verts et rouges, le pic de l'acte en
+  pointillé ;
+- la forme, et à côté **« Mes heures »** : sa carte de chaleur, le groupe
+  en contour ;
+- les agents avec leur maîtrise, et les cartes avec l'attaque et la
+  défense ;
+- les douze médailles, les derniers matchs, et les actes en barres.
 
 ### V9.0 — Les fondations (taille M) — à faire d'abord, et une seule fois
 
@@ -428,9 +500,11 @@ VALORANT :**
     valeurs aujourd'hui codées en dur dans `style.rs` et
     `composants.rs` ;
   - `texte::KPI = 28` et `texte::TITRE_PAGE = 22`.
-- **Une vraie police grasse** : une variante grasse de la police
-  d'interface, sous licence libre, environ 300 Ko dans l'exécutable. Ainsi
-  `.strong()` sera enfin gras.
+- **Une vraie police grasse** : **Ubuntu Medium et Ubuntu Bold** (licence
+  UFL, celle d'Ubuntu Light qu'egui embarque déjà), environ 300 Ko de
+  plus dans l'exécutable. Ainsi `.strong()` sera enfin gras, et les
+  chiffres de l'affiche et des tuiles auront leur poids. Le reste du texte
+  reste en Light.
 - **`ui::kpi`** : une tuile avec un libellé, une grande valeur, un écart
   coloré (▲ ▼) et la place pour une sparkline.
 - **`ui::Tableau`** : un tableau de données décrit par ses colonnes.
@@ -439,7 +513,13 @@ VALORANT :**
   - Il remplace les cinq `egui::Grid` faits à la main, et la ligne de
     match dessinée deux fois.
 - **Une grille de cartes qui passe à la ligne**, sur `Flex`, avec des
-  points de rupture rangés dans les jetons.
+  points de rupture rangés dans les jetons. Au centre de ki-chat, entre
+  les salons (248 px) et les membres (210 px), il reste environ 980 px :
+  c'est la largeur de référence, et les cinq cartes du vestiaire doivent
+  y tenir.
+- **`ui::section` à titre et aide**, comme dans la vitrine : icône verte,
+  titre de 15 px, aide de 11,5 px. C'est le cadre de chaque bloc de la
+  page, et il remplace les trois styles de titre d'aujourd'hui.
 
 **Dans `graphes.rs` :**
 
@@ -448,7 +528,9 @@ VALORANT :**
 - des valeurs sur l'axe des y ;
 - un anneau (le pourcentage de victoires) ;
 - des barres verticales (un acte par barre) ;
-- des valeurs qui glissent en 250 ms (`ctx.animate_value_with_time`).
+- des valeurs qui glissent en 250 ms (`ctx.animate_value_with_time`) ;
+- pour `heatmap_semaine` : une case encadrée (l'heure actuelle) et une
+  seconde série en contour (le groupe sous « Mes heures »).
 
 **Le code de la page :**
 
@@ -497,11 +579,14 @@ La fiche devient une page.
       sangs, clutchs ; chacune avec son écart par rapport aux dix matchs
       d'avant, et son repère médian du groupe ;
     - la courbe de RR, 220 px de haut, avec ses valeurs ;
-    - la forme et la série en cours (défaites comprises) ;
+    - la forme et la série en cours (défaites comprises), et à côté
+      **« Mes heures »**, avec le groupe en contour ;
     - les trois agents favoris en cartes (portrait, rôle, parties,
       victoires, K/D, niveau de maîtrise) ;
     - les cartes jouées, sur leur bandeau, avec le pourcentage de
-      victoires.
+      victoires ;
+    - les douze médailles, les derniers matchs, et les actes en barres
+      (le rang de fin d'acte), là où il n'y avait que des pastilles.
   - **Matchs** : la table (`ui::Tableau`), avec en colonnes la note, le
     MVP, la party et la durée. Une ligne dépliée montre les manches et le
     récit.
@@ -519,29 +604,31 @@ La fiche devient une page.
 
 ### V9.2 — L'accueil et la soirée (taille M)
 
-- **En direct, en cartes** :
-  - le bandeau de la carte en fond, le score en grand, le mode ;
-  - les avatars des membres de la même partie ;
-  - « cherche des joueurs » quand la party est ouverte.
-- **Ce soir.**
+L'accueil de la maquette, dans l'ordre décrit plus haut.
+
+- **L'affiche** et **le vestiaire** se calculent sur les fiches déjà
+  envoyées (`StatsValorant`) et sur la présence, sans message neuf.
+- **Le fil de la soirée.**
   - Nouveau message `ClientMsg::SoireeValorant { depuis }`, avec sa
     réponse `ServerMsg::Soiree { matchs }`.
   - `depuis` est le dernier 6 h du matin à l'heure du client : le serveur
     compte en UTC. Une partie à 1 h du matin reste donc dans la soirée de
     la veille.
   - La réponse contient tous les matchs du groupe depuis cette heure, un
-    match joué ensemble ne comptant qu'une fois.
+    match joué ensemble ne comptant qu'une fois, avec les manches.
   - On en tire les victoires et défaites du groupe, la somme des RR, le
     MVP de la soirée et le meilleur duo.
   - C'est un message à part, pour ne pas alourdir `StatsValorant`, qui
     plafonne déjà à cinq matchs par membre.
-- **Moi** : mon rang, ma jauge, ma journée, mes tuiles KPI.
-- **Podium de la semaine** (les RR gagnés en 7 jours), **records**,
-  **duos** et **heures du groupe**, mis en cartes.
+- **Les événements du fil** (un passage de palier, l'arrivée dans le
+  salon vocal) se déduisent des points de RR et de la présence. Le
+  serveur n'en garde rien de plus.
+- **Quand le groupe joue** : `activite` ne change pas. « Moi » vient des
+  matchs de sa propre fiche, comme « Mes heures ».
 
 ### V9.3 — Classement et Matchs (taille M)
 
-- **Le classement :**
+- **Le classement**, sur l'accueil et dans son onglet :
   - passe sur `ui::Tableau`, avec avatar, icône de rang, sparkline,
     forme et 7 jours ;
   - les colonnes se masquent par priorité selon la largeur ;
@@ -788,8 +875,8 @@ validation en soirée, comme d'habitude.
 8. **Un membre rendu muet** par un modérateur regarde la carte, mais ne
    dessine pas : le dessin est une parole.
 
-La maquette de la nouvelle page (trois propositions pour l'accueil, le
-profil et la carte tactique) attend l'avis de drion avant V9.0.
+La maquette est validée (2026-10-18) : la piste B + C, au style de
+ki-chat. Voir « L'idée » de V9.
 
 Sources consultées le 2026-10-18 :
 [politique développeur VALORANT de Riot](https://developer.riotgames.com/docs/valorant),

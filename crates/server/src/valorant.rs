@@ -5,7 +5,9 @@
 //! derniers mouvements de RR, derniers matchs résumés — que les autres
 //! consultent d'un clic droit. Tout passe par ici, et par ici seulement :
 //! la clé d'API ne quitte jamais le serveur, et le client ne parle jamais
-//! à HenrikDev.
+//! à HenrikDev. Le Riot ID ne sert qu'à la liaison : ensuite le compte se
+//! lit par son puuid (`/by-puuid/`), qui ne change jamais — un membre
+//! qui se renomme chez Riot est suivi, et son lien avec lui.
 //!
 //! **Budget.** La clé « Basic » autorise trente requêtes par minute, pour
 //! tout le groupe. Un fil unique sert les demandes l'une après l'autre et
@@ -172,6 +174,37 @@ impl CompteRiot {
     pub fn riot_id(&self) -> String {
         format!("{}#{}", self.nom, self.tag)
     }
+
+    /// La fin des chemins HenrikDev qui le désignent par son puuid
+    /// (`/valorant/v3/by-puuid/mmr/<ceci>`) : région, plateforme, puuid.
+    /// Le puuid ne change jamais, le Riot ID si : un compte renommé reste
+    /// lisible, et un Riot ID repris par quelqu'un d'autre ne lui ouvre
+    /// pas la fiche du membre.
+    fn par_puuid(&self) -> String {
+        format!("{}/{}/{}", self.region, self.plateforme, enc(&self.puuid))
+    }
+}
+
+/// La réponse parle-t-elle d'un autre compte que `puuid` ? Seulement si
+/// elle le dit (`data.account.puuid`) : une réponse muette sur son
+/// compte n'est pas suspecte, l'appel par puuid l'a déjà désigné.
+fn autre_compte(reponse: &Value, puuid: &str) -> bool {
+    reponse["data"]["account"]["puuid"]
+        .as_str()
+        .is_some_and(|p| !p.eq_ignore_ascii_case(puuid))
+}
+
+/// Le Riot ID que la réponse donne au compte (`data.account`), s'il est
+/// complet et plausible : c'est par lui qu'un renommage se voit, sans
+/// requête de plus. Un nom vide, trop long ou à caractère de contrôle
+/// n'est pas un Riot ID — on garde celui qu'on avait.
+fn riot_id_lu(reponse: &Value) -> Option<(String, String)> {
+    let plausible =
+        |s: &str, max: usize| !s.is_empty() && s.chars().count() <= max && !s.contains('#') && !s.chars().any(char::is_control);
+    let compte = &reponse["data"]["account"];
+    let nom = compte["name"].as_str().map(str::trim).filter(|n| plausible(n, 32))?;
+    let tag = compte["tag"].as_str().map(str::trim).filter(|t| plausible(t, 10))?;
+    Some((nom.to_string(), tag.to_string()))
 }
 
 /// Ce que le fil HenrikDev a à faire.
@@ -266,14 +299,16 @@ enum PointApi {
 
 impl PointApi {
     /// Le point d'API est le troisième segment du chemin
-    /// (`/valorant/v3/mmr/…`) — jamais une sous-chaîne : le Riot ID qui
-    /// suit vient d'un membre, et un membre peut s'appeler « mmr ».
+    /// (`/valorant/v3/mmr/…`), le quatrième derrière `by-puuid`
+    /// (`/valorant/v3/by-puuid/mmr/…`) — jamais une sous-chaîne : le Riot
+    /// ID qui suit vient d'un membre, et un membre peut s'appeler « mmr ».
     fn de(chemin: &str) -> Self {
-        let segment = chemin
-            .split('/')
-            .nth(3)
-            .and_then(|s| s.split('?').next())
-            .unwrap_or("");
+        let mut segments = chemin.split('/').skip(3);
+        let segment = match segments.next() {
+            Some("by-puuid") => segments.next(),
+            autre => autre,
+        };
+        let segment = segment.and_then(|s| s.split('?').next()).unwrap_or("");
         match segment {
             "mmr" => PointApi::Mmr,
             "mmr-history" => PointApi::History,
@@ -990,6 +1025,24 @@ impl Etat {
             .unwrap()
             .get(&user_id)
             .is_some_and(|t| maintenant.saturating_sub(*t) < MEDAILLES_REPIT.as_millis() as u64)
+    }
+
+    /// Le compte lié de `user_id` s'appelle désormais `riot_id` (« nom#tag »,
+    /// tel que HenrikDev le dit) : le lien suit, tant qu'il désigne le même
+    /// `puuid`. Rend vrai quand le compte a changé, à écrire.
+    fn renommer(&self, user_id: UserId, puuid: &str, riot_id: &str) -> bool {
+        let Some((nom, tag)) = riot_id.rsplit_once('#').filter(|(n, t)| !n.is_empty() && !t.is_empty()) else {
+            return false;
+        };
+        let mut comptes = self.comptes.lock().unwrap();
+        let Some(compte) = comptes.get_mut(&user_id) else { return false };
+        if !compte.puuid.eq_ignore_ascii_case(puuid) || (compte.nom == nom && compte.tag == tag) {
+            return false;
+        }
+        tracing::info!("VALORANT : {} s'appelle désormais {nom}#{tag}", compte.riot_id());
+        compte.nom = nom.to_string();
+        compte.tag = tag.to_string();
+        true
     }
 
     /// Les puuid des membres liés — pour reconnaître les coéquipiers du
@@ -1928,6 +1981,7 @@ fn apres_lecture(
 ) -> Option<Resultat> {
     match resultat {
         Ok((fiche, co)) => {
+            let riot_id_lu = fiche.riot_id.clone();
             etat.fil.derniere_tentative.lock().unwrap().remove(&user_id);
             // `nouveaux` se juge sur la fiche fraîche : avec soixante
             // matchs accumulés, d'anciens ids redeviendraient « nouveaux »
@@ -1951,6 +2005,11 @@ fn apres_lecture(
                 fiches.insert(user_id, fiche);
             }
             etat.sauver_fiches();
+            // Le compte a changé de Riot ID — même puuid, la lecture vient
+            // de le dire : le lien suit, sans requête ni geste du membre.
+            if etat.renommer(user_id, &compte.puuid, &riot_id_lu) {
+                etat.sauver_comptes();
+            }
             // Rien de neuf après une fin de partie : HenrikDev n'a pas
             // encore le match, on relira.
             if let Motif::Relance { essai, max } = motif {
@@ -2064,8 +2123,9 @@ fn lier(
     Ok(fiche)
 }
 
-/// Les médailles d'un compte chez HenrikDev (`/valorant/v1/accolades/…`,
-/// depuis sa v4.10) : les mêmes que le client Riot donne à son joueur, pour
+/// Les médailles d'un compte chez HenrikDev
+/// (`/valorant/v1/by-puuid/accolades/…`, depuis sa v4.10) : les mêmes que
+/// le client Riot donne à son joueur, pour
 /// tout compte lié — plus besoin que le membre ait VALORANT ouvert avec
 /// ki-chat. `acte` : l'acte en cours, au format court de HenrikDev
 /// ([`acte_courant`]). Une absence n'est pas une erreur : `None`, et la
@@ -2073,16 +2133,10 @@ fn lier(
 fn lire_medailles(api: &mut Api, etat: &Etat, user_id: UserId, compte: &CompteRiot, acte: &str) -> Option<Medailles> {
     let maintenant = maintenant_ms();
     let lues = api
-        .get(&format!(
-            "/valorant/v1/accolades/{}/{}/{}/{}",
-            compte.region,
-            compte.plateforme,
-            enc(&compte.nom),
-            enc(&compte.tag)
-        ))
+        .get(&format!("/valorant/v1/by-puuid/accolades/{}", compte.par_puuid()))
         .ok()
-        // Le même compte, au puuid : un Riot ID repris par un autre joueur
-        // ne lui donne pas les médailles de celui-ci.
+        // Le même compte, au puuid, et dit par la réponse : l'appel le
+        // désigne déjà, la réponse le confirme.
         .filter(|r| r["data"]["account"]["puuid"].as_str().is_some_and(|p| p.eq_ignore_ascii_case(&compte.puuid)))
         .and_then(|r| medailles_de(&r, acte, maintenant));
     let mut ratees = etat.medailles_ratees.lock().unwrap();
@@ -2303,27 +2357,23 @@ fn empiler_a_la_liaison(
 }
 
 /// Le rattrapage, à la liaison seulement : les archives de HenrikDev —
-/// soixante matchs (`v1/stored-matches`, sans plateforme dans le chemin)
-/// et cent points de RR (`v2/stored-mmr-history`) — rendues comme une
-/// fiche qui n'a que ça, à ranger sous les autres par
+/// soixante matchs (`v1/by-puuid/stored-matches`, sans plateforme dans le
+/// chemin) et cent points de RR (`v2/by-puuid/stored-mmr-history`) —
+/// rendues comme une fiche qui n'a que ça, à ranger sous les autres par
 /// [`empiler_a_la_liaison`]. Deux requêtes tolérées : une archive muette
 /// rend une fiche vide, qui ne change rien.
 fn rattraper(api: &mut Api, compte: &CompteRiot) -> FicheValorant {
     let matchs = api
         .get(&format!(
-            "/valorant/v1/stored-matches/{}/{}/{}?size={RATTRAPAGE_MATCHS}",
+            "/valorant/v1/by-puuid/stored-matches/{}/{}?size={RATTRAPAGE_MATCHS}",
             compte.region,
-            enc(&compte.nom),
-            enc(&compte.tag)
+            enc(&compte.puuid)
         ))
         .unwrap_or(Value::Null);
     let points = api
         .get(&format!(
-            "/valorant/v2/stored-mmr-history/{}/{}/{}/{}?size={RATTRAPAGE_POINTS}",
-            compte.region,
-            compte.plateforme,
-            enc(&compte.nom),
-            enc(&compte.tag)
+            "/valorant/v2/by-puuid/stored-mmr-history/{}?size={RATTRAPAGE_POINTS}",
+            compte.par_puuid()
         ))
         .unwrap_or(Value::Null);
     let archive = fiche_archivee(&matchs, &points);
@@ -2412,38 +2462,39 @@ fn fusionner(ancienne: FicheValorant, neuve: FicheValorant) -> FicheValorant {
     fiche
 }
 
-/// Trois requêtes : rang, historique de RR, derniers matchs. Rend aussi,
-/// par match, les autres membres liés (`lies` : membre → puuid) qui y
-/// jouaient — reconnus à leur puuid, sans rien garder des neuf autres.
-/// Sans le rang, pas de fiche ; sans l'historique ou les matchs, une
-/// fiche qui en manque (la fusion gardera les anciens) — sauf en 429, qui
-/// est une erreur franche : une fiche sans match sous 429 passerait pour
-/// « rien de neuf » et nourrirait la relance au moment où HenrikDev
-/// sature.
+/// Trois requêtes, par puuid : rang, historique de RR, derniers matchs.
+/// Rend aussi, par match, les autres membres liés (`lies` : membre →
+/// puuid) qui y jouaient — reconnus à leur puuid, sans rien garder des
+/// neuf autres. Sans le rang, pas de fiche ; sans l'historique ou les
+/// matchs, une fiche qui en manque (la fusion gardera les anciens) — sauf
+/// en 429, qui est une erreur franche : une fiche sans match sous 429
+/// passerait pour « rien de neuf » et nourrirait la relance au moment où
+/// HenrikDev sature. Un rang qui parle d'un autre compte est une erreur,
+/// un historique qui le fait est ignoré. Le Riot ID de la fiche est celui
+/// que le rang donne au compte : un renommage s'y lit (voir
+/// [`apres_lecture`]).
 fn construire(
     api: &mut Api,
     compte: &CompteRiot,
     niveau: Option<u32>,
     lies: &[(UserId, String)],
 ) -> Result<(FicheValorant, CoMembres), Erreur> {
-    let suffixe = format!(
-        "{}/{}/{}/{}",
-        compte.region,
-        compte.plateforme,
-        enc(&compte.nom),
-        enc(&compte.tag)
-    );
+    let suffixe = compte.par_puuid();
     let tolere = |r: Result<Value, Erreur>| match r {
         Ok(v) => Ok(v),
         Err(Erreur::Limite) => Err(Erreur::Limite),
         Err(_) => Ok(Value::Null),
     };
-    let mmr = api.get(&format!("/valorant/v3/mmr/{suffixe}"))?;
-    let historique = tolere(api.get(&format!("/valorant/v2/mmr-history/{suffixe}")))?;
-    let matchs = tolere(api.get(&format!("/valorant/v4/matches/{suffixe}?size={MATCHS_MAX}")))?;
+    let mmr = api.get(&format!("/valorant/v3/by-puuid/mmr/{suffixe}"))?;
+    if autre_compte(&mmr, &compte.puuid) {
+        return Err(Erreur::Autre("le rang reçu est celui d'un autre compte".into()));
+    }
+    let historique = tolere(api.get(&format!("/valorant/v2/by-puuid/mmr-history/{suffixe}")))?;
+    let historique = if autre_compte(&historique, &compte.puuid) { Value::Null } else { historique };
+    let matchs = tolere(api.get(&format!("/valorant/v4/by-puuid/matches/{suffixe}?size={MATCHS_MAX}")))?;
 
     let mut fiche = FicheValorant {
-        riot_id: compte.riot_id(),
+        riot_id: riot_id_lu(&mmr).map_or_else(|| compte.riot_id(), |(nom, tag)| format!("{nom}#{tag}")),
         region: compte.region.clone(),
         plateforme: compte.plateforme.clone(),
         niveau: niveau.unwrap_or(0),
@@ -4913,6 +4964,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(_dir);
     }
 
+    /// Par puuid, la fin du chemin désigne le compte quel que soit son
+    /// Riot ID ; une réponse qui dit un autre compte se voit, une réponse
+    /// muette ne l'est pas ; le Riot ID lu n'est gardé que plausible.
+    #[test]
+    fn le_compte_se_reconnait_a_son_puuid() {
+        let c = CompteRiot {
+            nom: "drion".into(),
+            tag: "EUW".into(),
+            puuid: "ab-12".into(),
+            region: "eu".into(),
+            plateforme: "pc".into(),
+            depuis: 0,
+        };
+        assert_eq!(c.par_puuid(), "eu/pc/ab-12");
+        let dit = |puuid: &str, nom: &str, tag: &str| {
+            serde_json::json!({"data": {"account": {"puuid": puuid, "name": nom, "tag": tag}}})
+        };
+        assert!(!autre_compte(&dit("AB-12", "x", "y"), "ab-12"), "la casse ne compte pas");
+        assert!(autre_compte(&dit("zz-99", "x", "y"), "ab-12"));
+        assert!(!autre_compte(&serde_json::json!({"data": {}}), "ab-12"), "muette : pas suspecte");
+        assert!(!autre_compte(&Value::Null, "ab-12"));
+        assert_eq!(riot_id_lu(&dit("ab-12", " Nouveau ", "TAG")), Some(("Nouveau".into(), "TAG".into())));
+        assert_eq!(riot_id_lu(&dit("ab-12", "", "TAG")), None);
+        assert_eq!(riot_id_lu(&dit("ab-12", "a#b", "TAG")), None);
+        assert_eq!(riot_id_lu(&dit("ab-12", "nom\u{7}", "TAG")), None);
+        assert_eq!(riot_id_lu(&dit("ab-12", &"x".repeat(33), "TAG")), None);
+        assert_eq!(riot_id_lu(&serde_json::json!({"data": {"account": {"name": "n"}}})), None);
+    }
+
+    /// La sonde des appels par puuid, contre le vrai HenrikDev — ignorée
+    /// d'office : `KI_HENRIK_KEY=… KI_SONDE_RIOT='Pseudo#TAG' cargo test -p
+    /// ki-server sonde_par_puuid -- --ignored --nocapture`. Résout le compte
+    /// par son nom (la liaison), relit tout par son puuid (rang,
+    /// historique, matchs, médailles, archives) et vérifie que chaque
+    /// réponse parle du même compte. Une quinzaine de requêtes.
+    #[test]
+    #[ignore]
+    fn sonde_par_puuid() {
+        let cle = std::env::var("KI_HENRIK_KEY").expect("KI_HENRIK_KEY");
+        let riot = std::env::var("KI_SONDE_RIOT").expect("KI_SONDE_RIOT='Pseudo#TAG'");
+        let (nom, tag) = riot.rsplit_once('#').expect("Pseudo#TAG");
+        let mut api = Api {
+            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build(),
+            cle,
+            seau: Seau::new(),
+            compteurs: Arc::default(),
+            motif: Motif::Liaison,
+        };
+        let lu = |r: Result<Value, Erreur>| r.unwrap_or_else(|e| panic!("{}", e.message()));
+        let d = lu(api.get(&format!("/valorant/v2/account/{}/{}", enc(nom), enc(tag))))["data"].clone();
+        let compte = CompteRiot {
+            nom: nom.into(),
+            tag: tag.into(),
+            puuid: d["puuid"].as_str().expect("puuid").into(),
+            region: d["region"].as_str().unwrap_or("eu").into(),
+            plateforme: "pc".into(),
+            depuis: 0,
+        };
+        println!("compte : {} → {} ({})", riot, compte.puuid, compte.par_puuid());
+        let (fiche, _) = construire(&mut api, &compte, None, &[]).unwrap_or_else(|e| panic!("{}", e.message()));
+        println!("fiche : {} · {} · {} matchs · {} points", fiche.riot_id, resume_rang(&fiche.rang), fiche.matchs.len(), fiche.historique_rr.len());
+        assert!(fiche.riot_id.eq_ignore_ascii_case(&riot), "le rang dit le même Riot ID");
+        assert!(!fiche.matchs.is_empty(), "les matchs retrouvent la ligne du compte par son puuid");
+        let accolades = lu(api.get(&format!("/valorant/v1/by-puuid/accolades/{}", compte.par_puuid())));
+        assert!(!autre_compte(&accolades, &compte.puuid), "médailles du même compte");
+        let archive = rattraper(&mut api, &compte);
+        println!("archives : {} matchs · {} points", archive.matchs.len(), archive.historique_rr.len());
+    }
+
+    /// Un renommage chez Riot : la lecture rend le nouveau Riot ID, le lien
+    /// suit et s'écrit ; un autre puuid, un Riot ID incomplet ou le même
+    /// ne changent rien.
+    #[test]
+    fn un_compte_renomme_est_suivi() {
+        let (v, _rx, dir) = service_a_l_arret("renomme");
+        compte(1, &v);
+        let c1 = v.etat.comptes.lock().unwrap()[&1].clone();
+        let (tx, _rx_travaux) = mpsc::channel();
+        let lue = FicheValorant { riot_id: "Nouveau#EUW".into(), ..FicheValorant::default() };
+        assert!(apres_lecture(&v.etat, 1, &c1, Motif::Periodique, Ok((lue, Vec::new())), &tx).is_some());
+        assert_eq!(v.riot_id(1).as_deref(), Some("Nouveau#EUW"));
+        let relu: BTreeMap<UserId, CompteRiot> = lire(&dir.join("comptes.json"));
+        assert_eq!(relu[&1].riot_id(), "Nouveau#EUW", "écrit sur le disque");
+        assert_eq!(relu[&1].puuid, c1.puuid, "le puuid ne bouge pas");
+        assert!(!v.etat.renommer(1, "puuid-autre", "Pirate#EUW"));
+        assert!(!v.etat.renommer(1, &c1.puuid, "sans-tag"));
+        assert!(!v.etat.renommer(1, &c1.puuid, "#EUW"));
+        assert!(!v.etat.renommer(1, &c1.puuid, "Nouveau#EUW"), "le même : rien à écrire");
+        assert!(!v.etat.renommer(2, &c1.puuid, "Inconnu#EUW"), "pas de compte, pas de lien");
+        assert_eq!(v.riot_id(1).as_deref(), Some("Nouveau#EUW"));
+        // Une lecture qui ne dit pas de Riot ID (fiche d'avant) ne touche à rien.
+        let muette = FicheValorant::default();
+        assert!(apres_lecture(&v.etat, 1, &c1, Motif::Periodique, Ok((muette, Vec::new())), &tx).is_some());
+        assert_eq!(v.riot_id(1).as_deref(), Some("Nouveau#EUW"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Chaque requête se compte par motif et par point d'API, les
     /// dernières restent en anneau, et le pic par minute se lit.
     #[test]
@@ -4934,6 +5082,15 @@ mod tests {
         assert_eq!(PointApi::de("/valorant/v3/mmr/eu/pc/esports/account"), PointApi::Mmr);
         assert_eq!(PointApi::de("/valorant/v9/inconnu/eu"), PointApi::Autre);
         assert_eq!(PointApi::de(""), PointApi::Autre);
+        // Par puuid, le point est le segment d'après `by-puuid`.
+        assert_eq!(PointApi::de("/valorant/v3/by-puuid/mmr/eu/pc/p"), PointApi::Mmr);
+        assert_eq!(PointApi::de("/valorant/v2/by-puuid/mmr-history/eu/pc/p"), PointApi::History);
+        assert_eq!(PointApi::de("/valorant/v4/by-puuid/matches/eu/pc/p?size=5"), PointApi::Matches);
+        assert_eq!(PointApi::de("/valorant/v1/by-puuid/accolades/eu/pc/p"), PointApi::Medailles);
+        assert_eq!(PointApi::de("/valorant/v1/by-puuid/stored-matches/eu/p?size=60"), PointApi::Stored);
+        assert_eq!(PointApi::de("/valorant/v2/by-puuid/stored-mmr-history/eu/pc/p?size=100"), PointApi::Stored);
+        assert_eq!(PointApi::de("/valorant/v2/by-puuid/account/p"), PointApi::Account);
+        assert_eq!(PointApi::de("/valorant/v3/by-puuid"), PointApi::Autre);
         let c = Compteurs::default();
         let ms = maintenant_ms();
         let req = |motif, point, code, ms| Requete { ms, motif, point, code, duree_ms: 10 };
