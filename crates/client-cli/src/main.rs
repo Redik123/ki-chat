@@ -172,7 +172,8 @@ async fn main() -> anyhow::Result<()> {
                 | ServerMsg::TactiqueEtat { .. }
                 | ServerMsg::Tactique { .. }
                 | ServerMsg::TactiqueRefus { .. }
-                | ServerMsg::Soiree { .. } => {}
+                | ServerMsg::Soiree { .. }
+                | ServerMsg::MonJournal { .. } => {}
                 ServerMsg::History { messages } => {
                     for m in messages {
                         println!("  [ancien] <{}> {}", m.username, m.text);

@@ -68,7 +68,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ki_protocol::{
     BilanMembre, CompteJoue, CompteLocal, CompteMedaille, DetailManches, FicheMembre, FicheValorant, JoueurSoiree,
-    MatchEsport, MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, MonCompte, PartieSoiree, PointRR,
+    JourDeJeu, MatchEsport, MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, MonCompte, PartieSoiree, PointRR,
     RangValorant, ServerMsg, StatsSaison, UserId, SOIREE_MAX_MS, SOIREE_PARTIES_MAX, STATS_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
@@ -750,6 +750,18 @@ impl Valorant {
         }
     }
 
+    /// Le journal des parties du membre, résumé jour par jour pour
+    /// lui-même ([`jours_de_jeu`]) : vide s'il n'en tient pas. Lit le
+    /// disque : à appeler hors du fil réseau.
+    pub fn mon_journal(&self, user_id: UserId, decalage_min: i32) -> Vec<JourDeJeu> {
+        let texte = {
+            let _verrou = self.etat.journal.lock().unwrap();
+            std::fs::read_to_string(self.chemin_du_journal(user_id)).unwrap_or_default()
+        };
+        let lignes: Vec<LignePartie> = texte.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        jours_de_jeu(&lignes, decalage_min)
+    }
+
     /// Efface le journal des parties du membre : il n'en veut plus.
     pub fn effacer_journal(&self, user_id: UserId) {
         let _verrou = self.etat.journal.lock().unwrap();
@@ -1268,6 +1280,48 @@ fn journal_avec(mut lignes: Vec<LignePartie>, ligne: LignePartie, maintenant: u6
     let trop = lignes.len().saturating_sub(JOURNAL_LIGNES);
     lignes.drain(..trop);
     lignes
+}
+
+/// Le journal résumé jour par jour, par file et par compte, du plus
+/// ancien au plus récent : les jours de son heure à lui, décalés de
+/// `decalage_min` minutes (ramené à un jour au plus). Pure : testée sans
+/// disque.
+fn jours_de_jeu(lignes: &[LignePartie], decalage_min: i32) -> Vec<JourDeJeu> {
+    let decalage_ms = i64::from(decalage_min.clamp(-24 * 60, 24 * 60)) * 60_000;
+    let mut jours: BTreeMap<(i32, &str, &str), (u16, u32)> = BTreeMap::new();
+    for l in lignes {
+        let local = i64::try_from(l.debut).unwrap_or(i64::MAX).saturating_add(decalage_ms);
+        let jour = i32::try_from(local.div_euclid(86_400_000)).unwrap_or(i32::MAX);
+        let e = jours.entry((jour, l.file.as_str(), l.compte.as_str())).or_default();
+        e.0 = e.0.saturating_add(1);
+        e.1 = e.1.saturating_add(l.duree_s);
+    }
+    jours
+        .into_iter()
+        .map(|((jour, file, compte), (parties, secondes))| JourDeJeu {
+            jour,
+            file: file.to_string(),
+            compte: compte.to_string(),
+            parties,
+            secondes,
+        })
+        .collect()
+}
+
+/// La réponse à `MonJournal`, sous le budget d'une ligne : quatre cents
+/// jours de modes et de comptes mêlés ne tiendraient pas toujours ; les
+/// jours les plus anciens partent d'abord.
+pub fn message_journal(mut jours: Vec<JourDeJeu>) -> ServerMsg {
+    loop {
+        let candidat = ServerMsg::MonJournal { jours };
+        let taille = serde_json::to_vec(&candidat).map_or(usize::MAX, |o| o.len());
+        let ServerMsg::MonJournal { jours: rendus } = candidat else { unreachable!() };
+        jours = rendus;
+        if taille <= STATS_MAX_BYTES || jours.is_empty() {
+            return ServerMsg::MonJournal { jours };
+        }
+        jours.drain(..(jours.len() / 4).max(1));
+    }
 }
 
 /// Une fin de partie vaut-elle une relecture de la fiche ? Pas quand elle
@@ -5365,10 +5419,60 @@ mod tests {
         let lue: LignePartie = serde_json::from_str(texte.lines().next().unwrap()).unwrap();
         assert_eq!((lue.duree_s, lue.compte.as_str(), lue.file.as_str()), (1800, "principal", "competitive"));
         assert!(!texte.contains("puuid") && !texte.contains('#'), "ni puuid ni Riot ID : {texte}");
+        // Relu pour lui seul, jour par jour ; rien pour un autre membre.
+        let jours = v.mon_journal(1, 0);
+        assert_eq!(jours.len(), 1);
+        assert_eq!((jours[0].parties, jours[0].secondes, jours[0].file.as_str()), (1, 1800, "competitive"));
+        assert!(v.mon_journal(2, 0).is_empty());
         v.effacer_journal(1);
         assert!(!chemin.exists());
+        assert!(v.mon_journal(1, 0).is_empty(), "effacé, plus rien à relire");
         v.effacer_journal(1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Le journal jour par jour : coupé à l'heure du membre, une entrée par
+    /// file et par compte, les durées additionnées ; et la réponse tient
+    /// dans une ligne, les jours les plus anciens partant d'abord.
+    #[test]
+    fn le_journal_se_resume_jour_par_jour() {
+        let heure = 3_600_000u64;
+        let jour = 24 * heure;
+        let l = |debut: u64, file: &str, compte: &str| LignePartie {
+            debut,
+            duree_s: 1_500,
+            file: file.into(),
+            carte: String::new(),
+            score: [13, 7],
+            party: 1,
+            compte: compte.into(),
+        };
+        // Le jour 100 à 23 h UTC, puis le 101 à 2 h et à 3 h UTC.
+        let lignes = vec![
+            l(100 * jour + 23 * heure, "competitive", "principal"),
+            l(101 * jour + 2 * heure, "competitive", "principal"),
+            l(101 * jour + 3 * heure, "swiftplay", "autre"),
+        ];
+        let resume = |decalage| jours_de_jeu(&lignes, decalage).into_iter().map(|j| (j.jour, j.file, j.parties, j.secondes)).collect::<Vec<_>>();
+        assert_eq!(
+            resume(0),
+            [(100, "competitive".to_string(), 1, 1_500), (101, "competitive".to_string(), 1, 1_500), (101, "swiftplay".to_string(), 1, 1_500)]
+        );
+        // À Paris l'été, coupé à 6 h : tout est la soirée du jour 100.
+        assert_eq!(
+            resume(120 - 360),
+            [(100, "competitive".to_string(), 2, 3_000), (100, "swiftplay".to_string(), 1, 1_500)]
+        );
+        assert_eq!(resume(i32::MAX), resume(24 * 60), "un décalage fou est ramené à un jour");
+
+        let beaucoup: Vec<JourDeJeu> = (0..20_000)
+            .map(|i| JourDeJeu { jour: i, file: "skirmishascension2v2".into(), compte: "inconnu".into(), parties: 3, secondes: 4_000 })
+            .collect();
+        let ServerMsg::MonJournal { jours } = message_journal(beaucoup) else { panic!() };
+        assert!(serde_json::to_vec(&ServerMsg::MonJournal { jours: jours.clone() }).unwrap().len() <= STATS_MAX_BYTES);
+        assert_eq!(jours.last().map(|j| j.jour), Some(19_999), "le plus récent reste");
+        let ServerMsg::MonJournal { jours } = message_journal(Vec::new()) else { panic!() };
+        assert!(jours.is_empty());
     }
 
     /// Le numéro envoyé par le client se vérifie contre ses comptes liés :

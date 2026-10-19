@@ -22,15 +22,19 @@ pub enum VueProfil {
     Agents,
     Cartes,
     Medailles,
+    Progression,
+    Comparer,
 }
 
 impl VueProfil {
-    const TOUTES: [(VueProfil, &'static str); 5] = [
+    pub(super) const TOUTES: [(VueProfil, &'static str); 7] = [
         (VueProfil::Ensemble, "Vue d'ensemble"),
         (VueProfil::Matchs, "Matchs"),
         (VueProfil::Agents, "Agents"),
         (VueProfil::Cartes, "Cartes"),
         (VueProfil::Medailles, "Médailles"),
+        (VueProfil::Progression, "Progression"),
+        (VueProfil::Comparer, "Comparer"),
     ];
 }
 
@@ -51,8 +55,10 @@ const PORTRAIT_AGENT: f32 = 40.0;
 const BANDEAU_CARTE: f32 = 56.0;
 
 impl PageValo {
-    /// Le profil d'un membre, sur toute la place qu'on lui donne. Rend
-    /// `false` quand on le referme : le bouton retour, ou Échap.
+    /// Le profil d'un membre, sur toute la place qu'on lui donne, seul :
+    /// le banc d'essai le photographie ainsi. Rend `false` quand on le
+    /// referme : le bouton retour, ou Échap. Ce qu'il demande se perd —
+    /// la page au centre, elle, le rend ([`Self::profil_contenu`]).
     pub fn profil(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>) -> bool {
         let mut ouvert = true;
         ui.horizontal(|ui| {
@@ -73,13 +79,13 @@ impl PageValo {
             ouvert = false;
         }
         ui.add_space(espace::M);
-        self.profil_contenu(ui, ouverte, cx);
+        self.profil_contenu(ui, ouverte, cx, &mut Vec::new());
         ouvert
     }
 
     /// Le profil sans sa barre : dans l'onglet Profil de la page au
     /// centre, comme seul au centre.
-    pub(super) fn profil_contenu(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>) {
+    pub(super) fn profil_contenu(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>, demandes: &mut Vec<Demande>) {
         match (ouverte.recue, &ouverte.fiche) {
             (false, _) => {
                 ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
@@ -87,11 +93,19 @@ impl PageValo {
             (true, None) => {
                 ui.label(RichText::new("pas de compte Riot lié — ou pas encore de fiche.").color(TEXT_DIM));
             }
-            (true, Some(fiche)) => self.profil_corps(ui, &ouverte.username, fiche, cx),
+            (true, Some(fiche)) => self.profil_corps(ui, ouverte.user_id, &ouverte.username, fiche, cx, demandes),
         }
     }
 
-    fn profil_corps(&mut self, ui: &mut Ui, username: &str, fiche: &FicheValorant, cx: &Contexte<'_>) {
+    fn profil_corps(
+        &mut self,
+        ui: &mut Ui,
+        user_id: UserId,
+        username: &str,
+        fiche: &FicheValorant,
+        cx: &Contexte<'_>,
+        demandes: &mut Vec<Demande>,
+    ) {
         let vue = Vue::new(username, fiche, self.fiche_periode, self.fiche_classe, cx, maintenant_ms());
         egui::ScrollArea::vertical().id_salt("profil_valo").auto_shrink([false, false]).show(ui, |ui| {
             en_tete(ui, &vue);
@@ -136,6 +150,8 @@ impl PageValo {
                     cartes(ui, &vue, None);
                 }
                 VueProfil::Medailles => medailles(ui, &vue),
+                VueProfil::Progression => self.progression(ui, &vue, user_id, cx, demandes),
+                VueProfil::Comparer => self.comparer(ui, &vue, user_id, cx, demandes),
             }
         });
     }

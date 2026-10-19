@@ -1188,15 +1188,80 @@ pub fn barres_verticales(ui: &mut Ui, id: egui::Id, barres: &[BarreV], hauteur: 
     survol
 }
 
+/// Une barre faite de parts empilées, de bas en haut : une semaine, un
+/// mode par couleur.
+pub struct BarreEmpilee {
+    pub parts: Vec<(f32, Color32)>,
+    pub etiquette: String,
+    pub info: String,
+}
+
+impl BarreEmpilee {
+    fn total(&self) -> f32 {
+        self.parts.iter().map(|(v, _)| if v.is_finite() { v.max(0.0) } else { 0.0 }).sum()
+    }
+}
+
+/// Des barres empilées côte à côte sur `hauteur`, de zéro à la plus
+/// haute, leur étiquette dessous — comme [`barres_verticales`], une
+/// couleur par part. Rend la barre survolée.
+pub fn barres_empilees(ui: &mut Ui, barres: &[BarreEmpilee], hauteur: f32) -> Option<usize> {
+    let largeur = ui.available_width();
+    let (rect, reponse) = ui.allocate_exact_size(Vec2::new(largeur, hauteur), Sense::hover());
+    if barres.is_empty() || !ui.is_rect_visible(rect) {
+        return None;
+    }
+    let n = barres.len() as f32;
+    let large = ((largeur - ECART_BARRES_V * (n - 1.0)) / n).clamp(4.0, BARRE_V_MAX);
+    let haut = barres.iter().map(BarreEmpilee::total).fold(0.0, f32::max).max(f32::EPSILON);
+    let zone = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() - HAUTEUR_DATES));
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.line_segment([zone.left_bottom(), Pos2::new(zone.left() + n * (large + ECART_BARRES_V), zone.bottom())], Stroke::new(1.0_f32, BORDER_SOFT));
+    let survol = reponse.hover_pos().and_then(|souris| case_sous(souris.x - rect.left(), large, ECART_BARRES_V, barres.len()));
+    let plus_large = barres
+        .iter()
+        .map(|b| painter.layout_no_wrap(b.etiquette.clone(), FontId::proportional(LEGENDE), TEXT_FAINT).size().x)
+        .fold(0.0, f32::max);
+    let pas = ((plus_large + 4.0) / (large + ECART_BARRES_V)).ceil().max(1.0) as usize;
+    let dernier = barres.len() - 1;
+    for (i, barre) in barres.iter().enumerate() {
+        let x = rect.left() + i as f32 * (large + ECART_BARRES_V);
+        let mut bas = zone.bottom();
+        let visibles: Vec<&(f32, Color32)> = barre.parts.iter().filter(|(v, _)| v.is_finite() && *v > 0.0).collect();
+        for (k, (valeur, couleur)) in visibles.iter().enumerate() {
+            let h = zone.height() * (valeur / haut).clamp(0.0, 1.0);
+            let part = Rect::from_min_max(Pos2::new(x, bas - h), Pos2::new(x + large, bas));
+            // Seul le haut de la pile est arrondi.
+            let coins = if k + 1 == visibles.len() { CornerRadius { nw: rayon::S, ne: rayon::S, sw: 0, se: 0 } } else { CornerRadius::ZERO };
+            let teinte = if survol == Some(i) { *couleur } else { theme::alpha(*couleur, 200) };
+            painter.rect_filled(part, coins, teinte);
+            bas -= h;
+        }
+        let montree = survol.map_or((dernier - i).is_multiple_of(pas), |s| s == i);
+        if montree {
+            painter.text(
+                Pos2::new(x + large / 2.0, zone.bottom() + 2.0),
+                Align2::CENTER_TOP,
+                &barre.etiquette,
+                FontId::proportional(LEGENDE),
+                if survol == Some(i) { TEXT_DIM } else { TEXT_FAINT },
+            );
+        }
+    }
+    if let Some(i) = survol {
+        if !barres[i].info.is_empty() {
+            reponse.on_hover_text(&barres[i].info);
+        }
+    }
+    survol
+}
+
 // ---------------------------------------------------------------------
 // Plusieurs courbes
 // ---------------------------------------------------------------------
 
 /// Une série d'une courbe à plusieurs : son nom pour la légende, sa
 /// couleur, ses points.
-// Ses premières pages : les comptes d'un membre (V8.2) et la comparaison
-// de deux membres (V9.4) ; d'ici là, les tests la dessinent.
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct Serie<'a> {
     pub nom: &'a str,
     pub couleur: Color32,
@@ -1204,17 +1269,13 @@ pub struct Serie<'a> {
 }
 
 /// La gouttière des valeurs, à gauche, et la ligne de la légende, en haut.
-#[cfg_attr(not(test), allow(dead_code))]
 const GOUTTIERE_Y: f32 = 40.0;
-#[cfg_attr(not(test), allow(dead_code))]
 const HAUTEUR_LEGENDE: f32 = 16.0;
 /// Le survol prend le point le plus proche, s'il est à moins de ça.
-#[cfg_attr(not(test), allow(dead_code))]
 const SURVOL_PX: f32 = 24.0;
 
 /// Des valeurs rondes pour graduer `[lo, hi]` : environ `cible` intervalles,
 /// d'un pas de 1, 2, 2,5 ou 5 fois une puissance de dix.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn graduations_y(lo: f32, hi: f32, cible: usize) -> Vec<f32> {
     if !(lo.is_finite() && hi.is_finite() && hi > lo) {
         return Vec::new();
@@ -1231,7 +1292,6 @@ pub(crate) fn graduations_y(lo: f32, hi: f32, cible: usize) -> Vec<f32> {
 /// rondes à gauche (`axe` les écrit), les dates dessous. Rend le point
 /// survolé, (série, indice dans sa tranche), et montre `info(série,
 /// indice)`. À moins de deux points en tout, rien n'est alloué.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn courbes(
     ui: &mut Ui,
     id: egui::Id,
@@ -1630,5 +1690,38 @@ mod tests {
         }
         assert_eq!(rien, None);
         assert_eq!(survol, Some((1, 0)));
+    }
+
+    /// Les parts s'empilent sous la plus haute pile ; une part vide, nulle
+    /// ou non finie ne dessine rien ; le survol rend sa barre.
+    #[test]
+    fn les_barres_empilees_se_dessinent() {
+        let ctx = egui::Context::default();
+        let barre = |parts: Vec<(f32, Color32)>, etiquette: &str| BarreEmpilee { parts, etiquette: etiquette.into(), info: "i".into() };
+        let barres = vec![
+            barre(vec![(2.0, SPEAK), (1.0, WARN)], "1/9"),
+            barre(vec![(f32::NAN, SPEAK), (0.0, WARN)], "8/9"),
+            barre(vec![(4.0, SPEAK)], "15/9"),
+        ];
+        assert_eq!(barres[0].total(), 3.0);
+        assert_eq!(barres[1].total(), 0.0, "une part non finie ne compte pas");
+        let mut survol = None;
+        let mut vide = Some(9);
+        for souris in [None, Some(Pos2::new(60.0, 40.0))] {
+            let mut entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 300.0))),
+                ..Default::default()
+            };
+            if let Some(p) = souris {
+                entree.events.push(egui::Event::PointerMoved(p));
+            }
+            ctx.run_ui(entree, |ui| {
+                survol = barres_empilees(ui, &barres, 120.0);
+                vide = barres_empilees(ui, &[], 120.0);
+            })
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(vide, None);
+        assert_eq!(survol, Some(1), "la deuxième barre, sous la souris");
     }
 }

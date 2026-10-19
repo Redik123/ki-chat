@@ -8,6 +8,7 @@ use ki_ui::jetons::police;
 use ki_ui::tableau::{Colonne, Tableau};
 
 use super::*;
+use crate::icons::Icon;
 
 /// Ce que montre une colonne du classement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,16 +27,18 @@ enum Col {
     Kast,
     Tete,
     Matchs,
+    /// La case « comparer ».
+    Comparer,
 }
 
 /// Les colonnes, dans l'ordre : ce qu'elles montrent, leur titre, leur
 /// largeur minimale, et quand elles se masquent — plus haut, plus tôt ;
 /// 0, jamais. À 980 px partent la tête, le KAST et l'ADR ; à 720 px, il
 /// reste le rang, la tendance, les 7 jours, la forme et le K/D.
-const COLONNES: [(Col, &str, f32, u8); 14] = [
+const COLONNES: [(Col, &str, f32, u8); 15] = [
     (Col::Place, "#", 22.0, 0),
-    (Col::Membre, "Membre", 140.0, 0),
-    (Col::Rang, "Rang", 140.0, 0),
+    (Col::Membre, "Membre", 130.0, 0),
+    (Col::Rang, "Rang", 132.0, 0),
     (Col::Tendance, "Tendance", 68.0, 4),
     (Col::Sept, "7 j", 48.0, 0),
     (Col::Trente, "30 j", 48.0, 7),
@@ -47,6 +50,7 @@ const COLONNES: [(Col, &str, f32, u8); 14] = [
     (Col::Kast, "KAST", 44.0, 11),
     (Col::Tete, "Tête", 44.0, 12),
     (Col::Matchs, "Matchs", 48.0, 8),
+    (Col::Comparer, "", 22.0, 0),
 ];
 
 /// La colonne des 7 jours : le tri tant qu'on n'a cliqué sur rien.
@@ -77,7 +81,7 @@ impl Col {
             Col::Kast => b.kast_pct().map(f64::from),
             Col::Tete => b.tete_pct().map(f64::from),
             Col::Matchs => Some(f64::from(b.matchs)),
-            Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan => return None,
+            Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan | Col::Comparer => return None,
         })
     }
 
@@ -99,7 +103,7 @@ impl Col {
     }
 
     fn cle_possible(self) -> bool {
-        !matches!(self, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan)
+        !matches!(self, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan | Col::Comparer)
     }
 }
 
@@ -115,9 +119,10 @@ impl PageValo {
     /// Le classement : une ligne par membre lié, triée par les RR des 7
     /// jours tant qu'on n'a pas cliqué un en-tête — le même tri sur
     /// l'accueil et dans l'onglet. Ceux qui n'ont pas joué sur la période
-    /// passent en bas, en pâle. Un clic sur une ligne ouvre la fiche.
+    /// passent en bas, en pâle. Un clic sur une ligne ouvre la fiche ;
+    /// deux lignes cochées se comparent.
     pub(super) fn classement_tableau(
-        &self,
+        &mut self,
         ui: &mut Ui,
         lignes: &[Ligne],
         noms: &Annuaire,
@@ -129,6 +134,27 @@ impl PageValo {
         let (sept, trente) = (maintenant.saturating_sub(7 * JOUR_MS), maintenant.saturating_sub(30 * JOUR_MS));
         let tableau = tableau();
         let ordre = ordonner(lignes, tableau.tri(ui), periode);
+
+        // Les deux cochés : de quoi les comparer.
+        self.a_comparer.retain(|id| lignes.iter().any(|l| l.f.user_id == *id));
+        let nom = |id: UserId| lignes.iter().find(|l| l.f.user_id == id).map_or_else(String::new, |l| l.f.username.clone());
+        match *self.a_comparer.as_slice() {
+            [a, b] => {
+                let (na, nb) = (nom(a), nom(b));
+                if ui::button(ui, Icon::Target, &format!("Comparer {na} et {nb}")).clicked() {
+                    demandes.push(Demande::OuvrirFiche(a, na));
+                    demandes.push(Demande::Comparer(b, nb));
+                    self.a_comparer.clear();
+                }
+                ui.add_space(espace::S);
+            }
+            [_] => {
+                ui::hint(ui, "Coche un second membre pour les comparer.");
+                ui.add_space(espace::S);
+            }
+            _ => {}
+        }
+        let a_comparer = &mut self.a_comparer;
 
         let clic = tableau.show(ui, ordre.len(), |ui, i, colonne| {
             let l = ordre[i];
@@ -226,11 +252,29 @@ impl PageValo {
                     let matchs = if b.matchs > 0 { format!("{}", b.matchs) } else { TIRET.to_string() };
                     cellule(ui, matchs, if pale { TEXT_FAINT } else { TEXT_DIM });
                 }
+                Col::Comparer => {
+                    let mut coche = a_comparer.contains(&f.user_id);
+                    if ui.add(egui::Checkbox::without_text(&mut coche)).on_hover_text("le comparer à un autre membre").changed() {
+                        cocher(a_comparer, f.user_id, coche);
+                    }
+                }
             }
         });
         if let Some(i) = clic {
             let f = ordre[i].f;
             demandes.push(Demande::OuvrirFiche(f.user_id, f.username.clone()));
+        }
+    }
+}
+
+/// Coche ou décoche un membre à comparer : deux au plus, le plus ancien
+/// coché part quand on en coche un troisième.
+fn cocher(liste: &mut Vec<UserId>, id: UserId, oui: bool) {
+    liste.retain(|x| *x != id);
+    if oui {
+        liste.push(id);
+        if liste.len() > 2 {
+            liste.remove(0);
         }
     }
 }
@@ -293,11 +337,11 @@ mod tests {
         let etroit = montrees(624.0);
         assert_eq!(
             etroit,
-            [Col::Place, Col::Membre, Col::Rang, Col::Tendance, Col::Sept, Col::Forme, Col::Kd],
+            [Col::Place, Col::Membre, Col::Rang, Col::Tendance, Col::Sept, Col::Forme, Col::Kd, Col::Comparer],
             "à 720 px"
         );
         assert_eq!(montrees(1_400.0).len(), COLONNES.len(), "tout tient sur un grand écran");
-        assert_eq!(montrees(200.0), [Col::Place, Col::Membre, Col::Rang, Col::Sept], "ce qui ne part jamais");
+        assert_eq!(montrees(200.0), [Col::Place, Col::Membre, Col::Rang, Col::Sept, Col::Comparer], "ce qui ne part jamais");
     }
 
     /// Chaque colonne qui trie, dans les deux sens : ceux qui ont joué
@@ -338,8 +382,22 @@ mod tests {
     fn seules_les_colonnes_de_chiffres_trient() {
         assert_eq!(COLONNES[COL_SEPT].0, Col::Sept);
         for (col, ..) in COLONNES {
-            let attendu = !matches!(col, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan);
+            let attendu = !matches!(col, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan | Col::Comparer);
             assert_eq!(col.cle_possible(), attendu, "{col:?}");
         }
+    }
+
+    /// Deux membres cochés au plus : un troisième fait partir le premier.
+    #[test]
+    fn on_coche_deux_membres_au_plus() {
+        let mut liste = Vec::new();
+        cocher(&mut liste, 1, true);
+        cocher(&mut liste, 2, true);
+        cocher(&mut liste, 2, true);
+        assert_eq!(liste, [1, 2]);
+        cocher(&mut liste, 3, true);
+        assert_eq!(liste, [2, 3]);
+        cocher(&mut liste, 2, false);
+        assert_eq!(liste, [3]);
     }
 }

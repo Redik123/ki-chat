@@ -185,7 +185,7 @@ impl PageValo {
             ui,
             Icon::Crown,
             "Classement",
-            Some("trié par les RR des 7 jours · un clic sur un en-tête change le tri, sur une ligne ouvre la fiche"),
+            Some("trié par les RR des 7 jours · un clic sur un en-tête change le tri, sur une ligne ouvre la fiche · coche deux lignes pour les comparer"),
             |ui| {
                 self.choix_de_periode(ui);
                 ui.add_space(espace::S);
