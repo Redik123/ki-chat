@@ -700,8 +700,9 @@ La fiche devient une page.
   attaque en première mi-temps) est à vérifier sur deux matchs réels.
 
 **Ce qui est fait (2026-10-19), première version :**
-- **Où.** ⚙ → Bêta → « Profil VALORANT » : la fiche d'un membre s'ouvre
-  à la place du chat, et non plus dans une fenêtre. Les salons, les
+- **Où.** ⚙ → Bêta → « Profil VALORANT » (« Page VALORANT » depuis
+  V9.2) : la fiche d'un membre s'ouvre à la place du chat, et non plus
+  dans une fenêtre. Les salons, les
   membres et la barre vocale restent autour. « Retour au chat » ou Échap
   la referme. Coupé, rien ne change.
 - **Le code.** `valo_page/profil.rs`, un module enfant de `valo_page` :
@@ -741,7 +742,7 @@ La fiche devient une page.
   - le choix du compte, qui vient avec V8.2 ;
   - les vues Progression et Comparer, en V9.4.
 
-### V9.2 — L'accueil et la soirée (taille M)
+### V9.2 — L'accueil et la soirée (taille M) — première version le 2026-10-19
 
 L'accueil de la maquette, dans l'ordre décrit plus haut.
 
@@ -764,6 +765,59 @@ L'accueil de la maquette, dans l'ordre décrit plus haut.
   serveur n'en garde rien de plus.
 - **Quand le groupe joue** : `activite` ne change pas. « Moi » vient des
   matchs de sa propre fiche, comme « Mes heures ».
+
+**Ce qui est fait (2026-10-19), et ce qui diffère :**
+- **Où.** L'interrupteur de V9.1 devient ⚙ → Bêta → « Page VALORANT »
+  (clé `valo_au_centre`, il faut le rallumer une fois). Toute la page
+  prend la place du chat, et pas seulement le profil :
+  - les onglets Accueil · Classement · Matchs · Profil · Carte tactique ·
+    Esport · Boutique ;
+  - « Carte tactique » ouvre sa fenêtre, partagée avec le salon vocal ;
+  - le bouton « Valorant » ouvre l'accueil, une fiche ouvre le Profil ;
+  - « Fermer », Échap ou un clic sur un salon textuel reviennent au chat.
+  - Coupé, la fenêtre et les fiches d'avant restent telles quelles.
+- **Le fil.** `ClientMsg::SoireeValorant { depuis }` et
+  `ServerMsg::Soiree { depuis, parties }`, annoncés par `Welcome.soiree`.
+  - Chaque `PartieSoiree` porte la carte, le mode, la durée, et un
+    `JoueurSoiree` par membre qui y était : agent, K/D/A, score, manches
+    et déroulé, note, MVP, ΔRR, palier avant et après, médailles.
+  - Le serveur réunit les matchs par id : une partie à quatre n'en fait
+    qu'une. Il en garde 40 au plus, sur 36 h au plus, et retire les plus
+    anciennes jusqu'à tenir dans une ligne (`STATS_MAX_BYTES`). Classe
+    « coûteuse » du limiteur.
+  - Le client la demande quand l'accueil se montre, puis toutes les deux
+    minutes, et dès que 6 h du matin passe. « Actualiser » la redemande.
+    Une réponse d'une autre soirée est ignorée.
+- **L'accueil, de haut en bas :**
+  - l'affiche : la date de la soirée, le score du groupe en grand, les RR
+    à tous, les parties et le temps ; à droite la partie en direct (de la
+    présence) et le MVP de la soirée (le plus de MVP, puis la meilleure
+    note sur deux parties) ; le bandeau de la carte en fond ;
+  - le vestiaire : cinq cartes côte à côte dès 900 px. Le statut vient de
+    la présence : en partie, sélection, en file, au menu, en ligne, hors
+    ligne. Un clic ouvre la fiche ;
+  - le fil, à côté des records (six tuiles) et des duos. La partie en
+    cours en tête, puis une carte par partie : manches case par case, et
+    pour chacun agent, K/D/A, ACS, ΔRR, MVP et trois médailles. Les
+    passages de palier (▲ / ▼) se lisent entre les parties ;
+  - les duos : ceux du soir (même résultat dans la même partie = même
+    camp ; un nul ne compte pas), puis ceux des 30 jours ;
+  - quand le groupe joue : Le groupe / Moi / Moi et le groupe, la case de
+    l'heure encadrée, et trois repères : le grand rendez-vous (la
+    meilleure fenêtre de deux heures), le soir le plus joué, et
+    maintenant. **Écart :** « la semaine » de la maquette est devenue
+    « le soir le plus joué ». « Moi » vient de ma fiche, demandée une
+    fois par connexion ;
+  - le classement trié par 7 jours la première fois, et les douze
+    médailles du groupe.
+- **ki-ui :** `grille` égalise ses rangées : cinq cases sur quatre
+  colonnes font trois et deux, pas quatre et une.
+- **Le banc** photographie trois scènes d'accueil de plus : 980 px,
+  720 px, et un serveur qui ne raconte pas encore la soirée.
+- **Pas encore :**
+  - l'arrivée dans le salon vocal comme événement du fil ;
+  - le bouton ⤢ détacher, pour un second écran ;
+  - le classement en `ui::Tableau`, c'est V9.3.
 
 ### V9.3 — Classement et Matchs (taille M)
 

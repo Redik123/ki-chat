@@ -67,9 +67,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ki_protocol::{
-    BilanMembre, CompteJoue, CompteLocal, CompteMedaille, DetailManches, FicheMembre, FicheValorant, MatchEsport,
-    MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, MonCompte, PointRR, RangValorant, ServerMsg,
-    StatsSaison, UserId, STATS_MAX_BYTES,
+    BilanMembre, CompteJoue, CompteLocal, CompteMedaille, DetailManches, FicheMembre, FicheValorant, JoueurSoiree,
+    MatchEsport, MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, MonCompte, PartieSoiree, PointRR,
+    RangValorant, ServerMsg, StatsSaison, UserId, SOIREE_MAX_MS, SOIREE_PARTIES_MAX, STATS_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -782,6 +782,12 @@ impl Valorant {
             .iter()
             .map(|(id, f)| (*id, f.resume(n_matchs, n_points), bilan_membre(f, maintenant)))
             .collect()
+    }
+
+    /// Les parties du groupe depuis `depuis` : le fil de la soirée, tiré
+    /// des fiches du cache — rien ne part vers HenrikDev.
+    pub fn soiree(&self, depuis: u64) -> Vec<PartieSoiree> {
+        soiree_de(&self.etat.fiches.lock().unwrap(), depuis, maintenant_ms())
     }
 
     /// Les 168 cases jour × heure (UTC) des parties commencées sur trente
@@ -1718,6 +1724,97 @@ fn activite_de<'a>(fiches: impl Iterator<Item = &'a FicheValorant>, maintenant: 
         Vec::new()
     } else {
         cases
+    }
+}
+
+/// Les parties commencées depuis `depuis` (ramené à [`SOIREE_MAX_MS`] au
+/// plus), de la plus récente à la plus ancienne et [`SOIREE_PARTIES_MAX`]
+/// au plus : un match joué ensemble — le même `id` chez plusieurs membres
+/// — n'en fait qu'une, avec une ligne par membre, la meilleure en tête.
+/// Chaque ligne porte les RR de la partie et le palier d'avant et
+/// d'après, lus dans l'historique du membre, et ses médailles.
+fn soiree_de(fiches: &BTreeMap<UserId, FicheValorant>, depuis: u64, maintenant: u64) -> Vec<PartieSoiree> {
+    let depuis = depuis.max(maintenant.saturating_sub(SOIREE_MAX_MS));
+    let mut parties: Vec<PartieSoiree> = Vec::new();
+    let mut par_id: HashMap<&str, usize> = HashMap::new();
+    for (&user_id, f) in fiches {
+        let mut points: Vec<&PointRR> = f.historique_rr.iter().collect();
+        points.sort_by_key(|p| p.date);
+        for m in f.matchs.iter().filter(|m| m.date >= depuis) {
+            let point = points.iter().position(|p| !m.id.is_empty() && p.match_id == m.id);
+            let (delta_rr, tier_avant, tier) = match point {
+                Some(k) => (Some(points[k].delta), k.checked_sub(1).map_or(0, |j| points[j].tier), points[k].tier),
+                None => (None, 0, m.tier),
+            };
+            let medailles = f
+                .medailles
+                .as_ref()
+                .and_then(|md| md.du_match(&m.id))
+                .map(|x| x.medailles.clone())
+                .unwrap_or_default();
+            let joueur = JoueurSoiree {
+                user_id,
+                agent: m.agent.clone(),
+                kills: m.kills,
+                deaths: m.deaths,
+                assists: m.assists,
+                score: m.score,
+                manches: m.manches,
+                gagne: m.gagne,
+                deroule: m.manches_detail.as_ref().map(|d| d.deroule.clone()).unwrap_or_default(),
+                perf: m.perf,
+                mvp: m.mvp,
+                delta_rr,
+                tier_avant,
+                tier,
+                medailles,
+            };
+            let deja = (!m.id.is_empty()).then(|| par_id.get(m.id.as_str()).copied()).flatten();
+            let i = match deja {
+                Some(i) => i,
+                None => {
+                    parties.push(PartieSoiree {
+                        id: m.id.clone(),
+                        date: m.date,
+                        carte: m.carte.clone(),
+                        mode: m.mode.clone(),
+                        duree_s: m.duree_s,
+                        joueurs: Vec::new(),
+                    });
+                    if !m.id.is_empty() {
+                        par_id.insert(m.id.as_str(), parties.len() - 1);
+                    }
+                    parties.len() - 1
+                }
+            };
+            if !parties[i].joueurs.iter().any(|j| j.user_id == user_id) {
+                parties[i].joueurs.push(joueur);
+            }
+        }
+    }
+    parties.sort_by_key(|p| std::cmp::Reverse(p.date));
+    parties.truncate(SOIREE_PARTIES_MAX);
+    for p in &mut parties {
+        p.joueurs.sort_by_key(|j| std::cmp::Reverse(j.score));
+    }
+    parties
+}
+
+/// La réponse à `SoireeValorant`, sous le budget d'une ligne : une soirée
+/// de quarante parties à dix ne tiendrait pas ; les plus anciennes partent
+/// d'abord, jamais la plus récente.
+pub fn message_soiree(depuis: u64, mut parties: Vec<PartieSoiree>) -> ServerMsg {
+    loop {
+        let candidat = ServerMsg::Soiree { depuis, parties };
+        let taille = serde_json::to_vec(&candidat).map_or(usize::MAX, |o| o.len());
+        let ServerMsg::Soiree { parties: rendues, .. } = candidat else { unreachable!() };
+        parties = rendues;
+        if taille <= STATS_MAX_BYTES || parties.len() <= 1 {
+            return ServerMsg::Soiree { depuis, parties };
+        }
+        // Un quart de moins à chaque tour : quelques tours au pire.
+        let garder = parties.len() - (parties.len() / 4).max(1);
+        parties.truncate(garder);
     }
 }
 
@@ -3379,6 +3476,78 @@ pub fn iso_vers_ms(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La soirée : un match joué à deux n'en fait qu'un, avec ses deux
+    /// lignes et leurs RR ; un match seul reste seul ; trop vieux, ou d'un
+    /// `depuis` trop lointain, il n'y est pas ; un passage de palier se lit.
+    #[test]
+    fn la_soiree_reunit_les_parties_jouees_ensemble() {
+        let heure = 3_600_000u64;
+        let maintenant = 1_800_000_000_000u64;
+        let m = |id: &str, date: u64, score: u32| MatchResume {
+            id: id.into(),
+            date,
+            carte: "Lotus".into(),
+            mode: "Compétitif".into(),
+            agent: "Jett".into(),
+            score,
+            manches: (13, 11),
+            gagne: Some(true),
+            ..Default::default()
+        };
+        let p = |id: &str, date: u64, tier: u8, delta: i32| PointRR { match_id: id.into(), date, tier, delta, ..Default::default() };
+        let mut fiches = BTreeMap::new();
+        fiches.insert(
+            1,
+            FicheValorant {
+                matchs: vec![m("ensemble", maintenant - heure, 4_000), m("seul", maintenant - 3 * heure, 3_000), m("vieux", maintenant - 50 * heure, 1)],
+                historique_rr: vec![p("seul", maintenant - 3 * heure, 15, 18), p("ensemble", maintenant - heure, 16, 21)],
+                ..Default::default()
+            },
+        );
+        fiches.insert(2, FicheValorant { matchs: vec![m("ensemble", maintenant - heure, 5_000), m("", maintenant - 2 * heure, 1)], ..Default::default() });
+        let soiree = soiree_de(&fiches, 0, maintenant);
+        let ids: Vec<&str> = soiree.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["ensemble", "", "seul"], "de la plus récente à la plus ancienne, le vieux match ramené hors du fil");
+        let ensemble = &soiree[0];
+        assert_eq!(ensemble.joueurs.iter().map(|j| j.user_id).collect::<Vec<_>>(), [2, 1], "une partie, deux lignes, la meilleure en tête");
+        let moi = &ensemble.joueurs[1];
+        assert_eq!((moi.delta_rr, moi.tier_avant, moi.tier), (Some(21), 15, 16), "le passage de Platine 1 à Platine 2");
+        assert_eq!(ensemble.joueurs[0].delta_rr, None, "sans point, pas de RR");
+        assert!(soiree_de(&fiches, maintenant - 2 * heure + 1, maintenant).iter().all(|p| p.id == "ensemble"));
+    }
+
+    /// La soirée la plus lourde — quarante parties à dix membres, aux noms
+    /// et médailles les plus longs — part quand même, allégée de ses plus
+    /// anciennes parties ; une soirée ordinaire part entière.
+    #[test]
+    fn la_plus_grosse_soiree_tient_dans_une_ligne() {
+        let joueur = JoueurSoiree {
+            user_id: UserId::MAX,
+            agent: "x".repeat(ki_protocol::MAX_JEU_TEXTE),
+            score: u32::MAX,
+            deroule: "V".repeat(30),
+            delta_rr: Some(i32::MIN),
+            medailles: Medaille::TOUTES.iter().map(|&medaille| MedailleGagnee { medaille, valeur: f32::MAX, record: true }).collect(),
+            ..Default::default()
+        };
+        let partie = |date: u64| PartieSoiree {
+            id: "8a1b2c3d-1234-5678-9abc-def012345678".into(),
+            date,
+            carte: "x".repeat(ki_protocol::MAX_JEU_TEXTE),
+            mode: "x".repeat(ki_protocol::MAX_JEU_TEXTE),
+            duree_s: u32::MAX,
+            joueurs: vec![joueur.clone(); 10],
+        };
+        let parties: Vec<PartieSoiree> = (0..SOIREE_PARTIES_MAX as u64).rev().map(partie).collect();
+        let ServerMsg::Soiree { parties: rendues, .. } = message_soiree(1, parties) else { panic!() };
+        let ligne = serde_json::to_vec(&ServerMsg::Soiree { depuis: 1, parties: rendues.clone() }).unwrap().len();
+        assert!(ligne <= STATS_MAX_BYTES, "{ligne} octets");
+        assert!(!rendues.is_empty() && rendues[0].date == SOIREE_PARTIES_MAX as u64 - 1, "la plus récente reste");
+        let ordinaire: Vec<PartieSoiree> = (0..8).map(|d| PartieSoiree { joueurs: vec![JoueurSoiree::default(); 4], ..partie(d) }).collect();
+        let ServerMsg::Soiree { parties, .. } = message_soiree(1, ordinaire) else { panic!() };
+        assert_eq!(parties.len(), 8);
+    }
 
     #[test]
     fn le_recap_compte_la_semaine_et_classe_par_rr() {

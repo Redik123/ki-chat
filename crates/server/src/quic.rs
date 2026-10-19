@@ -469,6 +469,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         journal_parties: true,
         // Et la carte tactique de son salon vocal.
         tactique: true,
+        // Et le fil de la soirée du groupe.
+        soiree: true,
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
@@ -635,6 +637,7 @@ fn classe_de(msg: &ClientMsg) -> Classe {
         | ClientMsg::History { .. }
         | ClientMsg::HistoryBefore { .. }
         | ClientMsg::StatsValorant
+        | ClientMsg::SoireeValorant { .. }
         | ClientMsg::FicheValorant { .. }
         | ClientMsg::RequestAvatars { .. }
         | ClientMsg::AdminListUsers
@@ -2211,6 +2214,12 @@ fn handle_msg(
                     .commander(crate::musique::Commande::Volume(pour_cent)),
                 C::Arreter => state.musique.commander(crate::musique::Commande::Arreter),
             }
+        }
+        ClientMsg::SoireeValorant { depuis } => {
+            // Tirée des fiches du cache, comme la page du groupe : rien ne
+            // part vers HenrikDev.
+            let parties = state.valorant.soiree(depuis);
+            let _ = tx.send(crate::valorant::message_soiree(depuis, parties));
         }
         ClientMsg::StatsValorant => {
             // Les fiches du cache, résumées et avec leur bilan, le pseudo
