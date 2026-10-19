@@ -286,6 +286,13 @@ pub enum ClientMsg {
     /// `depuis` est le dernier 6 h du matin à l'heure du client, que le
     /// serveur ne connaît pas.
     SoireeValorant { depuis: u64 },
+    /// Son propre journal des parties (`ChoixJournal`), résumé jour par
+    /// jour — seulement vers un serveur qui l'a dit
+    /// (`Welcome.journal_lecture`). `decalage_min` : les minutes à ajouter
+    /// à l'heure UTC pour tomber sur son jour — l'écart de son fuseau,
+    /// moins six heures, pour que ses jours commencent à 6 h du matin
+    /// comme ses soirées. Le serveur ne relit jamais le journal d'un autre.
+    MonJournal { decalage_min: i32 },
     /// Une commande au bot musique (permission « Contrôler la musique »).
     Musique { commande: CommandeMusique },
     /// Un geste à la table de cartes de son salon vocal — seulement vers un
@@ -644,6 +651,11 @@ pub enum ServerMsg {
         /// le prendrait pour un message invalide.
         #[serde(default)]
         soiree: bool,
+        /// Ce serveur relit à chacun son journal des parties et comprend
+        /// `ClientMsg::MonJournal` (depuis V9.4) ; un serveur antérieur le
+        /// prendrait pour un message invalide.
+        #[serde(default)]
+        journal_lecture: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -790,6 +802,12 @@ pub enum ServerMsg {
         depuis: u64,
         #[serde(default)]
         parties: Vec<PartieSoiree>,
+    },
+    /// La réponse à `MonJournal` : son temps de jeu jour par jour, par file
+    /// et par compte, du plus ancien au plus récent. Vide sans journal.
+    MonJournal {
+        #[serde(default)]
+        jours: Vec<JourDeJeu>,
     },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
@@ -2741,6 +2759,27 @@ pub const SOIREE_PARTIES_MAX: usize = 40;
 /// cette borne.
 pub const SOIREE_MAX_MS: u64 = 36 * 3_600_000;
 
+/// Ce que le journal des parties d'un membre dit d'un de ses jours, pour
+/// une file et un compte : combien de parties, combien de temps.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JourDeJeu {
+    /// Le jour, compté depuis le 1ᵉʳ janvier 1970, à son heure et coupé à
+    /// 6 h du matin (`ClientMsg::MonJournal::decalage_min`).
+    pub jour: i32,
+    /// La file telle que la présence la nomme (« competitive »,
+    /// « swiftplay ») ; vide pour une partie personnalisée.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    /// « principal », « second », « autre » ou « inconnu » : jamais un
+    /// Riot ID.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub compte: String,
+    #[serde(default)]
+    pub parties: u16,
+    #[serde(default)]
+    pub secondes: u32,
+}
+
 /// Une partie de la soirée, telle que le groupe l'a jouée : une ligne par
 /// membre qui y était — deux, trois, cinq pour une partie ensemble.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3132,6 +3171,47 @@ pub struct EstimationMmr {
     pub points: u16,
 }
 
+impl EstimationMmr {
+    /// L'estimation sur ces points-là — ceux d'un acte, pour suivre le MMR
+    /// d'un acte à l'autre —, sans les `delta == 0` ni les descentes
+    /// protégées ; `None` sans [`MMR_MIN_PAR_CAMP`] victoires et autant de
+    /// défaites. [`FicheValorant::mmr_estime`] y passe ses points retenus.
+    pub fn des_points<'a>(points: impl IntoIterator<Item = &'a PointRR>) -> Option<EstimationMmr> {
+        let (mut gains, mut pertes) = (0f32, 0f32);
+        let (mut victoires, mut defaites) = (0u16, 0u16);
+        for p in points.into_iter().filter(|p| p.delta != 0 && !p.protege) {
+            if p.delta > 0 {
+                gains += p.delta as f32;
+                victoires = victoires.saturating_add(1);
+            } else {
+                pertes += p.delta.unsigned_abs() as f32;
+                defaites = defaites.saturating_add(1);
+            }
+        }
+        if victoires < MMR_MIN_PAR_CAMP || defaites < MMR_MIN_PAR_CAMP {
+            return None;
+        }
+        let gain_moyen = gains / f32::from(victoires);
+        let perte_moyenne = pertes / f32::from(defaites);
+        let diff = gain_moyen - perte_moyenne;
+        let position = if diff >= SEUIL_MMR {
+            PositionMmr::AuDessus
+        } else if diff <= -SEUIL_MMR {
+            PositionMmr::EnDessous
+        } else {
+            PositionMmr::AuNiveau
+        };
+        Some(EstimationMmr {
+            position,
+            gain_moyen,
+            perte_moyenne,
+            victoires,
+            defaites,
+            points: victoires.saturating_add(defaites),
+        })
+    }
+}
+
 /// Le nom français du mode classé, tel que le serveur le traduit.
 const MODE_CLASSE: &str = "Compétitif";
 /// Les modes sans manches : un combat à mort n'a ni camp ni score par
@@ -3248,42 +3328,12 @@ impl FicheValorant {
         let mut points: Vec<&PointRR> = self.historique_rr.iter().collect();
         points.sort_by_key(|p| std::cmp::Reverse(p.date));
         let acte = points.first().map(|p| p.saison.as_str()).unwrap_or_default();
-        let (mut gains, mut pertes) = (0f32, 0f32);
-        let (mut victoires, mut defaites) = (0u16, 0u16);
         let retenus = points
             .iter()
+            .copied()
             .filter(|p| (acte.is_empty() || p.saison == acte) && p.delta != 0 && !p.protege)
             .take(MMR_POINTS);
-        for p in retenus {
-            if p.delta > 0 {
-                gains += p.delta as f32;
-                victoires = victoires.saturating_add(1);
-            } else {
-                pertes += p.delta.unsigned_abs() as f32;
-                defaites = defaites.saturating_add(1);
-            }
-        }
-        if victoires < MMR_MIN_PAR_CAMP || defaites < MMR_MIN_PAR_CAMP {
-            return None;
-        }
-        let gain_moyen = gains / f32::from(victoires);
-        let perte_moyenne = pertes / f32::from(defaites);
-        let diff = gain_moyen - perte_moyenne;
-        let position = if diff >= SEUIL_MMR {
-            PositionMmr::AuDessus
-        } else if diff <= -SEUIL_MMR {
-            PositionMmr::EnDessous
-        } else {
-            PositionMmr::AuNiveau
-        };
-        Some(EstimationMmr {
-            position,
-            gain_moyen,
-            perte_moyenne,
-            victoires,
-            defaites,
-            points: victoires.saturating_add(defaites),
-        })
+        EstimationMmr::des_points(retenus)
     }
 
     /// (nom, bilan) par la clé donnée, sur la fenêtre, trié par matchs
@@ -5568,6 +5618,30 @@ mod tests {
     /// sans rang ou en placements, rien ; un point protégé, un delta nul
     /// ou un acte précédent ne comptent pas ; au-delà de vingt, seuls les
     /// plus récents pèsent.
+    /// L'estimation se refait sur les points d'un acte, sans les descentes
+    /// protégées ni les deltas nuls ; le journal relu fait l'aller-retour,
+    /// sans ses champs vides.
+    #[test]
+    fn le_mmr_d_un_acte_et_le_journal_relu() {
+        let p = |delta, protege| PointRR { delta, protege, saison: "e9a1".into(), ..Default::default() };
+        let points = [p(20, false), p(-10, false), p(22, false), p(-12, false), p(18, false), p(-60, true), p(0, false), p(-11, false)];
+        let e = EstimationMmr::des_points(&points).unwrap();
+        assert_eq!((e.victoires, e.defaites, e.position), (3, 3, PositionMmr::AuDessus));
+        assert!(EstimationMmr::des_points(&points[..4]).is_none(), "deux victoires : pas assez");
+
+        let msg = ServerMsg::MonJournal {
+            jours: vec![JourDeJeu { jour: 20_380, file: "competitive".into(), compte: String::new(), parties: 2, secondes: 3_600 }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"mon_journal""#) && !json.contains("compte"), "{json}");
+        let ServerMsg::MonJournal { jours } = serde_json::from_str(&json).unwrap() else { panic!() };
+        assert_eq!(jours[0].secondes, 3_600);
+        let demande = serde_json::to_string(&ClientMsg::MonJournal { decalage_min: -240 }).unwrap();
+        assert_eq!(demande, r#"{"type":"mon_journal","decalage_min":-240}"#);
+        let ServerMsg::MonJournal { jours } = serde_json::from_str(r#"{"type":"mon_journal"}"#).unwrap() else { panic!() };
+        assert!(jours.is_empty());
+    }
+
     #[test]
     fn le_mmr_cache_se_devine_aux_variations_de_rr() {
         // Le point `i` est d'autant plus ancien que `i` est grand.
@@ -6650,8 +6724,13 @@ mod tests {
     #[test]
     fn un_serveur_d_avant_les_cartes_ne_les_sert_pas() {
         let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
-        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, tactique, soiree, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, tactique, soiree, journal_lecture, .. } =
+            serde_json::from_str(json).unwrap()
+        else {
+            panic!()
+        };
         assert!(!soiree, "ni ne raconte la soirée");
+        assert!(!journal_lecture, "ni ne relit le journal");
         assert!(!cartes);
         assert!(!comptes_joues, "un serveur d'avant V8.1 ne lit pas le compte joué");
         assert!(!journal_parties, "ni ne tient le journal des parties");

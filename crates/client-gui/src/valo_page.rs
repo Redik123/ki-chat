@@ -41,8 +41,12 @@ mod accueil;
 pub(crate) mod banc;
 mod centre;
 mod classement;
+mod comparer;
 mod matchs;
 mod profil;
+mod progression;
+
+pub use progression::{decalage_journal, Journal};
 
 // ---------------------------------------------------------------------
 // Constantes
@@ -244,6 +248,12 @@ pub enum Demande {
     OuvrirFiche(UserId, String),
     /// La carte tactique, depuis son onglet de la page au centre.
     OuvrirTactique,
+    /// Comparer la fiche ouverte à celle de ce membre (la vue Comparer du
+    /// profil) : la demander au serveur.
+    Comparer(UserId, String),
+    /// Mon journal des parties, résumé jour par jour, pour la vue
+    /// Progression de mon profil.
+    MonJournal,
 }
 
 // ---------------------------------------------------------------------
@@ -282,6 +292,9 @@ pub struct PageValo {
     heures: accueil::Heures,
     /// Les cartes de l'onglet Matchs montrées : « voir plus » en ajoute.
     cartes_matchs: usize,
+    /// Les membres cochés dans le classement pour les comparer : deux au
+    /// plus, le dernier coché remplaçant le plus ancien.
+    a_comparer: Vec<UserId>,
 }
 
 impl PageValo {
@@ -306,6 +319,7 @@ impl PageValo {
             onglet_centre: centre::OngletCentre::Accueil,
             heures: accueil::Heures::Groupe,
             cartes_matchs: matchs::CARTES_PAR_PAGE,
+            a_comparer: Vec::new(),
         }
     }
 
@@ -314,6 +328,12 @@ impl PageValo {
         storage.set_string("valo_periode", self.periode.cle().into());
         storage.set_string("fiche_periode", self.fiche_periode.cle().into());
         storage.set_string("fiche_classe", if self.fiche_classe { "on" } else { "off" }.into());
+    }
+
+    /// La vue Comparer du profil, l'onglet Profil devant.
+    pub fn vers_comparer(&mut self) {
+        self.vue_profil = profil::VueProfil::Comparer;
+        self.vers_profil();
     }
 
     /// La fiche se ferme : rien de déplié, rien de survolé, table repliée.
@@ -756,6 +776,29 @@ fn en_tete(ui: &mut Ui, titre: &str) {
     ui::hint(ui, titre);
 }
 
+/// Ce que dit le survol d'un point de RR : la carte, le delta, le rang,
+/// quand, et ce qui l'explique (bonus, placement, descente protégée).
+fn info_de_point(x: &PointRR) -> String {
+    let mut texte = format!(
+        "{} · {} · {} · {} RR · {}",
+        if x.carte.is_empty() { "?" } else { x.carte.as_str() },
+        signe(x.delta).0,
+        nom_de_rang(x.tier),
+        x.rr,
+        crate::il_y_a(x.date)
+    );
+    if x.bonus != 0 {
+        texte.push_str(&format!(" · dont {} de bonus de performance", signe(x.bonus).0));
+    }
+    if x.placement {
+        texte.push_str(" · placement");
+    }
+    if x.protege {
+        texte.push_str(" · descente protégée");
+    }
+    texte
+}
+
 /// Le rang en une ligne : l'icône du palier si elle est là, puis le nom à
 /// sa couleur — « Non classé » en pâle.
 fn rang_court(ui: &mut Ui, tier: u8, rr: u16, taille: f32, rangs: &rangs::Rangs) {
@@ -1104,6 +1147,11 @@ pub struct Contexte<'a> {
     /// Les photos des membres, pour leurs avatars : celles que ki-chat a
     /// déjà en mémoire, rien n'est demandé d'ici.
     pub photos: &'a HashMap<UserId, (String, egui::TextureHandle)>,
+    /// La fiche à laquelle on compare celle qui est ouverte (la vue
+    /// Comparer du profil), demandée ou reçue.
+    pub comparee: Option<&'a FicheOuverte>,
+    /// Mon journal des parties, pour la vue Progression de mon profil.
+    pub journal: Journal<'a>,
 }
 
 impl PageValo {
@@ -2217,27 +2265,7 @@ impl PageValo {
         let frontieres = frontieres_d_acte(&dans_l_ordre);
         let points: Vec<PointCourbe> = vue.p.iter().map(|x| PointCourbe::from(*x)).collect();
         let pic = vue.fiche.pic.as_ref().filter(|p| p.tier >= 3).map(|p| graphes::valeur_rr(p.tier, p.rr));
-        let info = |i: usize| -> String {
-            let Some(x) = vue.p.get(i) else { return String::new() };
-            let mut texte = format!(
-                "{} · {} · {} · {} RR · {}",
-                if x.carte.is_empty() { "?" } else { x.carte.as_str() },
-                signe(x.delta).0,
-                nom_de_rang(x.tier),
-                x.rr,
-                crate::il_y_a(x.date)
-            );
-            if x.bonus != 0 {
-                texte.push_str(&format!(" · dont {} de bonus de performance", signe(x.bonus).0));
-            }
-            if x.placement {
-                texte.push_str(" · placement");
-            }
-            if x.protege {
-                texte.push_str(" · descente protégée");
-            }
-            texte
-        };
+        let info = |i: usize| vue.p.get(i).map_or_else(String::new, |x| info_de_point(x));
         let survole = graphes::courbe_temps(ui, egui::Id::new("fiche_courbe"), &points, hauteur, true, &frontieres, pic, info);
         self.survol = survole.and_then(|i| vue.p.get(i)).map(|x| x.match_id.clone()).filter(|id| !id.is_empty());
     }
@@ -3283,12 +3311,12 @@ mod tests {
         let rangs = rangs::Rangs::new();
         let catalogue = Catalogue::new();
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         assert_eq!(vue.e.len(), 5);
         assert_eq!(vue.b.matchs, 5, "un Spike Rush a des manches, il compte");
         assert_eq!(vue.e[0].id, "a", "du plus récent au plus ancien");
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         assert_eq!(vue.e.len(), 2);
         assert_eq!(vue.b.rr, 20);
         assert!(vue.point_de("a").is_some());
@@ -3498,7 +3526,7 @@ mod tests {
                         dessiner(&ctx, souris, |ui| {
                             let ctx = ui.ctx();
                             let demandes =
-                                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
+                                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
                             assert!(demandes.is_empty());
                         });
                     }
@@ -3511,7 +3539,7 @@ mod tests {
                 page.tri_desc = !page.tri_desc;
                 dessiner(&ctx, None, |ui| {
                     let ctx = ui.ctx();
-                    page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
+                    page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
                 });
             }
             page.onglet = Onglet::Matchs;
@@ -3520,13 +3548,13 @@ mod tests {
             page.plus = true;
             dessiner(&ctx, None, |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
             });
             // Avant la réponse du serveur, et sans personne de lié.
             dessiner(&ctx, None, |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: false, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
-                page.fenetre(ctx, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: false, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
             });
             assert!(page.ouvert);
 
@@ -3546,7 +3574,7 @@ mod tests {
                         for souris in [None, Some(Pos2::new(200.0, 250.0)), Some(Pos2::new(320.0, 600.0))] {
                             dessiner(&ctx, souris, |ui| {
                                 let ctx = ui.ctx();
-                                assert!(page.fiche(ctx, ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }));
+                                assert!(page.fiche(ctx, ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }));
                             });
                         }
                     }
@@ -3557,13 +3585,36 @@ mod tests {
 
             // Le profil au centre : toutes ses vues, sur les mêmes fiches,
             // une ligne de match dépliée ; il reste ouvert sans Échap.
-            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() };
-            for ouverte in [&attente, &sans, &vide, &pauvre, &riche] {
-                for vue in [profil::VueProfil::Ensemble, profil::VueProfil::Matchs, profil::VueProfil::Agents, profil::VueProfil::Cartes, profil::VueProfil::Medailles] {
-                    page.vue_profil = vue;
-                    page.deplie = Some("m1".into());
-                    for souris in [None, Some(Pos2::new(300.0, 500.0))] {
-                        dessiner(&ctx, souris, |ui| assert!(page.profil(ui, ouverte, &cx)));
+            // Comparé à Nono (qui a joué les mêmes matchs), avec mon journal ;
+            // puis sans rien à comparer et sans journal.
+            let photos = HashMap::new();
+            let aujourd_hui = progression::jour_de_journal(maintenant, decalage_journal());
+            let journal: Vec<ki_protocol::JourDeJeu> = (0..40)
+                .map(|i| ki_protocol::JourDeJeu {
+                    jour: aujourd_hui - i,
+                    file: if i % 3 == 0 { "swiftplay" } else { "competitive" }.into(),
+                    compte: if i % 7 == 0 { "second" } else { "principal" }.into(),
+                    parties: 2,
+                    secondes: 3_000,
+                })
+                .collect();
+            let nono = FicheOuverte { user_id: 2, username: "Nono".into(), recue: true, fiche: Some(stats[1].fiche.clone()) };
+            let attendue = FicheOuverte { user_id: 4, username: "Bob".into(), recue: false, fiche: None };
+            let journaux = [
+                (None, Journal::default()),
+                (Some(&nono), Journal { servi: true, coche: true, jours: Some(&journal) }),
+                (Some(&attendue), Journal { servi: true, coche: false, jours: Some(&[]) }),
+                (None, Journal { servi: true, coche: true, jours: None }),
+            ];
+            for (comparee, journal) in journaux {
+                let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee, journal };
+                for ouverte in [&attente, &sans, &vide, &pauvre, &riche] {
+                    for (vue, _) in profil::VueProfil::TOUTES {
+                        page.vue_profil = vue;
+                        page.deplie = Some("m1".into());
+                        for souris in [None, Some(Pos2::new(300.0, 500.0))] {
+                            dessiner(&ctx, souris, |ui| assert!(page.profil(ui, ouverte, &cx)));
+                        }
                     }
                 }
             }
@@ -3620,7 +3671,7 @@ mod tests {
                 for periode in Periode::TOUTES {
                     page.periode = periode;
                     for (soiree, servie) in [(&soiree[..], true), (&[][..], false)] {
-                        let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree, soiree_servie: servie, ma_fiche: stats.first().map(|f| &f.fiche), photos: &photos };
+                        let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree, soiree_servie: servie, ma_fiche: stats.first().map(|f| &f.fiche), photos: &photos, comparee: None, journal: Journal::default() };
                         for souris in [None, Some(Pos2::new(300.0, 300.0)), Some(Pos2::new(600.0, 800.0))] {
                             dessiner(&ctx, souris, |ui| {
                                 let (ouvert, demandes) = page.centre(ui, &cx, None, &mut boutique);
@@ -3630,7 +3681,7 @@ mod tests {
                     }
                 }
             }
-            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &soiree, soiree_servie: true, ma_fiche: None, photos: &photos };
+            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &soiree, soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
             // Les filtres des matchs : un membre, et un mode qui n'est plus
             // dans la période, oublié.
             page.onglet_centre = centre::OngletCentre::Matchs;
@@ -3649,7 +3700,7 @@ mod tests {
             });
             // Avant la réponse du serveur, et sans personne de lié.
             for (stats, recu) in [(&stats[..], false), (&[][..], true)] {
-                let cx = Contexte { stats, recu, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos };
+                let cx = Contexte { stats, recu, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
                 for onglet in [centre::OngletCentre::Accueil, centre::OngletCentre::Classement, centre::OngletCentre::Matchs] {
                     page.onglet_centre = onglet;
                     dessiner(&ctx, None, |ui| {
@@ -3737,11 +3788,11 @@ mod tests {
         let catalogue = Catalogue::new();
         let deux = [membre(1, 10), membre(2, 20)];
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         assert!(vue.repere(Bilan::kd, 1.0).is_none());
         let trois = [membre(1, 10), membre(2, 20), membre(3, 30)];
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         let (mediane, max) = vue.repere(Bilan::kd, 5.0).expect("trois membres assez classés");
         assert_eq!(mediane, 2.0);
         assert_eq!(max, 5.0, "le plafond prend en compte la valeur du membre");
@@ -3804,8 +3855,8 @@ mod tests {
         for _ in 0..4 {
             ctx.run_ui(entree(), |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
-                page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() });
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
+                page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() });
             }).drop_without_applying_deltas();
         }
         let groupe = ctx.memory(|m| m.area_rect(egui::Id::new("valo_page_v5"))).expect("la page est ouverte");
@@ -3879,7 +3930,7 @@ mod tests {
             for souris in [None, Some(Pos2::new(200.0, 160.0))] {
                 dessiner(&ctx, souris, |ui| {
                     let ctx = ui.ctx();
-                    page.fenetre(ctx, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new() }, &mut boutique);
+                    page.fenetre(ctx, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
                 });
             }
         }

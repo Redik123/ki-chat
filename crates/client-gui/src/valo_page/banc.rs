@@ -14,7 +14,8 @@ use std::path::PathBuf;
 
 use super::*;
 use ki_protocol::{
-    CompteMedaille, DetailManches, JoueurSoiree, MedailleGagnee, MedaillesDuMatch, PartieSoiree, RangValorant, StatsSaison,
+    CompteMedaille, DetailManches, JourDeJeu, JoueurSoiree, MedailleGagnee, MedaillesDuMatch, PartieSoiree, RangValorant,
+    StatsSaison,
 };
 
 /// La fenêtre : assez large pour la plus large scène, assez haute pour
@@ -60,7 +61,7 @@ struct Scene {
     quoi: Quoi,
 }
 
-const SCENES: [Scene; 15] = [
+const SCENES: [Scene; 19] = [
     Scene { nom: "accueil", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-serveur-d-avant", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: false } },
@@ -74,6 +75,10 @@ const SCENES: [Scene; 15] = [
     Scene { nom: "profil-large", fiche: 0, largeur: 1440.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
     Scene { nom: "profil-matchs", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Matchs) },
     Scene { nom: "profil-medailles", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Medailles) },
+    Scene { nom: "profil-progression", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Progression) },
+    Scene { nom: "profil-progression-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Profil(profil::VueProfil::Progression) },
+    Scene { nom: "profil-comparer", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Comparer) },
+    Scene { nom: "profil-comparer-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Profil(profil::VueProfil::Comparer) },
     Scene { nom: "profil-pauvre", fiche: 1, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
     Scene { nom: "profil-vide", fiche: 2, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
 ];
@@ -89,6 +94,9 @@ struct Banc {
     activite: Vec<u16>,
     ouvertes: Vec<FicheOuverte>,
     soiree: Vec<PartieSoiree>,
+    /// Jerem, à qui drion se compare ; le journal de drion.
+    comparee: FicheOuverte,
+    journal: Vec<JourDeJeu>,
     photos: HashMap<UserId, (String, egui::TextureHandle)>,
     rangs: rangs::Rangs,
     catalogue: Catalogue,
@@ -149,6 +157,7 @@ impl Banc {
         membres[3].online = false;
         // Une soirée pauvre : trois classés ; puis rien du tout.
         let pauvre = FicheValorant { matchs: fiches[3].matchs[..3].to_vec(), historique_rr: fiches[3].historique_rr[..3].to_vec(), saisons: Vec::new(), medailles: None, ..fiches[3].clone() };
+        let comparee = FicheOuverte { user_id: 2, username: "Jerem".into(), recue: true, fiche: Some(fiches[1].clone()) };
         let ouvertes = vec![
             FicheOuverte { user_id: 1, username: "drion".into(), recue: true, fiche: Some(fiches[0].clone()) },
             FicheOuverte { user_id: 4, username: "Kevin".into(), recue: true, fiche: Some(pauvre) },
@@ -168,6 +177,8 @@ impl Banc {
             activite: activite_du_groupe(),
             ouvertes,
             soiree: soiree_inventee(maintenant),
+            comparee,
+            journal: journal_invente(maintenant),
             photos: HashMap::new(),
             rangs: rangs::Rangs::new(),
             catalogue: Catalogue::new(),
@@ -202,6 +213,8 @@ impl eframe::App for Banc {
             soiree_servie,
             ma_fiche: self.ouvertes[0].fiche.as_ref(),
             photos: &self.photos,
+            comparee: Some(&self.comparee),
+            journal: Journal { servi: true, coche: true, jours: Some(&self.journal) },
         };
         let ouverte = &self.ouvertes[scene.fiche];
         let page = &mut self.page;
@@ -218,6 +231,8 @@ impl eframe::App for Banc {
                 }
                 Quoi::Onglet(onglet) => {
                     page.onglet_centre = onglet;
+                    // drion et Jerem cochés : le bouton « Comparer » se voit.
+                    page.a_comparer = vec![1, 2];
                     let _ = page.centre(&mut dedans, &cx, Some(ouverte), boutique);
                 }
                 Quoi::Profil(vue) => {
@@ -438,11 +453,13 @@ fn fiche_inventee(nom: &str, niveau: f32, rang: (u8, u16), n: usize, graine: u64
         historique_rr: points,
         matchs,
         maj: maintenant - 4 * 60_000,
-        saisons: [(9, 1), (10, 2), (12, 1), (13, 3), (14, 2), (rang.0, 3)]
+        // Six actes, du plus ancien au plus récent ; les deux derniers sont
+        // ceux des points de RR.
+        saisons: [(9, "e9a1"), (10, "e9a2"), (12, "e9a3"), (13, "e10a1"), (14, "e10a2"), (rang.0, "e10a3")]
             .iter()
             .enumerate()
             .map(|(k, &(tier, acte))| StatsSaison {
-                saison: format!("e{}a{acte}", 8 + k / 3),
+                saison: acte.into(),
                 victoires: 18 + k as u16 * 3,
                 parties: 34 + k as u16 * 2,
                 tier_fin: tier.min(rang.0),
@@ -576,6 +593,38 @@ fn soiree_inventee(maintenant: u64) -> Vec<PartieSoiree> {
         ),
         partie(minutes(160), "Bind", vec![joueur(5, "Omen", false, (8, 13), 0, (14, 14)), joueur(4, "Sova", false, (8, 13), 0, (11, 11))]),
     ]
+}
+
+/// Douze semaines de journal pour drion : trois soirs sur quatre, des
+/// classées surtout, du swiftplay et du deathmatch parfois, et un second
+/// compte de temps en temps.
+fn journal_invente(maintenant: u64) -> Vec<JourDeJeu> {
+    let mut des = Des(0x10_0a);
+    let aujourd_hui = progression::jour_de_journal(maintenant, decalage_journal());
+    let mut jours = Vec::new();
+    for jour in (aujourd_hui - 84)..=aujourd_hui {
+        if des.part() < 0.25 {
+            continue;
+        }
+        let mut ajouter = |file: &str, compte: &str, parties: u16, minutes: u32| {
+            jours.push(JourDeJeu { jour, file: file.into(), compte: compte.into(), parties, secondes: minutes * 60 });
+        };
+        let classees = des.entre(1, 4) as u16;
+        ajouter("competitive", "principal", classees, u32::from(classees) * des.entre(30, 42));
+        if des.part() < 0.35 {
+            ajouter("swiftplay", "principal", 1, des.entre(12, 18));
+        }
+        if des.part() < 0.25 {
+            ajouter("deathmatch", "principal", 2, 18);
+        }
+        if des.part() < 0.12 {
+            ajouter("competitive", "second", 1, 36);
+        }
+        if des.part() < 0.05 {
+            ajouter("hurm", "autre", 1, 12);
+        }
+    }
+    jours
 }
 
 /// Les parties du groupe par heure de la semaine, en UTC : le soir, plus

@@ -1363,6 +1363,15 @@ struct KiApp {
     /// l'accueil. Demandée une fois par connexion.
     ma_fiche: Option<ki_protocol::FicheValorant>,
     ma_fiche_demandee: bool,
+    /// La fiche comparée à celle qui est ouverte (la vue Comparer du
+    /// profil), demandée ou reçue.
+    comparee: Option<FicheOuverte>,
+    /// Le serveur relit le journal des parties (`Welcome.journal_lecture`),
+    /// et mon journal tel qu'il l'a rendu, avec la dernière demande : il
+    /// se redemande au plus toutes les cinq minutes.
+    serveur_journal_lecture: bool,
+    mon_journal: Option<Vec<ki_protocol::JourDeJeu>>,
+    mon_journal_demande: Option<std::time::Instant>,
     /// Interdiction de veille système pendant le vocal.
     veille: veille::Garde,
 }
@@ -1793,6 +1802,10 @@ impl KiApp {
             soiree_demandee: None,
             ma_fiche: None,
             ma_fiche_demandee: false,
+            comparee: None,
+            serveur_journal_lecture: false,
+            mon_journal: None,
+            mon_journal_demande: None,
             veille: veille::Garde::default(),
         };
         // Instance relancée par le dispositif de secours : le dire. Sans ce
@@ -2204,9 +2217,12 @@ impl KiApp {
                 soiree_servie: self.serveur_soiree,
                 ma_fiche: self.ma_fiche.as_ref(),
                 photos: &self.avatars,
+                comparee: self.comparee.as_ref(),
+                journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.journal_parties, jours: self.mon_journal.as_deref() },
             };
             if !self.valo.fiche(ctx, f, &cx) {
                 self.fiche = None;
+                self.comparee = None;
                 self.valo.fermer_fiche();
             }
         }
@@ -2244,6 +2260,8 @@ impl KiApp {
                 soiree_servie: self.serveur_soiree,
                 ma_fiche: self.ma_fiche.as_ref(),
                 photos: &self.avatars,
+                comparee: self.comparee.as_ref(),
+                journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.journal_parties, jours: self.mon_journal.as_deref() },
             };
             let fiche = self.fiche.as_ref();
             let valo = &mut self.valo;
@@ -2265,6 +2283,7 @@ impl KiApp {
         if self.valo_au_centre && (self.valo.ouvert || self.fiche.is_some()) {
             self.valo.ouvert = false;
             self.fiche = None;
+            self.comparee = None;
             self.valo.fermer_fiche();
         }
     }
@@ -2292,11 +2311,27 @@ impl KiApp {
                 valo_page::Demande::Actualiser => {
                     self.ouvrir_stats();
                     self.soiree_demandee = None;
+                    self.mon_journal = None;
+                    self.mon_journal_demande = None;
                 }
                 valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
                 valo_page::Demande::OuvrirTactique => {
                     self.tactique.ouvert = true;
                     self.catalogue.demarrer();
+                }
+                valo_page::Demande::Comparer(user_id, username) => {
+                    if self.comparee.as_ref().is_none_or(|c| c.user_id != user_id) {
+                        self.comparee = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
+                        self.send(ClientMsg::FicheValorant { user_id });
+                    }
+                    self.valo.vers_comparer();
+                }
+                valo_page::Demande::MonJournal => {
+                    let vieille = self.mon_journal_demande.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(300));
+                    if self.serveur_journal_lecture && vieille {
+                        self.mon_journal_demande = Some(std::time::Instant::now());
+                        self.send(ClientMsg::MonJournal { decalage_min: valo_page::decalage_journal() });
+                    }
                 }
             }
         }
@@ -4150,6 +4185,8 @@ impl KiApp {
             soiree_servie: self.serveur_soiree,
             ma_fiche: self.ma_fiche.as_ref(),
             photos: &self.avatars,
+            comparee: self.comparee.as_ref(),
+            journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.journal_parties, jours: self.mon_journal.as_deref() },
         };
         let demandes = self.valo.fenetre(ctx, &cx, &mut boutique);
         self.boutique = boutique;
@@ -4181,6 +4218,10 @@ impl KiApp {
     fn ouvrir_fiche(&mut self, user_id: UserId, username: String) {
         self.valo.fermer_fiche();
         self.valo.vers_profil();
+        // On ne se compare pas à soi-même.
+        if self.comparee.as_ref().is_some_and(|c| c.user_id == user_id) {
+            self.comparee = None;
+        }
         self.fiche = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
         self.send(ClientMsg::FicheValorant { user_id });
     }
@@ -4721,6 +4762,11 @@ impl KiApp {
         self.soiree_demandee = None;
         self.ma_fiche = None;
         self.ma_fiche_demandee = false;
+        self.comparee = None;
+        // Mon journal relu : celui de ce serveur.
+        self.serveur_journal_lecture = false;
+        self.mon_journal = None;
+        self.mon_journal_demande = None;
         // Nos comptes Riot : ceux de ce serveur.
         self.serveur_comptes_joues = false;
         self.mes_comptes.clear();
@@ -4993,6 +5039,9 @@ impl KiApp {
         if self.serveur_journal && self.choix_journal_dit != Some(self.journal_parties) {
             self.send(ClientMsg::ChoixJournal { oui: self.journal_parties });
             self.choix_journal_dit = Some(self.journal_parties);
+            // Effacé ou repris : la Progression le relira.
+            self.mon_journal = None;
+            self.mon_journal_demande = None;
         }
         // À chaque image : rien n'est copié tant qu'aucune lecture n'arrive.
         let lie_existe = self
@@ -5386,6 +5435,7 @@ impl KiApp {
                 journal_parties,
                 tactique,
                 soiree,
+                journal_lecture,
                 protocole,
                 ..
             } => {
@@ -5423,6 +5473,8 @@ impl KiApp {
                 self.serveur_tactique = tactique;
                 // Et pour le fil de la soirée.
                 self.serveur_soiree = soiree;
+                // Et pour la relecture de mon journal des parties.
+                self.serveur_journal_lecture = journal_lecture;
                 // Et pour nos comptes Riot, qu'il envoie juste après.
                 self.serveur_comptes_joues = comptes_joues;
                 self.mes_comptes.clear();
@@ -5884,6 +5936,10 @@ impl KiApp {
                 if Some(user_id) == self.my_id {
                     self.ma_fiche = fiche.clone();
                 }
+                if let Some(c) = self.comparee.as_mut().filter(|c| c.user_id == user_id) {
+                    c.recue = true;
+                    c.fiche = fiche.clone();
+                }
                 if let Some(f) = &mut self.fiche {
                     if f.user_id == user_id {
                         f.recue = true;
@@ -5921,6 +5977,9 @@ impl KiApp {
             }
             ServerMsg::TactiqueRefus { message } => {
                 self.tactique.refuser(ki_protocol::safe_display(&message, 200));
+            }
+            ServerMsg::MonJournal { jours } => {
+                self.mon_journal = Some(jours);
             }
             ServerMsg::Soiree { depuis, parties } => {
                 // Une réponse d'avant 6 h du matin ne remplace pas la soirée.
@@ -15295,6 +15354,7 @@ impl KiApp {
                     self.portes.ouvert = false;
                 } else if self.fiche.is_some() {
                     self.fiche = None;
+                    self.comparee = None;
                     self.valo.fermer_fiche();
                 } else if self.valo.ouvert {
                     self.valo.ouvert = false;

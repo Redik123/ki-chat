@@ -471,6 +471,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         tactique: true,
         // Et le fil de la soirée du groupe.
         soiree: true,
+        // Et la relecture de son journal des parties.
+        journal_lecture: true,
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
@@ -638,6 +640,7 @@ fn classe_de(msg: &ClientMsg) -> Classe {
         | ClientMsg::HistoryBefore { .. }
         | ClientMsg::StatsValorant
         | ClientMsg::SoireeValorant { .. }
+        | ClientMsg::MonJournal { .. }
         | ClientMsg::FicheValorant { .. }
         | ClientMsg::RequestAvatars { .. }
         | ClientMsg::AdminListUsers
@@ -2220,6 +2223,15 @@ fn handle_msg(
             // part vers HenrikDev.
             let parties = state.valorant.soiree(depuis);
             let _ = tx.send(crate::valorant::message_soiree(depuis, parties));
+        }
+        ClientMsg::MonJournal { decalage_min } => {
+            // Son journal à lui, jamais celui d'un autre : relu sur le
+            // disque, hors de la boucle asynchrone.
+            let (state, tx) = (state.clone(), tx.clone());
+            tokio::task::spawn_blocking(move || {
+                let jours = state.valorant.mon_journal(user_id, decalage_min);
+                let _ = tx.send(crate::valorant::message_journal(jours));
+            });
         }
         ClientMsg::StatsValorant => {
             // Les fiches du cache, résumées et avec leur bilan, le pseudo

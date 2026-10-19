@@ -102,7 +102,7 @@ impl PageValo {
         let noms = Annuaire::new(cx.stats, cx.membres);
         match self.onglet_centre {
             OngletCentre::Profil => match fiche {
-                Some(ouverte) => self.profil_contenu(ui, ouverte, cx),
+                Some(ouverte) => self.profil_contenu(ui, ouverte, cx, &mut demandes),
                 None => {
                     // Sans fiche ouverte, la sienne.
                     match cx.moi.and_then(|moi| cx.stats.iter().find(|f| f.user_id == moi)) {
@@ -148,7 +148,7 @@ impl PageValo {
     /// du groupe, puis les records.
     fn onglet_classement(&mut self, ui: &mut Ui, cx: &Contexte<'_>, lignes: &[Ligne], noms: &Annuaire, demandes: &mut Vec<Demande>) {
         let aide = format!(
-            "sur {} · un clic sur un en-tête change le tri, sur une ligne ouvre la fiche",
+            "sur {} · un clic sur un en-tête change le tri, sur une ligne ouvre la fiche · coche deux lignes pour les comparer",
             self.periode.titre()
         );
         ui::section(ui, Icon::Crown, "Classement", Some(&aide), |ui| {

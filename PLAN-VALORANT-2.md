@@ -875,7 +875,7 @@ L'accueil de la maquette, dans l'ordre décrit plus haut.
   matchs à 980 et 720 px. Ses fiches jouent ensemble et une fois en face.
 - **Pas encore :** le classement des médailles reste l'ancienne grille.
 
-### V9.4 — Comparer et Progression (taille M)
+### V9.4 — Comparer et Progression (taille M) — première version le 2026-10-19
 
 - **Comparer deux membres** (c'était le bonus V5.1), choisis par la case
   « comparer » du classement (reportée de V9.3) : tuiles côte à côte,
@@ -887,6 +887,65 @@ L'accueil de la maquette, dans l'ordre décrit plus haut.
   - le MMR estimé ;
   - le temps de jeu par semaine, par mode et par compte, tiré du journal
     de V8.4.
+
+**Ce qui est fait (2026-10-19), et ce qui diffère :**
+- **Deux vues de plus dans le profil**, après Médailles : Progression et
+  Comparer. Elles suivent la période et le mode choisis, comme les
+  autres vues.
+- **Comparer** (`valo_page/comparer.rs`). Le membre du profil en bleu,
+  l'autre en orange.
+  - On choisit l'autre en pastilles, dans la vue, ou en cochant deux
+    lignes du classement : « Comparer drion et Jerem » ouvre le profil
+    du premier sur cette vue. Un troisième coché remplace le plus ancien.
+  - L'application demande la fiche entière de l'autre
+    (`ClientMsg::FicheValorant`) et la garde à côté de la fiche ouverte.
+  - **Face à face**, ligne par ligne : le rang, les RR de la période, la
+    part des victoires, K/D, ACS, ADR, KAST, tête, premiers sangs,
+    matchs. Le meilleur en gras, à sa couleur ; une barre partagée quand
+    les deux valeurs s'additionnent, un point du côté du meilleur sinon.
+    **Écart :** des lignes plutôt que des tuiles côte à côte, qui se
+    lisaient moins bien d'un membre à l'autre.
+  - **Les courbes de RR** sur le même axe (`graphes::courbes`, qui
+    attendait sa première page depuis V9.0), les paliers en abrégé.
+  - **Ensemble** : les parties dans le même camp et leur bilan, puis ce
+    que chacun fait avec l'autre et sans lui (K/D, victoires, trois
+    parties au moins de chaque côté), et le score de l'un contre
+    l'autre. Le camp se lit à `avec` et `contre`, sinon au même match
+    chez l'autre (le même score vu du même côté) ; un nul ne compte pas.
+  - **Les agents et les cartes en commun**, en cartes : parties, K/D et
+    victoires de chacun, la meilleure part en gras.
+- **Progression** (`valo_page/progression.rs`) :
+  - toute la courbe de RR que le serveur garde, les actes marqués et le
+    pic ;
+  - les actes en barres, puis un tableau acte par acte : le rang de fin,
+    les victoires et le MMR estimé sur les classés de l'acte
+    (`EstimationMmr::des_points`, sorti de `mmr_estime` dans le
+    protocole) ;
+  - le MMR estimé d'aujourd'hui en quatre tuiles ;
+  - **mon temps de jeu**, sur mon seul profil : cette semaine, 30 jours,
+    par soir joué, en tout ; les douze dernières semaines en barres
+    empilées (`graphes::barres_empilees`, nouveau), un mode par couleur
+    (les quatre plus joués, les autres en gris) ; puis la part de chaque
+    compte (principal, second, non lié, inconnu).
+  - **Le journal ne se montre qu'à son propriétaire.** La case de V8.4
+    dit « garder », pas « montrer au groupe ». Sur le profil d'un autre,
+    un mot le dit. Le montrer au groupe demanderait une seconde case.
+- **Protocole et serveur :** `ClientMsg::MonJournal { decalage_min }`,
+  `ServerMsg::MonJournal { jours }` et `Welcome.journal_lecture`.
+  - Le serveur relit le fichier du connecté, jamais celui d'un autre,
+    hors de la boucle réseau (classe « coûteuse » du limiteur).
+  - Il le résume jour par jour (`jours_de_jeu`, pure et testée), par
+    file et par compte. Les jours sont ceux du membre, coupés à 6 h du
+    matin comme les soirées : le client envoie son décalage.
+  - Les jours les plus anciens partent si la ligne dépasse
+    `STATS_MAX_BYTES`.
+  - Le client le redemande au plus toutes les cinq minutes, et quand la
+    case change.
+- **Le banc** photographie Progression et Comparer à 980 et 720 px, sur
+  un journal inventé de douze semaines ; le classement montre deux
+  lignes cochées.
+- **Pas encore :** le MMR estimé dans le temps. Il n'existe qu'acte par
+  acte.
 
 **Validation V9** : à chaque jalon, les captures du banc pour des fiches
 pleines, pauvres et vides. On lit la page à 720 px et à 1 600 px de
