@@ -615,6 +615,49 @@ sorts y sont déjà, venues avec V10.1.
 - La nouvelle page arrive d'abord dans ⚙ → **Bêta** pour une version, à
   côté de l'ancienne, puis la remplace.
 
+**Ce qui est fait (2026-10-19), et ce qui diffère :**
+- **ki-ui.**
+  - `texte::KPI`, `texte::TITRE_PAGE`, `largeur::{TUILE_MIN, CARTE_MIN,
+    PAGE_REFERENCE, PAGE_ETROITE}` dans ki-ui-base ;
+    `ombre::{DOUCE, MENU, LEVEE}` dans ki-ui, à la place des valeurs
+    codées en dur.
+  - **Écart :** seulement **Ubuntu Medium** (340 Ko), pas de Bold. Elle
+    suffit aux chiffres et aux titres, pour la moitié du poids. egui n'a
+    pas de graisse : `.strong()` ne change que la couleur. Le poids passe
+    donc par `police::moyenne(ctx, taille)`, qui retombe sur le corps dans
+    un contexte sans l'allure de ki-ui (un test).
+  - `surface`, `Kpi` (et `Ecart`, coloré selon que la hausse est bonne),
+    `grille` à cases égales (calculée, pas sur `Flex` : les cases d'une
+    dernière rangée gardent leur largeur), et le module `tableau`.
+  - `ui::section` existait déjà, avec son icône, son titre et son aide :
+    il sert tel quel.
+  - La vitrine montre tout ça dans « Tableaux de bord ».
+- **graphes.rs.**
+  - `anneau`, `barres_verticales` (étiquettes éclaircies quand elles se
+    touchent) et `courbes` (plusieurs séries, légende, valeurs rondes sur
+    l'axe des y). `courbes` attend ses pages, V8.2 et V9.4 ; un test la
+    dessine d'ici là.
+  - La heatmap prend `EnPlus { encadree, contour }`.
+  - Les valeurs qui glissent : l'anneau et les barres.
+- **La page d'aujourd'hui en profite déjà :**
+  - un `Contexte` remplace les neuf arguments de `fenetre` et `fiche` ;
+  - « Quand le groupe joue » encadre l'heure qu'il est ;
+  - « Mes heures » a le groupe en contour bleu ;
+  - la forme a son anneau ;
+  - les actes passent en barres.
+- **Le bug KAST/FK** est corrigé : `resume()` garde
+  `DetailManches::leger()` (manches, KAST, premiers sangs, premières
+  morts).
+- **Déplacé vers V9.1**, où ils servent pour la première fois :
+  - le rôle des agents et les icônes de rang en grand (`FORME` 4) ;
+  - le module `valo/`. La nouvelle page s'y écrit à côté de
+    `valo_page.rs`, qui reste l'ancienne page jusqu'à la bascule (le
+    choix dans Bêta). On ne découpe pas un fichier qui va disparaître.
+  - `banc_valo`, qui photographie les pages de `valo/`. Pour qu'il puisse
+    les inclure sans ki-chat autour, `valo/` ne dépend que d'egui, de
+    ki-ui, du protocole, de `graphes` et d'un trait `Images` pour les
+    textures, comme la carte tactique.
+
 ### V9.1 — Le profil (taille L)
 
 La fiche devient une page.
