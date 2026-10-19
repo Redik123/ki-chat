@@ -1123,7 +1123,7 @@ impl<'a> Kpi<'a> {
             dedans.left_top() + Vec2::new(0.0, 15.0),
             Align2::LEFT_TOP,
             &self.valeur,
-            crate::jetons::police::moyenne(texte::KPI),
+            crate::jetons::police::moyenne(ui.ctx(), texte::KPI),
             self.couleur,
         );
         let mut x = dedans.left();

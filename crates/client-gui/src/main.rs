@@ -2169,7 +2169,17 @@ impl KiApp {
         }
         self.catalogue.demarrer();
         if let Some(f) = &self.fiche {
-            if !self.valo.fiche(ctx, f, &self.stats, &self.members, &self.rangs, &self.catalogue) {
+            let cx = valo_page::Contexte {
+                stats: &self.stats,
+                recu: self.stats_recu,
+                esports: &self.esports,
+                activite: &self.activite,
+                moi: self.my_id,
+                membres: &self.members,
+                rangs: &self.rangs,
+                catalogue: &self.catalogue,
+            };
+            if !self.valo.fiche(ctx, f, &cx) {
                 self.fiche = None;
                 self.valo.fermer_fiche();
             }
@@ -4005,18 +4015,18 @@ impl KiApp {
         // La boutique est à soi : elle sort de `self` le temps de la fenêtre,
         // les fiches et les icônes n'y sont lues qu'en lecture.
         let mut boutique = std::mem::take(&mut self.boutique);
-        let demandes = self.valo.fenetre(
-            ctx,
-            &self.stats,
-            self.stats_recu,
-            &self.esports,
-            &self.activite,
-            self.my_id,
-            &self.members,
-            &self.rangs,
-            &self.catalogue,
-            &mut boutique,
-        );
+        // Les champs un à un, et non une méthode : la page s'emprunte à part.
+        let cx = valo_page::Contexte {
+            stats: &self.stats,
+            recu: self.stats_recu,
+            esports: &self.esports,
+            activite: &self.activite,
+            moi: self.my_id,
+            membres: &self.members,
+            rangs: &self.rangs,
+            catalogue: &self.catalogue,
+        };
+        let demandes = self.valo.fenetre(ctx, &cx, &mut boutique);
         self.boutique = boutique;
         for demande in demandes {
             match demande {
