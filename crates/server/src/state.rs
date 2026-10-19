@@ -1644,6 +1644,7 @@ mod tests {
             comptes_joues: true,
             journal_parties: true,
             tactique: true,
+            soiree: true,
             protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");

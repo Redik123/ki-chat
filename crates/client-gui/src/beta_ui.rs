@@ -67,15 +67,16 @@ impl KiApp {
         ui::section(
             ui,
             Icon::Target,
-            "Profil VALORANT",
-            Some("La nouvelle page d'un membre, à la place du chat plutôt que dans une fenêtre."),
+            "Page VALORANT",
+            Some("La nouvelle page du groupe et des fiches, à la place du chat plutôt que dans des fenêtres."),
             |ui| {
-                ui::ligne(ui, "Profil", |ui| {
-                    ui::interrupteur(ui, &mut self.profil_au_centre, "Ouvrir le profil à la place du chat");
+                ui::ligne(ui, "Page", |ui| {
+                    ui::interrupteur(ui, &mut self.valo_au_centre, "Ouvrir la page VALORANT à la place du chat");
                     ui::precision(
                         ui,
-                        "Clic droit sur un membre → sa fiche : elle s'ouvre en grand, au centre. Échap ou « Retour au \
-                         chat » la referme. Coupé, la fiche reste la fenêtre d'avant.",
+                        "Le bouton « Valorant » ouvre l'accueil de la soirée ; clic droit sur un membre → sa fiche, \
+                         dans l'onglet Profil. Échap, « Fermer » ou un clic sur un salon textuel reviennent au chat. \
+                         Coupé, la page et les fiches restent les fenêtres d'avant.",
                     );
                 });
             },

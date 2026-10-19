@@ -1193,10 +1193,13 @@ fn courbe_discrete(p: &Painter, rect: Rect, serie: &[f32]) {
 }
 
 /// Combien de colonnes de `largeur_min` tiennent dans `largeur`, avec
-/// `ecart` entre elles — une au moins, `n` au plus.
+/// `ecart` entre elles — une au moins, `n` au plus — et pas plus qu'il
+/// n'en faut pour des rangées égales : cinq cases sur quatre colonnes font
+/// trois et deux, pas quatre et une seule.
 pub fn colonnes_de_grille(largeur: f32, largeur_min: f32, ecart: f32, n: usize) -> usize {
-    let tiennent = ((largeur + ecart) / (largeur_min + ecart)).floor().max(1.0) as usize;
-    tiennent.min(n.max(1))
+    let n = n.max(1);
+    let tiennent = (((largeur + ecart) / (largeur_min + ecart)).floor().max(1.0) as usize).min(n);
+    n.div_ceil(n.div_ceil(tiennent))
 }
 
 /// Une grille qui passe à la ligne : `n` cases d'égale largeur, autant par
@@ -1225,5 +1228,25 @@ pub fn grille(ui: &mut Ui, n: usize, largeur_min: f32, ecart: f32, mut case: imp
         if i < n {
             ui.add_space(ecart);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Autant de colonnes qu'il en tient, en rangées aussi égales que
+    /// possible.
+    #[test]
+    fn la_grille_equilibre_ses_rangees() {
+        // 4 tiennent : 5 cases font 3 + 2, 8 font 4 + 4, 4 font 4.
+        assert_eq!(colonnes_de_grille(800.0, 180.0, 12.0, 5), 3);
+        assert_eq!(colonnes_de_grille(800.0, 180.0, 12.0, 8), 4);
+        assert_eq!(colonnes_de_grille(800.0, 180.0, 12.0, 4), 4);
+        // 5 tiennent : 7 cases font 4 + 3.
+        assert_eq!(colonnes_de_grille(1000.0, 180.0, 12.0, 7), 4);
+        // Rien ne tient : une colonne ; aucune case : une colonne aussi.
+        assert_eq!(colonnes_de_grille(100.0, 180.0, 12.0, 3), 1);
+        assert_eq!(colonnes_de_grille(800.0, 180.0, 12.0, 0), 1);
     }
 }

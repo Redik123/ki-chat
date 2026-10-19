@@ -1347,9 +1347,22 @@ struct KiApp {
     /// Le bouton « Soundboard » de la barre du bas (onglet Bêta). D'origine,
     /// visible pour qui a déjà des sons dans ses dossiers, caché sinon.
     soundboard_visible: bool,
-    /// Le profil VALORANT prend la place du chat au lieu d'une fenêtre
-    /// (onglet Bêta, V9.1) : la nouvelle page, à côté de l'ancienne.
-    profil_au_centre: bool,
+    /// La page VALORANT et ses fiches prennent la place du chat au lieu de
+    /// leurs fenêtres (onglet Bêta, V9) : la nouvelle page, à côté de
+    /// l'ancienne.
+    valo_au_centre: bool,
+    /// Le serveur raconte la soirée (`Welcome.soiree`).
+    serveur_soiree: bool,
+    /// Le fil de la soirée (`ServerMsg::Soiree`), sa borne, et la dernière
+    /// demande : il se relit toutes les deux minutes tant que l'accueil se
+    /// montre.
+    soiree: Vec<ki_protocol::PartieSoiree>,
+    soiree_depuis: u64,
+    soiree_demandee: Option<std::time::Instant>,
+    /// Ma propre fiche, entière : « Moi » sur la carte de chaleur de
+    /// l'accueil. Demandée une fois par connexion.
+    ma_fiche: Option<ki_protocol::FicheValorant>,
+    ma_fiche_demandee: bool,
     /// Interdiction de veille système pendant le vocal.
     veille: veille::Garde,
 }
@@ -1773,7 +1786,13 @@ impl KiApp {
                 "off" => false,
                 _ => soundboard::Soundboard::a_des_sons(),
             },
-            profil_au_centre: get("profil_au_centre", "off") == "on",
+            valo_au_centre: get("valo_au_centre", "off") == "on",
+            serveur_soiree: false,
+            soiree: Vec::new(),
+            soiree_depuis: 0,
+            soiree_demandee: None,
+            ma_fiche: None,
+            ma_fiche_demandee: false,
             veille: veille::Garde::default(),
         };
         // Instance relancée par le dispositif de secours : le dire. Sans ce
@@ -2166,8 +2185,8 @@ impl KiApp {
     /// de rang se préparent dans [`Self::preparer_fiche`] ; la page
     /// elle-même est dans `valo_page`.
     fn fiche_window(&mut self, ctx: &egui::Context) {
-        // Au centre, la fiche n'a pas de fenêtre : c'est le profil.
-        if self.profil_au_centre {
+        // Au centre, la fiche n'a pas de fenêtre : c'est l'onglet Profil.
+        if self.valo_au_centre {
             return;
         }
         self.preparer_fiche(ctx);
@@ -2181,6 +2200,9 @@ impl KiApp {
                 membres: &self.members,
                 rangs: &self.rangs,
                 catalogue: &self.catalogue,
+                soiree: &self.soiree,
+                soiree_servie: self.serveur_soiree,
+                ma_fiche: self.ma_fiche.as_ref(),
             };
             if !self.valo.fiche(ctx, f, &cx) {
                 self.fiche = None;
@@ -2189,30 +2211,92 @@ impl KiApp {
         }
     }
 
-    /// Le profil VALORANT à la place du chat (onglet Bêta) : la même fiche,
-    /// en page. Échap ou « Retour au chat » le referme.
-    fn profil_panel(&mut self, ui: &mut egui::Ui) {
+    /// La page VALORANT à la place du chat (onglet Bêta) : ses onglets,
+    /// l'accueil et le profil. « Fermer » ou Échap la referment, avec la
+    /// fiche ouverte.
+    fn valo_panel(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.preparer_valo(&ctx);
         self.preparer_fiche(&ctx);
-        let Some(f) = &self.fiche else { return };
-        let cx = valo_page::Contexte {
-            stats: &self.stats,
-            recu: self.stats_recu,
-            esports: &self.esports,
-            activite: &self.activite,
-            moi: self.my_id,
-            membres: &self.members,
-            rangs: &self.rangs,
-            catalogue: &self.catalogue,
+        if self.valo.sur_l_accueil() {
+            self.demander_soiree();
+        }
+        // Ma fiche, une fois : « Moi » sur la carte de chaleur.
+        if !self.ma_fiche_demandee {
+            if let Some(moi) = self.my_id.filter(|_| !self.mes_comptes.is_empty()) {
+                self.ma_fiche_demandee = true;
+                self.send(ClientMsg::FicheValorant { user_id: moi });
+            }
+        }
+        let mut boutique = std::mem::take(&mut self.boutique);
+        let (ouvert, demandes) = {
+            let cx = valo_page::Contexte {
+                stats: &self.stats,
+                recu: self.stats_recu,
+                esports: &self.esports,
+                activite: &self.activite,
+                moi: self.my_id,
+                membres: &self.members,
+                rangs: &self.rangs,
+                catalogue: &self.catalogue,
+                soiree: &self.soiree,
+                soiree_servie: self.serveur_soiree,
+                ma_fiche: self.ma_fiche.as_ref(),
+            };
+            let fiche = self.fiche.as_ref();
+            let valo = &mut self.valo;
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(theme::BG_BASE).inner_margin(marge::egale(espace::XL)))
+                .show(ui, |ui| valo.centre(ui, &cx, fiche, &mut boutique))
+                .inner
         };
-        let valo = &mut self.valo;
-        let ouvert = egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme::BG_BASE).inner_margin(marge::egale(espace::XL)))
-            .show(ui, |ui| valo.profil(ui, f, &cx))
-            .inner;
+        self.boutique = boutique;
+        self.executer_demandes_valo(demandes);
         if !ouvert {
+            self.retour_au_chat();
+        }
+    }
+
+    /// La page VALORANT qui tient la place du chat se referme, avec sa
+    /// fiche : « Fermer », Échap, ou un clic sur un salon textuel.
+    fn retour_au_chat(&mut self) {
+        if self.valo_au_centre && (self.valo.ouvert || self.fiche.is_some()) {
+            self.valo.ouvert = false;
             self.fiche = None;
             self.valo.fermer_fiche();
+        }
+    }
+
+    /// Le fil de la soirée : demandé à l'ouverture de l'accueil, puis toutes
+    /// les deux minutes, et dès que la soirée change (6 h du matin).
+    fn demander_soiree(&mut self) {
+        if !self.serveur_soiree {
+            return;
+        }
+        let depuis = valo_page::debut_de_soiree(chrono::Local::now());
+        let vieille = self.soiree_demandee.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(120));
+        if vieille || depuis != self.soiree_depuis {
+            self.soiree_depuis = depuis;
+            self.soiree_demandee = Some(std::time::Instant::now());
+            self.send(ClientMsg::SoireeValorant { depuis });
+        }
+    }
+
+    /// Ce que la page VALORANT demande : actualiser, ouvrir une fiche ou la
+    /// carte tactique.
+    fn executer_demandes_valo(&mut self, demandes: Vec<valo_page::Demande>) {
+        for demande in demandes {
+            match demande {
+                valo_page::Demande::Actualiser => {
+                    self.ouvrir_stats();
+                    self.soiree_demandee = None;
+                }
+                valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
+                valo_page::Demande::OuvrirTactique => {
+                    self.tactique.ouvert = true;
+                    self.catalogue.demarrer();
+                }
+            }
         }
     }
 
@@ -4043,22 +4127,10 @@ impl KiApp {
     /// icônes de rang, on lui prête la boutique le temps de la fenêtre,
     /// et on exécute ce qu'elle demande — actualiser, ouvrir une fiche.
     fn stats_window(&mut self, ctx: &egui::Context) {
-        if !self.valo.ouvert {
+        if !self.valo.ouvert || self.valo_au_centre {
             return;
         }
-        for f in &self.stats {
-            self.rangs.preparer(ctx, f.fiche.rang.tier);
-            if let Some(pic) = &f.fiche.pic {
-                self.rangs.preparer(ctx, pic.tier);
-            }
-        }
-        // « En direct » montre le rang de ceux qui jouent, fiche ou pas.
-        for m in &self.members {
-            if let Some(tier) = palier_de(m) {
-                self.rangs.preparer(ctx, tier);
-            }
-        }
-        self.catalogue.demarrer();
+        self.preparer_valo(ctx);
         // La boutique est à soi : elle sort de `self` le temps de la fenêtre,
         // les fiches et les icônes n'y sont lues qu'en lecture.
         let mut boutique = std::mem::take(&mut self.boutique);
@@ -4072,15 +4144,31 @@ impl KiApp {
             membres: &self.members,
             rangs: &self.rangs,
             catalogue: &self.catalogue,
+            soiree: &self.soiree,
+            soiree_servie: self.serveur_soiree,
+            ma_fiche: self.ma_fiche.as_ref(),
         };
         let demandes = self.valo.fenetre(ctx, &cx, &mut boutique);
         self.boutique = boutique;
-        for demande in demandes {
-            match demande {
-                valo_page::Demande::Actualiser => self.ouvrir_stats(),
-                valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
+        self.executer_demandes_valo(demandes);
+    }
+
+    /// Les icônes de rang de la page du groupe — les fiches, et le rang de
+    /// ceux qui jouent, fiche ou pas — et le catalogue.
+    fn preparer_valo(&mut self, ctx: &egui::Context) {
+        for f in &self.stats {
+            self.rangs.preparer(ctx, f.fiche.rang.tier);
+            if let Some(pic) = &f.fiche.pic {
+                self.rangs.preparer(ctx, pic.tier);
             }
         }
+        // « En direct » montre le rang de ceux qui jouent, fiche ou pas.
+        for m in &self.members {
+            if let Some(tier) = palier_de(m) {
+                self.rangs.preparer(ctx, tier);
+            }
+        }
+        self.catalogue.demarrer();
     }
 
     /// Ouvre la fiche VALORANT d'un membre et la demande au serveur. Une
@@ -4089,6 +4177,7 @@ impl KiApp {
     /// il s'ouvrirait déjà déplié chez le second.
     fn ouvrir_fiche(&mut self, user_id: UserId, username: String) {
         self.valo.fermer_fiche();
+        self.valo.vers_profil();
         self.fiche = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
         self.send(ClientMsg::FicheValorant { user_id });
     }
@@ -4623,6 +4712,12 @@ impl KiApp {
         // La carte tactique : celle d'un salon de ce serveur.
         self.tactique.recevoir_etat(None);
         self.serveur_tactique = false;
+        // La soirée et ma fiche : celles de ce serveur.
+        self.serveur_soiree = false;
+        self.soiree.clear();
+        self.soiree_demandee = None;
+        self.ma_fiche = None;
+        self.ma_fiche_demandee = false;
         // Nos comptes Riot : ceux de ce serveur.
         self.serveur_comptes_joues = false;
         self.mes_comptes.clear();
@@ -5287,6 +5382,7 @@ impl KiApp {
                 comptes_joues,
                 journal_parties,
                 tactique,
+                soiree,
                 protocole,
                 ..
             } => {
@@ -5322,6 +5418,8 @@ impl KiApp {
                 self.cartes.regles_disponibles = protocole >= 2;
                 // Et pour la carte tactique du salon.
                 self.serveur_tactique = tactique;
+                // Et pour le fil de la soirée.
+                self.serveur_soiree = soiree;
                 // Et pour nos comptes Riot, qu'il envoie juste après.
                 self.serveur_comptes_joues = comptes_joues;
                 self.mes_comptes.clear();
@@ -5780,6 +5878,9 @@ impl KiApp {
                 self.mes_comptes = comptes;
             }
             ServerMsg::FicheValorant { user_id, fiche } => {
+                if Some(user_id) == self.my_id {
+                    self.ma_fiche = fiche.clone();
+                }
                 if let Some(f) = &mut self.fiche {
                     if f.user_id == user_id {
                         f.recue = true;
@@ -5817,6 +5918,12 @@ impl KiApp {
             }
             ServerMsg::TactiqueRefus { message } => {
                 self.tactique.refuser(ki_protocol::safe_display(&message, 200));
+            }
+            ServerMsg::Soiree { depuis, parties } => {
+                // Une réponse d'avant 6 h du matin ne remplace pas la soirée.
+                if depuis == self.soiree_depuis {
+                    self.soiree = parties;
+                }
             }
             ServerMsg::StatsValorant { fiches, esports, activite } => {
                 self.stats = fiches;
@@ -6878,8 +6985,8 @@ impl KiApp {
         self.voice_bar(ui, voice);
         self.sidebar(ui, voice);
         self.roster_panel(ui, voice);
-        if self.profil_au_centre && self.fiche.is_some() {
-            self.profil_panel(ui);
+        if self.valo_au_centre && (self.valo.ouvert || self.fiche.is_some()) {
+            self.valo_panel(ui);
         } else {
             self.chat_panel(ui);
         }
@@ -7227,6 +7334,7 @@ impl KiApp {
                     }
                     if ui::button(ui, Icon::Target, "Valorant").clicked() {
                         self.ouvrir_stats();
+                        self.valo.vers_accueil();
                     }
                     if ui::button(ui, Icon::Film, "Clips").clicked() {
                         self.ouvrir_clips();
@@ -7594,8 +7702,11 @@ impl KiApp {
                                     let selected = self.current == Some(id);
                                     let pastille = self.non_lus.get(&id).filter(|n| n.nb > 0).copied();
                                     let row = channel_row(ui, &ch.name, selected, ChannelKind::Text, pastille, false);
-                                    if row.clicked() && !selected {
-                                        self.join(id);
+                                    if row.clicked() {
+                                        self.retour_au_chat();
+                                        if !selected {
+                                            self.join(id);
+                                        }
                                     }
                                 }
 
@@ -7613,6 +7724,7 @@ impl KiApp {
                                     let contexte = self.contexte_portes();
                                     let mut actions = Vec::new();
                                     let mut lire = None;
+                                    let mut clique = false;
                                     for i in temporaires {
                                         let Some(ch) = self.channels.get(i) else { continue };
                                         let selected = self.current == Some(ch.id);
@@ -7625,8 +7737,11 @@ impl KiApp {
                                         };
                                         let row = channel_row(ui, &ch.name, selected, ChannelKind::Text, pastille, true)
                                             .on_hover_text(bulle);
-                                        if row.clicked() && !selected {
-                                            lire = Some(ch.id);
+                                        if row.clicked() {
+                                            clique = true;
+                                            if !selected {
+                                                lire = Some(ch.id);
+                                            }
                                         }
                                         // Fermer la porte depuis son salon : la mienne,
                                         // ou n'importe laquelle avec « Expulser ».
@@ -7643,6 +7758,9 @@ impl KiApp {
                                                 }
                                             });
                                         }
+                                    }
+                                    if clique {
+                                        self.retour_au_chat();
                                     }
                                     if let Some(id) = lire {
                                         self.join(id);
@@ -15292,7 +15410,7 @@ impl KiApp {
         storage.set_string("loupedeck", if self.loupedeck_etat.actif { "on" } else { "off" }.into());
         storage.set_string("loupedeck_config", self.loupedeck_etat.config.ecrire());
         storage.set_string("soundboard_visible", if self.soundboard_visible { "on" } else { "off" }.into());
-        storage.set_string("profil_au_centre", if self.profil_au_centre { "on" } else { "off" }.into());
+        storage.set_string("valo_au_centre", if self.valo_au_centre { "on" } else { "off" }.into());
         storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
         storage.set_string(
             "output_device",

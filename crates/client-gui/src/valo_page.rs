@@ -25,7 +25,7 @@ use chrono::{Datelike, TimeZone, Timelike};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, RichText, Sense, Ui, Vec2};
 use ki_protocol::{
     nom_de_rang, Bilan, BilanMembre, FicheMembre, FicheValorant, JeuEtat, JeuStatut, MatchEsport,
-    MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, Member, PointRR,
+    MatchResume, Medaille, MedailleGagnee, Medailles, MedaillesDuMatch, Member, PartieSoiree, PointRR,
     PositionMmr, UserId,
 };
 
@@ -36,8 +36,10 @@ use crate::ui;
 use crate::valo_catalogue::Catalogue;
 use crate::{boutique, rangs, FicheOuverte};
 
+mod accueil;
 #[cfg(debug_assertions)]
 pub(crate) mod banc;
+mod centre;
 mod profil;
 
 // ---------------------------------------------------------------------
@@ -238,6 +240,8 @@ pub enum Tri {
 pub enum Demande {
     Actualiser,
     OuvrirFiche(UserId, String),
+    /// La carte tactique, depuis son onglet de la page au centre.
+    OuvrirTactique,
 }
 
 // ---------------------------------------------------------------------
@@ -270,6 +274,13 @@ pub struct PageValo {
     fiche_plus: bool,
     /// La vue du profil, quand la fiche prend la place du chat.
     vue_profil: profil::VueProfil,
+    /// L'onglet de la page au centre.
+    onglet_centre: centre::OngletCentre,
+    /// La carte de chaleur de l'accueil : le groupe, moi, ou les deux.
+    heures: accueil::Heures,
+    /// Le classement de l'accueil se trie par les 7 jours la première
+    /// fois qu'il se montre ; ensuite, comme on l'a laissé.
+    tri_accueil_pose: bool,
 }
 
 impl PageValo {
@@ -291,6 +302,9 @@ impl PageValo {
             survol: None,
             fiche_plus: false,
             vue_profil: profil::VueProfil::Ensemble,
+            onglet_centre: centre::OngletCentre::Accueil,
+            heures: accueil::Heures::Groupe,
+            tri_accueil_pose: false,
         }
     }
 
@@ -414,6 +428,24 @@ impl<'a> Annuaire<'a> {
 fn bornes_de_fenetre(ctx: &egui::Context) -> (f32, f32) {
     let ecran = ctx.content_rect();
     ((ecran.width() - 40.0).max(360.0), (ecran.height() - 40.0).max(300.0))
+}
+
+/// Le début de la soirée qu'on vit : le dernier 6 h du matin à l'heure
+/// locale — une partie à 1 h du matin est encore de la veille.
+pub fn debut_de_soiree(maintenant: chrono::DateTime<chrono::Local>) -> u64 {
+    let six = |jour: chrono::NaiveDate| {
+        jour.and_hms_opt(6, 0, 0)
+            .and_then(|t| t.and_local_timezone(chrono::Local).earliest())
+            .map_or(0, |t| t.timestamp_millis().max(0) as u64)
+    };
+    let jour = maintenant.date_naive();
+    let ce_matin = six(jour);
+    let ms = maintenant.timestamp_millis().max(0) as u64;
+    if ms >= ce_matin {
+        ce_matin
+    } else {
+        jour.pred_opt().map_or(ce_matin.saturating_sub(JOUR_MS), six)
+    }
 }
 
 fn maintenant_ms() -> u64 {
@@ -1055,6 +1087,14 @@ pub struct Contexte<'a> {
     pub membres: &'a [Member],
     pub rangs: &'a rangs::Rangs,
     pub catalogue: &'a Catalogue,
+    /// Les parties du groupe depuis 6 h du matin (`ServerMsg::Soiree`).
+    pub soiree: &'a [PartieSoiree],
+    /// Le serveur raconte la soirée (`Welcome.soiree`) : sans lui, le fil
+    /// le dit.
+    pub soiree_servie: bool,
+    /// Ma propre fiche, entière, si le serveur l'a envoyée : « Moi » sur la
+    /// carte de chaleur de l'accueil.
+    pub ma_fiche: Option<&'a FicheValorant>,
 }
 
 impl PageValo {
@@ -1062,7 +1102,7 @@ impl PageValo {
     /// boutique est prêtée le temps de l'onglet. Rend ce que la page
     /// demande : actualiser, ouvrir une fiche.
     pub fn fenetre(&mut self, ctx: &egui::Context, cx: &Contexte<'_>, boutique: &mut boutique::Lecteur) -> Vec<Demande> {
-        let Contexte { stats, recu, esports, activite, moi: my_id, membres, rangs, catalogue } = *cx;
+        let Contexte { stats, recu, esports, activite, moi: my_id, membres, rangs, catalogue, .. } = *cx;
         let mut demandes = Vec::new();
         if !self.ouvert {
             return demandes;
@@ -1190,8 +1230,10 @@ impl PageValo {
     ) {
         records(ui, lignes, self.periode, rangs);
         ui.add_space(espace::XL);
+        ui.label(RichText::new("Classement").strong().size(texte::CORPS));
+        ui.add_space(espace::XS);
         self.classement(ui, lignes, noms, my_id, rangs, demandes);
-        medailles_du_groupe(ui, lignes, noms, my_id, demandes);
+        medailles_du_groupe(ui, lignes, noms, my_id, demandes, &MEDAILLES_DU_GROUPE);
         duos(ui, lignes, noms);
         quand_le_groupe_joue(ui, activite);
     }
@@ -1217,8 +1259,6 @@ impl PageValo {
         let (tri, desc) = (self.tri, self.tri_desc);
         let mut nouveau_tri: Option<Tri> = None;
 
-        ui.label(RichText::new("Classement").strong().size(texte::CORPS));
-        ui.add_space(espace::XS);
         egui::ScrollArea::horizontal().id_salt("valo_classement").show(ui, |ui| {
             egui::Grid::new("stats_classement").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
                 for (titre, cle, masquable) in COLONNES {
@@ -1671,6 +1711,7 @@ fn medailles_du_groupe(
     noms: &Annuaire,
     my_id: Option<UserId>,
     demandes: &mut Vec<Demande>,
+    colonnes: &[Medaille],
 ) {
     let avec: Vec<(&Ligne, &Medailles)> = lignes
         .iter()
@@ -1702,7 +1743,7 @@ fn medailles_du_groupe(
     egui::ScrollArea::horizontal().id_salt("valo_medailles").show(ui, |ui| {
         egui::Grid::new("stats_medailles").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
             en_tete(ui, "Joueur");
-            for m in MEDAILLES_DU_GROUPE {
+            for &m in colonnes {
                 en_tete(ui, m.nom());
             }
             en_tete(ui, "Toutes");
@@ -1716,7 +1757,7 @@ fn medailles_du_groupe(
                 if ui.add(egui::Label::new(pseudo).sense(Sense::click())).on_hover_text("ouvrir sa fiche").clicked() {
                     demandes.push(Demande::OuvrirFiche(l.f.user_id, l.f.username.clone()));
                 }
-                for m in MEDAILLES_DU_GROUPE {
+                for &m in colonnes {
                     let n = fois(md, m);
                     if n == 0 {
                         cellule(ui, TIRET, TEXT_FAINT);
@@ -3232,11 +3273,11 @@ mod tests {
         // garde le Spike Rush dans la table, « Compétitif » l'écarte.
         let rangs = rangs::Rangs::new();
         let catalogue = Catalogue::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, maintenant);
         assert_eq!(vue.e.len(), 5);
         assert_eq!(vue.b.matchs, 5, "un Spike Rush a des manches, il compte");
         assert_eq!(vue.e[0].id, "a", "du plus récent au plus ancien");
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, maintenant);
         assert_eq!(vue.e.len(), 2);
         assert_eq!(vue.b.rr, 20);
         assert!(vue.point_de("a").is_some());
@@ -3446,7 +3487,7 @@ mod tests {
                         dessiner(&ctx, souris, |ui| {
                             let ctx = ui.ctx();
                             let demandes =
-                                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
                             assert!(demandes.is_empty());
                         });
                     }
@@ -3459,7 +3500,7 @@ mod tests {
                 page.tri_desc = !page.tri_desc;
                 dessiner(&ctx, None, |ui| {
                     let ctx = ui.ctx();
-                    page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                    page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
                 });
             }
             page.onglet = Onglet::Matchs;
@@ -3468,13 +3509,13 @@ mod tests {
             page.plus = true;
             dessiner(&ctx, None, |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
             });
             // Avant la réponse du serveur, et sans personne de lié.
             dessiner(&ctx, None, |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: false, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
-                page.fenetre(ctx, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: false, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
             });
             assert!(page.ouvert);
 
@@ -3494,7 +3535,7 @@ mod tests {
                         for souris in [None, Some(Pos2::new(200.0, 250.0)), Some(Pos2::new(320.0, 600.0))] {
                             dessiner(&ctx, souris, |ui| {
                                 let ctx = ui.ctx();
-                                assert!(page.fiche(ctx, ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }));
+                                assert!(page.fiche(ctx, ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }));
                             });
                         }
                     }
@@ -3505,7 +3546,7 @@ mod tests {
 
             // Le profil au centre : toutes ses vues, sur les mêmes fiches,
             // une ligne de match dépliée ; il reste ouvert sans Échap.
-            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue };
+            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None };
             for ouverte in [&attente, &sans, &vide, &pauvre, &riche] {
                 for vue in [profil::VueProfil::Ensemble, profil::VueProfil::Matchs, profil::VueProfil::Agents, profil::VueProfil::Cartes, profil::VueProfil::Medailles] {
                     page.vue_profil = vue;
@@ -3595,10 +3636,10 @@ mod tests {
         let rangs = rangs::Rangs::new();
         let catalogue = Catalogue::new();
         let deux = [membre(1, 10), membre(2, 20)];
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, maintenant);
         assert!(vue.repere(Bilan::kd, 1.0).is_none());
         let trois = [membre(1, 10), membre(2, 20), membre(3, 30)];
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, maintenant);
         let (mediane, max) = vue.repere(Bilan::kd, 5.0).expect("trois membres assez classés");
         assert_eq!(mediane, 2.0);
         assert_eq!(max, 5.0, "le plafond prend en compte la valeur du membre");
@@ -3661,8 +3702,8 @@ mod tests {
         for _ in 0..4 {
             ctx.run_ui(entree(), |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
-                page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue });
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
+                page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None });
             }).drop_without_applying_deltas();
         }
         let groupe = ctx.memory(|m| m.area_rect(egui::Id::new("valo_page_v5"))).expect("la page est ouverte");
@@ -3736,7 +3777,7 @@ mod tests {
             for souris in [None, Some(Pos2::new(200.0, 160.0))] {
                 dessiner(&ctx, souris, |ui| {
                     let ctx = ui.ctx();
-                    page.fenetre(ctx, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                    page.fenetre(ctx, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None }, &mut boutique);
                 });
             }
         }

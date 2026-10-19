@@ -73,6 +73,13 @@ impl PageValo {
             ouvert = false;
         }
         ui.add_space(espace::M);
+        self.profil_contenu(ui, ouverte, cx);
+        ouvert
+    }
+
+    /// Le profil sans sa barre : dans l'onglet Profil de la page au
+    /// centre, comme seul au centre.
+    pub(super) fn profil_contenu(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>) {
         match (ouverte.recue, &ouverte.fiche) {
             (false, _) => {
                 ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
@@ -82,7 +89,6 @@ impl PageValo {
             }
             (true, Some(fiche)) => self.profil_corps(ui, &ouverte.username, fiche, cx),
         }
-        ouvert
     }
 
     fn profil_corps(&mut self, ui: &mut Ui, username: &str, fiche: &FicheValorant, cx: &Contexte<'_>) {

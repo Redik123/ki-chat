@@ -281,6 +281,11 @@ pub enum ClientMsg {
     ChoixJournal { oui: bool },
     /// Toutes les fiches des membres liés, pour la page de stats.
     StatsValorant,
+    /// Les parties du groupe depuis `depuis` (ms Unix) : le fil de la
+    /// soirée — seulement vers un serveur qui l'a dit (`Welcome.soiree`).
+    /// `depuis` est le dernier 6 h du matin à l'heure du client, que le
+    /// serveur ne connaît pas.
+    SoireeValorant { depuis: u64 },
     /// Une commande au bot musique (permission « Contrôler la musique »).
     Musique { commande: CommandeMusique },
     /// Un geste à la table de cartes de son salon vocal — seulement vers un
@@ -634,6 +639,11 @@ pub enum ServerMsg {
         /// antérieur, chacun dessine sur la sienne.
         #[serde(default)]
         tactique: bool,
+        /// Ce serveur raconte la soirée du groupe et comprend
+        /// `ClientMsg::SoireeValorant` (depuis V9.2) ; un serveur antérieur
+        /// le prendrait pour un message invalide.
+        #[serde(default)]
+        soiree: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -772,6 +782,14 @@ pub enum ServerMsg {
         /// `jour * 24 + heure`. Vide si rien — ou si le serveur est d'avant.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         activite: Vec<u16>,
+    },
+    /// La réponse à `SoireeValorant` : les parties du groupe depuis
+    /// `depuis`, de la plus récente à la plus ancienne, une seule par match
+    /// joué ensemble.
+    Soiree {
+        depuis: u64,
+        #[serde(default)]
+        parties: Vec<PartieSoiree>,
     },
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
@@ -2714,6 +2732,74 @@ pub struct MedailleGagnee {
     pub valeur: f32,
     #[serde(default)]
     pub record: bool,
+}
+
+/// Les parties d'une soirée, au plus : au-delà, les plus anciennes
+/// restent hors du fil.
+pub const SOIREE_PARTIES_MAX: usize = 40;
+/// Une soirée remonte au plus à ça : un `depuis` plus ancien est ramené à
+/// cette borne.
+pub const SOIREE_MAX_MS: u64 = 36 * 3_600_000;
+
+/// Une partie de la soirée, telle que le groupe l'a jouée : une ligne par
+/// membre qui y était — deux, trois, cinq pour une partie ensemble.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PartieSoiree {
+    /// Le match chez HenrikDev ; vide pour un match sans identifiant, qui
+    /// reste seul.
+    #[serde(default)]
+    pub id: String,
+    /// Son début, en millisecondes Unix.
+    pub date: u64,
+    #[serde(default)]
+    pub carte: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub duree_s: u32,
+    #[serde(default)]
+    pub joueurs: Vec<JoueurSoiree>,
+}
+
+/// La ligne d'un membre dans une partie de la soirée.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JoueurSoiree {
+    pub user_id: UserId,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub kills: u16,
+    #[serde(default)]
+    pub deaths: u16,
+    #[serde(default)]
+    pub assists: u16,
+    #[serde(default)]
+    pub score: u32,
+    /// Les manches de son équipe, gagnées / perdues.
+    #[serde(default)]
+    pub manches: (u8, u8),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gagne: Option<bool>,
+    /// Ses manches une à une, `V` ou `D` ; vide sans détail.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deroule: String,
+    /// Sa note de performance, 0 si inconnue ; MVP comme
+    /// [`MatchResume::mvp`].
+    #[serde(default)]
+    pub perf: u16,
+    #[serde(default)]
+    pub mvp: u8,
+    /// Les RR que la partie lui a valus, s'il était en classé.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_rr: Option<i32>,
+    /// Son palier avant et après la partie (0 : inconnu) : un passage de
+    /// palier se raconte dans le fil.
+    #[serde(default)]
+    pub tier_avant: u8,
+    #[serde(default)]
+    pub tier: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub medailles: Vec<MedailleGagnee>,
 }
 
 /// Les médailles d'un match : son id (celui de [`MatchResume::id`]), son
@@ -6564,7 +6650,8 @@ mod tests {
     #[test]
     fn un_serveur_d_avant_les_cartes_ne_les_sert_pas() {
         let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
-        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, tactique, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, tactique, soiree, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        assert!(!soiree, "ni ne raconte la soirée");
         assert!(!cartes);
         assert!(!comptes_joues, "un serveur d'avant V8.1 ne lit pas le compte joué");
         assert!(!journal_parties, "ni ne tient le journal des parties");

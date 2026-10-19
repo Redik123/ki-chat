@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 
 use super::*;
-use ki_protocol::{CompteMedaille, DetailManches, MedailleGagnee, MedaillesDuMatch, RangValorant, StatsSaison};
+use ki_protocol::{
+    CompteMedaille, DetailManches, JoueurSoiree, MedailleGagnee, MedaillesDuMatch, PartieSoiree, RangValorant, StatsSaison,
+};
 
 /// La fenêtre : assez large pour la plus large scène, assez haute pour
 /// une page entière.
@@ -40,23 +42,34 @@ pub(crate) fn lancer(dossier: PathBuf) -> eframe::Result {
     )
 }
 
+/// Ce qu'une scène montre : l'accueil de la page au centre, ou un profil
+/// dans une de ses vues.
+#[derive(Clone, Copy)]
+enum Quoi {
+    Accueil { soiree: bool },
+    Profil(profil::VueProfil),
+}
+
 /// Une scène : son nom de fichier, la fiche ouverte, la largeur de la
-/// colonne et la vue du profil.
+/// colonne et ce qu'elle montre.
 struct Scene {
     nom: &'static str,
     fiche: usize,
     largeur: f32,
-    vue: profil::VueProfil,
+    quoi: Quoi,
 }
 
-const SCENES: [Scene; 7] = [
-    Scene { nom: "profil-riche", fiche: 0, largeur: 980.0, vue: profil::VueProfil::Ensemble },
-    Scene { nom: "profil-etroit", fiche: 0, largeur: 720.0, vue: profil::VueProfil::Ensemble },
-    Scene { nom: "profil-large", fiche: 0, largeur: 1440.0, vue: profil::VueProfil::Ensemble },
-    Scene { nom: "profil-matchs", fiche: 0, largeur: 980.0, vue: profil::VueProfil::Matchs },
-    Scene { nom: "profil-medailles", fiche: 0, largeur: 980.0, vue: profil::VueProfil::Medailles },
-    Scene { nom: "profil-pauvre", fiche: 1, largeur: 980.0, vue: profil::VueProfil::Ensemble },
-    Scene { nom: "profil-vide", fiche: 2, largeur: 980.0, vue: profil::VueProfil::Ensemble },
+const SCENES: [Scene; 10] = [
+    Scene { nom: "accueil", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: true } },
+    Scene { nom: "accueil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Accueil { soiree: true } },
+    Scene { nom: "accueil-serveur-d-avant", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: false } },
+    Scene { nom: "profil-riche", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
+    Scene { nom: "profil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
+    Scene { nom: "profil-large", fiche: 0, largeur: 1440.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
+    Scene { nom: "profil-matchs", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Matchs) },
+    Scene { nom: "profil-medailles", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Medailles) },
+    Scene { nom: "profil-pauvre", fiche: 1, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
+    Scene { nom: "profil-vide", fiche: 2, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
 ];
 
 struct Banc {
@@ -69,8 +82,10 @@ struct Banc {
     membres: Vec<Member>,
     activite: Vec<u16>,
     ouvertes: Vec<FicheOuverte>,
+    soiree: Vec<PartieSoiree>,
     rangs: rangs::Rangs,
     catalogue: Catalogue,
+    boutique: boutique::Lecteur,
 }
 
 impl Banc {
@@ -99,7 +114,21 @@ impl Banc {
                 fiche: f.resume(5, 10),
             })
             .collect();
-        let membres = noms.iter().enumerate().map(|(i, nom)| membre(i as UserId + 1, nom)).collect();
+        let mut membres: Vec<Member> = noms.iter().enumerate().map(|(i, nom)| membre(i as UserId + 1, nom)).collect();
+        // Pandora joue en ce moment, Lina est en file, Kevin est parti.
+        membres[2].jeu = Some(JeuStatut {
+            etat: JeuEtat::EnJeu,
+            file: "competitive".into(),
+            carte: "Split".into(),
+            score_allie: 7,
+            score_adverse: 5,
+            party_taille: 1,
+            party_max: 5,
+            rang: 13,
+            ..Default::default()
+        });
+        membres[4].jeu = Some(JeuStatut { etat: JeuEtat::Menus, file: "competitive".into(), party_taille: 2, party_max: 5, ..Default::default() });
+        membres[3].online = false;
         // Une soirée pauvre : trois classés ; puis rien du tout.
         let pauvre = FicheValorant { matchs: fiches[3].matchs[..3].to_vec(), historique_rr: fiches[3].historique_rr[..3].to_vec(), saisons: Vec::new(), medailles: None, ..fiches[3].clone() };
         let ouvertes = vec![
@@ -120,8 +149,10 @@ impl Banc {
             membres,
             activite: activite_du_groupe(),
             ouvertes,
+            soiree: soiree_inventee(maintenant),
             rangs: rangs::Rangs::new(),
             catalogue: Catalogue::new(),
+            boutique: boutique::Lecteur::new(),
         }
     }
 }
@@ -138,7 +169,7 @@ impl eframe::App for Banc {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         };
-        self.page.vue_profil = scene.vue;
+        let soiree_servie = !matches!(scene.quoi, Quoi::Accueil { soiree: false });
         let cx = Contexte {
             stats: &self.stats,
             recu: true,
@@ -148,16 +179,29 @@ impl eframe::App for Banc {
             membres: &self.membres,
             rangs: &self.rangs,
             catalogue: &self.catalogue,
+            soiree: if soiree_servie { &self.soiree } else { &[] },
+            soiree_servie,
+            ma_fiche: self.ouvertes[0].fiche.as_ref(),
         };
         let ouverte = &self.ouvertes[scene.fiche];
+        let page = &mut self.page;
+        let boutique = &mut self.boutique;
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::BG_BASE)).show(ui, |ui| {
             let colonne = Rect::from_min_size(ui.max_rect().min, Vec2::new(scene.largeur, ui.max_rect().height()));
             ui.painter().rect_filled(colonne, 0.0, theme::BG_BASE);
             let mut dedans = ui.new_child(egui::UiBuilder::new().max_rect(colonne.shrink(espace::XL)));
-            self.page.profil(&mut dedans, ouverte, &cx);
+            match scene.quoi {
+                Quoi::Accueil { .. } => {
+                    page.vers_accueil();
+                    page.heures = accueil::Heures::LesDeux;
+                    let _ = page.centre(&mut dedans, &cx, Some(ouverte), boutique);
+                }
+                Quoi::Profil(vue) => {
+                    page.vue_profil = vue;
+                    page.profil(&mut dedans, ouverte, &cx);
+                }
+            }
         });
-        // La scène suivante change de vue : celle-ci ne doit pas la garder.
-        self.page.vue_profil = scene.vue;
 
         let image = ctx.input(|i| {
             i.raw.events.iter().find_map(|e| match e {
@@ -415,6 +459,70 @@ fn medailles_inventees(matchs: &[MatchResume], maintenant: u64) -> ki_protocol::
             })
             .collect(),
     }
+}
+
+/// Une soirée de cinq parties, la plus récente il y a vingt minutes : trois
+/// jouées ensemble, une seule pour Pandora, et Jerem qui passe Diamant 1.
+fn soiree_inventee(maintenant: u64) -> Vec<PartieSoiree> {
+    let mut des = Des(0x50_1e);
+    let mut joueur = |user_id: UserId, agent: &str, gagne: bool, manches: (u8, u8), mvp: u8, tiers: (u8, u8)| {
+        let deroule: String = (0..manches.0 + manches.1).map(|k| if k % 3 == 1 { 'D' } else { 'V' }).collect();
+        let kills = des.entre(12, 26) as u16;
+        JoueurSoiree {
+            user_id,
+            agent: agent.into(),
+            kills,
+            deaths: des.entre(10, 19) as u16,
+            assists: des.entre(2, 9) as u16,
+            score: u32::from(kills) * 230,
+            manches,
+            gagne: Some(gagne),
+            deroule: if gagne { deroule } else { deroule.replace('V', "x").replace('D', "V").replace('x', "D") },
+            perf: des.entre(260, 470) as u16,
+            mvp,
+            delta_rr: Some(if gagne { des.entre(15, 23) as i32 } else { -(des.entre(12, 18) as i32) }),
+            tier_avant: tiers.0,
+            tier: tiers.1,
+            medailles: if mvp == ki_protocol::MVP_DU_MATCH {
+                vec![MedailleGagnee { medaille: Medaille::PremiersSangs, valeur: 4.0, record: false }]
+            } else {
+                Vec::new()
+            },
+        }
+    };
+    let minutes = |m: u64| maintenant.saturating_sub(m * 60_000);
+    let partie = |date, carte: &str, joueurs: Vec<JoueurSoiree>| PartieSoiree {
+        id: format!("soir-{date}"),
+        date,
+        carte: carte.into(),
+        mode: MODE_CLASSE.into(),
+        duree_s: 2_100,
+        joueurs,
+    };
+    vec![
+        partie(
+            minutes(20),
+            "Lotus",
+            vec![
+                joueur(2, "Raze", true, (13, 11), ki_protocol::MVP_DU_MATCH, (18, 19)),
+                joueur(1, "Jett", true, (13, 11), 0, (16, 16)),
+                joueur(4, "Sova", true, (13, 11), 0, (11, 11)),
+            ],
+        ),
+        partie(minutes(65), "Haven", vec![joueur(1, "Jett", false, (10, 13), 0, (16, 16)), joueur(2, "Raze", false, (10, 13), 0, (18, 18))]),
+        partie(minutes(80), "Sunset", vec![joueur(3, "Sage", true, (13, 8), ki_protocol::MVP_D_EQUIPE, (13, 13))]),
+        partie(
+            minutes(115),
+            "Ascent",
+            vec![
+                joueur(1, "Jett", true, (13, 6), ki_protocol::MVP_DU_MATCH, (16, 16)),
+                joueur(2, "Jett", true, (13, 6), 0, (18, 18)),
+                joueur(4, "Fade", true, (13, 6), 0, (11, 11)),
+                joueur(5, "Omen", true, (13, 6), 0, (14, 14)),
+            ],
+        ),
+        partie(minutes(160), "Bind", vec![joueur(5, "Omen", false, (8, 13), 0, (14, 14)), joueur(4, "Sova", false, (8, 13), 0, (11, 11))]),
+    ]
 }
 
 /// Les parties du groupe par heure de la semaine, en UTC : le soir, plus
