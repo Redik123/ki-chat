@@ -1032,25 +1032,29 @@ fn en_direct(
 // La page du groupe
 // ---------------------------------------------------------------------
 
+/// Ce que la page lit de l'application, prêté le temps d'une image : ce
+/// que le serveur a envoyé, et de quoi nommer et illustrer.
+#[derive(Clone, Copy)]
+pub struct Contexte<'a> {
+    /// Les fiches du groupe (`StatsValorant`).
+    pub stats: &'a [FicheMembre],
+    /// Elles sont arrivées, même vides.
+    pub recu: bool,
+    pub esports: &'a [MatchEsport],
+    /// Les parties du groupe par heure de la semaine, en UTC.
+    pub activite: &'a [u16],
+    pub moi: Option<UserId>,
+    pub membres: &'a [Member],
+    pub rangs: &'a rangs::Rangs,
+    pub catalogue: &'a Catalogue,
+}
+
 impl PageValo {
-    /// La fenêtre du groupe. `stats`, `recu`, `esports` et `activite`
-    /// viennent de l'application, telles que le serveur les a envoyées ;
-    /// la boutique est prêtée le temps de l'onglet. Rend ce que la page
+    /// La fenêtre du groupe, sur ce que l'application lui prête ; la
+    /// boutique est prêtée le temps de l'onglet. Rend ce que la page
     /// demande : actualiser, ouvrir une fiche.
-    #[allow(clippy::too_many_arguments)]
-    pub fn fenetre(
-        &mut self,
-        ctx: &egui::Context,
-        stats: &[FicheMembre],
-        recu: bool,
-        esports: &[MatchEsport],
-        activite: &[u16],
-        my_id: Option<UserId>,
-        membres: &[Member],
-        rangs: &rangs::Rangs,
-        catalogue: &Catalogue,
-        boutique: &mut boutique::Lecteur,
-    ) -> Vec<Demande> {
+    pub fn fenetre(&mut self, ctx: &egui::Context, cx: &Contexte<'_>, boutique: &mut boutique::Lecteur) -> Vec<Demande> {
+        let Contexte { stats, recu, esports, activite, moi: my_id, membres, rangs, catalogue } = *cx;
         let mut demandes = Vec::new();
         if !self.ouvert {
             return demandes;
@@ -1799,7 +1803,8 @@ fn quand_le_groupe_joue(ui: &mut Ui, activite: &[u16]) {
     ui.add_space(espace::XL);
     ui::section_label(ui, "Quand le groupe joue");
     ui::hint(ui, "les parties commencées sur 30 jours, tous modes, à l'heure locale");
-    graphes::heatmap_semaine(ui, &locale, |jour, heure| {
+    let plus = graphes::EnPlus { encadree: Some(graphes::case_de_maintenant()), contour: None };
+    graphes::heatmap_semaine(ui, &locale, plus, |jour, heure| {
         let n = locale.get(jour * 24 + heure).copied().unwrap_or(0);
         format!(
             "{} {heure}h–{}h · {} · heure locale, à une heure près au changement d'heure",
@@ -1948,21 +1953,14 @@ struct Vue<'a> {
     catalogue: &'a Catalogue,
     /// Les bilans du groupe s'il a déjà été reçu — pour la médiane.
     groupe: Vec<Ligne<'a>>,
+    /// Les parties du groupe par heure, en UTC : le contour de « Mes
+    /// heures ».
+    activite: &'a [u16],
 }
 
 impl<'a> Vue<'a> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        username: &'a str,
-        fiche: &'a FicheValorant,
-        periode: PeriodeFiche,
-        classe: bool,
-        stats: &'a [FicheMembre],
-        membres: &'a [Member],
-        rangs: &'a rangs::Rangs,
-        catalogue: &'a Catalogue,
-        maintenant: u64,
-    ) -> Self {
+    fn new(username: &'a str, fiche: &'a FicheValorant, periode: PeriodeFiche, classe: bool, cx: &Contexte<'a>, maintenant: u64) -> Self {
+        let Contexte { stats, membres, rangs, catalogue, activite, .. } = *cx;
         let (depuis, derniers) = periode.fenetre(maintenant);
         let mut e: Vec<&MatchResume> = fiche
             .matchs
@@ -1984,7 +1982,7 @@ impl<'a> Vue<'a> {
         }
         b.rr = p.iter().fold(0i32, |acc, x| acc.saturating_add(x.delta));
         let (groupe, _) = lignes_du_groupe(stats, maintenant);
-        Self { username, fiche, e, p, b, classe, periode, noms: Annuaire::new(stats, membres), rangs, catalogue, groupe }
+        Self { username, fiche, e, p, b, classe, periode, noms: Annuaire::new(stats, membres), rangs, catalogue, groupe, activite }
     }
 
     /// Les matchs à manches de la sélection, ceux qui pèsent.
@@ -2043,15 +2041,7 @@ impl<'a> Vue<'a> {
 impl PageValo {
     /// La fiche d'un membre : une page déroulante à deux filtres. Rend
     /// `false` quand elle se ferme.
-    pub fn fiche(
-        &mut self,
-        ctx: &egui::Context,
-        ouverte: &FicheOuverte,
-        stats: &[FicheMembre],
-        membres: &[Member],
-        rangs: &rangs::Rangs,
-        catalogue: &Catalogue,
-    ) -> bool {
+    pub fn fiche(&mut self, ctx: &egui::Context, ouverte: &FicheOuverte, cx: &Contexte<'_>) -> bool {
         let mut open = true;
         let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
         let titre = format!("VALORANT — {}", ouverte.username);
@@ -2074,7 +2064,7 @@ impl PageValo {
                     ui.label(RichText::new("pas de compte Riot lié — ou pas encore de fiche.").color(TEXT_DIM));
                 }
                 (true, Some(fiche)) => {
-                    self.fiche_corps(ui, &ouverte.username, fiche, stats, membres, rangs, catalogue);
+                    self.fiche_corps(ui, &ouverte.username, fiche, cx);
                 }
             });
         open
@@ -2082,17 +2072,8 @@ impl PageValo {
 
     /// Le corps de la fiche : l'identité et les filtres en tête, puis les
     /// sections qui se déroulent.
-    #[allow(clippy::too_many_arguments)]
-    fn fiche_corps(
-        &mut self,
-        ui: &mut Ui,
-        username: &str,
-        fiche: &FicheValorant,
-        stats: &[FicheMembre],
-        membres: &[Member],
-        rangs: &rangs::Rangs,
-        catalogue: &Catalogue,
-    ) {
+    fn fiche_corps(&mut self, ui: &mut Ui, username: &str, fiche: &FicheValorant, cx: &Contexte<'_>) {
+        let catalogue = cx.catalogue;
         // L'identité sur sa ligne — sur sa carte de joueur quand on la
         // connaît —, les filtres sur la leur, comme la ligne d'onglets de
         // la page du groupe. Six boutons et un Riot ID sur une seule ligne
@@ -2119,17 +2100,7 @@ impl PageValo {
         });
         ui.add_space(espace::S);
 
-        let vue = Vue::new(
-            username,
-            fiche,
-            self.fiche_periode,
-            self.fiche_classe,
-            stats,
-            membres,
-            rangs,
-            catalogue,
-            maintenant_ms(),
-        );
+        let vue = Vue::new(username, fiche, self.fiche_periode, self.fiche_classe, cx, maintenant_ms());
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             en_tete_fiche(ui, &vue);
             ui.add_space(espace::L);
@@ -2576,6 +2547,13 @@ fn forme(ui: &mut Ui, vue: &Vue) {
             .unwrap_or_default()
     };
     ui.horizontal(|ui| {
+        // La part des victoires d'un coup d'œil, à côté de leur détail.
+        if v + d > 0 {
+            let part = v as f32 / (v + d) as f32;
+            let couleur = if part >= 0.5 { SPEAK } else { DANGER };
+            graphes::anneau(ui, egui::Id::new("fiche_anneau"), part, 34.0, couleur, &format!("{:.0}", part * 100.0))
+                .on_hover_text(format!("{:.0} % de victoires sur les matchs classés récents", part * 100.0));
+        }
         ui.label(RichText::new("Forme").color(TEXT_DIM).size(texte::PETIT));
         graphes::bande_forme(ui, &resultats, Vec2::new(8.0, 12.0), Some(&info));
         ui.label(RichText::new(format!("{v} V · {d} D · {serie_texte}")).color(TEXT_DIM).size(texte::PETIT));
@@ -2854,17 +2832,35 @@ fn cases_des_heures(dates: impl Iterator<Item = u64>) -> Vec<u16> {
     cases
 }
 
-/// Quand il joue — cinq matchs au moins pour que ça dise quelque chose.
+/// Quand il joue — cinq matchs au moins pour que ça dise quelque chose —,
+/// le groupe en contour, et l'heure qu'il est encadrée.
 fn mes_heures(ui: &mut Ui, vue: &Vue) {
     if vue.e.len() < 5 {
         return;
     }
     let cases = cases_des_heures(vue.e.iter().map(|m| m.date));
+    let decalage = chrono::Local::now().offset().local_minus_utc() / 3600;
+    let groupe = activite_locale(vue.activite, decalage);
+    let avec_groupe = groupe.iter().any(|&v| v > 0);
     ui.add_space(espace::L);
     ui.label(RichText::new("Mes heures").color(TEXT_DIM).size(texte::PETIT));
-    graphes::heatmap_semaine(ui, &cases, |jour, heure| {
+    if avec_groupe {
+        ui::hint(ui, "en vert, mes parties ; en contour bleu, celles du groupe sur 30 jours");
+    }
+    let plus = graphes::EnPlus {
+        encadree: Some(graphes::case_de_maintenant()),
+        contour: avec_groupe.then_some(groupe.as_slice()),
+    };
+    graphes::heatmap_semaine(ui, &cases, plus, |jour, heure| {
         let n = cases.get(jour * 24 + heure).copied().unwrap_or(0);
-        format!("{} {heure}h–{}h · {}", JOURS_LONGS.get(jour).copied().unwrap_or("?"), heure + 1, pluriel(u32::from(n), "partie"))
+        let g = groupe.get(jour * 24 + heure).copied().unwrap_or(0);
+        let du_groupe = if avec_groupe { format!(" · le groupe : {}", pluriel(u32::from(g), "partie")) } else { String::new() };
+        format!(
+            "{} {heure}h–{}h · {}{du_groupe}",
+            JOURS_LONGS.get(jour).copied().unwrap_or("?"),
+            heure + 1,
+            pluriel(u32::from(n), "partie")
+        )
     });
 }
 
@@ -2979,38 +2975,26 @@ fn actes(ui: &mut Ui, vue: &Vue) {
     }
     ui.add_space(espace::L);
     ui.label(RichText::new("Actes").color(TEXT_DIM).size(texte::PETIT));
-    let dernier = saisons.len() - 1;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
-        for (i, s) in saisons.iter().enumerate() {
-            let couleur = graphes::couleur_de_rang(s.tier_fin);
-            let mut texte = RichText::new(format!("{} · {} · {} V / {}", s.saison, nom_de_rang(s.tier_fin), s.victoires, s.parties))
-                .color(couleur)
-                .size(texte::PETIT);
-            if i == dernier {
-                texte = texte.strong();
-            }
-            // Un bouton qu'on ne clique pas, plutôt qu'un cadre : dans une
-            // ligne qui replie, un cadre ne passe pas à la ligne, il
-            // déborde — et dix-sept actes poussaient la fenêtre hors de
-            // l'écran. Un widget d'un bloc, lui, replie.
-            ui.add(
-                egui::Button::new(texte)
-                    .sense(Sense::hover())
-                    .fill(theme::alpha(couleur, 28))
-                    .stroke(egui::Stroke::NONE)
-                    .corner_radius(egui::CornerRadius::same(rayon::M))
-                    .min_size(Vec2::ZERO),
-            )
-            .on_hover_text(format!(
-                    "fin d'acte : {} · {} RR · {} sur {}",
-                    nom_de_rang(s.tier_fin),
-                    s.rr_fin,
-                    pluriel(u32::from(s.victoires), "victoire"),
-                    pluriel(u32::from(s.parties), "partie")
-                ));
-        }
-    });
+    ui::hint(ui, "le rang de fin de chaque acte, du plus ancien au plus récent");
+    // Une barre par acte, à la hauteur de son rang de fin : de Fer 1 (3)
+    // à Radiant (27).
+    let barres: Vec<graphes::BarreV> = saisons
+        .iter()
+        .map(|s| graphes::BarreV {
+            valeur: f32::from(s.tier_fin.saturating_sub(2)) + f32::from(s.rr_fin.min(100)) / 100.0,
+            couleur: graphes::couleur_de_rang(s.tier_fin),
+            etiquette: s.saison.clone(),
+            info: format!(
+                "{} · fin d'acte : {} · {} RR · {} sur {}",
+                s.saison,
+                nom_de_rang(s.tier_fin),
+                s.rr_fin,
+                pluriel(u32::from(s.victoires), "victoire"),
+                pluriel(u32::from(s.parties), "partie")
+            ),
+        })
+        .collect();
+    graphes::barres_verticales(ui, egui::Id::new("fiche_actes"), &barres, 96.0, Some(26.0));
 }
 
 // ---------------------------------------------------------------------
@@ -3225,11 +3209,11 @@ mod tests {
         // garde le Spike Rush dans la table, « Compétitif » l'écarte.
         let rangs = rangs::Rangs::new();
         let catalogue = Catalogue::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &[], &[], &rangs, &catalogue, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
         assert_eq!(vue.e.len(), 5);
         assert_eq!(vue.b.matchs, 5, "un Spike Rush a des manches, il compte");
         assert_eq!(vue.e[0].id, "a", "du plus récent au plus ancien");
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &[], &[], &rangs, &catalogue, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
         assert_eq!(vue.e.len(), 2);
         assert_eq!(vue.b.rr, 20);
         assert!(vue.point_de("a").is_some());
@@ -3439,7 +3423,7 @@ mod tests {
                         dessiner(&ctx, souris, |ui| {
                             let ctx = ui.ctx();
                             let demandes =
-                                page.fenetre(ctx, &stats, true, &[], &activite, Some(1), &membres, &rangs, &catalogue, &mut boutique);
+                                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
                             assert!(demandes.is_empty());
                         });
                     }
@@ -3452,7 +3436,7 @@ mod tests {
                 page.tri_desc = !page.tri_desc;
                 dessiner(&ctx, None, |ui| {
                     let ctx = ui.ctx();
-                    page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &catalogue, &mut boutique);
+                    page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
                 });
             }
             page.onglet = Onglet::Matchs;
@@ -3461,13 +3445,13 @@ mod tests {
             page.plus = true;
             dessiner(&ctx, None, |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &stats, true, &[], &activite, None, &membres, &rangs, &catalogue, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
             });
             // Avant la réponse du serveur, et sans personne de lié.
             dessiner(&ctx, None, |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &stats, false, &[], &[], None, &membres, &rangs, &catalogue, &mut boutique);
-                page.fenetre(ctx, &[], true, &[], &[], None, &[], &rangs, &catalogue, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: false, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                page.fenetre(ctx, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, &mut boutique);
             });
             assert!(page.ouvert);
 
@@ -3487,7 +3471,7 @@ mod tests {
                         for souris in [None, Some(Pos2::new(200.0, 250.0)), Some(Pos2::new(320.0, 600.0))] {
                             dessiner(&ctx, souris, |ui| {
                                 let ctx = ui.ctx();
-                                assert!(page.fiche(ctx, ouverte, &stats, &membres, &rangs, &catalogue));
+                                assert!(page.fiche(ctx, ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }));
                             });
                         }
                     }
@@ -3573,10 +3557,10 @@ mod tests {
         let rangs = rangs::Rangs::new();
         let catalogue = Catalogue::new();
         let deux = [membre(1, 10), membre(2, 20)];
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &deux, &[], &rangs, &catalogue, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
         assert!(vue.repere(Bilan::kd, 1.0).is_none());
         let trois = [membre(1, 10), membre(2, 20), membre(3, 30)];
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &trois, &[], &rangs, &catalogue, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue }, maintenant);
         let (mediane, max) = vue.repere(Bilan::kd, 5.0).expect("trois membres assez classés");
         assert_eq!(mediane, 2.0);
         assert_eq!(max, 5.0, "le plafond prend en compte la valeur du membre");
@@ -3639,8 +3623,8 @@ mod tests {
         for _ in 0..4 {
             ctx.run_ui(entree(), |ui| {
                 let ctx = ui.ctx();
-                page.fenetre(ctx, &stats, true, &[], &[], Some(1), &membres, &rangs, &catalogue, &mut boutique);
-                page.fiche(ctx, &ouverte, &stats, &membres, &rangs, &catalogue);
+                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
+                page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue });
             }).drop_without_applying_deltas();
         }
         let groupe = ctx.memory(|m| m.area_rect(egui::Id::new("valo_page_v5"))).expect("la page est ouverte");
@@ -3714,7 +3698,7 @@ mod tests {
             for souris in [None, Some(Pos2::new(200.0, 160.0))] {
                 dessiner(&ctx, souris, |ui| {
                     let ctx = ui.ctx();
-                    page.fenetre(ctx, &stats, recu, &[], &[], Some(1), &membres, &rangs, &catalogue, &mut boutique);
+                    page.fenetre(ctx, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue }, &mut boutique);
                 });
             }
         }

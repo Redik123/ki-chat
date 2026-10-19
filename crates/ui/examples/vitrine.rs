@@ -487,7 +487,7 @@ impl Vitrine {
                                     r if r < 0 => couleur::DANGER,
                                     _ => couleur::TEXT_FAINT,
                                 };
-                                ui.label(RichText::new(format!("{rr:+}")).font(police::moyenne(texte::CORPS)).color(teinte));
+                                ui.label(RichText::new(format!("{rr:+}")).font(police::moyenne(ui.ctx(), texte::CORPS)).color(teinte));
                             }
                         }
                     });
@@ -497,7 +497,7 @@ impl Vitrine {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Ubuntu Light 3 – 1").size(texte::KPI).color(couleur::TEXT));
                     ui.add_space(espace::XL);
-                    ui.label(RichText::new("Ubuntu Medium 3 – 1").font(police::moyenne(texte::KPI)).color(couleur::TEXT));
+                    ui.label(RichText::new("Ubuntu Medium 3 – 1").font(police::moyenne(ui.ctx(), texte::KPI)).color(couleur::TEXT));
                 });
             },
         );

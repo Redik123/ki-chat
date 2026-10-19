@@ -138,9 +138,16 @@ pub mod police {
 
     /// Du texte qui pèse : un chiffre clé, un titre. egui n'a pas de
     /// graisse — `.strong()` n'y change que la couleur —, d'où une famille
-    /// à part.
-    pub fn moyenne(taille: f32) -> FontId {
-        FontId::new(taille, FontFamily::Name(MOYENNE.into()))
+    /// à part. Dans un contexte où l'allure de ki-ui n'est pas installée
+    /// (un test), le corps ordinaire : egui paniquerait sur une famille
+    /// inconnue.
+    pub fn moyenne(ctx: &egui::Context, taille: f32) -> FontId {
+        let famille = FontFamily::Name(MOYENNE.into());
+        if ctx.fonts(|f| f.definitions().families.contains_key(&famille)) {
+            FontId::new(taille, famille)
+        } else {
+            FontId::proportional(taille)
+        }
     }
 }
 

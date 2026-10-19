@@ -883,11 +883,29 @@ pub(crate) fn teinte_de_case(valeur: u16, max: u16) -> Color32 {
     theme::mix(theme::mix(BG_ACTIVE, SPEAK, 0.25), SPEAK, part.clamp(0.0, 1.0))
 }
 
+/// Ce qu'une heatmap de la semaine montre en plus de ses cases.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EnPlus<'a> {
+    /// La case encadrée, (jour, heure) : l'heure qu'il est.
+    pub encadree: Option<(usize, usize)>,
+    /// Une seconde série, en contour : le groupe, sous « Mes heures ».
+    pub contour: Option<&'a [u16]>,
+}
+
+/// La case de l'heure qu'il est, (jour, heure), lundi en tête, à l'heure
+/// locale.
+pub fn case_de_maintenant() -> (usize, usize) {
+    let t = chrono::Local::now();
+    (t.weekday().num_days_from_monday() as usize, t.hour() as usize)
+}
+
 /// Sept lignes (lundi en haut) sur vingt-quatre colonnes : la case
 /// `cases[jour × 24 + heure]` d'autant plus verte qu'elle compte de
 /// parties (les cases manquantes valent zéro) ; les jours à gauche, une
-/// heure sur six en haut ; `info(jour, heure)` en tooltip au survol.
-pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], info: impl Fn(usize, usize) -> String) {
+/// heure sur six en haut ; `info(jour, heure)` en tooltip au survol. Et ce
+/// que `plus` y ajoute : la case de l'heure encadrée, une seconde série en
+/// contour, d'autant plus nette qu'elle compte.
+pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], plus: EnPlus<'_>, info: impl Fn(usize, usize) -> String) {
     let largeur = ui.available_width();
     let cote = ((largeur - 2.0 * MARGE.x - LARGEUR_JOURS) / 24.0).clamp(6.0, 18.0);
     let (w, h) = (cote, (cote * 0.8).clamp(6.0, 14.0));
@@ -903,6 +921,8 @@ pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], info: impl Fn(usize, usize) -
     let valeur = |jour: usize, heure: usize| cases.get(jour * 24 + heure).copied().unwrap_or(0);
     let max = cases.iter().copied().max().unwrap_or(0);
 
+    let contour = |jour: usize, heure: usize| plus.contour.and_then(|c| c.get(jour * 24 + heure).copied()).unwrap_or(0);
+    let max_contour = plus.contour.and_then(|c| c.iter().copied().max()).unwrap_or(0);
     for (jour, nom) in JOURS.iter().enumerate() {
         let y = origine.y + jour as f32 * (h + pas);
         painter.text(
@@ -916,7 +936,20 @@ pub fn heatmap_semaine(ui: &mut Ui, cases: &[u16], info: impl Fn(usize, usize) -
             let x = origine.x + heure as f32 * (w + pas);
             let case = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
             painter.rect_filled(case, CornerRadius::same(rayon::S), teinte_de_case(valeur(jour, heure), max));
+            let c = contour(jour, heure);
+            if c > 0 {
+                let part = c as f32 / max_contour.max(1) as f32;
+                let trait_ = Stroke::new(1.0_f32, theme::alpha(theme::INFO, (50.0 + 170.0 * part) as u8));
+                painter.rect_stroke(case.shrink(0.5), CornerRadius::same(rayon::S), trait_, egui::StrokeKind::Inside);
+            }
         }
+    }
+    if let Some((jour, heure)) = plus.encadree.filter(|&(j, h)| j < 7 && h < 24) {
+        let case = Rect::from_min_size(
+            Pos2::new(origine.x + heure as f32 * (w + pas), origine.y + jour as f32 * (h + pas)),
+            Vec2::new(w, h),
+        );
+        painter.rect_stroke(case, CornerRadius::same(rayon::S), Stroke::new(1.5_f32, WARN), egui::StrokeKind::Outside);
     }
     for heure in (0..24).step_by(6) {
         let x = origine.x + heure as f32 * (w + pas);
@@ -1039,6 +1072,265 @@ pub fn valeur_rr(tier: u8, rr: u16) -> f32 {
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// Valeurs qui glissent, anneau, barres verticales
+// ---------------------------------------------------------------------
+
+/// Le temps qu'une valeur met à glisser vers la nouvelle.
+const GLISSE: f32 = 0.25;
+
+/// Un anneau de `diametre` : la part `part` (de 0 à 1) en `couleur` sur un
+/// cercle de fond, partie du haut dans le sens des aiguilles d'une montre,
+/// et `texte` au milieu. La part glisse quand elle change.
+pub fn anneau(ui: &mut Ui, id: egui::Id, part: f32, diametre: f32, couleur: Color32, texte_: &str) -> Response {
+    let cible = if part.is_finite() { part.clamp(0.0, 1.0) } else { 0.0 };
+    let part = ui.ctx().animate_value_with_time(id, cible, GLISSE);
+    let (rect, reponse) = ui.allocate_exact_size(Vec2::splat(diametre), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return reponse;
+    }
+    let painter = ui.painter();
+    let epaisseur = (diametre * 0.12).clamp(4.0, 12.0);
+    let rayon_ = diametre / 2.0 - epaisseur / 2.0;
+    let centre = rect.center();
+    painter.circle_stroke(centre, rayon_, Stroke::new(epaisseur, BG_ACTIVE));
+    if part > 0.0 {
+        painter.add(Shape::line(arc(centre, rayon_, part), Stroke::new(epaisseur, couleur)));
+    }
+    painter.text(
+        centre,
+        Align2::CENTER_CENTER,
+        texte_,
+        ki_ui::jetons::police::moyenne(ui.ctx(), (diametre * 0.24).clamp(texte::PETIT, texte::KPI)),
+        TEXT,
+    );
+    reponse
+}
+
+/// Les points d'un arc de cercle, du haut (midi), sur `part` du tour, dans
+/// le sens des aiguilles d'une montre à l'écran.
+pub(crate) fn arc(centre: Pos2, rayon_: f32, part: f32) -> Vec<Pos2> {
+    let part = part.clamp(0.0, 1.0);
+    let n = ((64.0 * part).ceil() as usize).max(2);
+    (0..=n)
+        .map(|k| {
+            let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * part * k as f32 / n as f32;
+            centre + Vec2::new(angle.cos(), angle.sin()) * rayon_
+        })
+        .collect()
+}
+
+/// Une barre verticale : sa valeur, sa couleur, son étiquette dessous, et
+/// ce que dit son survol.
+#[derive(Clone, Debug)]
+pub struct BarreV {
+    pub valeur: f32,
+    pub couleur: Color32,
+    pub etiquette: String,
+    pub info: String,
+}
+
+/// La largeur d'une barre verticale, au plus, et l'écart entre deux.
+const BARRE_V_MAX: f32 = 28.0;
+const ECART_BARRES_V: f32 = 6.0;
+
+/// Des barres verticales côte à côte sur `hauteur`, de zéro à `max` (la
+/// plus haute s'il n'est pas donné), leur étiquette dessous : un acte par
+/// barre. Leur hauteur glisse quand elle change. Rend la barre survolée.
+pub fn barres_verticales(ui: &mut Ui, id: egui::Id, barres: &[BarreV], hauteur: f32, max: Option<f32>) -> Option<usize> {
+    let largeur = ui.available_width();
+    let (rect, reponse) = ui.allocate_exact_size(Vec2::new(largeur, hauteur), Sense::hover());
+    if barres.is_empty() || !ui.is_rect_visible(rect) {
+        return None;
+    }
+    let n = barres.len() as f32;
+    let large = ((largeur - ECART_BARRES_V * (n - 1.0)) / n).clamp(4.0, BARRE_V_MAX);
+    let haut = max
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .unwrap_or_else(|| barres.iter().map(|b| b.valeur).filter(|v| v.is_finite()).fold(0.0, f32::max))
+        .max(f32::EPSILON);
+    let zone = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() - HAUTEUR_DATES));
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.line_segment([zone.left_bottom(), Pos2::new(zone.left() + n * (large + ECART_BARRES_V), zone.bottom())], Stroke::new(1.0_f32, BORDER_SOFT));
+    let survol = reponse.hover_pos().and_then(|souris| case_sous(souris.x - rect.left(), large, ECART_BARRES_V, barres.len()));
+    // Des étiquettes trop larges pour leur barre : une sur `pas`, et
+    // toujours la dernière — la plus récente.
+    let plus_large = barres
+        .iter()
+        .map(|b| painter.layout_no_wrap(b.etiquette.clone(), FontId::proportional(LEGENDE), TEXT_FAINT).size().x)
+        .fold(0.0, f32::max);
+    let pas = ((plus_large + 4.0) / (large + ECART_BARRES_V)).ceil().max(1.0) as usize;
+    let dernier = barres.len() - 1;
+    for (i, barre) in barres.iter().enumerate() {
+        let cible = if barre.valeur.is_finite() { (barre.valeur / haut).clamp(0.0, 1.0) } else { 0.0 };
+        let part = ui.ctx().animate_value_with_time(id.with(i), cible, GLISSE);
+        let x = rect.left() + i as f32 * (large + ECART_BARRES_V);
+        let colonne = Rect::from_min_max(Pos2::new(x, zone.bottom() - zone.height() * part), Pos2::new(x + large, zone.bottom()));
+        let teinte = if survol == Some(i) { barre.couleur } else { theme::alpha(barre.couleur, 200) };
+        painter.rect_filled(colonne, CornerRadius { nw: rayon::S, ne: rayon::S, sw: 0, se: 0 }, teinte);
+        let montree = survol.map_or((dernier - i).is_multiple_of(pas), |s| s == i);
+        if montree {
+            painter.text(
+                Pos2::new(x + large / 2.0, zone.bottom() + 2.0),
+                Align2::CENTER_TOP,
+                &barre.etiquette,
+                FontId::proportional(LEGENDE),
+                if survol == Some(i) { TEXT_DIM } else { TEXT_FAINT },
+            );
+        }
+    }
+    if let Some(i) = survol {
+        if !barres[i].info.is_empty() {
+            reponse.on_hover_text(&barres[i].info);
+        }
+    }
+    survol
+}
+
+// ---------------------------------------------------------------------
+// Plusieurs courbes
+// ---------------------------------------------------------------------
+
+/// Une série d'une courbe à plusieurs : son nom pour la légende, sa
+/// couleur, ses points.
+// Ses premières pages : les comptes d'un membre (V8.2) et la comparaison
+// de deux membres (V9.4) ; d'ici là, les tests la dessinent.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Serie<'a> {
+    pub nom: &'a str,
+    pub couleur: Color32,
+    pub points: &'a [PointCourbe],
+}
+
+/// La gouttière des valeurs, à gauche, et la ligne de la légende, en haut.
+#[cfg_attr(not(test), allow(dead_code))]
+const GOUTTIERE_Y: f32 = 40.0;
+#[cfg_attr(not(test), allow(dead_code))]
+const HAUTEUR_LEGENDE: f32 = 16.0;
+/// Le survol prend le point le plus proche, s'il est à moins de ça.
+#[cfg_attr(not(test), allow(dead_code))]
+const SURVOL_PX: f32 = 24.0;
+
+/// Des valeurs rondes pour graduer `[lo, hi]` : environ `cible` intervalles,
+/// d'un pas de 1, 2, 2,5 ou 5 fois une puissance de dix.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn graduations_y(lo: f32, hi: f32, cible: usize) -> Vec<f32> {
+    if !(lo.is_finite() && hi.is_finite() && hi > lo) {
+        return Vec::new();
+    }
+    let brut = (hi - lo) / cible.max(1) as f32;
+    let puissance = 10_f32.powf(brut.log10().floor());
+    let pas = [1.0, 2.0, 2.5, 5.0, 10.0].iter().map(|m| m * puissance).find(|p| *p >= brut).unwrap_or(10.0 * puissance);
+    let premier = (lo / pas).ceil() * pas;
+    (0..64).map(|k| premier + k as f32 * pas).take_while(|v| *v <= hi + pas * 1e-3).collect()
+}
+
+/// Plusieurs courbes dans le temps sur un même axe — les comptes d'un
+/// membre, deux membres comparés —, leur légende en haut, des valeurs
+/// rondes à gauche (`axe` les écrit), les dates dessous. Rend le point
+/// survolé, (série, indice dans sa tranche), et montre `info(série,
+/// indice)`. À moins de deux points en tout, rien n'est alloué.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn courbes(
+    ui: &mut Ui,
+    id: egui::Id,
+    series: &[Serie<'_>],
+    hauteur: f32,
+    axe: impl Fn(f32) -> String,
+    info: impl Fn(usize, usize) -> String,
+) -> Option<(usize, usize)> {
+    let mut dates: Vec<u64> = series.iter().flat_map(|s| s.points.iter().map(|p| p.date)).collect();
+    dates.sort_unstable();
+    dates.dedup();
+    let largeur = ui.available_width();
+    let proj = projeter_dates(&dates, (largeur - 2.0 * MARGE.x - GOUTTIERE_Y).max(1.0))?;
+    let (lo, hi) = bornes_y(series.iter().flat_map(|s| s.points.iter().map(|p| p.valeur)));
+
+    ui.push_id(id, |ui| {
+        let (rect, reponse) = ui.allocate_exact_size(Vec2::new(largeur, hauteur), Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return None;
+        }
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.rect_filled(rect, CornerRadius::same(rayon::M), BG_DEEP);
+        let interieur = rect.shrink2(MARGE);
+
+        // La légende : une pastille et un nom par série.
+        let mut x = interieur.left() + GOUTTIERE_Y;
+        for s in series {
+            painter.circle_filled(Pos2::new(x + 4.0, interieur.top() + HAUTEUR_LEGENDE / 2.0), 4.0, s.couleur);
+            let nom = painter.text(
+                Pos2::new(x + 12.0, interieur.top() + HAUTEUR_LEGENDE / 2.0),
+                Align2::LEFT_CENTER,
+                s.nom,
+                FontId::proportional(texte::PETIT),
+                TEXT_DIM,
+            );
+            x = nom.right() + 14.0;
+        }
+
+        let zone = Rect::from_min_max(
+            Pos2::new(interieur.left() + GOUTTIERE_Y, interieur.top() + HAUTEUR_LEGENDE + 4.0),
+            Pos2::new(interieur.right(), (interieur.bottom() - HAUTEUR_DATES).max(interieur.top() + HAUTEUR_LEGENDE + 5.0)),
+        );
+        // Les valeurs rondes, à gauche, et leur trait.
+        for v in graduations_y(lo, hi, 4) {
+            let y = y_de(v, lo, hi, zone);
+            painter.line_segment([Pos2::new(zone.left(), y), Pos2::new(zone.right(), y)], Stroke::new(1.0_f32, BORDER_SOFT));
+            painter.text(Pos2::new(zone.left() - 6.0, y), Align2::RIGHT_CENTER, axe(v), FontId::proportional(LEGENDE), TEXT_FAINT);
+        }
+        // Les dates dessous.
+        let graduations = proj.graduations(decalage_local_ms(), ECART_GRADUATIONS);
+        let derniere = graduations.len().saturating_sub(1);
+        for (k, (x, date, dans_la_journee)) in graduations.iter().enumerate() {
+            let ancre = if k == 0 && derniere > 0 {
+                Align2::LEFT_TOP
+            } else if k == derniere && derniere > 0 {
+                Align2::RIGHT_TOP
+            } else {
+                Align2::CENTER_TOP
+            };
+            painter.text(
+                Pos2::new(zone.left() + x, zone.bottom() + 2.0),
+                ancre,
+                etiquette_de_date(*date, *dans_la_journee),
+                FontId::proportional(LEGENDE),
+                TEXT_FAINT,
+            );
+        }
+
+        // Les séries, chacune triée par date, puis le point survolé.
+        let pos = |p: &PointCourbe| Pos2::new(zone.left() + proj.x_de_date(p.date), y_de(p.valeur, lo, hi, zone));
+        let mut plus_proche: Option<(f32, usize, usize)> = None;
+        for (k, s) in series.iter().enumerate() {
+            let mut ordre: Vec<usize> = (0..s.points.len()).collect();
+            ordre.sort_by_key(|&i| s.points[i].date);
+            let ligne: Vec<Pos2> = ordre.iter().map(|&i| pos(&s.points[i])).collect();
+            if ligne.len() >= 2 {
+                painter.add(Shape::line(ligne.clone(), Stroke::new(2.0_f32, s.couleur)));
+            }
+            for (&i, &q) in ordre.iter().zip(&ligne) {
+                painter.circle_filled(q, RAYON_POINT - 0.5, s.couleur);
+                if let Some(souris) = reponse.hover_pos() {
+                    let d = q.distance(souris);
+                    if d <= SURVOL_PX && plus_proche.is_none_or(|(m, ..)| d < m) {
+                        plus_proche = Some((d, k, i));
+                    }
+                }
+            }
+        }
+        let (_, k, i) = plus_proche?;
+        painter.circle_stroke(pos(&series[k].points[i]), RAYON_HALO, Stroke::new(1.5_f32, TEXT));
+        let texte_ = info(k, i);
+        if !texte_.is_empty() {
+            reponse.on_hover_text(texte_);
+        }
+        Some((k, i))
+    })
+    .inner
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1283,5 +1575,60 @@ mod tests {
         assert!(proche(uv.height(), (452.0 / 128.0) / (620.0 / 76.0)) && proche(uv.center().y, 0.5));
         let tout = uv_couvrant(Vec2::ZERO, Vec2::splat(10.0));
         assert_eq!(tout, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)));
+    }
+
+    /// Des valeurs rondes, d'un bout à l'autre de l'échelle, jamais trop
+    /// nombreuses ; rien pour une échelle vide.
+    #[test]
+    fn les_valeurs_de_l_axe_sont_rondes() {
+        assert_eq!(graduations_y(0.0, 100.0, 4), vec![0.0, 25.0, 50.0, 75.0, 100.0]);
+        assert_eq!(graduations_y(1480.0, 1620.0, 4), vec![1500.0, 1550.0, 1600.0]);
+        assert_eq!(graduations_y(0.2, 0.9, 4), vec![0.2, 0.4, 0.6, 0.8]);
+        assert!(graduations_y(5.0, 5.0, 4).is_empty());
+        assert!(graduations_y(f32::NAN, 5.0, 4).is_empty());
+        assert!(graduations_y(-1e6, 1e6, 4).len() <= 6);
+    }
+
+    /// L'arc part de midi et tourne dans le sens des aiguilles d'une
+    /// montre : un quart de tour finit à trois heures.
+    #[test]
+    fn l_anneau_part_de_midi() {
+        let points = arc(Pos2::ZERO, 10.0, 0.25);
+        assert!(points[0].distance(Pos2::new(0.0, -10.0)) < 1e-3);
+        assert!(points.last().unwrap().distance(Pos2::new(10.0, 0.0)) < 1e-3);
+        assert_eq!(arc(Pos2::ZERO, 10.0, 7.0).len(), 65, "borné à un tour");
+    }
+
+    /// Deux séries se dessinent sur un même axe, et le survol trouve le
+    /// point le plus proche ; une seule date en tout ne dessine rien.
+    #[test]
+    fn plusieurs_courbes_se_dessinent() {
+        let ctx = egui::Context::default();
+        let a: Vec<PointCourbe> = (0..6).map(|i| point(1_756_000_000_000 + i * JOUR_MS, 1_500.0 + 10.0 * i as f32)).collect();
+        let b: Vec<PointCourbe> = (0..4).map(|i| point(1_756_000_000_000 + (2 * i + 1) * JOUR_MS / 2, 1_480.0)).collect();
+        let series = [
+            Serie { nom: "Principal", couleur: SPEAK, points: &a },
+            Serie { nom: "Smurf", couleur: WARN, points: &b },
+        ];
+        let mut survol = None;
+        let mut rien = Some((9, 9));
+        // Le premier point de la seconde série : une demi-journée sur cinq,
+        // à 1 480 sur une échelle de 1 470 à 1 560.
+        for souris in [None, Some(Pos2::new(104.0, 180.0))] {
+            let mut entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 300.0))),
+                ..Default::default()
+            };
+            if let Some(p) = souris {
+                entree.events.push(egui::Event::PointerMoved(p));
+            }
+            ctx.run_ui(entree, |ui| {
+                survol = courbes(ui, egui::Id::new("essai"), &series, 220.0, |v| format!("{v}"), |k, i| format!("{k} {i}"));
+                rien = courbes(ui, egui::Id::new("seul"), &series[..1][..0], 100.0, |v| format!("{v}"), |_, _| String::new());
+            })
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(rien, None);
+        assert_eq!(survol, Some((1, 0)));
     }
 }
