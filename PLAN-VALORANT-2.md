@@ -882,10 +882,44 @@ ServerMsg::TactiqueEtat { carte: Option<CarteTactique> } // à l'arrivée
       Ascent en attaque et en défense, Lotus, sans les noms, sans minimap,
       puis la molette et un trait tirés par de faux gestes. Avec
       `BANC_PETIT`, la fenêtre à sa taille minimale.
-- **V10.2 — La carte partagée (taille M)**. Le protocole, le serveur, la
-  synchronisation, l'arrivée en cours de route et les bornes. Des tests
-  serveur comme ceux des cartes : expiration, bornes, auteur forcé,
-  départ du salon, salon vide.
+- **V10.2 — La carte partagée (taille M) — fait le 2026-10-19**. Le
+  protocole, le serveur, la synchronisation, l'arrivée en cours de route
+  et les bornes. Des tests serveur comme ceux des cartes : expiration,
+  bornes, auteur forcé, départ du salon, salon vide.
+  - **Ce qui est fait, et ce qui diffère du fil décrit plus haut :**
+    - **L'arrivée en cours de route.** `TactiqueEtat` ne porte que le plan
+      (`CarteTactique { salon, carte, par }`). Chaque trait vivant suit dans
+      son propre `EvenementTactique::Trait`, avec `reste_ms`. Dix joueurs à
+      trente traits de 4 000 points ne tiendraient pas dans une ligne ; un
+      trait entier, si (le test `le_plus_gros_trait_tient_dans_une_ligne`).
+    - **`depuis`.** Chaque morceau dit la place de son premier point : les
+      points d'avant restent, ceux d'après sont remplacés. Un morceau reçu
+      deux fois, ou reçu avant l'état, ne double rien.
+    - Une zone repart entière (centre et bord) à chaque changement ; un
+      morceau vide ne l'efface pas.
+    - Le serveur ne renvoie pas un morceau à son auteur. Les retraits
+      (`Retire`, `RetireTout`) et les plans vont à tout le salon.
+    - **Pas de tic serveur** : les traits morts partent à chaque geste et à
+      chaque arrivée. Un trait laissé en plan, sans crayon levé, vieillit
+      depuis son dernier morceau, chez le serveur comme chez les clients.
+    - `Classe::Dessin` (30 par seconde, rafale de 60) ; un muet voit la
+      carte, et son crayon levé lui vaut un seul `TactiqueRefus`.
+    - Le client ouvre la carte du salon au premier regard, sur le plan
+      choisi chez lui. Une carte déjà ouverte lui arrive en entrant dans le
+      salon. Le plan du salon ne se remplace pas, même s'il manque au
+      catalogue : la fenêtre le dit.
+    - La barre dit avec qui la carte se partage : « partagée avec ton salon
+      vocal », « rien que pour toi » (hors vocal, ou serveur d'avant), ou
+      l'avis du muet.
+    - Tests :
+      - serveur : `un_trait_se_trace_par_morceaux`, `les_bornes_tiennent`,
+        `les_traits_s_eteignent_et_se_rejouent`, `les_gestes_se_tiennent`,
+        `la_carte_suit_le_salon` ;
+      - client : `les_traits_du_salon_se_montent`, `le_salon_mene_le_plan`,
+        et `un_trait_tire_part_au_salon`, qui tire un vrai trait à la
+        souris dans egui sans écran et recolle ses morceaux.
+    - Le banc gagne une huitième scène : la carte du salon racontée par le
+      fil, vue par un muet.
 - **V10.3 — Le confort (taille M)** : les icônes d'agents et de sorts, le
   laser, le ping et son son (`sfxgen`), la fenêtre détachée, la bannière
   « X a ouvert la carte » et la carte choisie d'après la présence.

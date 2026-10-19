@@ -286,6 +286,9 @@ pub enum ClientMsg {
     /// Un geste à la table de cartes de son salon vocal — seulement vers un
     /// serveur qui l'a dit (`Welcome.cartes`).
     Cartes { action: ActionCartes },
+    /// Un geste sur la carte tactique de son salon vocal — seulement vers
+    /// un serveur qui l'a dit (`Welcome.tactique`).
+    Tactique { action: ActionTactique },
     /// Le client annonce son état vocal : émission en cours, et micro coupé
     /// volontairement — pour que les autres distinguent « muet » de « parti ».
     VoiceState {
@@ -626,6 +629,11 @@ pub enum ServerMsg {
         /// antérieur le prendrait pour un message invalide.
         #[serde(default)]
         journal_parties: bool,
+        /// Ce serveur partage la carte tactique des salons vocaux et
+        /// comprend `ClientMsg::Tactique` (depuis V10.2) ; face à un serveur
+        /// antérieur, chacun dessine sur la sienne.
+        #[serde(default)]
+        tactique: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -737,6 +745,17 @@ pub enum ServerMsg {
     },
     /// Un geste refusé à la table, et pourquoi — à celui qui l'a fait.
     CartesRefus { message: String },
+    /// La carte tactique de mon salon vocal, tout entière : à l'arrivée
+    /// dans un salon où elle est ouverte, et à son ouverture. `None` : plus
+    /// de carte pour moi (j'ai quitté le salon, il s'est vidé).
+    TactiqueEtat {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carte: Option<CarteTactique>,
+    },
+    /// Ce qui change sur la carte tactique de mon salon vocal.
+    Tactique { evenement: EvenementTactique },
+    /// Un geste refusé sur la carte, et pourquoi — à celui qui l'a fait.
+    TactiqueRefus { message: String },
     /// Toutes les fiches du groupe, pour la page de stats — et les
     /// prochains matchs d'esport, si le serveur les a.
     ///
@@ -4604,6 +4623,133 @@ mod media_tests {
     }
 }
 
+// --- La carte tactique (V10 de PLAN-VALORANT-2.md) ---
+//
+// Un plan de VALORANT où le salon vocal dessine la manche suivante. Rien ne
+// vient du jeu : le plan n'est qu'un nom de carte (« Ascent »), que chaque
+// client retrouve dans son catalogue, et les traits viennent des mains de
+// qui dessine. Chacun s'efface 15 s après que son auteur a levé le crayon.
+// Le serveur relaie et borne ; il ne garde rien sur le disque.
+
+/// La vie d'un trait, crayon levé.
+pub const TACTIQUE_VIE_MS: u32 = 15_000;
+/// Les points d'un morceau de trait, au plus : un morceau plus gros est
+/// refusé entier.
+pub const TACTIQUE_POINTS_PAR_MORCEAU: usize = 512;
+/// Les points d'un trait, au plus : au-delà, le serveur ignore la suite.
+pub const TACTIQUE_POINTS_PAR_TRAIT: usize = 4000;
+/// Les traits vivants d'un même auteur : au-delà, le plus ancien des siens
+/// s'en va.
+pub const TACTIQUE_TRAITS_PAR_JOUEUR: usize = 30;
+/// Un nom de plan, au plus, en caractères.
+pub const MAX_PLAN_TACTIQUE: usize = 32;
+
+/// Un point de la minimap, de 0 à `u16::MAX` sur chaque axe : (0, 0) en
+/// haut à gauche de l'image. Le plan, la vue et le zoom de chacun n'y
+/// changent rien.
+pub type PointTactique = [u16; 2];
+
+/// Ce que trace un trait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutilTactique {
+    /// Un trait libre.
+    Crayon,
+    /// Un chemin, avec sa pointe au bout.
+    Fleche,
+    /// Un cercle : son centre et un point du bord. Chaque morceau les
+    /// remplace tous les deux.
+    Zone,
+    /// Un outil d'une version plus récente : le trait se tient, sans se
+    /// dessiner.
+    #[serde(other)]
+    Inconnu,
+}
+
+/// Un nom de plan acceptable : 1 à [`MAX_PLAN_TACTIQUE`] caractères, sans
+/// caractère de contrôle, bords rognés.
+pub fn plan_tactique_valide(carte: &str) -> Option<&str> {
+    let carte = carte.trim();
+    let n = carte.chars().count();
+    (n > 0 && n <= MAX_PLAN_TACTIQUE && !carte.chars().any(char::is_control)).then_some(carte)
+}
+
+/// Un geste sur la carte tactique de son salon vocal. L'auteur est la
+/// connexion qui l'envoie : le serveur ne croit jamais un auteur écrit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ActionTactique {
+    /// Ouvrir la carte de mon salon sur ce plan. Déjà ouverte, rien ne
+    /// change : je reçois son état.
+    Ouvrir { carte: String },
+    /// Changer de plan : tous les traits s'effacent, chez tout le monde.
+    Choisir { carte: String },
+    /// Un morceau de mon trait `id` : les points qui s'ajoutent — pour une
+    /// zone, son centre et son bord, qui remplacent les précédents. `fin`
+    /// lève le crayon : ses 15 s partent de là. L'outil est celui du
+    /// premier morceau.
+    Trait {
+        id: u32,
+        outil: OutilTactique,
+        #[serde(default)]
+        points: Vec<PointTactique>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        fin: bool,
+    },
+    /// Retirer mon trait `id`.
+    Annuler { id: u32 },
+    /// Retirer tous mes traits.
+    EffacerLesMiens,
+}
+
+/// La carte tactique d'un salon vocal. Ses traits vivants la suivent, un
+/// [`EvenementTactique::Trait`] chacun : dix joueurs à trente traits de
+/// quatre mille points ne tiendraient pas dans une ligne.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CarteTactique {
+    pub salon: ChannelId,
+    /// Le plan, par son nom affiché (« Ascent »).
+    pub carte: String,
+    /// Qui l'a ouverte, ou a choisi ce plan.
+    pub par: UserId,
+}
+
+/// Ce qui change sur la carte, dit à tout le salon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum EvenementTactique {
+    /// Un nouveau plan : tous les traits s'effacent.
+    Plan { carte: String, par: UserId },
+    /// Un morceau d'un trait — sauf à son auteur, qui l'a déjà — ou tout
+    /// le trait, à qui arrive en cours de route. Ses points vont à la place
+    /// `depuis` : les points d'avant restent, ceux d'après sont remplacés.
+    /// Un morceau reçu deux fois ne double rien.
+    Trait {
+        auteur: UserId,
+        id: u32,
+        outil: OutilTactique,
+        #[serde(default)]
+        depuis: u32,
+        #[serde(default)]
+        points: Vec<PointTactique>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        fin: bool,
+        /// À qui arrive : ce qu'il reste à vivre au trait déjà fini. Sans
+        /// lui, un trait fini a ses 15 s entières.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reste_ms: Option<u32>,
+    },
+    /// Un trait retiré : par son auteur, ou poussé par ses trop nombreux
+    /// suivants.
+    Retire { auteur: UserId, id: u32 },
+    /// Tous les traits d'un auteur : il les a effacés, ou il a quitté le
+    /// salon.
+    RetireTout { auteur: UserId },
+    /// Un événement d'une version plus récente.
+    #[serde(other)]
+    Inconnu,
+}
+
 // --- Petits utilitaires hex (clé voix dans Welcome) ---
 
 pub fn hex_encode(bytes: &[u8]) -> String {
@@ -6395,10 +6541,93 @@ mod tests {
     #[test]
     fn un_serveur_d_avant_les_cartes_ne_les_sert_pas() {
         let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
-        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        let ServerMsg::Welcome { cartes, comptes_joues, journal_parties, tactique, .. } = serde_json::from_str(json).unwrap() else { panic!() };
         assert!(!cartes);
         assert!(!comptes_joues, "un serveur d'avant V8.1 ne lit pas le compte joué");
         assert!(!journal_parties, "ni ne tient le journal des parties");
+        assert!(!tactique, "ni ne partage la carte tactique");
+    }
+
+    /// La carte tactique sur le fil : les gestes et les événements font
+    /// l'aller-retour, ce qui est par défaut ne part pas, et un outil ou un
+    /// événement d'une version future se lit sans casser le reste.
+    #[test]
+    fn la_carte_tactique_traverse_les_versions() {
+        let geste = ClientMsg::Tactique {
+            action: ActionTactique::Trait { id: 7, outil: OutilTactique::Fleche, points: vec![[0, 65535], [1, 2]], fin: false },
+        };
+        let json = serde_json::to_string(&geste).unwrap();
+        assert_eq!(json, r#"{"type":"tactique","action":{"op":"trait","id":7,"outil":"fleche","points":[[0,65535],[1,2]]}}"#);
+        let ClientMsg::Tactique { action } = serde_json::from_str::<ClientMsg>(&json).unwrap() else { panic!() };
+        let ClientMsg::Tactique { action: envoyee } = geste else { panic!() };
+        assert_eq!(action, envoyee);
+        for action in [
+            ActionTactique::Ouvrir { carte: "Ascent".into() },
+            ActionTactique::Choisir { carte: "Lotus".into() },
+            ActionTactique::Annuler { id: 3 },
+            ActionTactique::EffacerLesMiens,
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<ActionTactique>(&json).unwrap(), action, "{json}");
+        }
+
+        let futur = r#"{"type":"tactique","evenement":{"op":"trait","auteur":2,"id":1,"outil":"icone","points":[[5,5]]}}"#;
+        let ServerMsg::Tactique { evenement } = serde_json::from_str(futur).unwrap() else { panic!() };
+        assert_eq!(
+            evenement,
+            EvenementTactique::Trait {
+                auteur: 2,
+                id: 1,
+                outil: OutilTactique::Inconnu,
+                depuis: 0,
+                points: vec![[5, 5]],
+                fin: false,
+                reste_ms: None
+            }
+        );
+        let ServerMsg::Tactique { evenement } =
+            serde_json::from_str(r#"{"type":"tactique","evenement":{"op":"laser","auteur":2,"pos":[1,1]}}"#).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(evenement, EvenementTactique::Inconnu);
+        let etat = ServerMsg::TactiqueEtat { carte: None };
+        assert_eq!(serde_json::to_string(&etat).unwrap(), r#"{"type":"tactique_etat"}"#);
+
+        assert_eq!(plan_tactique_valide("  Ascent "), Some("Ascent"));
+        assert_eq!(plan_tactique_valide(""), None);
+        assert_eq!(plan_tactique_valide("A\u{7}"), None);
+        assert_eq!(plan_tactique_valide(&"é".repeat(MAX_PLAN_TACTIQUE)).map(|c| c.chars().count()), Some(MAX_PLAN_TACTIQUE));
+        assert_eq!(plan_tactique_valide(&"é".repeat(MAX_PLAN_TACTIQUE + 1)), None);
+    }
+
+    /// Le plus gros trait qu'un serveur renvoie à l'arrivée, et le plus gros
+    /// morceau qu'un client envoie, tiennent dans une ligne, de loin.
+    #[test]
+    fn le_plus_gros_trait_tient_dans_une_ligne() {
+        let trait_entier = ServerMsg::Tactique {
+            evenement: EvenementTactique::Trait {
+                auteur: UserId::MAX,
+                id: u32::MAX,
+                outil: OutilTactique::Crayon,
+                depuis: u32::MAX,
+                points: vec![[u16::MAX, u16::MAX]; TACTIQUE_POINTS_PAR_TRAIT],
+                fin: true,
+                reste_ms: Some(TACTIQUE_VIE_MS),
+            },
+        };
+        let ligne = serde_json::to_vec(&trait_entier).unwrap().len();
+        assert!(ligne < MAX_LINE / 2, "{ligne} octets");
+        let morceau = ClientMsg::Tactique {
+            action: ActionTactique::Trait {
+                id: u32::MAX,
+                outil: OutilTactique::Crayon,
+                points: vec![[u16::MAX, u16::MAX]; TACTIQUE_POINTS_PAR_MORCEAU],
+                fin: true,
+            },
+        };
+        let ligne = serde_json::to_vec(&morceau).unwrap().len();
+        assert!(ligne < 8 * 1024, "{ligne} octets : un morceau plein pèse environ 7 Ko");
     }
 
     /// Le compte joué : absent, il ne coûte rien sur le fil et un statut

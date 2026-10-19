@@ -906,6 +906,9 @@ struct KiApp {
     /// Le serveur tient les tables de cartes (`Welcome.cartes`) : sans
     /// cette preuve, ni bouton ni geste.
     serveur_cartes: bool,
+    /// Le serveur partage la carte tactique des salons vocaux
+    /// (`Welcome.tactique`) : sans lui, chacun dessine sur la sienne.
+    serveur_tactique: bool,
     /// Le serveur nous dit nos comptes Riot et lit lequel est ouvert
     /// (`Welcome.comptes_joues`) : sans lui, rien à classer.
     serveur_comptes_joues: bool,
@@ -1526,6 +1529,7 @@ impl KiApp {
             serveur_medailles: false,
             serveur_choix_medailles: false,
             serveur_cartes: false,
+            serveur_tactique: false,
             serveur_comptes_joues: false,
             mes_comptes: Vec::new(),
             comptes_tus: get("comptes_tus", "").split(',').filter(|e| !e.is_empty()).map(str::to_string).collect(),
@@ -3773,18 +3777,29 @@ impl KiApp {
         }
     }
 
-    /// La carte tactique, si elle est ouverte : le plan choisi et sa
-    /// minimap viennent du catalogue, mes traits ont la couleur de mon
-    /// pseudo.
+    /// La carte tactique : celle de mon salon vocal face à un serveur qui
+    /// la partage, sinon la mienne seule. Le plan choisi et sa minimap
+    /// viennent du catalogue, mes traits ont la couleur de mon pseudo, et
+    /// mes gestes partent au serveur.
     fn tactique_window(&mut self, ctx: &egui::Context) {
-        if !self.tactique.ouvert {
-            return;
-        }
+        let lien = match (self.serveur_tactique, self.voice_channel) {
+            (false, _) => tactique::Lien::SansServeur,
+            (true, None) => tactique::Lien::HorsVocal,
+            (true, Some(_)) => tactique::Lien::Salon,
+        };
+        self.tactique.relier(lien);
         let moi = self.my_id.unwrap_or(0);
-        let couleur = self.members.iter().find(|m| Some(m.user_id) == self.my_id).map_or(ACCENT, couleur_de_membre);
-        let plans = self.catalogue.plans();
-        let minimap = self.tactique.choisi(plans).and_then(|p| self.catalogue.minimap(p));
-        self.tactique.fenetre(ctx, plans, minimap, moi, couleur);
+        let mien = self.members.iter().find(|m| Some(m.user_id) == self.my_id);
+        self.tactique.muet = mien.is_some_and(|m| m.force_muted);
+        if self.tactique.ouvert {
+            let couleur = mien.map_or(ACCENT, couleur_de_membre);
+            let plans = self.catalogue.plans();
+            let minimap = self.tactique.choisi(plans).and_then(|p| self.catalogue.minimap(p));
+            self.tactique.fenetre(ctx, plans, minimap, moi, couleur);
+        }
+        for action in self.tactique.a_envoyer() {
+            self.send(ClientMsg::Tactique { action });
+        }
     }
 
     fn soundboard_window(&mut self, ctx: &egui::Context) {
@@ -4548,6 +4563,9 @@ impl KiApp {
         // La table de cartes : celle d'un salon de ce serveur.
         self.cartes.effacer();
         self.serveur_cartes = false;
+        // La carte tactique : celle d'un salon de ce serveur.
+        self.tactique.recevoir_etat(None);
+        self.serveur_tactique = false;
         // Nos comptes Riot : ceux de ce serveur.
         self.serveur_comptes_joues = false;
         self.mes_comptes.clear();
@@ -5211,6 +5229,7 @@ impl KiApp {
                 cartes,
                 comptes_joues,
                 journal_parties,
+                tactique,
                 protocole,
                 ..
             } => {
@@ -5244,6 +5263,8 @@ impl KiApp {
                 // invalide.
                 self.serveur_cartes = cartes;
                 self.cartes.regles_disponibles = protocole >= 2;
+                // Et pour la carte tactique du salon.
+                self.serveur_tactique = tactique;
                 // Et pour nos comptes Riot, qu'il envoie juste après.
                 self.serveur_comptes_joues = comptes_joues;
                 self.mes_comptes.clear();
@@ -5730,6 +5751,15 @@ impl KiApp {
             }
             ServerMsg::CartesRefus { message } => {
                 self.cartes.refuser(ki_protocol::safe_display(&message, 200));
+            }
+            ServerMsg::TactiqueEtat { carte } => self.tactique.recevoir_etat(carte),
+            ServerMsg::Tactique { evenement } => {
+                let membres = &self.members;
+                let couleur = |id: UserId| membres.iter().find(|m| m.user_id == id).map_or(TEXT_DIM, couleur_de_membre);
+                self.tactique.recevoir(evenement, self.my_id.unwrap_or(0), &couleur);
+            }
+            ServerMsg::TactiqueRefus { message } => {
+                self.tactique.refuser(ki_protocol::safe_display(&message, 200));
             }
             ServerMsg::StatsValorant { fiches, esports, activite } => {
                 self.stats = fiches;

@@ -8,10 +8,12 @@
 //! (par le catalogue), les traits des mains de qui dessine. La carte vit
 //! dans la fenêtre de ki-chat, jamais dans l'overlay en jeu.
 //!
-//! En V10.1 elle est locale : on y dessine seul, pour régler la sensation
-//! (épaisseur, lissage, fondu). Les traits sont déjà rangés dans le repère
-//! de la minimap — de 0 à 1 sur chaque axe — et portent leur auteur et leur
-//! numéro : le partage (V10.2) n'aura qu'à les faire voyager.
+//! Dans un salon vocal, face à un serveur qui la partage (V10.2), elle est
+//! celle de tout le salon : chaque trait part par morceaux, toutes les
+//! 50 ms pendant qu'on le tire, et ceux des autres arrivent de même. Les
+//! traits sont rangés dans le repère de la minimap — de 0 à 1 sur chaque
+//! axe —, et se reconnaissent à leur auteur et à leur numéro. Ailleurs, on
+//! y dessine seul.
 //!
 //! Le module ne dépend que d'egui, de ki-ui, de serde et du protocole : le
 //! banc `examples/banc_tactique.rs` le photographie sans ki-chat autour.
@@ -22,7 +24,7 @@ use eframe::egui::{
     self, epaint::Vertex, pos2, vec2, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
     StrokeKind,
 };
-use ki_protocol::UserId;
+use ki_protocol::{ActionTactique, CarteTactique, EvenementTactique, OutilTactique, PointTactique, UserId};
 use ki_ui::composants as ui;
 use ki_ui::icones::Icon;
 use ki_ui::jetons::{couleur as c, espace, rayon, texte};
@@ -46,6 +48,10 @@ const ECART_MIN_PX: f32 = 2.0;
 const REPEINT: Duration = Duration::from_millis(33);
 /// Un nom de zone plus long n'est pas un nom de zone.
 const NOM_DE_ZONE_MAX: usize = 32;
+/// Le rythme des morceaux d'un trait qu'on tire, vers le salon.
+const MORCEAU: Duration = Duration::from_millis(50);
+/// Le temps qu'un refus du serveur reste affiché.
+const REFUS_AFFICHE: Duration = Duration::from_secs(6);
 
 // ---------------------------------------------------------------------
 // Les plans
@@ -165,6 +171,47 @@ impl Outil {
             Outil::Zone => Icon::Target,
         }
     }
+
+    fn vers_fil(self) -> OutilTactique {
+        match self {
+            Outil::Crayon => OutilTactique::Crayon,
+            Outil::Fleche => OutilTactique::Fleche,
+            Outil::Zone => OutilTactique::Zone,
+        }
+    }
+
+    /// `None` : un outil d'une version plus récente, qui ne se dessine pas
+    /// ici.
+    fn du_fil(outil: OutilTactique) -> Option<Outil> {
+        match outil {
+            OutilTactique::Crayon => Some(Outil::Crayon),
+            OutilTactique::Fleche => Some(Outil::Fleche),
+            OutilTactique::Zone => Some(Outil::Zone),
+            OutilTactique::Inconnu => None,
+        }
+    }
+}
+
+/// Un point de la carte sur le fil : de 0 à `u16::MAX` sur chaque axe.
+fn vers_fil(p: Pos2) -> PointTactique {
+    let axe = |t: f32| (t.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16;
+    [axe(p.x), axe(p.y)]
+}
+
+fn du_fil(p: PointTactique) -> Pos2 {
+    pos2(p[0] as f32 / u16::MAX as f32, p[1] as f32 / u16::MAX as f32)
+}
+
+/// Avec qui la carte se partage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lien {
+    /// Rien que pour soi : ce serveur ne partage pas la carte.
+    #[default]
+    SansServeur,
+    /// Rien que pour soi : on n'est pas dans un salon vocal.
+    HorsVocal,
+    /// Celle de son salon vocal.
+    Salon,
 }
 
 /// D'où l'on regarde : en attaque, son spawn en bas ; en défense, la carte
@@ -192,6 +239,9 @@ pub struct Trait {
     /// Le crayon levé : le compte à rebours part de là. `None` pendant le
     /// tracé, où le trait ne vieillit pas.
     pub fini_le: Option<Instant>,
+    /// Son dernier morceau : le trait d'un autre laissé en plan, sans
+    /// crayon levé, s'en va après 15 s de silence.
+    pub maj: Instant,
 }
 
 impl Trait {
@@ -289,6 +339,26 @@ pub struct Tactique {
     /// Le numéro de mon trait en cours de tracé.
     en_cours: Option<u32>,
     prochain_id: u32,
+    /// Avec qui la carte se partage, dit à chaque image par l'appli.
+    lien: Lien,
+    /// Un modérateur m'a rendu muet : je regarde, sans dessiner.
+    pub muet: bool,
+    /// Le serveur a dit la carte de mon salon (`TactiqueEtat`) : le plan
+    /// est le sien.
+    du_salon: bool,
+    /// L'ouverture est demandée au serveur, la réponse en route.
+    ouverture_demandee: bool,
+    /// Qui a ouvert la carte du salon, ou choisi son plan.
+    par: Option<UserId>,
+    /// Les gestes à envoyer au serveur, pris par l'appli à chaque image.
+    envois: Vec<ActionTactique>,
+    /// Les points de mon trait en cours déjà partis — ceux de ma zone, qui
+    /// repartent entiers —, et quand.
+    envoyes: usize,
+    zone_envoyee: Vec<PointTactique>,
+    envoye_le: Option<Instant>,
+    /// Le dernier refus du serveur, et quand il est arrivé.
+    refus: Option<(String, Instant)>,
 }
 
 impl Default for Tactique {
@@ -304,20 +374,201 @@ impl Default for Tactique {
             centre: pos2(0.5, 0.5),
             en_cours: None,
             prochain_id: 1,
+            lien: Lien::SansServeur,
+            muet: false,
+            du_salon: false,
+            ouverture_demandee: false,
+            par: None,
+            envois: Vec::new(),
+            envoyes: 0,
+            zone_envoyee: Vec::new(),
+            envoye_le: None,
+            refus: None,
         }
     }
 }
 
 impl Tactique {
     /// Le plan choisi parmi ceux proposés ; s'il n'y en a pas encore, le
-    /// premier.
+    /// premier. Celui du salon ne se remplace pas, même absent du
+    /// catalogue : la fenêtre le dit.
     pub fn choisi<'a>(&mut self, plans: &'a [Plan]) -> Option<&'a Plan> {
-        if !plans.iter().any(|p| p.nom == self.carte) {
+        let connu = plans.iter().any(|p| p.nom == self.carte);
+        if !connu && !(self.du_salon && !self.carte.is_empty()) {
             if let Some(p) = plans.first() {
                 self.choisir(&p.nom);
             }
         }
         plans.iter().find(|p| p.nom == self.carte)
+    }
+
+    /// Avec qui la carte se partage, à chaque image. Quitter le partage
+    /// rend la carte à soi seul, vide.
+    pub fn relier(&mut self, lien: Lien) {
+        if self.lien == Lien::Salon && lien != Lien::Salon {
+            self.recevoir_etat(None);
+        }
+        self.lien = lien;
+    }
+
+    /// La carte est celle du salon : ce qu'on y fait part au serveur.
+    fn partagee(&self) -> bool {
+        self.lien == Lien::Salon
+    }
+
+    /// Les gestes à envoyer au serveur depuis la dernière fois.
+    pub fn a_envoyer(&mut self) -> Vec<ActionTactique> {
+        std::mem::take(&mut self.envois)
+    }
+
+    /// Un geste refusé par le serveur, à montrer quelques secondes.
+    pub fn refuser(&mut self, message: String) {
+        self.refus = Some((message, Instant::now()));
+    }
+
+    /// La carte du salon, tout entière (`TactiqueEtat`) : son plan, puis
+    /// ses traits, qui suivent un par un. `None` : plus de carte du salon.
+    pub fn recevoir_etat(&mut self, carte: Option<CarteTactique>) {
+        self.traits.clear();
+        self.en_cours = None;
+        self.ouverture_demandee = false;
+        match carte {
+            Some(c) => {
+                self.du_salon = true;
+                self.par = Some(c.par);
+                if self.carte != c.carte {
+                    self.carte = c.carte;
+                    self.recadrer();
+                }
+            }
+            None => {
+                self.du_salon = false;
+                self.par = None;
+            }
+        }
+    }
+
+    /// Ce qui change sur la carte du salon. Mes propres morceaux ne me
+    /// reviennent pas ; ceux qui arrivent quand même (mes traits rejoués à
+    /// une reconnexion) prennent la place qu'ils disent.
+    pub fn recevoir(&mut self, evenement: EvenementTactique, moi: UserId, couleur_de: &dyn Fn(UserId) -> Color32) {
+        let maintenant = Instant::now();
+        match evenement {
+            EvenementTactique::Plan { carte, par } => {
+                self.par = Some(par);
+                // Mon propre choix, déjà fait ici : rien à effacer de ce
+                // que j'ai tracé depuis.
+                if par == moi && carte == self.carte {
+                    return;
+                }
+                self.choisir(&carte);
+                self.traits.clear();
+                self.en_cours = None;
+            }
+            EvenementTactique::Trait { auteur, id, outil, depuis, points, fin, reste_ms } => {
+                if auteur == moi && self.en_cours == Some(id) {
+                    return;
+                }
+                let Some(outil) = Outil::du_fil(outil) else { return };
+                if auteur == moi {
+                    self.prochain_id = self.prochain_id.max(id.wrapping_add(1)).max(1);
+                }
+                let i = match self.traits.iter().position(|t| t.auteur == auteur && t.id == id) {
+                    Some(i) => i,
+                    None => {
+                        let t = Trait {
+                            auteur,
+                            id,
+                            couleur: couleur_de(auteur),
+                            outil,
+                            points: Vec::new(),
+                            fini_le: None,
+                            maj: maintenant,
+                        };
+                        self.traits.push(t);
+                        self.limiter(auteur);
+                        match self.traits.iter().position(|t| t.auteur == auteur && t.id == id) {
+                            Some(i) => i,
+                            None => return,
+                        }
+                    }
+                };
+                let t = &mut self.traits[i];
+                t.points.truncate(depuis as usize);
+                let place = POINTS_MAX.saturating_sub(t.points.len());
+                t.points.extend(points.into_iter().take(place).map(du_fil));
+                t.maj = maintenant;
+                if fin {
+                    let reste = reste_ms.map_or(VIE, |ms| Duration::from_millis(ms as u64).min(VIE));
+                    t.fini_le = Some(maintenant.checked_sub(VIE - reste).unwrap_or(maintenant));
+                }
+            }
+            EvenementTactique::Retire { auteur, id } => {
+                self.traits.retain(|t| (t.auteur, t.id) != (auteur, id));
+                if auteur == moi && self.en_cours == Some(id) {
+                    self.en_cours = None;
+                }
+            }
+            EvenementTactique::RetireTout { auteur } => {
+                self.traits.retain(|t| t.auteur != auteur);
+                if auteur == moi {
+                    self.en_cours = None;
+                }
+            }
+            EvenementTactique::Inconnu => {}
+        }
+    }
+
+    /// Le plan choisi dans la liste : chez tout le salon si la carte est la
+    /// sienne.
+    fn changer_de_plan(&mut self, carte: &str) {
+        self.choisir(carte);
+        if self.partagee() && self.du_salon {
+            self.envois.push(ActionTactique::Choisir { carte: carte.to_string() });
+        }
+    }
+
+    /// Ce qui est neuf dans mon trait en cours part au salon : tout de
+    /// suite au premier morceau et au crayon levé, sinon toutes les 50 ms.
+    /// Une zone repart entière, ses deux points, à chaque changement.
+    fn pousser_mon_trait(&mut self, moi: UserId, maintenant: Instant, fin: bool) {
+        if !self.partagee() || !self.du_salon {
+            return;
+        }
+        let Some(id) = self.en_cours else { return };
+        let Some(t) = self.traits.iter().find(|t| t.auteur == moi && t.id == id) else { return };
+        let outil = t.outil;
+        let fil: Vec<PointTactique> = t.points.iter().map(|p| vers_fil(*p)).collect();
+        let neufs = match outil {
+            Outil::Zone if fin || fil != self.zone_envoyee => fil.clone(),
+            Outil::Zone => Vec::new(),
+            Outil::Crayon | Outil::Fleche => fil[self.envoyes.min(fil.len())..].to_vec(),
+        };
+        let du = self.envoye_le.is_none_or(|e| maintenant.saturating_duration_since(e) >= MORCEAU);
+        if !(fin || (du && !neufs.is_empty())) {
+            return;
+        }
+        self.envoyes = fil.len();
+        self.zone_envoyee = if outil == Outil::Zone { fil } else { Vec::new() };
+        self.envoye_le = Some(maintenant);
+        let mut morceaux: Vec<Vec<PointTactique>> =
+            neufs.chunks(ki_protocol::TACTIQUE_POINTS_PAR_MORCEAU).map(<[PointTactique]>::to_vec).collect();
+        if morceaux.is_empty() {
+            morceaux.push(Vec::new());
+        }
+        let dernier = morceaux.len() - 1;
+        for (k, points) in morceaux.into_iter().enumerate() {
+            self.envois.push(ActionTactique::Trait { id, outil: outil.vers_fil(), points, fin: fin && k == dernier });
+        }
+    }
+
+    /// Des points de mon trait attendent leur morceau.
+    fn reste_a_pousser(&self, moi: UserId) -> bool {
+        self.partagee()
+            && self.du_salon
+            && self.en_cours.is_some_and(|id| {
+                self.traits.iter().any(|t| t.auteur == moi && t.id == id && t.outil != Outil::Zone && t.points.len() > self.envoyes)
+            })
     }
 
     /// Un trait qui arrive tout fait — d'un banc d'essai aujourd'hui, du
@@ -344,20 +595,28 @@ impl Tactique {
         }
     }
 
-    /// Retire le dernier trait de `moi`.
+    /// Retire le dernier trait de `moi`, chez tout le salon si la carte
+    /// est la sienne.
     pub fn annuler(&mut self, moi: UserId) {
         if let Some(i) = self.traits.iter().rposition(|t| t.auteur == moi) {
             let t = self.traits.remove(i);
             if self.en_cours == Some(t.id) {
                 self.en_cours = None;
             }
+            if self.partagee() && self.du_salon {
+                self.envois.push(ActionTactique::Annuler { id: t.id });
+            }
         }
     }
 
-    /// Retire tous les traits de `moi`.
+    /// Retire tous les traits de `moi`, de même.
     pub fn effacer_les_miens(&mut self, moi: UserId) {
+        let avant = self.traits.len();
         self.traits.retain(|t| t.auteur != moi);
         self.en_cours = None;
+        if self.partagee() && self.du_salon && self.traits.len() < avant {
+            self.envois.push(ActionTactique::EffacerLesMiens);
+        }
     }
 
     /// La carte entière, centrée.
@@ -366,9 +625,13 @@ impl Tactique {
         self.centre = pos2(0.5, 0.5);
     }
 
-    /// Les traits morts s'en vont.
-    fn purger(&mut self, maintenant: Instant) {
-        self.traits.retain(|t| !t.mort(maintenant));
+    /// Les traits morts s'en vont, et ceux des autres laissés en plan —
+    /// sans crayon levé ni morceau depuis 15 s.
+    fn purger(&mut self, maintenant: Instant, moi: UserId) {
+        self.traits.retain(|t| {
+            let en_plan = t.auteur != moi && t.fini_le.is_none() && maintenant.saturating_duration_since(t.maj) >= VIE;
+            !t.mort(maintenant) && !en_plan
+        });
     }
 
     /// Au-delà de [`TRAITS_MAX`] traits d'un auteur, les plus anciens des
@@ -445,8 +708,14 @@ impl Tactique {
         ma_couleur: Color32,
     ) {
         let maintenant = Instant::now();
-        self.purger(maintenant);
+        self.purger(maintenant, moi);
         let plan = self.choisi(plans);
+        // La carte du salon s'ouvre au premier regard, sur le plan choisi
+        // ici ; déjà ouverte, le serveur l'aurait dite à l'arrivée.
+        if self.partagee() && !self.du_salon && !self.ouverture_demandee && !self.carte.is_empty() {
+            self.envois.push(ActionTactique::Ouvrir { carte: self.carte.clone() });
+            self.ouverture_demandee = true;
+        }
         self.barre(ui, plans, moi);
         ui.add_space(espace::S);
         let (zone, reponse) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -460,17 +729,17 @@ impl Tactique {
         match plan {
             Some(plan) => self.dessiner(&p, &vue, plan, minimap, maintenant),
             None => {
-                p.text(
-                    zone.center(),
-                    Align2::CENTER_CENTER,
-                    "le catalogue des cartes arrive…",
-                    FontId::proportional(texte::COURANT),
-                    c::TEXT_FAINT,
-                );
+                let attente = if plans.is_empty() {
+                    "le catalogue des cartes arrive…".to_string()
+                } else {
+                    format!("« {} » n'est pas dans ton catalogue : mets ki-chat à jour", self.carte)
+                };
+                p.text(zone.center(), Align2::CENTER_CENTER, attente, FontId::proportional(texte::COURANT), c::TEXT_FAINT);
             }
         }
         p.rect_stroke(zone, rayon::XL, Stroke::new(1.0, c::BORDER), StrokeKind::Inside);
-        if let Some(dans) = self.prochain_repeint(maintenant) {
+        let morceau = self.reste_a_pousser(moi).then_some(MORCEAU);
+        if let Some(dans) = self.prochain_repeint(maintenant).into_iter().chain(morceau).min() {
             ui.ctx().request_repaint_after(dans);
         }
     }
@@ -489,7 +758,7 @@ impl Tactique {
                     }
                 });
             if choisie != self.carte {
-                self.choisir(&choisie);
+                self.changer_de_plan(&choisie);
             }
             ui.scope(|ui| {
                 ui.set_max_width(210.0);
@@ -519,10 +788,20 @@ impl Tactique {
                 self.effacer_les_miens(moi);
             }
         });
+        let refus = self.refus.as_ref().filter(|(_, quand)| quand.elapsed() < REFUS_AFFICHE).map(|(m, _)| m.as_str());
+        let partage = match (self.lien, self.muet) {
+            _ if refus.is_some() => refus.unwrap_or_default(),
+            (Lien::Salon, true) => "un modérateur t'a rendu muet : tu regardes la carte du salon, sans y dessiner",
+            (Lien::Salon, false) => "partagée avec ton salon vocal",
+            (Lien::HorsVocal, _) => "rien que pour toi : rejoins un salon vocal pour la partager",
+            (Lien::SansServeur, _) => "rien que pour toi : ce serveur ne partage pas encore la carte",
+        };
         ui::hint(
             ui,
-            "chaque trait s'efface 15 s après qu'on lève le crayon · molette : zoom · clic du milieu : déplacer · \
-             double-clic : recadrer · N : noms",
+            format!(
+                "{partage} · chaque trait s'efface 15 s après qu'on lève le crayon · molette : zoom · \
+                 clic du milieu : déplacer · double-clic : recadrer · N : noms"
+            ),
         );
     }
 
@@ -582,7 +861,10 @@ impl Tactique {
             }
             return;
         }
-        if let Some(ecran) = r.interact_pointer_pos() {
+        // Muet sur la carte du salon : on regarde, on zoome, on ne dessine
+        // pas.
+        let dessine = !(self.muet && self.partagee());
+        if let Some(ecran) = r.interact_pointer_pos().filter(|_| dessine) {
             let commence = r.drag_started_by(PointerButton::Primary) || r.clicked_by(PointerButton::Primary);
             if commence && self.en_cours.is_none() {
                 // Le premier point là où le bouton s'est enfoncé, pas là où
@@ -591,8 +873,11 @@ impl Tactique {
                 let id = self.prochain_id;
                 self.prochain_id = self.prochain_id.wrapping_add(1).max(1);
                 let points = vec![borner_au_plan(vue.vers_carte(depart))];
-                self.ajouter(Trait { auteur: moi, id, couleur, outil: self.outil, points, fini_le: None });
+                self.ajouter(Trait { auteur: moi, id, couleur, outil: self.outil, points, fini_le: None, maj: maintenant });
                 self.en_cours = Some(id);
+                self.envoyes = 0;
+                self.zone_envoyee.clear();
+                self.envoye_le = None;
             }
             if r.dragged_by(PointerButton::Primary) {
                 let ici = borner_au_plan(vue.vers_carte(ecran));
@@ -614,10 +899,14 @@ impl Tactique {
         }
         // Le crayon se lève au relâcher, où qu'il ait lieu : un trait ne
         // reste jamais « en cours » sans bouton enfoncé.
-        if self.en_cours.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+        let leve = self.en_cours.is_some() && !ui.input(|i| i.pointer.primary_down());
+        if leve {
             if let Some(t) = self.mon_trait(moi) {
                 t.fini_le = Some(maintenant);
             }
+        }
+        self.pousser_mon_trait(moi, maintenant, leve);
+        if leve {
             self.en_cours = None;
         }
     }
@@ -768,6 +1057,7 @@ mod tests {
             outil: Outil::Crayon,
             points: vec![pos2(0.5, 0.5)],
             fini_le: None,
+            maj: t0,
         };
         assert_eq!(t.opacite(t0 + Duration::from_secs(100)), 1.0, "en cours de tracé, il ne vieillit pas");
         let t = Trait { fini_le: Some(t0), ..t };
@@ -816,6 +1106,7 @@ mod tests {
             outil: Outil::Fleche,
             points: vec![pos2(2.0, -1.0)],
             fini_le,
+            maj: t0,
         };
         let mut tac = Tactique::default();
         tac.ajouter(trait_de(1, 1, Some(t0)));
@@ -834,7 +1125,7 @@ mod tests {
         tac.effacer_les_miens(2);
         assert_eq!(tac.traits.len(), 1);
         tac.ajouter(trait_de(3, 1, Some(t0)));
-        tac.purger(t0 + VIE);
+        tac.purger(t0 + VIE, 1);
         assert_eq!(tac.traits.len(), 1, "le mort part, celui qu'on trace reste");
         tac.carte = "Ascent".into();
         tac.choisir("Lotus");
@@ -848,7 +1139,15 @@ mod tests {
         let t0 = Instant::now();
         let mut tac = Tactique::default();
         assert_eq!(tac.prochain_repeint(t0), None, "une carte vide ne coûte rien");
-        let t = Trait { auteur: 1, id: 1, couleur: Color32::WHITE, outil: Outil::Crayon, points: vec![], fini_le: None };
+        let t = Trait {
+            auteur: 1,
+            id: 1,
+            couleur: Color32::WHITE,
+            outil: Outil::Crayon,
+            points: vec![],
+            fini_le: None,
+            maj: t0,
+        };
         tac.ajouter(t.clone());
         assert_eq!(tac.prochain_repeint(t0), None, "en cours de tracé, le pointeur suffit");
         tac.ajouter(Trait { id: 2, fini_le: Some(t0), ..t });
@@ -918,5 +1217,140 @@ mod tests {
             assert!(bas.y > 0.85 && (bas.x - 0.5).abs() < 1e-4, "{attaque:?} → {bas:?}");
         }
         assert_eq!(quarts_pour(None, Some(milieu)), 0);
+    }
+
+    fn carte_du_salon(tac: &mut Tactique) {
+        tac.relier(Lien::Salon);
+        tac.recevoir_etat(Some(CarteTactique { salon: 4, carte: "Ascent".into(), par: 2 }));
+    }
+
+    fn trait_recu(auteur: UserId, id: u32, depuis: u32, points: Vec<PointTactique>, fin: bool, reste_ms: Option<u32>) -> EvenementTactique {
+        EvenementTactique::Trait { auteur, id, outil: OutilTactique::Fleche, depuis, points, fin, reste_ms }
+    }
+
+    /// Les traits des autres se montent morceau par morceau, chacun à sa
+    /// place : un morceau reçu deux fois ne double rien, le temps qui reste
+    /// se reprend, un outil inconnu ne se dessine pas, et les retraits
+    /// retirent.
+    #[test]
+    fn les_traits_du_salon_se_montent() {
+        let mut tac = Tactique::default();
+        carte_du_salon(&mut tac);
+        let couleur = |_| Color32::RED;
+        tac.recevoir(trait_recu(2, 1, 0, vec![[0, 0], [100, 100]], false, None), 1, &couleur);
+        tac.recevoir(trait_recu(2, 1, 2, vec![[200, 200]], false, None), 1, &couleur);
+        tac.recevoir(trait_recu(2, 1, 2, vec![[200, 200]], false, None), 1, &couleur);
+        assert_eq!(tac.traits.len(), 1);
+        assert_eq!(tac.traits[0].points.len(), 3, "le morceau en double ne double rien");
+        assert_eq!(tac.traits[0].couleur, Color32::RED);
+        assert!(tac.traits[0].fini_le.is_none());
+        tac.recevoir(trait_recu(2, 1, 3, vec![], true, None), 1, &couleur);
+        assert!(tac.traits[0].fini_le.is_some_and(|f| f.elapsed() < Duration::from_secs(1)), "15 s entières");
+
+        tac.recevoir(trait_recu(3, 1, 0, vec![[1, 1]], true, Some(4_000)), 1, &couleur);
+        let reste = VIE.saturating_sub(tac.traits[1].fini_le.unwrap().elapsed());
+        assert!(reste <= Duration::from_secs(4) && reste > Duration::from_millis(3_500), "{reste:?}");
+        let futur = EvenementTactique::Trait {
+            auteur: 3,
+            id: 2,
+            outil: OutilTactique::Inconnu,
+            depuis: 0,
+            points: vec![[1, 1]],
+            fin: true,
+            reste_ms: None,
+        };
+        tac.recevoir(futur, 1, &couleur);
+        assert_eq!(tac.traits.len(), 2, "un outil d'après ne se dessine pas");
+
+        tac.recevoir(EvenementTactique::Retire { auteur: 3, id: 1 }, 1, &couleur);
+        assert_eq!(tac.traits.len(), 1);
+        tac.recevoir(trait_recu(2, 5, 0, vec![[9, 9]], true, None), 1, &couleur);
+        tac.recevoir(EvenementTactique::RetireTout { auteur: 2 }, 1, &couleur);
+        assert!(tac.traits.is_empty());
+    }
+
+    /// Un plan choisi par un autre efface tout ; le mien, revenu du
+    /// serveur, n'efface pas ce que j'ai tracé depuis ; mes traits rejoués
+    /// à une reconnexion repoussent mon prochain numéro ; quitter le salon
+    /// rend une carte à soi, vide.
+    #[test]
+    fn le_salon_mene_le_plan() {
+        let mut tac = Tactique::default();
+        carte_du_salon(&mut tac);
+        let couleur = |_| Color32::RED;
+        tac.recevoir(trait_recu(1, 41, 0, vec![[5, 5]], true, Some(9_000)), 1, &couleur);
+        assert_eq!(tac.prochain_id, 42, "mes numéros ne retombent pas sur un trait vivant");
+        tac.recevoir(trait_recu(2, 1, 0, vec![[5, 5]], true, None), 1, &couleur);
+        tac.recevoir(EvenementTactique::Plan { carte: "Ascent".into(), par: 1 }, 1, &couleur);
+        assert_eq!(tac.traits.len(), 2, "mon propre choix, déjà fait ici");
+        tac.recevoir(EvenementTactique::Plan { carte: "Lotus".into(), par: 2 }, 1, &couleur);
+        assert!(tac.traits.is_empty());
+        assert_eq!((tac.carte.as_str(), tac.par), ("Lotus", Some(2)));
+        let plans = [Plan { nom: "Ascent".into(), ..Plan::default() }];
+        assert!(tac.choisi(&plans).is_none(), "le plan du salon ne se remplace pas par le premier venu");
+
+        tac.relier(Lien::HorsVocal);
+        assert!(!tac.du_salon);
+        assert_eq!(tac.choisi(&plans).map(|p| p.nom.as_str()), Some("Ascent"), "seul, on reprend un plan connu");
+    }
+
+    /// Une image de la carte, sans écran : `evenements` pour seule entrée.
+    fn image(ctx: &egui::Context, tac: &mut Tactique, plans: &[Plan], evenements: Vec<egui::Event>) {
+        let entree = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 800.0))),
+            events: evenements,
+            ..Default::default()
+        };
+        ctx.run_ui(entree, |ui| tac.contenu(ui, plans, None, 1, Color32::GREEN)).drop_without_applying_deltas();
+    }
+
+    fn bouton(pos: Pos2, enfonce: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed: enfonce, modifiers: Default::default() }
+    }
+
+    /// Un trait tiré à la souris sur la carte du salon part par morceaux :
+    /// le premier tout de suite, le dernier au crayon levé, et bout à bout
+    /// ils refont le trait. Muet, on ne dessine rien. Sans carte du salon,
+    /// la première image la demande, une fois.
+    #[test]
+    fn un_trait_tire_part_au_salon() {
+        let plans = [Plan { nom: "Ascent".into(), ..Plan::default() }];
+        let ctx = egui::Context::default();
+        let mut tac = Tactique::default();
+        tac.relier(Lien::Salon);
+        image(&ctx, &mut tac, &plans, vec![]);
+        image(&ctx, &mut tac, &plans, vec![]);
+        assert_eq!(tac.a_envoyer(), vec![ActionTactique::Ouvrir { carte: "Ascent".into() }]);
+        tac.recevoir_etat(Some(CarteTactique { salon: 4, carte: "Ascent".into(), par: 1 }));
+
+        let tirer = |tac: &mut Tactique| {
+            let depart = pos2(300.0, 500.0);
+            image(&ctx, tac, &plans, vec![egui::Event::PointerMoved(depart)]);
+            image(&ctx, tac, &plans, vec![bouton(depart, true)]);
+            for k in 1..=12 {
+                image(&ctx, tac, &plans, vec![egui::Event::PointerMoved(depart + vec2(15.0 * k as f32, -10.0 * k as f32))]);
+            }
+            image(&ctx, tac, &plans, vec![bouton(depart + vec2(180.0, -120.0), false)]);
+            image(&ctx, tac, &plans, vec![]);
+        };
+        tirer(&mut tac);
+        let envois = tac.a_envoyer();
+        assert!(envois.len() >= 2, "{envois:?}");
+        let mut bout_a_bout = Vec::new();
+        for (k, action) in envois.iter().enumerate() {
+            let ActionTactique::Trait { id, outil, points, fin } = action else { panic!("{action:?}") };
+            assert_eq!((*id, *outil), (1, OutilTactique::Fleche));
+            assert_eq!(*fin, k == envois.len() - 1, "seul le dernier lève le crayon");
+            bout_a_bout.extend_from_slice(points);
+        }
+        let local: Vec<PointTactique> = tac.traits[0].points.iter().map(|p| vers_fil(*p)).collect();
+        assert!(local.len() > 5, "{local:?}");
+        assert_eq!(bout_a_bout, local);
+        assert!(tac.traits[0].fini_le.is_some());
+
+        tac.muet = true;
+        tirer(&mut tac);
+        assert!(tac.a_envoyer().is_empty());
+        assert_eq!(tac.traits.len(), 1, "muet, on regarde");
     }
 }
