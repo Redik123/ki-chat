@@ -2203,6 +2203,7 @@ impl KiApp {
                 soiree: &self.soiree,
                 soiree_servie: self.serveur_soiree,
                 ma_fiche: self.ma_fiche.as_ref(),
+                photos: &self.avatars,
             };
             if !self.valo.fiche(ctx, f, &cx) {
                 self.fiche = None;
@@ -2242,6 +2243,7 @@ impl KiApp {
                 soiree: &self.soiree,
                 soiree_servie: self.serveur_soiree,
                 ma_fiche: self.ma_fiche.as_ref(),
+                photos: &self.avatars,
             };
             let fiche = self.fiche.as_ref();
             let valo = &mut self.valo;
@@ -4147,6 +4149,7 @@ impl KiApp {
             soiree: &self.soiree,
             soiree_servie: self.serveur_soiree,
             ma_fiche: self.ma_fiche.as_ref(),
+            photos: &self.avatars,
         };
         let demandes = self.valo.fenetre(ctx, &cx, &mut boutique);
         self.boutique = boutique;

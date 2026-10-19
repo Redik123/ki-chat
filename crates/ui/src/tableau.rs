@@ -33,12 +33,13 @@ pub struct Colonne<'a> {
     grandit: bool,
     priorite: u8,
     droite: bool,
+    chiffre: bool,
     triable: bool,
 }
 
 impl<'a> Colonne<'a> {
     pub fn new(titre: &'a str, largeur: f32) -> Self {
-        Self { titre, largeur, grandit: false, priorite: 0, droite: false, triable: false }
+        Self { titre, largeur, grandit: false, priorite: 0, droite: false, chiffre: false, triable: false }
     }
 
     /// Elle prend la place qui reste (le nom d'un membre).
@@ -57,6 +58,14 @@ impl<'a> Colonne<'a> {
     /// Alignée à droite : un chiffre.
     pub fn droite(mut self) -> Self {
         self.droite = true;
+        self.chiffre = true;
+        self
+    }
+
+    /// Elle se trie comme un chiffre — du plus grand au plus petit d'abord —
+    /// sans être alignée à droite : un rang, son icône devant.
+    pub fn chiffre(mut self) -> Self {
+        self.chiffre = true;
         self
     }
 
@@ -183,7 +192,7 @@ impl<'a> Tableau<'a> {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked();
             if clic {
-                let nouveau = basculer(tri, i, c.droite);
+                let nouveau = basculer(tri, i, c.chiffre);
                 ui.data_mut(|d| d.insert_temp(self.id, nouveau));
             }
             let trie = tri.filter(|t| t.colonne == i);
@@ -295,5 +304,9 @@ mod tests {
         assert_eq!(t, Tri { colonne: 3, croissant: false });
         assert_eq!(basculer(Some(t), 3, true), Tri { colonne: 3, croissant: true });
         assert_eq!(basculer(Some(t), 0, false), Tri { colonne: 0, croissant: true });
+        // Un rang, à gauche, se trie pourtant comme un chiffre.
+        let rang = Colonne::new("Rang", 90.0).chiffre();
+        assert!(rang.chiffre && !rang.droite);
+        assert!(Colonne::new("7 j", 50.0).droite().chiffre);
     }
 }

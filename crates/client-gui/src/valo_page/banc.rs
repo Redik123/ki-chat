@@ -42,11 +42,12 @@ pub(crate) fn lancer(dossier: PathBuf) -> eframe::Result {
     )
 }
 
-/// Ce qu'une scène montre : l'accueil de la page au centre, ou un profil
-/// dans une de ses vues.
+/// Ce qu'une scène montre : l'accueil de la page au centre, un autre de
+/// ses onglets, ou un profil dans une de ses vues.
 #[derive(Clone, Copy)]
 enum Quoi {
     Accueil { soiree: bool },
+    Onglet(centre::OngletCentre),
     Profil(profil::VueProfil),
 }
 
@@ -59,10 +60,15 @@ struct Scene {
     quoi: Quoi,
 }
 
-const SCENES: [Scene; 10] = [
+const SCENES: [Scene; 15] = [
     Scene { nom: "accueil", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-serveur-d-avant", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: false } },
+    Scene { nom: "classement", fiche: 0, largeur: 980.0, quoi: Quoi::Onglet(centre::OngletCentre::Classement) },
+    Scene { nom: "classement-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Onglet(centre::OngletCentre::Classement) },
+    Scene { nom: "classement-large", fiche: 0, largeur: 1440.0, quoi: Quoi::Onglet(centre::OngletCentre::Classement) },
+    Scene { nom: "matchs", fiche: 0, largeur: 980.0, quoi: Quoi::Onglet(centre::OngletCentre::Matchs) },
+    Scene { nom: "matchs-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Onglet(centre::OngletCentre::Matchs) },
     Scene { nom: "profil-riche", fiche: 0, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
     Scene { nom: "profil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
     Scene { nom: "profil-large", fiche: 0, largeur: 1440.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
@@ -83,6 +89,7 @@ struct Banc {
     activite: Vec<u16>,
     ouvertes: Vec<FicheOuverte>,
     soiree: Vec<PartieSoiree>,
+    photos: HashMap<UserId, (String, egui::TextureHandle)>,
     rangs: rangs::Rangs,
     catalogue: Catalogue,
     boutique: boutique::Lecteur,
@@ -103,6 +110,16 @@ impl Banc {
         .zip(noms)
         .map(|(&(niveau, rang, n, graine), nom)| fiche_inventee(nom, niveau, rang, n, graine, maintenant))
         .collect();
+        let mut fiches = fiches;
+        // Des parties jouées ensemble : Jerem avec drion une partie sur
+        // deux, Kevin de temps en temps, et Lina une fois en face.
+        for k in (0..12).step_by(2) {
+            jouer_avec_drion(&mut fiches, 1, k, true);
+        }
+        for k in [0, 4, 9] {
+            jouer_avec_drion(&mut fiches, 3, k, true);
+        }
+        jouer_avec_drion(&mut fiches, 4, 3, false);
         let stats: Vec<FicheMembre> = fiches
             .iter()
             .zip(noms)
@@ -111,7 +128,8 @@ impl Banc {
                 user_id: i as UserId + 1,
                 username: nom.to_string(),
                 bilan: Some(bilan_local(f, maintenant)),
-                fiche: f.resume(5, 10),
+                // Le premier palier du serveur pour un groupe de cinq.
+                fiche: f.resume(30, 30),
             })
             .collect();
         let mut membres: Vec<Member> = noms.iter().enumerate().map(|(i, nom)| membre(i as UserId + 1, nom)).collect();
@@ -150,6 +168,7 @@ impl Banc {
             activite: activite_du_groupe(),
             ouvertes,
             soiree: soiree_inventee(maintenant),
+            photos: HashMap::new(),
             rangs: rangs::Rangs::new(),
             catalogue: Catalogue::new(),
             boutique: boutique::Lecteur::new(),
@@ -182,6 +201,7 @@ impl eframe::App for Banc {
             soiree: if soiree_servie { &self.soiree } else { &[] },
             soiree_servie,
             ma_fiche: self.ouvertes[0].fiche.as_ref(),
+            photos: &self.photos,
         };
         let ouverte = &self.ouvertes[scene.fiche];
         let page = &mut self.page;
@@ -194,6 +214,10 @@ impl eframe::App for Banc {
                 Quoi::Accueil { .. } => {
                     page.vers_accueil();
                     page.heures = accueil::Heures::LesDeux;
+                    let _ = page.centre(&mut dedans, &cx, Some(ouverte), boutique);
+                }
+                Quoi::Onglet(onglet) => {
+                    page.onglet_centre = onglet;
                     let _ = page.centre(&mut dedans, &cx, Some(ouverte), boutique);
                 }
                 Quoi::Profil(vue) => {
@@ -429,6 +453,35 @@ fn fiche_inventee(nom: &str, niveau: f32, rang: (u8, u16), n: usize, graine: u64
         titre_joueur: String::new(),
         medailles,
     }
+}
+
+/// Le match `k` de `qui` devient le `k`-ième de drion — le même id, la
+/// même carte, la même heure —, dans son camp ou en face : ses manches,
+/// son résultat et son point de RR suivent.
+fn jouer_avec_drion(fiches: &mut [FicheValorant], qui: usize, k: usize, meme_camp: bool) {
+    let Some(modele) = fiches[0].matchs.get(k).cloned() else { return };
+    let f = &mut fiches[qui];
+    let Some(m) = f.matchs.get_mut(k) else { return };
+    let ancien = std::mem::replace(&mut m.id, modele.id.clone());
+    m.date = modele.date;
+    m.carte = modele.carte.clone();
+    m.duree_s = modele.duree_s;
+    let inverser = |d: &str| d.chars().map(|c| if c == 'V' { 'D' } else { 'V' }).collect::<String>();
+    m.gagne = if meme_camp { modele.gagne } else { modele.gagne.map(|g| !g) };
+    m.manches = if meme_camp { modele.manches } else { (modele.manches.1, modele.manches.0) };
+    if let (Some(d), Some(dm)) = (m.manches_detail.as_mut(), modele.manches_detail.as_ref()) {
+        d.manches = dm.manches;
+        d.deroule = if meme_camp { dm.deroule.clone() } else { inverser(&dm.deroule) };
+    }
+    let gagne = m.gagne == Some(true);
+    if let Some(p) = f.historique_rr.iter_mut().find(|p| p.match_id == ancien) {
+        p.match_id = modele.id.clone();
+        p.date = modele.date;
+        p.carte = modele.carte.clone();
+        p.delta = if gagne { p.delta.abs() } else { -p.delta.abs() };
+    }
+    f.matchs.sort_by_key(|m| std::cmp::Reverse(m.date));
+    f.historique_rr.sort_by_key(|p| std::cmp::Reverse(p.date));
 }
 
 fn medailles_inventees(matchs: &[MatchResume], maintenant: u64) -> ki_protocol::Medailles {

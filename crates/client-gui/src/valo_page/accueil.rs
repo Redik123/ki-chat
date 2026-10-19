@@ -12,6 +12,9 @@
 //! 4. quand le groupe joue — le groupe, moi, ou les deux — et ses repères ;
 //! 5. le classement, trié par les 7 jours, et les douze médailles.
 //!
+//! Les parties du fil sont les cartes de l'onglet Matchs ([`matchs`]) ; le
+//! classement est celui de son onglet ([`classement`]).
+//!
 //! L'affiche et le fil viennent de `ServerMsg::Soiree` ; le vestiaire,
 //! les records et le classement des fiches de `StatsValorant` ; « en
 //! direct » de la présence. Rien de neuf n'est demandé à HenrikDev.
@@ -34,8 +37,8 @@ impl Heures {
         [(Heures::Groupe, "Le groupe"), (Heures::Moi, "Moi"), (Heures::LesDeux, "Moi et le groupe")];
 }
 
-const JOURS_CAPITALES: [&str; 7] = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"];
-const MOIS_CAPITALES: [&str; 12] =
+pub(super) const JOURS_CAPITALES: [&str; 7] = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"];
+pub(super) const MOIS_CAPITALES: [&str; 12] =
     ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN", "JUILLET", "AOÛT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DÉCEMBRE"];
 /// La hauteur de l'affiche.
 const HAUTEUR_AFFICHE: f32 = 132.0;
@@ -165,7 +168,7 @@ impl PageValo {
                 ui.spacing_mut().item_spacing.x = espace::L;
                 ui.allocate_ui_with_layout(Vec2::new(gauche, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.set_width(gauche);
-                    fil(ui, cx, noms);
+                    fil(ui, cx, noms, demandes);
                 });
                 let droite = ui.available_width();
                 ui.allocate_ui_with_layout(Vec2::new(droite, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -174,21 +177,22 @@ impl PageValo {
                 });
             });
         } else {
-            fil(ui, cx, noms);
+            fil(ui, cx, noms, demandes);
             records_et_duos(ui, lignes, noms, cx);
         }
         self.quand_on_joue(ui, cx);
-        // Le classement, trié par les 7 jours la première fois.
-        if !self.tri_accueil_pose {
-            self.tri_accueil_pose = true;
-            self.tri = Tri::Rr7;
-            self.tri_desc = true;
-        }
-        ui::section(ui, Icon::Crown, "Classement", Some("trié par les RR des 7 jours ; un clic sur un en-tête change le tri"), |ui| {
-            self.choix_de_periode(ui);
-            self.classement(ui, lignes, noms, cx.moi, cx.rangs, demandes);
-            medailles_du_groupe(ui, lignes, noms, cx.moi, demandes, &Medaille::TOUTES);
-        });
+        ui::section(
+            ui,
+            Icon::Crown,
+            "Classement",
+            Some("trié par les RR des 7 jours · un clic sur un en-tête change le tri, sur une ligne ouvre la fiche"),
+            |ui| {
+                self.choix_de_periode(ui);
+                ui.add_space(espace::S);
+                self.classement_tableau(ui, lignes, noms, cx, demandes);
+                medailles_du_groupe(ui, lignes, noms, cx.moi, demandes, &Medaille::TOUTES);
+            },
+        );
     }
 
     /// La carte de chaleur, au choix du groupe, de moi ou des deux, et ses
@@ -531,7 +535,7 @@ fn carte_de_membre(ui: &mut Ui, place: usize, l: &Ligne, cx: &Contexte<'_>) -> R
 
 /// La partie en cours en tête, puis chaque partie de la soirée, la plus
 /// récente d'abord, avec les passages de palier qu'elle a valus.
-fn fil(ui: &mut Ui, cx: &Contexte<'_>, noms: &Annuaire) {
+fn fil(ui: &mut Ui, cx: &Contexte<'_>, noms: &Annuaire, demandes: &mut Vec<Demande>) {
     ui::section(ui, Icon::Play, "Le fil de la soirée", Some("depuis 6 h du matin · une carte par partie, jouée seul ou ensemble"), |ui| {
         if let Some((j, joueurs)) = en_cours(cx) {
             ui.horizontal_wrapped(|ui| {
@@ -570,75 +574,13 @@ fn fil(ui: &mut Ui, cx: &Contexte<'_>, noms: &Annuaire) {
                     ui.label(RichText::new(format!("{verbe} {}", nom_de_rang(j.tier))).color(graphes::couleur_de_rang(j.tier)).size(texte::COURANT));
                 });
             }
-            carte_de_partie(ui, p, cx, noms);
+            ui.push_id(("partie_du_soir", &p.id, p.date), |ui| {
+                matchs::carte_de_partie(ui, &matchs::Partie::de_la_soiree(p), cx, noms, demandes);
+            });
             ui.add_space(espace::S);
         }
         if let Some(premiere) = cx.soiree.last() {
-            ui::hint(ui, format!("la soirée commence · {}", heure_de(premiere.date)));
-        }
-    });
-}
-
-/// « 21:47 », à l'heure locale.
-fn heure_de(ms: u64) -> String {
-    chrono::Local.timestamp_millis_opt(ms as i64).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
-}
-
-/// Une partie : l'heure, la carte, le résultat, les manches, puis chaque
-/// membre qui y était — son agent, son K/D/A, ses RR, ses médailles.
-fn carte_de_partie(ui: &mut Ui, p: &PartieSoiree, cx: &Contexte<'_>, noms: &Annuaire) {
-    ui::surface(ui, |ui| {
-        ui.set_width(ui.available_width());
-        let premier = p.joueurs.first();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = espace::S;
-            ui.label(RichText::new(heure_de(p.date)).color(TEXT_FAINT).size(texte::PETIT));
-            carte_cellule(ui, &p.carte, cx.catalogue);
-            if let Some(j) = premier {
-                let (resultat, teinte) = match j.gagne {
-                    Some(true) => ("Victoire", SPEAK),
-                    Some(false) => ("Défaite", DANGER),
-                    None => ("Nul", TEXT_DIM),
-                };
-                ui.label(
-                    RichText::new(format!("{resultat} {}-{}", j.manches.0, j.manches.1))
-                        .font(police::moyenne(ui.ctx(), texte::CORPS))
-                        .color(teinte),
-                );
-            }
-            if p.mode != MODE_CLASSE && !p.mode.is_empty() {
-                ui::hint(ui, &p.mode);
-            }
-            if p.duree_s > 0 {
-                ui::hint(ui, duree_texte(p.duree_s));
-            }
-        });
-        if let Some(deroule) = premier.map(|j| j.deroule.as_str()).filter(|d| !d.is_empty()) {
-            ui.add_space(espace::XXS);
-            graphes::cases_manches(ui, deroule);
-        }
-        ui.add_space(espace::XS);
-        for j in &p.joueurs {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = espace::S;
-                agent_cellule(ui, &j.agent, cx.catalogue);
-                ui.label(RichText::new(noms.nom(j.user_id)).color(noms.couleur(j.user_id)).size(texte::COURANT));
-                ui.label(RichText::new(format!("{} / {} / {}", j.kills, j.deaths, j.assists)).color(TEXT).size(texte::PETIT));
-                let manches = u32::from(j.manches.0) + u32::from(j.manches.1);
-                if manches > 0 && j.score > 0 {
-                    ui.label(RichText::new(format!("{} ACS", j.score / manches)).color(TEXT_DIM).size(texte::PETIT));
-                }
-                if let Some(delta) = j.delta_rr {
-                    let (t, c) = signe(delta);
-                    ui.label(RichText::new(format!("{t} RR")).font(police::moyenne(ui.ctx(), texte::PETIT)).color(c));
-                }
-                if j.mvp == ki_protocol::MVP_DU_MATCH {
-                    badge(ui, "MVP", theme::WARN);
-                }
-                for g in j.medailles.iter().filter(|g| g.medaille != Medaille::Inconnue && g.medaille != Medaille::Mvp).take(3) {
-                    badge(ui, nom_court(g.medaille), teinte_de_medaille(g.medaille));
-                }
-            });
+            ui::hint(ui, format!("la soirée commence · {}", matchs::heure_de(premiere.date)));
         }
     });
 }
