@@ -833,12 +833,7 @@ pub fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         .stroke(Stroke::new(1.0_f32, theme::BORDER))
         .corner_radius(CornerRadius::same(rayon::XL))
         .inner_margin(marge::egale(espace::XL))
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 10],
-            blur: 30,
-            spread: 0,
-            color: Color32::from_black_alpha(90),
-        })
+        .shadow(crate::jetons::ombre::DOUCE)
         .show(ui, |ui| add(ui))
         .response;
 
@@ -1005,4 +1000,211 @@ pub fn text_field<'a>(text: &'a mut String, hint: &str, password: bool) -> egui:
         .margin(marge::symetrique(espace::L, espace::M))
         .background_color(theme::BG_DEEP)
         .desired_width(f32::INFINITY)
+}
+
+// ---------------------------------------------------------------------
+// Tableaux de bord : surfaces, tuiles de chiffres, grilles
+// ---------------------------------------------------------------------
+
+/// Une surface posée sur la page : une carte de tableau de bord, sans
+/// titre. Plus discrète que [`card`] — ni ombre ni reflet —, pour en
+/// aligner beaucoup.
+pub fn surface<R>(ui: &mut Ui, contenu: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    egui::Frame::NONE
+        .fill(theme::BG_RAISED)
+        .stroke(Stroke::new(1.0_f32, theme::BORDER_SOFT))
+        .corner_radius(CornerRadius::same(rayon::XL))
+        .inner_margin(marge::egale(espace::L))
+        .show(ui, contenu)
+}
+
+/// L'écart d'un chiffre clé à sa référence (les matchs d'avant, la médiane
+/// du groupe) : la flèche dit le sens, la couleur dit si c'est mieux.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ecart {
+    /// Positif : en hausse.
+    pub valeur: f32,
+    /// Tel qu'on le lit (« +0,12 »).
+    pub texte: String,
+    /// La hausse est bonne (un K/D) ; fausse : mauvaise (des morts).
+    pub hausse_bonne: bool,
+}
+
+impl Ecart {
+    pub fn new(valeur: f32, texte: impl Into<String>) -> Self {
+        Self { valeur, texte: texte.into(), hausse_bonne: true }
+    }
+
+    /// La hausse est mauvaise.
+    pub fn a_l_envers(mut self) -> Self {
+        self.hausse_bonne = false;
+        self
+    }
+
+    /// Sa couleur : verte quand c'est mieux, rouge quand c'est pire, grise
+    /// à plat.
+    pub fn couleur(&self) -> Color32 {
+        if self.valeur.abs() < f32::EPSILON || !self.valeur.is_finite() {
+            theme::TEXT_FAINT
+        } else if (self.valeur > 0.0) == self.hausse_bonne {
+            theme::ACCENT
+        } else {
+            theme::DANGER
+        }
+    }
+}
+
+/// Une tuile de chiffre clé : un intitulé en capitales, une grande valeur
+/// en Ubuntu Medium, puis l'écart et une précision ; une petite courbe en
+/// fond, si on la donne.
+///
+/// ```ignore
+/// ui::Kpi::new("K/D", "1,24").ecart(ui::Ecart::new(0.12, "+0,12")).precision("médiane 1,05").show(ui);
+/// ```
+pub struct Kpi<'a> {
+    intitule: &'a str,
+    valeur: String,
+    couleur: Color32,
+    ecart: Option<Ecart>,
+    precision: Option<&'a str>,
+    serie: &'a [f32],
+}
+
+impl<'a> Kpi<'a> {
+    pub fn new(intitule: &'a str, valeur: impl Into<String>) -> Self {
+        Self { intitule, valeur: valeur.into(), couleur: theme::TEXT, ecart: None, precision: None, serie: &[] }
+    }
+
+    /// La couleur de la valeur (un rang, un résultat).
+    pub fn couleur(mut self, couleur: Color32) -> Self {
+        self.couleur = couleur;
+        self
+    }
+
+    pub fn ecart(mut self, ecart: Ecart) -> Self {
+        self.ecart = Some(ecart);
+        self
+    }
+
+    pub fn precision(mut self, precision: &'a str) -> Self {
+        self.precision = Some(precision);
+        self
+    }
+
+    /// Une courbe discrète au bas de la tuile : la valeur match après
+    /// match, la plus ancienne à gauche.
+    pub fn serie(mut self, serie: &'a [f32]) -> Self {
+        self.serie = serie;
+        self
+    }
+
+    /// La tuile, à la largeur qu'on lui laisse, [`Kpi::HAUTEUR`] de haut.
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let largeur = ui.available_width().max(crate::jetons::largeur::TUILE_MIN * 0.6);
+        let (rect, reponse) = ui.allocate_exact_size(Vec2::new(largeur, Self::HAUTEUR), Sense::hover());
+        if !ui.is_rect_visible(rect) {
+            return reponse;
+        }
+        let p = ui.painter_at(rect);
+        p.rect(rect, CornerRadius::same(rayon::XL), theme::BG_RAISED, Stroke::new(1.0_f32, theme::BORDER_SOFT), StrokeKind::Inside);
+        let dedans = rect.shrink(espace::L);
+        if self.serie.len() >= 2 {
+            // Sous l'écart et la précision, au ras de la tuile.
+            courbe_discrete(&p, Rect::from_min_max(egui::pos2(dedans.left(), dedans.bottom() - 10.0), dedans.right_bottom()), self.serie);
+        }
+        p.text(
+            dedans.left_top(),
+            Align2::LEFT_TOP,
+            self.intitule.to_uppercase(),
+            FontId::proportional(texte::MINUSCULE),
+            theme::TEXT_FAINT,
+        );
+        let valeur = p.text(
+            dedans.left_top() + Vec2::new(0.0, 15.0),
+            Align2::LEFT_TOP,
+            &self.valeur,
+            crate::jetons::police::moyenne(texte::KPI),
+            self.couleur,
+        );
+        let mut x = dedans.left();
+        let y = valeur.bottom() + espace::XS;
+        if let Some(ecart) = &self.ecart {
+            let couleur = ecart.couleur();
+            if ecart.valeur.abs() >= f32::EPSILON && ecart.valeur.is_finite() {
+                let c = egui::pos2(x + 4.0, y + 7.0);
+                let (h, l) = (4.0, 4.5);
+                let pointe = if ecart.valeur > 0.0 {
+                    vec![egui::pos2(c.x, c.y - h), egui::pos2(c.x + l, c.y + h), egui::pos2(c.x - l, c.y + h)]
+                } else {
+                    vec![egui::pos2(c.x, c.y + h), egui::pos2(c.x - l, c.y - h), egui::pos2(c.x + l, c.y - h)]
+                };
+                p.add(egui::Shape::convex_polygon(pointe, couleur, Stroke::NONE));
+                x += 12.0;
+            }
+            let r = p.text(egui::pos2(x, y), Align2::LEFT_TOP, &ecart.texte, FontId::proportional(texte::PETIT), couleur);
+            x = r.right() + espace::S;
+        }
+        if let Some(precision) = self.precision {
+            p.text(egui::pos2(x, y), Align2::LEFT_TOP, precision, FontId::proportional(texte::PETIT), theme::TEXT_FAINT);
+        }
+        reponse
+    }
+}
+
+impl Kpi<'_> {
+    /// La hauteur d'une tuile : l'intitulé, la valeur, l'écart.
+    pub const HAUTEUR: f32 = 92.0;
+}
+
+/// Une courbe sans axe, en filigrane : la tendance, pas les valeurs.
+fn courbe_discrete(p: &Painter, rect: Rect, serie: &[f32]) {
+    let (min, max) = serie.iter().filter(|v| v.is_finite()).fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+    if min > max {
+        return;
+    }
+    let etendue = (max - min).max(f32::EPSILON);
+    let n = (serie.len() - 1).max(1) as f32;
+    let points: Vec<egui::Pos2> = serie
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.is_finite())
+        .map(|(i, v)| egui::pos2(rect.left() + rect.width() * i as f32 / n, rect.bottom() - rect.height() * (v - min) / etendue))
+        .collect();
+    p.add(egui::Shape::line(points, Stroke::new(1.5_f32, theme::translucide(theme::ACCENT, 90))));
+}
+
+/// Combien de colonnes de `largeur_min` tiennent dans `largeur`, avec
+/// `ecart` entre elles — une au moins, `n` au plus.
+pub fn colonnes_de_grille(largeur: f32, largeur_min: f32, ecart: f32, n: usize) -> usize {
+    let tiennent = ((largeur + ecart) / (largeur_min + ecart)).floor().max(1.0) as usize;
+    tiennent.min(n.max(1))
+}
+
+/// Une grille qui passe à la ligne : `n` cases d'égale largeur, autant par
+/// rangée qu'il en tient à `largeur_min` au moins, `ecart` entre elles.
+/// `case` remplit la case `i`. Les rangées prennent la hauteur de leur plus
+/// haute case.
+pub fn grille(ui: &mut Ui, n: usize, largeur_min: f32, ecart: f32, mut case: impl FnMut(&mut Ui, usize)) {
+    if n == 0 {
+        return;
+    }
+    let largeur = ui.available_width();
+    let colonnes = colonnes_de_grille(largeur, largeur_min, ecart, n);
+    let cote = ((largeur - ecart * (colonnes as f32 - 1.0)) / colonnes as f32).floor();
+    let mut i = 0;
+    while i < n {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = ecart;
+            for k in i..(i + colonnes).min(n) {
+                ui.allocate_ui_with_layout(Vec2::new(cote, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(cote);
+                    case(ui, k);
+                });
+            }
+        });
+        i += colonnes;
+        if i < n {
+            ui.add_space(ecart);
+        }
+    }
 }

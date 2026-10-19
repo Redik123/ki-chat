@@ -204,6 +204,25 @@ pub mod texte {
     pub const TITRE: f32 = 15.0;
     /// Titre d'une page, d'une fenêtre.
     pub const GRAND: f32 = 19.0;
+    /// Le titre d'une page qui prend la place du chat.
+    pub const TITRE_PAGE: f32 = 22.0;
+    /// Le chiffre d'une tuile, d'une affiche : ce qu'on lit de loin.
+    pub const KPI: f32 = 28.0;
+}
+
+/// Les largeurs qui décident d'une mise en page, en points.
+pub mod largeur {
+    /// Une tuile de chiffre clé, au plus étroit.
+    pub const TUILE_MIN: f32 = 150.0;
+    /// Une carte de membre, au plus étroite : cinq tiennent dans
+    /// [`PAGE_REFERENCE`].
+    pub const CARTE_MIN: f32 = 180.0;
+    /// Le centre de ki-chat entre la colonne des salons et celle des
+    /// membres, dans une fenêtre ordinaire : la largeur où une page doit
+    /// être belle.
+    pub const PAGE_REFERENCE: f32 = 980.0;
+    /// En dessous, une page passe sur une seule colonne.
+    pub const PAGE_ETROITE: f32 = 720.0;
 }
 
 #[cfg(test)]

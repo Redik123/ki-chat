@@ -17,6 +17,8 @@
 //!   en français, récents, catégories, teintes de peau.
 //! - [`liste`] : la liste virtualisée, qui ne construit que ce qui se voit
 //!   et garde immobile la ligne qu'on lit quand le reste bouge.
+//! - [`tableau`] : un tableau de données décrit par ses colonnes — tri,
+//!   colonnes masquées par priorité, rayures, survol, clic.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
 //!   sombre), installée en un appel.
 //!
@@ -31,6 +33,7 @@ pub mod jetons;
 pub mod liste;
 pub mod selecteur_emoji;
 pub mod style;
+pub mod tableau;
 #[cfg(debug_assertions)]
 mod mouchard;
 

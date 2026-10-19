@@ -2,11 +2,12 @@
 //! espacements, thème sombre, appliqués au contexte egui en un appel —
 //! `ki_ui::style::installer(ctx)` à la création de la fenêtre.
 
-use crate::jetons::{espace, marge, rayon, texte};
+use std::sync::Arc;
+
+use crate::jetons::{espace, marge, ombre, police, rayon, texte};
 use egui::{
-    epaint::Shadow,
     style::{HandleShape, Selection},
-    Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Vec2,
+    CornerRadius, FontFamily, FontId, Stroke, TextStyle, Vec2,
 };
 
 use crate::jetons::couleur::*;
@@ -73,11 +74,22 @@ pub fn installer(ctx: &egui::Context) {
 /// symboles géométriques (`●`, `↑`, `↓`…) n'y existent pas et s'affichaient
 /// donc en carrés « tofu ». Hack les couvre — filet de sécurité pour tout
 /// caractère un peu exotique qui traverserait l'interface.
+/// Ubuntu Medium, de la famille d'Ubuntu Light qu'egui embarque, sous la
+/// même licence (UFL 1.0, `polices/UFL.txt`) : 340 Ko pour des chiffres et
+/// des titres qui pèsent.
+const UBUNTU_MEDIUM: &[u8] = include_bytes!("../polices/Ubuntu-Medium.ttf");
+
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
         family.push("Hack".to_owned());
     }
+    // La famille moyenne : Ubuntu Medium, puis tout le corps pour ce
+    // qu'elle n'a pas (symboles, emoji).
+    fonts.font_data.insert("Ubuntu-Medium".to_owned(), Arc::new(egui::FontData::from_static(UBUNTU_MEDIUM)));
+    let mut moyenne = vec!["Ubuntu-Medium".to_owned()];
+    moyenne.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
+    fonts.families.insert(FontFamily::Name(police::MOYENNE.into()), moyenne);
     // Les emoji en couleur : la police emoji du système, dans sa famille.
     crate::emoji::installer(&mut fonts);
     ctx.set_fonts(fonts);
@@ -108,18 +120,8 @@ fn visuals() -> egui::Visuals {
     v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.window_corner_radius = CornerRadius::same(rayon::XL);
     v.menu_corner_radius = CornerRadius::same(rayon::XL);
-    v.window_shadow = Shadow {
-        offset: [0, 14],
-        blur: 40,
-        spread: 0,
-        color: Color32::from_black_alpha(140),
-    };
-    v.popup_shadow = Shadow {
-        offset: [0, 6],
-        blur: 20,
-        spread: 0,
-        color: Color32::from_black_alpha(120),
-    };
+    v.window_shadow = ombre::LEVEE;
+    v.popup_shadow = ombre::MENU;
 
     // Sert au surlignage du texte, au remplissage des curseurs, et au
     // contour du champ de saisie qui a le focus — d'où l'accent.

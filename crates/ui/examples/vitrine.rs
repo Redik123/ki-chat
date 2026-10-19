@@ -12,8 +12,9 @@ use eframe::egui::{self, vec2, Color32, CornerRadius, RichText, Sense};
 use ki_ui::composants::{self as c, Tone};
 use ki_ui::flex::{Case, Flex, Repartit};
 use ki_ui::icones::{self, Icon};
-use ki_ui::jetons::{couleur, espace, rayon, texte};
+use ki_ui::jetons::{couleur, espace, largeur, police, rayon, texte};
 use ki_ui::liste::Liste;
+use ki_ui::tableau::{Colonne, Tableau};
 
 fn main() -> eframe::Result {
     // Le mouchard de ki-ui parle au journal : on le veut dans le terminal.
@@ -92,6 +93,7 @@ impl eframe::App for Vitrine {
                 self.emoji(ui);
                 self.mesures(ui, niveau, temps);
                 self.flex(ui);
+                self.tableau_de_bord(ui);
                 self.liste(ui);
             });
             if self.capture.is_some() {
@@ -409,6 +411,96 @@ impl Vitrine {
                 }
             });
         });
+    }
+
+    fn tableau_de_bord(&mut self, ui: &mut egui::Ui) {
+        c::section(
+            ui,
+            Icon::Target,
+            "Tableaux de bord",
+            Some("ki_ui::composants::{Kpi, grille, surface} · ki_ui::tableau · police::moyenne"),
+            |ui| {
+                c::section_label(ui, "des tuiles qui passent à la ligne");
+                let serie = [12.0, 14.0, 13.0, 17.0, 16.0, 19.0, 18.0, 22.0];
+                let tuiles: [(&str, &str, Option<c::Ecart>, &str); 5] = [
+                    ("K/D", "1,24", Some(c::Ecart::new(0.12, "+0,12")), "médiane 1,05"),
+                    ("ACS", "231", Some(c::Ecart::new(-14.0, "−14")), "médiane 218"),
+                    ("Victoires", "58 %", Some(c::Ecart::new(0.0, "=")), "sur 40 matchs"),
+                    ("Morts", "14,2", Some(c::Ecart::new(1.3, "+1,3").a_l_envers()), "par match"),
+                    ("RR", "Platine 2", None, "≈ 2 victoires pour Platine 3"),
+                ];
+                c::grille(ui, tuiles.len(), largeur::TUILE_MIN, espace::L, |ui, i| {
+                    let (intitule, valeur, ecart, precision) = tuiles[i].clone();
+                    let mut tuile = c::Kpi::new(intitule, valeur).precision(precision).serie(&serie);
+                    if let Some(e) = ecart {
+                        tuile = tuile.ecart(e);
+                    }
+                    if i == 4 {
+                        tuile = tuile.couleur(couleur::INFO);
+                    }
+                    tuile.show(ui);
+                });
+                ui.add_space(espace::L);
+                c::section_label(ui, "un tableau : clic sur un en-tête pour trier, colonnes masquées quand la place manque");
+                let mut lignes = [
+                    ("Jerem", "Diamant 1", 142, "VVDVV"),
+                    ("drion", "Platine 2", 88, "VDVVD"),
+                    ("Pandora", "Or 3", 40, "DVVDV"),
+                    ("Kevin", "Platine 1", -12, "DDVDV"),
+                    ("Lina", "Argent 2", 0, "VDDVD"),
+                ];
+                let tableau = Tableau::new("vitrine-classement")
+                    .colonne(Colonne::new("Membre", 140.0).grandit().triable())
+                    .colonne(Colonne::new("Rang", 100.0).priorite(1))
+                    .colonne(Colonne::new("Forme", 90.0).priorite(2))
+                    .colonne(Colonne::new("7 jours", 64.0).droite().triable())
+                    .tri_par_defaut(3, false);
+                if let Some(tri) = tableau.tri(ui) {
+                    match tri.colonne {
+                        0 => lignes.sort_by_key(|l| l.0.to_lowercase()),
+                        _ => lignes.sort_by_key(|l| l.2),
+                    }
+                    if !tri.croissant {
+                        lignes.reverse();
+                    }
+                }
+                c::surface(ui, |ui| {
+                    tableau.show(ui, lignes.len(), |ui, i, colonne| {
+                        let (nom, rang, rr, forme) = lignes[i];
+                        match colonne {
+                            0 => {
+                                ui.label(RichText::new(nom).color(couleur::pour_pseudo(nom)));
+                            }
+                            1 => {
+                                ui.label(RichText::new(rang).color(couleur::TEXT_DIM));
+                            }
+                            2 => {
+                                for r in forme.chars() {
+                                    let teinte = if r == 'V' { couleur::ACCENT } else { couleur::DANGER };
+                                    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 9.0), Sense::hover());
+                                    ui.painter().rect_filled(rect, CornerRadius::same(2), teinte);
+                                }
+                            }
+                            _ => {
+                                let teinte = match rr {
+                                    r if r > 0 => couleur::ACCENT,
+                                    r if r < 0 => couleur::DANGER,
+                                    _ => couleur::TEXT_FAINT,
+                                };
+                                ui.label(RichText::new(format!("{rr:+}")).font(police::moyenne(texte::CORPS)).color(teinte));
+                            }
+                        }
+                    });
+                });
+                ui.add_space(espace::L);
+                c::section_label(ui, "le poids du texte");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Ubuntu Light 3 – 1").size(texte::KPI).color(couleur::TEXT));
+                    ui.add_space(espace::XL);
+                    ui.label(RichText::new("Ubuntu Medium 3 – 1").font(police::moyenne(texte::KPI)).color(couleur::TEXT));
+                });
+            },
+        );
     }
 
     fn liste(&mut self, ui: &mut egui::Ui) {
