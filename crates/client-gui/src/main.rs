@@ -143,6 +143,12 @@ const FERMETURE_DEMONTAGE: std::time::Duration = std::time::Duration::from_secs(
 const SPEAK_LEVEL: f32 = 0.02;
 
 fn main() -> eframe::Result {
+    // Le banc des pages VALORANT, en version de debug : une fenêtre sur un
+    // groupe inventé, photographiée scène par scène (valo_page/banc.rs).
+    #[cfg(debug_assertions)]
+    if let Some(dossier) = valo_page::banc::demande() {
+        return valo_page::banc::lancer(dossier);
+    }
     // Traces sur stderr ET dans un fichier, plus un panic hook : compilée
     // `panic = "abort"` sans console, l'application mourait sans témoin.
     let journal = secours::installer();
@@ -1341,6 +1347,9 @@ struct KiApp {
     /// Le bouton « Soundboard » de la barre du bas (onglet Bêta). D'origine,
     /// visible pour qui a déjà des sons dans ses dossiers, caché sinon.
     soundboard_visible: bool,
+    /// Le profil VALORANT prend la place du chat au lieu d'une fenêtre
+    /// (onglet Bêta, V9.1) : la nouvelle page, à côté de l'ancienne.
+    profil_au_centre: bool,
     /// Interdiction de veille système pendant le vocal.
     veille: veille::Garde,
 }
@@ -1764,6 +1773,7 @@ impl KiApp {
                 "off" => false,
                 _ => soundboard::Soundboard::a_des_sons(),
             },
+            profil_au_centre: get("profil_au_centre", "off") == "on",
             veille: veille::Garde::default(),
         };
         // Instance relancée par le dispositif de secours : le dire. Sans ce
@@ -2153,21 +2163,14 @@ impl KiApp {
     /// La fiche VALORANT d'un membre, telle que le serveur la garde :
     /// rang, pic, les mouvements de RR et les matchs accumulés. Elle vient
     /// du cache du serveur, l'ouvrir ne coûte rien à personne. Les icônes
-    /// de rang se préparent ici (le rang, le pic, le palier suivant, le
-    /// rang de chaque match) ; la page elle-même est dans `valo_page`.
+    /// de rang se préparent dans [`Self::preparer_fiche`] ; la page
+    /// elle-même est dans `valo_page`.
     fn fiche_window(&mut self, ctx: &egui::Context) {
-        let Some(f) = &self.fiche else { return };
-        if let Some(fiche) = &f.fiche {
-            let mut tiers: Vec<u8> = vec![fiche.rang.tier, fiche.rang.tier.saturating_add(1)];
-            tiers.extend(fiche.pic.iter().map(|p| p.tier));
-            tiers.extend(fiche.matchs.iter().map(|m| m.tier));
-            tiers.sort_unstable();
-            tiers.dedup();
-            for tier in tiers {
-                self.rangs.preparer(ctx, tier);
-            }
+        // Au centre, la fiche n'a pas de fenêtre : c'est le profil.
+        if self.profil_au_centre {
+            return;
         }
-        self.catalogue.demarrer();
+        self.preparer_fiche(ctx);
         if let Some(f) = &self.fiche {
             let cx = valo_page::Contexte {
                 stats: &self.stats,
@@ -2184,6 +2187,50 @@ impl KiApp {
                 self.valo.fermer_fiche();
             }
         }
+    }
+
+    /// Le profil VALORANT à la place du chat (onglet Bêta) : la même fiche,
+    /// en page. Échap ou « Retour au chat » le referme.
+    fn profil_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.preparer_fiche(&ctx);
+        let Some(f) = &self.fiche else { return };
+        let cx = valo_page::Contexte {
+            stats: &self.stats,
+            recu: self.stats_recu,
+            esports: &self.esports,
+            activite: &self.activite,
+            moi: self.my_id,
+            membres: &self.members,
+            rangs: &self.rangs,
+            catalogue: &self.catalogue,
+        };
+        let valo = &mut self.valo;
+        let ouvert = egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(theme::BG_BASE).inner_margin(marge::egale(espace::XL)))
+            .show(ui, |ui| valo.profil(ui, f, &cx))
+            .inner;
+        if !ouvert {
+            self.fiche = None;
+            self.valo.fermer_fiche();
+        }
+    }
+
+    /// Les icônes de rang que la fiche ouverte montrera (le rang, le pic,
+    /// le palier suivant, le rang de chaque match), et le catalogue.
+    fn preparer_fiche(&mut self, ctx: &egui::Context) {
+        let Some(f) = &self.fiche else { return };
+        if let Some(fiche) = &f.fiche {
+            let mut tiers: Vec<u8> = vec![fiche.rang.tier, fiche.rang.tier.saturating_add(1)];
+            tiers.extend(fiche.pic.iter().map(|p| p.tier));
+            tiers.extend(fiche.matchs.iter().map(|m| m.tier));
+            tiers.sort_unstable();
+            tiers.dedup();
+            for tier in tiers {
+                self.rangs.preparer(ctx, tier);
+            }
+        }
+        self.catalogue.demarrer();
     }
 
     /// Une fois par session : si la précédente est morte en pleine
@@ -6831,7 +6878,11 @@ impl KiApp {
         self.voice_bar(ui, voice);
         self.sidebar(ui, voice);
         self.roster_panel(ui, voice);
-        self.chat_panel(ui);
+        if self.profil_au_centre && self.fiche.is_some() {
+            self.profil_panel(ui);
+        } else {
+            self.chat_panel(ui);
+        }
         self.comms_popup(ctx, voice);
         self.partage_windows(ctx);
         self.diffusion_window(ctx);
@@ -15241,6 +15292,7 @@ impl KiApp {
         storage.set_string("loupedeck", if self.loupedeck_etat.actif { "on" } else { "off" }.into());
         storage.set_string("loupedeck_config", self.loupedeck_etat.config.ecrire());
         storage.set_string("soundboard_visible", if self.soundboard_visible { "on" } else { "off" }.into());
+        storage.set_string("profil_au_centre", if self.profil_au_centre { "on" } else { "off" }.into());
         storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
         storage.set_string(
             "output_device",

@@ -1132,7 +1132,7 @@ pub struct BarreV {
 }
 
 /// La largeur d'une barre verticale, au plus, et l'écart entre deux.
-const BARRE_V_MAX: f32 = 28.0;
+const BARRE_V_MAX: f32 = 44.0;
 const ECART_BARRES_V: f32 = 6.0;
 
 /// Des barres verticales côte à côte sur `hauteur`, de zéro à `max` (la

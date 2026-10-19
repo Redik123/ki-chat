@@ -43,7 +43,8 @@ const JSON_MAX: u64 = 4 * 1024 * 1024;
 const IMAGE_MAX: u64 = 1024 * 1024;
 /// La forme de `catalogue.json` : la changer invalide celui du disque.
 /// 2 : les actes (pour les médailles). 3 : les plans de la carte tactique.
-const FORME: u32 = 3;
+/// 4 : le rôle des agents.
+const FORME: u32 = 4;
 
 // ---------------------------------------------------------------------
 // Les noms
@@ -60,6 +61,9 @@ struct Liste {
     /// (nom anglais — celui de HenrikDev —, portrait de minimap 64 px).
     #[serde(default)]
     agents: Vec<(String, String)>,
+    /// (nom anglais, rôle en français : « Duelliste »).
+    #[serde(default)]
+    roles: Vec<(String, String)>,
     /// (nom interne — la fin de `mapUrl` —, nom anglais, bandeau).
     #[serde(default)]
     cartes: Vec<(String, String, String)>,
@@ -105,6 +109,7 @@ impl<V: Clone> Table<V> {
 #[derive(Debug, Default)]
 pub struct Index {
     agents: Table<String>,
+    roles: Table<String>,
     /// Par nom interne ET par nom anglais : (nom anglais, bandeau).
     cartes: Table<(String, String)>,
     files: Table<String>,
@@ -118,6 +123,9 @@ impl Index {
         let mut index = Index::default();
         for (nom, url) in liste.agents {
             index.agents.poser(&nom, url);
+        }
+        for (nom, role) in liste.roles {
+            index.roles.poser(&nom, role);
         }
         for (interne, nom, bandeau) in liste.cartes {
             let valeur = (nom.clone(), bandeau);
@@ -317,6 +325,11 @@ fn liste_depuis(version: String, agents: &Value, cartes: &Value, files: &Value, 
                 liste.agents.push((nom.trim().to_string(), url.to_string()));
             }
         }
+        if let (Some(nom), Some(role)) = (a["displayName"].as_str(), a["role"]["displayName"].as_str().and_then(role_en_francais)) {
+            if !nom.trim().is_empty() {
+                liste.roles.push((nom.trim().to_string(), role.to_string()));
+            }
+        }
     }
     for c in donnees(cartes) {
         let (Some(chemin), Some(nom)) = (c["mapUrl"].as_str(), c["displayName"].as_str()) else { continue };
@@ -347,6 +360,18 @@ fn liste_depuis(version: String, agents: &Value, cartes: &Value, files: &Value, 
         }
     }
     liste
+}
+
+/// Le rôle d'un agent tel que la liste anglaise le donne, en français ; un
+/// rôle d'une version future ne se nomme pas.
+fn role_en_francais(role: &str) -> Option<&'static str> {
+    match role.trim() {
+        "Duelist" => Some("Duelliste"),
+        "Controller" => Some("Contrôleur"),
+        "Initiator" => Some("Initiateur"),
+        "Sentinel" => Some("Sentinelle"),
+        _ => None,
+    }
 }
 
 /// Les actes de `/v1/seasons` (ceux dont le type dit `Act`), nommés avec
@@ -490,6 +515,11 @@ impl Catalogue {
     pub fn agent(&self, nom: &str) -> Option<&egui::TextureHandle> {
         let url = self.index.as_ref()?.agents.chercher(nom.trim())?;
         self.texture(url)
+    }
+
+    /// Le rôle d'un agent, en français, par son nom anglais.
+    pub fn role(&self, nom: &str) -> Option<&str> {
+        self.index.as_ref()?.roles.chercher(nom.trim()).map(String::as_str)
     }
 
     /// Le bandeau d'une carte (456 × 100), par son nom affiché ou interne.
@@ -644,7 +674,7 @@ mod tests {
 
     fn liste_de_test() -> Liste {
         let agents = serde_json::json!({"data": [
-            {"displayName": "KAY/O", "minimapPortrait": "https://media.valorant-api.com/agents/601dbbe7/minimapportrait.png"},
+            {"displayName": "KAY/O", "minimapPortrait": "https://media.valorant-api.com/agents/601dbbe7/minimapportrait.png", "role": {"displayName": "Initiator"}},
             {"displayName": "Pirate", "minimapPortrait": "https://ailleurs.example/x.png"}
         ]});
         let plan = |nom: &str, icone: &str| {
@@ -681,6 +711,7 @@ mod tests {
     fn les_listes_se_reduisent() {
         let l = liste_de_test();
         assert_eq!(l.agents.len(), 1);
+        assert_eq!(l.roles, vec![("KAY/O".to_string(), "Initiateur".to_string())]);
         assert_eq!(l.cartes[0], ("Plummet".into(), "Summit".into(), "https://media.valorant-api.com/maps/756d/listviewicon.png".into()));
         assert_eq!(l.cartes[1].2, "");
         let plans: Vec<&str> = l.plans.iter().map(|p| p.nom.as_str()).collect();
@@ -727,6 +758,7 @@ mod tests {
         for agent in ["Jett", "KAY/O", "Gekko", "Sova"] {
             assert!(index.agents.chercher(agent).is_some(), "{agent}");
         }
+        assert_eq!(index.roles.chercher("Jett").map(String::as_str), Some("Duelliste"));
         assert_eq!(index.nom_de_carte("Plummet"), Some("Summit"));
         assert_eq!(index.nom_de_carte("HURM_Alley"), Some("District"));
         assert!(index.files.chercher("abilitydraftarena").is_some());
