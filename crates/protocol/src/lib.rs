@@ -2536,6 +2536,21 @@ pub struct DetailManches {
     pub deroule: String,
 }
 
+impl DetailManches {
+    /// Ce que la page du groupe en montre : les manches, le KAST, les
+    /// premiers sangs et les premières morts — une quarantaine d'octets
+    /// par match, quand le détail entier en pèse trois fois plus.
+    pub fn leger(&self) -> DetailManches {
+        DetailManches {
+            manches: self.manches,
+            kast: self.kast,
+            premiers_sangs: self.premiers_sangs,
+            premieres_morts: self.premieres_morts,
+            ..DetailManches::default()
+        }
+    }
+}
+
 /// Une médaille VALORANT — un « goldstar » chez Riot, une Accolade dans
 /// le jeu depuis la 13.06 : ce que l'écran de fin de partie décerne en
 /// compétition et en Premier. Riot ne les nomme pas (son catalogue n'a que
@@ -3236,16 +3251,17 @@ impl FicheValorant {
     }
 
     /// La fiche allégée pour la page du groupe : les `n_matchs` matchs les
-    /// plus récents sans `manches_detail`, les `n_points` points les plus
-    /// récents, `saisons` vidées — le reste tel quel. Les `id` restent :
-    /// ils servent au regroupement « ensemble » et au lien ΔRR.
+    /// plus récents avec leur détail léger ([`DetailManches::leger`]), les
+    /// `n_points` points les plus récents, `saisons` vidées — le reste tel
+    /// quel. Les `id` restent : ils servent au regroupement « ensemble » et
+    /// au lien ΔRR.
     pub fn resume(&self, n_matchs: usize, n_points: usize) -> FicheValorant {
         let mut matchs: Vec<&MatchResume> = self.matchs.iter().collect();
         matchs.sort_by_key(|m| std::cmp::Reverse(m.date));
         let matchs: Vec<MatchResume> = matchs
             .into_iter()
             .take(n_matchs)
-            .map(|m| MatchResume { manches_detail: None, ..m.clone() })
+            .map(|m| MatchResume { manches_detail: m.manches_detail.as_ref().map(DetailManches::leger), ..m.clone() })
             .collect();
         // Les médailles : les sommes entières, et celles des seuls matchs
         // qui partent.
@@ -5609,7 +5625,14 @@ mod tests {
         assert_eq!(r.historique_rr.len(), 10);
         let ids: Vec<&str> = r.matchs.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["m59", "m58", "m57", "m56", "m55"]);
-        assert!(r.matchs.iter().all(|m| m.manches_detail.is_none()));
+        let leger = DetailManches {
+            manches: detail.manches,
+            kast: detail.kast,
+            premiers_sangs: detail.premiers_sangs,
+            premieres_morts: detail.premieres_morts,
+            ..Default::default()
+        };
+        assert!(r.matchs.iter().all(|m| m.manches_detail.as_ref() == Some(&leger)), "le KAST et les premiers sangs restent");
         assert!(r.matchs.iter().all(|m| m.avec == [2]), "les co-membres restent");
         assert_eq!(r.historique_rr[0].match_id, "m99");
         assert_eq!(r.historique_rr[9].match_id, "m90");
