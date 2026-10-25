@@ -62,6 +62,7 @@
   var VOCAL_LOCUTEURS_MAX = 32;
   var VOCAL_PING_MS = 5000;
   var VOCAL_AFFICHAGE_MS = 150;
+  var VOCAL_PERSONNE_MAX = 200;             // le volume d'une personne, en %, comme dans ki-chat
   var CONFIG_ENCODEUR = {
     codec: 'opus', sampleRate: VOCAL_FREQUENCE, numberOfChannels: 1, bitrate: VOCAL_DEBIT,
     opus: { frameDuration: VOCAL_TRAME_US, application: 'voip' }
@@ -88,6 +89,7 @@
     nomServeurLateral: $('nom-serveur-lateral'), nomPorteLateral: $('nom-porte-lateral'),
     statutSalon: $('statut-salon'), boutonSalons: $('bouton-salons'), boutonPresents: $('bouton-presents'),
     vocaux: $('vocaux'), vocalOccupantsListe: $('vocal-occupants-liste'), vocalSalonActif: $('vocal-salon-actif'),
+    vocalOccupantsAide: $('vocal-occupants-aide'),
     moiNom: $('moi-nom'), moiAvatar: $('moi-avatar'), voile: $('voile'),
     bandeau: $('bandeau'), bandeauTexte: $('bandeau-texte'), bandeauFermer: $('bandeau-fermer'),
     fil: $('fil'),
@@ -915,6 +917,12 @@
     controleIgnore: false, // ce serveur ne connaît pas `vocal` : on n'insiste pas
     locuteurs: new Map(),  // id → { id, decodeur, dernier, seq, recu, pertes }
     occupants: new Map(),  // id → nom (ce que le serveur en dit)
+    // Le volume de chacun, réglé par l'invité pour lui seul : nom → % (100
+    // n'est pas rangé) et nom → coupé. Rangés au nom, pas à l'id : celui
+    // d'un invité change à chaque entrée, son nom pas.
+    volumes: {},
+    coupes: {},
+    reglageOuvert: '',     // le nom dont le réglage est déplié sous la liste
     minuteurs: []
   };
 
@@ -1032,6 +1040,60 @@
       }
     });
     rendreVocalOccupants();
+    envoyerGains();
+  }
+
+  // ---- Le volume de chacun ----
+  // Appliqué dans « ki-sortie », voix par voix, avant le mélange : le
+  // volume général vient après, sur le tout.
+  function volumePersonne(n) {
+    var v = vocal.volumes[n];
+    return typeof v === 'number' ? v : 100;
+  }
+
+  function gainPersonne(n) {
+    return vocal.coupes[n] ? 0 : volumePersonne(n) / 100;
+  }
+
+  // Le fil audio ne connaît que des ids : on lui redit le gain de chaque
+  // occupant quand la liste change et quand la sortie se monte.
+  function envoyerGains() {
+    if (!vocal.sortie) return;
+    vocal.occupants.forEach(function (n, id) {
+      vocal.sortie.port.postMessage({ type: 'gain', id: id, gain: gainPersonne(n) });
+    });
+  }
+
+  function reglerPersonne(n, pourcent, coupe) {
+    var v = Math.max(0, Math.min(VOCAL_PERSONNE_MAX, Math.round(Number(pourcent) || 0)));
+    if (v === 100) delete vocal.volumes[n]; else vocal.volumes[n] = v;
+    if (coupe) vocal.coupes[n] = true; else delete vocal.coupes[n];
+    memoriser('ki-porte-vocal-volumes', JSON.stringify({ volumes: vocal.volumes, coupes: vocal.coupes }));
+    envoyerGains();
+  }
+
+  // Ce qui s'écrit à côté du nom quand on a touché à son volume.
+  function etiquetteVolume(n) {
+    if (vocal.coupes[n]) return 'coupé';
+    var v = volumePersonne(n);
+    return v === 100 ? '' : v + ' %';
+  }
+
+  function rappelerVolumes() {
+    var brut = rappeler('ki-porte-vocal-volumes');
+    if (!brut) return;
+    var lu;
+    try { lu = JSON.parse(brut); } catch (e) { return; }
+    if (!lu || typeof lu !== 'object') return;
+    var volumes = lu.volumes && typeof lu.volumes === 'object' ? lu.volumes : {};
+    var coupes = lu.coupes && typeof lu.coupes === 'object' ? lu.coupes : {};
+    Object.keys(volumes).forEach(function (n) {
+      var v = volumes[n];
+      if (typeof v === 'number' && v >= 0 && v <= VOCAL_PERSONNE_MAX && v !== 100) vocal.volumes[n] = Math.round(v);
+    });
+    Object.keys(coupes).forEach(function (n) {
+      if (coupes[n] === true) vocal.coupes[n] = true;
+    });
   }
 
   function nomLocuteur(id) {
@@ -1146,6 +1208,7 @@
     vocal.sortie.port.onmessage = function (ev) {
       if (ev.data && ev.data.type === 'etat') vocal.profondeur = ev.data.profondeur;
     };
+    envoyerGains();
     vocal.gain = ctx.createGain();
     vocal.gain.gain.value = vocal.volume / 100;
     vocal.sortie.connect(vocal.gain);
@@ -1404,27 +1467,145 @@
 
   // Les occupants du vocal, sous son entrée dans la colonne — l'anneau
   // vert marque qui parle (rendreVocalQui). Le texte caché reste pour les
-  // lecteurs d'écran.
+  // lecteurs d'écran. Un nom se touche pour régler le volume de la
+  // personne : son curseur se déplie dessous.
   function rendreVocalOccupants() {
     var zone = el.vocalOccupantsListe;
+    // La liste est refaite à chaque entrée ou sortie : ce qui avait le
+    // focus le retrouve, plutôt que de le perdre sur la page.
+    var actif = document.activeElement;
+    var garde = actif && zone.contains(actif) ? { nom: actif.dataset.nom, role: actif.dataset.role } : null;
+    var refocus = null;
     while (zone.firstChild) zone.removeChild(zone.firstChild);
     var noms = [];
+    var ouvertVu = false;
+    var autres = 0;
     vocal.occupants.forEach(function (n, id) {
       var moi = estMonNomVocal(n);
       noms.push(moi ? 'toi' : sansSuffixe(n));
+      if (!moi) autres += 1;
       var li = document.createElement('li');
       li.dataset.id = String(id);
-      if (moi) li.classList.add('moi');
       var web = estInvite(id) || n.slice(-SUFFIXE_WEB.length) === SUFFIXE_WEB;
-      li.appendChild(faireAvatar(n, web));
+      var ligne;
+      if (moi) {
+        li.classList.add('moi');
+        ligne = document.createElement('span');
+      } else {
+        ligne = document.createElement('button');
+        ligne.type = 'button';
+        ligne.dataset.nom = n;
+        ligne.dataset.role = 'ligne';
+        ligne.title = 'Régler le volume de ' + sansSuffixe(n) + ', pour toi seul';
+        ligne.setAttribute('aria-expanded', vocal.reglageOuvert === n ? 'true' : 'false');
+        ligne.addEventListener('click', function () {
+          vocal.reglageOuvert = vocal.reglageOuvert === n ? '' : n;
+          rendreVocalOccupants();
+        });
+      }
+      ligne.className = 'occupant';
+      ligne.appendChild(faireAvatar(n, web));
       var nomEl = document.createElement('span');
+      nomEl.className = 'occupant-nom';
       nomEl.textContent = moi ? 'toi' : borner(sansSuffixe(n), NOM_MAX + 8);
-      li.appendChild(nomEl);
+      ligne.appendChild(nomEl);
+      li.appendChild(ligne);
+      if (!moi) {
+        var marque = document.createElement('span');
+        marque.className = 'occupant-volume';
+        marque.textContent = etiquetteVolume(n);
+        ligne.appendChild(marque);
+        if (vocal.reglageOuvert === n) {
+          li.appendChild(faireReglage(n, marque));
+          ouvertVu = true;
+        }
+      }
       zone.appendChild(li);
+      if (garde && garde.nom === n) {
+        Array.prototype.forEach.call(li.querySelectorAll('[data-role]'), function (e) {
+          if (e.dataset.role === garde.role) refocus = e;
+        });
+      }
     });
+    // Parti du vocal : son réglage se replie (il reste gardé pour son retour).
+    if (!ouvertVu) vocal.reglageOuvert = '';
+    if (refocus) refocus.focus();
+    el.vocalOccupantsAide.hidden = autres === 0;
     el.vocalOccupants.textContent = noms.length
       ? 'Dans le vocal : ' + noms.join(', ')
       : 'Dans le vocal : le serveur ne l’a pas dit.';
+  }
+
+  // Le réglage d'une personne : son volume de 0 à 200 %, la couper, la
+  // remettre à 100 %. Pour soi seul : rien ne part au serveur.
+  function faireReglage(n, marque) {
+    var boite = document.createElement('div');
+    boite.className = 'occupant-reglage';
+
+    var rangee = document.createElement('div');
+    rangee.className = 'occupant-rangee';
+    var curseur = document.createElement('input');
+    curseur.type = 'range';
+    curseur.min = '0';
+    curseur.max = String(VOCAL_PERSONNE_MAX);
+    curseur.step = '5';
+    curseur.value = String(volumePersonne(n));
+    curseur.dataset.nom = n;
+    curseur.dataset.role = 'curseur';
+    curseur.setAttribute('aria-label', 'Volume de ' + sansSuffixe(n));
+    var valeur = document.createElement('span');
+    valeur.className = 'occupant-valeur';
+    rangee.appendChild(curseur);
+    rangee.appendChild(valeur);
+
+    var boutons = document.createElement('div');
+    boutons.className = 'occupant-boutons';
+    var couper = document.createElement('button');
+    couper.type = 'button';
+    couper.className = 'secondaire petit';
+    couper.dataset.nom = n;
+    couper.dataset.role = 'couper';
+    var normal = document.createElement('button');
+    normal.type = 'button';
+    normal.className = 'secondaire petit';
+    normal.textContent = '100 %';
+    normal.title = 'Remettre le volume de ' + sansSuffixe(n) + ' à 100 %';
+    normal.dataset.nom = n;
+    normal.dataset.role = 'normal';
+    boutons.appendChild(couper);
+    boutons.appendChild(normal);
+
+    boite.appendChild(rangee);
+    boite.appendChild(boutons);
+
+    function rendre() {
+      var coupe = !!vocal.coupes[n];
+      var v = volumePersonne(n);
+      valeur.textContent = v + ' %';
+      curseur.setAttribute('aria-valuetext', coupe ? 'coupé' : v + ' %');
+      couper.textContent = coupe ? 'Rendre le son' : 'Couper';
+      couper.setAttribute('aria-pressed', coupe ? 'true' : 'false');
+      normal.disabled = v === 100 && !coupe;
+      boite.classList.toggle('coupe', coupe);
+      marque.textContent = etiquetteVolume(n);
+    }
+    // Bouger le curseur rend le son : on veut l'entendre à ce volume-là.
+    curseur.addEventListener('input', function () {
+      reglerPersonne(n, curseur.value, false);
+      rendre();
+    });
+    couper.addEventListener('click', function () {
+      reglerPersonne(n, volumePersonne(n), !vocal.coupes[n]);
+      rendre();
+    });
+    normal.addEventListener('click', function () {
+      reglerPersonne(n, 100, false);
+      curseur.value = '100';
+      rendre();
+      curseur.focus();
+    });
+    rendre();
+    return boite;
   }
 
   function rendreVocalQui(ids) {
@@ -1590,10 +1771,14 @@
 
     // « ki-sortie » : une file de trames PCM par locuteur, un tampon de
     // gigue (on attend CIBLE trames avant de commencer à lire, on lâche
-    // les plus vieilles au-delà de MAXI), et la somme de tous, bornée.
+    // les plus vieilles au-delà de MAXI), et la somme de tous, chacun à
+    // son volume, bornée.
     function Sortie() {
       var moi = Reflect.construct(AudioWorkletProcessor, [], Sortie);
       moi.locuteurs = new Map();   // id → { file: [Float32Array], lu, amorce }
+      // id → gain, que la page règle ; absent : 1. À part des files, que
+      // « retirer » et « vider » jettent : le réglage, lui, reste.
+      moi.gains = new Map();
       moi.dernierEtat = 0;
       moi.port.onmessage = function (ev) { moi.recevoir(ev.data); };
       return moi;
@@ -1611,6 +1796,10 @@
         this.locuteurs.delete(m.id);
       } else if (m.type === 'vider') {
         this.locuteurs.clear();
+      } else if (m.type === 'gain') {
+        var g = Number(m.gain);
+        if (!(g >= 0)) return;
+        if (g === 1) this.gains.delete(m.id); else this.gains.set(m.id, Math.min(g, 4));
       }
     };
     Sortie.prototype.process = function (entrees, sorties) {
@@ -1618,16 +1807,20 @@
       if (!sortie) return true;
       sortie.fill(0);
       var profondeur = 0;
-      this.locuteurs.forEach(function (l) {
+      var gains = this.gains;
+      this.locuteurs.forEach(function (l, id) {
         if (l.amorce) {
           if (l.file.length < CIBLE) return;
           l.amorce = false;
         }
         if (l.file.length > profondeur) profondeur = l.file.length;
+        // Coupé, on lit quand même : la file se vide au rythme du son, et
+        // l'on reprend au présent quand on le rend.
+        var g = gains.has(id) ? gains.get(id) : 1;
         for (var i = 0; i < sortie.length; i++) {
           if (l.file.length === 0) { l.amorce = true; break; }   // à sec : on réamorce
           var bloc = l.file[0];
-          sortie[i] += bloc[l.lu++];
+          sortie[i] += bloc[l.lu++] * g;
           if (l.lu >= bloc.length) { l.file.shift(); l.lu = 0; }
         }
       });
@@ -1719,6 +1912,7 @@
   var volumeRappele = rappeler('ki-porte-vocal-volume');
   if (volumeRappele !== '' && Number(volumeRappele) >= 0 && Number(volumeRappele) <= 100) vocal.volume = Number(volumeRappele);
   el.vocalVolume.value = String(vocal.volume);
+  rappelerVolumes();
   rendreModeVocal();
   majCompteur();
   rendreDebit();
