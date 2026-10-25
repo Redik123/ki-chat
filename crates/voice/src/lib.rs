@@ -38,6 +38,8 @@ pub mod spectre;
 pub mod timbre;
 #[cfg(windows)]
 mod wasapi;
+#[cfg(target_os = "android")]
+mod android;
 /// Le son du jeu dans le stream : capture en boucle (Windows) et lecteur
 /// (partout).
 pub mod jeu;
@@ -264,7 +266,8 @@ impl VoiceConfig {
             bitrate: 64_000,
             input_device: None,
             output_device: None,
-            native_audio: cfg!(windows),
+            // Android : le micro AAudio en mode « communication » (android.rs).
+            native_audio: cfg!(windows) || cfg!(target_os = "android"),
             raw_mic: false,
             comms_mic: false,
             robust_output: false,
@@ -2074,7 +2077,10 @@ fn capture_loop(
                     .into(),
             );
         }
-        let opened = open_input(device_name.as_deref(), native, raw, comms);
+        // Android : l'annulation d'écho du téléphone suit le réglage
+        // « Annulation d'écho » ; changer celui-ci rouvre le micro (plus bas).
+        let echo_plateforme = sh.aec.load(Ordering::Relaxed);
+        let opened = open_input(device_name.as_deref(), native, raw, comms, echo_plateforme);
         let OpenedInput { stream, chunks, rate: in_rate, alive, fallback, name } = match opened {
             Ok(parts) => {
                 // Le repli est signalé — sans quoi débrancher son micro pour
@@ -2086,7 +2092,9 @@ fn capture_loop(
                 // Ce qui s'est réellement ouvert, et non ce qu'on a demandé.
                 #[cfg(windows)]
                 let natif = matches!(parts.stream, InputStream::Native(_));
-                #[cfg(not(windows))]
+                #[cfg(target_os = "android")]
+                let natif = matches!(parts.stream, InputStream::Android(_));
+                #[cfg(not(any(windows, target_os = "android")))]
                 let natif = false;
                 let moteur = if natif { docteur::Moteur::Natif } else { docteur::Moteur::Secours };
                 sh.counters.input_engine.store(moteur.code(), Ordering::Relaxed);
@@ -2119,6 +2127,14 @@ fn capture_loop(
         // L'état du monde au moment de l'ouverture : générations de reset et
         // empreinte du périphérique. Toute divergence ultérieure = réouverture.
         let my_epoch = sh.audio_reset.load(Ordering::Relaxed);
+        // Le téléphone annule déjà l'écho (micro en mode « communication ») :
+        // l'annulateur du moteur n'a plus rien à apprendre, et le faire
+        // tourner derrière le sien, c'est adapter un filtre linéaire à un
+        // signal déjà traité — au risque d'entamer la voix.
+        #[cfg(target_os = "android")]
+        let echo_du_telephone = echo_plateforme && matches!(stream, InputStream::Android(_));
+        #[cfg(not(target_os = "android"))]
+        let echo_du_telephone = false;
         let my_signature = device_signature(device_name.as_deref(), true, native);
         let mut my_gen = native_generation();
         // Début de l'épisode de zéros stricts en cours, s'il y en a un.
@@ -2146,6 +2162,14 @@ fn capture_loop(
         if sh.audio_reset.load(Ordering::Relaxed) != my_epoch {
             tracing::info!("réinitialisation audio demandée — réouverture du micro");
             journal("réinitialisation demandée — réouverture du micro".into());
+            drop(stream);
+            continue 'device;
+        }
+        // Android : l'annulation d'écho du téléphone se choisit à l'ouverture
+        // du micro. Le réglage a changé : on le rouvre.
+        #[cfg(target_os = "android")]
+        if matches!(stream, InputStream::Android(_)) && sh.aec.load(Ordering::Relaxed) != echo_plateforme {
+            journal("annulation d'écho changée — réouverture du micro".into());
             drop(stream);
             continue 'device;
         }
@@ -2395,7 +2419,7 @@ fn capture_loop(
             // chaîne préfère une trame déjà débarrassée de la voix des
             // autres. La file manquante est complétée de silence : pas de
             // lointain = rien à soustraire.
-            if sh.aec.load(Ordering::Relaxed) {
+            if sh.aec.load(Ordering::Relaxed) && !echo_du_telephone {
                 let canceller = aec
                     .get_or_insert_with(|| match ki_aec::Aec::new(
                         FRAME_SAMPLES,
@@ -2803,6 +2827,10 @@ enum InputStream {
     Cpal(cpal::Stream),
     #[cfg(windows)]
     Native(wasapi::NativeStream),
+    /// Le micro d'Android en mode « communication » : l'annulation d'écho est
+    /// alors celle du téléphone (voir android.rs).
+    #[cfg(target_os = "android")]
+    Android(android::MicroAndroid),
 }
 
 /// Flux de sortie, quel que soit le moteur. Même contrat de simple tenue.
@@ -2965,6 +2993,9 @@ fn open_input(
     native: bool,
     raw: bool,
     comms: bool,
+    // Android : le micro en mode « communication », avec l'annulation d'écho
+    // du téléphone. Sans effet ailleurs.
+    echo_plateforme: bool,
 ) -> anyhow::Result<OpenedInput> {
     // Moteur natif d'abord, s'il est demandé ; toute erreur fait retomber
     // sur cpal dans la foulée — au pire, on se comporte comme avant.
@@ -2989,8 +3020,40 @@ fn open_input(
             }
         }
     }
+    #[cfg(target_os = "android")]
+    if native {
+        let (tx, chunks) = chunk_channel();
+        let alive = Arc::new(AtomicBool::new(true));
+        match android::ouvrir_micro(echo_plateforme, tx, alive.clone()) {
+            Ok((micro, rate)) => {
+                tracing::info!("micro : AAudio ({rate} Hz, mono, communication : {echo_plateforme})");
+                journal(format!(
+                    "micro ouvert : AAudio ({rate} Hz, mono){}",
+                    if echo_plateforme {
+                        " — mode communication, annulation d'écho du téléphone"
+                    } else {
+                        ""
+                    }
+                ));
+                return Ok(OpenedInput {
+                    stream: InputStream::Android(micro),
+                    chunks,
+                    rate,
+                    alive,
+                    fallback: false,
+                    name: "micro du téléphone".into(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!("micro AAudio indisponible : {e:#} — repli sur cpal");
+                journal_if_new(format!("micro AAudio indisponible : {e:#} — repli cpal"));
+            }
+        }
+    }
     #[cfg(not(windows))]
     let _ = (native, raw, comms);
+    #[cfg(not(target_os = "android"))]
+    let _ = echo_plateforme;
     // L'hôte est ré-interrogé à chaque tentative : c'est ce qui permet de
     // voir réapparaître un périphérique rebranché.
     let host = cpal::default_host();
@@ -4307,7 +4370,7 @@ pub fn capturer_micro(
     mut suivre: impl FnMut(usize, &[f32; FRAME_SAMPLES]) -> bool,
 ) -> anyhow::Result<(Vec<f32>, String)> {
     let OpenedInput { stream: _stream, chunks, rate, alive, name, .. } =
-        open_input(device_name, native, raw, false)?;
+        open_input(device_name, native, raw, false, false)?;
     let mut resampler = CubicResampler::new(rate as f64 / SAMPLE_RATE as f64);
     let mut frame = [0f32; FRAME_SAMPLES];
     let mut pcm = Vec::new();
