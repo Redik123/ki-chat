@@ -60,6 +60,9 @@ struct Reglages {
     gain_auto: bool,
     gain_micro: f32,
     volume: f32,
+    /// « Ne garder que ma voix » (la voix d'à côté du PC) :
+    /// `ki_voice::proximite::PROXIMITE_*`, 0 = éteint.
+    proximite: u8,
 }
 
 impl Default for Reglages {
@@ -75,6 +78,7 @@ impl Default for Reglages {
             gain_auto: true,
             gain_micro: 1.0,
             volume: 1.0,
+            proximite: ki_voice::proximite::PROXIMITE_OFF,
         }
     }
 }
@@ -90,17 +94,29 @@ impl Reglages {
         }
     }
 
+    /// La voix d'à côté : elle apprend le niveau de sa voix (pas d'ancre
+    /// mesurée sur le téléphone), et baisse ou coupe celles qui arrivent
+    /// nettement plus bas.
+    fn reglages_proximite(&self) -> ki_voice::proximite::ReglagesProximite {
+        ki_voice::proximite::ReglagesProximite::de_force(self.proximite, None)
+    }
+
     fn prefs(&self) -> VoicePrefs {
         let mut p = VoicePrefs::par_defaut();
         p.vad_threshold = self.seuil_effectif();
         p.vad_neural = self.neuronal;
         p.vad_sensitivity = self.sensibilite;
+        // Le seuil de volume garde Silero : au haut-parleur d'un téléphone,
+        // le gain automatique remontait le moindre bruit, et le reste de
+        // l'écho, au niveau d'une voix — et Silero ouvrait le micro.
+        p.vad_garde = true;
         p.vad_hangover_ms = 400;
         p.noise_mode = self.bruit;
         p.aec = self.echo;
         p.agc = self.gain_auto;
         p.input_gain = self.gain_micro;
         p.output_gain = self.volume;
+        p.proximite = self.reglages_proximite();
         // Le micro ne s'ouvre qu'en vocal (voir `horloge`).
         p.moteur_a_la_demande = true;
         p
@@ -963,6 +979,9 @@ fn horloge(app: AppHandle, partage: Partage) {
 // Commandes de la page
 // ---------------------------------------------------------------------------
 
+// Les champs du formulaire de la page, un par un : c'est la forme d'une
+// commande Tauri.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn connecter(
     app: AppHandle,
@@ -1168,6 +1187,7 @@ fn regler(partage: State<'_, Partage>, reglages: Reglages) {
         m.set_agc(r.gain_auto);
         m.set_input_gain(r.gain_micro);
         m.set_output_gain(if a.sourd { 0.0 } else { r.volume });
+        m.set_proximite(r.reglages_proximite());
     }
 }
 
@@ -1224,6 +1244,11 @@ struct EtatAudio {
     actif: bool,
     /// Crête du micro, 0..1.
     niveau: f32,
+    /// La crête que jugent le seuil de volume et la garde de Silero : avant
+    /// le gain automatique. La jauge montrait `niveau`, après toute la
+    /// chaîne, si bien que la barre du seuil n'était pas face à ce qu'elle
+    /// juge, et le régler semblait ne rien faire.
+    decision: f32,
     /// Probabilité de parole selon Silero, 0..1.
     parole: f32,
     /// La décision d'émission est ouverte : on parle, pour le moteur.
@@ -1258,6 +1283,7 @@ fn etat_audio(partage: State<'_, Partage>) -> EtatAudio {
         return EtatAudio {
             actif: false,
             niveau: 0.0,
+            decision: 0.0,
             parole: 0.0,
             ouvert: false,
             emet: false,
@@ -1287,6 +1313,7 @@ fn etat_audio(partage: State<'_, Partage>) -> EtatAudio {
     EtatAudio {
         actif: true,
         niveau: st.mic_peak,
+        decision: st.niveau_decision,
         parole: st.vad_prob,
         ouvert: st.vad_ouvert,
         emet: m.is_sending(),
