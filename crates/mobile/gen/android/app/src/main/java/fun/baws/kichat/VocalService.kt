@@ -121,13 +121,22 @@ class VocalService : Service() {
       )
     }
 
-    fun retourAppli(context: Context): PendingIntent {
-      val intent = Intent(context, MainActivity::class.java)
-        .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-      return PendingIntent.getActivity(
-        context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    /**
+     * Ouvrir l'appli comme le fait l'icône du lanceur. Une tâche lancée
+     * autrement (une notification, le widget de l'écran externe) se fermait
+     * au geste « retour » au lieu de passer en arrière-plan : l'activité
+     * détruite, le processus s'arrête avec elle, et le vocal aussi.
+     */
+    fun lancement(context: Context): Intent =
+      Intent(Intent.ACTION_MAIN)
+        .addCategory(Intent.CATEGORY_LAUNCHER)
+        .setClass(context, MainActivity::class.java)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun retourAppli(context: Context): PendingIntent =
+      PendingIntent.getActivity(
+        context, 0, lancement(context), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
       )
-    }
 
     // Ce que montre la notification en ce moment, pour la redessiner quand
     // l'état de la page change (fil principal seulement).

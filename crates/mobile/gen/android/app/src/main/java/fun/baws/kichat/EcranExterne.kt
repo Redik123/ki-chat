@@ -209,11 +209,9 @@ object EcranExterne {
    * fermé : c'est là qu'on veut l'appli.
    */
   fun ouvrirSurEcranExterne(context: Context): PendingIntent {
-    val intent = Intent(context, MainActivity::class.java)
-      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     val options = ActivityOptions.makeBasic().setLaunchDisplayId(ECRAN_EXTERNE).toBundle()
     return PendingIntent.getActivity(
-      context, 2, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT, options
+      context, 2, VocalService.lancement(context), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT, options
     )
   }
 
