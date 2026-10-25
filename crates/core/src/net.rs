@@ -125,6 +125,9 @@ pub struct VoicePrefs {
     /// Activation vocale neuronale (Silero) et sa sensibilité.
     pub vad_neural: bool,
     pub vad_sensitivity: f32,
+    /// Le seuil d'amplitude sert aussi de garde au réseau (voir
+    /// `ki_voice::VoiceConfig::vad_garde`).
+    pub vad_garde: bool,
     /// Débit Opus en bits/s.
     pub bitrate: i32,
     /// La file « médias » de la visionneuse : le moteur la joue quand il
@@ -190,6 +193,7 @@ impl VoicePrefs {
             vad_hangover_ms: c.vad_hangover_ms,
             vad_neural: c.vad_neural,
             vad_sensitivity: c.vad_sensitivity,
+            vad_garde: c.vad_garde,
             bitrate: c.bitrate,
             medias: ki_voice::medias::File::new(),
             agc: c.agc,
@@ -529,6 +533,7 @@ fn start_engine(
     cfg.vad_hangover_ms = prefs.vad_hangover_ms;
     cfg.vad_neural = prefs.vad_neural;
     cfg.vad_sensitivity = prefs.vad_sensitivity;
+    cfg.vad_garde = prefs.vad_garde;
     cfg.bitrate = prefs.bitrate;
     cfg.agc = prefs.agc;
     cfg.aec = prefs.aec;

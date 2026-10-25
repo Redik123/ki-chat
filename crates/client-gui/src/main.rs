@@ -2054,6 +2054,8 @@ impl KiApp {
             vad_hangover_ms: self.vad_hangover_ms,
             vad_neural: self.vad_neural,
             vad_sensitivity: self.vad_sens,
+            // Le PC garde Silero seul juge, comme jusqu'ici.
+            vad_garde: false,
             bitrate: self.effective_bitrate(),
             agc: self.agc,
             aec: self.aec_on,
