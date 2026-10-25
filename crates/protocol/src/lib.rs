@@ -99,10 +99,10 @@ pub mod perm {
         (UPLOAD_FILE, "Partager des fichiers", "téléverser images et documents"),
         (CREATE_INVITE, "Créer des invitations", "générer des codes d'accès"),
         (MANAGE_INVITES, "Gérer les invitations", "révoquer les codes des autres"),
-        (KICK, "Expulser", "déconnecter quelqu'un, qui peut revenir"),
+        (KICK, "Expulser", "déconnecter quelqu'un, qui peut revenir au bout de 5 minutes"),
         (BAN, "Bannir", "empêcher quelqu'un de revenir"),
-        (RESET_PASSWORD, "Réinitialiser les mots de passe", ""),
-        (MANAGE_CHANNELS, "Gérer les salons", "créer, renommer, supprimer, verrouiller"),
+        (RESET_PASSWORD, "Réinitialiser les mots de passe", "donner un nouveau mot de passe à quelqu'un, dont la session est coupée"),
+        (MANAGE_CHANNELS, "Gérer les salons", "créer, renommer, supprimer, verrouiller — et voir tous les salons, privés compris"),
         (MANAGE_ROLES, "Gérer les rôles", "créer des rôles et les attribuer"),
         (MANAGE_SERVER, "Gérer le serveur", "nom et logo"),
         (VIEW_AUDIT_LOG, "Voir le journal", "consulter les actions d'administration"),
@@ -2060,6 +2060,15 @@ pub fn rank_holder(roles: &[RoleInfo], rank: u16, except: Option<RoleId>) -> Opt
 /// `ceiling` donnait le même rang à tous les rôles qu'un même auteur créait.
 pub fn free_rank_below(roles: &[RoleInfo], ceiling: u16) -> Option<u16> {
     (1..=ceiling).rev().find(|r| rank_holder(roles, *r, None).is_none())
+}
+
+/// Le rang libre le plus **bas** au-dessus du plancher, à `ceiling` au plus :
+/// celui que propose la création d'un rôle. Un rôle neuf naît tout en bas,
+/// comme dans Discord — juste sous son auteur, il passait au-dessus des
+/// modérateurs, et ceux qui le portaient échappaient à la modération sans
+/// que rien ne le dise.
+pub fn lowest_free_rank(roles: &[RoleInfo], ceiling: u16) -> Option<u16> {
+    (1..=ceiling).find(|r| rank_holder(roles, *r, None).is_none())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

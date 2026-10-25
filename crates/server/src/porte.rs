@@ -741,18 +741,33 @@ impl Portes {
         Some((salon, nom, ancien))
     }
 
-    /// Les invités en vocal dans un salon qui n'existe plus : sortis, et
-    /// rendus pour qu'on le leur dise.
-    fn vocaux_perdus(&self, existe: impl Fn(ChannelId) -> bool) -> Vec<(UserId, String, ChannelId)> {
+    /// Les salons vocaux où des invités sont, avec l'hôte de leur porte.
+    fn vocaux_occupes(&self) -> Vec<(ChannelId, UserId)> {
+        let inner = self.inner.lock().unwrap();
+        let mut v: Vec<(ChannelId, UserId)> = inner
+            .portes
+            .values()
+            .flat_map(|p| p.invites.iter().filter_map(move |i| Some((i.vocal?, p.hote))))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Les invités en vocal là où ils ne peuvent plus être — `permis` dit,
+    /// d'un salon vocal et de l'hôte de la porte, s'ils le peuvent encore :
+    /// sortis, et rendus pour qu'on le leur dise.
+    fn vocaux_perdus(&self, permis: impl Fn(ChannelId, UserId) -> bool) -> Vec<(UserId, String, ChannelId, ChannelId)> {
         let mut inner = self.inner.lock().unwrap();
         let mut perdus = Vec::new();
         for porte in inner.portes.values_mut() {
+            let hote = porte.hote;
             for invite in porte.invites.iter_mut() {
                 if let Some(vocal) = invite.vocal {
-                    if !existe(vocal) {
+                    if !permis(vocal, hote) {
                         invite.vocal = None;
                         invite.ecoute = false;
-                        perdus.push((invite.invite_id, invite.nom.clone(), porte.salon));
+                        perdus.push((invite.invite_id, invite.nom.clone(), porte.salon, vocal));
                     }
                 }
             }
@@ -1701,10 +1716,35 @@ fn ecouter(state: &AppState, invite_id: UserId, actif: bool) -> Option<Line> {
 /// sorti, et sa page l'apprend. Appelé par `AppState::reconcile_memberships`,
 /// qui diffuse le roster juste après.
 pub fn verifier_vocaux(state: &AppState) {
-    for (invite_id, nom, salon) in state.portes.vocaux_perdus(|c| state.channel_is(c, ChannelKind::Voice)) {
+    // Un invité n'est dans un salon vocal que par son hôte : quand l'hôte
+    // ne le voit plus — le salon est devenu privé, ou l'hôte a perdu le
+    // rôle qui l'y faisait entrer —, l'invité, un inconnu, n'a plus à y
+    // écouter. Hôte déconnecté : on ne peut rien lui demander, l'invité
+    // reste où il a été mis.
+    //
+    // Le verdict se prend hors du verrou des portes : il demande celui des
+    // connectés, et les tenir tous deux ouvrirait la porte à un interblocage.
+    let interdits: Vec<(ChannelId, UserId)> = state
+        .portes
+        .vocaux_occupes()
+        .into_iter()
+        .filter(|&(vocal, hote)| {
+            let connecte = state.users.lock().unwrap().contains_key(&hote);
+            !state.channel_is(vocal, ChannelKind::Voice) || (connecte && !state.can_view(hote, vocal))
+        })
+        .collect();
+    if interdits.is_empty() {
+        return;
+    }
+    for (invite_id, nom, salon, vocal) in state.portes.vocaux_perdus(|v, h| !interdits.contains(&(v, h))) {
         state.portes.envoyer(invite_id, &ligne_porte_vocal_fin());
-        tracing::info!("{nom} sorti du vocal : le salon n'existe plus");
-        state.poster_systeme(salon, PSEUDO_PORTE, &format!("{nom} sort du vocal — le salon n'existe plus"));
+        let pourquoi = if state.channel_is(vocal, ChannelKind::Voice) {
+            "le salon n'est plus ouvert à son hôte"
+        } else {
+            "le salon n'existe plus"
+        };
+        tracing::info!("{nom} sorti du vocal : {pourquoi}");
+        state.poster_systeme(salon, PSEUDO_PORTE, &format!("{nom} sort du vocal — {pourquoi}"));
     }
 }
 

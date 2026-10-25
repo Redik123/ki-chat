@@ -96,12 +96,13 @@
         </button>
         <p id="vocal-note" class="aide" hidden></p>
         <ul id="vocal-occupants-liste" class="occupants" aria-label="Dans le vocal"></ul>
+        <p id="vocal-occupants-aide" class="aide" hidden>Touche un nom pour régler son volume, pour toi seul.</p>
         <!-- Conservé pour le texte lu par les lecteurs d'écran ; la liste
              au-dessus en est le rendu visible. -->
         <p id="vocal-occupants" class="visuellement-cache" aria-live="polite"></p>
       </div>
 
-      <div class="moi">
+      <div class="barre-moi">
         <span id="moi-avatar" class="avatar" aria-hidden="true">?</span>
         <div class="moi-texte">
           <strong id="moi-nom">toi</strong>
@@ -155,6 +156,7 @@
         <summary>Réglages</summary>
         <label id="vocal-seuil-ligne" class="vocal-reglage">Seuil de la voix <input id="vocal-seuil" type="range" min="-70" max="-15" step="1" value="-40"></label>
         <label class="vocal-reglage">Volume <input id="vocal-volume" type="range" min="0" max="100" value="100"></label>
+        <p class="vocal-reglage-aide">Le volume de chacun : touche son nom sous le salon vocal, dans la liste des salons.</p>
       </details>
     </div>
 

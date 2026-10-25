@@ -437,26 +437,30 @@ impl AdminTab {
         }
     }
 
-    /// Permission qui donne accès à cet onglet. Un onglet hors de portée
-    /// est **caché**, pas grisé : un onglet vide n'apprend rien.
-    fn needs(self) -> ki_protocol::Perms {
+    /// Les permissions qui donnent accès à cet onglet — **une seule**
+    /// suffit. Un onglet hors de portée est **caché**, pas grisé : un onglet
+    /// vide n'apprend rien.
+    fn needs(self) -> &'static [ki_protocol::Perms] {
         use ki_protocol::perm::*;
         match self {
             // L'état du serveur entier — stocks, diagnostics — : au
             // super-admin, comme les diagnostics.
-            AdminTab::Tableau => ADMINISTRATOR,
-            AdminTab::Server => MANAGE_SERVER,
-            AdminTab::Channels => MANAGE_CHANNELS,
-            AdminTab::Roles => MANAGE_ROLES,
-            AdminTab::Members => KICK,
+            AdminTab::Tableau => &[ADMINISTRATOR],
+            AdminTab::Server => &[MANAGE_SERVER],
+            AdminTab::Channels => &[MANAGE_CHANNELS],
+            AdminTab::Roles => &[MANAGE_ROLES],
+            // Les comptes, à qui peut agir dessus : débannir et
+            // réinitialiser un mot de passe se font d'ici, et l'onglet
+            // n'ouvrait qu'avec « Expulser ».
+            AdminTab::Members => &[KICK, BAN, RESET_PASSWORD],
             // Retirer ce que les autres ont envoyé : de la modération,
             // comme supprimer leurs messages.
-            AdminTab::Fichiers => DELETE_MESSAGES,
-            AdminTab::Invites => CREATE_INVITE,
-            AdminTab::Audit => VIEW_AUDIT_LOG,
+            AdminTab::Fichiers => &[DELETE_MESSAGES],
+            AdminTab::Invites => &[CREATE_INVITE, MANAGE_INVITES],
+            AdminTab::Audit => &[VIEW_AUDIT_LOG],
             // Les journaux techniques des joueurs : réservé au super-admin,
             // pas à quiconque sait expulser quelqu'un.
-            AdminTab::Diagnostics => ADMINISTRATOR,
+            AdminTab::Diagnostics => &[ADMINISTRATOR],
         }
     }
 }
@@ -1137,6 +1141,12 @@ struct KiApp {
     ban_draft: Option<BanDraft>,
     /// Salon vocal verrouillé dont on attend le mot de passe.
     voice_prompt: Option<VoicePrompt>,
+    /// Les mots de passe des salons vocaux qu'on a posés ou tapés, le temps
+    /// de la session : ils repartent avec chaque entrée dans ce salon, et
+    /// celui qui pose un verrou n'a pas à retaper le sien — le serveur ne
+    /// laisse plus entrer sans, admins compris, le propriétaire excepté.
+    /// Oublié au premier refus.
+    mots_de_passe_vocaux: HashMap<ChannelId, String>,
     /// Rôle en cours de création ou d'édition.
     role_draft: Option<RoleDraft>,
     /// Salon en cours de création.
@@ -1674,6 +1684,7 @@ impl KiApp {
             invite_label: String::new(),
             ban_draft: None,
             voice_prompt: None,
+            mots_de_passe_vocaux: HashMap::new(),
             role_draft: None,
             channel_draft: None,
             channel_edit: None,
@@ -4372,7 +4383,9 @@ impl KiApp {
             MANAGE_ROLES,
             KICK,
             BAN,
+            RESET_PASSWORD,
             CREATE_INVITE,
+            MANAGE_INVITES,
             VIEW_AUDIT_LOG,
             DELETE_MESSAGES,
         ]
@@ -4517,7 +4530,8 @@ impl KiApp {
         // nouveau salon en silence (voir prev_voice_channel).
         self.prev_voice_channel = None;
         self.prev_voice_peers.clear();
-        self.send(ClientMsg::JoinVoice { channel, password: None });
+        let password = self.mots_de_passe_vocaux.get(&channel).cloned();
+        self.send(ClientMsg::JoinVoice { channel, password });
     }
 
     /// Annonce ce qu'on veut du vocal, et laisse à l'affichage le temps que le
@@ -4731,6 +4745,7 @@ impl KiApp {
         // --- Fenêtres et brouillons en cours ---
         self.ban_draft = None;
         self.voice_prompt = None;
+        self.mots_de_passe_vocaux.clear();
         self.channel_edit = None;
         self.verrou_draft = None;
         // Les résultats se rapportent à un serveur et à ses salons : les
@@ -6116,6 +6131,7 @@ impl KiApp {
             ServerMsg::VoiceLocked { channel, wrong } => {
                 self.voice_channel = None;
                 self.voice_intent = None;
+                self.mots_de_passe_vocaux.remove(&channel);
                 self.voice_prompt = Some(VoicePrompt {
                     channel,
                     password: String::new(),
@@ -7165,6 +7181,7 @@ impl KiApp {
                 // refus laissait l'affichage dans un salon où l'on n'est pas.
                 self.voice_channel = Some(channel);
                 self.set_voice_intent(Some(channel));
+                self.mots_de_passe_vocaux.insert(channel, prompt.password.clone());
                 self.send(ClientMsg::JoinVoice {
                     channel,
                     password: Some(prompt.password),
@@ -7948,13 +7965,27 @@ impl KiApp {
     /// Le pouvoir de changer `m` de salon vocal : celui que le serveur
     /// exige (« Déplacer en vocal », et un rang au-dessus du sien), sur
     /// quelqu'un de connecté — ni un bot, ni un invité web, que sa porte
-    /// gère à part.
+    /// gère à part — et **en vocal**, dans un salon qu'on voit : déplacer
+    /// quelqu'un qui n'y est pas le montrait en vocal chez tous, sans voix
+    /// ni écoute. Le serveur le refuse désormais.
     fn peut_deplacer(&self, m: &Member) -> bool {
         !est_bot(m.user_id)
             && !est_invite_membre(m)
             && m.online
+            && m.voice.is_some_and(|c| self.channels.iter().any(|k| k.id == c))
             && self.outranks(m.rank)
             && self.can(ki_protocol::perm::MOVE_MEMBERS)
+    }
+
+    /// Suis-je le propriétaire du serveur ? Son rôle est seul au rang le
+    /// plus haut.
+    fn suis_proprietaire(&self) -> bool {
+        self.my_rank == u16::MAX
+    }
+
+    /// Cet onglet de l'administration m'est-il ouvert ?
+    fn onglet_ouvert(&self, tab: AdminTab) -> bool {
+        tab.needs().iter().any(|p| self.can(*p))
     }
 
     /// Un salon vocal comme cible du glisser-déposer (son intitulé et ses
@@ -8165,20 +8196,50 @@ impl KiApp {
                     ui.set_width(200.0);
                     let mut roles_sorted = self.roles.clone();
                     roles_sorted.sort_by_key(|r| std::cmp::Reverse(r.rank));
+                    // Ses rôles tels qu'on les connaît — y compris ce qu'on
+                    // vient de cocher, dont le roster n'est pas encore revenu :
+                    // deux clics rapides partaient de la même liste, et le
+                    // second défaisait le premier.
+                    let actuels = self
+                        .members
+                        .iter()
+                        .find(|x| x.user_id == m.user_id)
+                        .map_or_else(|| m.roles.clone(), |x| x.roles.clone());
+                    // Ce qu'il détient déjà : n'est vérifié que ce qu'un rôle
+                    // lui **ajoute**, comme au serveur.
+                    let detient = self
+                        .roles
+                        .iter()
+                        .filter(|r| r.id == ki_protocol::ROLE_EVERYONE || actuels.contains(&r.id))
+                        .fold(0, |acc, r| acc | r.perms);
                     for role in &roles_sorted {
-                        let assignable = self.outranks(role.rank);
-                        let mut has = m.roles.contains(&role.id);
+                        // @everyone se porte d'office : une case toujours
+                        // décochée qui ne fait rien n'a rien à faire ici.
+                        if role.id == ki_protocol::ROLE_EVERYONE {
+                            continue;
+                        }
+                        let au_dessus = !self.outranks(role.rank);
+                        let trop = !self.can(role.perms & !detient);
+                        let mut has = actuels.contains(&role.id);
                         let label = RichText::new(&role.name)
                             .color(theme::member_color(role.color, &role.name));
-                        if ui
-                            .add_enabled(assignable, egui::Checkbox::new(&mut has, label))
-                            .changed()
-                        {
-                            let mut new_roles = m.roles.clone();
+                        let reponse = ui.add_enabled(!au_dessus && !trop, egui::Checkbox::new(&mut has, label));
+                        let reponse = if au_dessus {
+                            reponse.on_disabled_hover_text("ce rôle est à ton rang ou au-dessus")
+                        } else if trop {
+                            reponse.on_disabled_hover_text("il donne des permissions que tu n'as pas")
+                        } else {
+                            reponse
+                        };
+                        if reponse.changed() {
+                            let mut new_roles = actuels.clone();
                             if has {
                                 new_roles.push(role.id);
                             } else {
                                 new_roles.retain(|id| *id != role.id);
+                            }
+                            if let Some(x) = self.members.iter_mut().find(|x| x.user_id == m.user_id) {
+                                x.roles = new_roles.clone();
                             }
                             self.send(ClientMsg::AdminSetUserRoles {
                                 username: m.username.clone(),
@@ -8236,9 +8297,20 @@ impl KiApp {
                     .filter(|c| c.kind == ChannelKind::Voice && Some(c.id) != m.voice)
                     .cloned()
                     .collect();
+                let proprietaire = self.suis_proprietaire();
                 ui.menu_button("Déplacer en vocal", |ui| {
                     ui.set_width(200.0);
                     for c in &vocaux {
+                        // Un salon fermé par un mot de passe n'est qu'à ceux
+                        // qui ont le code : seul le propriétaire y amène.
+                        if c.locked && !proprietaire {
+                            ui.add_enabled_ui(false, |ui| ui::button(ui, Icon::Key, &c.name))
+                                .response
+                                .on_disabled_hover_text(
+                                    "fermé par un mot de passe : seul le propriétaire y amène quelqu'un",
+                                );
+                            continue;
+                        }
                         if ui::button(ui, Icon::Volume, &c.name).clicked() {
                             self.send(ClientMsg::AdminVoiceMove {
                                 username: m.username.clone(),
@@ -12308,7 +12380,7 @@ impl KiApp {
                 // bannissements et le journal ajoutés.
                 ui.horizontal_wrapped(|ui| {
                     let tabs: Vec<AdminTab> =
-                        AdminTab::ALL.into_iter().filter(|t| self.can(t.needs())).collect();
+                        AdminTab::ALL.into_iter().filter(|t| self.onglet_ouvert(*t)).collect();
                     for tab in tabs {
                         // Un clic, même sur l'onglet ouvert, recharge ce
                         // qu'il montre.
@@ -12337,10 +12409,10 @@ impl KiApp {
                     .show(ui, |ui| {
                         // L'onglet ouvert peut être devenu hors de portée si
                         // les rôles viennent de changer sous nos pieds.
-                        if !self.can(self.admin_tab.needs()) {
+                        if !self.onglet_ouvert(self.admin_tab) {
                             self.admin_tab = AdminTab::ALL
                                 .into_iter()
-                                .find(|t| self.can(t.needs()))
+                                .find(|t| self.onglet_ouvert(*t))
                                 .unwrap_or(AdminTab::Server);
                         }
                         match self.admin_tab {
@@ -12566,12 +12638,16 @@ impl KiApp {
                     });
                     ui::hint(
                         ui,
-                        "qui gère les salons entre sans le mot de passe : \
-                         poser un verrou ne s'enferme pas dehors",
+                        "seuls ceux qui ont le mot de passe entrent, admins compris ; \
+                         le propriétaire seul passe sans, et lui seul y déplace du monde. \
+                         Ton ki-chat retient celui-ci pour toi.",
                     );
                 });
                 if poser || retirer {
                     let v = self.verrou_draft.take().expect("vérifié à l'instant");
+                    if poser {
+                        self.mots_de_passe_vocaux.insert(v.channel, v.mot_de_passe.clone());
+                    }
                     to_send.push(ClientMsg::AdminSetVoicePassword {
                         channel: v.channel,
                         password: poser.then_some(v.mot_de_passe),
@@ -12588,8 +12664,12 @@ impl KiApp {
 
     /// Onglet « Rôles » : couleur, rang, permissions.
     fn admin_roles_tab(&mut self, ui: &mut egui::Ui, to_send: &mut Vec<ClientMsg>) {
-        let roles = self.roles.clone();
+        // Du plus haut au plus bas : l'ordre est ce qui décide qui agit sur
+        // qui, autant qu'il se lise.
+        let mut roles = self.roles.clone();
+        roles.sort_by_key(|r| std::cmp::Reverse(r.rank));
         ui::group_title(ui, Icon::Crown, "Rôles");
+        ui::hint(ui, "du plus haut au plus bas : on n'agit que sur qui est plus bas que soi");
         for role in &roles {
             ui.horizontal(|ui| {
                 let color = theme::member_color(role.color, &role.name);
@@ -12598,6 +12678,26 @@ impl KiApp {
                 ui::hint(ui, format!("rang {}", role.rank));
                 if role.system {
                     ui::hint(ui, "système");
+                }
+                // Qui le porte : @everyone, tout le monde ; les autres, la
+                // liste au survol.
+                if role.id != ki_protocol::ROLE_EVERYONE {
+                    let porteurs: Vec<&str> = self
+                        .members
+                        .iter()
+                        .filter(|m| !m.invite && m.roles.contains(&role.id))
+                        .map(|m| m.username.as_str())
+                        .collect();
+                    let n = porteurs.len();
+                    let compte = match n {
+                        0 => "personne".to_string(),
+                        1 => "1 membre".to_string(),
+                        n => format!("{n} membres"),
+                    };
+                    let reponse = ui.label(RichText::new(compte).color(theme::TEXT_FAINT).size(texte::PETIT));
+                    if n > 0 {
+                        reponse.on_hover_text(porteurs.join(", "));
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // On ne touche qu'à ce qui est strictement sous son
@@ -12639,12 +12739,14 @@ impl KiApp {
                 name: String::new(),
                 color: ACCENT,
                 colored: true,
-                // Par défaut le plus haut rang **libre** sous soi : un rôle
-                // créé au même rang serait immédiatement hors de portée de
-                // son auteur, et le rang juste en dessous, pris d'office,
-                // mettait tous les rôles qu'il créait à égalité.
-                rank: ki_protocol::free_rank_below(&self.roles, self.my_rank.saturating_sub(1))
-                    .unwrap_or_else(|| self.my_rank.saturating_sub(1)),
+                // Par défaut tout en bas : le premier rang libre au-dessus
+                // d'@everyone, comme dans Discord. Il naissait juste sous son
+                // auteur — au-dessus des modérateurs quand le propriétaire le
+                // créait : un rôle de couleur suffisait à mettre ceux qui le
+                // portent hors de portée de la modération, sans que rien ne
+                // le dise. Libre, parce que deux rôles ne partagent pas un
+                // rang : à égalité, personne n'agit sur l'autre.
+                rank: ki_protocol::lowest_free_rank(&self.roles, self.my_rank.saturating_sub(1)).unwrap_or(0),
                 rank_saved: None,
                 perms: ki_protocol::perm::DEFAULT,
             });
@@ -12679,6 +12781,21 @@ impl KiApp {
             let ceiling = self.my_rank.saturating_sub(1);
             ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
             ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
+            // Où il tombe parmi les autres : un nombre seul ne dit pas s'il
+            // passe au-dessus des modérateurs.
+            let autres: Vec<&ki_protocol::RoleInfo> =
+                self.roles.iter().filter(|r| Some(r.id) != draft.id).collect();
+            let dessous = autres.iter().filter(|r| r.rank < draft.rank).max_by_key(|r| r.rank);
+            let dessus = autres.iter().filter(|r| r.rank > draft.rank).min_by_key(|r| r.rank);
+            let place = match (dessous, dessus) {
+                (Some(b), Some(h)) => format!("entre « {} » et « {} »", safe_name(&b.name), safe_name(&h.name)),
+                (Some(b), None) => format!("au-dessus de « {} »", safe_name(&b.name)),
+                (None, Some(h)) => format!("en dessous de « {} »", safe_name(&h.name)),
+                (None, None) => String::new(),
+            };
+            if !place.is_empty() {
+                ui::hint(ui, place);
+            }
             if Some(draft.rank) != draft.rank_saved {
                 taken = ki_protocol::rank_holder(&self.roles, draft.rank, draft.id)
                     .map(|r| r.name.clone());
@@ -12686,8 +12803,7 @@ impl KiApp {
             if let Some(other) = &taken {
                 ui.label(
                     RichText::new(format!(
-                        "rang déjà pris par « {} » : à rang égal, aucun des deux ne \
-                         pourrait agir sur l'autre",
+                        "rang déjà pris par « {} » : à rang égal, aucun des deux ne pourrait agir sur l'autre",
                         safe_name(other)
                     ))
                     .color(DANGER)
@@ -12787,7 +12903,14 @@ impl KiApp {
             ui::hint(ui, "lien permanent — chaque compte créé sera consigné au journal");
         }
         ui.add_space(espace::M);
-        if ui::button(ui, Icon::Plus, "Générer le code").clicked() {
+        // Gérer les invitations sans pouvoir en créer : on révoque, on ne
+        // génère pas.
+        let peut_creer = self.can(ki_protocol::perm::CREATE_INVITE);
+        let generer = ui
+            .add_enabled_ui(peut_creer, |ui| ui::button(ui, Icon::Plus, "Générer le code"))
+            .inner
+            .on_disabled_hover_text("il faut la permission « Créer des invitations »");
+        if generer.clicked() {
             to_send.push(ClientMsg::AdminCreateInvite {
                 uses: self.invite_uses,
                 label: self.invite_label.trim().to_string(),
@@ -12865,8 +12988,13 @@ impl KiApp {
                                 .size(texte::PETIT),
                         );
                     }
+                    // Ses propres codes, qui sait en créer les révoque ;
+                    // ceux des autres, il faut gérer les invitations.
+                    let revocable = self.can(ki_protocol::perm::MANAGE_INVITES)
+                        || invite.created_by == self.username.trim();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !invite.revoked
+                            && revocable
                             && ui::icon_button_ex(ui, Icon::Ban, 24.0, "Révoquer", None).clicked()
                         {
                             to_send

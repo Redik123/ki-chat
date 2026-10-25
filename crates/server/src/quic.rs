@@ -514,7 +514,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         }
     }
     let _ = tx.send(ServerMsg::MusiqueEtat {
-        etat: state.musique.etat(),
+        etat: crate::musique::etat_pour(&state, user_id),
     });
 
     // Tâche d'écriture : verse sur le flux de contrôle des lignes **déjà
@@ -956,6 +956,26 @@ fn require(
     ok
 }
 
+/// Comme [`require`], mais une seule des permissions suffit.
+fn require_une(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    tx: &crate::state::Outbox,
+    une_de: &[ki_protocol::Perms],
+) -> bool {
+    let ok = une_de.iter().any(|p| state.holds(user_id, *p));
+    if !ok {
+        let _ = tx.send(ServerMsg::Error {
+            message: "tu n'as pas cette permission".into(),
+        });
+    }
+    ok
+}
+
+/// Ce qui donne droit à la liste des comptes : agir sur eux.
+const SUR_LES_COMPTES: &[ki_protocol::Perms] =
+    &[ki_protocol::perm::KICK, ki_protocol::perm::BAN, ki_protocol::perm::RESET_PASSWORD];
+
 /// Consomme un jeton du budget d'entrées et sorties de vocal.
 fn take_voice_budget(state: &Arc<AppState>, user_id: UserId) -> bool {
     let mut users = state.users.lock().unwrap();
@@ -1069,23 +1089,91 @@ const INVITATIONS_AFFICHEES: usize = 200;
 /// et toutes recevaient les codes d'invitation en clair — de quoi créer des
 /// comptes sans en avoir le droit. Seuls CREATE_INVITE et MANAGE_INVITES
 /// les reçoivent.
+/// Le journal tel que ce lecteur peut le lire : les salons qu'il ne voit
+/// pas n'y sont pas nommés.
+///
+/// `VIEW_AUDIT_LOG` est au modérateur par défaut, qui ne voit pas forcément
+/// les salons privés : le journal lui donnait pourtant leur nom (création,
+/// renommage, verrou, déplacement en vocal) et l'extrait des messages qu'on
+/// y supprimait. Qui gère les salons les voit tous et lit tout.
+fn journal_pour(
+    state: &Arc<AppState>,
+    lecteur: UserId,
+    records: Vec<ki_protocol::AuditRecord>,
+) -> Vec<ki_protocol::AuditRecord> {
+    if state.holds(lecteur, ki_protocol::perm::MANAGE_CHANNELS) {
+        return records;
+    }
+    let tous = state.channels.list();
+    let visibles: Vec<ki_protocol::ChannelInfo> = state.visible_channels(lecteur);
+    // Un nom de salon tel qu'il peut le lire : le sien s'il le voit ; un
+    // salon supprimé ne dit plus s'il était privé, il reste anonyme.
+    let nom = |n: &str| -> String {
+        if visibles.iter().any(|c| c.name == n) {
+            n.to_string()
+        } else if tous.iter().any(|c| c.name == n) {
+            "un salon privé".to_string()
+        } else {
+            "un salon supprimé".to_string()
+        }
+    };
+    records
+        .into_iter()
+        .map(|mut r| {
+            match r.action.as_str() {
+                a if a.starts_with("channel.") => r.target = nom(&r.target),
+                "voice.move" if r.detail != "hors du vocal" => r.detail = nom(&r.detail),
+                "server.fil_valorant" => {
+                    if let Some(n) = r.detail.strip_prefix('#') {
+                        let lu = nom(n);
+                        r.detail = if lu == n { format!("#{n}") } else { lu };
+                    }
+                }
+                "message.delete" => {
+                    // « salon 12 : l'extrait » : l'extrait d'un salon caché ne
+                    // se lit pas.
+                    let salon = r
+                        .detail
+                        .strip_prefix("salon ")
+                        .and_then(|d| d.split(' ').next())
+                        .and_then(|id| id.parse::<ki_protocol::ChannelId>().ok());
+                    if salon.is_none_or(|c| !state.can_view(lecteur, c)) {
+                        r.detail = "dans un salon que tu ne vois pas".to_string();
+                    }
+                }
+                _ => {}
+            }
+            r
+        })
+        .collect()
+}
+
+/// La liste des comptes et des invitations, chacune à qui y a droit : les
+/// comptes à qui peut agir dessus (expulser, bannir, réinitialiser), toutes
+/// les invitations à qui les gère, et seulement les siennes à qui ne fait
+/// qu'en créer. Elle partait entière après n'importe quelle action — créer
+/// une invitation suffisait à recevoir tous les comptes et tous les codes.
 fn send_admin_info(state: &Arc<AppState>, demandeur: UserId, tx: &crate::state::Outbox) {
-    let mut users = state.accounts.list(&state.roles);
-    {
+    let users = if SUR_LES_COMPTES.iter().any(|p| state.holds(demandeur, *p)) {
+        let mut users = state.accounts.list(&state.roles);
         let connected = state.users.lock().unwrap();
         for u in &mut users {
             u.online = connected.contains_key(&u.user_id);
         }
-    }
-    let invites = if state.holds(demandeur, ki_protocol::perm::CREATE_INVITE)
-        || state.holds(demandeur, ki_protocol::perm::MANAGE_INVITES)
-    {
-        let mut invites = state.accounts.invites();
-        invites.truncate(INVITATIONS_AFFICHEES);
-        invites
+        users
     } else {
         Vec::new()
     };
+    let invites = if state.holds(demandeur, ki_protocol::perm::MANAGE_INVITES) {
+        state.accounts.invites()
+    } else if state.holds(demandeur, ki_protocol::perm::CREATE_INVITE) {
+        let moi = state.users.lock().unwrap().get(&demandeur).map(|u| u.username.clone()).unwrap_or_default();
+        state.accounts.invites().into_iter().filter(|i| i.created_by == moi).collect()
+    } else {
+        Vec::new()
+    };
+    let mut invites = invites;
+    invites.truncate(INVITATIONS_AFFICHEES);
     let _ = tx.send(ServerMsg::AdminInfo { users, invites });
 }
 /// Résume un changement d'identité pour le journal d'audit. Le logo n'y
@@ -1669,16 +1757,21 @@ fn handle_msg(
             if cible != user_id && !require(state, user_id, tx, ki_protocol::perm::MANAGE_SERVER) {
                 return;
             }
+            let qui = state
+                .accounts
+                .list(&state.roles)
+                .into_iter()
+                .find(|a| a.user_id == cible)
+                .map(|a| a.username)
+                .unwrap_or_else(|| cible.to_string());
+            // Comme toute action sur quelqu'un d'autre : sur un rang
+            // inférieur au sien seulement.
+            if cible != user_id && !outranks_account(state, user_id, &qui, tx) {
+                return;
+            }
             let ancien = state.valorant.riot_id(cible);
             let ok = state.valorant.delier(cible);
             if ok && cible != user_id {
-                let qui = state
-                    .accounts
-                    .list(&state.roles)
-                    .into_iter()
-                    .find(|a| a.user_id == cible)
-                    .map(|a| a.username)
-                    .unwrap_or_else(|| cible.to_string());
                 state.audit.record(
                     "valorant.unlink",
                     username,
@@ -1825,7 +1918,8 @@ fn handle_msg(
             // Le stock et les journaux se relisent sur le pool bloquant.
             let (state, tx) = (state.clone(), tx.clone());
             tokio::task::spawn_blocking(move || {
-                let _ = tx.send(crate::files::liste_admin(&state));
+                let voit = |c| state.can_view(user_id, c);
+                let _ = tx.send(crate::files::liste_admin(&state, &voit));
             });
         }
         ClientMsg::AdminSupprimerFichiers { ids, messages } => {
@@ -1844,7 +1938,8 @@ fn handle_msg(
             let (state, tx) = (state.clone(), tx.clone());
             let actor = username.to_string();
             tokio::task::spawn_blocking(move || {
-                let bilan = crate::files::supprimer_admin(&state, &ids, messages);
+                let voit = |c| state.can_view(user_id, c);
+                let bilan = crate::files::supprimer_admin(&state, &voit, &ids, messages);
                 let mo = bilan.octets as f64 / (1024.0 * 1024.0);
                 state.audit.record(
                     "fichiers.delete",
@@ -1869,7 +1964,7 @@ fn handle_msg(
                         ),
                     },
                 });
-                let _ = tx.send(crate::files::liste_admin(&state));
+                let _ = tx.send(crate::files::liste_admin(&state, &voit));
             });
         }
         ClientMsg::AdminSetFilValorant { channel } => {
@@ -1883,7 +1978,11 @@ fn handle_msg(
                         .channels
                         .list()
                         .into_iter()
-                        .find(|c| c.id == id && c.kind == ki_protocol::ChannelKind::Text);
+                        .find(|c| c.id == id && c.kind == ki_protocol::ChannelKind::Text)
+                        // Un salon qu'on ne voit pas répond comme un salon qui
+                        // n'existe pas : sans ça, la réponse en donnait le nom
+                        // à qui essayait les numéros un à un.
+                        .filter(|c| state.can_view(user_id, c.id));
                     let Some(salon) = salon else {
                         let _ = tx.send(ServerMsg::Error {
                             message: "ce salon n'existe pas, ou n'est pas un salon texte".into(),
@@ -1960,6 +2059,24 @@ fn handle_msg(
                 .unwrap()
                 .get(&user_id)
                 .and_then(|u| u.voice);
+            // Le bot qui joue dans un salon qu'on ne voit pas ne se pilote
+            // pas d'ici : ni sa file, ni sa lecture, ni le faire venir — il
+            // quitterait ce salon pour le nôtre. Chercher, et gérer les
+            // playlists du serveur, ne touchent pas à son salon.
+            let hors_salon = matches!(
+                &commande,
+                C::Chercher { .. } | C::PlaylistSupprimer { .. } | C::PlaylistAjouterPiste { .. }
+            );
+            if !hors_salon {
+                if let Some(salon) = state.musique.etat().salon {
+                    if !state.can_view(user_id, salon) {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "le bot musique joue en ce moment dans un salon que tu ne vois pas".into(),
+                        });
+                        return;
+                    }
+                }
+            }
             let quoi = match &commande {
                 C::Rejoindre => "rejoindre",
                 C::Ajouter { .. } | C::AjouterPiste { .. } => "ajouter",
@@ -2368,15 +2485,44 @@ fn handle_msg(
                     });
                     return;
                 }
+                // Un salon fermé par un mot de passe n'est qu'à ceux qui ont
+                // le code : déplacer quelqu'un dedans serait l'y faire entrer
+                // sans. Seul le propriétaire, qui y entre lui-même sans code,
+                // peut y amener du monde.
+                if state.voice_locked(channel) && !state.est_proprietaire(user_id) {
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "ce salon est fermé par un mot de passe : seul le propriétaire peut y amener quelqu'un"
+                            .into(),
+                    });
+                    return;
+                }
             }
-            // Le verrou du salon n'est pas consulté : il garde la porte de
-            // ceux qui entrent d'eux-mêmes, pas la main d'un modérateur qui
-            // range les gens.
+            // Où il est : il faut y être — un déplacement ne fait entrer
+            // personne en vocal, il n'aurait pas d'appareil pour porter sa
+            // voix et y serait un fantôme, montré à tous et muet — et il faut
+            // voir ce salon : sortir quelqu'un d'un vocal privé qu'on ne voit
+            // pas, c'est agir dans un salon qui, pour soi, n'existe pas.
+            let ou_est = {
+                let users = state.users.lock().unwrap();
+                users.get(&target_id).and_then(|u| u.voice)
+            };
+            match ou_est {
+                Some(c) if state.can_view(user_id, c) => {}
+                _ => {
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "cette personne n'est pas en vocal".into(),
+                    });
+                    return;
+                }
+            }
             let bouge = {
                 let mut users = state.users.lock().unwrap();
                 match users.get_mut(&target_id) {
-                    Some(u) if u.voice != channel => {
+                    Some(u) if u.voice.is_some() && u.voice != channel => {
                         u.voice = channel;
+                        if channel.is_none() {
+                            u.voix_par = None;
+                        }
                         u.speaking = false;
                         true
                     }
@@ -2708,7 +2854,12 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminListUsers => {
-            if require(state, user_id, tx, ki_protocol::perm::KICK) {
+            // Débannir demande la liste (les bannis y sont), réinitialiser un
+            // mot de passe aussi : `KICK` seul la donnait, et BAN ou
+            // RESET_PASSWORD sans lui ne servaient à rien.
+            let mut une_de = SUR_LES_COMPTES.to_vec();
+            une_de.extend([ki_protocol::perm::CREATE_INVITE, ki_protocol::perm::MANAGE_INVITES]);
+            if require_une(state, user_id, tx, &une_de) {
                 send_admin_info(state, user_id, tx);
             }
         }
@@ -2716,7 +2867,7 @@ fn handle_msg(
             if require(state, user_id, tx, ki_protocol::perm::VIEW_AUDIT_LOG) {
                 let limit = limit.clamp(1, 500) as usize;
                 let _ = tx.send(ServerMsg::AuditLog {
-                    records: state.audit.recent(limit),
+                    records: journal_pour(state, user_id, state.audit.recent(limit)),
                 });
             }
         }
@@ -2762,7 +2913,11 @@ fn handle_msg(
             }
         }
         ClientMsg::AdminRevokeInvite { code } => {
-            if require(state, user_id, tx, ki_protocol::perm::MANAGE_INVITES) {
+            // Ses propres codes, qui sait en créer les révoque ; ceux des
+            // autres, il faut gérer les invitations.
+            let le_sien = state.holds(user_id, ki_protocol::perm::CREATE_INVITE)
+                && state.accounts.invites().iter().any(|i| i.code == code && i.created_by == username);
+            if le_sien || require(state, user_id, tx, ki_protocol::perm::MANAGE_INVITES) {
                 let (state, tx) = (state.clone(), tx.clone());
                 let actor = username.to_string();
                 tokio::task::spawn_blocking(move || match state.accounts.revoke_invite(&code) {
@@ -3147,8 +3302,11 @@ fn handle_msg(
             let current = existing.as_ref().map(|r| r.rank).unwrap_or(0);
             // Le rang **actuel** compte autant que le demandé : sinon on
             // baisserait d'abord un rôle trop haut pour ensuite le reprendre.
-            if !ki_protocol::perm::outranks(mine, current)
-                || !ki_protocol::perm::outranks(mine, role.rank)
+            // Une exception : le propriétaire règle la couleur de son propre
+            // rôle — le magasin n'y laisse changer rien d'autre.
+            let le_sien = role.id == ki_protocol::ROLE_OWNER && state.est_proprietaire(user_id);
+            if (!ki_protocol::perm::outranks(mine, current) || !ki_protocol::perm::outranks(mine, role.rank))
+                && !le_sien
             {
                 let _ = tx.send(ServerMsg::Error {
                     message: "ce rôle est à ton rang ou au-dessus".into(),

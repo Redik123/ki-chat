@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ki_protocol::{
-    ChannelId, CompteursMusique, EtatMusique, Piste, ResumePlaylist, ServerMsg, MUSIQUE_ID, VOICE_HEADER_LEN,
+    ChannelId, CompteursMusique, EtatMusique, Piste, ResumePlaylist, ServerMsg, UserId, MUSIQUE_ID, VOICE_HEADER_LEN,
 };
 use serde::{Deserialize, Serialize};
 use rand::Rng;
@@ -1065,8 +1065,7 @@ fn envoyer(state: &AppState, salon: ChannelId, paquet: bytes::Bytes) {
 /// Publie l'état à tout le monde — et le roster quand le bot apparaît,
 /// disparaît ou se tait.
 fn publier(state: &AppState, roster: bool) {
-    let etat = state.musique.etat();
-    state.broadcast_all(&ServerMsg::MusiqueEtat { etat });
+    diffuser_etat(state);
     if roster {
         state.broadcast_all(&ServerMsg::Members {
             members: state.roster(),
@@ -1074,6 +1073,53 @@ fn publier(state: &AppState, roster: bool) {
         // Les invités web à l'écoute de son salon le comptent parmi les
         // occupants : c'est ainsi que leur page le nomme quand il joue.
         crate::porte::annoncer_occupants(state);
+    }
+}
+
+/// L'état du bot vu de qui ne voit pas le salon où il joue : libre, sans
+/// salon, sans file ni morceau — ni le nom de qui a ajouté quoi. Les
+/// playlists du serveur, elles, ne tiennent à aucun salon.
+pub fn vu_de_dehors(etat: &EtatMusique) -> EtatMusique {
+    EtatMusique {
+        disponible: etat.disponible,
+        volume: etat.volume,
+        compteurs: etat.compteurs.clone(),
+        playlists: etat.playlists.clone(),
+        ..Default::default()
+    }
+}
+
+/// L'état du bot pour cette personne : entier si elle voit son salon.
+pub fn etat_pour(state: &AppState, user_id: UserId) -> EtatMusique {
+    let etat = state.musique.etat();
+    match etat.salon {
+        Some(salon) if !state.can_view(user_id, salon) => vu_de_dehors(&etat),
+        _ => etat,
+    }
+}
+
+/// Pousse l'état du bot à chacun, tel qu'il peut le voir : quand le bot
+/// joue dans un salon privé, ceux qui ne le voient pas n'en apprennent ni
+/// le salon, ni la file, ni qui l'a remplie.
+pub fn diffuser_etat(state: &AppState) {
+    let etat = state.musique.etat();
+    let Some(salon) = etat.salon else {
+        state.broadcast_all(&ServerMsg::MusiqueEtat { etat });
+        return;
+    };
+    let dehors = vu_de_dehors(&etat);
+    let (Some(plein), Some(vide)) = (
+        crate::state::encode(&ServerMsg::MusiqueEtat { etat }),
+        crate::state::encode(&ServerMsg::MusiqueEtat { etat: dehors }),
+    ) else {
+        return;
+    };
+    let ids: Vec<UserId> = state.users.lock().unwrap().keys().copied().collect();
+    for id in ids {
+        let ligne = if state.can_view(id, salon) { &plein } else { &vide };
+        if let Some(u) = state.users.lock().unwrap().get(&id) {
+            u.envoyer_ligne(ligne);
+        }
     }
 }
 
