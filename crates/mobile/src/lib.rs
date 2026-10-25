@@ -451,7 +451,7 @@ fn vue(a: &Appli) -> Vue {
             admin: m.admin,
             force_muet: m.force_muted,
             force_sourd: m.force_deafened,
-            sous_moi: m.rank < e.rang,
+            sous_moi: ki_protocol::perm::outranks(e.rang, m.rank),
             en_ligne: m.online,
             mobile: m.mobile,
             vocal: m.voice,

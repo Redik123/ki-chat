@@ -1004,7 +1004,7 @@ fn outranks_account(
     target: &str,
     tx: &crate::state::Outbox,
 ) -> bool {
-    let ok = rank_of_account(state, target) < rank_of(state, actor);
+    let ok = ki_protocol::perm::outranks(rank_of(state, actor), rank_of_account(state, target));
     if !ok {
         let _ = tx.send(ServerMsg::Error {
             message: "cette personne est d'un rang égal ou supérieur au tien".into(),
@@ -2813,7 +2813,7 @@ fn handle_msg(
             }
             // Le rang, en plus de la permission : c'est lui qui empêche
             // d'atteindre quelqu'un d'aussi haut placé que soi.
-            if rank_of(state, target) >= rank_of(state, user_id) {
+            if !ki_protocol::perm::outranks(rank_of(state, user_id), rank_of(state, target)) {
                 let _ = tx.send(ServerMsg::Error {
                     message: "cette personne est d'un rang égal ou supérieur au tien".into(),
                 });
@@ -3262,7 +3262,7 @@ fn handle_msg(
             // toucher, et il pourrait agir sur nous), et l'on n'y met pas
             // une permission qu'on n'a pas soi-même — sans quoi « gérer les
             // rôles » suffirait à devenir administrateur.
-            if rank >= rank_of(state, user_id) {
+            if !ki_protocol::perm::outranks(rank_of(state, user_id), rank) {
                 let _ = tx.send(ServerMsg::Error {
                     message: "un rôle ne peut pas atteindre ton propre rang".into(),
                 });
@@ -3305,7 +3305,9 @@ fn handle_msg(
             // Une exception : le propriétaire règle la couleur de son propre
             // rôle — le magasin n'y laisse changer rien d'autre.
             let le_sien = role.id == ki_protocol::ROLE_OWNER && state.est_proprietaire(user_id);
-            if (current >= mine || role.rank >= mine) && !le_sien {
+            if (!ki_protocol::perm::outranks(mine, current) || !ki_protocol::perm::outranks(mine, role.rank))
+                && !le_sien
+            {
                 let _ = tx.send(ServerMsg::Error {
                     message: "ce rôle est à ton rang ou au-dessus".into(),
                 });
@@ -3351,7 +3353,7 @@ fn handle_msg(
                 return;
             }
             let current = state.roles.get(id).map(|r| r.rank).unwrap_or(0);
-            if current >= rank_of(state, user_id) {
+            if !ki_protocol::perm::outranks(rank_of(state, user_id), current) {
                 let _ = tx.send(ServerMsg::Error {
                     message: "ce rôle est à ton rang ou au-dessus".into(),
                 });
@@ -3416,7 +3418,12 @@ fn handle_msg(
             let wanted = state.roles.sanitize(&roles);
             if wanted
                 .iter()
-                .any(|id| state.roles.get(*id).is_some_and(|r| r.rank >= mine))
+                .any(|id| {
+                    state
+                        .roles
+                        .get(*id)
+                        .is_some_and(|r| !ki_protocol::perm::outranks(mine, r.rank))
+                })
             {
                 let _ = tx.send(ServerMsg::Error {
                     message: "tu ne peux attribuer qu'un rôle sous ton rang".into(),
