@@ -38,6 +38,8 @@ pub mod spectre;
 pub mod timbre;
 #[cfg(windows)]
 mod wasapi;
+#[cfg(target_os = "android")]
+mod android;
 /// Le son du jeu dans le stream : capture en boucle (Windows) et lecteur
 /// (partout).
 pub mod jeu;
@@ -211,6 +213,11 @@ pub struct VoiceConfig {
     pub vad_neural: bool,
     /// Probabilité de parole à partir de laquelle le réseau ouvre le micro.
     pub vad_sensitivity: f32,
+    /// Garde de niveau pour le réseau : il n'ouvre le micro que si la crête,
+    /// avant le gain automatique, passe aussi `vad_threshold`. Sans elle,
+    /// Silero, qui juge après ce gain, ouvrait au moindre petit bruit — et
+    /// au reste d'un écho, sur le haut-parleur d'un téléphone.
+    pub vad_garde: bool,
     /// Gain automatique (AGC) : normalise le niveau micro tout seul.
     pub agc: bool,
     /// Niveau crête cible de l'AGC (0..1).
@@ -264,7 +271,8 @@ impl VoiceConfig {
             bitrate: 64_000,
             input_device: None,
             output_device: None,
-            native_audio: cfg!(windows),
+            // Android : le micro AAudio en mode « communication » (android.rs).
+            native_audio: cfg!(windows) || cfg!(target_os = "android"),
             raw_mic: false,
             comms_mic: false,
             robust_output: false,
@@ -278,6 +286,7 @@ impl VoiceConfig {
             vad_hangover_ms: 400,
             vad_neural: true,
             vad_sensitivity: 0.5,
+            vad_garde: false,
             agc: true,
             agc_target: 0.30,
             gate_threshold: 0.0,
@@ -773,6 +782,7 @@ struct Shared {
     vad_hangover_ms: AtomicU32,
     vad_neural: AtomicBool,
     vad_sens: AtomicU32,
+    vad_garde: AtomicBool,
     /// La proximité : ses réglages et leur génération (relus par la capture
     /// quand elle bouge).
     proximite: Mutex<proximite::ReglagesProximite>,
@@ -951,6 +961,7 @@ impl VoiceEngine {
             depart: Instant::now(),
             vad_hangover_ms: AtomicU32::new(cfg.vad_hangover_ms.clamp(50, 2000)),
             vad_neural: AtomicBool::new(cfg.vad_neural),
+            vad_garde: AtomicBool::new(cfg.vad_garde),
             vad_sens: AtomicU32::new(cfg.vad_sensitivity.clamp(0.1, 0.95).to_bits()),
             proximite: Mutex::new(cfg.proximite.bornes()),
             proximite_gen: AtomicU64::new(1),
@@ -1235,6 +1246,11 @@ impl VoiceEngine {
     /// Activation vocale neuronale (Silero) ou par seuil d'amplitude.
     pub fn set_vad_neural(&self, on: bool) {
         self.shared.vad_neural.store(on, Ordering::Relaxed);
+    }
+
+    /// La garde de niveau du réseau (voir `VoiceConfig::vad_garde`), à chaud.
+    pub fn set_vad_garde(&self, on: bool) {
+        self.shared.vad_garde.store(on, Ordering::Relaxed);
     }
 
     /// La proximité (« ne garder que ma voix »), à chaud. Une ancre
@@ -2086,7 +2102,9 @@ fn capture_loop(
                 // Ce qui s'est réellement ouvert, et non ce qu'on a demandé.
                 #[cfg(windows)]
                 let natif = matches!(parts.stream, InputStream::Native(_));
-                #[cfg(not(windows))]
+                #[cfg(target_os = "android")]
+                let natif = matches!(parts.stream, InputStream::Android(_));
+                #[cfg(not(any(windows, target_os = "android")))]
                 let natif = false;
                 let moteur = if natif { docteur::Moteur::Natif } else { docteur::Moteur::Secours };
                 sh.counters.input_engine.store(moteur.code(), Ordering::Relaxed);
@@ -2130,6 +2148,36 @@ fn capture_loop(
         // ne réessaie pas à chaque trame). Sa création est instantanée, elle
         // n'a pas besoin du chargement en arrière-plan des modèles.
         let mut aec: Option<Option<ki_aec::Aec>> = None;
+        // Le recalage du lointain sur l'écho, recréé avec l'annulateur : sur
+        // un téléphone, l'écho revient 170 à 260 ms après le son joué, au-delà
+        // de la queue du filtre (voir ki_aec::Recaleur). Sur PC, où il tient
+        // dedans, rien ne change pour l'instant.
+        let recaler = cfg!(target_os = "android");
+        // Et le haut-parleur d'un téléphone y revient plus fort que la bouche :
+        // le filtre seul laisse un écho au niveau de la voix, l'étage de
+        // suppression de résidu l'efface (voir ki_aec::Aec::avec_residu).
+        let nouvel_annulateur = || {
+            if recaler {
+                ki_aec::Aec::avec_residu(FRAME_SAMPLES, AEC_TAIL, SAMPLE_RATE)
+            } else {
+                ki_aec::Aec::new(FRAME_SAMPLES, AEC_TAIL, SAMPLE_RATE)
+            }
+        };
+        let mut recaleur: Option<ki_aec::Recaleur> = None;
+        // Et la garde d'écho : au haut-parleur d'un téléphone poussé à fond,
+        // ce que le filtre laisse passe encore le seuil de volume. Pendant
+        // que le haut-parleur joue, le micro n'ouvre que nettement au-dessus
+        // de l'écho attendu (voir ki_aec::GardeEcho).
+        let mut garde_echo: Option<ki_aec::GardeEcho> = None;
+        // Ce que la file du lointain n'avait pas quand la capture l'a
+        // demandé, à rattraper. La sortie la remplit par rafales (33 ms sur
+        // un téléphone), la capture la vide trame par trame : un creux la
+        // laissait à court, la trame était complétée de silence, et la suite
+        // du lointain arrivait d'autant plus tard face au micro. Le retard
+        // de l'écho changeait à chaque creux, et l'annulateur ne retirait
+        // plus rien. En sautant ensuite ce qui manquait, chaque trame du
+        // micro reste face au même instant du lointain.
+        let mut manque_lointain = 0usize;
         // Le lointain accumulé pendant que le micro était fermé date d'avant
         // lui : on n'en garde qu'une demi-queue de filtre, pour que le
         // « maintenant » des deux signaux coïncide à peu près.
@@ -2389,6 +2437,9 @@ fn capture_loop(
                 sh.counters.derniere_saturation_ms.store(depuis, Ordering::Relaxed);
             }
 
+            // La crête du lointain de cette trame, tel que donné à
+            // l'annulateur : la garde d'écho s'en sert plus bas.
+            let mut crete_lointain = 0f32;
             // 0. Annulation d'écho : soustrait ce que la sortie vient de
             // jouer (l'écho des haut-parleurs revenu dans le micro), AVANT
             // tout le reste — le filtre veut la capture telle quelle, et la
@@ -2397,11 +2448,7 @@ fn capture_loop(
             // lointain = rien à soustraire.
             if sh.aec.load(Ordering::Relaxed) {
                 let canceller = aec
-                    .get_or_insert_with(|| match ki_aec::Aec::new(
-                        FRAME_SAMPLES,
-                        AEC_TAIL,
-                        SAMPLE_RATE,
-                    ) {
+                    .get_or_insert_with(|| match nouvel_annulateur() {
                         Some(c) => {
                             journal("annulation d'écho active (queue 200 ms)".into());
                             Some(c)
@@ -2416,19 +2463,54 @@ fn capture_loop(
                     let mut far = [0f32; FRAME_SAMPLES];
                     {
                         let mut q = sh.aec_far.lock().unwrap();
+                        // L'arriéré d'abord : ces échantillons-là appartenaient
+                        // à des trames déjà passées.
+                        let rattrape = manque_lointain.min(q.len());
+                        q.drain(..rattrape);
+                        manque_lointain -= rattrape;
+                        let mut pris = 0;
                         for slot in far.iter_mut() {
                             match q.pop_front() {
-                                Some(s) => *slot = s,
+                                Some(s) => {
+                                    *slot = s;
+                                    pris += 1;
+                                }
                                 None => break,
                             }
                         }
+                        if pris < FRAME_SAMPLES {
+                            // Borné : une sortie durablement en retard ne se
+                            // rattrape pas, le recalage remesurera.
+                            manque_lointain = (manque_lointain + FRAME_SAMPLES - pris).min(AEC_FAR_MAX);
+                        }
                     }
-                    canceller.process(&mut frame, &far);
+                    if recaler {
+                        let r = recaleur.get_or_insert_with(|| ki_aec::Recaleur::new(FRAME_SAMPLES, SAMPLE_RATE));
+                        let mut cale = [0f32; FRAME_SAMPLES];
+                        // Le recalage a changé : le filtre avait appris
+                        // l'ancien, il repart de zéro sur le nouveau.
+                        if r.recaler(&frame, &far, &mut cale) {
+                            if let Some(neuf) = nouvel_annulateur() {
+                                *canceller = neuf;
+                            }
+                            if let Some(ms) = r.retard_ms() {
+                                tracing::info!("annulation d'écho recalée : l'écho revient {ms:.0} ms après le son");
+                                journal(format!("annulation d'écho recalée : l'écho revient {ms:.0} ms après le son"));
+                            }
+                        }
+                        crete_lointain = cale.iter().fold(0f32, |m, s| m.max(s.abs()));
+                        canceller.process(&mut frame, &cale);
+                    } else {
+                        canceller.process(&mut frame, &far);
+                    }
                 }
             } else if aec.is_some() {
                 // Coupé à chaud : l'état part, la file aussi — une
                 // réactivation repartira d'un filtre neuf et aligné.
                 aec = None;
+                recaleur = None;
+                garde_echo = None;
+                manque_lointain = 0;
                 sh.aec_far.lock().unwrap().clear();
             }
 
@@ -2520,6 +2602,11 @@ fn capture_loop(
             // automatique, qui ramènerait toute voix — même lointaine — au
             // même niveau et rendrait le seuil aveugle.
             let crete_decision = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+            let garde_lointain = if recaler && sh.aec.load(Ordering::Relaxed) {
+                garde_echo.get_or_insert_with(ki_aec::GardeEcho::new).trame(crete_lointain, crete_decision)
+            } else {
+                0.0
+            };
             sh.counters.niveau_decision_bits.store(crete_decision.to_bits(), Ordering::Relaxed);
             // 4. Gain automatique : normalise le niveau de la voix — et ne
             // s'adapte que sur une trame proche : une voix lointaine ne doit
@@ -2669,7 +2756,13 @@ fn capture_loop(
                         p_precedente = Some(p);
                         sh.counters.vad_prob_bits.store(p.to_bits(), Ordering::Relaxed);
                         sh.counters.silero_etat.store(SILERO_PRET, Ordering::Relaxed);
-                        parole::Parole::Neuronale { p, sens: load_f32(&sh.vad_sens) }
+                        parole::Parole::Neuronale {
+                            p,
+                            sens: load_f32(&sh.vad_sens),
+                            niveau: crete_decision,
+                            garde: if sh.vad_garde.load(Ordering::Relaxed) { threshold } else { 0.0 }
+                                .max(garde_lointain),
+                        }
                     }
                     None => {
                         let etat = if matches!(silero, EnFond::Echec) {
@@ -2678,13 +2771,13 @@ fn capture_loop(
                             SILERO_CHARGEMENT
                         };
                         sh.counters.silero_etat.store(etat, Ordering::Relaxed);
-                        parole::Parole::Seuil { niveau: crete_decision, seuil: threshold }
+                        parole::Parole::Seuil { niveau: crete_decision, seuil: threshold.max(garde_lointain) }
                     }
                 }
             } else {
                 sh.counters.vad_prob_bits.store(0, Ordering::Relaxed);
                 sh.counters.silero_etat.store(SILERO_INACTIF, Ordering::Relaxed);
-                parole::Parole::Seuil { niveau: crete_decision, seuil: threshold }
+                parole::Parole::Seuil { niveau: crete_decision, seuil: threshold.max(garde_lointain) }
             };
             let maintien = parole::maintien_trames(sh.vad_hangover_ms.load(Ordering::Relaxed));
             let voix_recente = if actif { decision.trame(parole, verdict.proche, maintien) } else { false };
@@ -2803,6 +2896,10 @@ enum InputStream {
     Cpal(cpal::Stream),
     #[cfg(windows)]
     Native(wasapi::NativeStream),
+    /// Le micro d'Android, ouvert par AAudio en préréglage « generic » : celui
+    /// où l'annulateur d'écho du moteur fait son travail (voir android.rs).
+    #[cfg(target_os = "android")]
+    Android(android::MicroAndroid),
 }
 
 /// Flux de sortie, quel que soit le moteur. Même contrat de simple tenue.
@@ -2986,6 +3083,29 @@ fn open_input(
             Err(e) => {
                 tracing::warn!("micro natif indisponible : {e:#} — repli sur cpal");
                 journal_if_new(format!("moteur natif indisponible (micro) : {e:#} — repli cpal"));
+            }
+        }
+    }
+    #[cfg(target_os = "android")]
+    if native {
+        let (tx, chunks) = chunk_channel();
+        let alive = Arc::new(AtomicBool::new(true));
+        match android::ouvrir_micro(tx, alive.clone()) {
+            Ok((micro, rate)) => {
+                tracing::info!("micro : AAudio ({rate} Hz, mono, préréglage generic)");
+                journal(format!("micro ouvert : AAudio ({rate} Hz, mono, préréglage generic)"));
+                return Ok(OpenedInput {
+                    stream: InputStream::Android(micro),
+                    chunks,
+                    rate,
+                    alive,
+                    fallback: false,
+                    name: "micro du téléphone".into(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!("micro AAudio indisponible : {e:#} — repli sur cpal");
+                journal_if_new(format!("micro AAudio indisponible : {e:#} — repli cpal"));
             }
         }
     }
