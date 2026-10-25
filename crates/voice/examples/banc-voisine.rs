@@ -141,7 +141,7 @@ fn main() -> anyhow::Result<()> {
             vad.traiter(&f);
             let p = vad.derniere();
             p_prec = Some(p);
-            let part = decision.trame(Parole::Neuronale { p, sens }, verdict.proche, maintien);
+            let part = decision.trame(Parole::Neuronale { p, sens, niveau: 0.0, garde: 0.0 }, verdict.proche, maintien);
             Trame { proche: verdict.proche, parole: p >= sens, part, sortie_db: en_db(efficace(&f)), brut_db, p }
         })
         .collect();

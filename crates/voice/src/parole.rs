@@ -4,7 +4,10 @@
 //! passe un seuil d'amplitude. **Neuronal** : Silero juge que c'est de la
 //! parole — avec une hystérésis (on ouvre à `sens`, on ne referme qu'à
 //! `sens - 0,15`, comme l'enveloppe de référence de Silero) pour ne pas
-//! hacher deux syllabes. Dans tous les cas le verdict de proximité
+//! hacher deux syllabes. Avec, au besoin, une garde de niveau : Silero juge
+//! la trame après le gain automatique, qui remonte un petit bruit ou le
+//! reste d'un écho au niveau d'une voix ; la garde exige, pour ouvrir, que
+//! la crête d'avant ce gain passe le seuil d'amplitude. Dans tous les cas le verdict de proximité
 //! ([`crate::proximite`]) a un droit de veto : une parole lointaine n'est
 //! pas une prise de parole. Puis un maintien : la trame part encore quelques
 //! dixièmes de seconde après la dernière voix, le temps d'une fin de mot.
@@ -20,8 +23,11 @@ pub enum Parole {
     /// Seuil d'amplitude : `niveau` (crête, avant le gain automatique)
     /// contre `seuil`.
     Seuil { niveau: f32, seuil: f32 },
-    /// Silero : probabilité `p` contre la sensibilité `sens`.
-    Neuronale { p: f32, sens: f32 },
+    /// Silero : probabilité `p` contre la sensibilité `sens`. Pour ouvrir,
+    /// `niveau` (crête, avant le gain automatique) doit aussi passer `garde`
+    /// — 0 : pas de garde. Une fois ouvert, seule la probabilité compte :
+    /// une fin de mot plus douce ne referme pas le micro.
+    Neuronale { p: f32, sens: f32, niveau: f32, garde: f32 },
 }
 
 /// Sous la sensibilité, de combien la probabilité doit retomber pour que le
@@ -61,9 +67,12 @@ impl Decision {
                 self.ouvert = niveau >= seuil;
                 self.ouvert
             }
-            Parole::Neuronale { p, sens } => {
-                self.ouvert =
-                    if self.ouvert { p >= Self::seuil_fermeture(sens) } else { p >= sens };
+            Parole::Neuronale { p, sens, niveau, garde } => {
+                self.ouvert = if self.ouvert {
+                    p >= Self::seuil_fermeture(sens)
+                } else {
+                    p >= sens && niveau >= garde
+                };
                 self.ouvert
             }
         };
@@ -105,7 +114,7 @@ mod tests {
     #[test]
     fn l_hysterese_ouvre_haut_et_referme_bas() {
         let mut d = Decision::new();
-        let n = |p| Parole::Neuronale { p, sens: 0.5 };
+        let n = |p| Parole::Neuronale { p, sens: 0.5, niveau: 0.0, garde: 0.0 };
         assert!(!d.trame(n(0.45), true, 0));
         assert!(d.trame(n(0.55), true, 0));
         // Entre les deux seuils : toujours ouvert.
@@ -132,7 +141,7 @@ mod tests {
     #[test]
     fn une_parole_lointaine_ne_part_pas() {
         let mut d = Decision::new();
-        let n = Parole::Neuronale { p: 0.99, sens: 0.5 };
+        let n = Parole::Neuronale { p: 0.99, sens: 0.5, niveau: 0.0, garde: 0.0 };
         for _ in 0..10 {
             assert!(!d.trame(n, false, 7));
         }
@@ -146,13 +155,28 @@ mod tests {
         assert_eq!(partis, 7);
     }
 
+    /// La garde : un petit bruit que Silero prend pour de la parole (remonté
+    /// par le gain automatique) n'ouvre pas le micro ; une vraie voix, si.
+    /// Et une fois ouvert, une fin de mot plus douce ne le referme pas.
+    #[test]
+    fn la_garde_ecarte_un_petit_bruit() {
+        let mut d = Decision::new();
+        let n = |p, niveau| Parole::Neuronale { p, sens: 0.5, niveau, garde: 0.02 };
+        assert!(!d.trame(n(0.95, 0.008), true, 0), "petit bruit sous la garde");
+        assert!(!d.parle());
+        assert!(d.trame(n(0.95, 0.1), true, 0), "une voix au-dessus de la garde");
+        assert!(d.trame(n(0.7, 0.005), true, 0), "fin de mot plus douce : toujours ouvert");
+        assert!(!d.trame(n(0.2, 0.005), true, 0));
+        assert!(!d.trame(n(0.95, 0.005), true, 0), "refermé : la garde revaut");
+    }
+
     #[test]
     fn la_reinitialisation_oublie_tout() {
         let mut d = Decision::new();
         assert!(d.trame(Parole::Toujours, true, 50));
         d.reinitialiser();
         assert!(!d.parle());
-        assert!(!d.trame(Parole::Neuronale { p: 0.4, sens: 0.5 }, true, 50));
+        assert!(!d.trame(Parole::Neuronale { p: 0.4, sens: 0.5, niveau: 0.0, garde: 0.0 }, true, 50));
     }
 
     #[test]

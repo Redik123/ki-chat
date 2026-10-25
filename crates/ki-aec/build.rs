@@ -1,6 +1,6 @@
 //! Télécharge le tarball officiel de SpeexDSP, vérifie son empreinte
-//! SHA-256, puis compile les quatre fichiers C de l'annulateur d'écho (MDF)
-//! et de sa FFT — sans autotools : le seul header que le configure aurait
+//! SHA-256, puis compile les six fichiers C de l'annulateur d'écho (MDF), de
+//! sa FFT et de la suppression de résidu — sans autotools : le seul header que le configure aurait
 //! généré est fabriqué ici.
 //!
 //! Hors-ligne : poser `KI_SPEEXDSP_SRC` sur un dossier contenant les sources
@@ -70,9 +70,11 @@ fn main() {
         .define("EXPORT", Some(""))
         // M_PI sous MSVC.
         .define("_USE_MATH_DEFINES", None)
-        // Le filtre seul : preprocess.c et filterbank.c (la suppression de
-        // résidu) ne sont plus appelés, voir src/lib.rs.
+        // La suppression de résidu (preprocess.c, filterbank.c) ne sert
+        // qu'au téléphone, voir `Aec::avec_residu` dans src/lib.rs.
         .file(dsp.join("mdf.c"))
+        .file(dsp.join("preprocess.c"))
+        .file(dsp.join("filterbank.c"))
         .file(dsp.join("fftwrap.c"))
         .file(dsp.join("kiss_fft.c"))
         .file(dsp.join("kiss_fftr.c"))

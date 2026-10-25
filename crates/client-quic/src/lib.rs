@@ -37,6 +37,8 @@ pub struct QuicClient {
     pub fingerprint: String,
     send: quinn::SendStream,
     lines: BufReader<quinn::RecvStream>,
+    /// La ligne en cours de lecture : voir [`read_line`].
+    tampon: Vec<u8>,
     /// Maintenu en vie tant que la connexion existe.
     _endpoint: quinn::Endpoint,
 }
@@ -210,6 +212,7 @@ impl QuicClient {
             fingerprint,
             send,
             lines: BufReader::new(recv),
+            tampon: Vec::new(),
             _endpoint: endpoint,
         })
     }
@@ -225,7 +228,7 @@ impl QuicClient {
     /// Attend le prochain message serveur. None = connexion fermée.
     pub async fn next_msg(&mut self) -> Option<ServerMsg> {
         loop {
-            match read_line(&mut self.lines).await {
+            match read_line(&mut self.lines, &mut self.tampon).await {
                 Some(line) => {
                     if let Some(msg) = lire_message(&line) {
                         return Some(msg);
@@ -241,7 +244,7 @@ impl QuicClient {
     pub fn split(self) -> (ControlWriter, ControlReader) {
         (
             ControlWriter { conn: self.conn.clone(), send: self.send, endpoint: self._endpoint },
-            ControlReader { conn: self.conn, lines: self.lines },
+            ControlReader { conn: self.conn, lines: self.lines, tampon: self.tampon },
         )
     }
 }
@@ -325,6 +328,8 @@ pub fn datagram_sender_slot(slot: Arc<Mutex<Option<quinn::Connection>>>) -> Data
 pub struct ControlReader {
     pub conn: quinn::Connection,
     lines: BufReader<quinn::RecvStream>,
+    /// La ligne en cours de lecture : voir [`read_line`].
+    tampon: Vec<u8>,
 }
 
 /// Pourquoi le serveur a raccroché, s'il l'a dit : le code de fermeture
@@ -370,7 +375,7 @@ fn lire_message(line: &str) -> Option<ServerMsg> {
 impl ControlReader {
     pub async fn next_msg(&mut self) -> Option<ServerMsg> {
         loop {
-            match read_line(&mut self.lines).await {
+            match read_line(&mut self.lines, &mut self.tampon).await {
                 Some(line) => {
                     if let Some(msg) = lire_message(&line) {
                         return Some(msg);
@@ -389,21 +394,34 @@ impl ControlReader {
 /// lecteur de lignes ordinaire ferait grandir son tampon sans limite, et un
 /// serveur hostile — ou simplement en panne — épuiserait la mémoire de
 /// l'application. Une ligne trop longue ferme la connexion.
-async fn read_line(reader: &mut BufReader<quinn::RecvStream>) -> Option<String> {
+///
+/// La ligne en cours s'accumule dans `tampon`, qui appartient au lecteur et
+/// non à cette lecture. `next_msg` attend dans un `select!` à côté des envois
+/// (battements, « je parle », « j'ai lu ») : chaque envoi abandonne la
+/// lecture en cours. Le tampon était local, et ce que `read_until` avait
+/// déjà tiré du flux partait avec lui : la suite du message arrivait seule,
+/// illisible, et le message était jeté. Les plus gros, ceux qui arrivent en
+/// plusieurs paquets — la liste des membres, l'historique —, se perdaient
+/// le plus : le téléphone voyait une personne en ligne sur douze, puis
+/// seulement celles dont la fiche changeait ensuite.
+async fn read_line<R>(reader: &mut R, tampon: &mut Vec<u8>) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     const NEWLINE: u8 = 10;
     const CARRIAGE_RETURN: u8 = 13;
 
-    let mut buf = Vec::new();
-    let limit = ki_protocol::MAX_LINE as u64 + 1;
-    reader.take(limit).read_until(NEWLINE, &mut buf).await.ok()?;
+    let limit = (ki_protocol::MAX_LINE as u64 + 1).saturating_sub(tampon.len() as u64);
+    let lu = reader.take(limit).read_until(NEWLINE, tampon).await;
 
-    if buf.len() > ki_protocol::MAX_LINE {
+    if tampon.len() > ki_protocol::MAX_LINE {
         tracing::warn!("ligne de contrôle trop longue : connexion abandonnée");
         return None;
     }
-    if buf.last() != Some(&NEWLINE) {
+    if lu.is_err() || tampon.last() != Some(&NEWLINE) {
         return None; // flux refermé
     }
+    let mut buf = std::mem::take(tampon);
     buf.pop();
     if buf.last() == Some(&CARRIAGE_RETURN) {
         buf.pop();
@@ -523,6 +541,40 @@ impl rustls::client::danger::ServerCertVerifier for PinVerify {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une lecture abandonnée en pleine ligne — ce que fait le `select!` de la
+    /// boucle réseau à chaque envoi — ne perd rien : la suivante reprend où
+    /// elle en était, et la ligne arrive entière.
+    #[tokio::test]
+    async fn une_lecture_interrompue_ne_perd_pas_la_ligne() {
+        use tokio::io::AsyncWriteExt;
+        let (mut serveur, client) = tokio::io::duplex(64);
+        let mut lecteur = BufReader::new(client);
+        let mut tampon = Vec::new();
+
+        serveur.write_all(b"{\"type\":\"members\",").await.unwrap();
+        // Un envoi passe devant : la lecture en cours est abandonnée.
+        let abandonnee = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            read_line(&mut lecteur, &mut tampon),
+        )
+        .await;
+        assert!(abandonnee.is_err(), "la ligne n'était pas finie");
+
+        serveur.write_all(b"\"members\":[]}
+{\"type\":\"pong\"}
+").await.unwrap();
+        assert_eq!(
+            read_line(&mut lecteur, &mut tampon).await.as_deref(),
+            Some("{\"type\":\"members\",\"members\":[]}")
+        );
+        assert_eq!(read_line(&mut lecteur, &mut tampon).await.as_deref(), Some("{\"type\":\"pong\"}"));
+
+        // Flux refermé au milieu d'une ligne : rien, et pas une demi-ligne.
+        serveur.write_all(b"{\"type\":").await.unwrap();
+        drop(serveur);
+        assert_eq!(read_line(&mut lecteur, &mut tampon).await, None);
+    }
 
     /// Le cœur de la confiance au premier usage : on accepte un serveur
     /// inconnu, on le reconnaît ensuite, et l'on refuse quiconque se présente

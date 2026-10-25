@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pour Samsung : ce widget va sur l'écran externe (« sub_screen »). -->
+<samsung-appwidget-provider display="sub_screen" />
