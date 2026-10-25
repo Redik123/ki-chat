@@ -626,6 +626,9 @@
   // ---------- la vue : salons, membres, vocal ----------
   listen("vue", (e) => {
     vue = e.payload;
+    // Même pendant une reconnexion, où le reste ne se redessine pas : l'écran
+    // externe dit alors qu'on attend le serveur.
+    suivreEcranExterne();
     if (!vue.connecte && !enConnexion && vue.moi == null) return;
     $("nom-serveur").textContent = vue.serveur || "ki-chat";
     const total = $("total-non-lus");
@@ -784,7 +787,49 @@
       serviceEtat = cle;
       android.service(mode, texte);
     }
+    suivreEcranExterne();
   }
+
+  // Le widget de l'écran externe des Galaxy Z Flip et la notification du
+  // vocal (EcranExterne.kt) : le vocal, qui y est et qui parle, le micro, les
+  // non-lus. Envoyé seulement quand ça change ; Android en limite de toute
+  // façon la cadence.
+  let ecranExterneEtat = null;
+  function suivreEcranExterne() {
+    if (typeof android?.ecranExterne !== "function") return;
+    const idVocal = vue ? vue.vocal ?? vue.vocal_voulu : null;
+    const s = idVocal != null ? vue.salons.find((x) => x.id === idVocal) : null;
+    const etat = !vue || !sessionOuverte ? { session: false } : {
+      session: true,
+      connecte: vue.connecte,
+      serveur: vue.serveur || nomServeur,
+      vocal: idVocal != null,
+      salon: s ? s.nom : nomVocal,
+      muet: !!(vue.muet || vue.sourd),
+      occupants: (s?.occupants || []).map((p) => ({
+        nom: p.nom, couleur: p.couleur, parle: p.parle, muet: p.muet, moi: p.id === vue.moi,
+      })),
+      non_lus: vue.total_non_lus || 0,
+    };
+    const json = JSON.stringify(etat);
+    if (json !== ecranExterneEtat) {
+      ecranExterneEtat = json;
+      android.ecranExterne(json);
+    }
+  }
+  // Leurs boutons, passés par le Kotlin : les mêmes gestes que la barre
+  // vocale. Rouvrir le micro en sourdine en sort aussi, comme sur PC : sinon
+  // le bouton n'aurait rien rouvert.
+  window.kiAction = (action) => {
+    if (!vue) return;
+    if (action === "micro") {
+      if (vue.sourd) invoke("sourdine", { sourd: false });
+      else invoke("micro", { muet: !vue.muet });
+    } else if (action === "quitter") {
+      invoke("quitter_vocal");
+      fermerFeuille();
+    }
+  };
   function dessinerBarreVocale() {
     const s = vue.vocal != null ? vue.salons.find((x) => x.id === vue.vocal) : null;
     suivreService();
@@ -1673,6 +1718,7 @@
     $("logo-serveur").classList.add("cache");
     sessionOuverte = false;
     if (android && serviceEtat) { android.service("", ""); serviceEtat = null; }
+    suivreEcranExterne();
   });
   listen("info", (e) => bandeau(e.payload));
   listen("erreur", (e) => bandeau(e.payload, true));

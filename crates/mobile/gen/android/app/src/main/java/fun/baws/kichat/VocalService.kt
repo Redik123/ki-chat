@@ -1,5 +1,6 @@
 package `fun`.baws.kichat
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,13 +8,16 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 
 /**
  * Garde ki-chat en vie quand l'appli passe en arrière-plan.
@@ -45,6 +49,9 @@ class VocalService : Service() {
       !vocal && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
       else -> 0
     }
+    enCours = true
+    dernierVocal = vocal
+    dernierTexte = texte
     ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(this, vocal, texte), type)
     if (veille == null) {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -73,6 +80,7 @@ class VocalService : Service() {
   }
 
   override fun onDestroy() {
+    enCours = false
     veille?.release()
     veille = null
     wifi?.release()
@@ -80,8 +88,12 @@ class VocalService : Service() {
     super.onDestroy()
   }
 
-  /** L'appli balayée hors des récentes : le processus part, le service avec. */
+  /**
+   * L'appli balayée hors des récentes : le processus part, le service avec,
+   * et le widget de l'écran externe ne doit plus montrer le vocal.
+   */
   override fun onTaskRemoved(rootIntent: Intent?) {
+    EcranExterne.pagePartie(this)
     stopSelf()
   }
 
@@ -117,15 +129,62 @@ class VocalService : Service() {
       )
     }
 
-    private fun notification(context: Context, vocal: Boolean, texte: String): Notification =
-      NotificationCompat.Builder(context, CANAL_VOCAL)
+    // Ce que montre la notification en ce moment, pour la redessiner quand
+    // l'état de la page change (fil principal seulement).
+    private var enCours = false
+    private var dernierVocal = false
+    private var dernierTexte = ""
+
+    /**
+     * L'état de la page a changé (micro, qui parle, non-lus) : la
+     * notification suit, sans repasser par `startForeground`.
+     */
+    fun rafraichir(context: Context) {
+      if (!enCours) return
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+        != PackageManager.PERMISSION_GRANTED
+      ) {
+        return
+      }
+      NotificationManagerCompat.from(context)
+        .notify(NOTIFICATION_ID, notification(context, dernierVocal, dernierTexte))
+    }
+
+    /**
+     * En vocal, avec les boutons du widget de l'écran externe : couper le
+     * micro, quitter, ouvrir. Elle s'affiche aussi sur l'écran externe.
+     */
+    private fun notification(context: Context, vocal: Boolean, texte: String): Notification {
+      val e = EcranExterne.etat
+      val b = NotificationCompat.Builder(context, CANAL_VOCAL)
         .setSmallIcon(R.mipmap.ic_launcher)
-        .setContentTitle(if (vocal) "En vocal" else "Connecté")
-        .setContentText(texte)
         .setOngoing(true)
         .setSilent(true)
+        .setShowWhen(false)
         .setCategory(if (vocal) NotificationCompat.CATEGORY_CALL else NotificationCompat.CATEGORY_SERVICE)
         .setContentIntent(retourAppli(context))
-        .build()
+      when {
+        vocal && e != null && e.vocal -> {
+          b.setContentTitle(e.salon.ifEmpty { "En vocal" } + if (e.muet) " · micro coupé" else "")
+            .setContentText(e.quiParle() ?: e.presents())
+            .setSubText(e.serveur.ifEmpty { null })
+            .addAction(
+              if (e.muet) R.drawable.ic_micro_coupe else R.drawable.ic_micro,
+              if (e.muet) "Rouvrir le micro" else "Couper le micro",
+              EcranExterne.actionDiffusee(context, EcranExterne.ACTION_MICRO)
+            )
+            .addAction(
+              R.drawable.ic_raccrocher, "Quitter le vocal",
+              EcranExterne.actionDiffusee(context, EcranExterne.ACTION_QUITTER)
+            )
+            .addAction(R.drawable.ic_ouvrir, "Ouvrir ki-chat", retourAppli(context))
+        }
+        vocal -> b.setContentTitle("En vocal").setContentText(texte)
+        else -> b.setContentTitle("Connecté")
+          .setContentText(listOfNotNull(texte.ifEmpty { null }, e?.takeIf { it.nonLus > 0 }?.texteNonLus()).joinToString(" · "))
+      }
+      return b.build()
+    }
   }
 }
