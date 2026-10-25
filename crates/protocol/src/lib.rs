@@ -121,6 +121,18 @@ pub mod perm {
     pub fn has(held: u64, need: u64) -> bool {
         held & ADMINISTRATOR != 0 || held & need == need
     }
+
+    /// Vrai si un rang `actor` peut agir sur un rang `target` : le déplacer,
+    /// lui couper le micro, l'expulser, le bannir, toucher à ses rôles — ou
+    /// toucher à un rôle de ce rang.
+    ///
+    /// **Strictement** au-dessus : à rang égal, personne n'agit sur l'autre.
+    /// La règle vit ici et nulle part ailleurs, pour que le serveur qui la
+    /// fait respecter et les interfaces qui masquent ce qu'il refuserait ne
+    /// puissent pas diverger.
+    pub fn outranks(actor: u16, target: u16) -> bool {
+        target < actor
+    }
 }
 
 /// Rôles créés au premier démarrage, jamais supprimables.
@@ -2024,6 +2036,30 @@ pub struct RoleInfo {
     /// Rôle du serveur : ni supprimable, ni renommable.
     #[serde(default)]
     pub system: bool,
+}
+
+/// Le rôle qui occupe déjà le rang `rank`, hormis `except` — celui qu'on
+/// est en train de modifier.
+///
+/// Deux rôles ne partagent pas un rang. À rang égal, aucun de leurs membres
+/// ne peut agir sur l'autre, alors que la liste des rôles, triée à égalité
+/// par ancienneté, montre quand même l'un au-dessus de l'autre : c'est ainsi
+/// que des administrateurs se retrouvaient sans pouvoir sur un collègue
+/// qu'ils voyaient en dessous d'eux. Le rang 0 fait exception : c'est le
+/// plancher d'`@everyone`, celui des rôles qui ne donnent d'autorité sur
+/// personne — une couleur, un tri.
+pub fn rank_holder(roles: &[RoleInfo], rank: u16, except: Option<RoleId>) -> Option<&RoleInfo> {
+    if rank == 0 {
+        return None;
+    }
+    roles.iter().find(|r| r.rank == rank && Some(r.id) != except)
+}
+
+/// Le rang libre le plus haut, à `ceiling` ou en dessous, sans descendre au
+/// plancher : celui que propose la création d'un rôle. Prendre d'office
+/// `ceiling` donnait le même rang à tous les rôles qu'un même auteur créait.
+pub fn free_rank_below(roles: &[RoleInfo], ceiling: u16) -> Option<u16> {
+    (1..=ceiling).rev().find(|r| rank_holder(roles, *r, None).is_none())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5960,6 +5996,55 @@ mod tests {
         // Exiger deux permissions demande bien de les avoir toutes les deux.
         assert!(!perm::has(perm::KICK, perm::KICK | perm::BAN));
         assert!(perm::has(perm::KICK | perm::BAN, perm::KICK | perm::BAN));
+    }
+
+    /// La hiérarchie : propriétaire > admin haut > admin bas > membre. Chacun
+    /// agit sur tout ce qui est en dessous de lui — un autre administrateur
+    /// compris —, jamais sur son égal ni sur plus haut.
+    #[test]
+    fn on_agit_sur_tout_ce_qui_est_strictement_en_dessous() {
+        let (proprietaire, admin_haut, admin_bas, membre) = (u16::MAX, 200, 100, 0);
+        let echelle = [proprietaire, admin_haut, admin_bas, membre];
+        for (i, &acteur) in echelle.iter().enumerate() {
+            for (j, &cible) in echelle.iter().enumerate() {
+                assert_eq!(
+                    perm::outranks(acteur, cible),
+                    i < j,
+                    "rang {acteur} sur rang {cible}"
+                );
+            }
+        }
+        // Le membre sans rôle, au plancher, n'agit sur personne.
+        assert!(!perm::outranks(0, 0));
+    }
+
+    /// Deux rôles ne partagent pas un rang, sauf au plancher ; et le rang
+    /// proposé à la création est le plus haut encore libre sous son auteur.
+    #[test]
+    fn un_rang_ne_se_partage_pas_et_le_premier_libre_se_trouve() {
+        let role = |id: RoleId, rank: u16| RoleInfo {
+            id,
+            name: format!("r{id}"),
+            color: None,
+            rank,
+            perms: 0,
+            system: false,
+        };
+        let roles = [role(1, 0), role(2, u16::MAX), role(3, 100), role(4, 65_534), role(5, 0)];
+        assert_eq!(rank_holder(&roles, 100, None).map(|r| r.id), Some(3));
+        // Le rôle qu'on modifie ne se gêne pas lui-même.
+        assert_eq!(rank_holder(&roles, 100, Some(3)), None);
+        assert_eq!(rank_holder(&roles, 101, None), None);
+        // Le plancher se partage : on y met les rôles de couleur.
+        assert_eq!(rank_holder(&roles, 0, None), None);
+
+        // Sous le propriétaire, 65534 est pris : le suivant descend d'un cran.
+        assert_eq!(free_rank_below(&roles, u16::MAX - 1), Some(65_533));
+        assert_eq!(free_rank_below(&roles, 100), Some(99));
+        assert_eq!(free_rank_below(&roles, 250), Some(250));
+        // Rien sous le rang 1 : le plancher n'est pas un rang libre.
+        assert_eq!(free_rank_below(&[role(3, 1)], 1), None);
+        assert_eq!(free_rank_below(&roles, 0), None);
     }
 
     /// Aucun bit ne doit être attribué deux fois : une collision donnerait
