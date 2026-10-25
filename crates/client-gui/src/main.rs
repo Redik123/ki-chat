@@ -5367,8 +5367,7 @@ impl KiApp {
                     // prendre. On le dit en clair et l'on propose la sortie,
                     // au lieu de laisser une erreur de bibliothèque et un
                     // carnet qu'aucun écran ne permet de corriger.
-                    let changed = e.contains("ApplicationVerificationFailure")
-                        || e.contains("invalid peer certificate");
+                    let changed = net::identite_changee(&e);
                     if changed {
                         self.identity_alarm = Some(self.url.trim().to_string());
                         self.disconnect(Some(

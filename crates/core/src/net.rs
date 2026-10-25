@@ -61,6 +61,34 @@ pub enum Event {
     Fingerprint(String),
 }
 
+/// L'échec d'une connexion vient-il d'un certificat qui n'est plus celui
+/// retenu ? Le serveur a été réinstallé, ou quelqu'un s'interpose : c'est le
+/// seul échec où l'utilisateur a une décision à prendre, et se reconnecter
+/// tout seul n'y changerait rien.
+pub fn identite_changee(erreur: &str) -> bool {
+    erreur.contains("ApplicationVerificationFailure") || erreur.contains("invalid peer certificate")
+}
+
+/// Le serveur refuse ces identifiants : un mot de passe retenu ne vaut plus
+/// rien. Les textes sont ceux de `Accounts::authenticate` côté serveur, et
+/// de [`motif_de_conge`] pour une réinitialisation.
+///
+/// Un serveur occupé, un limiteur d'essais, une expulsion ou un
+/// bannissement ne disent rien du mot de passe : l'oublier pour si peu
+/// obligeait à le retaper.
+pub fn refus_d_identifiants(raison: &str) -> bool {
+    raison.starts_with("mot de passe incorrect")
+        || raison.starts_with("compte inconnu")
+        || raison.starts_with("ton mot de passe a été réinitialisé")
+}
+
+/// Un refus d'accueil qui passera tout seul : le serveur est occupé, ou trop
+/// de connexions arrivent de la même adresse. Une connexion automatique peut
+/// réessayer un peu plus tard.
+pub fn refus_passager(raison: &str) -> bool {
+    raison.starts_with("serveur occupé") || raison.starts_with("trop de connexions en cours")
+}
+
 pub enum Cmd {
     Send(ClientMsg),
     Quit,
@@ -871,5 +899,54 @@ fn motif_de_conge(code: u64, motif: &str) -> Option<String> {
         Some("ton mot de passe a été réinitialisé par un modérateur — reconnecte-toi avec le nouveau".into())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Seul un refus du mot de passe le fait oublier : les textes du serveur,
+    /// tels qu'ils arrivent (`Accounts::authenticate`, `Refus::message`).
+    #[test]
+    fn seul_un_refus_du_mot_de_passe_le_fait_oublier() {
+        assert!(refus_d_identifiants("mot de passe incorrect"));
+        assert!(refus_d_identifiants("compte inconnu"));
+        assert!(refus_d_identifiants("compte inconnu — code d'invitation requis pour en créer un"));
+        let reinitialise =
+            motif_de_conge(u64::from(ki_protocol::FERMETURE_MOT_DE_PASSE), "").unwrap();
+        assert!(refus_d_identifiants(&reinitialise));
+
+        for passe in [
+            "serveur occupé — réessaie dans un instant",
+            "trop de tentatives — réessaie dans 30 s",
+            "trop de connexions en cours depuis ton adresse — réessaie dans un instant",
+            "compte bloqué par un admin",
+            "expulsé — tu pourras revenir dans 5 min",
+            "délai de connexion dépassé",
+        ] {
+            assert!(!refus_d_identifiants(passe), "{passe}");
+        }
+        let expulse = motif_de_conge(u64::from(ki_protocol::FERMETURE_EXPULSE), "spam").unwrap();
+        assert!(!refus_d_identifiants(&expulse));
+    }
+
+    #[test]
+    fn un_serveur_occupe_se_reessaie_un_refus_non() {
+        assert!(refus_passager("serveur occupé — réessaie dans un instant"));
+        assert!(refus_passager(
+            "trop de connexions en cours depuis ton adresse — réessaie dans un instant"
+        ));
+        // Le limiteur d'essais : réessayer tout seul prolongerait l'attente.
+        assert!(!refus_passager("trop de tentatives — réessaie dans 30 s"));
+        assert!(!refus_passager("mot de passe incorrect"));
+    }
+
+    #[test]
+    fn un_certificat_change_se_reconnait() {
+        assert!(identite_changee(
+            "connexion : invalid peer certificate: ApplicationVerificationFailure"
+        ));
+        assert!(!identite_changee("délai de connexion dépassé"));
     }
 }
