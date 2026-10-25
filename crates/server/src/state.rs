@@ -869,6 +869,25 @@ impl AppState {
         crate::channels::can_view(&info, &self.effective_roles(user_id), manages)
     }
 
+    /// Cette personne porte-t-elle le rôle de propriétaire ? Pas une
+    /// permission : un administrateur a toutes les permissions sans être le
+    /// propriétaire, et ce qui n'est permis qu'à lui ne se délègue pas.
+    pub fn est_proprietaire(&self, user_id: UserId) -> bool {
+        let users = self.users.lock().unwrap();
+        users
+            .get(&user_id)
+            .is_some_and(|u| u.roles.contains(&ki_protocol::ROLE_OWNER))
+    }
+
+    /// Ce salon vocal est-il fermé par un mot de passe en ce moment ?
+    pub fn voice_locked(&self, channel: ChannelId) -> bool {
+        self.voice_locks
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .is_some_and(|l| l.expires_at > std::time::Instant::now())
+    }
+
     /// Cette personne détient-elle cette permission ?
     pub fn holds(&self, user_id: UserId, need: ki_protocol::Perms) -> bool {
         let users = self.users.lock().unwrap();
@@ -1010,6 +1029,9 @@ impl AppState {
         // les en sort, comme les membres.
         crate::porte::verifier_vocaux(self);
         self.push_channels();
+        // Qui voit le salon du bot a pu changer : l'état de la musique se
+        // repousse à chacun tel qu'il le voit désormais.
+        crate::musique::diffuser_etat(self);
         self.broadcast_all(&ServerMsg::Members {
             members: self.roster(),
         });
@@ -1024,9 +1046,11 @@ impl AppState {
         channel: ChannelId,
         password: Option<&str>,
     ) -> Result<(), bool> {
-        // Qui gère les salons entre toujours : c'est lui qui pose le verrou,
-        // et il doit pouvoir vérifier ce qu'il vient de faire.
-        if self.manages_channels(user_id) {
+        // Seul le propriétaire entre sans le mot de passe. Un verrou se pose
+        // pour qu'on ne soit qu'entre ceux qui ont le code : les admins et
+        // ceux qui gèrent les salons y compris — celui qui le pose le
+        // connaît, son client le retient.
+        if self.est_proprietaire(user_id) {
             return Ok(());
         }
         let mut locks = self.voice_locks.lock().unwrap();

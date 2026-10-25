@@ -11,6 +11,7 @@
 //! serveur de 1,2 Go, et un lecteur (ou un téléphone) peut reprendre où il
 //! en était.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -26,6 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use ki_protocol::{FichierPartage, ServerMsg, UserId};
 
+use crate::history::Partage;
 use crate::state::AppState;
 
 /// Taille max d'un fichier : 25 Mo (aligné sur la limite du routeur).
@@ -500,16 +502,43 @@ fn principal(dir: &FsPath) -> Option<String> {
         .map(|(_, nom)| nom)
 }
 
+/// Ce que `voit` laisse voir des fichiers partagés : les partages dans les
+/// salons visibles, et les fichiers à taire tout à fait — ceux qui ne sont
+/// partagés que dans des salons cachés.
+///
+/// Sans ce tri, l'onglet Fichiers d'un modérateur montrait le nom, l'auteur,
+/// le salon et le lien des captures postées dans un salon privé qu'il ne
+/// voit pas — et le lien suffit à les ouvrir.
+fn partages_visibles(
+    state: &AppState,
+    voit: &dyn Fn(ki_protocol::ChannelId) -> bool,
+) -> (Vec<ki_protocol::ChannelInfo>, HashMap<String, Vec<Partage>>, HashSet<String>) {
+    let (salons, caches): (Vec<_>, Vec<_>) = state.channels.list().into_iter().partition(|c| voit(c.id));
+    let ids: Vec<ki_protocol::ChannelId> = salons.iter().map(|c| c.id).collect();
+    let partages = state.history.partages_de_fichiers(&state.data_dir, &ids);
+    let ids_caches: Vec<ki_protocol::ChannelId> = caches.iter().map(|c| c.id).collect();
+    let a_taire = if ids_caches.is_empty() {
+        HashSet::new()
+    } else {
+        state
+            .history
+            .partages_de_fichiers(&state.data_dir, &ids_caches)
+            .into_keys()
+            .filter(|id| !partages.contains_key(id))
+            .collect()
+    };
+    (salons, partages, a_taire)
+}
+
 /// Les fichiers du stock pour l'administration, du plus récent au plus
 /// ancien : ce qu'ils pèsent, qui les a envoyés, où ils sont partagés. La
 /// liste tient dans une ligne de protocole — les plus récents d'abord,
-/// `tronque` sinon. Pour le pool bloquant.
-pub fn liste_admin(state: &AppState) -> ServerMsg {
+/// `tronque` sinon. `voit` dit quels salons le demandeur voit : ce qui n'est
+/// partagé qu'ailleurs n'y figure pas. Pour le pool bloquant.
+pub fn liste_admin(state: &AppState, voit: &dyn Fn(ki_protocol::ChannelId) -> bool) -> ServerMsg {
     let racine = files_dir(state);
     let envois = lire_envois(&state.data_dir);
-    let salons = state.channels.list();
-    let ids: Vec<ki_protocol::ChannelId> = salons.iter().map(|c| c.id).collect();
-    let partages = state.history.partages_de_fichiers(&state.data_dir, &ids);
+    let (salons, partages, a_taire) = partages_visibles(state, voit);
     let nom_salon = |id: ki_protocol::ChannelId| {
         salons.iter().find(|c| c.id == id).map_or_else(|| format!("salon {id}"), |c| c.name.clone())
     };
@@ -520,7 +549,7 @@ pub fn liste_admin(state: &AppState) -> ServerMsg {
     let mut tronque = false;
     for s in &stock {
         let Some(id) = s.dir.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
-        if !ki_protocol::id_de_fichier_valide(&id) {
+        if !ki_protocol::id_de_fichier_valide(&id) || a_taire.contains(&id) {
             continue;
         }
         if fichiers.len() >= ki_protocol::FICHIERS_LISTE_MAX {
@@ -591,17 +620,19 @@ pub struct BilanSuppression {
 /// Supprime des fichiers du stock — des identifiants valides seulement, rien
 /// d'autre n'y désigne un dossier — et, `avec_messages`, les messages du chat
 /// qui les partagent, annoncés à leur salon comme une suppression ordinaire.
-/// Pour le pool bloquant.
-pub fn supprimer_admin(state: &AppState, ids: &[String], avec_messages: bool) -> BilanSuppression {
-    let partages = if avec_messages {
-        let salons: Vec<ki_protocol::ChannelId> = state.channels.list().iter().map(|c| c.id).collect();
-        state.history.partages_de_fichiers(&state.data_dir, &salons)
-    } else {
-        Default::default()
-    };
+/// Comme la liste, la suppression s'arrête à ce que `voit` laisse voir : un
+/// fichier partagé seulement dans un salon caché n'est pas touché, et les
+/// messages d'un salon caché restent. Pour le pool bloquant.
+pub fn supprimer_admin(
+    state: &AppState,
+    voit: &dyn Fn(ki_protocol::ChannelId) -> bool,
+    ids: &[String],
+    avec_messages: bool,
+) -> BilanSuppression {
+    let (_, partages, a_taire) = partages_visibles(state, voit);
     let racine = files_dir(state);
     let mut bilan = BilanSuppression::default();
-    for id in ids.iter().filter(|id| ki_protocol::id_de_fichier_valide(id)) {
+    for id in ids.iter().filter(|id| ki_protocol::id_de_fichier_valide(id) && !a_taire.contains(*id)) {
         let dir = racine.join(id);
         if dir.is_dir() {
             let octets: u64 = std::fs::read_dir(&dir)
@@ -614,6 +645,9 @@ pub fn supprimer_admin(state: &AppState, ids: &[String], avec_messages: bool) ->
                 }
                 Err(e) => tracing::error!("suppression de {} impossible : {e}", dir.display()),
             }
+        }
+        if !avec_messages {
+            continue;
         }
         for p in partages.get(id).map(Vec::as_slice).unwrap_or_default() {
             // Un message qui partageait deux fichiers n'est retiré qu'une fois.
@@ -841,7 +875,8 @@ mod tests {
         state.history.append(salon.id, &dit(7, "kevin", 10, format!("https://x:8080/files/{video}/clip.mp4")));
         state.history.append(salon.id, &dit(8, "lea", 11, format!("/files/{image}/photo.png")));
 
-        let ServerMsg::AdminFichiers { fichiers, total_octets, tronque, .. } = liste_admin(&state) else {
+        let tout = |_| true;
+        let ServerMsg::AdminFichiers { fichiers, total_octets, tronque, .. } = liste_admin(&state, &tout) else {
             panic!("pas une liste de fichiers");
         };
         assert_eq!((total_octets, tronque, fichiers.len()), (3500, false, 2));
@@ -853,14 +888,75 @@ mod tests {
         assert_eq!(i.salons, vec![salon.name.clone()]);
 
         // La vidéo et son message partent ; l'identifiant piégé, rien.
-        let bilan = supprimer_admin(&state, &[video.to_string(), "../../etc/passwd".into()], true);
+        let bilan = supprimer_admin(&state, &tout, &[video.to_string(), "../../etc/passwd".into()], true);
         assert_eq!(bilan, BilanSuppression { fichiers: 1, octets: 3000, messages: 1 });
         assert!(!racine.join(video).exists());
         assert!(racine.join(image).exists());
         assert!(state.history.recent(salon.id, 10).iter().all(|r| r.ts != 10), "le message est retiré");
         // Sans les messages : le fichier part, le message reste.
-        let bilan = supprimer_admin(&state, &[image.to_string()], false);
+        let bilan = supprimer_admin(&state, &tout, &[image.to_string()], false);
         assert_eq!((bilan.fichiers, bilan.messages), (1, 0));
         assert!(state.history.recent(salon.id, 10).iter().any(|r| r.ts == 11));
+    }
+
+    /// Un salon privé ne fuit pas par l'onglet Fichiers : qui ne le voit pas
+    /// n'y lit ni le nom, ni l'auteur, ni le lien de ce qui n'a été posté que
+    /// là, et ne peut pas le supprimer ; ce qui est aussi partagé dans un
+    /// salon visible reste listé, sans le nom du salon caché.
+    #[tokio::test]
+    async fn les_fichiers_d_un_salon_cache_ne_se_listent_pas() {
+        let dir = std::env::temp_dir().join(format!("ki-fichiers-caches-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let quota = Quota { max_bytes: 0, ttl_days: 0 };
+        let state = AppState::new("changeme".into(), dir.to_str().unwrap(), quota, quota, 512).unwrap();
+        let public = state
+            .channels
+            .list()
+            .into_iter()
+            .find(|c| c.kind == ki_protocol::ChannelKind::Text)
+            .expect("un salon textuel par défaut");
+        let prive = state
+            .channels
+            .create_with("staff", ki_protocol::ChannelKind::Text, Some(vec![99]), None)
+            .unwrap();
+        state.history.open_channel(&state.data_dir, prive.id).unwrap();
+        let (secret, double) = ("1111111111111111", "2222222222222222");
+        let racine = dir.join("files");
+        for id in [secret, double] {
+            std::fs::create_dir_all(racine.join(id)).unwrap();
+            std::fs::write(racine.join(id).join("capture.png"), vec![0u8; 100]).unwrap();
+        }
+        let dit = |ts, text: String| ki_protocol::ChatRecord {
+            user_id: 7,
+            username: "kevin".into(),
+            text,
+            ts,
+            ..Default::default()
+        };
+        state.history.append(prive.id, &dit(10, format!("/files/{secret}/capture.png")));
+        state.history.append(prive.id, &dit(11, format!("/files/{double}/capture.png")));
+        state.history.append(public.id, &dit(12, format!("/files/{double}/capture.png")));
+
+        let sans_le_prive = |c| c != prive.id;
+        let ServerMsg::AdminFichiers { fichiers, .. } = liste_admin(&state, &sans_le_prive) else {
+            panic!("pas une liste de fichiers");
+        };
+        assert_eq!(fichiers.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec![double]);
+        assert_eq!(fichiers[0].salons, vec![public.name.clone()], "le salon caché n'est pas nommé");
+        assert_eq!(fichiers[0].messages, 1);
+        // Qui voit tout les a tous les deux.
+        let ServerMsg::AdminFichiers { fichiers, .. } = liste_admin(&state, &|_| true) else {
+            panic!("pas une liste de fichiers");
+        };
+        assert_eq!(fichiers.len(), 2);
+
+        // La suppression s'arrête au même endroit : le fichier caché reste,
+        // et du fichier double, seul le message visible part.
+        let bilan = supprimer_admin(&state, &sans_le_prive, &[secret.to_string(), double.to_string()], true);
+        assert_eq!((bilan.fichiers, bilan.messages), (1, 1));
+        assert!(racine.join(secret).exists());
+        assert!(!racine.join(double).exists());
+        assert!(state.history.recent(prive.id, 10).iter().any(|r| r.ts == 11));
     }
 }
