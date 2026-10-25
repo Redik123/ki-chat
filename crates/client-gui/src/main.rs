@@ -2065,6 +2065,8 @@ impl KiApp {
             vad_hangover_ms: self.vad_hangover_ms,
             vad_neural: self.vad_neural,
             vad_sensitivity: self.vad_sens,
+            // Le PC garde Silero seul juge, comme jusqu'ici.
+            vad_garde: false,
             bitrate: self.effective_bitrate(),
             agc: self.agc,
             aec: self.aec_on,
@@ -5382,8 +5384,7 @@ impl KiApp {
                     // prendre. On le dit en clair et l'on propose la sortie,
                     // au lieu de laisser une erreur de bibliothèque et un
                     // carnet qu'aucun écran ne permet de corriger.
-                    let changed = e.contains("ApplicationVerificationFailure")
-                        || e.contains("invalid peer certificate");
+                    let changed = net::identite_changee(&e);
                     if changed {
                         self.identity_alarm = Some(self.url.trim().to_string());
                         self.disconnect(Some(

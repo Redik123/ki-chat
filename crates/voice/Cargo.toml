@@ -69,6 +69,14 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_PropertiesSystem",
 ] }
 
+# Le micro sur Android, ouvert par AAudio en mode « communication » (voir
+# android.rs) : cpal n'en donne pas le réglage. ndk-sys pour l'AAudio de
+# l'API 26, libc pour aller chercher à l'exécution ce qui n'existe qu'à
+# partir de l'API 28.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
+libc = "0.2"
+
 [dev-dependencies]
 prost = "0.11"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

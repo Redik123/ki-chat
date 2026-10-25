@@ -27,8 +27,13 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.ki_mobile"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!-- « density » : l'écran externe d'un Flip n'a pas la densité de
+             l'écran intérieur. Sans elle, passer de l'un à l'autre recréerait
+             l'activité, et la page rechargée rouvrirait une session neuve,
+             hors du vocal. Avec elle, l'activité suit (voir
+             MainActivity.onConfigurationChanged). -->
         <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
@@ -51,6 +56,25 @@
             android:resource="@xml/file_paths" />
         </provider>
         <receiver android:name=".InstallRecepteur" android:exported="false" />
+        <!-- Le widget de l'écran externe des Galaxy Z Flip (Flex Window) : la
+             recette de Samsung, deux meta-data dont la seconde l'envoie sur
+             l'écran externe (voir EcranExterne.kt). -->
+        <receiver
+          android:name=".EcranExterneWidget"
+          android:exported="false"
+          android:label="@string/widget_nom">
+          <intent-filter>
+            <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+          </intent-filter>
+          <meta-data
+            android:name="android.appwidget.provider"
+            android:resource="@xml/widget_ecran_externe" />
+          <meta-data
+            android:name="com.samsung.android.appwidget.provider"
+            android:resource="@xml/widget_ecran_externe_samsung" />
+        </receiver>
+        <!-- Ses boutons, et ceux de la notification du vocal. -->
+        <receiver android:name=".ActionVocalRecepteur" android:exported="false" />
         <service
           android:name=".VocalService"
           android:exported="false"

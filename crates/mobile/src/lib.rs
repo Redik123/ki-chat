@@ -60,6 +60,9 @@ struct Reglages {
     gain_auto: bool,
     gain_micro: f32,
     volume: f32,
+    /// « Ne garder que ma voix » (la voix d'à côté du PC) :
+    /// `ki_voice::proximite::PROXIMITE_*`, 0 = éteint.
+    proximite: u8,
 }
 
 impl Default for Reglages {
@@ -75,6 +78,7 @@ impl Default for Reglages {
             gain_auto: true,
             gain_micro: 1.0,
             volume: 1.0,
+            proximite: ki_voice::proximite::PROXIMITE_OFF,
         }
     }
 }
@@ -90,17 +94,29 @@ impl Reglages {
         }
     }
 
+    /// La voix d'à côté : elle apprend le niveau de sa voix (pas d'ancre
+    /// mesurée sur le téléphone), et baisse ou coupe celles qui arrivent
+    /// nettement plus bas.
+    fn reglages_proximite(&self) -> ki_voice::proximite::ReglagesProximite {
+        ki_voice::proximite::ReglagesProximite::de_force(self.proximite, None)
+    }
+
     fn prefs(&self) -> VoicePrefs {
         let mut p = VoicePrefs::par_defaut();
         p.vad_threshold = self.seuil_effectif();
         p.vad_neural = self.neuronal;
         p.vad_sensitivity = self.sensibilite;
+        // Le seuil de volume garde Silero : au haut-parleur d'un téléphone,
+        // le gain automatique remontait le moindre bruit, et le reste de
+        // l'écho, au niveau d'une voix — et Silero ouvrait le micro.
+        p.vad_garde = true;
         p.vad_hangover_ms = 400;
         p.noise_mode = self.bruit;
         p.aec = self.echo;
         p.agc = self.gain_auto;
         p.input_gain = self.gain_micro;
         p.output_gain = self.volume;
+        p.proximite = self.reglages_proximite();
         // Le micro ne s'ouvre qu'en vocal (voir `horloge`).
         p.moteur_a_la_demande = true;
         p
@@ -137,8 +153,19 @@ struct Appli {
     /// Le moteur voix survit aux reconnexions (voir `VoiceLink`).
     lien: VoiceLink,
     identifiants: Option<Identifiants>,
-    /// Le salon vocal où l'on veut être : retrouvé après une coupure.
+    /// La session a été ouverte toute seule, avec le mot de passe retenu :
+    /// un serveur injoignable ou occupé se réessaie au lieu de renvoyer à
+    /// l'écran de connexion.
+    auto: bool,
+    /// Le salon vocal où l'on veut être : retrouvé après une coupure. Il suit
+    /// ce que dit le serveur (déplacé par un modérateur, sorti, voix passée
+    /// sur le PC), et c'est lui que suit le service au premier plan : pendant
+    /// une coupure, `etat.vocal` est vide, mais l'on est toujours en vocal.
     vocal_voulu: Option<ChannelId>,
+    /// Quand on a demandé ce vocal au serveur, et si c'était une reprise
+    /// après une coupure : sans réponse au bout de quelques secondes, on y
+    /// renonce plutôt que de garder le micro et le service pour rien.
+    vocal_demande: Option<(std::time::Instant, bool)>,
     muet: bool,
     sourd: bool,
     /// Ce qu'on a annoncé de sa parole, pour n'envoyer que les changements.
@@ -167,11 +194,26 @@ struct Appli {
 
 type Partage = Arc<Mutex<Appli>>;
 
+/// Ce que la page dit quand un geste part sans connexion.
+const HORS_LIGNE: &str = "pas connecté pour l'instant — réessaie une fois la connexion revenue";
+
 impl Appli {
     fn envoyer(&self, msg: ClientMsg) {
         if let Some(n) = &self.net {
             n.send(msg);
         }
+    }
+
+    /// Un geste de l'utilisateur (écrire, réagir, modifier, supprimer) : sans
+    /// connexion accueillie, il se perdait sans un mot — la page vidait la
+    /// saisie d'un message qui n'était jamais parti. On le refuse, et la page
+    /// le garde.
+    fn envoyer_geste(&self, msg: ClientMsg) -> Result<(), String> {
+        if self.net.is_none() || !self.etat.accueilli {
+            return Err(HORS_LIGNE.into());
+        }
+        self.envoyer(msg);
+        Ok(())
     }
 
     fn etat_vierge(courant: Option<ChannelId>) -> Etat {
@@ -276,6 +318,10 @@ struct Vue {
     salons: Vec<VueSalon>,
     courant: Option<ChannelId>,
     vocal: Option<ChannelId>,
+    /// Le vocal où l'on veut être, y compris pendant une coupure : le service
+    /// au premier plan le suit, sans quoi il perdait son micro à chaque
+    /// reconnexion.
+    vocal_voulu: Option<ChannelId>,
     muet: bool,
     sourd: bool,
     membres: Vec<VueMembre>,
@@ -421,6 +467,7 @@ fn vue(a: &Appli) -> Vue {
         salons,
         courant: e.courant,
         vocal: e.vocal,
+        vocal_voulu: a.vocal_voulu,
         muet: a.muet,
         sourd: a.sourd,
         membres,
@@ -574,7 +621,16 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                         a.fil_sale = true;
                     }
                     a.vue_sale = true;
+                    let vocal_avant = a.etat.vocal;
                     let effets = a.etat.appliquer(msg);
+                    // Le vocal voulu suit le serveur : un modérateur qui nous
+                    // déplace ou nous sort, la voix qui passe sur le PC. Sans
+                    // ça, la prochaine reprise nous ramenait là d'où l'on
+                    // venait d'être sorti — et reprenait la voix au PC.
+                    if a.etat.vocal != vocal_avant {
+                        a.vocal_voulu = a.etat.vocal;
+                        a.vocal_demande = None;
+                    }
                     // Un serveur qui tient les lus connaît les pokes : on les
                     // accepte, comme le PC. Sans ça, il refusait qu'on nous
                     // poke (« client d'avant »).
@@ -602,8 +658,15 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                         }
                         // Reprise : le salon vocal d'avant la coupure.
                         if let Some(c) = a.vocal_voulu {
-                            if let Ok(m) = a.etat.rejoindre_vocal(c, None) {
-                                a.envoyer(m);
+                            match a.etat.rejoindre_vocal(c, None) {
+                                Ok(m) => {
+                                    a.vocal_demande = Some((std::time::Instant::now(), true));
+                                    a.envoyer(m);
+                                }
+                                Err(e) => {
+                                    a.vocal_voulu = None;
+                                    let _ = app.emit("erreur", e);
+                                }
                             }
                         }
                         let _ = app.emit("connecte", ());
@@ -625,23 +688,43 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                             }
                             Effet::MotDePasseVocal { salon, faux } => {
                                 a.vocal_voulu = None;
+                                a.vocal_demande = None;
                                 let _ = app.emit("mot_de_passe_vocal", (salon, faux));
                             }
+                            // Refusé à l'accueil pour un motif passager (serveur
+                            // occupé), pendant une connexion automatique : on
+                            // réessaie plutôt que de rendre l'écran de connexion.
+                            Effet::Fin(raison)
+                                if !a.etat.accueilli && a.auto && net::refus_passager(&raison) =>
+                            {
+                                let _ = app.emit("attente", raison);
+                                drop(a);
+                                reconnecter(&app, &partage, generation);
+                                return;
+                            }
                             Effet::Fin(raison) => {
-                                fin(&mut a, &app, raison);
+                                fin(&mut a, &app, Fin::de(raison));
                                 return;
                             }
                         }
                     }
                 }
                 Event::ConnectFailed(e) => {
-                    // Jamais accueilli sur cette session : un refus ou un
-                    // serveur injoignable, à dire. Déjà accueilli une fois (la
-                    // reprise d'une coupure) : on retente.
-                    if !a.deja_accueilli {
-                        fin(&mut a, &app, e);
+                    // L'identité du serveur a changé : se reconnecter n'y
+                    // changerait rien, c'est à l'utilisateur de trancher — et
+                    // une reprise martelait le serveur toutes les vingt
+                    // secondes, sans fin.
+                    //
+                    // Sinon, jamais accueilli sur une connexion tapée à la
+                    // main : une adresse fausse ou un serveur éteint, à dire.
+                    // Une connexion automatique (au lancement de l'appli, sans
+                    // réseau, ou pendant que le serveur redémarre) ou la
+                    // reprise d'une coupure : on retente. Rendre l'écran de
+                    // connexion faisait oublier le mot de passe retenu.
+                    if net::identite_changee(&e) || (!a.deja_accueilli && !a.auto) {
+                        fin(&mut a, &app, Fin::de(e));
                     } else {
-                        let _ = app.emit("coupe", e);
+                        let _ = app.emit(if a.deja_accueilli { "coupe" } else { "attente" }, e);
                         drop(a);
                         reconnecter(&app, &partage, generation);
                     }
@@ -655,7 +738,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                     return;
                 }
                 Event::Congedie(raison) => {
-                    fin(&mut a, &app, raison);
+                    fin(&mut a, &app, Fin::de(raison));
                     return;
                 }
             }
@@ -680,10 +763,41 @@ fn demander_photos(a: &mut Appli) {
     }
 }
 
+/// Pourquoi la session s'arrête, tel que la page le reçoit.
+#[derive(Clone, Default, Serialize)]
+struct Fin {
+    /// Ce qu'on montre ; vide pour une déconnexion voulue.
+    raison: String,
+    /// Le serveur refuse ces identifiants : le mot de passe retenu ne vaut
+    /// plus rien, la page l'oublie. Elle l'oubliait jusqu'ici à **tout**
+    /// échec d'une connexion automatique — un téléphone sans réseau au
+    /// lancement, un serveur qui redémarre, et il fallait le retaper.
+    oublier_mdp: bool,
+    /// Le certificat présenté n'est pas celui retenu : la page propose
+    /// d'accepter la nouvelle identité, comme le PC. Sans cette sortie,
+    /// l'appli restait refusée pour toujours.
+    identite_changee: bool,
+}
+
+impl Fin {
+    fn de(raison: String) -> Self {
+        if net::identite_changee(&raison) {
+            return Self {
+                raison: "l'identité du serveur a changé depuis la dernière connexion".into(),
+                oublier_mdp: false,
+                identite_changee: true,
+            };
+        }
+        Self { oublier_mdp: net::refus_d_identifiants(&raison), identite_changee: false, raison }
+    }
+}
+
 /// Fin de session sans reprise : refus, expulsion, déconnexion voulue.
-fn fin(a: &mut Appli, app: &AppHandle, raison: String) {
+fn fin(a: &mut Appli, app: &AppHandle, raison: Fin) {
     a.identifiants = None;
+    a.auto = false;
     a.vocal_voulu = None;
+    a.vocal_demande = None;
     a.generation += 1;
     if let Some(mut n) = a.net.take() {
         n.quitter_borne(Duration::from_millis(500));
@@ -770,6 +884,24 @@ fn horloge(app: AppHandle, partage: Partage) {
                     reconnecter(&app, &partage, generation);
                 }
             }
+            // Un vocal demandé que le serveur n'accorde pas (salon disparu,
+            // permission retirée, refus) : on y renonce au bout de quelques
+            // secondes. Sinon le micro et le service « vocal » restaient
+            // allumés pour un vocal où l'on n'est pas. Le refus d'une entrée
+            // à la main, le serveur l'a déjà dit ; une reprise ratée, on la
+            // dit.
+            if let Some((depuis, reprise)) = a.vocal_demande {
+                if a.etat.vocal.is_some() || a.vocal_voulu.is_none() {
+                    a.vocal_demande = None;
+                } else if a.etat.accueilli && depuis.elapsed() > Duration::from_secs(10) {
+                    a.vocal_demande = None;
+                    a.vocal_voulu = None;
+                    a.vue_sale = true;
+                    if reprise {
+                        let _ = app.emit("erreur", "le vocal n'a pas pu reprendre après la coupure — rejoins-le à nouveau");
+                    }
+                }
+            }
             // Le moteur (donc le micro) ne tourne qu'en vocal, ou pendant
             // l'essai des réglages : hors de là, Android n'a pas à montrer
             // son témoin de micro.
@@ -847,6 +979,9 @@ fn horloge(app: AppHandle, partage: Partage) {
 // Commandes de la page
 // ---------------------------------------------------------------------------
 
+// Les champs du formulaire de la page, un par un : c'est la forme d'une
+// commande Tauri.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn connecter(
     app: AppHandle,
@@ -856,6 +991,8 @@ fn connecter(
     mot_de_passe: String,
     invitation: Option<String>,
     empreinte: Option<String>,
+    // Lancée toute seule, avec le mot de passe retenu : voir `Appli::auto`.
+    auto: Option<bool>,
 ) {
     {
         let mut a = partage.lock().unwrap();
@@ -866,8 +1003,10 @@ fn connecter(
             invitation: invitation.map(|i| i.trim().to_string()).filter(|i| !i.is_empty()),
             empreinte: empreinte.unwrap_or_default(),
         });
+        a.auto = auto.unwrap_or(false);
         a.etat = Appli::etat_vierge(None);
         a.vocal_voulu = None;
+        a.vocal_demande = None;
         a.deja_accueilli = false;
     }
     ESSAIS.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -877,7 +1016,7 @@ fn connecter(
 #[tauri::command]
 fn deconnecter(app: AppHandle, partage: State<'_, Partage>) {
     let mut a = partage.lock().unwrap();
-    fin(&mut a, &app, String::new());
+    fin(&mut a, &app, Fin::default());
 }
 
 #[tauri::command]
@@ -926,36 +1065,43 @@ fn envoyer(
         return Ok(());
     }
     let salon = a.etat.courant.ok_or("aucun salon ouvert")?;
-    a.envoyer(ClientMsg::Chat {
+    // Sans connexion, le message reste dans la saisie : la page ne la vide
+    // qu'une fois l'envoi accepté.
+    a.envoyer_geste(ClientMsg::Chat {
         text: texte,
         reply_to: reponse.map(|(user_id, ts)| MsgRef { user_id: id_rust(user_id), ts }),
         salon: Some(salon),
-    });
-    Ok(())
+    })
 }
 
 #[tauri::command]
-fn reagir(partage: State<'_, Partage>, auteur: IdPage, ts: u64, emoji: String, on: bool) {
+fn reagir(
+    partage: State<'_, Partage>,
+    auteur: IdPage,
+    ts: u64,
+    emoji: String,
+    on: bool,
+) -> Result<(), String> {
     let a = partage.lock().unwrap();
-    a.envoyer(ClientMsg::React { message: MsgRef { user_id: id_rust(auteur), ts }, emoji, on });
+    a.envoyer_geste(ClientMsg::React { message: MsgRef { user_id: id_rust(auteur), ts }, emoji, on })
 }
 
 /// Modifier son propre message (le serveur refuse ceux des autres).
 #[tauri::command]
-fn modifier(partage: State<'_, Partage>, auteur: IdPage, ts: u64, texte: String) {
+fn modifier(partage: State<'_, Partage>, auteur: IdPage, ts: u64, texte: String) -> Result<(), String> {
     let texte = texte.trim().to_string();
     if texte.is_empty() {
-        return;
+        return Ok(());
     }
     let a = partage.lock().unwrap();
-    a.envoyer(ClientMsg::EditMessage { message: MsgRef { user_id: id_rust(auteur), ts }, text: texte });
+    a.envoyer_geste(ClientMsg::EditMessage { message: MsgRef { user_id: id_rust(auteur), ts }, text: texte })
 }
 
 /// Supprimer un message : le sien, ou celui d'un autre avec la permission.
 #[tauri::command]
-fn supprimer(partage: State<'_, Partage>, auteur: IdPage, ts: u64) {
+fn supprimer(partage: State<'_, Partage>, auteur: IdPage, ts: u64) -> Result<(), String> {
     let a = partage.lock().unwrap();
-    a.envoyer(ClientMsg::DeleteMessage { message: MsgRef { user_id: id_rust(auteur), ts } });
+    a.envoyer_geste(ClientMsg::DeleteMessage { message: MsgRef { user_id: id_rust(auteur), ts } })
 }
 
 #[tauri::command]
@@ -965,8 +1111,12 @@ fn rejoindre_vocal(
     mot_de_passe: Option<String>,
 ) -> Result<(), String> {
     let mut a = partage.lock().unwrap();
+    if a.net.is_none() || !a.etat.accueilli {
+        return Err(HORS_LIGNE.into());
+    }
     let m = a.etat.rejoindre_vocal(salon, mot_de_passe)?;
     a.vocal_voulu = Some(salon);
+    a.vocal_demande = Some((std::time::Instant::now(), false));
     a.envoyer(m);
     Ok(())
 }
@@ -975,6 +1125,7 @@ fn rejoindre_vocal(
 fn quitter_vocal(partage: State<'_, Partage>) {
     let mut a = partage.lock().unwrap();
     a.vocal_voulu = None;
+    a.vocal_demande = None;
     a.parle_annonce = false;
     let m = a.etat.quitter_vocal();
     a.envoyer(m);
@@ -1036,6 +1187,7 @@ fn regler(partage: State<'_, Partage>, reglages: Reglages) {
         m.set_agc(r.gain_auto);
         m.set_input_gain(r.gain_micro);
         m.set_output_gain(if a.sourd { 0.0 } else { r.volume });
+        m.set_proximite(r.reglages_proximite());
     }
 }
 
@@ -1092,6 +1244,11 @@ struct EtatAudio {
     actif: bool,
     /// Crête du micro, 0..1.
     niveau: f32,
+    /// La crête que jugent le seuil de volume et la garde de Silero : avant
+    /// le gain automatique. La jauge montrait `niveau`, après toute la
+    /// chaîne, si bien que la barre du seuil n'était pas face à ce qu'elle
+    /// juge, et le régler semblait ne rien faire.
+    decision: f32,
     /// Probabilité de parole selon Silero, 0..1.
     parole: f32,
     /// La décision d'émission est ouverte : on parle, pour le moteur.
@@ -1126,6 +1283,7 @@ fn etat_audio(partage: State<'_, Partage>) -> EtatAudio {
         return EtatAudio {
             actif: false,
             niveau: 0.0,
+            decision: 0.0,
             parole: 0.0,
             ouvert: false,
             emet: false,
@@ -1155,6 +1313,7 @@ fn etat_audio(partage: State<'_, Partage>) -> EtatAudio {
     EtatAudio {
         actif: true,
         niveau: st.mic_peak,
+        decision: st.niveau_decision,
         parole: st.vad_prob,
         ouvert: st.vad_ouvert,
         emet: m.is_sending(),
