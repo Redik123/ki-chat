@@ -46,6 +46,13 @@ class KiAndroid(private val activite: Activity) {
     }
   }
 
+  /**
+   * Ce que montrent le widget de l'écran externe et la notification du vocal
+   * (voir EcranExterne) : un JSON, poussé par la page à chaque changement.
+   */
+  @JavascriptInterface
+  fun ecranExterne(etat: String) = EcranExterne.recevoir(contexte, etat)
+
   @JavascriptInterface
   fun retenirSecret(nom: String, valeur: String) = Secrets.retenir(contexte, nom, valeur)
 
