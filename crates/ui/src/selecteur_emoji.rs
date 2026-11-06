@@ -340,6 +340,16 @@ fn catalogue() -> &'static Catalogue {
 /// fois ; à égalité, les courants d'abord (l'ordre de la liste
 /// française), puis l'ordre du catalogue. « feu » donne 🔥 avant 🍀
 /// (« feuilles »).
+/// Les emoji qui répondent à `requete`, en français comme en anglais, les meilleurs
+/// d'abord : l'emoji et son nom. Pour chercher sans ouvrir le sélecteur.
+pub fn rechercher(requete: &str, max: usize) -> Vec<(&'static str, String)> {
+    chercher(&plier(requete.trim()))
+        .into_iter()
+        .take(max)
+        .map(|e| (e.as_str(), nom_fr(e).unwrap_or_else(|| e.name()).to_string()))
+        .collect()
+}
+
 fn chercher(requete: &str) -> Vec<&'static Emoji> {
     if requete.is_empty() {
         return Vec::new();
@@ -421,7 +431,7 @@ fn sans_selecteur(emoji: &str) -> String {
 }
 
 /// En minuscules, sans accents : « Cœur » et « coeur » se trouvent pareil.
-fn plier(texte: &str) -> String {
+pub fn plier(texte: &str) -> String {
     let mut plie = String::with_capacity(texte.len());
     for c in texte.chars().flat_map(char::to_lowercase) {
         match c {

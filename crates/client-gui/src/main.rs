@@ -44,6 +44,7 @@ mod secret;
 mod servers;
 mod sfxgen;
 mod soundboard;
+mod suggestions;
 mod tactique;
 mod theme;
 mod ui;
@@ -855,6 +856,8 @@ struct KiApp {
     input: String,
     /// Redonner le focus à la zone de saisie au prochain rendu.
     focus_input: bool,
+    /// Le panneau des suggestions de la saisie : pseudos, commandes, emoji.
+    suggestions: suggestions::Suggestions,
     show_settings: bool,
     /// Journal audio déplié dans les réglages.
     show_audio_journal: bool,
@@ -1549,6 +1552,7 @@ impl KiApp {
             fil_au_bas: true,
             input: String::new(),
             focus_input: false,
+            suggestions: suggestions::Suggestions::default(),
             show_settings: false,
             show_audio_journal: false,
             app_ctx: cc.egui_ctx.clone(),
@@ -8843,6 +8847,12 @@ impl KiApp {
             return;
         }
         let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
+        // Avant la zone de saisie : elle prendrait ces touches pour elle.
+        if let Some(choix) = self.suggestions.clavier(ui.ctx()) {
+            self.appliquer_suggestion(ui.ctx(), &choix);
+        }
+        let mut curseur_saisie = None;
+        let mut focus_saisie = false;
         self.edition_bar(ui);
         self.reply_bar(ui);
         let mut emoji_choisi: Option<String> = None;
@@ -8892,7 +8902,7 @@ impl KiApp {
                         let sortie = ui
                             .allocate_ui_with_layout(taille, disposition, |ui| {
                                 egui::TextEdit::multiline(&mut self.input)
-                                    .id(egui::Id::unique("saisie_du_chat"))
+                                    .id(id_saisie())
                                     .char_limit(ki_protocol::MAX_CHAT_TEXT)
                                     .desired_rows(lignes)
                                     .frame(egui::Frame::new().inner_margin(marge::symetrique(espace::XS, espace::XS)))
@@ -8906,6 +8916,8 @@ impl KiApp {
                             sortie.galley_pos,
                             &sortie.galley,
                         );
+                        curseur_saisie =
+                            sortie.cursor_range.filter(|r| r.primary == r.secondary).map(|r| r.primary.index.0);
                         let response = sortie.response.response;
                         if menu_edition(&response, &mut self.input, false) {
                             self.focus_input = true;
@@ -8944,6 +8956,7 @@ impl KiApp {
                         if std::mem::take(&mut self.focus_input) {
                             response.request_focus();
                         }
+                        focus_saisie = response.has_focus();
                     });
 
                     // Les emoji, sans passer par le sélecteur de Windows.
@@ -8983,6 +8996,20 @@ impl KiApp {
             self.hauteur_saisie = cadre.response.rect.height();
         }
 
+        // Une commande ne part pas dans le salon. Refusée, elle reste dans la
+        // saisie, à corriger, et le bandeau d'erreur dit pourquoi. En édition, on
+        // réécrit un message : ce qui commence par `/` en reste un.
+        if submit && self.edition.is_none() {
+            let text = self.input.trim().to_string();
+            if let Some(ordre) = suggestions::lire_commande(&text) {
+                submit = false;
+                match self.executer_commande(ordre) {
+                    Ok(()) => self.input.clear(),
+                    Err(message) => self.error = Some(message),
+                }
+            }
+        }
+
         if submit {
             let text = self.input.trim().to_string();
             // Un message toutes les 1,5 s : le serveur tient la même
@@ -9018,6 +9045,128 @@ impl KiApp {
                 self.input.clear();
             }
         }
+
+        // Le panneau, une fois le texte et le curseur de cette image connus.
+        let mut etat = std::mem::take(&mut self.suggestions);
+        etat.actualiser(ui.ctx(), &self.input, curseur_saisie, focus_saisie, || self.sources_suggestions());
+        etat.retenir_le_focus(ui.ctx(), id_saisie());
+        let clique = etat.panneau(ui.ctx(), cadre.response.rect);
+        self.suggestions = etat;
+        if let Some(choix) = clique {
+            self.appliquer_suggestion(ui.ctx(), &choix);
+        }
+    }
+
+    /// Ce que le panneau des suggestions peut proposer : tous les membres sauf
+    /// soi et les bots, et les commandes qu'on a le droit de lancer.
+    fn sources_suggestions(&self) -> suggestions::Sources {
+        let membres = self
+            .members
+            .iter()
+            .filter(|m| Some(m.user_id) != self.my_id && !est_bot(m.user_id))
+            .map(|m| suggestions::Membre {
+                pseudo: m.username.clone(),
+                couleur: couleur_de_membre(m),
+                en_ligne: m.online,
+                detail: if !m.online {
+                    "hors ligne"
+                } else if m.voice.is_some() {
+                    "en vocal"
+                } else {
+                    "en ligne"
+                },
+            })
+            .collect();
+        let commandes = if self.edition.is_some() { Vec::new() } else { self.commandes_disponibles() };
+        suggestions::Sources { membres, commandes }
+    }
+
+    /// Les commandes qu'on peut lancer tout de suite. Le serveur revérifie les
+    /// droits : ceci sert à ne pas proposer ce qu'il refuserait.
+    fn commandes_disponibles(&self) -> Vec<suggestions::Commande> {
+        let mut commandes = Vec::new();
+        // Même condition que le bouton Poke du profil.
+        if self.serveur_gere_lus {
+            commandes.push(suggestions::POKE);
+        }
+        let musique = &self.musique;
+        let bot_la = musique.salon.is_some();
+        let pilote = bot_la && self.can(ki_protocol::perm::CONTROL_MUSIC);
+        // Les mêmes droits que la recherche du bandeau de musique.
+        if bot_la && (pilote || self.server_info.musique_membres_ajoutent) {
+            commandes.push(suggestions::MUSIQUE);
+        }
+        if pilote && musique.lecture {
+            commandes.push(suggestions::PAUSE);
+        }
+        if pilote && !musique.lecture && musique.en_cours.is_some() {
+            commandes.push(suggestions::REPRENDRE);
+        }
+        if pilote && musique.en_cours.is_some() {
+            commandes.push(suggestions::SUIVANT);
+        }
+        if self.serveur_cartes {
+            commandes.push(suggestions::CARTES);
+        }
+        commandes
+    }
+
+    /// Lance une commande de la saisie. `Err` : pourquoi elle ne part pas.
+    fn executer_commande(&mut self, ordre: suggestions::Ordre<'_>) -> Result<(), String> {
+        use ki_protocol::CommandeMusique as C;
+        use suggestions::Ordre;
+        let (commande, refus) = match ordre {
+            Ordre::Poke(_) => (suggestions::POKE, "ce serveur ne gère pas les pokes"),
+            Ordre::Musique(_) => (suggestions::MUSIQUE, "le bot de musique n'est pas là, ou tu n'as pas le droit d'ajouter"),
+            Ordre::Pause => (suggestions::PAUSE, "rien à mettre en pause, ou tu n'as pas le droit"),
+            Ordre::Reprendre => (suggestions::REPRENDRE, "rien à reprendre, ou tu n'as pas le droit"),
+            Ordre::Suivant => (suggestions::SUIVANT, "aucun morceau en cours, ou tu n'as pas le droit"),
+            Ordre::Cartes => (suggestions::CARTES, "ce serveur ne gère pas les cartes"),
+        };
+        if !self.commandes_disponibles().contains(&commande) {
+            return Err(format!("/{} : {refus}", commande.nom));
+        }
+        match ordre {
+            Ordre::Poke(pseudo) => {
+                if pseudo.is_empty() {
+                    return Err("/poke : qui ? Écris /poke @pseudo".into());
+                }
+                let nom = ki_protocol::safe_display(pseudo, 32);
+                let membre = self
+                    .members
+                    .iter()
+                    .find(|m| !est_bot(m.user_id) && m.username.eq_ignore_ascii_case(pseudo))
+                    .ok_or_else(|| format!("/poke : personne ne s'appelle « {nom} »"))?;
+                if Some(membre.user_id) == self.my_id {
+                    return Err("/poke : tu ne peux pas te poke toi-même".into());
+                }
+                if let Some(motif) = self.poke_impossible(membre) {
+                    return Err(format!("/poke : {nom}, {motif}"));
+                }
+                self.send(ClientMsg::Poke { user_id: membre.user_id });
+            }
+            Ordre::Musique(texte) => {
+                if texte.is_empty() {
+                    return Err("/musique : quoi ? Écris un lien ou une recherche".into());
+                }
+                if ki_protocol::url_musique_valide(texte) {
+                    self.commander_musique(C::Ajouter { url: texte.to_string(), maintenant: false });
+                } else if texte.chars().count() > ki_protocol::MAX_RECHERCHE_MUSIQUE {
+                    return Err("/musique : recherche trop longue".into());
+                } else {
+                    // Les résultats arrivent dans le bandeau de musique, comme
+                    // pour une recherche faite depuis son champ.
+                    self.musique_recherche = texte.to_string();
+                    let source = if self.musique_soundcloud { "soundcloud" } else { "youtube" }.to_string();
+                    self.commander_musique(C::Chercher { texte: texte.to_string(), source });
+                }
+            }
+            Ordre::Pause => self.commander_musique(C::Pause),
+            Ordre::Reprendre => self.commander_musique(C::Lecture),
+            Ordre::Suivant => self.commander_musique(C::Suivant),
+            Ordre::Cartes => self.cartes.ouvert = true,
+        }
+        Ok(())
     }
 
     /// Allumer ou couper le changeur de voix — par le raccourci global ou le
@@ -9206,8 +9355,7 @@ impl KiApp {
     /// sélection s'il y en a une —, et y remet le curseur juste après : on
     /// continue d'écrire comme si on l'avait tapé.
     fn inserer_dans_la_saisie(&mut self, ctx: &egui::Context, texte: &str) {
-        let id = egui::Id::unique("saisie_du_chat");
-        let mut etat = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let etat = egui::TextEdit::load_state(ctx, id_saisie()).unwrap_or_default();
         let total = self.input.chars().count();
         let (debut, fin) = match etat.cursor.char_range() {
             Some(r) => {
@@ -9216,6 +9364,21 @@ impl KiApp {
             }
             None => (total, total),
         };
+        self.remplacer_dans_la_saisie(ctx, debut, fin, texte);
+    }
+
+    /// Le mot en cours devient ce que le panneau des suggestions a choisi.
+    fn appliquer_suggestion(&mut self, ctx: &egui::Context, choix: &suggestions::Choix) {
+        self.remplacer_dans_la_saisie(ctx, choix.debut, choix.fin, &choix.insertion);
+    }
+
+    /// Remplace les caractères `debut..fin` de la saisie par `texte`, et y remet
+    /// le curseur juste après. Rien si le message dépassait alors sa taille maximale.
+    fn remplacer_dans_la_saisie(&mut self, ctx: &egui::Context, debut: usize, fin: usize, texte: &str) {
+        let id = id_saisie();
+        let mut etat = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let total = self.input.chars().count();
+        let (debut, fin) = (debut.min(total), fin.min(total));
         if total - (fin - debut) + texte.chars().count() > ki_protocol::MAX_CHAT_TEXT {
             return;
         }
@@ -14000,6 +14163,11 @@ const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_millis(1500)
 
 /// Ce qui vient du serveur lui-même : le fil de jeu (identifiant 0) et le
 /// bot musique. Jamais un compte, jamais un membre.
+/// La zone de saisie du salon : son curseur et son focus se manipulent par cet id.
+fn id_saisie() -> egui::Id {
+    egui::Id::unique("saisie_du_chat")
+}
+
 fn est_bot(user_id: UserId) -> bool {
     user_id == 0 || user_id == ki_protocol::MUSIQUE_ID
 }
@@ -15512,6 +15680,8 @@ impl KiApp {
         let voice = self.instantane_voix.take().unwrap_or_else(|| self.voice_snapshot());
 
         if self.welcomed {
+            // Avant tout le reste : ouvert, le panneau des suggestions garde Échap.
+            self.suggestions.echap(ctx);
             // Échap ferme la fenêtre la plus « en avant ».
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 if self.atelier.est_ouvert() {

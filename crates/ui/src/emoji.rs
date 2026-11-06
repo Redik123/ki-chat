@@ -376,7 +376,7 @@ pub(crate) fn peignable(emoji: &str) -> bool {
 
 /// Peint un emoji en vignette, centré dans `rect` sans le déformer. Rend
 /// faux s'il ne se peint pas en couleur ici.
-pub(crate) fn peindre_vignette(painter: &Painter, rect: Rect, emoji: &str) -> bool {
+pub fn peindre_vignette(painter: &Painter, rect: Rect, emoji: &str) -> bool {
     let Some(id) = glyphe(emoji) else { return false };
     let Some(rendu) = rendu(&cache(painter.ctx()), painter.ctx(), id, RESOLUTION_VIGNETTE) else { return false };
     let taille = rendu.texture.size_vec2();
