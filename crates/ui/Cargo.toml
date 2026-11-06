@@ -13,11 +13,13 @@ license.workspace = true
 # pour iced) : jetons.rs les traduit en types egui.
 ki-ui-base = { path = "../ui-base" }
 # La version d'eframe dans ki-chat : déjà dans l'arbre.
-egui = { version = "0.36", default-features = false }
+# Les polices emoji noir et blanc : le dernier recours pour ce que ki_ui::emoji
+# ne peint pas. Depuis egui 0.37, elles ne viennent plus sans cette option.
+egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 # Flexbox, grille et block CSS, calculés par taffy. Caché derrière `flex` :
 # si egui_taffy prend du retard sur egui, on le remplace sans toucher aux
 # écrans.
-egui_taffy = "0.14"
+egui_taffy = "0.16"
 # Le mouchard des mises en page instables (versions de développement).
 tracing.workspace = true
 # Une icône se retient (la touche d'un Loupedeck retient la sienne).
@@ -26,9 +28,9 @@ serde.workspace = true
 # Les emoji en couleur (emoji.rs) : les outils mêmes d'egui pour lire une
 # police (skrifa), façonner un texte (harfrust) et peindre (vello_cpu), aux
 # mêmes versions ; unicode-properties dit ce qui s'affiche en emoji.
-skrifa = { version = "0.44", default-features = false, features = ["std"] }
-harfrust = "0.12"
-vello_cpu = { version = "0.1", default-features = false, features = ["std", "u8_pipeline"] }
+skrifa = { version = "0.49", default-features = false, features = ["std"] }
+harfrust = "0.15"
+vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"] }
 unicode-segmentation = "1.13"
 unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
 # Le sélecteur d'emoji : la liste des emoji, leurs groupes, noms et teintes.
@@ -36,10 +38,11 @@ emojis = "0.9"
 
 [dev-dependencies]
 # Les polices d'egui, pour les tests qui mesurent du texte.
-egui = { version = "0.36", features = ["default_fonts"] }
+egui = { version = "0.37", features = ["default_fonts", "serde"] }
+serde_json.workspace = true
 # Pour voir parler le mouchard dans les tests.
 tracing-subscriber.workspace = true
 # La vitrine (examples/vitrine.rs) : une fenêtre, comme ki-chat.
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow"] }
 # Le mode capture de la vitrine (VITRINE_CAPTURE) écrit ses pages en PNG.
 png = "0.18"

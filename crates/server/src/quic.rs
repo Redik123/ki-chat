@@ -338,7 +338,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
     }
 
     // --- Phase 2 : enregistrement + tâches ---
-    use rand::Rng;
+    use rand::RngExt;
     let voice_token: u64 = rand::rng().random();
     let (raw_tx, mut rx) = mpsc::channel::<crate::state::Line>(crate::state::OUTBOX_CAP);
     let tx = crate::state::Outbox::new(raw_tx, conn.clone());
@@ -899,7 +899,7 @@ pub fn load_or_create_cert(
     tracing::info!("génération du certificat TLS auto-signé (premier démarrage)");
     let certified = rcgen::generate_simple_self_signed(vec!["ki-chat".into()])?;
     let cert_der = certified.cert.der().to_vec();
-    let key_der = certified.key_pair.serialize_der();
+    let key_der = certified.signing_key.serialize_der();
     // La clé d'abord, lisible de son seul propriétaire, puis le certificat :
     // l'existence du second garantit celle de la première. Écrits d'un bloc
     // l'un et l'autre — une coupure au mauvais moment laissait une clé

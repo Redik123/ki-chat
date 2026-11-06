@@ -9,14 +9,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
+use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 
 use ki_protocol::{perm, AccountInfo, InviteInfo, RoleId, UserId, ROLE_OWNER};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::roles::Roles;
 
@@ -181,9 +179,9 @@ fn check_password(password: &str) -> Result<(), String> {
 }
 
 fn hash_password(password: &str) -> Result<String, String> {
-    let salt = SaltString::generate(&mut OsRng);
+    // Le sel est tiré par `hash_password` lui-même, au hasard du système.
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|_| "erreur interne".to_string())?
         .to_string())
 }
@@ -915,6 +913,26 @@ impl Accounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un compte créé avant la montée d'argon2 0.5 à 0.6 doit rester ouvrable :
+    /// ce hachage vient de l'ancienne version, et il n'y a pas de migration.
+    #[test]
+    fn un_hachage_d_avant_la_montee_reste_valide() {
+        const ANCIEN: &str =
+            "$argon2id$v=19$m=19456,t=2,p=1$c2VsZGVsYW1vbnRlZTAxMg$9wVIYF5JAfRZTziWtha+0Pdr+2aCOwL5rv9PhMy0lBs";
+        let parsed = PasswordHash::new(ANCIEN).unwrap();
+        assert!(Argon2::default().verify_password("mot de passe d'avant".as_bytes(), &parsed).is_ok());
+        assert!(Argon2::default().verify_password(b"un autre", &parsed).is_err());
+    }
+
+    /// Les nouveaux hachages gardent les mêmes paramètres, et un sel à chaque fois.
+    #[test]
+    fn un_hachage_neuf_garde_les_memes_parametres() {
+        let a = hash_password("secret").unwrap();
+        let b = hash_password("secret").unwrap();
+        assert!(a.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"), "{a}");
+        assert_ne!(a, b);
+    }
 
     /// Une sanction vocale qu'''un redémarrage efface n'''en est pas une : il
     /// suffirait de relancer le client. Elle doit être sur le disque.

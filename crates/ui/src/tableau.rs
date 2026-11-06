@@ -143,8 +143,8 @@ impl<'a> Tableau<'a> {
     /// La hauteur de l'en-tête.
     pub const HAUTEUR_TETE: f32 = 26.0;
 
-    pub fn new(id_salt: impl egui::AsId) -> Self {
-        Self { id: Id::new(("ki-tableau", id_salt)), colonnes: Vec::new(), hauteur_ligne: 32.0, tri_defaut: None }
+    pub fn new(id_salt: impl egui::AsIdSalt) -> Self {
+        Self { id: Id::unique(("ki-tableau", id_salt)), colonnes: Vec::new(), hauteur_ligne: 32.0, tri_defaut: None }
     }
 
     pub fn colonne(mut self, colonne: Colonne<'a>) -> Self {

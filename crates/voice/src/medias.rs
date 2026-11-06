@@ -306,7 +306,7 @@ fn ouvrir(
     let (device, _repli) = crate::pick_device(&hote, peripherique, false);
     let device = device.context("aucun périphérique de sortie audio")?;
     let supporte = device.default_output_config().context("config sortie")?;
-    let cadence = supporte.sample_rate().0;
+    let cadence = supporte.sample_rate();
     let voies = supporte.channels() as usize;
     let flux = crate::build_output_stream(
         &device,

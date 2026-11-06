@@ -382,7 +382,7 @@ async fn emettre(
     fin: Instant,
     c: &Arc<Compteurs>,
 ) {
-    use rand::Rng;
+    use rand::RngExt;
     let chiffre = XChaCha20Poly1305::new((&cle).into());
     // Le compteur sert de nonce : il doit être imprévisible et ne jamais se
     // répéter sous une même clé. Même règle que le moteur — un départ fixe

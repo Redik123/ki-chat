@@ -350,10 +350,17 @@ pub fn micro_par_defaut() -> Option<String> {
     }
 }
 
+/// Le nom d'un périphérique, celui que l'utilisateur choisit et que ses réglages
+/// retiennent. Sous Windows, c'est le « FriendlyName » de l'ancien `Device::name()`
+/// de cpal : les noms déjà enregistrés restent reconnus.
+fn nom_peripherique(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
+}
+
 /// Noms des périphériques audio disponibles : (entrées, sorties).
 pub fn list_devices() -> (Vec<String>, Vec<String>) {
     fn names(devs: Option<impl Iterator<Item = cpal::Device>>) -> Vec<String> {
-        devs.map(|d| d.filter_map(|dev| dev.name().ok()).collect())
+        devs.map(|d| d.filter_map(|dev| nom_peripherique(&dev)).collect())
             .unwrap_or_default()
     }
     let host = cpal::default_host();
@@ -395,11 +402,11 @@ fn find_by_name(host: &cpal::Host, name: &str, input: bool) -> Option<cpal::Devi
     let devices = |host: &cpal::Host| {
         if input { host.input_devices().ok() } else { host.output_devices().ok() }
     };
-    if let Some(d) = devices(host)?.find(|d| d.name().is_ok_and(|n| n == name)) {
+    if let Some(d) = devices(host)?.find(|d| nom_peripherique(d).is_some_and(|n| n == name)) {
         return Some(d);
     }
     let want = normalized_device_name(name);
-    devices(host)?.find(|d| d.name().is_ok_and(|n| normalized_device_name(&n) == want))
+    devices(host)?.find(|d| nom_peripherique(d).is_some_and(|n| normalized_device_name(&n) == want))
 }
 
 /// Le périphérique demandé est-il présent ?
@@ -1917,7 +1924,7 @@ impl Sender {
             // avec une probabilité de l'ordre de 10⁻⁸, là où la collision
             // était certaine.
             counter: {
-                use rand::Rng as _;
+                use rand::RngExt as _;
                 rand::rng().random::<u64>() >> 16
             },
             user_id,
@@ -3050,8 +3057,8 @@ fn device_signature(device_name: Option<&str>, input: bool, native: bool) -> Opt
     };
     Some(format!(
         "{}|{}|{}|{}",
-        device.name().unwrap_or_default(),
-        cfg.sample_rate().0,
+        nom_peripherique(&device).unwrap_or_default(),
+        cfg.sample_rate(),
         cfg.channels(),
         fallback,
     ))
@@ -3122,17 +3129,17 @@ fn open_input(
     }
     let device = device.context("aucun périphérique d'entrée (micro) trouvé")?;
     let supported = device.default_input_config().context("config micro")?;
-    let in_rate = supported.sample_rate().0;
+    let in_rate = supported.sample_rate();
     let channels = supported.channels() as usize;
     tracing::info!(
         "micro : {} ({} Hz, {} canaux)",
-        device.name().unwrap_or_default(),
+        nom_peripherique(&device).unwrap_or_default(),
         in_rate,
         channels
     );
     journal(format!(
         "micro ouvert : {} ({} Hz, {} canaux){}",
-        device.name().unwrap_or_default(),
+        nom_peripherique(&device).unwrap_or_default(),
         in_rate,
         channels,
         if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
@@ -3151,7 +3158,7 @@ fn open_input(
         rate: in_rate,
         alive,
         fallback,
-        name: device.name().unwrap_or_default(),
+        name: nom_peripherique(&device).unwrap_or_default(),
     })
 }
 
@@ -3678,7 +3685,7 @@ fn build_input_stream(
         T: cpal::SizedSample + dasp_sample::ToSample<f32>,
     {
         let stream = device.build_input_stream(
-            config,
+            *config,
             move |data: &[T], _: &_| {
                 let mut buf = tx.take(data.len() / channels.max(1));
                 fold_mono_into(data, channels, &mut buf);
@@ -3706,6 +3713,7 @@ fn build_input_stream(
         SF::F32 => build::<f32>(device, &config, channels, tx, a),
         SF::I16 => build::<i16>(device, &config, channels, tx, a),
         SF::I32 => build::<i32>(device, &config, channels, tx, a),
+        SF::I24 => build::<cpal::I24>(device, &config, channels, tx, a),
         SF::U16 => build::<u16>(device, &config, channels, tx, a),
         SF::F64 => build::<f64>(device, &config, channels, tx, a),
         SF::I8 => build::<i8>(device, &config, channels, tx, a),
@@ -3923,7 +3931,7 @@ fn ouvrir_micro_jeux(
     anyhow::ensure!(!repli, "« {cable} » introuvable");
     let device = device.context("aucune sortie")?;
     let supported = device.default_output_config().context("configuration du câble")?;
-    let rate = supported.sample_rate().0;
+    let rate = supported.sample_rate();
     let channels = supported.channels() as usize;
     let alive = Arc::new(AtomicBool::new(true));
     let stream = build_output_stream(
@@ -4007,17 +4015,17 @@ fn open_output(
     }
     let device = device.context("aucun périphérique de sortie audio trouvé")?;
     let supported = device.default_output_config().context("config sortie")?;
-    let out_rate = supported.sample_rate().0;
+    let out_rate = supported.sample_rate();
     let channels = supported.channels() as usize;
     tracing::info!(
         "sortie : {} ({} Hz, {} canaux)",
-        device.name().unwrap_or_default(),
+        nom_peripherique(&device).unwrap_or_default(),
         out_rate,
         channels
     );
     journal(format!(
         "sortie ouverte : {} ({} Hz, {} canaux){}",
-        device.name().unwrap_or_default(),
+        nom_peripherique(&device).unwrap_or_default(),
         out_rate,
         channels,
         if fallback { " — repli, le périphérique réglé est introuvable" } else { "" },
@@ -4371,7 +4379,7 @@ fn build_output_stream(
         // rappels puis plus jamais.
         let mut stereo: Vec<f32> = Vec::new();
         let stream = device.build_output_stream(
-            config,
+            *config,
             move |data: &mut [T], _: &_| {
                 let frames = data.len() / channels;
                 if stereo.len() < frames * 2 {
@@ -4405,6 +4413,7 @@ fn build_output_stream(
         SF::F32 => build::<f32>(device, &config, channels, write_frames, a),
         SF::I16 => build::<i16>(device, &config, channels, write_frames, a),
         SF::I32 => build::<i32>(device, &config, channels, write_frames, a),
+        SF::I24 => build::<cpal::I24>(device, &config, channels, write_frames, a),
         SF::U16 => build::<u16>(device, &config, channels, write_frames, a),
         SF::F64 => build::<f64>(device, &config, channels, write_frames, a),
         SF::I8 => build::<i8>(device, &config, channels, write_frames, a),

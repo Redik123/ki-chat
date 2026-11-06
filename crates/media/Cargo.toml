@@ -29,7 +29,7 @@ bytemuck = "1"
 openh264 = { version = "0.9", features = ["source"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     # Le décodeur des streams sur la carte graphique (DXVA) : un appareil
     # Direct3D 11 prêté au décodeur de Windows.

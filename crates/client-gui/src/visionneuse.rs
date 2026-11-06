@@ -702,7 +702,7 @@ impl Visionneuse {
         let bas = if est_video { BAS_VIDEO } else { BAS_IMAGE };
         let mut fermer = false;
         let mut aller: isize = 0;
-        egui::Area::new(egui::Id::new("visionneuse"))
+        egui::Area::new(egui::Id::unique("visionneuse"))
             .order(egui::Order::Foreground)
             .fixed_pos(ecran.min)
             .show(ctx, |ui| {
@@ -851,7 +851,7 @@ impl Visionneuse {
         url: &str,
         previews: &mut Previews,
     ) -> Rect {
-        let id = ui.id().with("visionneuse-image");
+        let id = ui.scope_id().with("visionneuse-image");
         let reponse = ui.interact(contenu, id, Sense::click_and_drag());
         let Some(preview) = previews.get(ui.ctx(), url) else {
             ui.painter().text(

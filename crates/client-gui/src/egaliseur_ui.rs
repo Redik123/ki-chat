@@ -194,7 +194,7 @@ pub(crate) fn editeur(
             .find(|(_, fabrique)| fabrique() == *bandes)
             .map(|(nom, _)| *nom)
             .unwrap_or("Personnalisé");
-        egui::ComboBox::from_id_salt(ui.id().with("prereglage"))
+        egui::ComboBox::from_id_salt(ui.scope_id().with("prereglage"))
             .width(150.0)
             .selected_text(RichText::new(actuel).color(TEXT))
             .show_ui(ui, |ui| {
@@ -369,7 +369,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
     ui.horizontal_wrapped(|ui| {
         let (pastille, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
         ui.painter().circle_filled(pastille.center(), 6.0, COULEURS[i % BANDES_MAX]);
-        egui::ComboBox::from_id_salt(ui.id().with(("forme", i)))
+        egui::ComboBox::from_id_salt(ui.scope_id().with(("forme", i)))
             .width(120.0)
             .selected_text(RichText::new(b.forme.nom()).color(TEXT))
             .show_ui(ui, |ui| {

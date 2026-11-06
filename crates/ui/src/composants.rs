@@ -776,7 +776,7 @@ pub fn onglet(ui: &mut Ui, ouvert: bool, libelle: &str) -> Response {
         }
     }
     reponse.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, ouvert, libelle)
+        egui::WidgetInfo::selected(egui::Role::Button, true, ouvert, libelle)
     });
     reponse
 }
@@ -821,7 +821,7 @@ pub fn interrupteur(ui: &mut Ui, on: &mut bool, libelle: &str) -> Response {
         })
         .inner;
     reponse.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, libelle)
+        egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, libelle)
     });
     reponse
 }

@@ -247,6 +247,7 @@ impl KiApp {
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.profil_nom)
+                                .margin(egui::Margin::symmetric(4, 5))
                                 .hint_text("nom du profil")
                                 .desired_width(160.0),
                         );

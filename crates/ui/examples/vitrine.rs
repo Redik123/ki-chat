@@ -97,23 +97,21 @@ impl eframe::App for Vitrine {
                 self.liste(ui);
             });
             if self.capture.is_some() {
-                self.photographier(ui, sortie.state.offset.y, sortie.content_size.y - sortie.inner_rect.height());
+                self.photographier(ui, sortie.state.clamped_offset().y, sortie.content_size.y - sortie.inner_rect.height());
             }
         });
     }
 }
+
+/// La dernière capture rendue par egui : son rappel la dépose ici.
+static CAPTURE: std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>> = std::sync::Mutex::new(None);
 
 impl Vitrine {
     /// Le mode capture, à chaque image : attendre que la page se pose, la
     /// demander à egui, l'écrire quand elle arrive, passer à la suivante.
     fn photographier(&mut self, ui: &egui::Ui, decalage: f32, fond: f32) {
         let Some(c) = &mut self.capture else { return };
-        let image = ui.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let image = CAPTURE.lock().ok().and_then(|mut c| c.take());
         if let Some(image) = image {
             c.page += 1;
             let chemin = c.dossier.join(format!("vitrine-{}.png", c.page));
@@ -135,7 +133,11 @@ impl Vitrine {
         c.attente += 1;
         if !c.demandee && c.attente > 6 {
             c.demandee = true;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            ui.ctx().request_screenshot(|image| {
+                if let Ok(mut c) = CAPTURE.lock() {
+                    *c = Some(image);
+                }
+            });
         }
         ui.ctx().request_repaint();
     }
@@ -329,6 +331,7 @@ impl Vitrine {
                 ki_ui::emoji::mise_en_page(ui, tampon.as_str(), egui::FontId::proportional(texte::CORPS), largeur)
             };
             let sortie = egui::TextEdit::multiline(&mut self.message)
+                .margin(egui::Margin::symmetric(4, 2))
                 .layouter(&mut mise_en_page)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY)
@@ -386,7 +389,7 @@ impl Vitrine {
             Flex::ligne().ecart(espace::S).show(ui, "saisie", |f| {
                 f.ui(|ui| c::icon_button(ui, Icon::Paperclip, "Joindre"));
                 f.grandit(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.pseudo).desired_width(ui.available_width()));
+                    ui.add(egui::TextEdit::singleline(&mut self.pseudo).margin(egui::Margin::symmetric(4, 5)).desired_width(ui.available_width()));
                 });
                 f.ui(|ui| c::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer", Some(couleur::ACCENT)));
             });

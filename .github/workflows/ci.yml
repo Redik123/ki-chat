@@ -47,7 +47,7 @@ env:
   # nouvelle version de Rust ne doit pas pouvoir mettre le filet au rouge —
   # et bloquer le déploiement du serveur — d'un jour à l'autre. On la monte
   # exprès, en même temps que release.yml.
-  RUST_TOOLCHAIN: "1.98.0"
+  RUST_TOOLCHAIN: "1.99.1"
   # `.cargo/config.toml` pointe vers le cmake d'une machine précise (celui de
   # Visual Studio 2026). Sans `force` de son côté, celui d'ici l'emporte —
   # c'est exactement ce que ce fichier prévoit pour l'intégration continue.

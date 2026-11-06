@@ -320,7 +320,7 @@ fn courbes_superposees(ui: &mut Ui, a: &Vue, b: &Vue) {
         }
         let points = [&a.p, &b.p];
         let noms = [a.username, b.username];
-        graphes::courbes(ui, egui::Id::new("comparer_courbes"), &series, HAUTEUR_COURBES, etiquette_de_rang, |k, i| {
+        graphes::courbes(ui, egui::Id::unique("comparer_courbes"), &series, HAUTEUR_COURBES, etiquette_de_rang, |k, i| {
             points[k].get(i).map_or_else(String::new, |p| format!("{} · {}", noms[k], info_de_point(p)))
         });
     });

@@ -18,5 +18,5 @@ path = "src/main.rs"
 [dependencies]
 # Les mêmes fonctionnalités que côté client : une divergence entre signeur et
 # vérifieur ne se verrait qu'en production, sur les machines des autres.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
-sha2 = "0.10"
+ed25519-dalek = { version = "3", default-features = false }
+sha2 = "0.11"

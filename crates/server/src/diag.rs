@@ -31,7 +31,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::state::AppState;
 

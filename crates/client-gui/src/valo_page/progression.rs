@@ -219,7 +219,7 @@ fn courbe_entiere(ui: &mut Ui, vue: &Vue) {
         let courbe: Vec<PointCourbe> = points.iter().map(|p| PointCourbe::from(*p)).collect();
         let pic = vue.fiche.pic.as_ref().filter(|p| p.tier >= 3).map(|p| graphes::valeur_rr(p.tier, p.rr));
         let info = |i: usize| points.get(i).map_or_else(String::new, |p| info_de_point(p));
-        graphes::courbe_temps(ui, egui::Id::new("progression_courbe"), &courbe, HAUTEUR_COURBE_ENTIERE, true, &frontieres, pic, info);
+        graphes::courbe_temps(ui, egui::Id::unique("progression_courbe"), &courbe, HAUTEUR_COURBE_ENTIERE, true, &frontieres, pic, info);
     });
 }
 
@@ -234,7 +234,7 @@ fn les_actes_en_detail(ui: &mut Ui, vue: &Vue) {
         }
         let barres = barres_d_actes(saisons);
         let haut = barres.iter().map(|b| b.valeur).fold(0.0, f32::max) + 2.0;
-        graphes::barres_verticales(ui, egui::Id::new("progression_actes"), &barres, HAUTEUR_ACTES, Some(haut.min(26.0)));
+        graphes::barres_verticales(ui, egui::Id::unique("progression_actes"), &barres, HAUTEUR_ACTES, Some(haut.min(26.0)));
         ui.add_space(espace::M);
         let mmr = mmr_par_acte(vue.fiche);
         let lignes: Vec<&StatsSaison> = saisons.iter().rev().collect();

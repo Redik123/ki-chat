@@ -92,7 +92,7 @@ impl EmissionVideo for NetHandle {
             ki_protocol::write_media_header(&mut head, &header);
             let nonce = ki_protocol::nonce_for_media(domaine, stream_id, s);
             let Ok(sealed) = cipher.encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: &f.data,
                     aad: &head,

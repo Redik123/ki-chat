@@ -1683,8 +1683,8 @@ mod tests {
                 entree.events.push(egui::Event::PointerMoved(p));
             }
             ctx.run_ui(entree, |ui| {
-                survol = courbes(ui, egui::Id::new("essai"), &series, 220.0, |v| format!("{v}"), |k, i| format!("{k} {i}"));
-                rien = courbes(ui, egui::Id::new("seul"), &series[..1][..0], 100.0, |v| format!("{v}"), |_, _| String::new());
+                survol = courbes(ui, egui::Id::unique("essai"), &series, 220.0, |v| format!("{v}"), |k, i| format!("{k} {i}"));
+                rien = courbes(ui, egui::Id::unique("seul"), &series[..1][..0], 100.0, |v| format!("{v}"), |_, _| String::new());
             })
             .drop_without_applying_deltas();
         }

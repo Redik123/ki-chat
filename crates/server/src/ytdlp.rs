@@ -60,9 +60,13 @@ pub fn empreinte_attendue(sommes: &str, nom: &str) -> Option<String> {
     })
 }
 
+fn hex(octets: &[u8]) -> String {
+    octets.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn empreinte_de(chemin: &Path) -> Option<String> {
     let octets = std::fs::read(chemin).ok()?;
-    Some(format!("{:x}", Sha256::digest(&octets)))
+    Some(hex(&Sha256::digest(&octets)))
 }
 
 fn lire_borne(reponse: ureq::Response, max: u64) -> Result<Vec<u8>, String> {
@@ -101,7 +105,7 @@ pub fn mettre_a_jour(data_dir: &str, agent: &ureq::Agent) -> Result<Option<PathB
         .call()
         .map_err(|e| format!("téléchargement : {e}"))?;
     let octets = lire_borne(reponse, TELECHARGEMENT_MAX)?;
-    let obtenue = format!("{:x}", Sha256::digest(&octets));
+    let obtenue = hex(&Sha256::digest(&octets));
     if obtenue != attendue {
         return Err(
             "empreinte du binaire téléchargé différente de celle publiée — rien d'installé".into(),

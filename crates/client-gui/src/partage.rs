@@ -193,9 +193,8 @@ fn secret_machine() -> Vec<u8> {
                     return lu;
                 }
             }
-            use chacha20poly1305::aead::rand_core::RngCore as _;
             let mut neuf = vec![0u8; 32];
-            chacha20poly1305::aead::OsRng.fill_bytes(&mut neuf);
+            getrandom::fill(&mut neuf).expect("hasard du système indisponible");
             if let Some(chemin) = chemin {
                 if let Some(dossier) = chemin.parent() {
                     let _ = std::fs::create_dir_all(dossier);
@@ -898,7 +897,7 @@ fn fil_audio(
                     h.seq,
                 );
                 let Ok(opus) =
-                    cipher.decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad })
+                    cipher.decrypt(&XNonce::from(nonce), Payload { msg: sealed, aad })
                 else {
                     continue;
                 };
@@ -1258,7 +1257,7 @@ fn fil_decodeur(
             let nonce = ki_protocol::nonce_for_media(domaine, stream_id, h.seq);
             // L'en-tête est l'AAD : altéré en route, le tag le trahit.
             let (aad, sealed) = bytes.split_at(ki_protocol::MEDIA_HEADER_LEN);
-            if let Ok(clair) = cipher.decrypt(XNonce::from_slice(&nonce), Payload { msg: sealed, aad }) {
+            if let Ok(clair) = cipher.decrypt(&XNonce::from(nonce), Payload { msg: sealed, aad }) {
                 attentes[usize::from(h.basse)].insert(h.seq, (h.idr, h.pts_us, clair));
                 if usize::from(h.basse) == couche {
                     bilan.recues += 1;
@@ -1588,11 +1587,11 @@ mod tests {
         ki_protocol::write_media_header(&mut head, &h);
         let nonce = ki_protocol::nonce_for_media(ki_protocol::MEDIA_DOMAIN_VIDEO, 3, 41);
         let sealed = cipher
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: b"nal factice", aad: &head })
+            .encrypt(&XNonce::from(nonce), Payload { msg: b"nal factice", aad: &head })
             .unwrap();
 
         let clair = cipher
-            .decrypt(XNonce::from_slice(&nonce), Payload { msg: &sealed, aad: &head })
+            .decrypt(&XNonce::from(nonce), Payload { msg: &sealed, aad: &head })
             .unwrap();
         assert_eq!(clair, b"nal factice");
 
@@ -1600,7 +1599,7 @@ mod tests {
         let mut faux = head;
         faux[8] ^= 1;
         assert!(cipher
-            .decrypt(XNonce::from_slice(&nonce), Payload { msg: &sealed, aad: &faux })
+            .decrypt(&XNonce::from(nonce), Payload { msg: &sealed, aad: &faux })
             .is_err());
     }
 

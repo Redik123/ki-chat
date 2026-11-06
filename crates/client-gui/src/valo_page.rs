@@ -1176,7 +1176,7 @@ impl PageValo {
         // écran ne se rattrape plus.
         let (max_l, max_h) = bornes_de_fenetre(ctx);
         egui::Window::new("VALORANT")
-            .id(egui::Id::new("valo_page_v5"))
+            .id(egui::Id::unique("valo_page_v5"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -2153,7 +2153,7 @@ impl PageValo {
         let titre = format!("VALORANT — {}", ouverte.username);
         let (max_l, max_h) = bornes_de_fenetre(ctx);
         egui::Window::new(titre)
-            .id(egui::Id::new("fiche_valorant_v5"))
+            .id(egui::Id::unique("fiche_valorant_v5"))
             .collapsible(false)
             .resizable(true)
             .default_width(640.0)
@@ -2266,7 +2266,7 @@ impl PageValo {
         let points: Vec<PointCourbe> = vue.p.iter().map(|x| PointCourbe::from(*x)).collect();
         let pic = vue.fiche.pic.as_ref().filter(|p| p.tier >= 3).map(|p| graphes::valeur_rr(p.tier, p.rr));
         let info = |i: usize| vue.p.get(i).map_or_else(String::new, |x| info_de_point(x));
-        let survole = graphes::courbe_temps(ui, egui::Id::new("fiche_courbe"), &points, hauteur, true, &frontieres, pic, info);
+        let survole = graphes::courbe_temps(ui, egui::Id::unique("fiche_courbe"), &points, hauteur, true, &frontieres, pic, info);
         self.survol = survole.and_then(|i| vue.p.get(i)).map(|x| x.match_id.clone()).filter(|id| !id.is_empty());
     }
 
@@ -2313,7 +2313,7 @@ impl PageValo {
                     // vient du curseur de cette image, exacte même en
                     // plein défilement. Le fond se réserve ici aussi, pour
                     // passer sous le texte.
-                    let id_ligne = ui.id().with(("ligne", i));
+                    let id_ligne = ui.scope_id().with(("ligne", i));
                     let haut_ligne = ui.cursor().min.y;
                     let (decalage, taille): (f32, Vec2) =
                         ui.data(|d| d.get_temp(id_ligne)).unwrap_or((-2.0, Vec2::new(largeur_page, 20.0)));
@@ -2649,7 +2649,7 @@ fn forme(ui: &mut Ui, vue: &Vue) {
         if v + d > 0 {
             let part = v as f32 / (v + d) as f32;
             let couleur = if part >= 0.5 { SPEAK } else { DANGER };
-            graphes::anneau(ui, egui::Id::new("fiche_anneau"), part, 34.0, couleur, &format!("{:.0}", part * 100.0))
+            graphes::anneau(ui, egui::Id::unique("fiche_anneau"), part, 34.0, couleur, &format!("{:.0}", part * 100.0))
                 .on_hover_text(format!("{:.0} % de victoires sur les matchs classés récents", part * 100.0));
         }
         ui.label(RichText::new("Forme").color(TEXT_DIM).size(texte::PETIT));
@@ -3074,7 +3074,7 @@ fn actes(ui: &mut Ui, vue: &Vue) {
     ui.add_space(espace::L);
     ui.label(RichText::new("Actes").color(TEXT_DIM).size(texte::PETIT));
     ui::hint(ui, "le rang de fin de chaque acte, du plus ancien au plus récent");
-    graphes::barres_verticales(ui, egui::Id::new("fiche_actes"), &barres_d_actes(saisons), 96.0, Some(26.0));
+    graphes::barres_verticales(ui, egui::Id::unique("fiche_actes"), &barres_d_actes(saisons), 96.0, Some(26.0));
 }
 
 /// Une barre par acte, à la hauteur de son rang de fin : de Fer 1 (3) à
@@ -3724,10 +3724,10 @@ mod tests {
             dessiner(&ctx, Some(souris), |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 40.0));
-                    let id = egui::Id::new("ligne_test");
+                    let id = egui::Id::unique("ligne_test");
                     let cadre = cadre_avant.then(|| ui.interact(rect, id, Sense::click()));
                     let dedans = Rect::from_min_size(Pos2::new(40.0, 50.0), Vec2::new(200.0, 20.0));
-                    let muet = ui.interact(dedans, egui::Id::new("pastille_test"), Sense::hover());
+                    let muet = ui.interact(dedans, egui::Id::unique("pastille_test"), Sense::hover());
                     let cadre = cadre.unwrap_or_else(|| ui.interact(rect, id, Sense::click()));
                     survols = (cadre.hovered(), muet.hovered());
                 });
@@ -3757,11 +3757,11 @@ mod tests {
             ctx.run_ui(entree, |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let fond = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(1_000.0, 800.0));
-                    ui.interact(fond, egui::Id::new("defilement_test"), Sense::drag());
+                    ui.interact(fond, egui::Id::unique("defilement_test"), Sense::drag());
                     let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 40.0));
-                    let cadre = ui.interact(rect, egui::Id::new("ligne_test"), Sense::click());
+                    let cadre = ui.interact(rect, egui::Id::unique("ligne_test"), Sense::click());
                     let dedans = Rect::from_min_size(Pos2::new(40.0, 50.0), Vec2::new(200.0, 20.0));
-                    ui.interact(dedans, egui::Id::new("pastille_test"), Sense::hover());
+                    ui.interact(dedans, egui::Id::unique("pastille_test"), Sense::hover());
                     clique |= cadre.clicked();
                 });
             }).drop_without_applying_deltas();
@@ -3859,8 +3859,8 @@ mod tests {
                 page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() });
             }).drop_without_applying_deltas();
         }
-        let groupe = ctx.memory(|m| m.area_rect(egui::Id::new("valo_page_v5"))).expect("la page est ouverte");
-        let fiche = ctx.memory(|m| m.area_rect(egui::Id::new("fiche_valorant_v5"))).expect("la fiche est ouverte");
+        let groupe = ctx.memory(|m| m.area_rect(egui::Id::unique("valo_page_v5"))).expect("la page est ouverte");
+        let fiche = ctx.memory(|m| m.area_rect(egui::Id::unique("fiche_valorant_v5"))).expect("la fiche est ouverte");
         // 860 et 640 de contenu, plus les marges de la fenêtre.
         assert!((850.0..=900.0).contains(&groupe.width()), "page du groupe : {}", groupe.width());
         assert!((630.0..=680.0).contains(&fiche.width()), "fiche : {}", fiche.width());

@@ -551,7 +551,7 @@ impl Atelier {
         let Some(p) = self.projet.as_mut() else {
             return;
         };
-        egui::Area::new(egui::Id::new("atelier"))
+        egui::Area::new(egui::Id::unique("atelier"))
             .order(egui::Order::Foreground)
             .fixed_pos(ecran.min)
             .show(ctx, |ui| {
@@ -1570,7 +1570,7 @@ fn peindre_apercu(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     if deplacable {
         let r = ui.interact(
             dest,
-            ui.id().with("atelier-apercu"),
+            ui.scope_id().with("atelier-apercu"),
             Sense::click_and_drag(),
         );
         if r.dragged() {
@@ -1727,7 +1727,7 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
     // La bande elle-même : un clic déplace la tête.
     let r = ui.interact(
         bande,
-        ui.id().with("atelier-bande"),
+        ui.scope_id().with("atelier-bande"),
         Sense::click_and_drag(),
     );
     // Les poignées, par-dessus.
@@ -1737,8 +1737,8 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
             Vec2::new(14.0, bande.height() + 8.0),
         )
     };
-    let rd = ui.interact(poignee(xd), ui.id().with("atelier-debut"), Sense::drag());
-    let rf = ui.interact(poignee(xf), ui.id().with("atelier-fin"), Sense::drag());
+    let rd = ui.interact(poignee(xd), ui.scope_id().with("atelier-debut"), Sense::drag());
+    let rf = ui.interact(poignee(xf), ui.scope_id().with("atelier-fin"), Sense::drag());
     for (rect, actif) in [
         (poignee(xd), rd.hovered() || rd.dragged()),
         (poignee(xf), rf.hovered() || rf.dragged()),

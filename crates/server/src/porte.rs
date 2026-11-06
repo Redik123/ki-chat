@@ -92,7 +92,7 @@ use ki_protocol::{
     PORTE_SLUG_MIN, PORTE_TELECHARGEMENT, PORTE_TTL_MAX_SECS, PORTE_VIDE_SECS, VOICE_HEADER_LEN,
     VOICE_MAX_PACKET,
 };
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ki_protocol::{ChannelId, ChannelInfo, Member, ServerMsg, UserId};
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::mpsc::error::TrySendError;
 
 use crate::accounts::Accounts;

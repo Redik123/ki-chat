@@ -33,6 +33,9 @@ use tactique::{Camp, Lien, Outil, Plan, Tactique, Trait};
 const MOI: UserId = 1;
 const NOMS: [&str; 4] = ["", "drion", "Kevin", "Lina"];
 
+/// La dernière capture rendue par egui : son rappel la dépose ici.
+static CAPTURE: std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>> = std::sync::Mutex::new(None);
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -296,7 +299,7 @@ impl eframe::App for Banc {
     /// Les faux gestes des dernières scènes, image par image, dans le cadre
     /// de la fenêtre.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        let Some(fenetre) = ctx.memory(|m| m.area_rect(egui::Id::new("carte_tactique"))) else { return };
+        let Some(fenetre) = ctx.memory(|m| m.area_rect(egui::Id::unique("carte_tactique"))) else { return };
         // Le bas de la fenêtre est à la carte, sous la barre d'outils.
         let centre = fenetre.center() + vec2(0.0, 50.0);
         let i = self.images;
@@ -305,6 +308,7 @@ impl eframe::App for Banc {
             5 if i == 3 => {
                 raw.events.push(egui::Event::PointerMoved(centre + vec2(-80.0, -120.0)));
                 raw.events.push(egui::Event::MouseWheel {
+                    source: egui::MouseWheelSource::Wheel,
                     unit: egui::MouseWheelUnit::Point,
                     delta: vec2(0.0, 300.0),
                     phase: egui::TouchPhase::Move,
@@ -355,12 +359,7 @@ impl eframe::App for Banc {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         };
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let image = CAPTURE.lock().ok().and_then(|mut c| c.take());
         if let Some(image) = image {
             let prefixe = if petit() { "petit-" } else { "" };
             let chemin = dossier.join(format!("{prefixe}tactique-{}.png", self.scene + 1));
@@ -388,7 +387,11 @@ impl eframe::App for Banc {
         };
         if !self.demandee && pret {
             self.demandee = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            ctx.request_screenshot(|image| {
+                if let Ok(mut c) = CAPTURE.lock() {
+                    *c = Some(image);
+                }
+            });
         }
         // Le banc tourne en continu : les faux gestes vont image par image.
         ctx.request_repaint();

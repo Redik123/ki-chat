@@ -26,6 +26,9 @@ pub fn installer(ctx: &egui::Context) {
 
     let s = &mut style.spacing;
     s.item_spacing = Vec2::new(espace::M, espace::S);
+    // Pas d'élastique au bord des listes (activé par défaut depuis egui 0.37) :
+    // le fil virtualisé raisonne sur un décalage qui reste dans ses bornes.
+    s.scroll.kinetic.rubber_band = false;
     s.button_padding = Vec2::new(espace::L, espace::S);
     s.window_margin = marge::egale(espace::XL);
     s.menu_margin = marge::egale(espace::M);
@@ -193,6 +196,15 @@ mod tests {
 
     /// Le thème du système ne commande pas : un contexte qui se croit en
     /// clair prend quand même nos couleurs, les widgets comme le reste.
+    #[test]
+    fn pas_d_elastique_au_bord_des_listes() {
+        // Avec l'élastique d'egui, un décalage imposé au-delà du fond de l'image
+        // d'avant est ramené en arrière : « aller en bas » du fil ne tient plus.
+        let ctx = egui::Context::default();
+        installer(&ctx);
+        assert!(!ctx.global_style().spacing.scroll.kinetic.rubber_band);
+    }
+
     #[test]
     fn le_theme_sombre_s_impose_meme_a_un_systeme_en_clair() {
         let ctx = egui::Context::default();

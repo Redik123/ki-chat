@@ -12,31 +12,30 @@ serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "2", features = ["json"] }
 # L'empreinte SHA-256 du yt-dlp téléchargé, contre les sommes publiées.
-sha2 = "0.10"
+sha2 = "0.11"
 # Le dimanche soir du récap hebdo du fil de jeu, et ses dates en clair.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Le bot musique : encodage Opus et chiffrement des trames, comme un membre.
 ki-opus = { path = "../ki-opus" }
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-rand = "0.9"
+rand = "0.10"
 futures-util = "0.3"
-argon2 = "0.5"
+argon2 = "0.6"
 # Le re-export rand_core::OsRng de password-hash exige cette feature.
-rand_core = { version = "0.6", features = ["getrandom"] }
-socket2 = "0.5"
+socket2 = "0.6"
 # Transport QUIC : chat (flux fiable) + voix (datagrammes) sur une connexion.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Certificat TLS auto-signé, généré et persisté au premier démarrage.
-rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 bytes = "1"
 # Les fichiers partagés servis en flux (`ReaderStream`) : jamais un clip
 # entier en mémoire par spectateur.
 tokio-util = { version = "0.7", features = ["io"] }
-axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 # L'horloge de hyper (délai de lecture des en-têtes) : déjà compilé pour
 # axum-server, nommé ici pour régler son constructeur.
 hyper-util = { version = "0.1.18", features = ["server-auto", "tokio"] }
@@ -48,9 +47,9 @@ libc = "0.2"
 [dev-dependencies]
 # Le client WebSocket des tests des portes web : la même bibliothèque
 # qu'axum utilise déjà côté serveur, donc rien de neuf à compiler.
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 
 # Le grain du minuteur Windows (15,6 ms) est trop grossier pour cadencer le
 # bot musique à 20 ms : `timeBeginPeriod(1)` sur la machine de développement.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Media"] }
+windows = { version = "0.62", features = ["Win32_Media"] }

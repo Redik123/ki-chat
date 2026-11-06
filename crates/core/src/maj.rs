@@ -98,6 +98,32 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer as _;
 
+    fn hex(octets: &[u8]) -> String {
+        octets.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Valeurs calculées avec ed25519-dalek 2 et sha2 0.10. Les clients déjà
+    /// installés vérifient ce que signe le signeur d'aujourd'hui, et l'inverse.
+    #[test]
+    fn signature_et_empreinte_restent_celles_d_avant_la_montee() {
+        let cle = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        assert_eq!(
+            hex(cle.verifying_key().as_bytes()),
+            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        );
+        let signature = cle.sign(b"manifeste de ki-chat");
+        assert_eq!(
+            hex(&signature.to_bytes()),
+            "1672969ee82270bf828aa580904804caf1eff6beb74cd130bba7b6115d5d1998\
+             7fe078b5126b19c4e104f93aad72503b7dc943657b9490cf28b3c0aca251ae0e"
+        );
+        assert!(cle.verifying_key().verify_strict(b"manifeste de ki-chat", &signature).is_ok());
+        assert_eq!(
+            hex(&sha2::Sha256::digest(b"ki-chat")),
+            "216ea5d2c5aad9b8df30ca48251f99b8cbe839931061be17f444adc9e0439f13"
+        );
+    }
+
     fn signe(manifeste: &str) -> (ed25519_dalek::VerifyingKey, ed25519_dalek::Signature) {
         let cle = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         (cle.verifying_key(), cle.sign(manifeste.as_bytes()))

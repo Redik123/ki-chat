@@ -482,7 +482,7 @@ impl NetHandle {
             let nonce =
                 ki_protocol::nonce_for_media(ki_protocol::MEDIA_DOMAIN_GAME_AUDIO, stream_id, s);
             let Ok(sealed) =
-                cipher.encrypt(XNonce::from_slice(&nonce), Payload { msg: opus, aad: &head })
+                cipher.encrypt(&XNonce::from(nonce), Payload { msg: opus, aad: &head })
             else {
                 return;
             };
@@ -910,6 +910,19 @@ fn motif_de_conge(code: u64, motif: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Valeur calculée avec chacha20poly1305 0.10 : un client à jour et un
+    /// client d'avant la montée doivent se comprendre, sans quoi plus de voix.
+    #[test]
+    fn le_chiffrement_reste_celui_d_avant_la_montee() {
+        let c = XChaCha20Poly1305::new(&[1u8; 32].into());
+        let nonce = XNonce::from([2u8; 24]);
+        let scelle = c.encrypt(&nonce, Payload { msg: b"trame opus", aad: b"en-tete" }).unwrap();
+        let hex: String = scelle.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "b8145782cf57933dd512aee5a7e17c21e9a085ef960b0d4af9d0");
+        let clair = c.decrypt(&nonce, Payload { msg: &scelle, aad: b"en-tete" }).unwrap();
+        assert_eq!(clair, b"trame opus");
+    }
 
     /// Seul un refus du mot de passe le fait oublier : les textes du serveur,
     /// tels qu'ils arrivent (`Accounts::authenticate`, `Refus::message`).

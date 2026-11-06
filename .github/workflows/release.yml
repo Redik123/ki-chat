@@ -41,7 +41,7 @@ env:
   # La chaîne Rust, épinglée : clippy tourne en `-D warnings`, et une
   # nouvelle version de Rust ne doit pas pouvoir bloquer une release d'un
   # jour à l'autre. Même version que ci.yml ; on la monte exprès.
-  RUST_TOOLCHAIN: "1.98.0"
+  RUST_TOOLCHAIN: "1.99.1"
 
 jobs:
   # Le filet, avant tout le reste. `needs: ci` en dessous fait que rien n'est

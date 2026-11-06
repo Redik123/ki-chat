@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             token
         }
         Err(_) => {
-            use rand::Rng;
+            use rand::RngExt;
             let hasard: u64 = rand::rng().random();
             let token = format!("ki-{hasard:016x}");
             tracing::warn!(

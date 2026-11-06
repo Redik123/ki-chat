@@ -33,7 +33,7 @@ use ki_protocol::{
     ChannelId, CompteursMusique, EtatMusique, Piste, ResumePlaylist, ServerMsg, UserId, MUSIQUE_ID, VOICE_HEADER_LEN,
 };
 use serde::{Deserialize, Serialize};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::state::AppState;
 

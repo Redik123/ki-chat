@@ -28,7 +28,7 @@ use axum::extract::{Path as Param, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 
 use crate::export::{self, Recette};

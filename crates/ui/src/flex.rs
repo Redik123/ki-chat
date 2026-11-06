@@ -43,11 +43,11 @@ pub enum Aligne {
 impl Aligne {
     fn taffy(self) -> taffy::AlignItems {
         match self {
-            Aligne::Debut => taffy::AlignItems::Start,
-            Aligne::Centre => taffy::AlignItems::Center,
-            Aligne::Fin => taffy::AlignItems::End,
-            Aligne::Etire => taffy::AlignItems::Stretch,
-            Aligne::LigneDeBase => taffy::AlignItems::Baseline,
+            Aligne::Debut => taffy::AlignItems::START,
+            Aligne::Centre => taffy::AlignItems::CENTER,
+            Aligne::Fin => taffy::AlignItems::END,
+            Aligne::Etire => taffy::AlignItems::STRETCH,
+            Aligne::LigneDeBase => taffy::AlignItems::BASELINE,
         }
     }
 }
@@ -72,12 +72,12 @@ pub enum Repartit {
 impl Repartit {
     fn taffy(self) -> taffy::JustifyContent {
         match self {
-            Repartit::Debut => taffy::JustifyContent::Start,
-            Repartit::Centre => taffy::JustifyContent::Center,
-            Repartit::Fin => taffy::JustifyContent::End,
-            Repartit::Entre => taffy::JustifyContent::SpaceBetween,
-            Repartit::Autour => taffy::JustifyContent::SpaceAround,
-            Repartit::Egal => taffy::JustifyContent::SpaceEvenly,
+            Repartit::Debut => taffy::JustifyContent::START,
+            Repartit::Centre => taffy::JustifyContent::CENTER,
+            Repartit::Fin => taffy::JustifyContent::END,
+            Repartit::Entre => taffy::JustifyContent::SPACE_BETWEEN,
+            Repartit::Autour => taffy::JustifyContent::SPACE_AROUND,
+            Repartit::Egal => taffy::JustifyContent::SPACE_EVENLY,
         }
     }
 }
@@ -149,12 +149,12 @@ impl Flex {
     }
 
     pub fn aligner(mut self, aligne: Aligne) -> Self {
-        self.style.align_items = Some(aligne.taffy());
+        self.style.align_items = aligne.taffy();
         self
     }
 
     pub fn repartir(mut self, repartit: Repartit) -> Self {
-        self.style.justify_content = Some(repartit.taffy());
+        self.style.justify_content = repartit.taffy();
         self
     }
 
@@ -183,7 +183,7 @@ impl Flex {
     ) -> R {
         #[cfg(debug_assertions)]
         let etiquette = format!("{id:?}");
-        let id = identifiant(ui, ui.id().with(id));
+        let id = identifiant(ui, ui.scope_id().with(id));
         let en_ligne = self.en_ligne();
         let etire = self.etire();
         // Toute la largeur : sans elle, la racine se contente de celle de
@@ -230,7 +230,7 @@ impl Flex {
     /// Ses éléments prennent-ils toute sa largeur (dans une colonne) ou toute
     /// sa hauteur (dans une rangée) ?
     fn etire(&self) -> bool {
-        matches!(self.style.align_items, None | Some(taffy::AlignItems::Stretch))
+        self.style.align_items.is_stretch_or_normal()
     }
 }
 

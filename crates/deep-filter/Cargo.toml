@@ -1,0 +1,39 @@
+# Le débruiteur DeepFilterNet3, repris de https://github.com/Rikorose/DeepFilterNet
+# (libDF, commit 7b14b89, MIT ou Apache-2.0 au choix, code et poids du modèle).
+#
+# Pourquoi une copie plutôt que la dépendance git : le dépôt d'origine est figé
+# sur tract ^0.21 et ndarray 0.15. Or tract 0.19 à 0.21.15 a deux failles
+# (RUSTSEC-2026-0217, GHSA-h668-6x6g-f8r5), et les 0.21 corrigées ramènent une
+# version vulnérable de `time`. Seul tract 0.23 est propre : il faut donc pouvoir
+# modifier le code. On ne garde que ce qui sert à l'inférence ; ni l'entraînement,
+# ni les jeux de données, ni l'API C.
+#
+# Le traitement du silence reste celui de la v0.5.6 et non celui de main (son
+# `skip_counter` fait tourner le modèle sur les trames muettes, ce qui change
+# l'état du réseau pendant plusieurs secondes). Résultat mesuré sur 10 s de voix
+# bruitée : même sortie que l'ancienne version sous tract 0.19 (écart 2e-7).
+[package]
+name = "ki-deep-filter"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "Débruitage DeepFilterNet3 par tract (repris de libDF)"
+
+[lib]
+# Le nom d'origine : `df::tract::DfTract`, comme dans la bibliothèque amont.
+name = "df"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+log = "0.4"
+flate2 = "1"
+tar = "0.4"
+rust-ini = "0.21"
+itertools = "0.15"
+num-complex = "0.4"
+realfft = "3.5"
+ndarray = "0.17"
+tract-core = "0.23"
+tract-onnx = "0.23"
+tract-pulse = "0.23"

@@ -73,7 +73,7 @@ struct Etat {
 
 /// Le panneau seul : rend l'emoji choisi.
 pub fn panneau(ui: &mut Ui) -> Option<String> {
-    let id = Id::new("ki-ui-selecteur-emoji");
+    let id = Id::unique("ki-ui-selecteur-emoji");
     let mut memoire = ui.data_mut(|d| d.get_persisted_mut_or_default::<Memoire>(id).clone());
     let mut etat = ui.data_mut(|d| d.get_temp_mut_or_default::<Etat>(id).clone());
     let image = ui.ctx().cumulative_frame_nr();

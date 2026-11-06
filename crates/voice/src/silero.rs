@@ -29,7 +29,7 @@ const CONTEXTE: usize = 64;
 const RATE: i64 = 16_000;
 
 pub struct Silero {
-    modele: TypedRunnableModel<TypedModel>,
+    modele: Arc<TypedRunnableModel>,
     /// Le modèle garde-t-il son entrée « fréquence » après optimisation ?
     trois_entrees: bool,
     etat: Tensor,
@@ -103,7 +103,7 @@ impl Silero {
             entrees.push(tensor0(RATE).into());
         }
         let sorties = self.modele.run(entrees)?;
-        let p = sorties[0].to_array_view::<f32>()?[[0, 0]];
+        let p = sorties[0].to_plain_array_view::<f32>()?[[0, 0]];
         self.etat = sorties[1].clone().into_tensor();
         Ok(p)
     }

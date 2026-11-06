@@ -118,7 +118,7 @@ fn evaluer(proto: &pb::ModelProto, tenseur: &str) -> TractResult<bool> {
         .konst
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("la condition {tenseur} ne se replie pas en constante : {fact:?}"))?;
-    Ok(*konst.to_scalar::<bool>()?)
+    Ok(*konst.try_as_plain_ram()?.to_scalar::<bool>()?)
 }
 
 /// Remplace chaque « If » du graphe principal par la branche que sa
@@ -211,7 +211,7 @@ fn main() -> TractResult<()> {
                 entrees_run.push(tensor0(16_000i64).into());
             }
             let sorties = modele.run(entrees_run)?;
-            derniere = sorties[0].to_array_view::<f32>()?[[0, 0]];
+            derniere = sorties[0].to_plain_array_view::<f32>()?[[0, 0]];
             etat = sorties[1].clone().into_tensor();
         }
         println!(
@@ -247,7 +247,7 @@ fn main() -> TractResult<()> {
                 entrees_run.push(tensor0(16_000i64).into());
             }
             let sorties = modele.run(entrees_run)?;
-            let p = sorties[0].to_array_view::<f32>()?[[0, 0]];
+            let p = sorties[0].to_plain_array_view::<f32>()?[[0, 0]];
             etat = sorties[1].clone().into_tensor();
             frise.push(match p {
                 p if p >= 0.8 => '█',

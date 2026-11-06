@@ -158,14 +158,16 @@ fn glyphe(grappe: &str) -> Option<GlyphId> {
 }
 
 fn faconner(grappe: &str) -> Option<GlyphId> {
-    static FACONNAGE: OnceLock<Option<harfrust::ShaperData>> = OnceLock::new();
-    let police = FontRef::new(police()?).ok()?;
-    let donnees = FACONNAGE.get_or_init(|| Some(harfrust::ShaperData::new(&police))).as_ref()?;
-    let faconneur = donnees.shaper(&police).instance(None).build();
-    let mut tampon = harfrust::UnicodeBuffer::new();
-    tampon.push_str(grappe);
-    tampon.guess_segment_properties();
-    let sortie = faconneur.shape(tampon, harfrust::ShapeOptions::new());
+    // La police du façonneur : gardée, elle ne se relit pas à chaque grappe.
+    static FACONNAGE: OnceLock<Option<harfrust::Font>> = OnceLock::new();
+    let octets = police()?;
+    let police = FontRef::new(octets).ok()?;
+    let donnees = FACONNAGE.get_or_init(|| harfrust::Font::new(octets, 0)).as_ref()?;
+    let faconneur = harfrust::ShaperFont::new(donnees);
+    let mut sortie = harfrust::Buffer::new();
+    sortie.push_str(grappe);
+    sortie.guess_segment_properties();
+    harfrust::shape(&faconneur, &mut sortie, harfrust::ShapeOptions::new()).ok()?;
     let couleurs = police.color_glyphs();
     let mut trouve = None;
     for info in sortie.glyph_infos() {
@@ -328,7 +330,7 @@ pub fn label_avec(ui: &mut Ui, texte: impl Into<WidgetText>, regler: impl FnOnce
         return ui.add(regler(egui::Label::new(job)));
     }
     let (pos, galley, response) = regler(egui::Label::new(job)).layout_in_ui(ui);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), galley.text()));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), galley.text()));
     if ui.is_rect_visible(response.rect) {
         // Comme un label d'egui : sélectionnable si le style le veut.
         let couleur = ui.style().visuals.text_color();
@@ -405,7 +407,7 @@ struct Rendu {
 type Cache = Arc<Mutex<HashMap<(GlyphId, u16), Option<Rendu>>>>;
 
 fn cache(ctx: &Context) -> Cache {
-    ctx.data_mut(|d| d.get_temp_mut_or_default::<Cache>(egui::Id::new("ki-ui-emoji")).clone())
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Cache>(egui::Id::unique("ki-ui-emoji")).clone())
 }
 
 fn rendu(cache: &Cache, ctx: &Context, id: GlyphId, resolution: u16) -> Option<Rendu> {

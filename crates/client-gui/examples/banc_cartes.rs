@@ -24,6 +24,9 @@ use ki_protocol::{
 const MOI: UserId = 1;
 const NOMS: [&str; 6] = ["", "drion", "Kevin", "Lina", "Tom", "Sacha"];
 
+/// La dernière capture rendue par egui : son rappel la dépose ici.
+static CAPTURE: std::sync::Mutex<Option<std::sync::Arc<egui::ColorImage>>> = std::sync::Mutex::new(None);
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -334,12 +337,7 @@ impl eframe::App for Banc {
             }
             return;
         };
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let image = CAPTURE.lock().ok().and_then(|mut c| c.take());
         if let Some(image) = image {
             let prefixe = if petit() { "petit-" } else { "" };
             let chemin = dossier.join(format!("{prefixe}cartes-{}.png", self.scene + 1));
@@ -372,7 +370,11 @@ impl eframe::App for Banc {
         };
         if !self.demandee && pret {
             self.demandee = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            ctx.request_screenshot(|image| {
+                if let Ok(mut c) = CAPTURE.lock() {
+                    *c = Some(image);
+                }
+            });
         }
         ctx.request_repaint();
     }

@@ -34,12 +34,13 @@ tracing-subscriber.workspace = true
 # l'overlay découpé, les streams et la reprise après un pilote
 # réinitialisé en dépendent. Les options par défaut retirées ne servaient
 # qu'à Linux (x11, wayland) et au web ; `links` ouvre les liens du chat.
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "links", "persistence"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "persistence"] }
 # Le spectre de la voix derrière la courbe de l'égaliseur (page Casque). Déjà
 # compilé pour le débruitage : la même version, rien de plus à télécharger.
 realfft = "3.5"
 # Chiffrement des trames du partage d'écran (clé de stream, en-tête en AAD).
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
+getrandom = "0.4"
 ki-client-quic = { path = "../client-quic" }
 # La connexion et la voix, partagées avec l'appli mobile.
 ki-core = { path = "../core" }
@@ -62,12 +63,12 @@ ki-loupedeck = { path = "../loupedeck" }
 # La boîte à outils d'interface : jetons de design, mise en page flexbox.
 ki-ui = { path = "../ui" }
 ab_glyph = "0.2"
-epaint_default_fonts = "0.36"
+epaint_default_fonts = "0.37"
 # Poll clavier global (GetAsyncKeyState) : le push-to-talk fonctionne
 # même quand la fenêtre n'a pas le focus — indispensable en jeu.
-device_query = "2"
+device_query = "4"
 # Dialogue natif de sélection de fichier (partage de fichiers).
-rfd = "0.15"
+rfd = "0.17"
 # Client HTTP bloquant pour l'upload de fichiers.
 ureq = { version = "2", features = ["json"] }
 # Lire le presse-papiers pour « Coller » au clic droit : egui ne le lit
@@ -79,7 +80,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Le QR code du lien téléphone (atelier des clips) : la matrice seule, que
 # l'on dessine nous-mêmes.
 qrcode = { version = "0.14", default-features = false }
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 # Vérification de la signature des mises à jour. 100 % Rust, pas de
 # dépendance C : l'application remplace son propre exécutable, c'est le seul
 # endroit du projet où une bibliothèque de cryptographie tierce serait un
@@ -87,10 +88,10 @@ base64 = "0.22"
 # `std` : sans lui, l'erreur du crate n'implémente pas `std::error::Error`
 # et ne remonte pas par `?`. On ne prend rien d'autre — ni signature, ni
 # génération de clés : ce binaire ne fait que vérifier.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "3", default-features = false }
 # L'empreinte de l'actif que le manifeste de mise à jour annonce : déjà dans
 # l'arbre (ed25519-dalek s'en sert).
-sha2 = "0.10"
+sha2 = "0.11"
 # Le trait `HasWindowHandle`, que `eframe::Frame` et `CreationContext`
 # implémentent : c'est par lui qu'on obtient le HWND de la fenêtre
 # principale (réduction dans la zone de notification, sonde zone_probe).
@@ -124,12 +125,12 @@ security-framework = "3"
 # dépendance est déclarée pour Windows et macOS seulement afin que
 # cargo-deny, qui résout aussi la cible Linux, ne voie jamais ces licences.
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-tray-icon = { version = "0.25", default-features = false }
+tray-icon = { version = "0.26", default-features = false }
 
 # Coffre à secrets natif : DPAPI protège les mots de passe mémorisés avec
 # une clé dérivée de la session Windows. Déjà tiré par eframe.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     # SetThreadExecutionState : pas de veille système en plein salon vocal.

@@ -199,7 +199,7 @@ mod platform {
             .copy_bytes(&mut nonce)
             .map_err(|e| format!("tirage du nonce : {e}"))?;
         let sealed = cipher
-            .encrypt(XNonce::from_slice(&nonce), plaintext)
+            .encrypt(&XNonce::from(nonce), plaintext)
             .map_err(|_| "chiffrement impossible".to_string())?;
         let mut out = nonce.to_vec();
         out.extend_from_slice(&sealed);
@@ -213,9 +213,10 @@ mod platform {
             return Err("blob tronqué".into());
         }
         let (nonce, corps) = sealed.split_at(NONCE);
+        let nonce: [u8; NONCE] = nonce.try_into().map_err(|_| "blob tronqué".to_string())?;
         let cipher = XChaCha20Poly1305::new(&cle()?.into());
         cipher
-            .decrypt(XNonce::from_slice(nonce), corps)
+            .decrypt(&XNonce::from(nonce), corps)
             .map_err(|_| "blob illisible avec la clé de ce Trousseau".to_string())
     }
 

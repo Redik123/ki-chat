@@ -27,8 +27,8 @@ tracing-subscriber.workspace = true
 # La voix part chiffrée comme celle d'un vrai client : le serveur ne
 # déchiffre pas, mais la taille des paquets et le coût du relais doivent être
 # ceux de la production.
-chacha20poly1305 = "0.10"
-rand = "0.9"
+chacha20poly1305 = "0.11"
+rand = "0.10"
 
 # `timeBeginPeriod` : sans lui, le minuteur de Windows tourne à 15,6 ms et
 # `interval(20 ms)` livre une trame toutes les 31 ms — la charge émettrait
@@ -36,4 +36,4 @@ rand = "0.9"
 # tiers sans le dire. Une dégradation silencieuse n'a pas sa place dans un
 # outil de mesure.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Media"] }
+windows = { version = "0.62", features = ["Win32_Media"] }

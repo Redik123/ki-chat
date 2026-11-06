@@ -530,7 +530,7 @@ fn bloc_forme(ui: &mut Ui, vue: &Vue) {
             if v + d > 0 {
                 let part = v as f32 / (v + d) as f32;
                 let couleur = if part >= 0.5 { SPEAK } else { DANGER };
-                graphes::anneau(ui, egui::Id::new("profil_anneau"), part, 64.0, couleur, &format!("{:.0} %", part * 100.0))
+                graphes::anneau(ui, egui::Id::unique("profil_anneau"), part, 64.0, couleur, &format!("{:.0} %", part * 100.0))
                     .on_hover_text("la part des victoires sur ces classés");
                 ui.add_space(espace::L);
             }
@@ -768,7 +768,7 @@ fn les_actes(ui: &mut Ui, vue: &Vue) {
             // d'un acte à l'autre se voient.
             let barres = barres_d_actes(saisons);
             let haut = barres.iter().map(|b| b.valeur).fold(0.0, f32::max) + 2.0;
-            graphes::barres_verticales(ui, egui::Id::new("profil_actes"), &barres, 110.0, Some(haut.min(26.0)));
+            graphes::barres_verticales(ui, egui::Id::unique("profil_actes"), &barres, 110.0, Some(haut.min(26.0)));
         },
     );
 }

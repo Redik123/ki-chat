@@ -685,7 +685,7 @@ impl Tactique {
         let (max_l, max_h) = ((ecran.width() - 40.0).max(380.0), (ecran.height() - 40.0).max(360.0));
         let mut ouvert = true;
         egui::Window::new("Carte tactique")
-            .id(egui::Id::new("carte_tactique"))
+            .id(egui::Id::unique("carte_tactique"))
             .open(&mut ouvert)
             .collapsible(false)
             .resizable(true)

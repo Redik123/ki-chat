@@ -107,7 +107,7 @@ impl Liste {
     pub fn new(id_salt: impl egui::AsIdSalt) -> Self {
         Self {
             etiquette: format!("{id_salt:?}"),
-            id_salt: Id::new(id_salt),
+            id_salt: Id::unique(id_salt),
             hauteur_estimee: 40.0,
             ecart: None,
             marge: None,
@@ -191,7 +191,7 @@ impl Liste {
             Some((total - hauteur_vue).max(0.0))
         } else {
             let decalage =
-                etat.defilement.and_then(|d| scroll_area::State::load(ui.ctx(), d)).map(|s| s.offset.y);
+                etat.defilement.and_then(|d| scroll_area::State::load(ui.ctx(), d)).map(|s| s.clamped_offset().y);
             match (ancre_avant, decalage) {
                 (Some((i, y)), Some(d)) if (hauts[i] - y).abs() > 0.1 => Some((d + hauts[i] - y).max(0.0)),
                 _ => None,
@@ -229,9 +229,9 @@ impl Liste {
                 let rect =
                     Rect::from_min_size(pos2(origine.x, origine.y + y), vec2(largeur, vue.height().max(1.0)));
                 let cadre = if montrer {
-                    UiBuilder::new().id(cles[i]).max_rect(rect)
+                    UiBuilder::new().scope_id(cles[i]).max_rect(rect)
                 } else {
-                    UiBuilder::new().id(cles[i].with("mesure")).max_rect(rect).invisible()
+                    UiBuilder::new().scope_id(cles[i].with("mesure")).max_rect(rect).invisible()
                 };
                 let mut enfant = ui.new_child(cadre);
                 element(&mut enfant, i);
@@ -332,7 +332,7 @@ impl Liste {
         #[cfg(not(debug_assertions))]
         let _ = (&self.etiquette, recalee);
 
-        let decalage = sortie.state.offset.y;
+        let decalage = sortie.state.clamped_offset().y;
         let fond = (sortie.content_size.y - sortie.inner_rect.height()).max(0.0);
         etat.en_bas = if au_bas {
             // Envoyée en bas à cette image, elle y reste tant qu'on n'est pas
@@ -439,7 +439,10 @@ mod tests {
 
     impl Banc {
         fn new(largeur: f32, hauteur: f32) -> Self {
-            Self { ctx: Context::default(), taille: vec2(largeur, hauteur), en_plus: Default::default() }
+            let ctx = Context::default();
+            // Comme `style::installer` : pas d'élastique au bord des listes.
+            ctx.all_styles_mut(|s| s.spacing.scroll.kinetic.rubber_band = false);
+            Self { ctx, taille: vec2(largeur, hauteur), en_plus: Default::default() }
         }
 
         fn image(&self, elements: &[u64], reglage: impl Fn(Liste) -> Liste) -> Image {
@@ -470,8 +473,12 @@ mod tests {
         /// Défile comme le ferait la molette : seul le décalage change.
         fn defiler(&self, image: &Image, decalage: f32) {
             let id = image.sortie.id_defilement;
-            let mut etat = scroll_area::State::load(&self.ctx, id).expect("pas de défilement");
-            etat.offset.y = decalage;
+            let etat = scroll_area::State::load(&self.ctx, id).expect("pas de défilement");
+            // egui 0.37 n'offre plus de quoi écrire le décalage : on passe par
+            // la forme sérialisée de l'état, sans toucher au code de la liste.
+            let mut brut = serde_json::to_value(etat).expect("état du défilement");
+            brut["offset"]["y"] = serde_json::json!(decalage);
+            let etat: scroll_area::State = serde_json::from_value(brut).expect("état du défilement");
             etat.store(&self.ctx, id);
         }
 

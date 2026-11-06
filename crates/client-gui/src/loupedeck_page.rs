@@ -324,7 +324,7 @@ impl KiApp {
         let mut clic = None;
 
         // L'écran : une touche, ou la case d'une molette sur une bande.
-        let rep = ui.interact(zone, ui.id().with("loupedeck-ecran"), Sense::click());
+        let rep = ui.interact(zone, ui.scope_id().with("loupedeck-ecran"), Sense::click());
         let case_sous = |pos: Pos2| -> Selection {
             let (x, y) = ((pos.x - zone.left()) / e, (pos.y - zone.top()) / e);
             let rangee = ((y / 90.0) as usize).min(2);
@@ -366,7 +366,7 @@ impl KiApp {
             let r = 18.0 * e;
             let rep = ui.interact(
                 Rect::from_center_size(centre, Vec2::splat(2.0 * r + 7.0 * e)),
-                ui.id().with(("loupedeck-molette", i)),
+                ui.scope_id().with(("loupedeck-molette", i)),
                 Sense::click(),
             );
             let choisie = selection == Some(Selection::Molette(i));
@@ -393,7 +393,7 @@ impl KiApp {
             let r = 14.0 * e;
             let rep = ui.interact(
                 Rect::from_center_size(centre, Vec2::splat(2.0 * r + 7.0 * e)),
-                ui.id().with(("loupedeck-rond", i)),
+                ui.scope_id().with(("loupedeck-rond", i)),
                 Sense::click(),
             );
             let choisi = selection == Some(Selection::Rond(i));

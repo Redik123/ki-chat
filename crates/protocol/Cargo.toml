@@ -10,13 +10,13 @@ serde_json.workspace = true
 # Les vignettes (logos, photos de profil) voyagent en base64 : le contrôle
 # de leur en-tête PNG se fait ici, pour que client et serveur appliquent
 # exactement la même règle.
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Bancs de mesure (P1). `default-features = false` : on ne veut ni les
 # rapports HTML ni leur arbre de dépendances — les chiffres se lisent au
 # terminal, et le crate doit rester léger à compiler en CI.
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "diffusion"

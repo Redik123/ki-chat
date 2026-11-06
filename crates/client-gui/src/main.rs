@@ -2669,6 +2669,7 @@ impl KiApp {
                     ui.horizontal(|ui| {
                         let champ = ui.add(
                             egui::TextEdit::singleline(&mut self.musique_playlist_nom)
+                                .margin(egui::Margin::symmetric(4, 5))
                                 .hint_text("nom de la playlist")
                                 .desired_width(140.0)
                                 .char_limit(ki_protocol::MAX_NOM_PLAYLIST),
@@ -2764,7 +2765,7 @@ impl KiApp {
             .collect();
         let titre = if id == ki_protocol::MUSIQUE_ID { "Musique" } else { "VALORANT" };
         egui::Window::new(format!("{titre} · bot"))
-            .id(egui::Id::new("fiche_bot"))
+            .id(egui::Id::unique("fiche_bot"))
             .collapsible(false)
             .resizable(false)
             .default_width(440.0)
@@ -8797,7 +8798,7 @@ impl KiApp {
 
         if survol {
             let rect = ctx.content_rect();
-            egui::Area::new(egui::Id::new("depot-fichier"))
+            egui::Area::new(egui::Id::unique("depot-fichier"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(rect.min)
                 .show(ctx, |ui| {
@@ -8891,7 +8892,7 @@ impl KiApp {
                         let sortie = ui
                             .allocate_ui_with_layout(taille, disposition, |ui| {
                                 egui::TextEdit::multiline(&mut self.input)
-                                    .id(egui::Id::new("saisie_du_chat"))
+                                    .id(egui::Id::unique("saisie_du_chat"))
                                     .char_limit(ki_protocol::MAX_CHAT_TEXT)
                                     .desired_rows(lignes)
                                     .frame(egui::Frame::new().inner_margin(marge::symetrique(espace::XS, espace::XS)))
@@ -9081,7 +9082,7 @@ impl KiApp {
         let peut_supprimer =
             Some(msg.user_id) == self.my_id || self.can(ki_protocol::perm::DELETE_MESSAGES);
         let mut fermer = false;
-        let zone = egui::Area::new(egui::Id::new("menu-message"))
+        let zone = egui::Area::new(egui::Id::unique("menu-message"))
             .order(egui::Order::Foreground)
             .fixed_pos(menu.pos)
             .show(ctx, |ui| {
@@ -9205,7 +9206,7 @@ impl KiApp {
     /// sélection s'il y en a une —, et y remet le curseur juste après : on
     /// continue d'écrire comme si on l'avait tapé.
     fn inserer_dans_la_saisie(&mut self, ctx: &egui::Context, texte: &str) {
-        let id = egui::Id::new("saisie_du_chat");
+        let id = egui::Id::unique("saisie_du_chat");
         let mut etat = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
         let total = self.input.chars().count();
         let (debut, fin) = match etat.cursor.char_range() {
@@ -10388,6 +10389,7 @@ impl KiApp {
                                     ui.horizontal(|ui| {
                                         let champ = ui.add(
                                             egui::TextEdit::singleline(&mut self.riot_saisie)
+                                                .margin(egui::Margin::symmetric(4, 5))
                                                 .hint_text("Pseudo#TAG")
                                                 .desired_width(200.0),
                                         );
@@ -10964,9 +10966,8 @@ impl KiApp {
         if self.go_live.is_some() || self.go_live_attente.is_some() {
             return;
         }
-        use chacha20poly1305::aead::rand_core::RngCore;
         let mut key = [0u8; 32];
-        chacha20poly1305::aead::OsRng.fill_bytes(&mut key);
+        getrandom::fill(&mut key).expect("hasard du système indisponible");
         self.go_live_attente = Some(key);
         self.regulateur = partage::Regulateur::new();
         self.show_diffusion = false;
@@ -14128,7 +14129,7 @@ pub(crate) fn il_y_a(ms: u64) -> String {
 fn fantome_deplacement(ctx: &egui::Context) {
     let Some(glisse) = egui::DragAndDrop::payload::<DeplacementVocal>(ctx) else { return };
     let Some(pos) = ctx.pointer_hover_pos() else { return };
-    egui::Area::new(egui::Id::new("deplacement-vocal"))
+    egui::Area::new(egui::Id::unique("deplacement-vocal"))
         .order(egui::Order::Tooltip)
         .fixed_pos(pos + Vec2::new(14.0, 10.0))
         .interactable(false)

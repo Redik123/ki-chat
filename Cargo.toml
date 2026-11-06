@@ -4,6 +4,7 @@ members = [
     "crates/protocol",
     "crates/server",
     "crates/voice",
+    "crates/deep-filter",
     "crates/video",
     "crates/media",
     "crates/ki-opus",
@@ -51,6 +52,11 @@ opt-level = 3
 
 # Le pipeline vidéo lui-même touche aux pixels : optimisé aussi en dev.
 [profile.dev.package.ki-video]
+opt-level = 3
+
+# Le débruiteur est une crate de l'espace de travail, donc hors du "*" : sans
+# cette ligne, le réseau de neurones tournerait sans optimisation en dev.
+[profile.dev.package.ki-deep-filter]
 opt-level = 3
 
 # debug=false : avec DEBUG=true, nasm reçoit des flags de débogage qu'il

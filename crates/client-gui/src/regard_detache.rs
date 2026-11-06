@@ -178,7 +178,7 @@ impl Etat {
             .frame(egui::Frame::NONE.fill(Color32::BLACK))
             .show(ui, |ui| {
                 let dispo = ui.max_rect();
-                let toile = ui.interact(dispo, egui::Id::new("regard-toile"), Sense::click());
+                let toile = ui.interact(dispo, egui::Id::unique("regard-toile"), Sense::click());
                 if toile.double_clicked() {
                     d.basculer_plein = true;
                 }

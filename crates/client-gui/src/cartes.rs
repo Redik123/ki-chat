@@ -210,7 +210,7 @@ impl Cartes {
         let (max_l, max_h) = ((ecran.width() - 40.0).max(360.0), (ecran.height() - 40.0).max(300.0));
         let mut ouvert = true;
         egui::Window::new("Dernière carte")
-            .id(egui::Id::new("table_cartes"))
+            .id(egui::Id::unique("table_cartes"))
             .open(&mut ouvert)
             .collapsible(false)
             .resizable(true)
@@ -519,7 +519,7 @@ impl Cartes {
             }
             // Le contre se joue sur sa place, au clic.
             if assis && t.expose == Some(j.user_id) {
-                let zone_clic = ui.interact(case, ui.id().with(("contrer", j.user_id)), Sense::click());
+                let zone_clic = ui.interact(case, ui.scope_id().with(("contrer", j.user_id)), Sense::click());
                 if zone_clic.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     actions.push(ActionCartes::Contrer);
                 }
@@ -567,7 +567,7 @@ impl Cartes {
 
         // Le sens du jeu, en arc autour des deux tas ; quand il s'inverse,
         // les flèches font un demi-tour.
-        let cle = ui.id().with(("sens_du_jeu", t.manche));
+        let cle = ui.scope_id().with(("sens_du_jeu", t.manche));
         // Fenêtre fermée un moment : le sens a pu changer sans qu'on le
         // voie ; il se pose sans faire tourner les flèches.
         let vu_a_l_instant = self.peinte_le.is_some_and(|q| q.elapsed() < Duration::from_millis(500));
@@ -578,7 +578,7 @@ impl Cartes {
         // La pioche : un clic pioche, quand c'est à moi et que je n'ai pas
         // encore pioché.
         let peut_piocher = a_moi && t.piochee.is_none();
-        let clic = ui.interact(pioche, ui.id().with("pioche"), Sense::click());
+        let clic = ui.interact(pioche, ui.scope_id().with("pioche"), Sense::click());
         let survol = peut_piocher && clic.hovered();
         if peut_piocher {
             let halo = if survol { 110 } else { 55 };
@@ -875,7 +875,7 @@ impl Cartes {
         // Une carte jouable est relevée : on la vise là où elle est, et
         // jusqu'à sa place de repos pour que le pointeur ne la lâche pas.
         // La dernière posée par-dessus l'emporte — la rangée de devant.
-        let reponse = ui.interact(rect.expand2(vec2(0.0, LEVEE)), ui.id().with("main_cartes"), Sense::click());
+        let reponse = ui.interact(rect.expand2(vec2(0.0, LEVEE)), ui.scope_id().with("main_cartes"), Sense::click());
         let survol = reponse.hover_pos().and_then(|pos| {
             cases.iter().zip(&jouables).rposition(|(r, &jouable)| {
                 let visee = if jouable { Rect::from_min_max(r.min - vec2(0.0, LEVEE), r.max) } else { *r };
@@ -893,7 +893,7 @@ impl Cartes {
                 continue;
             }
             let leve = ui.ctx().animate_bool_with_time(
-                ui.id().with(("leve", carte.0)),
+                ui.scope_id().with(("leve", carte.0)),
                 survol == Some(i) && jouables[i],
                 0.10,
             );
@@ -960,7 +960,7 @@ impl Cartes {
         for (k, couleur) in CouleurCarte::TOUTES.into_iter().enumerate() {
             let pos = centre + vec2((k as f32 - 1.5) * 84.0, 0.0);
             let zone = Rect::from_center_size(pos, Vec2::splat(rayon_pastille * 2.0));
-            let clic = ui.interact(zone, ui.id().with(("couleur", k)), Sense::click());
+            let clic = ui.interact(zone, ui.scope_id().with(("couleur", k)), Sense::click());
             let r = if clic.hovered() { rayon_pastille + 4.0 } else { rayon_pastille };
             p.circle_filled(pos, r, teinte(couleur));
             p.circle_stroke(pos, r, Stroke::new(2.0, Color32::from_white_alpha(if clic.hovered() { 230 } else { 120 })));
@@ -993,7 +993,7 @@ impl Cartes {
     ) {
         p.rect_filled(rect, rayon::XL, Color32::from_black_alpha(190));
         // Le voile prend les clics : rien de ce qu'il couvre ne se joue.
-        let _ = ui.interact(rect, ui.id().with("voile_cible"), Sense::click());
+        let _ = ui.interact(rect, ui.scope_id().with("voile_cible"), Sense::click());
         let autres: Vec<&JoueurCartes> = t.joueurs.iter().filter(|j| j.user_id != moi).collect();
         let case = vec2(96.0, 104.0);
         let par_ligne = ((rect.width() - 40.0) / case.x).floor().max(1.0) as usize;
@@ -1010,7 +1010,7 @@ impl Cartes {
             let x0 = rect.center().x - case.x * ligne.len() as f32 / 2.0;
             for (k, j) in ligne.iter().enumerate() {
                 let zone = Rect::from_min_size(pos2(x0 + k as f32 * case.x, haut + l as f32 * case.y), case).shrink(3.0);
-                let clic = ui.interact(zone, ui.id().with(("cible", j.user_id)), Sense::click());
+                let clic = ui.interact(zone, ui.scope_id().with(("cible", j.user_id)), Sense::click());
                 if clic.hovered() {
                     p.rect_filled(zone, rayon::L, c::translucide(c::ACCENT, 45));
                 }

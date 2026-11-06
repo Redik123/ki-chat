@@ -47,7 +47,9 @@ use ki_protocol::{
 };
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
+use rand::RngExt;
+#[cfg(test)]
+use rand::SeedableRng;
 
 use crate::state::AppState;
 
@@ -996,7 +998,7 @@ pub fn agir(state: &AppState, user_id: UserId, action: ActionCartes) -> Result<(
                     return Err("personne n'a ouvert de table dans ton salon");
                 }
                 tracing::info!("cartes : table ouverte dans le salon {salon}");
-                e.insert(Salle { table: Table::new(salon, user_id, StdRng::from_os_rng()), vus: HashSet::new() })
+                e.insert(Salle { table: Table::new(salon, user_id, rand::make_rng::<StdRng>()), vus: HashSet::new() })
             }
         };
         let t = &mut salle.table;
