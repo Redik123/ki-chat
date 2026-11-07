@@ -17,9 +17,7 @@ use std::time::Duration;
 
 #[cfg(windows)]
 use anyhow::Context;
-#[cfg(windows)]
-use ki_opus::{Application, Bitrate, Encoder};
-use ki_opus::{Channels, Decoder};
+use ki_opus::{Application, Bitrate, Channels, Decoder, Encoder};
 
 #[cfg(windows)]
 use crate::{journal, wasapi};
@@ -133,6 +131,67 @@ impl Drop for GameAudio {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+/// Le son d'un stream qui ne se joue pas ici : le téléphone le décode pour le réencoder
+/// en AAC, le seul format que documente une télé.
+pub struct DecodeurSon {
+    dec: Decoder,
+    pcm: Vec<f32>,
+}
+
+impl DecodeurSon {
+    pub fn new() -> anyhow::Result<Self> {
+        let dec = Decoder::new(SAMPLE_RATE, Channels::Stereo)
+            .map_err(|e| anyhow::anyhow!("décodeur Opus stéréo : {e}"))?;
+        // Jusqu'à 60 ms d'un coup, au cas où l'émetteur grouperait.
+        Ok(Self { dec, pcm: vec![0.0; TRAME * 3 * 2] })
+    }
+
+    /// Un paquet : du stéréo entrelacé à 48 kHz, ou rien s'il est illisible.
+    pub fn decoder(&mut self, paquet: &[u8]) -> Option<&[f32]> {
+        let n = self.dec.decode_float(paquet, &mut self.pcm, false).ok()?;
+        Some(&self.pcm[..n * 2])
+    }
+}
+
+/// L'encodage du son d'un stream dont la capture se fait ailleurs : Android capture
+/// en Kotlin, et verse ici son stéréo entrelacé à 48 kHz.
+pub struct EncodeurSon {
+    enc: Encoder,
+    accum: Vec<f32>,
+    sortie: Vec<u8>,
+    emettre: PaquetAudio,
+}
+
+impl EncodeurSon {
+    pub fn new(bitrate: i32, emettre: PaquetAudio) -> anyhow::Result<Self> {
+        let mut enc = Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)
+            .map_err(|e| anyhow::anyhow!("encodeur Opus stéréo : {e}"))?;
+        let _ = enc.set_bitrate(Bitrate::Bits(bitrate));
+        // Un téléphone a autre chose à faire que le meilleur Opus possible.
+        let _ = enc.set_complexity(5);
+        Ok(Self {
+            enc,
+            accum: Vec::with_capacity(TRAME * 2 * 4),
+            // Taillée comme sur PC : un paquet tient dans un datagramme.
+            sortie: vec![0u8; ki_protocol::DATAGRAMME_SUR - ki_protocol::AUDIO_HEADER_LEN - 16],
+            emettre,
+        })
+    }
+
+    /// Du son de plus, dont la fin vient d'être capturée à `fin_us` : une trame
+    /// Opus par 20 ms, chacune remontant d'autant depuis la fin.
+    pub fn pousser(&mut self, pcm: &[f32], fin_us: u64) {
+        self.accum.extend_from_slice(pcm);
+        while self.accum.len() >= TRAME * 2 {
+            let pts_us = fin_us.saturating_sub(self.accum.len() as u64 * 1_000_000 / (2 * SAMPLE_RATE as u64));
+            if let Ok(n) = self.enc.encode_float(&self.accum[..TRAME * 2], &mut self.sortie) {
+                (self.emettre)(&self.sortie[..n], pts_us);
+            }
+            self.accum.drain(..TRAME * 2);
         }
     }
 }

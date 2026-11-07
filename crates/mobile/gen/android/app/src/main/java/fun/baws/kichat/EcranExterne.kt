@@ -130,6 +130,16 @@ object EcranExterne {
     }
   }
 
+  /** Un message à montrer dans le bandeau de la page. */
+  fun direALaPage(texte: String) = agirAvec("bandeau", texte)
+
+  /** Une action pour la page, avec un texte. */
+  fun agirAvec(action: String, texte: String) {
+    val webView = page?.get() ?: return
+    val cite = org.json.JSONObject.quote(texte)
+    webView.post { webView.evaluateJavascript("window.kiAction && window.kiAction(\"$action\", $cite)", null) }
+  }
+
   /** Un bouton du widget ou de la notification, transmis à la page. */
   fun agir(action: String): Boolean {
     val webView = page?.get() ?: return false

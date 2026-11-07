@@ -4,6 +4,8 @@
 //!   alimente, pilotés depuis un fil à part ;
 //! - [`etat`] : l'état du client (salons, membres, fil, non-lus, vocal),
 //!   tenu à jour d'après les messages du serveur ;
+//! - [`flux`] : les trames d'un partage d'écran, scellées, ouvertes, remises en
+//!   ordre ;
 //! - [`markup`] : la mise en forme des messages et la détection des
 //!   mentions ;
 //! - [`apparence`] : les couleurs des pseudos et des rangs, celles du PC ;
@@ -11,6 +13,8 @@
 
 pub mod apparence;
 pub mod etat;
+pub mod flux;
+pub mod fmp4;
 pub mod maj;
 pub mod markup;
 pub mod net;

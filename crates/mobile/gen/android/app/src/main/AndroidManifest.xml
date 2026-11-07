@@ -12,6 +12,12 @@
     <!-- Rester connecté hors vocal (option des réglages) : aucun type
          standard ne convient à une messagerie sans service de push. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Diffuser son écran : la capture système (voir DiffusionService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Envoyer un stream sur une télé : elle vient le chercher sur le téléphone, par le
+         réseau local (voir tele.rs). Demandée à ce moment-là, depuis Android 17. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Les notifications de messages et de mentions. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -83,5 +89,12 @@
             android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
             android:value="Messagerie auto-hébergée : garder la connexion au serveur du groupe pour recevoir les messages" />
         </service>
+        <service
+          android:name=".DiffusionService"
+          android:exported="false"
+          android:foregroundServiceType="mediaProjection" />
+        <meta-data
+          android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+          android:value="fun.baws.kichat.ReglagesCast" />
     </application>
 </manifest>

@@ -43,6 +43,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(target_os = "android")'.dependencies]
 # Les traces Rust dans logcat (balise « ki-chat »).
 tracing-android = "0.2"
+# Les partages d'écran (flux.rs) : le décodeur matériel, la surface de la vue
+# native, et le pont avec Kotlin.
+ndk-sys = { version = "0.6", features = ["media", "nativewindow"] }
+jni-sys = "0.3"
+libc = "0.2"
+getrandom = "0.4"
 
 # iOS : ce que fait KiAndroid (Kotlin) côté Android, fait ici en Rust — voir
 # ios.rs. Le Trousseau pour le mot de passe, la session audio pour le micro

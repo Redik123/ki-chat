@@ -7,9 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ki_client_quic::quinn;
 use ki_protocol::{ClientMsg, MediaHeader, StreamMeta};
-use tokio::sync::mpsc as tokio_mpsc;
+use ki_core::flux::lancer_envoi;
 
 pub use ki_core::net::*;
 
@@ -131,28 +130,4 @@ impl EmissionVideo for NetHandle {
             }
         }))
     }
-}
-
-/// La tâche d'envoi d'une qualité : chaque trame dans SON flux QUIC
-/// unidirectionnel, le plus ancien d'abord — la priorité décroît avec
-/// l'âge, en saturant (cf. le relais, même arithmétique). File de deux
-/// trames : au-delà, l'émetteur jette à la source.
-fn lancer_envoi(
-    rt: &tokio::runtime::Handle,
-    conn: quinn::Connection,
-) -> tokio_mpsc::Sender<(u64, Vec<u8>)> {
-    let (tx, mut rx) = tokio_mpsc::channel::<(u64, Vec<u8>)>(2);
-    rt.spawn(async move {
-        while let Some((seq, bytes)) = rx.recv().await {
-            let Ok(mut flux) = conn.open_uni().await else {
-                return;
-            };
-            let _ = flux.set_priority(0i32.saturating_sub(seq.min(i32::MAX as u64) as i32));
-            if flux.write_all(&bytes).await.is_err() {
-                return;
-            }
-            let _ = flux.finish();
-        }
-    });
-    tx
 }

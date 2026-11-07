@@ -53,6 +53,35 @@ class KiAndroid(private val activite: Activity) {
   @JavascriptInterface
   fun ecranExterne(etat: String) = EcranExterne.recevoir(contexte, etat)
 
+  /** Regarder un stream : la vue native plein écran, en attendant la première image. */
+  @JavascriptInterface
+  fun ouvrirRegard(nom: String) {
+    (activite as? MainActivity)?.ouvrirRegard(nom)
+  }
+
+  @JavascriptInterface
+  fun fermerRegard() {
+    (activite as? MainActivity)?.fermerRegard()
+  }
+
+  /** Ce téléphone sait-il envoyer un stream sur une télé ? */
+  @JavascriptInterface
+  fun teleDisponible(): Boolean = TeleCast.disponible(contexte)
+
+  @JavascriptInterface
+  fun regarderSurTele(nom: String) {
+    (activite as? MainActivity)?.regarderSurTele(nom)
+  }
+
+  /** Diffuser son écran : `qualite` parmi celles de DiffusionService. */
+  @JavascriptInterface
+  fun diffuser(qualite: String) {
+    (activite as? MainActivity)?.diffuser(qualite)
+  }
+
+  @JavascriptInterface
+  fun arreterDiffusion() = DiffusionService.arreter(contexte)
+
   @JavascriptInterface
   fun retenirSecret(nom: String, valeur: String) = Secrets.retenir(contexte, nom, valeur)
 

@@ -99,6 +99,9 @@
   /* Barre vocale */
   .barre-vocale { display: flex; align-items: center; padding: 8px 10px 8px 14px; background: var(--releve); border-top: 1px solid var(--bord); }
   .barre-vocale .ou { flex: 1; min-width: 0; }
+  .barre-tele { display: flex; align-items: center; padding: 8px 10px 8px 14px; background: var(--releve); border-top: 1px solid var(--bord); }
+  .barre-tele .ou { flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .barre-tele button { margin-left: 6px; flex: none; }
   .barre-vocale .ou b { color: var(--accent); font-size: 13px; display: block; }
   .barre-vocale .ou span { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
   .rond { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; background: var(--actif); color: var(--texte); }
@@ -147,6 +150,10 @@
   .emojis button:active { background: var(--survol); }
   .volume { display: flex; align-items: center; padding: 8px 18px; }
   .volume .nom { flex: 1; min-width: 0; }
+  .diffusion { display: flex; align-items: center; justify-content: space-between; padding: 6px 18px 12px; }
+  .diffusion .nom { flex: 1; min-width: 0; font-size: 14px; }
+  .diffusion select { background: var(--fond); color: var(--texte); border: 1px solid var(--bord); border-radius: 8px; padding: 6px; margin-left: 8px; }
+  .regarder { padding: 4px 10px; margin-left: 8px; font-size: 12px; }
   .volume input { width: 45%; accent-color: var(--accent); }
   .reglage-volume { padding: 4px 18px 10px; }
   .reglage-volume .haut { display: flex; align-items: center; color: var(--doux); font-size: 13px; }
@@ -229,6 +236,7 @@
   <symbol id="i-haut-parleur" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9a4 4 0 0 1 0 6"/></symbol>
   <symbol id="i-salons" viewBox="0 0 24 24"><path d="M5 9h14M4 15h14M10 4l-2 16M16 4l-2 16"/></symbol>
   <symbol id="i-membres" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18.5 20a6.5 6.5 0 0 0-2.5-5.1"/></symbol>
+  <symbol id="i-ecran" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
   <symbol id="i-telephone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18h2"/></symbol>
   <symbol id="i-sortir" viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></symbol>
   <symbol id="i-repondre" viewBox="0 0 24 24"><path d="M10 7L4 12l6 5M4 12h10a6 6 0 0 1 6 6"/></symbol>
@@ -294,6 +302,7 @@
   <div class="defile" id="vue-salons"></div>
   <div class="defile cache" id="vue-membres"></div>
   <div class="defile cache" id="vue-reglages"></div>
+  <div class="barre-tele cache" data-barre-tele></div>
   <div class="barre-vocale cache" data-barre-vocale></div>
   <nav class="onglets">
     <button class="actif" data-onglet="salons"><svg><use href="#i-salons"/></svg>Salons<span class="pastille total cache" id="total-non-lus"></span></button>
@@ -309,6 +318,7 @@
     <h1><span class="sous">#</span> <span id="nom-salon"></span></h1>
   </div>
   <div class="defile" id="defile-fil"><div id="fil"></div></div>
+  <div class="barre-tele cache" data-barre-tele></div>
   <div class="barre-vocale cache" data-barre-vocale></div>
   <div class="redaction">
     <div class="repond cache" id="repond"><svg class="petit"><use href="#i-repondre"/></svg><span id="repond-a"></span><button class="icone" id="annuler-reponse" aria-label="Annuler la réponse"><svg class="petit"><use href="#i-fermer"/></svg></button></div>
@@ -681,7 +691,7 @@
       if (s.occupants.length) {
         const o = document.createElement("div");
         o.className = "occupants";
-        for (const p of s.occupants) o.append(occupant(p));
+        for (const p of s.occupants) o.append(occupant(p, s));
         racine.append(o);
       }
     }
@@ -698,7 +708,117 @@
     return d;
   }
 
-  function occupant(p) {
+  // Les partages d'écran : la vue et la capture sont natives (voir RegardVue.kt et
+  // DiffusionService.kt), la page ne fait que les demander.
+  const streamsPossibles = !!window.KiAndroid?.ouvrirRegard;
+  // Sur une télé : le stream part là-bas, et le téléphone reste sur ki-chat, pour
+  // pouvoir écrire. C'est Kotlin qui choisit la télé (TeleCast.kt) et qui répond
+  // « tele_pret » ; on ne commence à regarder qu'à ce moment-là.
+  const teleDisponible = !!window.KiAndroid?.teleDisponible?.();
+  let teleNom = null;
+  let teleVoulue = null;
+  function dessinerBarreTele() {
+    for (const barre of document.querySelectorAll("[data-barre-tele]")) {
+      barre.classList.toggle("cache", !teleNom);
+      barre.replaceChildren();
+      if (!teleNom) continue;
+      const ou = document.createElement("span");
+      ou.className = "ou";
+      ou.textContent = "Sur la télé · " + teleNom;
+      const ici = document.createElement("button");
+      ici.className = "petit-bouton";
+      ici.textContent = "Sur le téléphone";
+      ici.onclick = () => {
+        const nom = teleNom;
+        teleNom = null;
+        dessinerBarreTele();
+        window.KiAndroid.ouvrirRegard(nom);
+      };
+      const stop = document.createElement("button");
+      stop.className = "petit-bouton";
+      stop.textContent = "Arrêter";
+      stop.onclick = () => {
+        teleNom = null;
+        dessinerBarreTele();
+        window.KiAndroid.fermerRegard();
+        invoke("fermer_regard");
+      };
+      barre.append(ou, ici, stop);
+    }
+  }
+  function boutonsDeStream(p) {
+    const boutons = [boutonRegarder(p)];
+    if (teleDisponible) {
+      const b = document.createElement("button");
+      b.className = "petit-bouton regarder";
+      b.textContent = "TV";
+      b.setAttribute("aria-label", "Regarder sur la télé");
+      b.onclick = (e) => {
+        e.stopPropagation();
+        teleVoulue = p.stream;
+        window.KiAndroid.regarderSurTele("Écran de " + p.nom);
+      };
+      boutons.push(b);
+    }
+    return boutons;
+  }
+  function regarderStream(p) {
+    teleNom = null;
+    teleVoulue = null;
+    dessinerBarreTele();
+    window.KiAndroid.ouvrirRegard("Écran de " + p.nom);
+    invoke("regarder", { stream: p.stream }).catch((e) => {
+      window.KiAndroid.fermerRegard();
+      bandeau(String(e), true);
+    });
+  }
+  function boutonRegarder(p) {
+    const b = document.createElement("button");
+    b.className = "petit-bouton plein regarder";
+    b.textContent = "Regarder";
+    b.onclick = (e) => { e.stopPropagation(); regarderStream(p); };
+    return b;
+  }
+  function peutRegarder(p, s) {
+    return streamsPossibles && p.stream != null && p.id !== vue.moi && s.id === vue.vocal;
+  }
+  function qualiteDiffusion() {
+    try { return localStorage.getItem("diffusion-qualite") || "720p30"; } catch { return "720p30"; }
+  }
+  /** Diffuser ou arrêter, en tête de la feuille du vocal. */
+  function blocDiffusion() {
+    const b = document.createElement("div");
+    b.className = "diffusion";
+    if (vue.diffuse) {
+      const t = document.createElement("span");
+      t.className = "nom vocal-ici";
+      const n = vue.spectateurs;
+      t.textContent = "Tu diffuses ton écran" + (n ? " · " + n + (n > 1 ? " spectateurs" : " spectateur") : "");
+      const stop = document.createElement("button");
+      stop.className = "petit-bouton";
+      stop.textContent = "Arrêter";
+      stop.onclick = () => window.KiAndroid.arreterDiffusion();
+      b.append(t, stop);
+      return b;
+    }
+    const q = document.createElement("select");
+    q.setAttribute("aria-label", "Qualité de la diffusion");
+    for (const [v, nom] of [["720p30", "720p · 30 i/s"], ["720p60", "720p · 60 i/s"], ["1080p30", "1080p · 30 i/s"]]) {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = nom;
+      q.append(o);
+    }
+    q.value = qualiteDiffusion();
+    q.onchange = () => { try { localStorage.setItem("diffusion-qualite", q.value); } catch {} };
+    const go = document.createElement("button");
+    go.className = "petit-bouton plein";
+    go.textContent = "Diffuser mon écran";
+    go.onclick = () => window.KiAndroid.diffuser(q.value);
+    b.append(go, q);
+    return b;
+  }
+
+  function occupant(p, s) {
     const d = document.createElement("div");
     d.className = "occupant";
     d.onclick = (e) => { e.stopPropagation(); menuMembre(p.id); };
@@ -713,6 +833,8 @@
     bloc.append(n);
     if (p.jeu) { const j = document.createElement("div"); j.className = "qui-joue"; j.textContent = p.jeu; bloc.append(j); }
     d.append(bloc);
+    if (peutRegarder(p, s)) d.append(...boutonsDeStream(p));
+    else if (p.stream != null) d.append(icone("ecran", "petit"));
     if (p.mobile) d.append(icone("telephone", "petit"));
     if (p.muet) d.append(icone("micro-coupe", "petit"));
     return d;
@@ -820,7 +942,32 @@
   // Leurs boutons, passés par le Kotlin : les mêmes gestes que la barre
   // vocale. Rouvrir le micro en sourdine en sort aussi, comme sur PC : sinon
   // le bouton n'aurait rien rouvert.
-  window.kiAction = (action) => {
+  window.kiAction = (action, texte) => {
+    if (action === "bandeau") { bandeau(texte, true); return; }
+    if (action === "fermer_regard") { invoke("fermer_regard"); return; }
+    if (action === "tele_pret") {
+      teleNom = texte;
+      dessinerBarreTele();
+      if (teleVoulue != null) {
+        const stream = teleVoulue;
+        teleVoulue = null;
+        invoke("regarder", { stream }).catch((e) => {
+          window.KiAndroid.fermerRegard();
+          teleNom = null;
+          dessinerBarreTele();
+          bandeau(String(e), true);
+        });
+      }
+      return;
+    }
+    if (action === "tele_fin") {
+      teleNom = null;
+      teleVoulue = null;
+      dessinerBarreTele();
+      invoke("fermer_regard");
+      if (texte) bandeau(texte, true);
+      return;
+    }
     if (!vue) return;
     if (action === "micro") {
       if (vue.sourd) invoke("sourdine", { sourd: false });
@@ -990,6 +1137,7 @@
     const s = vue.salons.find((x) => x.id === vue.vocal);
     if (!s) { fermerFeuille(); return; }
     f.replaceChildren(titre(s.nom));
+    if (streamsPossibles) f.append(blocDiffusion());
     const vol = volumes();
     for (const p of s.occupants) {
       const l = document.createElement("div");
@@ -1000,6 +1148,7 @@
       n.style.color = p.couleur;
       n.onclick = () => menuMembre(p.id);
       l.append(n);
+      if (peutRegarder(p, s)) l.append(...boutonsDeStream(p));
       if (p.mobile) l.append(icone("telephone", "petit"));
       if (p.id !== vue.moi) {
         const r = document.createElement("input");
@@ -1721,6 +1870,13 @@
     suivreEcranExterne();
   });
   listen("info", (e) => bandeau(e.payload));
+  listen("regard_fin", (e) => {
+    teleNom = null;
+    teleVoulue = null;
+    dessinerBarreTele();
+    window.KiAndroid?.fermerRegard?.();
+    if (e.payload) bandeau(e.payload);
+  });
   listen("erreur", (e) => bandeau(e.payload, true));
   listen("poke", (e) => { navigator.vibrate?.([80, 60, 80]); bandeau(e.payload + " te poke !"); });
   listen("prevenir", (e) => {

@@ -123,6 +123,14 @@ impl Reglages {
     }
 }
 
+#[cfg(target_os = "android")]
+mod flux;
+#[cfg(not(target_os = "android"))]
+#[path = "flux_absent.rs"]
+mod flux;
+#[cfg(target_os = "android")]
+mod tele;
+
 #[derive(Default)]
 struct Appli {
     reglages: Reglages,
@@ -190,6 +198,12 @@ struct Appli {
     /// redemande que ce qui a changé.
     photos: std::collections::HashMap<UserId, String>,
     photos_demandees: std::collections::HashSet<(UserId, String)>,
+    /// Le stream qu'on a demandé à regarder, le temps que le serveur réponde.
+    regard_demande: Option<u32>,
+    /// Le stream qu'on regarde.
+    regard: Option<flux::Regard>,
+    /// Qui regarde notre diffusion (voir `flux`).
+    spectateurs: Vec<UserId>,
 }
 
 type Partage = Arc<Mutex<Appli>>;
@@ -272,6 +286,8 @@ struct VueOccupant {
     parle: bool,
     muet: bool,
     mobile: bool,
+    /// Le stream qu'il diffuse, s'il diffuse.
+    stream: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -327,6 +343,11 @@ struct Vue {
     membres: Vec<VueMembre>,
     total_non_lus: u32,
     droits: Droits,
+    /// Le stream qu'on regarde.
+    regard: Option<u32>,
+    /// On diffuse son écran (ou c'est demandé), et à combien de spectateurs.
+    diffuse: bool,
+    spectateurs: usize,
 }
 
 /// Ce que mes permissions m'autorisent sur les autres.
@@ -428,6 +449,7 @@ fn vue(a: &Appli) -> Vue {
                                 m.muted || m.force_muted
                             },
                             mobile: m.mobile,
+                            stream: m.streaming,
                         })
                         .collect()
                 } else {
@@ -479,6 +501,9 @@ fn vue(a: &Appli) -> Vue {
             bannir: e.peut(ki_protocol::perm::BAN),
             supprimer: e.peut(ki_protocol::perm::DELETE_MESSAGES),
         },
+        regard: a.regard.as_ref().map(flux::Regard::stream_id).or(a.regard_demande),
+        diffuse: flux::diffusion_demandee(),
+        spectateurs: a.spectateurs.len(),
     }
 }
 
@@ -621,6 +646,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                         a.fil_sale = true;
                     }
                     a.vue_sale = true;
+                    messages_de_stream(&mut a, &app, &msg);
                     let vocal_avant = a.etat.vocal;
                     let effets = a.etat.appliquer(msg);
                     // Le vocal voulu suit le serveur : un modérateur qui nous
@@ -732,6 +758,7 @@ fn lancer(app: &AppHandle, partage: &Partage) {
                 }
                 Event::Disconnected => {
                     a.vue_sale = true;
+                    couper_les_streams(&mut a, &app, "connexion perdue : le stream s'arrête");
                     let _ = app.emit("coupe", String::new());
                     drop(a);
                     reconnecter(&app, &partage, generation);
@@ -744,6 +771,81 @@ fn lancer(app: &AppHandle, partage: &Partage) {
             }
         }
     });
+}
+
+/// Ce que le serveur dit des partages d'écran : la réponse à ce qu'on a demandé, et
+/// la vie de ceux qui nous concernent.
+fn messages_de_stream(a: &mut Appli, app: &AppHandle, msg: &ServerMsg) {
+    match msg {
+        ServerMsg::WatchAccepted { stream_id, stream_key, meta } if a.regard_demande == Some(*stream_id) => {
+            // Déjà regardé : c'est un `Watch` de retour d'arrière-plan, le fil tourne.
+            if a.regard.is_some() {
+                return;
+            }
+            let cle = ki_protocol::hex_decode(stream_key).and_then(|c| <[u8; 32]>::try_from(c).ok());
+            let regard = match (cle, a.net.as_ref()) {
+                (Some(cle), Some(net)) => flux::Regard::demarrer(*stream_id, cle, meta, net, &a.lien),
+                _ => None,
+            };
+            if regard.is_none() {
+                a.regard_demande = None;
+                let _ = app.emit("regard_fin", "impossible d'ouvrir ce stream");
+            }
+            a.regard = regard;
+        }
+        ServerMsg::WatchDenied { stream_id, reason } if a.regard_demande == Some(*stream_id) => {
+            fermer_le_regard(a);
+            let _ = app.emit("regard_fin", format!("impossible de regarder : {reason}"));
+        }
+        ServerMsg::StreamStopped { stream_id } => {
+            if a.regard_demande == Some(*stream_id) {
+                fermer_le_regard(a);
+                let _ = app.emit("regard_fin", "la diffusion est terminée");
+            }
+            if flux::terminee(*stream_id) {
+                a.spectateurs.clear();
+                let _ = app.emit("info", "ta diffusion est arrêtée");
+            }
+        }
+        ServerMsg::StreamStarted { user_id, .. } => {
+            // Seulement dans mon salon vocal : le seul dont je peux regarder les streams.
+            let e = &a.etat;
+            let membre = e.membres.iter().find(|m| m.user_id == *user_id);
+            if let Some(m) = membre.filter(|m| m.voice.is_some() && m.voice == e.vocal) {
+                let _ = app.emit("info", format!("{} diffuse son écran", m.username));
+            }
+        }
+        ServerMsg::StreamMetaChanged { stream_id, meta } => flux::source_changee(*stream_id, meta, a.regard_demande),
+        ServerMsg::StreamGranted { stream_id } => {
+            if let Some(net) = a.net.as_ref() {
+                flux::accordee(*stream_id, net);
+            }
+        }
+        ServerMsg::KeyframeNeeded { stream_id, basse: false } => flux::trame_cle_demandee(*stream_id),
+        ServerMsg::StreamBudget { stream_id, kbps, .. } => flux::budget(*stream_id, *kbps),
+        ServerMsg::StreamViewers { stream_id, viewers } if flux::diffusion() == Some(*stream_id) => {
+            a.spectateurs = viewers.iter().copied().filter(|id| Some(*id) != a.etat.moi).collect();
+        }
+        _ => {}
+    }
+}
+
+/// Ferme ce qu'on regarde, sans rien dire au serveur.
+fn fermer_le_regard(a: &mut Appli) {
+    a.regard_demande = None;
+    if let Some(regard) = a.regard.take() {
+        regard.arreter(a.net.as_ref());
+    }
+    a.vue_sale = true;
+}
+
+/// La connexion s'en va : le serveur oublie ce qu'on regarde et ce qu'on diffuse.
+fn couper_les_streams(a: &mut Appli, app: &AppHandle, raison: &str) {
+    if a.regard_demande.is_some() {
+        fermer_le_regard(a);
+        let _ = app.emit("regard_fin", raison);
+    }
+    flux::coupure();
 }
 
 /// Demande les photos de profil manquantes ou changées, en une fois.
@@ -794,6 +896,7 @@ impl Fin {
 
 /// Fin de session sans reprise : refus, expulsion, déconnexion voulue.
 fn fin(a: &mut Appli, app: &AppHandle, raison: Fin) {
+    couper_les_streams(a, app, "");
     a.identifiants = None;
     a.auto = false;
     a.vocal_voulu = None;
@@ -1343,6 +1446,25 @@ fn essai(partage: State<'_, Partage>, action: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Regarder un stream de mon salon vocal. La vue native est déjà ouverte par la
+/// page ; le fil démarre à la réponse du serveur, avec la clé du stream.
+#[tauri::command]
+fn regarder(partage: State<'_, Partage>, stream: u32) -> Result<(), String> {
+    let mut a = partage.lock().unwrap();
+    fermer_le_regard(&mut a);
+    a.regard_demande = Some(stream);
+    a.envoyer_geste(ClientMsg::Watch { stream_id: stream, couches: true })
+}
+
+#[tauri::command]
+fn fermer_regard(partage: State<'_, Partage>) {
+    let mut a = partage.lock().unwrap();
+    if let Some(stream_id) = a.regard_demande {
+        a.envoyer(ClientMsg::Unwatch { stream_id });
+    }
+    fermer_le_regard(&mut a);
+}
+
 #[tauri::command]
 fn poke(partage: State<'_, Partage>, id: IdPage) {
     partage.lock().unwrap().envoyer(ClientMsg::Poke { user_id: id_rust(id) });
@@ -1610,6 +1732,7 @@ pub fn run() {
         ..Appli::default()
     }));
     let pour_media = partage.clone();
+    flux::installer(partage.clone());
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("kimedia", move |_ctx, requete, repondre| {
             let partage = pour_media.clone();
@@ -1636,6 +1759,8 @@ pub fn run() {
             sourdine,
             volume_membre,
             poke,
+            regarder,
+            fermer_regard,
             moderer,
             regler,
             parler,
