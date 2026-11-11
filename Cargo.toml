@@ -18,6 +18,7 @@ members = [
     "crates/loupedeck",
     "crates/ui",
     "crates/ui-base",
+    "crates/mcp-relais",
 ]
 # Le harnais de fuzzing du protocole a sa propre chaîne (nightly, libFuzzer)
 # et son propre espace de travail : voir crates/protocol/fuzz/README.md.

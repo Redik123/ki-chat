@@ -15,6 +15,9 @@ mod images;
 mod instance;
 mod jeux;
 mod loupedeck;
+// Le serveur de test pour Claude : jamais dans une version publiée.
+#[cfg(all(debug_assertions, windows))]
+mod mcp;
 mod loupedeck_config;
 mod loupedeck_page;
 mod loupedeck_ui;
@@ -202,6 +205,15 @@ fn main() -> eframe::Result {
         // Seul l'état « maximisée » est repris, par nos soins (`update`).
         persist_window: false,
         ..Default::default()
+    };
+    // Le ki-chat de test a son propre profil : ni les serveurs ni les mots
+    // de passe mémorisés de l'utilisateur, donc aucune connexion à son
+    // compte sans qu'on la demande — et rien d'écrit dans ses réglages.
+    #[cfg(all(debug_assertions, windows))]
+    let options = if mcp::demande() {
+        eframe::NativeOptions { persistence_path: Some(mcp::profil()), ..options }
+    } else {
+        options
     };
     let depart = std::time::Instant::now();
     let outcome = eframe::run_native(
@@ -727,6 +739,9 @@ struct KiApp {
     /// tapé pendant une coupure pas encore détectée, un message partait dans
     /// le tampon d'une connexion morte et se perdait sans un mot.
     envoi_en_attente: Option<brouillons::Envoi>,
+    /// Le serveur de test pour Claude, lancé par `--mcp` (debug seulement).
+    #[cfg(all(debug_assertions, windows))]
+    mcp: Option<mcp::Serveur>,
     /// Ce qui s'écrivait dans les salons qu'on ne regarde pas : chacun
     /// retrouve son texte, sa réponse ou sa modification quand on y revient.
     brouillons: brouillons::Brouillons,
@@ -860,6 +875,11 @@ struct KiApp {
     input: String,
     /// Redonner le focus à la zone de saisie au prochain rendu.
     focus_input: bool,
+    /// Le texte du champ vient d'être posé d'un coup (message repris pour
+    /// le modifier, brouillon retrouvé) : le curseur va à sa fin. Il restait
+    /// où il était — au début d'un champ vide —, et ce qu'on tapait pour
+    /// compléter s'écrivait devant le message.
+    curseur_a_la_fin: bool,
     /// Le panneau des suggestions de la saisie : pseudos, commandes, emoji.
     suggestions: suggestions::Suggestions,
     show_settings: bool,
@@ -1508,6 +1528,8 @@ impl KiApp {
             jeton_http: Default::default(),
             liens_prets: Default::default(),
             envoi_en_attente: None,
+            #[cfg(all(debug_assertions, windows))]
+            mcp: mcp::demande().then(|| mcp::Serveur::demarrer(cc.egui_ctx.clone())),
             brouillons: Default::default(),
             channels: Vec::new(),
             current: None,
@@ -1557,6 +1579,7 @@ impl KiApp {
             fil_au_bas: true,
             input: String::new(),
             focus_input: false,
+            curseur_a_la_fin: false,
             suggestions: suggestions::Suggestions::default(),
             show_settings: false,
             show_audio_journal: false,
@@ -4285,6 +4308,7 @@ impl KiApp {
             }
             if self.current.is_some() || champ_libre {
                 let repris = self.brouillons.reprendre(channel);
+                self.curseur_a_la_fin = !repris.texte.is_empty();
                 self.input = repris.texte;
                 self.reponse_a = repris.reponse_a;
                 self.edition = repris.edition;
@@ -4462,6 +4486,12 @@ impl KiApp {
     /// qu'il veut, et il ne manque rien à celui qui n'en met aucun.
     fn play_sfx(&self, name: &str) {
         if !self.sfx_on || self.sfx_muted.contains(name) {
+            return;
+        }
+        // Le ki-chat de test ne joue rien : le casque est celui de
+        // l'utilisateur, qui n'a rien demandé.
+        #[cfg(all(debug_assertions, windows))]
+        if self.mcp.is_some() {
             return;
         }
         let Some(pcm) = self.sounds.get(name) else { return };
@@ -9028,6 +9058,14 @@ impl KiApp {
                         if std::mem::take(&mut self.focus_input) {
                             response.request_focus();
                         }
+                        // Après le champ : c'est l'état qu'il relira à
+                        // l'image suivante.
+                        if std::mem::take(&mut self.curseur_a_la_fin) {
+                            let mut etat = egui::TextEdit::load_state(ui.ctx(), id_saisie()).unwrap_or_default();
+                            let fin = egui::text::CCursor::new(self.input.chars().count());
+                            etat.cursor.set_char_range(Some(egui::text::CCursorRange::one(fin)));
+                            etat.store(ui.ctx(), id_saisie());
+                        }
                         focus_saisie = response.has_focus();
                     });
 
@@ -9442,6 +9480,7 @@ impl KiApp {
         };
         envoi.rendu = true;
         self.input = envoi.brut.clone();
+        self.curseur_a_la_fin = true;
         self.edition = envoi.edition;
         if self.reponse_a.is_none() {
             self.reponse_a = envoi.reponse_a.clone();
@@ -9457,6 +9496,7 @@ impl KiApp {
         self.input = msg.text.clone();
         self.reponse_a = None;
         self.focus_input = true;
+        self.curseur_a_la_fin = true;
     }
 
     /// Renoncer à modifier : le texte repris s'en va avec.
@@ -15542,6 +15582,15 @@ impl eframe::App for KiApp {
         self.logique(ctx, frame);
     }
 
+    /// Les clics et les touches que Claude envoie entrent ici, avec ceux de
+    /// la vraie souris : egui ne fait pas la différence.
+    #[cfg(all(debug_assertions, windows))]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(serveur) = self.mcp.as_mut() {
+            serveur.injecter(ctx, raw_input);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.interface(ui);
     }
@@ -15748,6 +15797,9 @@ impl KiApp {
         self.veille.actualiser(self.voice_channel.is_some());
 
         self.poll_events();
+        // Les demandes de Claude, après les messages reçus : `etat` les voit.
+        #[cfg(all(debug_assertions, windows))]
+        self.mcp_tick(ctx);
         self.envoyer_liens_prets();
         // Après les messages reçus : c'est eux qui programment les `Lu`.
         self.tick_lus(ctx);
