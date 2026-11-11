@@ -840,6 +840,7 @@ pub extern "system" fn Java_fun_baws_kichat_KiVideo_demarrerDiffusion(
         fps: fps as u8,
         kbps: kbps as u32,
         machine: 0,
+        reglage: kbps as u32,
     };
     *verrou(&EMISSION) = Some(Emission { cle, meta, accordee: None, force_idr: true, kbps: kbps as u32, finie: false });
     a.envoyer(ClientMsg::StreamStart { meta, stream_key: ki_protocol::hex_encode(&cle), couches: false });

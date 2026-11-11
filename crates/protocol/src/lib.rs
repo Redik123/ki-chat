@@ -4754,6 +4754,13 @@ pub struct StreamMeta {
     /// recapturerait ce second ki-chat sans fin. 0 = inconnue.
     #[serde(default)]
     pub machine: u64,
+    /// Le débit **réglé** par le streamer, en kbps : le plafond des paliers.
+    /// `kbps` dit ce qu'il encode à l'instant — plus bas quand le serveur lui
+    /// a demandé un palier. Sans ce champ, le serveur prenait le débit réduit
+    /// pour le nouveau réglage, et la qualité ne remontait plus jamais.
+    /// 0 = inconnu (client d'avant) : le serveur devine.
+    #[serde(default)]
+    pub reglage: u32,
 }
 
 #[cfg(test)]

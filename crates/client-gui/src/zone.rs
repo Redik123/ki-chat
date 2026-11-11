@@ -72,6 +72,27 @@ pub const ARG_REDUIT: &str = "--reduit";
 /// traînent pas.
 pub const CADENCE_REDUITE: Duration = Duration::from_millis(250);
 
+/// Une fenêtre maximisée dépasse de son écran de quelques pixels de chaque
+/// côté (le cadre invisible de Windows) : un jeu en plein écran, qui s'arrête
+/// au bord, ne la « contient » donc pas au pixel près. On pardonne cet écart.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const MARGE_DU_CADRE: i32 = 16;
+
+/// `devant` recouvre-t-elle `nous` en entier ? Rectangles d'écran : gauche,
+/// haut, droite, bas.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn recouvre(devant: [i32; 4], nous: [i32; 4]) -> bool {
+    let [g, h, d, b] = nous;
+    // Une fenêtre sans surface n'est recouverte par rien de particulier.
+    if d - g <= 2 * MARGE_DU_CADRE || b - h <= 2 * MARGE_DU_CADRE {
+        return false;
+    }
+    devant[0] <= g + MARGE_DU_CADRE
+        && devant[1] <= h + MARGE_DU_CADRE
+        && devant[2] >= d - MARGE_DU_CADRE
+        && devant[3] >= b - MARGE_DU_CADRE
+}
+
 /// Sans image depuis ce délai, réduite, le garde-fou somme la fenêtre.
 const SILENCE_MAX: Duration = Duration::from_secs(3);
 /// Après la sommation, le temps laissé à `update()` pour répondre.
@@ -354,6 +375,27 @@ impl Zone {
 
     pub fn reduite(&self) -> bool {
         self.etat != Etat::Ouverte
+    }
+
+    /// Personne ne peut voir la fenêtre : réduite, minimisée, ou entièrement
+    /// recouverte par la fenêtre au premier plan d'un autre programme — un
+    /// jeu en plein écran, le cas ordinaire de qui est en vocal.
+    ///
+    /// Windows ne signale pas l'occultation à winit : pour eframe, une
+    /// fenêtre derrière un jeu se voit, et l'interface s'y redessinait vingt
+    /// fois par seconde pour personne.
+    pub fn hors_de_vue(&self) -> bool {
+        if self.reduite() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            natif::recouverte(self.hwnd)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
 
     /// La fenêtre est-elle montrée par le système ? eframe la crée cachée
@@ -737,7 +779,11 @@ mod natif {
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible, ShowWindow, SW_RESTORE, SW_SHOW};
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, ShowWindow,
+        SW_RESTORE, SW_SHOW,
+    };
 
     fn h(hwnd: isize) -> HWND {
         HWND(hwnd as *mut core::ffi::c_void)
@@ -809,6 +855,37 @@ mod natif {
         r.is_ok()
     }
 
+    /// Minimisée, ou entièrement sous la fenêtre au premier plan d'un autre
+    /// programme. Une fenêtre à nous devant (stream détaché, overlay) ne
+    /// compte pas : c'est encore ki-chat qu'on regarde.
+    pub fn recouverte(hwnd: isize) -> bool {
+        if hwnd == 0 {
+            return false;
+        }
+        unsafe {
+            if IsIconic(h(hwnd)).as_bool() {
+                return true;
+            }
+            let devant = GetForegroundWindow();
+            if devant.0.is_null() || devant == h(hwnd) {
+                return false;
+            }
+            let mut processus = 0u32;
+            GetWindowThreadProcessId(devant, Some(&mut processus));
+            if processus == std::process::id() {
+                return false;
+            }
+            let (mut la_notre, mut la_sienne) = (RECT::default(), RECT::default());
+            if GetWindowRect(h(hwnd), &mut la_notre).is_err() || GetWindowRect(devant, &mut la_sienne).is_err() {
+                return false;
+            }
+            super::recouvre(
+                [la_sienne.left, la_sienne.top, la_sienne.right, la_sienne.bottom],
+                [la_notre.left, la_notre.top, la_notre.right, la_notre.bottom],
+            )
+        }
+    }
+
     /// La fenêtre est-elle montrée (`WS_VISIBLE`) ? Faux tant qu'eframe
     /// ne l'a pas révélée après sa première image.
     pub fn visible(hwnd: isize) -> bool {
@@ -865,6 +942,23 @@ mod natif {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn un_jeu_en_plein_ecran_recouvre_la_fenetre_meme_maximisee() {
+        let ecran = [0, 0, 1920, 1080];
+        // Fenêtre ordinaire au milieu de l'écran du jeu : cachée.
+        assert!(recouvre(ecran, [400, 200, 1520, 920]));
+        // Maximisée, elle dépasse de 8 px de chaque côté : cachée quand même.
+        assert!(recouvre(ecran, [-8, -8, 1928, 1088]));
+        // Sur le second écran, à droite : elle se voit.
+        assert!(!recouvre(ecran, [1920, 0, 3840, 1080]));
+        // À cheval sur les deux écrans : une moitié se voit.
+        assert!(!recouvre(ecran, [1500, 200, 2600, 900]));
+        // Une petite fenêtre devant ne cache pas la nôtre.
+        assert!(!recouvre([600, 300, 1000, 700], [400, 200, 1520, 920]));
+        // Une fenêtre sans surface (pas encore montrée) : rien à en dire.
+        assert!(!recouvre(ecran, [0, 0, 0, 0]));
+    }
 
     #[test]
     fn le_tooltip_compte_et_nomme() {

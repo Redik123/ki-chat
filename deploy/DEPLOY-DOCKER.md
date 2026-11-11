@@ -294,12 +294,52 @@ salons, fichiers partagés, identité du serveur (nom, logo) et **clé privée
 TLS**. Perdre ce volume, c'est perdre les comptes — et changer d'identité aux
 yeux des clients déjà installés.
 
-Sauvegarde :
+### Sauvegardes automatiques
+
+Le serveur prend seul un **instantané par nuit** dans `/data/sauvegardes/`, et
+un de plus **avant chaque changement de version** (au premier démarrage d'une
+nouvelle image, avant de relire le moindre fichier). Il en garde sept
+quotidiens, quatre hebdomadaires et les trois derniers d'avant mise à jour.
+
+Un instantané contient ce qui ne se refait pas : comptes, salons, rôles,
+réglages, historique, journal d'audit, comptes Riot liés, playlists,
+certificat et clé. **Pas** les fichiers partagés, les clips ni les
+diagnostics : gros, bornés par leurs quotas, et le serveur vit sans eux.
+
+```bash
+docker exec ki-chat ki-server sauvegardes      # la liste, du plus récent au plus ancien
+docker exec ki-chat ki-server sauvegarder      # un instantané tout de suite
+docker exec ki-chat ki-server verifier         # relit le dernier de bout en bout
+```
+
+Restaurer, **serveur arrêté** — rien n'est supprimé, l'état remplacé est mis
+de côté dans `/data/avant-restauration-<date>/` :
+
+```bash
+docker compose stop ki-chat
+docker compose run --rm ki-chat restaurer 20261112-030000-nuit
+docker compose start ki-chat
+```
+
+`KI_SAUVEGARDES=0` coupe les instantanés automatiques.
+
+**Ces instantanés vivent sur le même volume que ce qu'ils protègent.** Ils
+sauvent d'une erreur, d'un fichier abîmé ou d'une mise à jour ratée — pas de
+la perte du volume. Tant que l'envoi hors de la machine n'est pas en place,
+garde aussi une copie ailleurs de temps en temps :
 
 ```bash
 docker run --rm -v ki-chat-data:/data -v "$PWD":/sauvegarde debian:bookworm-slim \
   tar czf /sauvegarde/ki-chat-data.tgz -C /data .
 ```
+
+### Version des données
+
+`/data/SCHEMA.json` dit quel format de données s'y trouve et quelle version du
+serveur l'a écrit. Un serveur **plus ancien** que ses données refuse de
+démarrer plutôt que de réécrire les fichiers en perdant ce qu'il ne comprend
+pas : remets une image plus récente, ou restaure l'instantané d'avant la mise
+à jour. `KI_SCHEMA_FORCER=1` passe outre.
 
 Le conteneur tourne en utilisateur **10001**, pas en root. Si tu remplaces le
 volume nommé par un dossier de l'hôte (`-v /srv/ki-chat:/data`), donne-le-lui

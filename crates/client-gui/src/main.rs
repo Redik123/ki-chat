@@ -6,6 +6,7 @@ mod appicon;
 mod admin_fichiers;
 mod atelier;
 mod beta_ui;
+mod brouillons;
 mod cartes;
 mod clips;
 mod graphes;
@@ -725,7 +726,10 @@ struct KiApp {
     /// l'instant de l'envoi. Le champ se vidait à l'envoi quoi qu'il arrive :
     /// tapé pendant une coupure pas encore détectée, un message partait dans
     /// le tampon d'une connexion morte et se perdait sans un mot.
-    chat_en_attente: Option<(String, std::time::Instant)>,
+    envoi_en_attente: Option<brouillons::Envoi>,
+    /// Ce qui s'écrivait dans les salons qu'on ne regarde pas : chacun
+    /// retrouve son texte, sa réponse ou sa modification quand on y revient.
+    brouillons: brouillons::Brouillons,
     channels: Vec<ChannelInfo>,
     /// Tous les rôles du serveur, pour les couleurs et les badges.
     roles: Vec<ki_protocol::RoleInfo>,
@@ -1503,7 +1507,8 @@ impl KiApp {
             voice_token: 0,
             jeton_http: Default::default(),
             liens_prets: Default::default(),
-            chat_en_attente: None,
+            envoi_en_attente: None,
+            brouillons: Default::default(),
             channels: Vec::new(),
             current: None,
             voice_channel: None,
@@ -4257,6 +4262,36 @@ impl KiApp {
     /// Ouvre un salon textuel : on change ce qu'on lit, rien d'autre.
     fn join(&mut self, channel: ChannelId) {
         let meme_salon = self.current == Some(channel);
+        // Ce qui s'écrivait reste dans le salon qu'on quitte, et celui où
+        // l'on entre rend ce qu'on y avait laissé. Le champ unique faisait
+        // suivre le texte d'un salon à l'autre, et envoyait une modification
+        // en cours vers un salon où son message n'existe pas : refusée, le
+        // texte déjà effacé.
+        if !meme_salon {
+            // On n'était nulle part — connexion, reprise après coupure : ce
+            // que porte le champ y reste (un message rendu par la coupure,
+            // justement). Un brouillon rangé ne le remplace que s'il est vide.
+            let champ_libre =
+                self.input.trim().is_empty() && self.reponse_a.is_none() && self.edition.is_none();
+            if let Some(quitte) = self.current {
+                self.brouillons.ranger(
+                    quitte,
+                    brouillons::Brouillon {
+                        texte: std::mem::take(&mut self.input),
+                        reponse_a: self.reponse_a.take(),
+                        edition: self.edition.take(),
+                    },
+                );
+            }
+            if self.current.is_some() || champ_libre {
+                let repris = self.brouillons.reprendre(channel);
+                self.input = repris.texte;
+                self.reponse_a = repris.reponse_a;
+                self.edition = repris.edition;
+            }
+            // Le menu ouvert sur un message de l'autre salon n'a plus d'objet.
+            self.menu_message = None;
+        }
         self.current = Some(channel);
         self.messages.clear();
         // On repart du principe qu'il y a un passé à remonter : le serveur
@@ -4768,9 +4803,9 @@ impl KiApp {
         // connexion morte. Il revient dans le champ plutôt que de se perdre
         // en silence. (Au-delà de vingt secondes sans écho, c'est un refus du
         // serveur, déjà dit, pas une coupure.)
-        if let Some((texte, quand)) = self.chat_en_attente.take() {
-            if quand.elapsed() < std::time::Duration::from_secs(20) && self.input.trim().is_empty() {
-                self.input = texte;
+        if let Some(envoi) = self.envoi_en_attente.take() {
+            if envoi.a_rendre_apres_une_coupure(std::time::Instant::now(), self.input.trim().is_empty()) {
+                self.input = envoi.brut;
                 ki_voice::journal("message non confirmé par le serveur : rendu au champ de saisie".into());
             }
         }
@@ -4873,27 +4908,35 @@ impl KiApp {
             return Some(Duration::from_secs(1));
         }
 
+        // Personne ne regarde — fenêtre réduite, ou derrière un jeu en plein
+        // écran : c'est l'usage ordinaire, en vocal pendant une partie. Les
+        // vumètres n'ont alors personne à qui s'animer, et vingt images par
+        // seconde reconstruisaient toute l'interface pour rien. Quatre
+        // suffisent à ce qui reste : sons d'arrivée et de départ, état
+        // « parle » dit aux autres, cœur qui bat pour le garde-fou.
+        let anime = if self.plein_rythme() { ANIME } else { zone::CADENCE_REDUITE };
+
         // En vocal : vumètres par locuteur, indicateur d'émission, ping.
         if self.voice_channel.is_some() {
-            return Some(ANIME);
+            return Some(anime);
         }
         // Quelqu'un parle dans un salon qu'on regarde sans y être : son
         // vumètre s'anime quand même dans la liste des membres.
         if voice.levels.values().any(|l| *l > 0.0) {
-            return Some(ANIME);
+            return Some(anime);
         }
         // Réglages ouverts : vumètre du micro en direct, statistiques réseau,
         // et la calibration qui mesure cinq secondes durant.
         if self.show_settings {
-            return Some(ANIME);
+            return Some(anime);
         }
         // Un envoi de fichier en cours affiche sa progression.
         if self.upload_status.lock().unwrap().is_some() {
-            return Some(ANIME);
+            return Some(anime);
         }
         // Une mise à jour en téléchargement, aussi.
         if matches!(self.updater.status(), update::Status::Downloading { .. }) {
-            return Some(ANIME);
+            return Some(anime);
         }
         // Un périphérique audio perdu se rouvre en tâche de fond : la
         // bannière doit disparaître d'elle-même quand il revient.
@@ -4909,6 +4952,19 @@ impl KiApp {
             return Some(Duration::from_secs(1));
         }
         None
+    }
+
+    /// Faut-il animer à plein rythme ? Oui dès que quelqu'un peut voir la
+    /// fenêtre — et, cachée, tant que quelque chose d'autre que l'écran vit
+    /// de ce rythme : l'overlay en jeu (dessiné depuis l'interface), un
+    /// stream qu'on diffuse ou qu'on regarde, le Loupedeck et ses vumètres.
+    fn plein_rythme(&self) -> bool {
+        !self.zone.hors_de_vue()
+            || self.overlay.actif
+            || self.go_live.is_some()
+            || self.regard.is_some()
+            || (self.loupedeck_etat.actif
+                && self.loupedeck.as_ref().is_some_and(|l| l.statut() == loupedeck::Statut::Pilote))
     }
 
     /// Au-delà, « Connexion… » cesse d'attendre.
@@ -5475,6 +5531,9 @@ impl KiApp {
                 self.welcomed = true;
                 // Un plantage d'ici se racontera à ce serveur, et à lui seul.
                 secours::serveur_courant(Some(&self.url));
+                // Les brouillons rangés sont ceux de ce serveur : une reprise
+                // les garde, un autre serveur les fait oublier.
+                self.brouillons.serveur(&self.url);
                 // Un serveur qui parle un protocole plus récent que nous :
                 // ce qu'il envoie de neuf ne se lira pas ici. Le dire, plutôt
                 // que de laisser des morceaux manquer sans explication.
@@ -5600,9 +5659,9 @@ impl KiApp {
             } => {
                 // Notre message est revenu : il est bien parti.
                 if Some(user_id) == self.my_id
-                    && self.chat_en_attente.as_ref().is_some_and(|(t, _)| *t == text)
+                    && self.envoi_en_attente.as_ref().is_some_and(|e| e.est_l_echo_du_message(&text))
                 {
-                    self.chat_en_attente = None;
+                    self.envoi_confirme();
                 }
                 // Le serveur ne l'envoie qu'aux lecteurs du salon, mais un
                 // changement de salon peut le croiser en route : écrit dans
@@ -5735,6 +5794,10 @@ impl KiApp {
                 }
             }
             ServerMsg::MessageEdited { channel, message, text } => {
+                // Notre modification est revenue : elle est bien passée.
+                if self.envoi_en_attente.as_ref().is_some_and(|e| e.est_l_echo_de_la_modification(&message)) {
+                    self.envoi_confirme();
+                }
                 if self.current != Some(channel) {
                     return;
                 }
@@ -6061,6 +6124,12 @@ impl KiApp {
                     // sans rapport. Si le serveur a refusé l'entrée, il ne
                     // nous listera pas dedans : la fenêtre d'intention expire,
                     // et sa liste des membres nous remet d'aplomb.
+                    //
+                    // Une exception, qui ne défait rien : ce qu'on vient
+                    // d'envoyer et qui n'est pas revenu retourne dans le
+                    // champ. Si l'erreur parlait d'autre chose, l'écho
+                    // arrivera et le champ se revidera (`envoi_confirme`).
+                    self.rendre_l_envoi_refuse();
                     self.error = Some(message);
                 }
             }
@@ -6101,6 +6170,9 @@ impl KiApp {
             }
             ServerMsg::ChannelsUpdated { channels } => {
                 self.channels = channels;
+                // Un salon supprimé emporte ce qu'on y écrivait.
+                let salons: Vec<ChannelId> = self.channels.iter().map(|c| c.id).collect();
+                self.brouillons.garder_seulement(|salon| salons.contains(&salon));
                 // Le salon lu a pu disparaître, ou m'être retiré : on se
                 // rabat sur le premier salon textuel encore visible plutôt
                 // que de laisser une vue morte.
@@ -9025,19 +9097,37 @@ impl KiApp {
                             m.user_id == message.user_id && m.ts == message.ts && m.text == text
                         });
                         if !inchange {
+                            // Gardée jusqu'à son retour, comme un message :
+                            // refusée, elle revient dans le champ avec son
+                            // message au lieu de disparaître.
+                            self.envoi_en_attente = Some(brouillons::Envoi {
+                                brut: text.clone(),
+                                propre: ki_protocol::clean_chat(&text).unwrap_or_else(|_| text.clone()),
+                                quand: std::time::Instant::now(),
+                                salon: self.current,
+                                reponse_a: None,
+                                edition: Some(message),
+                                rendu: false,
+                            });
                             self.send(ClientMsg::EditMessage { message, text });
                             self.dernier_envoi = Some(std::time::Instant::now());
                         }
                     }
                     None => {
-                        let reply_to =
-                            self.reponse_a.take().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
+                        let reponse_a = self.reponse_a.take();
+                        let reply_to = reponse_a.as_ref().map(|r| MsgRef { user_id: r.user_id, ts: r.ts });
                         // Gardé jusqu'à ce que le serveur le renvoie : voir
-                        // `chat_en_attente`. Tel que le serveur le nettoiera,
+                        // `envoi_en_attente`. Tel que le serveur le nettoiera,
                         // pour le reconnaître à son retour.
-                        self.chat_en_attente = ki_protocol::clean_chat(&text)
-                            .ok()
-                            .map(|t| (t, std::time::Instant::now()));
+                        self.envoi_en_attente = ki_protocol::clean_chat(&text).ok().map(|propre| brouillons::Envoi {
+                            brut: text.clone(),
+                            propre,
+                            quand: std::time::Instant::now(),
+                            salon: self.current,
+                            reponse_a,
+                            edition: None,
+                            rendu: false,
+                        });
                         self.send(ClientMsg::Chat { text, reply_to, salon: None });
                         self.dernier_envoi = Some(std::time::Instant::now());
                     }
@@ -9312,9 +9402,52 @@ impl KiApp {
         // ailleurs : seul un clic gauche hors du menu le ferme.
         let ailleurs = ctx.input(|i| i.pointer.primary_clicked())
             && !zone.response.contains_pointer();
-        if fermer || ailleurs || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Échap est **pris** : sans ça, la même touche fermait le menu et
+        // annulait la modification en cours derrière lui.
+        if fermer || ailleurs || prendre_echap(ctx) {
             self.menu_message = None;
         }
+    }
+
+    /// Le serveur a renvoyé ce qu'on venait d'envoyer : c'est passé. Si une
+    /// erreur sans rapport l'avait fait remettre dans le champ entre-temps,
+    /// il en ressort — tant qu'on n'y a pas touché.
+    fn envoi_confirme(&mut self) {
+        let Some(envoi) = self.envoi_en_attente.take() else { return };
+        if !envoi.rendu || self.current != envoi.salon || self.input != envoi.brut {
+            return;
+        }
+        if self.edition == envoi.edition {
+            self.input.clear();
+            self.edition = None;
+            if envoi.edition.is_none() {
+                self.reponse_a = None;
+            }
+        }
+    }
+
+    /// Le serveur vient de dire une erreur : ce qu'on venait d'envoyer, et
+    /// qui n'est pas revenu, retourne dans le champ — avec la réponse ou la
+    /// modification qu'il portait — plutôt que de se perdre.
+    fn rendre_l_envoi_refuse(&mut self) {
+        let champ_libre = self.input.trim().is_empty() && self.edition.is_none();
+        let maintenant = std::time::Instant::now();
+        let salon = self.current;
+        let Some(envoi) = self
+            .envoi_en_attente
+            .as_mut()
+            .filter(|e| e.a_rendre_apres_un_refus(maintenant, salon, champ_libre))
+        else {
+            return;
+        };
+        envoi.rendu = true;
+        self.input = envoi.brut.clone();
+        self.edition = envoi.edition;
+        if self.reponse_a.is_none() {
+            self.reponse_a = envoi.reponse_a.clone();
+        }
+        self.focus_input = true;
+        ki_voice::journal("envoi refusé par le serveur : rendu au champ de saisie".into());
     }
 
     /// Reprendre un de ses messages dans la zone de saisie pour le
@@ -9341,7 +9474,7 @@ impl KiApp {
         if self.edition.is_none() {
             return;
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if prendre_echap(ui.ctx()) {
             self.annuler_edition();
             return;
         }
@@ -9395,7 +9528,7 @@ impl KiApp {
     /// qu'une réponse est en cours. Échap ou la croix y renoncent.
     fn reply_bar(&mut self, ui: &mut egui::Ui) {
         let Some(r) = self.reponse_a.clone() else { return };
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if prendre_echap(ui.ctx()) {
             self.reponse_a = None;
             return;
         }
@@ -11347,6 +11480,10 @@ impl KiApp {
                 // la couche réseau les annoncera d'elle-même à la première
                 // trame si elles bougent.
                 let mut meta = effectifs.meta(&g.key);
+                // Le réglage reste le réglage : `effectifs` porte le débit
+                // réduit par un palier, que le serveur prenait pour le
+                // nouveau plafond — la qualité ne remontait plus jamais.
+                meta.reglage = self.diffusion.kbps;
                 let (w, h) = g.stats.dims();
                 meta.width = w as u16;
                 meta.height = h as u16;
@@ -13597,6 +13734,14 @@ fn reaction_locale(reactions: &mut Vec<Reaction>, emoji: &str, by: UserId, on: b
     }
 }
 
+/// Prend Échap : vrai si la touche vient d'être pressée, et personne d'autre
+/// ne la lira dans cette image. Chaque lecteur la prenait pour lui sans la
+/// retirer, si bien qu'une seule pression fermait une fenêtre **et** annulait
+/// ce qui s'écrivait derrière.
+fn prendre_echap(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+}
+
 /// Le menu d'un message, ouvert d'un clic droit.
 #[derive(Clone)]
 struct MenuMessage {
@@ -15682,8 +15827,12 @@ impl KiApp {
         if self.welcomed {
             // Avant tout le reste : ouvert, le panneau des suggestions garde Échap.
             self.suggestions.echap(ctx);
-            // Échap ferme la fenêtre la plus « en avant ».
+            // Échap ferme la fenêtre la plus « en avant » — et elle seule : la
+            // touche est prise, pour que la zone de saisie derrière ne la
+            // lise pas à son tour. Fermer les réglages annulait aussi la
+            // modification en cours, et effaçait son texte.
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let mut prise = true;
                 if self.atelier.est_ouvert() {
                     self.atelier.fermer();
                 } else if self.visionneuse.est_ouverte() {
@@ -15708,6 +15857,11 @@ impl KiApp {
                     self.valo.ouvert = false;
                 } else if self.show_clips {
                     self.show_clips = false;
+                } else {
+                    prise = false;
+                }
+                if prise {
+                    prendre_echap(ctx);
                 }
             }
             self.main_screen(ui, &voice);

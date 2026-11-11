@@ -6,6 +6,11 @@
 //!   KI_HTTP_PORT        port HTTP (partage de fichiers, défaut 8080)
 //!   KI_UDP_PORT         port QUIC (contrôle + voix, défaut 9987)
 //!   KI_DATA_DIR         dossier de persistance (défaut ./data)
+//!   KI_SAUVEGARDES      0 : pas d'instantané automatique de data/ (défaut :
+//!                       un par nuit dans data/sauvegardes/, et un avant
+//!                       chaque changement de version)
+//!   KI_SCHEMA_FORCER    1 : démarrer quand même sur des données écrites par
+//!                       une version plus récente (voir `sauvegarde`)
 //!   KI_HENRIK_KEY       clé HenrikDev pour les fiches VALORANT (sinon data/henrik.key ; absente : liaisons fermées)
 //!   KI_FILES_MAX_BYTES  plafond global de data/files/ (défaut 2 Gio, 0 =
 //!                       illimité) — au-delà, les partages les plus anciens
@@ -58,6 +63,7 @@ mod processus;
 mod quic;
 mod reseau;
 mod roles;
+mod sauvegarde;
 mod state;
 mod store;
 mod stream;
@@ -82,6 +88,15 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // `ki-server sauvegarder | sauvegardes | verifier | restaurer` : un
+    // outil, pas un serveur. Avant tout le reste — ni code maître tiré au
+    // hasard, ni port ouvert.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let donnees = std::env::var("KI_DATA_DIR").unwrap_or_else(|_| "data".into());
+    if let Some(code) = sauvegarde::commande(&arguments, std::path::Path::new(&donnees)) {
+        std::process::exit(code);
+    }
 
     // Le code maître crée des comptes : jamais une valeur connue. Absent, il
     // est tiré au hasard à chaque démarrage et écrit au journal — de quoi
@@ -127,6 +142,18 @@ async fn main() -> anyhow::Result<()> {
     // Le dossier temporaire des outils externes, avant tout lancement : ce
     // qu'une exécution précédente y a laissé part d'abord.
     processus::init();
+    // Avant de charger quoi que ce soit : des données d'un schéma plus récent
+    // ne se relisent pas, et un changement de version garde l'état d'avant —
+    // les magasins réécrivent leurs fichiers dès le chargement.
+    let sauvegardes = sauvegarde::actives();
+    let forcer = std::env::var("KI_SCHEMA_FORCER").is_ok_and(|v| v == "1");
+    sauvegarde::au_demarrage(std::path::Path::new(&data_dir), env!("CARGO_PKG_VERSION"), sauvegardes, forcer)
+        .map_err(anyhow::Error::msg)?;
+    if sauvegardes {
+        sauvegarde::veiller(std::path::PathBuf::from(&data_dir));
+    } else {
+        tracing::warn!("KI_SAUVEGARDES=0 : aucun instantané automatique de {data_dir}");
+    }
     let state = Arc::new(AppState::new(token, &data_dir, files_quota, clips_quota, fichier_max_mb)?);
 
     // Purge du partage de fichiers, et des clips à part. Sans elle,

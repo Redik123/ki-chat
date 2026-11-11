@@ -147,6 +147,9 @@ impl Reglages {
             fps: self.fps.min(255) as u8,
             kbps: self.kbps,
             machine: empreinte_machine(cle),
+            // Par défaut, ce qu'on encode est le réglage ; qui obéit à un
+            // palier corrige ce champ (voir `KiApp::rediffuser`).
+            reglage: self.kbps,
         }
     }
 }

@@ -65,10 +65,31 @@ const MAX_PAR_SALON: usize = 2;
 /// [`ki_protocol::STREAM_KBPS_MAX`].
 const KBPS_MAX: u32 = ki_protocol::STREAM_KBPS_MAX;
 
-/// Les réglages annoncés par le streamer, débit ramené à [`KBPS_MAX`].
+/// Les réglages annoncés par le streamer, débits ramenés à [`KBPS_MAX`].
 fn debit_borne(mut meta: StreamMeta) -> StreamMeta {
     meta.kbps = meta.kbps.min(KBPS_MAX);
+    meta.reglage = meta.reglage.min(KBPS_MAX);
     meta
+}
+
+/// Le réglage du streamer — le plafond des paliers — d'après ce qu'il vient
+/// d'annoncer (`meta`, déjà borné).
+///
+/// Un client récent le dit (`meta.reglage`). Un client d'avant n'annonce que
+/// `kbps`, et y met le débit **réduit** quand il vient d'obéir à un palier :
+/// pris pour un réglage, ce débit devenait le plafond, plus aucun palier
+/// n'existait au-dessus, et chaque descente était définitive jusqu'à l'arrêt
+/// du stream — le « bloqué en 360p ». On reconnaît donc l'écho : un débit
+/// sous le réglage connu, égal au budget qu'on vient de lui demander, n'est
+/// pas un nouveau réglage.
+fn reglage_annonce(meta: &StreamMeta, connu: u32, budget: u32) -> u32 {
+    if meta.reglage > 0 {
+        return meta.reglage.max(meta.kbps);
+    }
+    if meta.kbps < connu && meta.kbps == budget {
+        return connu;
+    }
+    meta.kbps
 }
 /// Mémoire totale des trames en transit vers les spectateurs.
 const MEM_MAX: usize = 32 * 1024 * 1024;
@@ -195,6 +216,10 @@ struct Live {
     channel: ChannelId,
     key_hex: String,
     meta: StreamMeta,
+    /// Le débit réglé par le streamer : le plafond des paliers. Distinct de
+    /// `meta.kbps`, qui dit ce qu'il encode à l'instant — voir
+    /// [`reglage_annonce`].
+    reglage: u32,
     /// Première séquence vue de la qualité haute : la base des priorités.
     seq_start: Option<u64>,
     viewers: HashMap<UserId, Viewer>,
@@ -534,7 +559,7 @@ fn mesurer(live: &mut Live) -> Issue {
     }
     let maintenant = Instant::now();
     live.palier.derniere_mesure = maintenant;
-    let plafond = live.meta.kbps;
+    let plafond = live.reglage;
     let secondes = dt.as_secs_f64().max(0.1);
 
     // 1. La liaison montante du streamer.
@@ -772,6 +797,9 @@ impl Streams {
         // première mesure quand la borne le coupe.
         let demande = meta.kbps;
         let meta = debit_borne(meta);
+        // Au départ, rien n'a encore été demandé : le débit annoncé est le
+        // réglage, sauf si le client en dit un plus haut.
+        let reglage = reglage_annonce(&meta, 0, 0);
         let mut inner = self.inner.lock().unwrap();
         if let Some((id, _)) = inner.by_id.iter().find(|(_, l)| l.streamer == streamer) {
             return Ok(*id);
@@ -793,13 +821,14 @@ impl Streams {
                 channel,
                 key_hex,
                 meta,
+                reglage,
                 seq_start: None,
                 viewers: HashMap::new(),
                 last_idr_ask: Instant::now() - IDR_COOLDOWN,
-                palier: Palier::neuf(meta.kbps),
+                palier: Palier::neuf(reglage),
                 couches,
                 basse: Basse::eteinte(),
-                montant: Montant::neuf(meta.kbps),
+                montant: Montant::neuf(reglage),
                 annonce: Budget { haute: demande, basse: None, montant: false },
                 spectateurs_annonces: None,
             },
@@ -848,16 +877,20 @@ impl Streams {
             .by_id
             .iter_mut()
             .find(|(_, l)| l.streamer == streamer)?;
+        // Le réglage, et lui seul, plafonne les paliers : un streamer qui
+        // vient d'obéir à un palier annonce un débit réduit, pas un réglage.
+        let reglage = reglage_annonce(&meta, live.reglage, live.annonce.haute);
         // Le réglage a changé : le palier ne le dépasse jamais, et repart
         // de là s'il n'y avait pas de contrainte.
-        if live.palier.courant >= live.meta.kbps || live.palier.courant > meta.kbps {
-            live.palier.courant = meta.kbps;
+        if live.palier.courant >= live.reglage || live.palier.courant > reglage {
+            live.palier.courant = reglage;
         }
-        if live.montant.palier >= live.meta.kbps || live.montant.palier > meta.kbps {
-            live.montant.palier = meta.kbps;
+        if live.montant.palier >= live.reglage || live.montant.palier > reglage {
+            live.montant.palier = reglage;
         }
-        // Reconfiguré, le streamer encode à son réglage : le budget repart
-        // à la mesure suivante s'il en diffère — borné, entre autres.
+        live.reglage = reglage;
+        // Reconfiguré, le streamer encode à ce qu'il annonce : le budget
+        // repart à la mesure suivante s'il en diffère — borné, entre autres.
         live.annonce.haute = demande;
         live.meta = meta;
         Some(*id)
@@ -1472,6 +1505,58 @@ mod tests {
         assert!(s.spectateurs_changes().is_empty(), "rien de neuf");
         assert_eq!(s.spectateurs_du_salon(10), vec![(id, vec![])]);
         assert!(s.spectateurs_du_salon(11).is_empty());
+    }
+
+    /// Le « bloqué en 360p » : un streamer qui obéit à un palier relance sa
+    /// capture et annonce son débit réduit. Ce débit n'est pas son réglage :
+    /// le plafond des paliers doit rester où il était, sinon rien n'existe
+    /// plus au-dessus et la qualité ne remonte jamais.
+    #[test]
+    fn un_palier_obei_ne_devient_pas_le_plafond() {
+        let a = |kbps| Avale { kbps, sature: false, calme: true };
+        let cinq = Duration::from_secs(5);
+        let descendre = |s: &Streams, id: u32, kbps: u32| {
+            let mut inner = s.inner.lock().unwrap();
+            let live = inner.by_id.get_mut(&id).unwrap();
+            live.palier.courant = kbps;
+            live.annonce.haute = kbps;
+        };
+        let etat = |s: &Streams, id: u32| {
+            let inner = s.inner.lock().unwrap();
+            let live = &inner.by_id[&id];
+            (live.reglage, live.palier.courant, live.meta.kbps)
+        };
+
+        // Un client d'avant : il ne dit que `kbps`, et y met le débit réduit.
+        let s = Streams::new();
+        let id = s.start(1, 10, "k1".into(), meta(), false).unwrap();
+        descendre(&s, id, 2500);
+        s.meta_update(1, StreamMeta { kbps: 2500, ..meta() });
+        let (reglage, courant, annonce) = etat(&s, id);
+        assert_eq!((reglage, courant, annonce), (6000, 2500, 2500));
+        // Et la remontée existe toujours, cran par cran, jusqu'au réglage.
+        assert_eq!(prochain_palier(courant, reglage, &[a(2400)], cinq), Some(4000));
+        assert_eq!(prochain_palier(4000, reglage, &[a(3900)], cinq), Some(6000));
+
+        // Un client récent : il dit les deux, rien à deviner.
+        let s = Streams::new();
+        let id = s.start(1, 10, "k1".into(), StreamMeta { reglage: 6000, ..meta() }, false).unwrap();
+        descendre(&s, id, 1500);
+        // Même sans coïncider avec le budget demandé (plancher du client).
+        s.meta_update(1, StreamMeta { kbps: 1400, reglage: 6000, ..meta() });
+        assert_eq!(etat(&s, id), (6000, 1500, 1400));
+
+        // Un vrai changement de réglage reste un changement de réglage, vers
+        // le bas (le palier ne le dépasse pas) comme vers le haut.
+        s.meta_update(1, StreamMeta { kbps: 1000, reglage: 1000, ..meta() });
+        assert_eq!(etat(&s, id), (1000, 1000, 1000));
+        s.meta_update(1, StreamMeta { kbps: 8000, reglage: 8000, ..meta() });
+        assert_eq!(etat(&s, id), (8000, 8000, 8000));
+        // Client d'avant, réglage baissé hors de tout palier : pris tel quel.
+        let s = Streams::new();
+        let id = s.start(1, 10, "k1".into(), meta(), false).unwrap();
+        s.meta_update(1, StreamMeta { kbps: 4000, ..meta() });
+        assert_eq!(etat(&s, id), (4000, 4000, 4000));
     }
 
     /// Un streamer réglé au-dessus de la borne (une version d'avant, qui

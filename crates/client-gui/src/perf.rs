@@ -13,9 +13,10 @@
 //! - **le temps du fil de discussion** : la part qui croissait avec le
 //!   nombre de messages chargés ; le fil est désormais une liste virtualisée
 //!   (`ki_ui::liste`), elle doit rester constante ;
-//! - **les images par seconde réellement peintes** : aujourd'hui vingt, quoi
-//!   qu'il arrive et même fenêtre réduite. C'est le chiffre que P3.2 doit
-//!   faire tomber au repos — et que le partage d'écran devra faire monter.
+//! - **les images par seconde réellement peintes** : vingt en vocal quand la
+//!   fenêtre se voit, quatre quand elle est réduite ou derrière un jeu en
+//!   plein écran (`KiApp::plein_rythme`), aucune au repos. C'est le chiffre
+//!   à surveiller — et que le partage d'écran fait monter.
 //!
 //! On garde des **quantiles**, pas des moyennes : une moyenne de 3 ms cache
 //! une image sur vingt à 40 ms, et c'est exactement celle-là qui se voit.
