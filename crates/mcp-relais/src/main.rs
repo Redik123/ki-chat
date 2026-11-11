@@ -20,6 +20,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -27,6 +29,10 @@ use serde_json::{json, Value};
 /// Le tube que tient ki-chat (voir `client-gui/src/mcp.rs`).
 const TUBE: &str = r"\\.\pipe\ki-chat-mcp";
 const LANCER: &str = "lancer_ki_chat";
+const AUTRE: &str = "autre_membre";
+/// Le second client est un programme de test : il ne se connecte qu'à un
+/// serveur d'essai sur cette machine, jamais au serveur d'un groupe.
+const SERVEUR_D_ESSAI: &str = "127.0.0.1:19987";
 /// La version de MCP parlée quand le client n'en propose pas.
 const VERSION_MCP: &str = "2025-06-18";
 /// Le temps laissé à ki-chat pour s'ouvrir : une version de debug met un
@@ -137,6 +143,26 @@ fn outils() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": { "lignes": { "type": "integer", "description": "Par défaut 60, au plus 500" } },
+            },
+        },
+        {
+            "name": AUTRE,
+            "description": "Un second membre, pour voir ki-chat réagir à quelqu'un d'autre : le client en ligne de \
+                commande, sans micro ni casque (il n'ouvre aucun périphérique audio). Serveur d'essai local \
+                seulement. Actions : connecter (pseudo, mot_de_passe, invitation pour créer le compte), dire \
+                (un message dans son salon courant), commande (une ligne du client : /join 2, /history…), lire \
+                (ce qu'il a vu depuis la dernière lecture), deconnecter.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["connecter", "dire", "commande", "lire", "deconnecter"] },
+                    "serveur": { "type": "string", "description": "Par défaut 127.0.0.1:19987 ; une adresse locale seulement" },
+                    "pseudo": { "type": "string" },
+                    "mot_de_passe": { "type": "string", "description": "Celui d'un compte de test" },
+                    "invitation": { "type": "string", "description": "Code d'invitation, pour créer le compte à la première connexion" },
+                    "texte": { "type": "string", "description": "Le message de dire, ou la ligne de commande" },
+                },
+                "required": ["action"],
             },
         },
         {
@@ -257,6 +283,154 @@ fn lancer(args: &[String]) -> Value {
     )
 }
 
+/// Le second membre : le client en ligne de commande, tenu par le relais.
+struct Autre {
+    enfant: Child,
+    entree: ChildStdin,
+    /// Ce qu'il a affiché depuis la dernière lecture.
+    vu: Arc<Mutex<Vec<String>>>,
+}
+
+static AUTRE_MEMBRE: Mutex<Option<Autre>> = Mutex::new(None);
+
+/// Une adresse de cette machine, et rien d'autre.
+fn est_locale(serveur: &str) -> bool {
+    let hote = serveur.rsplit_once(':').map_or(serveur, |(h, _)| h);
+    matches!(hote, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+fn recueillir(flux: impl std::io::Read + Send + 'static, vu: Arc<Mutex<Vec<String>>>) {
+    std::thread::spawn(move || {
+        for ligne in BufReader::new(flux).lines().map_while(Result::ok) {
+            if let Ok(mut v) = vu.lock() {
+                v.push(ligne);
+                // Un bavard ne remplit pas la mémoire du relais.
+                let trop = v.len().saturating_sub(2000);
+                v.drain(..trop);
+            }
+        }
+    });
+}
+
+fn arreter_l_autre(autre: &mut Option<Autre>) {
+    if let Some(mut a) = autre.take() {
+        let _ = writeln!(a.entree, "/quit");
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = a.enfant.kill();
+        let _ = a.enfant.wait();
+    }
+}
+
+/// Ce que le second membre a vu depuis la dernière lecture, après lui avoir
+/// laissé le temps de recevoir.
+fn lire_l_autre(a: &Autre, attente: Duration) -> String {
+    std::thread::sleep(attente);
+    let lignes = a.vu.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+    if lignes.is_empty() {
+        "(rien de neuf)".into()
+    } else {
+        lignes.join("\n")
+    }
+}
+
+fn autre_membre(arguments: &Value) -> Value {
+    let champ = |cle: &str| arguments.get(cle).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let Ok(mut autre) = AUTRE_MEMBRE.lock() else {
+        return texte("le second membre est dans un état incohérent : relancer le relais", true);
+    };
+    // Mort entre deux appels (refus du serveur, expulsion) : on l'oublie,
+    // en gardant ce qu'il a dit avant de partir.
+    let mut derniers_mots = None;
+    if let Some(a) = autre.as_mut() {
+        if matches!(a.enfant.try_wait(), Ok(Some(_))) {
+            derniers_mots = Some(lire_l_autre(a, Duration::from_millis(100)));
+            *autre = None;
+        }
+    }
+    match champ("action").unwrap_or_default() {
+        "connecter" => {
+            let serveur = champ("serveur").unwrap_or(SERVEUR_D_ESSAI);
+            if !est_locale(serveur) {
+                return texte(
+                    format!(
+                        "« {serveur} » n'est pas une adresse locale : le second membre ne va que sur un serveur \
+                         d'essai de cette machine"
+                    ),
+                    true,
+                );
+            }
+            let (Some(pseudo), Some(mot_de_passe)) = (champ("pseudo"), champ("mot_de_passe")) else {
+                return texte("il faut un pseudo et un mot_de_passe (compte de test)", true);
+            };
+            let Some(exe) = std::env::current_exe()
+                .ok()
+                .and_then(|e| Some(e.parent()?.join(if cfg!(windows) { "ki-client-cli.exe" } else { "ki-client-cli" })))
+                .filter(|e| e.is_file())
+            else {
+                return texte("ki-client-cli introuvable à côté du relais : cargo build -p ki-client-cli", true);
+            };
+            arreter_l_autre(&mut autre);
+            let mut commande = Command::new(exe);
+            // `--tone --deaf` : ni micro ni casque, aucun périphérique ouvert.
+            commande.args([serveur, pseudo, mot_de_passe, "--tone", "--deaf"]);
+            if let Some(code) = champ("invitation") {
+                commande.args(["--invite", code]);
+            }
+            commande.env("RUST_LOG", "warn").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut enfant = match commande.spawn() {
+                Ok(e) => e,
+                Err(e) => return texte(format!("le second membre ne se lance pas : {e}"), true),
+            };
+            let vu = Arc::new(Mutex::new(Vec::new()));
+            let (Some(entree), Some(sortie), Some(erreurs)) =
+                (enfant.stdin.take(), enfant.stdout.take(), enfant.stderr.take())
+            else {
+                let _ = enfant.kill();
+                return texte("le second membre s'est lancé sans ses tubes", true);
+            };
+            recueillir(sortie, vu.clone());
+            recueillir(erreurs, vu.clone());
+            let a = Autre { enfant, entree, vu };
+            let dit = lire_l_autre(&a, Duration::from_millis(2500));
+            *autre = Some(a);
+            texte(dit, false)
+        }
+        action @ ("dire" | "commande") => {
+            let Some(a) = autre.as_mut() else {
+                return texte(
+                    derniers_mots
+                        .unwrap_or_else(|| "le second membre n'est pas connecté : action connecter d'abord".into()),
+                    true,
+                );
+            };
+            let Some(ligne) = champ("texte") else {
+                return texte("il faut un texte", true);
+            };
+            // Un message qui commencerait par « / » serait pris pour une
+            // commande du client : `dire` ne le permet pas.
+            if action == "dire" && ligne.starts_with('/') {
+                return texte("un message ne commence pas par « / » : c'est l'action commande", true);
+            }
+            if writeln!(a.entree, "{}", ligne.replace(['\n', '\r'], " ")).is_err() || a.entree.flush().is_err() {
+                return texte("le second membre ne répond plus", true);
+            }
+            texte(lire_l_autre(a, Duration::from_millis(600)), false)
+        }
+        "lire" => match autre.as_ref() {
+            Some(a) => texte(lire_l_autre(a, Duration::from_millis(300)), false),
+            None => {
+                let erreur = derniers_mots.is_none();
+                texte(derniers_mots.unwrap_or_else(|| "le second membre n'est pas connecté".into()), erreur)
+            }
+        },
+        "deconnecter" => {
+            arreter_l_autre(&mut autre);
+            texte("second membre déconnecté", false)
+        }
+        autre_action => texte(format!("action inconnue : {autre_action}"), true),
+    }
+}
+
 /// Répond à une requête MCP. `None` : rien à répondre (une notification).
 fn repondre(message: &Value, args: &[String]) -> Option<Value> {
     let id = message.get("id")?.clone();
@@ -276,6 +450,8 @@ fn repondre(message: &Value, args: &[String]) -> Option<Value> {
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             Ok(if nom == LANCER {
                 lancer(args)
+            } else if nom == AUTRE {
+                autre_membre(&arguments)
             } else if !outils().as_array().is_some_and(|o| o.iter().any(|t| t["name"] == nom)) {
                 texte(format!("outil inconnu : {nom}"), true)
             } else {
@@ -349,6 +525,10 @@ fn main() {
             }
         }
     }
+    // Claude Code a refermé le relais : le second membre ne lui survit pas.
+    if let Ok(mut autre) = AUTRE_MEMBRE.lock() {
+        arreter_l_autre(&mut autre);
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +585,24 @@ mod tests {
         let r = repondre(&appel, &[]).unwrap();
         assert_eq!(r["result"]["isError"], true);
         assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("outil inconnu"));
+    }
+
+    #[test]
+    fn le_second_membre_ne_va_que_sur_cette_machine() {
+        for locale in ["127.0.0.1:19987", "127.0.0.1", "localhost:9987", "[::1]:9987"] {
+            assert!(est_locale(locale), "{locale}");
+        }
+        for ailleurs in ["ts.baws.fun", "ts.baws.fun:9987", "192.168.1.10:9987", "127.0.0.1.exemple.fr:9987", ""] {
+            assert!(!est_locale(ailleurs), "{ailleurs}");
+        }
+        // Refusé avant de lancer quoi que ce soit, et dit pourquoi.
+        let refus =
+            autre_membre(&json!({ "action": "connecter", "serveur": "ts.baws.fun", "pseudo": "x", "mot_de_passe": "y" }));
+        assert_eq!(refus["isError"], true);
+        assert!(refus["content"][0]["text"].as_str().unwrap().contains("locale"));
+        // Sans connexion, parler n'a pas de sens.
+        let seul = autre_membre(&json!({ "action": "dire", "texte": "salut" }));
+        assert_eq!(seul["isError"], true);
     }
 
     #[test]
