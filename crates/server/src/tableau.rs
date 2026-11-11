@@ -148,7 +148,7 @@ fn stock(racine: &Path, quota: files::Quota) -> TableauStock {
 /// bibliothèque standard ne dit pas. Rien hors Unix : le serveur de
 /// production est un conteneur Linux, la machine de développement fait
 /// sans.
-fn disque_libre(dir: &Path) -> Option<u64> {
+pub(crate) fn disque_libre(dir: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         let sortie = std::process::Command::new("df")

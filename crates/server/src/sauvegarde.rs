@@ -57,6 +57,17 @@ const HEBDOMADAIRES: usize = 4;
 /// Les instantanés pris avant une mise à jour, gardés à part.
 const AVANT_MISE_A_JOUR: usize = 3;
 
+/// La place qu'un instantané doit laisser derrière lui : une sauvegarde ne
+/// doit jamais être ce qui remplit le disque — plus d'historique écrit, plus
+/// de comptes enregistrés, pour avoir voulu les protéger.
+const RESERVE: u64 = 256 * 1024 * 1024;
+
+/// Y a-t-il la place de copier `besoin` octets ? Il en faut le double, plus
+/// la réserve. Place inconnue (hors Unix) : on copie.
+fn assez_de_place(libre: Option<u64>, besoin: u64) -> bool {
+    libre.is_none_or(|l| l >= besoin.saturating_mul(2).saturating_add(RESERVE))
+}
+
 /// Ce que `data/` dit de lui-même.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Etiquette {
@@ -218,6 +229,13 @@ fn creer_prive(dossier: &Path) -> std::io::Result<()> {
 /// interrompue reste en `.partiel`, que la rotation emporte.
 pub fn instantane(data: &Path, motif: &str, quand: DateTime<Utc>) -> std::io::Result<PathBuf> {
     let (fichiers, laisses) = portee(data)?;
+    let besoin: u64 = fichiers.iter().filter_map(|f| std::fs::metadata(data.join(f)).ok()).map(|m| m.len()).sum();
+    if !assez_de_place(crate::tableau::disque_libre(data), besoin) {
+        return Err(std::io::Error::other(format!(
+            "pas assez de place sur le disque pour copier {} Mio en gardant une réserve",
+            besoin / (1024 * 1024)
+        )));
+    }
     let racine = data.join(DOSSIER);
     creer_prive(&racine)?;
     let base = format!("{}-{}", quand.format(FORMAT_DATE), motif_propre(motif));
@@ -519,8 +537,16 @@ pub fn actives() -> bool {
 /// schéma plus récent, et prendre un instantané quand le serveur a changé de
 /// version depuis le dernier démarrage — avant que la nouvelle ne réécrive
 /// le moindre fichier.
+///
+/// Une seule chose empêche de démarrer : des données plus récentes que le
+/// serveur. Tout le reste — instantané impossible, étiquette qui ne s'écrit
+/// pas — se dit au journal et laisse passer : un serveur qui ne démarre plus
+/// à cause de sa sauvegarde serait pire que pas de sauvegarde.
 pub fn au_demarrage(data: &Path, version: &str, sauvegarder: bool, forcer: bool) -> Result<(), String> {
-    std::fs::create_dir_all(data).map_err(|e| format!("{} : {e}", data.display()))?;
+    if let Err(e) = std::fs::create_dir_all(data) {
+        tracing::error!("sauvegarde : {} ne se crée pas ({e}) : ni instantané ni étiquette", data.display());
+        return Ok(());
+    }
     let chemin = data.join(ETIQUETTE);
     let connue: Option<Etiquette> = match std::fs::read(&chemin) {
         Ok(brut) => match serde_json::from_slice(&brut) {
@@ -564,8 +590,15 @@ pub fn au_demarrage(data: &Path, version: &str, sauvegarder: bool, forcer: bool)
         }
     }
     let etiquette = Etiquette { schema: SCHEMA, version: version.to_string() };
-    let json = serde_json::to_vec_pretty(&etiquette).map_err(|e| e.to_string())?;
-    crate::store::write_atomic(&chemin, &json).map_err(|e| format!("{} : {e}", chemin.display()))
+    match serde_json::to_vec_pretty(&etiquette) {
+        Ok(json) => {
+            if let Err(e) = crate::store::write_atomic(&chemin, &json) {
+                tracing::error!("sauvegarde : {} ne s'écrit pas : {e}", chemin.display());
+            }
+        }
+        Err(e) => tracing::error!("sauvegarde : étiquette non écrite : {e}"),
+    }
+    Ok(())
 }
 
 /// Désigne un instantané : son nom dans `data/sauvegardes/`, un chemin, ou
@@ -902,6 +935,29 @@ mod tests {
         assert!(!est_l_heure(h(22), 14));
         // Le serveur était arrêté cette nuit : on n'attend pas la suivante.
         assert!(est_l_heure(h(31), 14));
+    }
+
+    #[test]
+    fn un_instantane_ne_remplit_pas_le_disque() {
+        let mio = 1024 * 1024;
+        // 10 Mio à copier : il en faut 20, plus la réserve de 256.
+        assert!(assez_de_place(Some(300 * mio), 10 * mio));
+        assert!(!assez_de_place(Some(270 * mio), 10 * mio));
+        // Un disque presque plein ne reçoit rien, même pour trois fois rien.
+        assert!(!assez_de_place(Some(100 * mio), 1));
+        // Place inconnue (machine de développement) : on copie.
+        assert!(assez_de_place(None, 10 * mio));
+    }
+
+    /// Le dossier de données est un **fichier** : rien ne peut s'y écrire.
+    /// Ce n'est pas à la sauvegarde d'empêcher le serveur de démarrer.
+    #[test]
+    fn une_sauvegarde_impossible_ne_bloque_pas_le_demarrage() {
+        let base = banc("imblocable");
+        let pas_un_dossier = base.join("data");
+        std::fs::write(&pas_un_dossier, "un fichier à la place du dossier").unwrap();
+        assert!(au_demarrage(&pas_un_dossier, "0.1.70", true, false).is_ok());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
