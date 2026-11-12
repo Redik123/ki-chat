@@ -61,6 +61,39 @@ impl Couleur {
         let f = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
         Self::rgb(f(self.r, autre.r), f(self.g, autre.g), f(self.b, autre.b))
     }
+
+    /// La luminance relative, de 0 (noir) à 1 (blanc), telle que la
+    /// définissent les règles d'accessibilité du web (WCAG 2). L'alpha est
+    /// ignoré.
+    pub fn luminance(self) -> f32 {
+        let lineaire = |c: u8| {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lineaire(self.r) + 0.7152 * lineaire(self.g) + 0.0722 * lineaire(self.b)
+    }
+
+    /// Le contraste entre deux couleurs, de 1 (les mêmes) à 21 (noir sur
+    /// blanc). Un texte se lit à partir de 4,5.
+    pub fn contraste(self, autre: Self) -> f32 {
+        let (a, b) = (self.luminance(), autre.luminance());
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Cette couleur telle qu'elle se lira sur `fond` : inchangée si son
+    /// contraste atteint `mini`, sinon tirée vers le blanc ou le noir — du
+    /// côté qui s'éloigne du fond — juste assez pour l'atteindre. La teinte
+    /// reste reconnaissable.
+    pub fn lisible_sur(self, fond: Self, mini: f32) -> Self {
+        if self.contraste(fond) >= mini {
+            return self;
+        }
+        let vers = if fond.luminance() < 0.18 { Self::rgb(255, 255, 255) } else { Self::rgb(0, 0, 0) };
+        (1..=20)
+            .map(|pas| self.melanger(vers, pas as f32 / 20.0))
+            .find(|c| c.contraste(fond) >= mini)
+            .unwrap_or(vers)
+    }
 }
 
 /// La palette : un gris-bleu profond façon poste de jeu, un unique accent
@@ -88,7 +121,10 @@ pub mod couleur {
 
     pub const TEXT: Couleur = Couleur::rgb(0xe7, 0xed, 0xf4);
     pub const TEXT_DIM: Couleur = Couleur::rgb(0x94, 0xa2, 0xb2);
-    pub const TEXT_FAINT: Couleur = Couleur::rgb(0x63, 0x70, 0x7f);
+    /// Le texte pâle. À 4,6:1 sur le fond le plus clair où il s'écrit
+    /// (`BG_RAISED`) : il était à 3,2, sous le seuil de lisibilité de 4,5,
+    /// alors qu'il sert souvent en 11 points.
+    pub const TEXT_FAINT: Couleur = Couleur::rgb(0x7d, 0x8a, 0x99);
 
     /// Accent de la marque (vert ki-chat).
     pub const ACCENT: Couleur = Couleur::rgb(0x00, 0xd2, 0x6a);
@@ -236,6 +272,47 @@ mod tests {
         assert_eq!(BG_DEEP.translucide(0xcc).en_css(), "#0c0f14cc");
         assert_eq!(ACCENT.en_u32(), 0x00d26a);
         assert_eq!(Couleur::rgb(255, 0, 51).en_f32(), [1.0, 0.0, 0.2, 1.0]);
+    }
+
+    /// Tout texte de la palette se lit sur tout fond de la palette : c'est
+    /// le garde-fou qui manquait quand `TEXT_FAINT` était à 3,2:1.
+    #[test]
+    fn les_textes_se_lisent_sur_tous_les_fonds() {
+        for (nom, texte) in [("TEXT", TEXT), ("TEXT_DIM", TEXT_DIM), ("TEXT_FAINT", TEXT_FAINT)] {
+            for (fond_nom, fond) in [("BG_DEEP", BG_DEEP), ("BG_SIDE", BG_SIDE), ("BG_BASE", BG_BASE), ("BG_RAISED", BG_RAISED)] {
+                let c = texte.contraste(fond);
+                assert!(c >= 4.5, "{nom} sur {fond_nom} : {c:.2}");
+            }
+        }
+        // Et les couleurs de bordure n'en sont pas : elles ne s'écrivent pas.
+        assert!(BORDER_STRONG.contraste(BG_BASE) < 3.0 && BORDER.contraste(BG_BASE) < 3.0);
+        // Les bornes de la mesure.
+        let (noir, blanc) = (Couleur::rgb(0, 0, 0), Couleur::rgb(255, 255, 255));
+        assert!((noir.contraste(blanc) - 21.0).abs() < 0.01);
+        assert!((blanc.contraste(blanc) - 1.0).abs() < 0.001);
+        assert_eq!(noir.contraste(blanc), blanc.contraste(noir));
+    }
+
+    /// Une couleur trop sombre pour le fond s'éclaircit juste assez, en
+    /// gardant sa teinte ; une couleur déjà lisible ne bouge pas.
+    #[test]
+    fn une_couleur_illisible_est_tiree_vers_le_lisible() {
+        // Déjà lisibles : intactes.
+        assert_eq!(ACCENT.lisible_sur(BG_RAISED, 4.5), ACCENT);
+        assert_eq!(TEXT.lisible_sur(BG_RAISED, 4.5), TEXT);
+        // Un bleu nuit, un noir : éclaircis, au seuil ou au-dessus.
+        let nuit = Couleur::rgb(0x10, 0x20, 0x80);
+        let lu = nuit.lisible_sur(BG_RAISED, 4.5);
+        assert!(lu.contraste(BG_RAISED) >= 4.5 && nuit.contraste(BG_RAISED) < 4.5);
+        assert!(lu.b > lu.r && lu.b > lu.g, "toujours bleu : {lu:?}");
+        assert!(Couleur::rgb(0, 0, 0).lisible_sur(BG_RAISED, 4.5).contraste(BG_RAISED) >= 4.5);
+        // Le fond lui-même : on finit par s'en éloigner.
+        assert!(BG_RAISED.lisible_sur(BG_RAISED, 4.5).contraste(BG_RAISED) >= 4.5);
+        // Sur un fond clair, c'est vers le noir qu'on tire.
+        let papier = Couleur::rgb(0xf5, 0xf5, 0xf5);
+        let jaune = Couleur::rgb(0xff, 0xe0, 0x40);
+        let lu = jaune.lisible_sur(papier, 4.5);
+        assert!(lu.contraste(papier) >= 4.5 && lu.luminance() < jaune.luminance());
     }
 
     #[test]

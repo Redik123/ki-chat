@@ -412,7 +412,7 @@ impl KiApp {
                     ui.add_space(espace::XL);
                     ui.label(
                         RichText::new(concat!("ki-chat ", env!("CARGO_PKG_VERSION")))
-                            .color(theme::BORDER)
+                            .color(TEXT_FAINT)
                             .size(texte::PETIT),
                     );
                 });
@@ -429,7 +429,7 @@ impl KiApp {
             ui::section_label(ui, "Serveurs");
             if !self.lanceur.book.is_empty() {
                 ui.label(
-                    Texte::Aide.gras(ui, self.lanceur.book.len().to_string()).color(theme::BORDER_STRONG),
+                    Texte::Aide.gras_ton(ui, Ton::Pale, self.lanceur.book.len().to_string()),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

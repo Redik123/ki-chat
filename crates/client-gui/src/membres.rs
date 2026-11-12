@@ -771,7 +771,7 @@ impl KiApp {
                 ui.horizontal(|ui| {
                     ui::section_label(ui, "En ligne");
                     ui.label(
-                        Texte::Aide.gras(ui, online.len().to_string()).color(theme::BORDER_STRONG),
+                        Texte::Aide.gras_ton(ui, Ton::Pale, online.len().to_string()),
                     );
                 });
                 ui.add_space(espace::XXS);
@@ -827,7 +827,7 @@ impl KiApp {
                         ui.horizontal(|ui| {
                             ui::section_label(ui, "Invités");
                             ui.label(
-                                Texte::Aide.gras(ui, invites.len().to_string()).color(theme::BORDER_STRONG),
+                                Texte::Aide.gras_ton(ui, Ton::Pale, invites.len().to_string()),
                             );
                         });
                         ui.add_space(espace::XXS);
@@ -864,7 +864,7 @@ impl KiApp {
                         ui.horizontal(|ui| {
                             ui::section_label(ui, "Hors ligne");
                             ui.label(
-                                Texte::Aide.gras(ui, offline.len().to_string()).color(theme::BORDER_STRONG),
+                                Texte::Aide.gras_ton(ui, Ton::Pale, offline.len().to_string()),
                             );
                         });
                         ui.add_space(espace::XXS);

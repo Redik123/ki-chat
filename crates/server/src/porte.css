@@ -1,7 +1,7 @@
 /* La porte web de ki-chat — feuille servie à côté de porte.html.
    Le thème du client (theme.rs), à l'identique : fonds 0c0f14 (creusé),
    11151b (colonnes), 151a21 (panneaux), 1b212a (relief) ; texte e7edf4 /
-   94a2b2 / 63707f ; accent 00d26a ; danger ff6b6b ; invité f0b86c (l'ambre
+   94a2b2 / 7d8a99 ; accent 00d26a ; danger ff6b6b ; invité f0b86c (l'ambre
    du badge INVITÉ). Le salon reprend la fenêtre de ki-chat : la colonne des
    salons à gauche, le fil au centre avec ses avatars, les présents à
    droite. Mobile d'abord : une colonne, deux tiroirs, la saisie collée en
@@ -18,7 +18,7 @@
   --bord-doux: #1e252e;
   --texte: #e7edf4;
   --texte-dim: #94a2b2;
-  --texte-faible: #63707f;
+  --texte-faible: #7d8a99;
   --accent: #00d26a;
   --accent-fonce: #00a352;
   --parle: #00e676;

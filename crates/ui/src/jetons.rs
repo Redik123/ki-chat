@@ -103,6 +103,16 @@ pub mod couleur {
     }
 
     /// Mélange linéaire de deux couleurs (`t` = 0 → `a`, 1 → `b`).
+    /// Cette couleur telle qu'elle se lira sur `fond` : inchangée si elle
+    /// atteint le seuil de lisibilité (4,5:1), sinon éclaircie ou assombrie
+    /// juste assez, teinte gardée. Pour ce qui vient d'ailleurs — la couleur
+    /// d'un rôle, choisie par quelqu'un sur un autre écran.
+    pub fn lisible_sur(couleur: Color32, fond: Color32) -> Color32 {
+        let base = |c: Color32| ki_ui_base::Couleur::rgb(c.r(), c.g(), c.b());
+        let lue = base(couleur).lisible_sur(base(fond), 4.5);
+        Color32::from_rgb(lue.r, lue.g, lue.b)
+    }
+
     pub fn melanger(a: Color32, b: Color32, t: f32) -> Color32 {
         let t = t.clamp(0.0, 1.0);
         let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;

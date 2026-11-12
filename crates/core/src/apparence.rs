@@ -37,7 +37,7 @@ pub fn couleur_rang(palier: u8) -> u32 {
         21..=23 => 0x4fc86a,
         24..=26 => 0xe04a5a,
         27.. => 0xfff29a,
-        _ => 0x63707f,
+        _ => 0x7d8a99,
     }
 }
 

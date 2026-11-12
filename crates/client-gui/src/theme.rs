@@ -19,9 +19,14 @@ pub use ki_ui::jetons::couleur::{melanger as mix, pour_pseudo as color_for, tran
 ///
 /// Le repli n'est pas un pis-aller : un serveur sans rôles colorés doit
 /// continuer à afficher des pseudos distincts, comme avant.
+///
+/// La couleur d'un rôle vient du serveur telle que quelqu'un l'a choisie :
+/// un bleu nuit ou un noir ne se lisaient pas sur nos fonds sombres. Elle
+/// est éclaircie juste assez pour se lire sur le plus clair d'entre eux,
+/// teinte gardée ; une couleur déjà lisible ne bouge pas.
 pub fn member_color(color: Option<u32>, username: &str) -> Color32 {
     match color {
-        Some(rgb) => Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8),
+        Some(rgb) => ki_ui::jetons::couleur::lisible_sur(Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8), BG_RAISED),
         None => color_for(username),
     }
 }
