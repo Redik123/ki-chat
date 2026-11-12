@@ -24,6 +24,11 @@ use crate::ui::Ton;
 /// Deux messages du même auteur espacés de moins de ça sont regroupés.
 pub(crate) const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
 
+/// La largeur de lecture du fil, au plus. Sur un écran très large, une
+/// ligne qui court d'un bord à l'autre perd son lecteur au retour : le fil
+/// s'arrête ici, le reste de la place reste vide.
+pub(crate) const LARGEUR_LECTURE: f32 = 900.0;
+
 /// Assainit un message reçu avant affichage : pseudo et texte viennent
 /// d'autrui et passent par les mêmes règles que partout ailleurs.
 pub(crate) fn clean_record(mut record: ChatRecord) -> ChatRecord {
@@ -968,6 +973,9 @@ impl KiApp {
                     i => CleFil::Message(messages[i - 1].user_id, messages[i - 1].ts),
                 },
                 |ui, i| {
+                    // Tout le fil tient dans la largeur de lecture : les
+                    // messages, les séparateurs, l'en-tête et le pied.
+                    ui.set_max_width(ui.available_width().min(LARGEUR_LECTURE));
                     if i == 0 {
                         // En-tête du fil : c'est là que se remonte le passé.
                         // Un bouton explicite en plus du chargement au
