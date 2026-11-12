@@ -21,7 +21,7 @@ Sécurité : les limites, à dire aussi
 
 Ce qui sort du serveur vers l'extérieur
 - Les statistiques VALORANT : le Riot ID des comptes liés part chez HenrikDev, le service qui fournit les fiches.
-- Toi : la question, les derniers échanges de la conversation et ce que tes outils ont lu partent chez Anthropic.
+- Toi : la question, les derniers échanges de la conversation et ce que tes outils ont lu partent chez Anthropic. Tes recherches sur internet aussi : c'est Anthropic qui les exécute, sur les seuls sites que le propriétaire a autorisés.
 - Le bot musique va chercher les morceaux demandés là où ils sont (YouTube et autres).
 - L'appli interroge GitHub pour savoir si une mise à jour existe.
 - Les diagnostics : seulement si le membre a coché « Partager mes diagnostics ». C'est un journal technique (carte graphique, pilotes, statistiques réseau et audio), envoyé au serveur du groupe, jamais de message ni de voix.

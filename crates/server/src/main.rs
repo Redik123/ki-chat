@@ -14,6 +14,9 @@
 //!   KI_HENRIK_KEY       clé HenrikDev pour les fiches VALORANT (sinon data/henrik.key ; absente : liaisons fermées)
 //!   KI_ANTHROPIC_KEY    clé d'API Anthropic pour le salon Claude (sinon
 //!                       data/anthropic.key ; absente : pas de salon Claude)
+//!   KI_CLAUDE_WEB       les sites où Claude peut chercher sur internet, séparés
+//!                       par des virgules (défaut : une liste de sites de
+//!                       confiance, voir `claude`) ; 0 : pas de recherche
 //!   KI_FILES_MAX_BYTES  plafond global de data/files/ (défaut 2 Gio, 0 =
 //!                       illimité) — au-delà, les partages les plus anciens
 //!                       sont supprimés et les nouveaux envois refusés
