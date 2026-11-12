@@ -529,7 +529,8 @@ fn outils() -> Value {
         ),
         outil(
             "qui_est_la",
-            "Les membres connectés en ce moment : s'ils sont en vocal, et à quoi ils jouent s'ils le partagent.",
+            "Les membres connectés en ce moment — s'ils sont en vocal, s'ils partagent leur écran, à quoi ils jouent — \
+             puis, à part, ceux qui sont hors ligne.",
             json!({}),
             json!([]),
         ),
@@ -751,6 +752,59 @@ fn heure(ms: u64) -> String {
         .unwrap_or_default()
 }
 
+/// Qui est là, tel que l'outil `qui_est_la` le rend. La liste des membres du
+/// serveur porte **tout le monde**, hors-ligne compris — c'est la colonne
+/// de droite du client : les connectés d'abord, un par ligne, puis les
+/// autres, nommés à part pour qu'aucun ne passe pour présent. Le bot
+/// musique n'est pas quelqu'un : il a sa ligne.
+fn presence(membres: &[ki_protocol::Member], visibles: &HashMap<ChannelId, String>) -> String {
+    // Le nom d'un salon vocal que le demandeur ne voit pas ne se dit pas.
+    let vocal = |salon: ChannelId| match visibles.get(&salon) {
+        Some(nom) => format!("en vocal dans {nom}"),
+        None => "en vocal".to_string(),
+    };
+    let est_bot = |m: &ki_protocol::Member| m.user_id == ki_protocol::MUSIQUE_ID;
+    let par_pseudo = |a: &&ki_protocol::Member, b: &&ki_protocol::Member| a.username.to_lowercase().cmp(&b.username.to_lowercase());
+    let mut en_ligne: Vec<&ki_protocol::Member> = membres.iter().filter(|m| m.online && !est_bot(m)).collect();
+    en_ligne.sort_by(par_pseudo);
+    let mut hors_ligne: Vec<&ki_protocol::Member> = membres.iter().filter(|m| !m.online && !est_bot(m)).collect();
+    hors_ligne.sort_by(par_pseudo);
+
+    let mut lignes = Vec::new();
+    if en_ligne.is_empty() {
+        lignes.push("Personne n'est connecté en ce moment.".to_string());
+    } else {
+        lignes.push(format!("Connectés en ce moment ({}) :", en_ligne.len()));
+    }
+    for m in en_ligne {
+        let mut ligne = m.username.clone();
+        if m.invite {
+            ligne.push_str(" (invité web)");
+        }
+        if m.mobile {
+            ligne.push_str(" (sur téléphone)");
+        }
+        if let Some(salon) = m.voice {
+            ligne.push_str(&format!(" — {}", vocal(salon)));
+        }
+        if m.streaming.is_some() {
+            ligne.push_str(" — partage son écran");
+        }
+        if let Some(jeu) = &m.jeu {
+            ligne.push_str(&format!(" — {}", jeu.ligne()));
+        }
+        lignes.push(ligne);
+    }
+    if let Some(salon) = membres.iter().find(|m| est_bot(m)).and_then(|m| m.voice) {
+        lignes.push(format!("Le bot musique est {}.", vocal(salon)));
+    }
+    if !hors_ligne.is_empty() {
+        let noms: Vec<&str> = hors_ligne.iter().map(|m| m.username.as_str()).collect();
+        lignes.push(format!("Hors ligne, pas connectés ({}) : {}", noms.len(), noms.join(", ")));
+    }
+    lignes.join("\n")
+}
+
 /// Exécute un outil pour ce membre. Une erreur est un texte que Claude lira.
 fn executer(state: &AppState, user_id: UserId, nom: &str, entree: &Value) -> Result<String, String> {
     let texte = |cle: &str| entree.get(cle).and_then(Value::as_str).map(str::trim).ok_or(format!("il manque « {cle} »"));
@@ -803,29 +857,7 @@ fn executer(state: &AppState, user_id: UserId, nom: &str, entree: &Value) -> Res
         }
         "qui_est_la" => {
             let visibles: HashMap<ChannelId, String> = state.visible_channels(user_id).into_iter().map(|c| (c.id, c.name)).collect();
-            let mut membres = state.roster();
-            membres.sort_by_key(|m| m.username.to_lowercase());
-            if membres.is_empty() {
-                return Ok("personne n'est connecté".into());
-            }
-            Ok(membres
-                .iter()
-                .map(|m| {
-                    let mut ligne = m.username.clone();
-                    if let Some(salon) = m.voice {
-                        // Le nom d'un salon vocal qu'il ne voit pas ne se dit pas.
-                        match visibles.get(&salon) {
-                            Some(nom) => ligne.push_str(&format!(" — en vocal dans {nom}")),
-                            None => ligne.push_str(" — en vocal"),
-                        }
-                    }
-                    if let Some(jeu) = &m.jeu {
-                        ligne.push_str(&format!(" — {}", jeu.ligne()));
-                    }
-                    ligne
-                })
-                .collect::<Vec<_>>()
-                .join("\n"))
+            Ok(presence(&state.roster(), &visibles))
         }
         "stats_valorant" => {
             let voulu = texte("pseudo").unwrap_or("").to_lowercase();
@@ -1178,6 +1210,42 @@ mod tests {
         assert!(recues[0].1.get("fallbacks").is_none());
         drop(recues);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// « Qui est connecté » ne compte que les connectés : la liste des
+    /// membres porte aussi les hors-ligne, que Claude annonçait présents.
+    #[test]
+    fn qui_est_la_separe_les_connectes_des_hors_ligne() {
+        let membre = |id: UserId, pseudo: &str, en_ligne: bool, vocal: Option<ChannelId>| -> ki_protocol::Member {
+            let mut m = json!({"user_id": id, "username": pseudo, "speaking": false, "muted": false, "online": en_ligne});
+            if let Some(salon) = vocal {
+                m["voice"] = json!(salon);
+            }
+            serde_json::from_value(m).unwrap()
+        };
+        let membres = [
+            membre(1, "zoe", true, Some(7)),
+            membre(2, "Bob", false, None),
+            membre(3, "alice", true, Some(9)),
+            membre(4, "Carl", false, None),
+            membre(ki_protocol::MUSIQUE_ID, ki_protocol::MUSIQUE_NOM, true, Some(7)),
+        ];
+        // Le salon 9 n'est pas visible du demandeur : son nom ne sort pas.
+        let visibles: HashMap<ChannelId, String> = [(7, "Boys Talks".to_string())].into();
+        let rendu = presence(&membres, &visibles);
+        let lignes: Vec<&str> = rendu.lines().collect();
+        assert_eq!(
+            lignes,
+            [
+                "Connectés en ce moment (2) :",
+                "alice — en vocal",
+                "zoe — en vocal dans Boys Talks",
+                "Le bot musique est en vocal dans Boys Talks.",
+                "Hors ligne, pas connectés (2) : Bob, Carl",
+            ]
+        );
+        let seuls = [membre(2, "Bob", false, None)];
+        assert!(presence(&seuls, &visibles).starts_with("Personne n'est connecté"));
     }
 
     /// Sans clé, rien : le salon n'est pas annoncé.
