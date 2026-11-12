@@ -1,10 +1,15 @@
-//! La page VALORANT du groupe et la fiche d'un membre : deux fenêtres sur
-//! ce que le serveur sait des fiches HenrikDev, sans jamais solliciter
-//! HenrikDev elles-mêmes — ouvrir la page ou une fiche ne coûte aucune
-//! requête à personne.
+//! La page VALORANT : le groupe et la fiche de chacun, à la place du chat,
+//! sur ce que le serveur sait des fiches HenrikDev — sans jamais solliciter
+//! HenrikDev elle-même : l'ouvrir ne coûte aucune requête à personne.
+//!
+//! La page est dessinée par les modules d'à côté ([`centre`] et ses
+//! onglets : [`accueil`], [`classement`], [`matchs`], [`profil`]…) ; ce
+//! fichier porte ce qu'ils partagent — l'état, le contexte, les vues, les
+//! formateurs, les cellules. Les deux fenêtres flottantes d'avant, que la
+//! page a remplacées, sont parties avec la 0.2.0.
 //!
 //! Sur le patron du soundboard et de la visionneuse, le module tient son
-//! état (onglet, période, tri, filtres, ce qui est déplié) et rend des
+//! état (onglet, période, filtres, ce qui est déplié) et rend des
 //! [`Demande`] à l'application, qui garde la connexion : rien ici ne
 //! touche à `KiApp`. Les nombres viennent de `ki-protocol` (`Bilan`,
 //! `FicheValorant::bilan`, `forme`, `serie`…) — une seule implémentation
@@ -29,7 +34,7 @@ use ki_protocol::{
     PositionMmr, UserId,
 };
 
-use crate::graphes::{self, Barre, PointCourbe};
+use crate::graphes::{self, PointCourbe};
 use crate::icons;
 use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT};
 use crate::ui;
@@ -57,17 +62,10 @@ const JOUR_MS: u64 = 86_400_000;
 const ASSEZ: u16 = 5;
 /// Le nom français du mode classé, tel que le serveur le traduit.
 const MODE_CLASSE: &str = "Compétitif";
-/// Le fil des matchs du groupe s'arrête là, puis « voir plus ».
-const LIGNES_FIL: usize = 40;
-/// La table des matchs d'une fiche s'arrête là, puis « voir les N autres ».
-const LIGNES_TABLE: usize = 20;
 /// La largeur d'une tuile de record (page du groupe) et d'une tuile de
 /// la fiche ; les marges intérieures des cadres sont dedans.
 const TUILE_GROUPE: Vec2 = Vec2::new(150.0, 80.0);
-const TUILE_FICHE: f32 = 140.0;
 const MARGE_TUILE: f32 = 12.0;
-/// La ligne de matchs de la page groupe se déroule sur cette hauteur.
-const HAUTEUR_COURBE: f32 = 120.0;
 /// Le portrait d'un agent dans une ligne de table.
 const PORTRAIT: f32 = 18.0;
 /// La pastille d'une carte dans une ligne de table : son nom sur son
@@ -82,42 +80,6 @@ const TIRET: &str = "—";
 // ---------------------------------------------------------------------
 // Les choix de la page
 // ---------------------------------------------------------------------
-
-/// Les quatre onglets de la page du groupe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Onglet {
-    Groupe,
-    Matchs,
-    Esport,
-    Boutique,
-}
-
-impl Onglet {
-    pub const TOUS: [Onglet; 4] = [Onglet::Groupe, Onglet::Matchs, Onglet::Esport, Onglet::Boutique];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Onglet::Groupe => "Groupe",
-            Onglet::Matchs => "Matchs",
-            Onglet::Esport => "Esport",
-            Onglet::Boutique => "Boutique",
-        }
-    }
-
-    /// La clé mémorisée : l'onglet ouvert revient à la session suivante.
-    pub fn cle(self) -> &'static str {
-        match self {
-            Onglet::Groupe => "groupe",
-            Onglet::Matchs => "matchs",
-            Onglet::Esport => "esport",
-            Onglet::Boutique => "boutique",
-        }
-    }
-
-    pub fn depuis(cle: &str) -> Self {
-        Self::TOUS.into_iter().find(|o| o.cle() == cle).unwrap_or(Onglet::Groupe)
-    }
-}
 
 /// La fenêtre des agrégats de la page du groupe : sept ou trente jours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,19 +190,6 @@ impl PeriodeFiche {
     }
 }
 
-/// La colonne qui trie le classement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tri {
-    Rang,
-    Rr7,
-    Rr30,
-    Kd,
-    Acs,
-    Adr,
-    Kast,
-    Matchs,
-}
-
 /// Ce que la page demande à l'application, qui tient la connexion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Demande {
@@ -260,20 +209,15 @@ pub enum Demande {
 // L'état
 // ---------------------------------------------------------------------
 
-/// L'état des deux fenêtres : ce qui se mémorise d'une session à l'autre
-/// (onglet, périodes, mode) et ce qui ne dure que la fenêtre (tri,
-/// filtres, ligne dépliée, point survolé).
+/// L'état de la page : ce qui se mémorise d'une session à l'autre
+/// (périodes, mode) et ce qui ne dure que le temps qu'elle est ouverte
+/// (filtres, ligne dépliée, point survolé).
 pub struct PageValo {
     pub ouvert: bool,
-    onglet: Onglet,
     periode: Periode,
-    tri: Tri,
-    tri_desc: bool,
     /// Le fil des matchs : un mode, un membre — ou tout.
     filtre_mode: Option<String>,
     filtre_membre: Option<UserId>,
-    /// « voir plus » a été cliqué : tout le fil.
-    plus: bool,
     // La fiche.
     fiche_periode: PeriodeFiche,
     fiche_classe: bool,
@@ -298,18 +242,13 @@ pub struct PageValo {
 }
 
 impl PageValo {
-    /// Clés mémorisées : `valo_onglet`, `valo_periode`, `fiche_periode`,
-    /// `fiche_classe`.
+    /// Clés mémorisées : `valo_periode`, `fiche_periode`, `fiche_classe`.
     pub fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
             ouvert: false,
-            onglet: Onglet::depuis(&get("valo_onglet", "groupe")),
             periode: Periode::depuis(&get("valo_periode", "30")),
-            tri: Tri::Rang,
-            tri_desc: true,
             filtre_mode: None,
             filtre_membre: None,
-            plus: false,
             fiche_periode: PeriodeFiche::depuis(&get("fiche_periode", "30")),
             fiche_classe: get("fiche_classe", "on") != "off",
             deplie: None,
@@ -324,7 +263,6 @@ impl PageValo {
     }
 
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
-        storage.set_string("valo_onglet", self.onglet.cle().into());
         storage.set_string("valo_periode", self.periode.cle().into());
         storage.set_string("fiche_periode", self.fiche_periode.cle().into());
         storage.set_string("fiche_classe", if self.fiche_classe { "on" } else { "off" }.into());
@@ -442,13 +380,6 @@ impl<'a> Annuaire<'a> {
     fn noms(&self, ids: &[UserId]) -> String {
         ids.iter().map(|id| self.nom(*id)).collect::<Vec<_>>().join(", ")
     }
-}
-
-/// La taille au-delà de laquelle une fenêtre ne va pas : l'écran, moins
-/// une marge pour garder la poignée et la croix à portée.
-fn bornes_de_fenetre(ctx: &egui::Context) -> (f32, f32) {
-    let ecran = ctx.content_rect();
-    ((ecran.width() - 40.0).max(360.0), (ecran.height() - 40.0).max(300.0))
 }
 
 /// Le début de la soirée qu'on vit : le dernier 6 h du matin à l'heure
@@ -709,63 +640,6 @@ impl<'a> Grille<'a> {
     }
 }
 
-/// Un petit triangle : vers le bas (déplié, ou tri décroissant) ou vers
-/// la droite / le haut. Peint, pour ne pas dépendre d'une police.
-fn triangle(ui: &mut Ui, sens: Sens, couleur: Color32) -> Response {
-    let (rect, reponse) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
-    if ui.is_rect_visible(rect) {
-        let r = rect.shrink(1.5);
-        let points = match sens {
-            Sens::Bas => vec![r.left_top(), r.right_top(), r.center_bottom()],
-            Sens::Haut => vec![r.left_bottom(), r.right_bottom(), r.center_top()],
-            Sens::Droite => vec![r.left_top(), r.left_bottom(), r.right_center()],
-        };
-        ui.painter().add(egui::Shape::convex_polygon(points, couleur, egui::Stroke::NONE));
-    }
-    reponse
-}
-
-#[derive(Clone, Copy)]
-enum Sens {
-    Bas,
-    Haut,
-    Droite,
-}
-
-/// Les pastilles des co-membres d'un match : un point à la couleur de
-/// chacun dans son camp, cerclé de rouge pour ceux d'en face ; leurs noms
-/// au survol. Rien n'est alloué sans personne.
-fn pastilles(ui: &mut Ui, avec: &[UserId], contre: &[UserId], noms: &Annuaire) -> Option<Response> {
-    let n = avec.len() + contre.len();
-    if n == 0 {
-        return None;
-    }
-    let pas = 11.0;
-    let (rect, reponse) = ui.allocate_exact_size(Vec2::new(pas * n as f32, 12.0), Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return Some(reponse);
-    }
-    let painter = ui.painter();
-    for (i, id) in avec.iter().chain(contre.iter()).enumerate() {
-        let centre = Pos2::new(rect.left() + pas * i as f32 + 5.0, rect.center().y);
-        icons::dot(painter, centre, 4.0, noms.couleur(*id));
-        if i >= avec.len() {
-            painter.circle_stroke(centre, 5.0, egui::Stroke::new(1.0_f32, DANGER));
-        }
-    }
-    let mut texte = String::new();
-    if !avec.is_empty() {
-        texte.push_str(&format!("avec {}", noms.noms(avec)));
-    }
-    if !contre.is_empty() {
-        if !texte.is_empty() {
-            texte.push_str(" · ");
-        }
-        texte.push_str(&format!("contre {}", noms.noms(contre)));
-    }
-    Some(reponse.on_hover_text(texte))
-}
-
 /// Un texte de cellule, en 11,5 — la taille des tables de la page.
 fn cellule(ui: &mut Ui, texte: impl Into<String>, couleur: Color32) -> Response {
     ui.label(RichText::new(texte.into()).color(couleur).size(texte::PETIT))
@@ -797,20 +671,6 @@ fn info_de_point(x: &PointRR) -> String {
         texte.push_str(" · descente protégée");
     }
     texte
-}
-
-/// Le rang en une ligne : l'icône du palier si elle est là, puis le nom à
-/// sa couleur — « Non classé » en pâle.
-fn rang_court(ui: &mut Ui, tier: u8, rr: u16, taille: f32, rangs: &rangs::Rangs) {
-    if let Some(icone) = rangs.texture(tier).filter(|_| tier >= 3) {
-        ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(taille)));
-    }
-    if tier >= 3 {
-        ui.label(RichText::new(nom_de_rang(tier)).color(graphes::couleur_de_rang(tier)).strong().size(texte::PETIT));
-        ui.label(RichText::new(format!("{rr} RR")).color(TEXT_DIM).size(texte::PETIT));
-    } else {
-        ui::hint(ui, nom_de_rang(0));
-    }
 }
 
 /// L'agent d'une ligne de table : son portrait (valorant-api.com) puis son
@@ -1150,486 +1010,7 @@ pub struct Contexte<'a> {
 }
 
 impl PageValo {
-    /// La fenêtre du groupe, sur ce que l'application lui prête ; la
-    /// boutique est prêtée le temps de l'onglet. Rend ce que la page
-    /// demande : actualiser, ouvrir une fiche.
-    pub fn fenetre(&mut self, ctx: &egui::Context, cx: &Contexte<'_>, boutique: &mut boutique::Lecteur) -> Vec<Demande> {
-        let Contexte { stats, recu, esports, activite, moi: my_id, membres, rangs, catalogue, .. } = *cx;
-        let mut demandes = Vec::new();
-        if !self.ouvert {
-            return demandes;
-        }
-        let mut open = true;
-        let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
-        let maintenant = maintenant_ms();
-        let (lignes, local) = lignes_du_groupe(stats, maintenant);
-        let noms = Annuaire::new(stats, membres);
-        // La taille se mémorise d'une session à l'autre ; l'identifiant
-        // change avec la mise en page pour oublier ce qu'une version
-        // d'avant avait retenu. Et jamais plus large que l'écran : une
-        // fenêtre egui ne rétrécit pas d'elle-même, et sa poignée hors
-        // écran ne se rattrape plus.
-        let (max_l, max_h) = bornes_de_fenetre(ctx);
-        egui::Window::new("VALORANT")
-            .id(egui::Id::unique("valo_page_v5"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(860.0)
-            .default_height(roomy)
-            .min_width(620.0_f32.min(max_l))
-            .max_width(max_l)
-            .max_height(max_h)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Le groupe sur VALORANT").strong().size(texte::GRAND));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::button(ui, icons::Icon::Refresh, "Actualiser").clicked() {
-                            demandes.push(Demande::Actualiser);
-                        }
-                        let n = stats.len();
-                        let s = if n > 1 { "s" } else { "" };
-                        ui::hint(ui, format!("{n} joueur{s} lié{s}"));
-                    });
-                });
-                ui::hint(
-                    ui,
-                    "d'après les fiches que le serveur tient à jour par HenrikDev — la ligne de \
-                     chacun dans ses matchs, jamais celles des adversaires",
-                );
-                ui.add_space(espace::S);
-                // Les onglets à gauche, la période à droite — elle vaut
-                // pour les agrégats du groupe et l'en-tête du fil.
-                ui.horizontal(|ui| {
-                    for o in Onglet::TOUS {
-                        if ui::onglet(ui, self.onglet == o, o.label()).clicked() {
-                            self.onglet = o;
-                        }
-                    }
-                    if matches!(self.onglet, Onglet::Groupe | Onglet::Matchs) {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // De droite à gauche : « 30 j » d'abord, « 7 j » à sa gauche.
-                            for p in Periode::TOUTES.into_iter().rev() {
-                                if ui.selectable_label(self.periode == p, p.label()).clicked() {
-                                    self.periode = p;
-                                }
-                            }
-                        });
-                    }
-                });
-                ui.add_space(espace::M);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.onglet {
-                    Onglet::Groupe | Onglet::Matchs => {
-                        // Qui joue en ce moment : ça vient du roster, pas des
-                        // fiches — ça se montre avant qu'elles arrivent, et
-                        // même si personne n'a lié de compte.
-                        if self.onglet == Onglet::Groupe {
-                            let en_jeu = joueurs_en_direct(membres, catalogue);
-                            ui.label(RichText::new("En direct").strong().size(texte::CORPS));
-                            if en_jeu.is_empty() {
-                                ui::hint(ui, "personne sur VALORANT en ce moment — chacun peut partager sa partie dans ⚙ → Jeu");
-                            } else {
-                                ui::hint(ui, resume_en_direct(&en_jeu));
-                                lignes_en_direct(ui, &en_jeu, &noms, rangs, catalogue, my_id, &mut demandes);
-                            }
-                            ui.add_space(espace::XL);
-                        }
-                        if !recu {
-                            ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
-                            return;
-                        }
-                        if stats.is_empty() {
-                            ui.label(
-                                RichText::new("Personne n'a encore lié de compte Riot — ⚙ → Jeu.").color(TEXT_DIM),
-                            );
-                            return;
-                        }
-                        if local {
-                            ui::hint(ui, "serveur d'avant : statistiques sur les cinq derniers matchs");
-                            ui.add_space(espace::XS);
-                        }
-                        if self.onglet == Onglet::Groupe {
-                            self.onglet_groupe(ui, &lignes, &noms, activite, my_id, rangs, &mut demandes);
-                        } else {
-                            self.onglet_matchs(ui, &lignes, &noms, my_id, maintenant, catalogue, &mut demandes);
-                        }
-                    }
-                    Onglet::Esport => esports_ui(ui, esports),
-                    Onglet::Boutique => {
-                        ui.label(RichText::new("Ma boutique du jour").strong().size(texte::CORPS));
-                        ui::hint(
-                            ui,
-                            "lue dans ton client Riot, sur ce PC, pour toi seul — rien ne part vers le \
-                             serveur ; il faut VALORANT ouvert",
-                        );
-                        ui.add_space(espace::XS);
-                        boutique.ui(ui);
-                    }
-                });
-            });
-        if !open {
-            self.ouvert = false;
-            self.plus = false;
-        }
-        demandes
-    }
 
-    /// L'onglet Groupe : les records, le classement, les duos, et quand
-    /// le groupe joue.
-    #[allow(clippy::too_many_arguments)]
-    fn onglet_groupe(
-        &mut self,
-        ui: &mut Ui,
-        lignes: &[Ligne],
-        noms: &Annuaire,
-        activite: &[u16],
-        my_id: Option<UserId>,
-        rangs: &rangs::Rangs,
-        demandes: &mut Vec<Demande>,
-    ) {
-        records(ui, lignes, self.periode, rangs);
-        ui.add_space(espace::XL);
-        ui.label(RichText::new("Classement").strong().size(texte::CORPS));
-        ui.add_space(espace::XS);
-        self.classement(ui, lignes, noms, my_id, rangs, demandes);
-        medailles_du_groupe(ui, lignes, noms, my_id, demandes, &MEDAILLES_DU_GROUPE);
-        duos(ui, lignes, noms);
-        quand_le_groupe_joue(ui, activite);
-    }
-
-    /// Le classement : une ligne par membre lié, triable par ses en-têtes.
-    fn classement(
-        &mut self,
-        ui: &mut Ui,
-        lignes: &[Ligne],
-        noms: &Annuaire,
-        my_id: Option<UserId>,
-        rangs: &rangs::Rangs,
-        demandes: &mut Vec<Demande>,
-    ) {
-        let periode = self.periode;
-        let maintenant = maintenant_ms();
-        let (sept, trente) = (maintenant.saturating_sub(7 * JOUR_MS), maintenant.saturating_sub(30 * JOUR_MS));
-        // Sous 700 px, trois colonnes s'effacent ; la grille défile de
-        // toute façon.
-        let etroit = ui.available_width() < 700.0;
-        let mut ordre: Vec<&Ligne> = lignes.iter().collect();
-        trier(&mut ordre, |l| l.sans_match(periode), |l| cle_de_tri(l, self.tri, periode), self.tri_desc);
-        let (tri, desc) = (self.tri, self.tri_desc);
-        let mut nouveau_tri: Option<Tri> = None;
-
-        egui::ScrollArea::horizontal().id_salt("valo_classement").show(ui, |ui| {
-            egui::Grid::new("stats_classement").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
-                for (titre, cle, masquable) in COLONNES {
-                    if masquable && etroit {
-                        continue;
-                    }
-                    if en_tete_triable(ui, titre, cle, tri, desc) {
-                        nouveau_tri = cle;
-                    }
-                }
-                ui.end_row();
-                for (i, l) in ordre.iter().enumerate() {
-                    let f = l.f;
-                    let b = l.b(periode);
-                    let moi = my_id == Some(f.user_id);
-                    let pale = l.sans_match(periode);
-                    let texte = if pale { TEXT_FAINT } else { TEXT };
-                    let dim = if pale { TEXT_FAINT } else { TEXT_DIM };
-
-                    // #
-                    ui.label(RichText::new(format!("{}", i + 1)).color(if moi { ACCENT } else { TEXT_FAINT }));
-                    // Joueur — cliquable, sa couleur, en gras pour soi.
-                    let couleur = if pale { noms.couleur(f.user_id).gamma_multiply(0.6) } else { noms.couleur(f.user_id) };
-                    let mut pseudo = RichText::new(&f.username).color(couleur);
-                    if moi {
-                        pseudo = pseudo.strong();
-                    }
-                    let mut survol = f.fiche.riot_id.clone();
-                    if f.fiche.niveau > 0 {
-                        survol.push_str(&format!(" · niveau {}", f.fiche.niveau));
-                    }
-                    if let Some(pic) = f.fiche.pic.as_ref().filter(|p| p.tier >= 3) {
-                        survol.push_str(&format!(" · pic {}", nom_de_rang(pic.tier)));
-                    }
-                    if ui.add(egui::Label::new(pseudo).sense(Sense::click())).on_hover_text(survol).clicked() {
-                        demandes.push(Demande::OuvrirFiche(f.user_id, f.username.clone()));
-                    }
-                    // Rang : icône, nom, RR, et la jauge vers le palier suivant.
-                    let r = &f.fiche.rang;
-                    ui.horizontal(|ui| {
-                        rang_court(ui, r.tier, r.rr, 18.0, rangs);
-                        if (3..24).contains(&r.tier) {
-                            graphes::jauge(ui, f32::from(r.rr) / 100.0, None, 40.0, graphes::couleur_de_rang(r.tier));
-                        }
-                    });
-                    // Tendance : les points reçus, du plus ancien au plus récent.
-                    let mut points: Vec<&PointRR> = f.fiche.historique_rr.iter().collect();
-                    points.sort_by_key(|p| p.date);
-                    if points.len() >= 2 {
-                        let valeurs: Vec<f32> = points.iter().map(|p| graphes::valeur_rr(p.tier, p.rr)).collect();
-                        // La teinte suit la somme des deltas, comme
-                        // l'infobulle — pas la pente entre le premier et
-                        // le dernier point, qui ignore le gain du premier.
-                        let total = points.iter().fold(0i32, |acc, p| acc.saturating_add(p.delta));
-                        let (somme, teinte) = signe(total);
-                        graphes::sparkline(ui, &valeurs, Vec2::new(64.0, 16.0), teinte).on_hover_text(format!(
-                            "{somme} RR sur {}",
-                            pluriel(points.len() as u32, "classé")
-                        ));
-                    } else {
-                        cellule(ui, TIRET, TEXT_FAINT);
-                    }
-                    // 7 j et 30 j.
-                    let (t, c) = rr_texte(l.bilan.sept_jours.rr, &f.fiche.historique_rr, sept);
-                    cellule(ui, t, c);
-                    let (t, c) = rr_texte(l.bilan.trente_jours.rr, &f.fiche.historique_rr, trente);
-                    cellule(ui, t, c);
-                    // Forme.
-                    if l.bilan.forme.is_empty() {
-                        cellule(ui, TIRET, TEXT_FAINT);
-                    } else {
-                        graphes::bande_forme(ui, &l.bilan.forme, Vec2::new(7.0, 10.0), None)
-                            .on_hover_text("les dix derniers classés, le plus récent à droite");
-                    }
-                    // Bilan, K/D, ACS, ADR, KAST, Tête, Matchs.
-                    cellule(ui, bilan_texte(b), texte);
-                    cellule(ui, opt_dec(b.kd(), 2), texte);
-                    cellule(ui, opt_entier(b.acs()), texte);
-                    if !etroit {
-                        cellule(ui, opt_entier(b.adr()), texte);
-                        cellule(ui, opt_pct(b.kast_pct()), texte);
-                        cellule(ui, opt_pct(b.tete_pct()), texte);
-                    }
-                    let matchs = if b.matchs > 0 { format!("{}", b.matchs) } else { TIRET.to_string() };
-                    cellule(ui, matchs, dim);
-                    if ui.add(egui::Button::new(RichText::new("fiche").size(texte::PETIT)).small()).clicked() {
-                        demandes.push(Demande::OuvrirFiche(f.user_id, f.username.clone()));
-                    }
-                    ui.end_row();
-                }
-            });
-        });
-        if let Some(t) = nouveau_tri {
-            if t == self.tri {
-                self.tri_desc = !self.tri_desc;
-            } else {
-                self.tri = t;
-                self.tri_desc = true;
-            }
-        }
-    }
-
-    /// L'onglet Matchs : la somme de la période, deux filtres, et le fil
-    /// de tout le groupe — les matchs joués ensemble regroupés.
-    #[allow(clippy::too_many_arguments)]
-    fn onglet_matchs(
-        &mut self,
-        ui: &mut Ui,
-        lignes: &[Ligne],
-        noms: &Annuaire,
-        my_id: Option<UserId>,
-        maintenant: u64,
-        catalogue: &Catalogue,
-        demandes: &mut Vec<Demande>,
-    ) {
-        let periode = self.periode;
-        let depuis = maintenant.saturating_sub(periode.jours() * JOUR_MS);
-
-        // La somme des classés de tout le monde sur la période.
-        let mut total = Bilan::default();
-        for l in lignes {
-            let b = l.b(periode);
-            total.matchs = total.matchs.saturating_add(b.matchs);
-            total.victoires = total.victoires.saturating_add(b.victoires);
-            total.defaites = total.defaites.saturating_add(b.defaites);
-            total.duree_s = total.duree_s.saturating_add(b.duree_s);
-        }
-        if total.matchs > 0 {
-            let nuls = total.matchs.saturating_sub(total.victoires).saturating_sub(total.defaites);
-            let mut texte = format!(
-                "{} · {} V / {} D / {}",
-                pluriel(u32::from(total.matchs), "classé"),
-                total.victoires,
-                total.defaites,
-                pluriel(u32::from(nuls), "nul")
-            );
-            if total.duree_s > 0 {
-                texte.push_str(&format!(" · {}", duree_texte(total.duree_s)));
-            }
-            ui.label(RichText::new(texte).strong().size(texte::CORPS));
-            graphes::barre_vd(
-                ui,
-                u32::from(total.victoires),
-                u32::from(total.defaites),
-                u32::from(nuls),
-                ui.available_width(),
-            )
-            .on_hover_text(format!("le groupe sur {}, en classé", periode.titre()));
-            ui.add_space(espace::M);
-        }
-
-        // Tout ce qu'on sait, sur la période, du plus récent au plus ancien.
-        let modes: BTreeSet<&str> = lignes
-            .iter()
-            .flat_map(|l| l.f.fiche.matchs.iter())
-            .filter(|m| m.date >= depuis && !m.mode.is_empty())
-            .map(|m| m.mode.as_str())
-            .collect();
-        ui.horizontal(|ui| {
-            let mode = self.filtre_mode.clone().unwrap_or_else(|| "tous".to_string());
-            egui::ComboBox::from_id_salt("valo_fil_mode").selected_text(mode).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filtre_mode, None, "tous");
-                for m in &modes {
-                    ui.selectable_value(&mut self.filtre_mode, Some(m.to_string()), *m);
-                }
-            });
-            let membre = self.filtre_membre.map(|id| noms.nom(id)).unwrap_or_else(|| "tout le monde".to_string());
-            egui::ComboBox::from_id_salt("valo_fil_membre").selected_text(membre).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filtre_membre, None, "tout le monde");
-                for l in lignes {
-                    ui.selectable_value(&mut self.filtre_membre, Some(l.f.user_id), &l.f.username);
-                }
-            });
-        });
-        ui.add_space(espace::S);
-
-        let mut tous: Vec<(UserId, &MatchResume)> = lignes
-            .iter()
-            .flat_map(|l| l.f.fiche.matchs.iter().map(move |m| (l.f.user_id, m)))
-            .filter(|(id, m)| {
-                m.date >= depuis
-                    && self.filtre_mode.as_ref().is_none_or(|mode| &m.mode == mode)
-                    && self.filtre_membre.is_none_or(|qui| qui == *id)
-            })
-            .collect();
-        tous.sort_by_key(|(_, m)| std::cmp::Reverse(m.date));
-        let ids: Vec<&str> = tous.iter().map(|(_, m)| m.id.as_str()).collect();
-        let blocs = regrouper(&ids);
-        if blocs.is_empty() {
-            ui.label(RichText::new("Aucun match connu sur cette période.").color(TEXT_DIM));
-            return;
-        }
-        // Le point de RR de chaque membre pour chaque match, pour la
-        // colonne ΔRR.
-        let points: HashMap<(UserId, &str), &PointRR> = lignes
-            .iter()
-            .flat_map(|l| l.f.fiche.historique_rr.iter().map(move |p| ((l.f.user_id, p.match_id.as_str()), p)))
-            .filter(|((_, id), _)| !id.is_empty())
-            .collect();
-        // Les médailles de chacun, pour la dernière colonne.
-        let medailles: HashMap<UserId, &Medailles> =
-            lignes.iter().filter_map(|l| l.f.fiche.medailles.as_ref().map(|m| (l.f.user_id, m))).collect();
-        let limite = if self.plus { usize::MAX } else { LIGNES_FIL };
-        let mut lignes_montrees = 0usize;
-        let mut tronque = false;
-
-        egui::ScrollArea::horizontal().id_salt("valo_fil").show(ui, |ui| {
-            egui::Grid::new("stats_matchs").striped(true).spacing([12.0, 5.0]).show(ui, |ui| {
-                for titre in [
-                    "Quand", "Joueur", "Mode", "Carte", "Agent", "K / D / A", "ACS", "ADR", "KAST", "FK", "Score", "ΔRR", "Avec",
-                    "Médailles",
-                ] {
-                    en_tete(ui, titre);
-                }
-                ui.end_row();
-                for bloc in &blocs {
-                    if lignes_montrees >= limite {
-                        tronque = true;
-                        break;
-                    }
-                    lignes_montrees += bloc.len();
-                    let ensemble = bloc.len() > 1;
-                    if ensemble {
-                        // L'en-tête du bloc : quand, ENSEMBLE, le mode, la
-                        // carte et le score du premier — chacun a le sien
-                        // sur sa ligne.
-                        let (_, m) = tous[bloc[0]];
-                        cellule(ui, crate::il_y_a(m.date), TEXT_FAINT);
-                        ui.label(RichText::new(format!("ENSEMBLE ×{}", bloc.len())).color(ACCENT).strong().size(texte::PETIT));
-                        cellule(ui, &m.mode, TEXT);
-                        carte_cellule(ui, &m.carte, catalogue);
-                        for _ in 0..6 {
-                            ui.label("");
-                        }
-                        let score = RichText::new(format!("{}-{}", m.manches.0, m.manches.1))
-                            .color(teinte_de_score(m.gagne))
-                            .strong()
-                            .size(texte::PETIT);
-                        ui.label(score);
-                        ui.end_row();
-                    }
-                    for &i in bloc {
-                        let (qui, m) = tous[i];
-                        let point = points.get(&(qui, m.id.as_str())).copied();
-                        let md = medailles.get(&qui).and_then(|x| x.du_match(&m.id));
-                        ligne_du_fil(ui, qui, m, ensemble, point, md, noms, my_id, catalogue, demandes);
-                    }
-                }
-            });
-        });
-        if tronque && ui.button("voir plus").clicked() {
-            self.plus = true;
-        }
-    }
-}
-
-/// Les colonnes du classement : le titre, la clé de tri s'il y en a une,
-/// et si la colonne s'efface dans une fenêtre étroite.
-const COLONNES: [(&str, Option<Tri>, bool); 15] = [
-    ("#", None, false),
-    ("Joueur", None, false),
-    ("Rang", Some(Tri::Rang), false),
-    ("Tendance", None, false),
-    ("7 j", Some(Tri::Rr7), false),
-    ("30 j", Some(Tri::Rr30), false),
-    ("Forme", None, false),
-    ("Bilan", None, false),
-    ("K/D", Some(Tri::Kd), false),
-    ("ACS", Some(Tri::Acs), false),
-    ("ADR", Some(Tri::Adr), true),
-    ("KAST", Some(Tri::Kast), true),
-    ("Tête", None, true),
-    ("Matchs", Some(Tri::Matchs), false),
-    ("", None, false),
-];
-
-/// L'en-tête d'une colonne du classement : cliquable quand elle trie, la
-/// flèche du sens sur la colonne active. Rend `true` au clic.
-fn en_tete_triable(ui: &mut Ui, titre: &str, cle: Option<Tri>, actif: Tri, desc: bool) -> bool {
-    let Some(t) = cle else {
-        en_tete(ui, titre);
-        return false;
-    };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = espace::XXS;
-        let couleur = if actif == t { TEXT } else { TEXT_FAINT };
-        let r = ui
-            .add(egui::Label::new(RichText::new(titre).color(couleur).size(texte::PETIT)).sense(Sense::click()))
-            .on_hover_text("trier par cette colonne");
-        if actif == t {
-            triangle(ui, if desc { Sens::Bas } else { Sens::Haut }, TEXT_DIM);
-        }
-        r.clicked()
-    })
-    .inner
-}
-
-/// La valeur qui trie une ligne ; `None` quand elle n'en a pas (un taux
-/// sans match), et la ligne passe derrière celles qui en ont.
-fn cle_de_tri(l: &Ligne, tri: Tri, periode: Periode) -> Option<f64> {
-    let b = periode.bilan(&l.bilan);
-    let r = &l.f.fiche.rang;
-    match tri {
-        Tri::Rang => Some(f64::from(r.tier) * 1000.0 + f64::from(r.rr)),
-        Tri::Rr7 => Some(f64::from(l.bilan.sept_jours.rr)),
-        Tri::Rr30 => Some(f64::from(l.bilan.trente_jours.rr)),
-        Tri::Kd => b.kd().map(f64::from),
-        Tri::Acs => b.acs().map(f64::from),
-        Tri::Adr => b.adr().map(f64::from),
-        Tri::Kast => b.kast_pct().map(f64::from),
-        Tri::Matchs => Some(f64::from(b.matchs)),
-    }
 }
 
 /// Trie stable : ceux qui ont joué d'abord, puis par la clé dans le sens
@@ -1744,13 +1125,6 @@ fn records(ui: &mut Ui, lignes: &[Ligne], periode: Periode, rangs: &rangs::Rangs
     grille.montrer(ui);
 }
 
-/// Les paires qui jouent ensemble, d'après les duos de chacun : clé
-/// ordonnée, le plus grand des deux sens gagne, deux parties au moins,
-/// les plus assidues d'abord. Rend `(a, b, parties, victoires)`.
-/// Les médailles montrées dans le tableau du groupe.
-const MEDAILLES_DU_GROUPE: [Medaille; 6] =
-    [Medaille::Mvp, Medaille::Distinction, Medaille::TopFrag, Medaille::Aces, Medaille::Clutchs, Medaille::PremiersSangs];
-
 /// L'acte dont parlent la plupart des membres (« V26 · ACTE V ») : celui
 /// d'une lecture d'avant un changement d'acte ne compte plus.
 fn acte_du_groupe<'a>(medailles: impl Iterator<Item = &'a Medailles>) -> String {
@@ -1857,30 +1231,6 @@ fn paires_de_duos<'a>(duos: impl Iterator<Item = (UserId, &'a [(UserId, u16, u16
     v
 }
 
-/// La section des duos — absente sans paire.
-fn duos(ui: &mut Ui, lignes: &[Ligne], noms: &Annuaire) {
-    let paires = paires_de_duos(lignes.iter().map(|l| (l.f.user_id, l.bilan.duos.as_slice())));
-    if paires.is_empty() {
-        return;
-    }
-    ui.add_space(espace::XL);
-    ui::section_label(ui, "Duos");
-    ui::hint(ui, "les parties jouées dans le même camp sur 30 jours");
-    for (a, b, parties, victoires) in paires {
-        let pct = if parties > 0 { format!(" ({} %)", u32::from(victoires) * 100 / u32::from(parties)) } else { String::new() };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(noms.nom(a)).color(noms.couleur(a)).strong().size(texte::COURANT));
-            ui.label(RichText::new("&").color(TEXT_FAINT).size(texte::COURANT));
-            ui.label(RichText::new(noms.nom(b)).color(noms.couleur(b)).strong().size(texte::COURANT));
-            ui.label(
-                RichText::new(format!("— {} · {} V{pct}", pluriel(u32::from(parties), "partie"), victoires))
-                    .color(TEXT_DIM)
-                    .size(texte::COURANT),
-            );
-        });
-    }
-}
-
 /// Les 168 cases UTC tournées à l'heure locale : une heure qui passe
 /// minuit change de jour, et le dimanche soir déborde sur lundi.
 fn activite_locale(cases: &[u16], decalage_h: i32) -> Vec<u16> {
@@ -1899,28 +1249,6 @@ fn activite_locale(cases: &[u16], decalage_h: i32) -> Vec<u16> {
         }
     }
     locale
-}
-
-/// La heatmap des parties du groupe — absente sans activité.
-fn quand_le_groupe_joue(ui: &mut Ui, activite: &[u16]) {
-    if activite.is_empty() || activite.iter().all(|&v| v == 0) {
-        return;
-    }
-    let decalage = chrono::Local::now().offset().local_minus_utc() / 3600;
-    let locale = activite_locale(activite, decalage);
-    ui.add_space(espace::XL);
-    ui::section_label(ui, "Quand le groupe joue");
-    ui::hint(ui, "les parties commencées sur 30 jours, tous modes, à l'heure locale");
-    let plus = graphes::EnPlus { encadree: Some(graphes::case_de_maintenant()), contour: None };
-    graphes::heatmap_semaine(ui, &locale, plus, |jour, heure| {
-        let n = locale.get(jour * 24 + heure).copied().unwrap_or(0);
-        format!(
-            "{} {heure}h–{}h · {} · heure locale, à une heure près au changement d'heure",
-            JOURS_LONGS.get(jour).copied().unwrap_or("?"),
-            heure + 1,
-            pluriel(u32::from(n), "partie")
-        )
-    });
 }
 
 /// Les blocs du fil : les indices des matchs qui partagent un `id`
@@ -1944,68 +1272,6 @@ fn regrouper(ids: &[&str]) -> Vec<Vec<usize>> {
         }
     }
     blocs
-}
-
-/// Une ligne du fil des matchs du groupe.
-#[allow(clippy::too_many_arguments)]
-fn ligne_du_fil(
-    ui: &mut Ui,
-    qui: UserId,
-    m: &MatchResume,
-    dans_bloc: bool,
-    point: Option<&PointRR>,
-    medailles: Option<&MedaillesDuMatch>,
-    noms: &Annuaire,
-    my_id: Option<UserId>,
-    catalogue: &Catalogue,
-    demandes: &mut Vec<Demande>,
-) {
-    // Dans un bloc, le quand, le mode et la carte sont sur l'en-tête.
-    if dans_bloc {
-        ui.label("");
-    } else {
-        cellule(ui, crate::il_y_a(m.date), TEXT_FAINT);
-    }
-    let mut pseudo = RichText::new(format!("{}{}", if dans_bloc { "    " } else { "" }, noms.nom(qui)))
-        .color(noms.couleur(qui))
-        .size(texte::PETIT);
-    if my_id == Some(qui) {
-        pseudo = pseudo.strong();
-    }
-    if ui.add(egui::Label::new(pseudo).sense(Sense::click())).on_hover_text("ouvrir sa fiche").clicked() {
-        demandes.push(Demande::OuvrirFiche(qui, noms.nom(qui)));
-    }
-    if dans_bloc {
-        ui.label("");
-        ui.label("");
-    } else {
-        cellule(ui, &m.mode, TEXT);
-        carte_cellule(ui, &m.carte, catalogue);
-    }
-    agent_cellule(ui, &m.agent, catalogue);
-    cellule(ui, format!("{} / {} / {}", m.kills, m.deaths, m.assists), TEXT);
-    cellule(ui, opt_entier(acs_de(m)), TEXT_DIM);
-    cellule(ui, opt_entier(adr_de(m)), TEXT_DIM);
-    cellule(ui, opt_pct(kast_de(m)), TEXT_DIM);
-    let fk = m.manches_detail.as_ref().map(|d| d.premiers_sangs.to_string()).unwrap_or_else(|| TIRET.to_string());
-    cellule(ui, fk, TEXT_DIM);
-    ui.label(
-        RichText::new(format!("{}-{}", m.manches.0, m.manches.1)).color(teinte_de_score(m.gagne)).strong().size(texte::PETIT),
-    );
-    match point {
-        Some(p) => {
-            let (t, c) = signe(p.delta);
-            cellule(ui, t, c);
-        }
-        None => {
-            ui.label("");
-        }
-    }
-    if pastilles(ui, &m.avec, &m.contre, noms).is_none() {
-        ui.label("");
-    }
-    medailles_cellule(ui, medailles);
-    ui.end_row();
 }
 
 /// Les prochains matchs d'esport, tels que le serveur les a lus chez
@@ -2147,105 +1413,6 @@ impl<'a> Vue<'a> {
 }
 
 impl PageValo {
-    /// La fiche d'un membre : une page déroulante à deux filtres. Rend
-    /// `false` quand elle se ferme.
-    pub fn fiche(&mut self, ctx: &egui::Context, ouverte: &FicheOuverte, cx: &Contexte<'_>) -> bool {
-        let mut open = true;
-        let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
-        let titre = format!("VALORANT — {}", ouverte.username);
-        let (max_l, max_h) = bornes_de_fenetre(ctx);
-        egui::Window::new(titre)
-            .id(egui::Id::unique("fiche_valorant_v5"))
-            .collapsible(false)
-            .resizable(true)
-            .default_width(640.0)
-            .min_width(520.0_f32.min(max_l))
-            .max_width(max_l)
-            .max_height(max_h)
-            .default_height(roomy)
-            .open(&mut open)
-            .show(ctx, |ui| match (ouverte.recue, &ouverte.fiche) {
-                (false, _) => {
-                    ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
-                }
-                (true, None) => {
-                    ui.label(RichText::new("pas de compte Riot lié — ou pas encore de fiche.").color(TEXT_DIM));
-                }
-                (true, Some(fiche)) => {
-                    self.fiche_corps(ui, &ouverte.username, fiche, cx);
-                }
-            });
-        open
-    }
-
-    /// Le corps de la fiche : l'identité et les filtres en tête, puis les
-    /// sections qui se déroulent.
-    fn fiche_corps(&mut self, ui: &mut Ui, username: &str, fiche: &FicheValorant, cx: &Contexte<'_>) {
-        let catalogue = cx.catalogue;
-        // L'identité sur sa ligne — sur sa carte de joueur quand on la
-        // connaît —, les filtres sur la leur, comme la ligne d'onglets de
-        // la page du groupe. Six boutons et un Riot ID sur une seule ligne
-        // dépassent les 640 px de la fenêtre, et un `right_to_left` ne se
-        // replie pas : il se dessinait par-dessus « EU · PC · niveau … ».
-        identite(ui, fiche, catalogue);
-        ui.add_space(espace::XXS);
-        ui.horizontal(|ui| {
-            for p in PeriodeFiche::TOUTES {
-                if ui.selectable_label(self.fiche_periode == p, p.label()).clicked() {
-                    self.fiche_periode = p;
-                    self.fiche_plus = false;
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // De droite à gauche : « Tous », puis « Compétitif ».
-                if ui.selectable_label(!self.fiche_classe, "Tous").clicked() {
-                    self.fiche_classe = false;
-                }
-                if ui.selectable_label(self.fiche_classe, "Compétitif").clicked() {
-                    self.fiche_classe = true;
-                }
-            });
-        });
-        ui.add_space(espace::S);
-
-        let vue = Vue::new(username, fiche, self.fiche_periode, self.fiche_classe, cx, maintenant_ms());
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            en_tete_fiche(ui, &vue);
-            ui.add_space(espace::L);
-            self.courbe(ui, &vue);
-            forme(ui, &vue);
-            ui.add_space(espace::L);
-            tuiles(ui, &vue);
-            ui.add_space(espace::L);
-            medailles_fiche(ui, &vue);
-            agents_et_cartes(ui, &vue);
-            mes_heures(ui, &vue);
-            ui.add_space(espace::L);
-            self.table(ui, &vue);
-            actes(ui, &vue);
-            ui.add_space(espace::M);
-            ui.label(
-                RichText::new(format!("mis à jour {} · HenrikDev", crate::il_y_a(fiche.maj))).color(TEXT_FAINT).size(texte::MINUSCULE),
-            );
-        });
-    }
-
-    /// La courbe de RR sur les points de la fenêtre ; le point survolé
-    /// surligne sa ligne dans la table.
-    fn courbe(&mut self, ui: &mut Ui, vue: &Vue) {
-        let (rr, teinte) = signe(vue.b.rr);
-        let quoi = match vue.periode {
-            PeriodeFiche::DixDerniers => "10 derniers classés".to_string(),
-            p => p.titre().to_string(),
-        };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("RR — {quoi}")).color(TEXT_DIM).size(texte::PETIT));
-            if !vue.p.is_empty() {
-                ui.label(RichText::new(format!("· {rr}")).color(teinte).size(texte::PETIT).strong());
-            }
-        });
-        self.courbe_rr(ui, vue, HAUTEUR_COURBE);
-    }
 
     /// La courbe seule, sur `hauteur` : ou un mot quand il n'y a pas de
     /// quoi la tracer.
@@ -2272,152 +1439,6 @@ impl PageValo {
         self.survol = survole.and_then(|i| vue.p.get(i)).map(|x| x.match_id.clone()).filter(|id| !id.is_empty());
     }
 
-    /// La table des matchs retenus, une ligne dépliable par match.
-    fn table(&mut self, ui: &mut Ui, vue: &Vue) {
-        ui.label(RichText::new("Matchs").color(TEXT_DIM).size(texte::PETIT));
-        if vue.e.is_empty() {
-            ui::hint(ui, "Aucun match sur cette période.");
-            return;
-        }
-        let largeur_page = ui.available_width();
-        let limite = if self.fiche_plus { usize::MAX } else { LIGNES_TABLE };
-        let restants = vue.e.len().saturating_sub(limite);
-        let mut basculer: Option<String> = None;
-
-        egui::ScrollArea::horizontal().id_salt("fiche_table").show(ui, |ui| {
-            egui::Grid::new("fiche_matchs").striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
-                // Les textes de la table ne se sélectionnent pas : un label
-                // sélectionnable sent le clic, et passerait devant le cadre
-                // de la ligne — c'est toute la ligne qui se clique ici.
-                ui.style_mut().interaction.selectable_labels = false;
-                en_tete(ui, "Quand");
-                if !vue.classe {
-                    en_tete(ui, "Mode");
-                }
-                for titre in
-                    ["Carte", "Agent", "K / D / A", "ACS", "ADR", "KAST", "FK / FD", "Score", "ΔRR", "Rang", "Avec", "Médailles", ""]
-                {
-                    en_tete(ui, titre);
-                }
-                ui.end_row();
-                for (i, m) in vue.e.iter().enumerate().take(limite) {
-                    let deplie = !m.id.is_empty() && self.deplie.as_deref() == Some(m.id.as_str());
-                    let survole = !m.id.is_empty() && self.survol.as_deref() == Some(m.id.as_str());
-
-                    // Toute la ligne se clique et se surligne. Son cadre
-                    // s'enregistre AVANT les cellules : egui ne « survole »
-                    // un widget muet — les pastilles, l'icône de rang —
-                    // que s'il est au-dessus du dernier widget interactif
-                    // sous la souris ; posé après elles, le cadre les
-                    // éteignait, et leurs infobulles avec. Sa hauteur est
-                    // celle mesurée à l'image précédente (la première
-                    // image se contente d'une ligne de texte) ; sa position
-                    // vient du curseur de cette image, exacte même en
-                    // plein défilement. Le fond se réserve ici aussi, pour
-                    // passer sous le texte.
-                    let id_ligne = ui.scope_id().with(("ligne", i));
-                    let haut_ligne = ui.cursor().min.y;
-                    let (decalage, taille): (f32, Vec2) =
-                        ui.data(|d| d.get_temp(id_ligne)).unwrap_or((-2.0, Vec2::new(largeur_page, 20.0)));
-                    let rect_estime = Rect::from_min_size(Pos2::new(ui.cursor().min.x, haut_ligne + decalage), taille);
-                    let reponse = ui.interact(rect_estime, id_ligne, Sense::click());
-                    let fond = ui.painter().add(egui::Shape::Noop);
-
-                    let premier = cellule(ui, crate::il_y_a(m.date), TEXT_FAINT);
-                    if !vue.classe {
-                        cellule(ui, &m.mode, TEXT);
-                    }
-                    carte_cellule(ui, &m.carte, vue.catalogue);
-                    agent_cellule(ui, &m.agent, vue.catalogue);
-                    cellule(ui, format!("{} / {} / {}", m.kills, m.deaths, m.assists), TEXT)
-                        .on_hover_text(format!("éliminations / morts / assistances — {} points", milliers(m.score)));
-                    cellule(ui, opt_entier(acs_de(m)), TEXT_DIM);
-                    cellule(ui, opt_entier(adr_de(m)), TEXT_DIM);
-                    cellule(ui, opt_pct(kast_de(m)), TEXT_DIM);
-                    let fk = m
-                        .manches_detail
-                        .as_ref()
-                        .map(|d| format!("{} / {}", d.premiers_sangs, d.premieres_morts))
-                        .unwrap_or_else(|| TIRET.to_string());
-                    cellule(ui, fk, TEXT_DIM);
-                    ui.label(
-                        RichText::new(format!("{}-{}", m.manches.0, m.manches.1))
-                            .color(teinte_de_score(m.gagne))
-                            .strong()
-                            .size(texte::PETIT),
-                    );
-                    match vue.point_de(&m.id) {
-                        Some(p) => {
-                            let (t, c) = signe(p.delta);
-                            let reponse = cellule(ui, t, c);
-                            let mut details = Vec::new();
-                            if p.bonus != 0 {
-                                details.push(format!("dont {} de bonus de performance", signe(p.bonus).0));
-                            }
-                            if p.placement {
-                                details.push("match de placement".to_string());
-                            }
-                            if p.protege {
-                                details.push("descente protégée".to_string());
-                            }
-                            if !details.is_empty() {
-                                reponse.on_hover_text(details.join(" · "));
-                            }
-                        }
-                        None => {
-                            ui.label("");
-                        }
-                    }
-                    match vue.rangs.texture(m.tier).filter(|_| m.tier >= 3) {
-                        Some(icone) => {
-                            ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(16.0)))
-                                .on_hover_text(nom_de_rang(m.tier));
-                        }
-                        None => {
-                            let rang = if m.tier >= 3 { nom_de_rang(m.tier) } else { String::new() };
-                            ui.label(RichText::new(rang).color(graphes::couleur_de_rang(m.tier)).size(texte::PETIT));
-                        }
-                    }
-                    if pastilles(ui, &m.avec, &m.contre, &vue.noms).is_none() {
-                        ui.label("");
-                    }
-                    medailles_cellule(ui, vue.medailles_du(&m.id));
-                    let dernier = triangle(ui, if deplie { Sens::Bas } else { Sens::Droite }, TEXT_DIM);
-
-                    // Le cadre tel qu'il est vraiment : de la première à la
-                    // dernière cellule, sur la largeur de la grille — pour
-                    // le fond de cette image et le clic de la suivante.
-                    let gauche = premier.rect.left();
-                    let droite = ui.min_rect().right().max(gauche + largeur_page);
-                    let rect = Rect::from_min_max(
-                        Pos2::new(gauche, premier.rect.top() - 2.0),
-                        Pos2::new(droite, dernier.rect.bottom() + 2.0),
-                    );
-                    ui.data_mut(|d| d.insert_temp(id_ligne, (rect.top() - haut_ligne, rect.size())));
-                    if survole {
-                        ui.painter().set(fond, egui::Shape::rect_filled(rect, egui::CornerRadius::same(rayon::S), theme::alpha(ACCENT, 24)));
-                    } else if reponse.hovered() {
-                        ui.painter().set(fond, egui::Shape::rect_filled(rect, egui::CornerRadius::same(rayon::S), theme::alpha(TEXT, 10)));
-                    }
-                    if reponse.clicked() && !m.id.is_empty() {
-                        basculer = Some(m.id.clone());
-                    }
-                    ui.end_row();
-
-                    if deplie {
-                        detail_du_match(ui, m, vue, largeur_page);
-                        ui.end_row();
-                    }
-                }
-            });
-        });
-        if let Some(id) = basculer {
-            self.deplie = if self.deplie.as_deref() == Some(id.as_str()) { None } else { Some(id) };
-        }
-        if restants > 0 && ui.button(format!("voir les {} autres", restants)).clicked() {
-            self.fiche_plus = true;
-        }
-    }
 }
 
 /// Les frontières d'acte entre points consécutifs (du plus ancien au plus
@@ -2497,109 +1518,10 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
     }
 }
 
-/// L'en-tête de la fiche : le rang en grand, la jauge vers le palier
-/// suivant, l'acte en cours, le pic.
-fn en_tete_fiche(ui: &mut Ui, vue: &Vue) {
-    let fiche = vue.fiche;
-    let r = &fiche.rang;
-    let couleur = graphes::couleur_de_rang(r.tier);
-    ui.horizontal(|ui| {
-        if let Some(icone) = vue.rangs.texture(r.tier).filter(|_| r.tier >= 3) {
-            ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(40.0)));
-        }
-        if r.tier >= 3 {
-            ui.label(RichText::new(nom_de_rang(r.tier)).color(couleur).strong().size(texte::GRAND));
-            ui.label(RichText::new(format!("{} RR", r.rr)).color(TEXT_DIM).size(texte::TITRE));
-            if r.delta != 0 {
-                let (texte, teinte) = signe(r.delta);
-                ui.label(RichText::new(format!("{texte} au dernier match")).color(teinte).size(texte::PETIT));
-            }
-        } else {
-            ui.label(RichText::new("Non classé").color(TEXT_FAINT).strong().size(texte::GRAND));
-        }
-    });
-    if (3..24).contains(&r.tier) {
-        ui.horizontal(|ui| {
-            graphes::jauge(ui, f32::from(r.rr) / 100.0, None, 200.0, couleur);
-            ui.label(RichText::new(format!("{} / 100 vers {}", r.rr, nom_de_rang(r.tier + 1))).color(TEXT_FAINT).size(texte::PETIT));
-        });
-    } else if r.tier >= 24 && r.classement > 0 {
-        ui.label(RichText::new(format!("#{} du classement", milliers(r.classement))).color(TEXT_DIM).size(texte::PETIT));
-    }
-    ligne_mmr(ui, fiche);
-    // L'acte en cours, les placements, les boucliers.
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(s) = fiche.saisons.last() {
-        let pct = if s.parties > 0 { format!(" · {} %", u32::from(s.victoires) * 100 / u32::from(s.parties)) } else { String::new() };
-        parts.push(format!("acte {} · {} V / {}{pct}", s.saison.to_uppercase(), s.victoires, pluriel(u32::from(s.parties), "partie")));
-    }
-    if r.placements_restants > 0 {
-        parts.push(format!("encore {}", pluriel(u32::from(r.placements_restants), "placement")));
-    }
-    if r.boucliers > 0 {
-        parts.push(pluriel(u32::from(r.boucliers), "bouclier"));
-    }
-    if !parts.is_empty() {
-        ui.label(RichText::new(parts.join(" · ")).color(TEXT_DIM).size(texte::PETIT));
-    }
-    if let Some(pic) = fiche.pic.as_ref().filter(|p| p.tier >= 3) {
-        let mut texte = format!("pic : {} · {} RR", nom_de_rang(pic.tier), pic.rr);
-        if !pic.saison.is_empty() {
-            texte.push_str(&format!(" · {}", pic.saison.to_uppercase()));
-        }
-        ui::hint(ui, texte);
-    }
-}
-
 /// Pourquoi on peut dire quelque chose d'un MMR que Riot cache.
 const POURQUOI_MMR: &str = "Riot ne montre pas le MMR caché : on le devine à tes variations de RR — gagner plus qu'on ne perd, \
 c'est un MMR au-dessus du rang, le jeu pousse à monter ; l'inverse, en dessous. Sur les 20 derniers classés de l'acte, \
 sans les descentes protégées.";
-
-/// « MMR caché : au-dessus du rang · +22 par victoire, −13 par défaite
-/// sur 14 classés · ~2 victoires vers Or 3 » — l'estimation du protocole
-/// ([`FicheValorant::mmr_estime`]), ou pourquoi il n'y en a pas. Rien
-/// pour un non-classé. La ligne replie : elle ne pousse jamais la
-/// fenêtre.
-fn ligne_mmr(ui: &mut Ui, fiche: &FicheValorant) {
-    let r = &fiche.rang;
-    if r.tier < 3 {
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = espace::XS;
-        let Some(e) = fiche.mmr_estime() else {
-            let texte = if r.placements_restants > 0 {
-                "MMR caché : après les placements"
-            } else {
-                "MMR caché : pas assez de classés"
-            };
-            ui.label(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT)).on_hover_text(POURQUOI_MMR);
-            return;
-        };
-        let (ou, teinte) = match e.position {
-            PositionMmr::AuDessus => ("au-dessus du rang", SPEAK),
-            PositionMmr::AuNiveau => ("au niveau du rang", TEXT_DIM),
-            PositionMmr::EnDessous => ("en dessous du rang", DANGER),
-        };
-        ui.label(RichText::new(format!("MMR caché : {ou}")).color(teinte).strong().size(texte::PETIT))
-            .on_hover_text(POURQUOI_MMR);
-        let mut detail = format!(
-            "· +{} par victoire, −{} par défaite sur {}",
-            opt_entier(Some(e.gain_moyen)),
-            opt_entier(Some(e.perte_moyenne)),
-            pluriel(u32::from(e.points), "classé")
-        );
-        // Combien de victoires au rythme actuel jusqu'au palier suivant —
-        // pas pour Immortel et plus, qui n'ont pas de palier à 100 RR.
-        if (3..24).contains(&r.tier) && e.gain_moyen > 0.0 {
-            let restant = f32::from(100u16.saturating_sub(r.rr));
-            let n = (restant / e.gain_moyen).ceil().max(1.0) as u32;
-            detail.push_str(&format!(" · ~{} vers {}", pluriel(n, "victoire"), nom_de_rang(r.tier + 1)));
-        }
-        ui.label(RichText::new(detail).color(TEXT_FAINT).size(texte::PETIT)).on_hover_text(POURQUOI_MMR);
-    });
-}
 
 /// Les classés à manches du plus récent au plus ancien — l'ordre de
 /// `FicheValorant::forme`, refait ici pour avoir les matchs sous la main.
@@ -2608,193 +1530,6 @@ fn classes_recents(fiche: &FicheValorant) -> Vec<&MatchResume> {
         fiche.matchs.iter().filter(|m| m.mode == MODE_CLASSE && FicheValorant::a_des_manches(m)).collect();
     v.sort_by_key(|m| std::cmp::Reverse(m.date));
     v
-}
-
-/// La forme : les vingt derniers classés en cases, le bilan et la série
-/// en cours — sur les classés seulement, quelle que soit la période.
-fn forme(ui: &mut Ui, vue: &Vue) {
-    let classes = classes_recents(vue.fiche);
-    if classes.is_empty() {
-        return;
-    }
-    ui.add_space(espace::M);
-    let recents: Vec<&MatchResume> = classes.iter().copied().take(20).collect();
-    let resultats: Vec<i8> = recents
-        .iter()
-        .map(|m| match m.gagne {
-            Some(true) => 1,
-            Some(false) => -1,
-            None => 0,
-        })
-        .collect();
-    let (v, d) = classes.iter().fold((0u32, 0u32), |(v, d), m| match m.gagne {
-        Some(true) => (v + 1, d),
-        Some(false) => (v, d + 1),
-        None => (v, d),
-    });
-    let serie = vue.fiche.serie();
-    let serie_texte = if serie > 0 {
-        format!("série en cours : {serie} V")
-    } else if serie < 0 {
-        format!("série en cours : {} D", -i16::from(serie))
-    } else {
-        format!("série en cours : {TIRET}")
-    };
-    let info = |i: usize| -> String {
-        recents
-            .get(i)
-            .map(|m| format!("{} · {}-{} · {} · {}", m.carte, m.manches.0, m.manches.1, m.agent, crate::il_y_a(m.date)))
-            .unwrap_or_default()
-    };
-    ui.horizontal(|ui| {
-        // La part des victoires d'un coup d'œil, à côté de leur détail.
-        if v + d > 0 {
-            let part = v as f32 / (v + d) as f32;
-            let couleur = if part >= 0.5 { SPEAK } else { DANGER };
-            graphes::anneau(ui, egui::Id::unique("fiche_anneau"), part, 34.0, couleur, &format!("{:.0}", part * 100.0))
-                .on_hover_text(format!("{:.0} % de victoires sur les matchs classés récents", part * 100.0));
-        }
-        ui.label(RichText::new("Forme").color(TEXT_DIM).size(texte::PETIT));
-        graphes::bande_forme(ui, &resultats, Vec2::new(8.0, 12.0), Some(&info));
-        ui.label(RichText::new(format!("{v} V · {d} D · {serie_texte}")).color(TEXT_DIM).size(texte::PETIT));
-    });
-}
-
-/// Les huit tuiles de la fiche, avec le repère du groupe sous les taux.
-fn tuiles(ui: &mut Ui, vue: &Vue) {
-    let b = &vue.b;
-    let (w, h) = (TUILE_FICHE, 88.0);
-    let nuls = b.matchs.saturating_sub(b.victoires).saturating_sub(b.defaites);
-    let bilan_de = |ui: &mut Ui| {
-        ui.add_space(espace::XS);
-        graphes::barre_vd(ui, u32::from(b.victoires), u32::from(b.defaites), u32::from(nuls), w - 2.0 * MARGE_TUILE);
-    };
-    // Sous un taux : la jauge contre la médiane du groupe, s'il y en a.
-    let repere = |ui: &mut Ui, valeur: fn(&Bilan) -> Option<f32>, moi: Option<f32>, decimales: usize, unite: &str| {
-        let Some(moi) = moi else { return };
-        let Some((mediane, max)) = vue.repere(valeur, moi) else { return };
-        ui.add_space(espace::XS);
-        let teinte = if moi >= mediane { SPEAK } else { DANGER };
-        graphes::jauge(ui, moi / max, Some(mediane / max), w - 2.0 * MARGE_TUILE, teinte).on_hover_text(format!(
-            "médiane du groupe sur 30 jours : {}{unite} · {} : {}{unite}",
-            dec(mediane, decimales),
-            vue.username,
-            dec(moi, decimales)
-        ));
-    };
-
-    // Les sous-titres des tuiles disent pourquoi une valeur manque — et
-    // ne prêtent rien à la sélection qu'elle n'a pas : sans aucun match à
-    // manches, la seule raison est « aucun match », pas des manches non
-    // lues. Un dégât à zéro ne vient que d'un match résumé avant 0.1.40
-    // (l'archive de HenrikDev les donne) ; un détail absent vient d'un
-    // match d'avant, ou d'un match archivé. Courts : 116 px les tronquent.
-    let aucun = b.matchs == 0;
-    let sous_degats = if aucun {
-        "aucun match".to_string()
-    } else if b.matchs_degats == 0 {
-        "avant 0.1.40".to_string()
-    } else if b.matchs_degats < b.matchs {
-        format!("sur {}", pluriel(u32::from(b.matchs_degats), "match"))
-    } else {
-        String::new()
-    };
-    let sous_detail = if aucun {
-        "aucun match".to_string()
-    } else if b.matchs_detailles == 0 {
-        "manches non lues".to_string()
-    } else if b.matchs_detailles < b.matchs {
-        format!("sur {}", pluriel(u32::from(b.matchs_detailles), "match"))
-    } else {
-        String::new()
-    };
-    let sous_tirs = if aucun {
-        "aucun match".to_string()
-    } else if b.tirs > 0 {
-        format!("{} tirs", milliers(b.tirs))
-    } else {
-        "tirs non comptés".to_string()
-    };
-
-    let mut grille = Grille::new(w, h);
-    {
-        let valeur = if b.matchs > 0 { format!("{} V · {} D", b.victoires, b.defaites) } else { TIRET.to_string() };
-        let t = Tuile::new("Bilan", valeur, TEXT)
-            .sous(if b.matchs > 0 { opt_pct(b.victoires_pct()) } else { "aucun match".to_string() })
-            .info(format!(
-                "victoires / (victoires + défaites) = {} / {} sur {} à manches ; {} nul(s)",
-                b.victoires,
-                u32::from(b.victoires) + u32::from(b.defaites),
-                pluriel(u32::from(b.matchs), "match"),
-                nuls
-            ));
-        grille.tuile(t, bilan_de);
-
-        let t = Tuile::new("K/D", opt_dec(b.kd(), 2), ACCENT)
-            .sous(format!("KDA {}", opt_dec(b.kda(), 2)))
-            .info(format!(
-                "kills / morts = {} / {} ; KDA = (kills + assists) / morts = ({} + {}) / {}",
-                b.kills, b.deaths, b.kills, b.assists, b.deaths
-            ));
-        grille.tuile(t, |ui| repere(ui, Bilan::kd, b.kd(), 2, ""));
-
-        let t = Tuile::new("ACS", opt_entier(b.acs()), ACCENT)
-            .sous(format!("sur {}", pluriel(u32::from(b.manches), "manche")))
-            .info(format!("score / manches = {} / {}", milliers(b.score), b.manches));
-        grille.tuile(t, |ui| repere(ui, Bilan::acs, b.acs(), 0, ""));
-
-        let t = Tuile::new("ADR", opt_entier(b.adr()), ACCENT)
-            .sous(sous_degats)
-            .info(format!("dégâts / manches des matchs qui les ont = {} / {}", milliers(b.degats), b.manches_degats));
-        grille.tuile(t, |ui| repere(ui, Bilan::adr, b.adr(), 0, ""));
-
-        let t = Tuile::new("KAST", opt_pct(b.kast_pct()), ACCENT)
-            .sous(sous_detail.clone())
-            .info(format!(
-                "manches avec kill, assist, survie ou échange / manches lues = {} / {}",
-                b.kast, b.manches_detaillees
-            ));
-        grille.tuile(t, |ui| repere(ui, Bilan::kast_pct, b.kast_pct(), 0, " %"));
-
-        let t = Tuile::new("Tête", opt_pct(b.tete_pct()), ACCENT)
-            .sous(sous_tirs)
-            .info(format!("tirs à la tête / tirs = {} / {}", milliers(b.tetes), milliers(b.tirs)));
-        grille.tuile(t, |ui| repere(ui, Bilan::tete_pct, b.tete_pct(), 0, " %"));
-
-        let valeur = if b.matchs_detailles > 0 {
-            format!("{} · {} FD", b.premiers_sangs, b.premieres_morts)
-        } else {
-            TIRET.to_string()
-        };
-        let t = Tuile::new("Premiers sangs", valeur, ACCENT)
-            .sous(if b.matchs_detailles > 0 { format!("{} par match", opt_dec(b.fk_par_match(), 1)) } else { sous_detail.clone() })
-            .info(format!(
-                "premiers sangs et premières morts sur {} lus ; {} / {} par match",
-                pluriel(u32::from(b.matchs_detailles), "match"),
-                b.premiers_sangs,
-                b.matchs_detailles
-            ));
-        grille.tuile(t, |_| {});
-
-        let valeur = if b.matchs_detailles > 0 {
-            let mut v = format!("{} / {}", b.clutchs, b.clutchs_tentes);
-            if b.meilleur_clutch > 0 {
-                v.push_str(&format!(" · 1v{}", b.meilleur_clutch));
-            }
-            v
-        } else {
-            TIRET.to_string()
-        };
-        let t = Tuile::new("Clutchs", valeur, theme::WARN)
-            .sous(if b.matchs_detailles > 0 { multi_kills(b.triples, b.quadruples, b.aces) } else { sous_detail })
-            .info(format!(
-                "situations 1 contre X gagnées / tentées, le plus gros X gagné ; manches à 3, 4, 5 kills ou plus : \
-                 {} triple(s), {} quadruple(s), {} ace(s)",
-                b.triples, b.quadruples, b.aces
-            ));
-        grille.tuile(t, |_| {});
-    }
-    grille.montrer(ui);
 }
 
 /// « 3k×12 · 4k×3 » — les multi-kills, sans les zéros : à trois d'un
@@ -2812,112 +1547,6 @@ fn multi_kills(triples: u16, quadruples: u16, aces: u16) -> String {
     }
 }
 
-/// Agents et cartes en barres, côte à côte.
-/// Ses médailles de l'acte en tuiles — combien de fois, et son record —,
-/// puis la carrière en une ligne quand elle en dit plus. Rien tant qu'on
-/// ne lui en connaît aucune.
-fn medailles_fiche(ui: &mut Ui, vue: &Vue) {
-    let Some(md) = vue.fiche.medailles.as_ref() else { return };
-    let (liste, titre) = if md.cet_acte.is_empty() {
-        (&md.carriere, "Médailles — carrière".to_string())
-    } else if md.acte.is_empty() {
-        (&md.cet_acte, "Médailles — acte en cours".to_string())
-    } else {
-        (&md.cet_acte, format!("Médailles — {}", md.acte))
-    };
-    let mut connues: Vec<_> = liste.iter().filter(|c| c.medaille != Medaille::Inconnue && c.fois > 0).collect();
-    if connues.is_empty() {
-        return;
-    }
-    connues.sort_by_key(|c| c.medaille.ordre());
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(titre).color(TEXT_DIM).size(texte::PETIT));
-        ui.label(RichText::new(format!("· mises à jour {}", crate::il_y_a(md.maj))).color(TEXT_FAINT).size(texte::MINUSCULE));
-    });
-    let mut grille = Grille::new(TUILE_FICHE, 70.0);
-    for c in connues {
-        let teinte = if matches!(c.medaille, Medaille::Mvp | Medaille::Distinction) { theme::WARN } else { TEXT };
-        grille.tuile(
-            Tuile::new(c.medaille.nom(), format!("×{}", c.fois), teinte).sous(format!("record : {}", c.medaille.valeur(c.meilleur))),
-            |_| {},
-        );
-    }
-    grille.montrer(ui);
-    // La carrière, si elle dit autre chose que l'acte.
-    if !md.cet_acte.is_empty() && md.carriere != md.cet_acte {
-        let mut carriere: Vec<_> = md.carriere.iter().filter(|c| c.medaille != Medaille::Inconnue && c.fois > 0).collect();
-        carriere.sort_by_key(|c| c.medaille.ordre());
-        if !carriere.is_empty() {
-            let texte = carriere.iter().map(|c| format!("{} ×{}", c.medaille.nom(), c.fois)).collect::<Vec<_>>().join(" · ");
-            ui::hint(ui, format!("en carrière : {texte}"));
-        }
-    }
-    ui.add_space(espace::L);
-}
-
-fn agents_et_cartes(ui: &mut Ui, vue: &Vue) {
-    let agents = vue.ventiler(|m| m.agent.as_str());
-    let cartes = vue.ventiler(|m| m.carte.as_str());
-    ui.columns(2, |cols| {
-        cols[0].label(RichText::new("Agents").color(TEXT_DIM).size(texte::PETIT));
-        if agents.is_empty() {
-            cols[0].label(RichText::new(TIRET).color(TEXT_FAINT));
-        } else {
-            let max = agents.iter().map(|(_, b)| b.matchs).max().unwrap_or(0).max(1);
-            let lignes: Vec<Barre> = agents
-                .iter()
-                .take(6)
-                .map(|(nom, b)| Barre {
-                    label: nom.as_str(),
-                    part: f32::from(b.matchs) / f32::from(max),
-                    fond: 0.0,
-                    texte: format!("{} · {} · K/D {}", b.matchs, opt_pct(b.victoires_pct()), opt_dec(b.kd(), 1)),
-                    couleur: ACCENT,
-                    info: format!(
-                        "{} · {} V / {} D · {} kills / {} morts",
-                        pluriel(u32::from(b.matchs), "partie"),
-                        b.victoires,
-                        b.defaites,
-                        b.kills,
-                        b.deaths
-                    ),
-                    icone: vue.catalogue.agent(nom),
-                })
-                .collect();
-            // La colonne du libellé prend le portrait en plus du nom.
-            graphes::barres(&mut cols[0], &lignes, 94.0, 22.0);
-        }
-        cols[1].label(RichText::new("Cartes").color(TEXT_DIM).size(texte::PETIT));
-        if cartes.is_empty() {
-            cols[1].label(RichText::new(TIRET).color(TEXT_FAINT));
-        } else {
-            let max = cartes.iter().map(|(_, b)| b.matchs).max().unwrap_or(0).max(1);
-            let lignes: Vec<Barre> = cartes
-                .iter()
-                .map(|(nom, b)| {
-                    let taux = b.victoires_pct().map(|p| p / 100.0).unwrap_or(0.0);
-                    Barre {
-                        label: nom.as_str(),
-                        part: taux,
-                        fond: f32::from(b.matchs) / f32::from(max),
-                        texte: format!("{} · {}/{}", opt_pct(b.victoires_pct()), b.victoires, b.matchs),
-                        couleur: if taux >= 0.5 { SPEAK } else { DANGER },
-                        info: format!(
-                            "{} · {} V / {} D · la part colorée est le taux de victoire, le gris la part des parties",
-                            pluriel(u32::from(b.matchs), "partie"),
-                            b.victoires,
-                            b.defaites
-                        ),
-                        icone: vue.catalogue.bandeau(nom),
-                    }
-                })
-                .collect();
-            // Le bandeau de la carte, rogné, devant son nom.
-            graphes::barres(&mut cols[1], &lignes, 118.0, 22.0);
-        }
-    });
-}
-
 /// Les 168 cases jour × heure, à l'heure locale exacte, des dates données.
 fn cases_des_heures(dates: impl Iterator<Item = u64>) -> Vec<u16> {
     let mut cases = vec![0u16; 168];
@@ -2930,38 +1559,6 @@ fn cases_des_heures(dates: impl Iterator<Item = u64>) -> Vec<u16> {
         }
     }
     cases
-}
-
-/// Quand il joue — cinq matchs au moins pour que ça dise quelque chose —,
-/// le groupe en contour, et l'heure qu'il est encadrée.
-fn mes_heures(ui: &mut Ui, vue: &Vue) {
-    if vue.e.len() < 5 {
-        return;
-    }
-    let cases = cases_des_heures(vue.e.iter().map(|m| m.date));
-    let decalage = chrono::Local::now().offset().local_minus_utc() / 3600;
-    let groupe = activite_locale(vue.activite, decalage);
-    let avec_groupe = groupe.iter().any(|&v| v > 0);
-    ui.add_space(espace::L);
-    ui.label(RichText::new("Mes heures").color(TEXT_DIM).size(texte::PETIT));
-    if avec_groupe {
-        ui::hint(ui, "en vert, mes parties ; en contour bleu, celles du groupe sur 30 jours");
-    }
-    let plus = graphes::EnPlus {
-        encadree: Some(graphes::case_de_maintenant()),
-        contour: avec_groupe.then_some(groupe.as_slice()),
-    };
-    graphes::heatmap_semaine(ui, &cases, plus, |jour, heure| {
-        let n = cases.get(jour * 24 + heure).copied().unwrap_or(0);
-        let g = groupe.get(jour * 24 + heure).copied().unwrap_or(0);
-        let du_groupe = if avec_groupe { format!(" · le groupe : {}", pluriel(u32::from(g), "partie")) } else { String::new() };
-        format!(
-            "{} {heure}h–{}h · {}{du_groupe}",
-            JOURS_LONGS.get(jour).copied().unwrap_or("?"),
-            heure + 1,
-            pluriel(u32::from(n), "partie")
-        )
-    });
 }
 
 /// Ce que dit une ligne dépliée : les cases des manches puis le récit.
@@ -3042,43 +1639,6 @@ fn recit_du_match(m: &MatchResume, noms: &Annuaire) -> String {
     parts.join(" · ")
 }
 
-/// La ligne dépliée d'un match, sur toute la largeur de la grille : la
-/// cellule n'occupe qu'un pixel de large, le reste est peint à côté dans
-/// un enfant qui ne pèse pas sur les colonnes.
-fn detail_du_match(ui: &mut Ui, m: &MatchResume, vue: &Vue, largeur_page: f32) {
-    let texte = recit_du_match(m, &vue.noms);
-    let police = egui::FontId::proportional(texte::PETIT);
-    let largeur = (largeur_page - 16.0).max(80.0);
-    let galley = ui.fonts_mut(|f| f.layout(texte, police, TEXT_DIM, largeur));
-    let deroule = m.manches_detail.as_ref().map(|d| d.deroule.as_str()).unwrap_or("");
-    let hauteur_cases = if deroule.is_empty() { 0.0 } else { 14.0 + 4.0 };
-    let hauteur = hauteur_cases + galley.size().y + 6.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, hauteur), Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let zone = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.top() + 2.0), Vec2::new(largeur, hauteur));
-    let mut enfant = ui.new_child(egui::UiBuilder::new().max_rect(zone).layout(egui::Layout::top_down(egui::Align::Min)));
-    if !deroule.is_empty() {
-        graphes::cases_manches(&mut enfant, deroule);
-        enfant.add_space(espace::XS);
-    }
-    let pos = enfant.cursor().min;
-    enfant.painter().galley(pos, galley, TEXT_DIM);
-}
-
-/// Les actes joués, en pastilles teintées du rang de fin.
-fn actes(ui: &mut Ui, vue: &Vue) {
-    let saisons = &vue.fiche.saisons;
-    if saisons.is_empty() {
-        return;
-    }
-    ui.add_space(espace::L);
-    ui.label(RichText::new("Actes").color(TEXT_DIM).size(texte::PETIT));
-    ui::hint(ui, "le rang de fin de chaque acte, du plus ancien au plus récent");
-    graphes::barres_verticales(ui, egui::Id::unique("fiche_actes"), &barres_d_actes(saisons), 96.0, Some(26.0));
-}
-
 /// Une barre par acte, à la hauteur de son rang de fin : de Fer 1 (3) à
 /// Radiant (27).
 fn barres_d_actes(saisons: &[ki_protocol::StatsSaison]) -> Vec<graphes::BarreV> {
@@ -3107,7 +1667,6 @@ fn barres_d_actes(saisons: &[ki_protocol::StatsSaison]) -> Vec<graphes::BarreV> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ki_protocol::{DetailManches, RangValorant, StatsSaison};
 
     fn point(match_id: &str, date: u64, saison: &str, delta: i32) -> PointRR {
         PointRR { match_id: match_id.into(), date, tier: 16, rr: 50, delta, saison: saison.into(), ..Default::default() }
@@ -3133,10 +1692,6 @@ mod tests {
 
     #[test]
     fn les_choix_se_relisent_par_leur_cle() {
-        for o in Onglet::TOUS {
-            assert_eq!(Onglet::depuis(o.cle()), o);
-        }
-        assert_eq!(Onglet::depuis("n'importe quoi"), Onglet::Groupe);
         for p in Periode::TOUTES {
             assert_eq!(Periode::depuis(p.cle()), p);
         }
@@ -3147,13 +1702,11 @@ mod tests {
         assert_eq!(PeriodeFiche::depuis("?"), PeriodeFiche::TrenteJours);
         let page = PageValo::load(|cle, defaut| {
             match cle {
-                "valo_onglet" => "matchs",
                 "fiche_classe" => "off",
                 _ => defaut,
             }
             .to_string()
         });
-        assert_eq!(page.onglet, Onglet::Matchs);
         assert!(!page.fiche_classe);
         assert_eq!(page.fiche_periode, PeriodeFiche::TrenteJours);
     }
@@ -3505,126 +2058,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn les_deux_fenetres_se_dessinent_sans_paniquer() {
-        let maintenant = maintenant_ms();
-        let ctx = egui::Context::default();
-        let rangs = rangs::Rangs::new();
-        let catalogue = Catalogue::new();
-        let membres = membres();
-        let mut boutique = boutique::Lecteur::new();
-        let activite: Vec<u16> = (0..168u16).map(|i| i % 5).collect();
-
-        for vieux_serveur in [false, true] {
-            let stats = groupe(maintenant, vieux_serveur);
-            let activite = if vieux_serveur { Vec::new() } else { activite.clone() };
-            let mut page = PageValo::load(|_, d| d.to_string());
-            page.ouvert = true;
-            for onglet in [Onglet::Groupe, Onglet::Matchs, Onglet::Esport] {
-                page.onglet = onglet;
-                for periode in Periode::TOUTES {
-                    page.periode = periode;
-                    for souris in [None, Some(Pos2::new(300.0, 300.0)), Some(Pos2::new(700.0, 500.0))] {
-                        dessiner(&ctx, souris, |ui| {
-                            let ctx = ui.ctx();
-                            let demandes =
-                                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
-                            assert!(demandes.is_empty());
-                        });
-                    }
-                }
-            }
-            // Le classement dans tous ses tris, le fil dans ses filtres.
-            page.onglet = Onglet::Groupe;
-            for tri in [Tri::Rang, Tri::Rr7, Tri::Rr30, Tri::Kd, Tri::Acs, Tri::Adr, Tri::Kast, Tri::Matchs] {
-                page.tri = tri;
-                page.tri_desc = !page.tri_desc;
-                dessiner(&ctx, None, |ui| {
-                    let ctx = ui.ctx();
-                    page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
-                });
-            }
-            page.onglet = Onglet::Matchs;
-            page.filtre_membre = Some(2);
-            page.filtre_mode = Some(MODE_CLASSE.into());
-            page.plus = true;
-            dessiner(&ctx, None, |ui| {
-                let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
-            });
-            // Avant la réponse du serveur, et sans personne de lié.
-            dessiner(&ctx, None, |ui| {
-                let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: false, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
-                page.fenetre(ctx, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
-            });
-            assert!(page.ouvert);
-
-            // La fiche : pas reçue, sans compte, vide, pauvre, riche.
-            let riche = FicheOuverte { user_id: 1, username: "redik".into(), recue: true, fiche: Some(fiche_riche(maintenant)) };
-            let pauvre = FicheOuverte { user_id: 4, username: "Bob".into(), recue: true, fiche: Some(stats[3].fiche.clone()) };
-            let vide = FicheOuverte { user_id: 3, username: "Wam".into(), recue: true, fiche: Some(FicheValorant::default()) };
-            let attente = FicheOuverte { user_id: 9, username: "?".into(), recue: false, fiche: None };
-            let sans = FicheOuverte { user_id: 9, username: "?".into(), recue: true, fiche: None };
-            for ouverte in [&attente, &sans, &vide, &pauvre, &riche] {
-                for periode in PeriodeFiche::TOUTES {
-                    page.fiche_periode = periode;
-                    for classe in [true, false] {
-                        page.fiche_classe = classe;
-                        page.deplie = Some("m1".into());
-                        page.fiche_plus = periode == PeriodeFiche::Tout;
-                        for souris in [None, Some(Pos2::new(200.0, 250.0)), Some(Pos2::new(320.0, 600.0))] {
-                            dessiner(&ctx, souris, |ui| {
-                                let ctx = ui.ctx();
-                                assert!(page.fiche(ctx, ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }));
-                            });
-                        }
-                    }
-                }
-            }
-            page.fermer_fiche();
-            assert!(page.deplie.is_none() && page.survol.is_none() && !page.fiche_plus);
-
-            // Le profil au centre : toutes ses vues, sur les mêmes fiches,
-            // une ligne de match dépliée ; il reste ouvert sans Échap.
-            // Comparé à Nono (qui a joué les mêmes matchs), avec mon journal ;
-            // puis sans rien à comparer et sans journal.
-            let photos = HashMap::new();
-            let aujourd_hui = progression::jour_de_journal(maintenant, decalage_journal());
-            let journal: Vec<ki_protocol::JourDeJeu> = (0..40)
-                .map(|i| ki_protocol::JourDeJeu {
-                    jour: aujourd_hui - i,
-                    file: if i % 3 == 0 { "swiftplay" } else { "competitive" }.into(),
-                    compte: if i % 7 == 0 { "second" } else { "principal" }.into(),
-                    parties: 2,
-                    secondes: 3_000,
-                })
-                .collect();
-            let nono = FicheOuverte { user_id: 2, username: "Nono".into(), recue: true, fiche: Some(stats[1].fiche.clone()) };
-            let attendue = FicheOuverte { user_id: 4, username: "Bob".into(), recue: false, fiche: None };
-            let journaux = [
-                (None, Journal::default()),
-                (Some(&nono), Journal { servi: true, coche: true, jours: Some(&journal) }),
-                (Some(&attendue), Journal { servi: true, coche: false, jours: Some(&[]) }),
-                (None, Journal { servi: true, coche: true, jours: None }),
-            ];
-            for (comparee, journal) in journaux {
-                let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee, journal };
-                for ouverte in [&attente, &sans, &vide, &pauvre, &riche] {
-                    for (vue, _) in profil::VueProfil::TOUTES {
-                        page.vue_profil = vue;
-                        page.deplie = Some("m1".into());
-                        for souris in [None, Some(Pos2::new(300.0, 500.0))] {
-                            dessiner(&ctx, souris, |ui| assert!(page.profil(ui, ouverte, &cx)));
-                        }
-                    }
-                }
-            }
-            page.fermer_fiche();
-            assert_eq!(page.vue_profil, profil::VueProfil::Ensemble, "refermé, il rouvrira sur la vue d'ensemble");
-        }
-    }
-
     /// La page au centre, onglet par onglet : sur un serveur d'aujourd'hui
     /// et d'avant, sur les deux périodes, avec ou sans soirée, la souris ici
     /// ou là. Elle reste ouverte et ne demande rien d'elle-même — sauf le
@@ -3714,63 +2147,6 @@ mod tests {
         }
     }
 
-    /// Ce sur quoi la table compte : un widget muet posé au-dessus du
-    /// cadre cliquable d'une ligne reste survolé — ses infobulles vivent.
-    /// Posé en dessous (le cadre enregistré après lui), egui l'éteint.
-    #[test]
-    fn un_widget_muet_reste_survole_au_dessus_du_cadre_de_ligne() {
-        let ctx = egui::Context::default();
-        let souris = Pos2::new(60.0, 60.0);
-        for cadre_avant in [true, false] {
-            let mut survols = (false, false);
-            dessiner(&ctx, Some(souris), |ui| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 40.0));
-                    let id = egui::Id::unique("ligne_test");
-                    let cadre = cadre_avant.then(|| ui.interact(rect, id, Sense::click()));
-                    let dedans = Rect::from_min_size(Pos2::new(40.0, 50.0), Vec2::new(200.0, 20.0));
-                    let muet = ui.interact(dedans, egui::Id::unique("pastille_test"), Sense::hover());
-                    let cadre = cadre.unwrap_or_else(|| ui.interact(rect, id, Sense::click()));
-                    survols = (cadre.hovered(), muet.hovered());
-                });
-            });
-            assert!(survols.0, "le cadre est survolé dans les deux ordres");
-            assert_eq!(survols.1, cadre_avant, "le widget muet ne l'est qu'au-dessus du cadre");
-        }
-        // Et le clic arrive bien au cadre, même posé avant les cellules,
-        // même sur le fond glissable d'une zone de défilement (enregistré
-        // avant lui, comme `ScrollArea` le fait), même sous un label muet.
-        let mut clique = false;
-        let ecran = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_400.0, 900.0));
-        let appuyer = |pressed: bool| egui::Event::PointerButton {
-            pos: souris,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let entrees = [
-            vec![egui::Event::PointerMoved(souris)],
-            vec![egui::Event::PointerMoved(souris)],
-            vec![appuyer(true)],
-            vec![appuyer(false)],
-        ];
-        for events in entrees {
-            let entree = egui::RawInput { screen_rect: Some(ecran), events, ..Default::default() };
-            ctx.run_ui(entree, |ui| {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    let fond = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(1_000.0, 800.0));
-                    ui.interact(fond, egui::Id::unique("defilement_test"), Sense::drag());
-                    let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 40.0));
-                    let cadre = ui.interact(rect, egui::Id::unique("ligne_test"), Sense::click());
-                    let dedans = Rect::from_min_size(Pos2::new(40.0, 50.0), Vec2::new(200.0, 20.0));
-                    ui.interact(dedans, egui::Id::unique("pastille_test"), Sense::hover());
-                    clique |= cadre.clicked();
-                });
-            }).drop_without_applying_deltas();
-        }
-        assert!(clique, "le clic traverse le label muet et ignore le fond glissable");
-    }
-
     #[test]
     fn la_mediane_du_groupe_demande_trois_membres() {
         let maintenant = 1_756_000_000_000_u64;
@@ -3801,72 +2177,6 @@ mod tests {
         // Le bilan vient d'être refait ici : la page le dit.
         let (_, local) = lignes_du_groupe(&trois, maintenant);
         assert!(local);
-    }
-    /// Une fiche pleine — soixante matchs détaillés, cent points, des
-    /// actes, des co-membres — et la page du groupe à cinq membres se
-    /// dessinent dans leur largeur par défaut : rien ne fait grandir la
-    /// fenêtre (un cadre qui déborde d'une ligne repliée, une grille hors
-    /// d'une zone de défilement…), sinon elle sortirait de l'écran et ne
-    /// reviendrait plus, sa taille étant mémorisée.
-    #[test]
-    fn les_fenetres_gardent_leur_largeur_par_defaut() {
-        let mut fiche = FicheValorant { riot_id: "Redik#6162".into(), region: "eu".into(), plateforme: "pc".into(), niveau: 214, ..Default::default() };
-        fiche.rang = RangValorant { tier: 16, rr: 57, delta: 18, boucliers: 1, ..Default::default() };
-        fiche.pic = Some(RangValorant { tier: 18, rr: 12, saison: "e10a3".into(), ..Default::default() });
-        let base = 1_789_500_000_000u64;
-        for i in 0..60u64 {
-            let mut m = match_de_test(&format!("m{i}"), base - i * 5 * 3_600_000, if i % 7 == 3 { "Non classé" } else { "Compétitif" }, i % 3 != 0, &[2, 3]);
-            m.contre = vec![4];
-            m.degats = 3_000 + i as u32;
-            m.saison = if i < 30 { "e11a2".into() } else { "e11a1".into() };
-            m.manches_detail = Some(DetailManches { manches: 22, kast: 15, premiers_sangs: 3, premieres_morts: 2, triples: 1, clutchs_tentes: 2, clutchs: 1, meilleur_clutch: 2, poses: 2, desamorcages: 1, deroule: "VDVVDVDVVVDDVDVVDVVDVV".into(), ..Default::default() });
-            fiche.matchs.push(m);
-        }
-        for i in 0..100u64 {
-            fiche.historique_rr.push(point(&format!("m{i}"), base - i * 5 * 3_600_000, if i < 30 { "e11a2" } else { "e11a1" }, if i % 3 == 0 { -17 } else { 19 }));
-        }
-        // Dix-sept actes, comme un compte qui joue depuis l'épisode 5 :
-        // leurs pastilles doivent replier, pas pousser la fenêtre.
-        fiche.saisons = (0..17u8)
-            .map(|i| StatsSaison {
-                saison: format!("e{}a{}", 5 + i / 3, 1 + i % 3),
-                victoires: 20 + u16::from(i),
-                parties: 40 + 2 * u16::from(i),
-                tier_fin: 6 + i,
-                rr_fin: 40,
-            })
-            .collect();
-        let stats: Vec<FicheMembre> = (1..=5)
-            .map(|id| FicheMembre { user_id: id, username: format!("membre{id}"), fiche: fiche.resume(5, 10), bilan: None })
-            .collect();
-        let membres: Vec<Member> = Vec::new();
-        let ctx = egui::Context::default();
-        crate::theme::install(&ctx);
-        let rangs = rangs::Rangs::new();
-        let catalogue = Catalogue::new();
-        let mut boutique = boutique::Lecteur::default();
-        let mut page = PageValo::load(|_, d| d.to_string());
-        page.ouvert = true;
-        let ouverte = FicheOuverte { user_id: 1, username: "redik".into(), recue: true, fiche: Some(fiche) };
-        let entree = || egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1900.0, 1000.0))),
-            ..Default::default()
-        };
-        // Quelques images : les grilles et les zones de défilement se
-        // stabilisent à la deuxième.
-        for _ in 0..4 {
-            ctx.run_ui(entree(), |ui| {
-                let ctx = ui.ctx();
-                page.fenetre(ctx, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
-                page.fiche(ctx, &ouverte, &Contexte { stats: &stats, recu: true, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() });
-            }).drop_without_applying_deltas();
-        }
-        let groupe = ctx.memory(|m| m.area_rect(egui::Id::unique("valo_page_v5"))).expect("la page est ouverte");
-        let fiche = ctx.memory(|m| m.area_rect(egui::Id::unique("fiche_valorant_v5"))).expect("la fiche est ouverte");
-        // 860 et 640 de contenu, plus les marges de la fenêtre.
-        assert!((850.0..=900.0).contains(&groupe.width()), "page du groupe : {}", groupe.width());
-        assert!((630.0..=680.0).contains(&fiche.width()), "fiche : {}", fiche.width());
-        assert!(fiche.height() <= 1000.0 && groupe.height() <= 1000.0);
     }
 
     fn partie(file: &str, carte: &str, allie: u8, adverse: u8) -> JeuStatut {
@@ -3927,12 +2237,11 @@ mod tests {
         let stats = groupe(maintenant, false);
         let mut page = PageValo::load(|_, d| d.to_string());
         page.ouvert = true;
-        page.onglet = Onglet::Groupe;
+        // L'accueil de la page : c'est lui qui porte « En direct ».
         for recu in [false, true] {
             for souris in [None, Some(Pos2::new(200.0, 160.0))] {
                 dessiner(&ctx, souris, |ui| {
-                    let ctx = ui.ctx();
-                    page.fenetre(ctx, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, &mut boutique);
+                    page.centre(ui, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, None, &mut boutique);
                 });
             }
         }

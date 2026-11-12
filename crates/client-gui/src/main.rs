@@ -1414,10 +1414,6 @@ struct KiApp {
     barre_largeur_libelles: Option<f32>,
     barre_largeur_icones: Option<f32>,
     barre_largeur_droite: f32,
-    /// La page VALORANT et ses fiches prennent la place du chat au lieu de
-    /// leurs fenêtres (onglet Bêta, V9) : la nouvelle page, à côté de
-    /// l'ancienne.
-    valo_au_centre: bool,
     /// Le serveur raconte la soirée (`Welcome.soiree`).
     serveur_soiree: bool,
     /// Le fil de la soirée (`ServerMsg::Soiree`), sa borne, et la dernière
@@ -1879,7 +1875,6 @@ impl KiApp {
                 "off" => false,
                 _ => soundboard::Soundboard::a_des_sons(),
             },
-            valo_au_centre: get("valo_au_centre", "off") == "on",
             serveur_soiree: false,
             soiree: Vec::new(),
             soiree_depuis: 0,
@@ -2278,44 +2273,8 @@ impl KiApp {
         agent
     }
 
-    /// La fiche VALORANT d'un membre, telle que le serveur la garde :
-    /// rang, pic, les mouvements de RR et les matchs accumulés. Elle vient
-    /// du cache du serveur, l'ouvrir ne coûte rien à personne. Les icônes
-    /// de rang se préparent dans [`Self::preparer_fiche`] ; la page
-    /// elle-même est dans `valo_page`.
-    fn fiche_window(&mut self, ctx: &egui::Context) {
-        // Au centre, la fiche n'a pas de fenêtre : c'est l'onglet Profil.
-        if self.valo_au_centre {
-            return;
-        }
-        self.preparer_fiche(ctx);
-        if let Some(f) = &self.fiche {
-            let cx = valo_page::Contexte {
-                stats: &self.stats,
-                recu: self.stats_recu,
-                esports: &self.esports,
-                activite: &self.activite,
-                moi: self.my_id,
-                membres: &self.members,
-                rangs: &self.rangs,
-                catalogue: &self.catalogue,
-                soiree: &self.soiree,
-                soiree_servie: self.serveur_soiree,
-                ma_fiche: self.ma_fiche.as_ref(),
-                photos: &self.avatars,
-                comparee: self.comparee.as_ref(),
-                journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.journal_parties, jours: self.mon_journal.as_deref() },
-            };
-            if !self.valo.fiche(ctx, f, &cx) {
-                self.fiche = None;
-                self.comparee = None;
-                self.valo.fermer_fiche();
-            }
-        }
-    }
-
-    /// La page VALORANT à la place du chat (onglet Bêta) : ses onglets,
-    /// l'accueil et le profil. « Fermer » ou Échap la referment, avec la
+    /// La page VALORANT, à la place du chat : ses onglets, l'accueil et le
+    /// profil. « Fermer » ou Échap la referment, avec la
     /// fiche ouverte.
     fn valo_panel(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -2366,7 +2325,7 @@ impl KiApp {
     /// La page VALORANT qui tient la place du chat se referme, avec sa
     /// fiche : « Fermer », Échap, ou un clic sur un salon textuel.
     fn retour_au_chat(&mut self) {
-        if self.valo_au_centre && (self.valo.ouvert || self.fiche.is_some()) {
+        if self.valo.ouvert || self.fiche.is_some() {
             self.valo.ouvert = false;
             self.fiche = None;
             self.comparee = None;
@@ -4245,39 +4204,6 @@ impl KiApp {
         self.valo.ouvert = true;
         self.stats_recu = false;
         self.send(ClientMsg::StatsValorant);
-    }
-
-    /// La page VALORANT du groupe, tenue par `valo_page` : on prépare les
-    /// icônes de rang, on lui prête la boutique le temps de la fenêtre,
-    /// et on exécute ce qu'elle demande — actualiser, ouvrir une fiche.
-    fn stats_window(&mut self, ctx: &egui::Context) {
-        if !self.valo.ouvert || self.valo_au_centre {
-            return;
-        }
-        self.preparer_valo(ctx);
-        // La boutique est à soi : elle sort de `self` le temps de la fenêtre,
-        // les fiches et les icônes n'y sont lues qu'en lecture.
-        let mut boutique = std::mem::take(&mut self.boutique);
-        // Les champs un à un, et non une méthode : la page s'emprunte à part.
-        let cx = valo_page::Contexte {
-            stats: &self.stats,
-            recu: self.stats_recu,
-            esports: &self.esports,
-            activite: &self.activite,
-            moi: self.my_id,
-            membres: &self.members,
-            rangs: &self.rangs,
-            catalogue: &self.catalogue,
-            soiree: &self.soiree,
-            soiree_servie: self.serveur_soiree,
-            ma_fiche: self.ma_fiche.as_ref(),
-            photos: &self.avatars,
-            comparee: self.comparee.as_ref(),
-            journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.journal_parties, jours: self.mon_journal.as_deref() },
-        };
-        let demandes = self.valo.fenetre(ctx, &cx, &mut boutique);
-        self.boutique = boutique;
-        self.executer_demandes_valo(demandes);
     }
 
     /// Les icônes de rang de la page du groupe — les fiches, et le rang de
@@ -7277,7 +7203,7 @@ impl KiApp {
         self.voice_bar(ui, voice);
         self.sidebar(ui, voice);
         self.roster_panel(ui, voice);
-        if self.valo_au_centre && (self.valo.ouvert || self.fiche.is_some()) {
+        if self.valo.ouvert || self.fiche.is_some() {
             self.valo_panel(ui);
         } else {
             self.chat_panel(ui);
@@ -7285,8 +7211,6 @@ impl KiApp {
         self.comms_popup(ctx, voice);
         self.partage_windows(ctx);
         self.diffusion_window(ctx);
-        self.fiche_window(ctx);
-        self.stats_window(ctx);
         self.fiche_bot_window(ctx);
         self.clips_window(ctx);
         self.soundboard_window(ctx);
@@ -16307,7 +16231,6 @@ impl KiApp {
         storage.set_string("loupedeck", if self.loupedeck_etat.actif { "on" } else { "off" }.into());
         storage.set_string("loupedeck_config", self.loupedeck_etat.config.ecrire());
         storage.set_string("soundboard_visible", if self.soundboard_visible { "on" } else { "off" }.into());
-        storage.set_string("valo_au_centre", if self.valo_au_centre { "on" } else { "off" }.into());
         storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
         storage.set_string(
             "output_device",

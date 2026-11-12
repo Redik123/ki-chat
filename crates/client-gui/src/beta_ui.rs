@@ -63,23 +63,5 @@ impl KiApp {
                 });
             },
         );
-
-        ui::section(
-            ui,
-            Icon::Target,
-            "Page VALORANT",
-            Some("La nouvelle page du groupe et des fiches, à la place du chat plutôt que dans des fenêtres."),
-            |ui| {
-                ui::ligne(ui, "Page", |ui| {
-                    ui::interrupteur(ui, &mut self.valo_au_centre, "Ouvrir la page VALORANT à la place du chat");
-                    ui::precision(
-                        ui,
-                        "Le bouton « Valorant » ouvre l'accueil de la soirée ; clic droit sur un membre → sa fiche, \
-                         dans l'onglet Profil. Échap, « Fermer » ou un clic sur un salon textuel reviennent au chat. \
-                         Coupé, la page et les fiches restent les fenêtres d'avant.",
-                    );
-                });
-            },
-        );
     }
 }
