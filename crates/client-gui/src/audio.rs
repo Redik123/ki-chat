@@ -374,11 +374,13 @@ impl Vocal {
     /// secondes. Rend vrai quand le débit ou la protection a changé : les
     /// réglages sont alors à repousser au moteur.
     ///
-    /// La protection automatique s'engage dès 2 % de pertes et se relâche
-    /// sous 0,5 % après deux rapports propres. Le débit automatique baisse
-    /// d'un cran dès 5 % de pertes et remonte d'un cran après trois rapports
-    /// propres de suite (15 s), sans dépasser 64 kbit/s. Un débit choisi à la
-    /// main n'est jamais piloté : on affiche les pertes, c'est tout.
+    /// Un rapport est propre sous 1 % de pertes ; tout autre remet le compte
+    /// des rapports propres à zéro. La protection automatique s'engage dès
+    /// 2 % de pertes et se relâche sous 0,5 % après deux rapports propres,
+    /// que le débit soit automatique ou choisi à la main. Le débit
+    /// automatique baisse d'un cran au-dessus de 5 % de pertes et remonte
+    /// d'un cran après trois rapports propres de suite (15 s), sans dépasser
+    /// 64 kbit/s. Un débit choisi à la main n'est jamais piloté.
     pub(crate) fn sur_rapport_reseau(&mut self, reglages: &ReglagesAudio, pertes: f32) -> bool {
         self.upstream_loss = Some(pertes);
         let mut change = false;
@@ -391,6 +393,12 @@ impl Vocal {
             }
             change |= avant != self.dred_active;
         }
+        // Les rapports propres se comptent quel que soit le débit : la
+        // protection en a besoin pour se relâcher. Ils ne l'étaient qu'en
+        // débit automatique, et avec un débit choisi à la main elle restait
+        // engagée jusqu'à la fin de la session.
+        let propre = pertes < 1.0;
+        self.good_reports = if propre { self.good_reports.saturating_add(1) } else { 0 };
         if reglages.bitrate != 0 {
             return change;
         }
@@ -398,18 +406,12 @@ impl Vocal {
         if pertes > 5.0 {
             if cran > 0 {
                 self.auto_bitrate = BITRATES[cran - 1];
-                self.good_reports = 0;
                 change = true;
             }
-        } else if pertes < 1.0 {
-            self.good_reports = self.good_reports.saturating_add(1);
-            if self.good_reports >= 3 && self.auto_bitrate < DEBIT_AUTO_MAX {
-                self.auto_bitrate = BITRATES[cran + 1].min(DEBIT_AUTO_MAX);
-                self.good_reports = 0;
-                change = true;
-            }
-        } else {
+        } else if propre && self.good_reports >= 3 && self.auto_bitrate < DEBIT_AUTO_MAX {
+            self.auto_bitrate = BITRATES[cran + 1].min(DEBIT_AUTO_MAX);
             self.good_reports = 0;
+            change = true;
         }
         change
     }
@@ -746,6 +748,45 @@ mod tests {
         let vocal = Vocal::new();
         assert_eq!(vocal.dred_effectif(&coupee), 0);
         assert_eq!(vocal.dred_effectif(&toujours), ki_voice::DRED_DEFAULT);
+    }
+
+    /// Le défaut corrigé : les rapports propres n'étaient comptés qu'en
+    /// débit automatique, et la protection, une fois engagée avec un débit
+    /// choisi à la main, ne se relâchait plus de la session.
+    #[test]
+    fn la_protection_se_relache_aussi_avec_un_debit_choisi_a_la_main() {
+        let mut reglages = lire(&EnMemoire::default());
+        reglages.bitrate = 96_000;
+        assert_eq!(reglages.dred_mode, 1);
+        let mut vocal = Vocal::new();
+        assert!(vocal.sur_rapport_reseau(&reglages, 3.0));
+        assert_eq!(vocal.dred_effectif(&reglages), ki_voice::DRED_DEFAULT);
+        // Un rapport moyen entre deux propres : le compte repart de zéro.
+        assert!(!vocal.sur_rapport_reseau(&reglages, 0.2));
+        assert!(!vocal.sur_rapport_reseau(&reglages, 1.5));
+        assert!(!vocal.sur_rapport_reseau(&reglages, 0.2));
+        assert!(!vocal.sur_rapport_reseau(&reglages, 0.2));
+        assert_eq!(vocal.dred_effectif(&reglages), ki_voice::DRED_DEFAULT);
+        assert!(vocal.sur_rapport_reseau(&reglages, 0.2));
+        assert_eq!(vocal.dred_effectif(&reglages), 0);
+        // Le débit, lui, n'a pas bougé.
+        assert_eq!(vocal.debit_effectif(&reglages), 96_000);
+        assert_eq!(vocal.auto_bitrate, 64_000);
+    }
+
+    /// Au plancher du débit, un rapport de pertes n'est pas un rapport
+    /// propre : il faut trois vrais rapports propres pour remonter.
+    #[test]
+    fn au_plancher_les_pertes_remettent_le_compte_a_zero() {
+        let mut reglages = lire(&EnMemoire::default());
+        reglages.dred_mode = 0;
+        let mut vocal = Vocal::new();
+        vocal.auto_bitrate = 24_000;
+        assert!(!vocal.sur_rapport_reseau(&reglages, 0.0));
+        assert!(!vocal.sur_rapport_reseau(&reglages, 0.0));
+        assert!(!vocal.sur_rapport_reseau(&reglages, 9.0));
+        assert!(!vocal.sur_rapport_reseau(&reglages, 0.0), "un seul rapport propre après des pertes ne suffit pas");
+        assert_eq!(vocal.debit_effectif(&reglages), 24_000);
     }
 
     #[test]
