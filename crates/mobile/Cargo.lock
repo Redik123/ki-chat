@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "ki-aec"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "cc",
  "flate2",
@@ -2222,7 +2222,7 @@ dependencies = [
 
 [[package]]
 name = "ki-client-quic"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "ki-core"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "ki-deep-filter"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "anyhow",
  "flate2",
@@ -2272,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "ki-mobile"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "anyhow",
  "block2",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "ki-opus"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "cmake",
  "flate2",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "ki-protocol"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -2324,11 +2324,11 @@ dependencies = [
 
 [[package]]
 name = "ki-ui-base"
-version = "0.1.69"
+version = "0.1.70"
 
 [[package]]
 name = "ki-voice"
-version = "0.1.69"
+version = "0.1.70"
 dependencies = [
  "anyhow",
  "bytes",
