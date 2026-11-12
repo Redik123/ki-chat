@@ -172,7 +172,7 @@ impl Fichiers {
         ui.horizontal(|ui| {
             ui::group_title(ui, Icon::Paperclip, "Fichiers partagés");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::icon_button(ui, Icon::Refresh, "Relire la liste").clicked() {
+                if ui::Bouton::icone_seule(Icon::Refresh).bulle("Relire la liste").show(ui).clicked() {
                     actions.push(Action::Envoyer(self.demander()));
                 }
             });

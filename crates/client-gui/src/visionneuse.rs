@@ -742,24 +742,24 @@ impl Visionneuse {
                         ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, texte));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
+                        if ui::Bouton::icone_seule(Icon::Close).bulle("Fermer (Échap)").show(ui).clicked() {
                             fermer = true;
                         }
                         if !locale
-                            && ui::icon_button(ui, Icon::Screen, "Ouvrir dans le navigateur").clicked()
+                            && ui::Bouton::icone_seule(Icon::Screen).bulle("Ouvrir dans le navigateur").show(ui).clicked()
                         {
                             demandes.push(Demande::Navigateur(cible.url().to_string()));
                         }
-                        if !est_video && ui::icon_button(ui, Icon::Copy, "Copier l'image").clicked()
+                        if !est_video && ui::Bouton::icone_seule(Icon::Copy).bulle("Copier l'image").show(ui).clicked()
                         {
                             demandes.push(Demande::Copier(cible.url().to_string()));
                         }
-                        if locale && ui::icon_button(ui, Icon::Hash, "Voir dans le dossier").clicked() {
+                        if locale && ui::Bouton::icone_seule(Icon::Hash).bulle("Voir dans le dossier").show(ui).clicked() {
                             if let Cible::Fichier(p) = &cible {
                                 crate::clips::montrer_dans_le_dossier(p);
                             }
                         }
-                        if ui::icon_button(ui, Icon::Download, "Enregistrer sous…").clicked() {
+                        if ui::Bouton::icone_seule(Icon::Download).bulle("Enregistrer sous…").show(ui).clicked() {
                             demandes.push(Demande::EnregistrerSous(cible.clone()));
                         }
                     });
@@ -787,7 +787,7 @@ impl Visionneuse {
                         (d, Icon::ChevronRight, 1isize, "Suivant (→)"),
                     ] {
                         let mut c = ui.new_child(egui::UiBuilder::new().max_rect(r));
-                        if ui::icon_button_ex(&mut c, icone, 40.0, bulle, None).clicked() {
+                        if ui::Bouton::icone_seule(icone).cote(40.0).bulle(bulle).show(&mut c).clicked() {
                             aller = pas;
                         }
                     }
@@ -1003,7 +1003,7 @@ impl Visionneuse {
         } else {
             "Lire (espace)"
         };
-        let basculer = ui::icon_button_ex(ui, icone, 34.0, bulle, Some(TEXT)).clicked() || espace;
+        let basculer = ui::Bouton::icone_seule(icone).cote(34.0).couleur(TEXT).bulle(bulle).show(ui).clicked() || espace;
         if basculer && prete {
             if let Some(l) = &v.lecture {
                 l.jouer(!en_lecture);
@@ -1073,7 +1073,7 @@ impl Visionneuse {
         } else {
             Icon::Volume
         };
-        if ui::icon_button_ex(ui, icone_volume, 34.0, "Couper / rétablir le son", None).clicked() {
+        if ui::Bouton::icone_seule(icone_volume).cote(34.0).bulle("Couper / rétablir le son").show(ui).clicked() {
             self.muet = !self.muet;
         }
         let mut pct = self.volume * 100.0;
@@ -1088,7 +1088,7 @@ impl Visionneuse {
             self.muet = false;
         }
         let teinte = if v.boucle { Some(ACCENT) } else { None };
-        if ui::icon_button_ex(ui, Icon::Repeat, 34.0, "Lire en boucle", teinte).clicked() {
+        if ui::Bouton::icone_seule(Icon::Repeat).cote(34.0).couleur_si(teinte).bulle("Lire en boucle").show(ui).clicked() {
             v.boucle = !v.boucle;
             if let Some(l) = &v.lecture {
                 l.boucle(v.boucle);

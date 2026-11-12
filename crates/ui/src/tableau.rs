@@ -8,16 +8,26 @@
 //!   renverse le tri. Le tableau ne trie rien lui-même : il dit le tri
 //!   choisi ([`Tableau::tri`]), et l'appelant range ses lignes.
 //! - Les lignes sont rayées, s'éclairent au survol, et se cliquent.
+//! - Chaque colonne porte un identifiant, que le tri et le dessin des
+//!   cases rendent tel quel : le plus souvent une variante d'enum. Elles
+//!   se désignaient par leur rang, et en déplacer une changeait, sans une
+//!   erreur, ce que le tri triait et ce que chaque case montrait.
 //!
 //! ```ignore
+//! #[derive(Clone, Copy, PartialEq)]
+//! enum Col { Membre, Rang, Sept }
+//!
 //! let tableau = Tableau::new("classement")
-//!     .colonne(Colonne::new("Membre", 160.0).grandit())
-//!     .colonne(Colonne::new("Rang", 90.0).priorite(2))
-//!     .colonne(Colonne::new("7 j", 56.0).droite().triable())
-//!     .tri_par_defaut(2, false);
+//!     .colonne(Col::Membre, Colonne::new("Membre", 160.0).grandit())
+//!     .colonne(Col::Rang, Colonne::new("Rang", 90.0).priorite(2))
+//!     .colonne(Col::Sept, Colonne::new("7 j", 56.0).droite().triable())
+//!     .tri_par_defaut(Col::Sept, false);
 //! let tri = tableau.tri(ui);
-//! // … ranger `lignes` selon `tri` …
-//! if let Some(i) = tableau.show(ui, lignes.len(), |ui, ligne, colonne| { … }) { … }
+//! // … ranger `lignes` selon `tri.colonne` …
+//! if let Some(i) = tableau.show(ui, lignes.len(), |ui, ligne, colonne| match colonne {
+//!     Col::Membre => { … }
+//!     …
+//! }) { … }
 //! ```
 
 use egui::{self, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
@@ -76,17 +86,17 @@ impl<'a> Colonne<'a> {
     }
 }
 
-/// Le tri choisi : une colonne (par son rang parmi toutes), dans un sens.
+/// Le tri choisi : une colonne, par son identifiant, dans un sens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Tri {
-    pub colonne: usize,
+pub struct Tri<C> {
+    pub colonne: C,
     pub croissant: bool,
 }
 
 /// Un clic sur l'en-tête de `colonne` : la trier — les chiffres du plus
 /// grand au plus petit d'abord, les mots dans l'ordre —, ou renverser son
 /// tri si elle l'est déjà.
-pub fn basculer(tri: Option<Tri>, colonne: usize, chiffre: bool) -> Tri {
+pub fn basculer<C: Copy + PartialEq>(tri: Option<Tri<C>>, colonne: C, chiffre: bool) -> Tri<C> {
     match tri {
         Some(t) if t.colonne == colonne => Tri { colonne, croissant: !t.croissant },
         _ => Tri { colonne, croissant: !chiffre },
@@ -131,24 +141,36 @@ pub fn disposer(colonnes: &[Colonne<'_>], largeur: f32, ecart: f32) -> Vec<(usiz
         .collect()
 }
 
-/// Un tableau, le temps d'une image.
-pub struct Tableau<'a> {
+/// Un tableau, le temps d'une image. `C` : ce qui identifie une colonne.
+pub struct Tableau<'a, C> {
     id: Id,
+    identifiants: Vec<C>,
     colonnes: Vec<Colonne<'a>>,
     hauteur_ligne: f32,
-    tri_defaut: Option<Tri>,
+    tri_defaut: Option<Tri<C>>,
     surlignee: Option<usize>,
 }
 
-impl<'a> Tableau<'a> {
+impl<'a, C: Copy + PartialEq + Send + Sync + 'static> Tableau<'a, C> {
     /// La hauteur de l'en-tête.
     pub const HAUTEUR_TETE: f32 = 26.0;
 
     pub fn new(id_salt: impl egui::AsIdSalt) -> Self {
-        Self { id: Id::unique(("ki-tableau", id_salt)), colonnes: Vec::new(), hauteur_ligne: 32.0, tri_defaut: None, surlignee: None }
+        Self {
+            id: Id::unique(("ki-tableau", id_salt)),
+            identifiants: Vec::new(),
+            colonnes: Vec::new(),
+            hauteur_ligne: 32.0,
+            tri_defaut: None,
+            surlignee: None,
+        }
     }
 
-    pub fn colonne(mut self, colonne: Colonne<'a>) -> Self {
+    /// Une colonne de plus, à droite des précédentes. `identifiant` est ce
+    /// que [`Tableau::tri`] et le dessin des cases rendront pour elle.
+    pub fn colonne(mut self, identifiant: C, colonne: Colonne<'a>) -> Self {
+        debug_assert!(!self.identifiants.contains(&identifiant), "deux colonnes portent le même identifiant");
+        self.identifiants.push(identifiant);
         self.colonnes.push(colonne);
         self
     }
@@ -166,20 +188,25 @@ impl<'a> Tableau<'a> {
     }
 
     /// Le tri tant qu'on n'a cliqué sur aucun en-tête.
-    pub fn tri_par_defaut(mut self, colonne: usize, croissant: bool) -> Self {
+    pub fn tri_par_defaut(mut self, colonne: C, croissant: bool) -> Self {
         self.tri_defaut = Some(Tri { colonne, croissant });
         self
     }
 
+    /// Le tri d'origine, celui de [`Tableau::tri_par_defaut`].
+    pub fn tri_d_origine(&self) -> Option<Tri<C>> {
+        self.tri_defaut
+    }
+
     /// Le tri choisi, gardé d'une image à l'autre.
-    pub fn tri(&self, ui: &Ui) -> Option<Tri> {
-        ui.data(|d| d.get_temp::<Tri>(self.id)).or(self.tri_defaut)
+    pub fn tri(&self, ui: &Ui) -> Option<Tri<C>> {
+        ui.data(|d| d.get_temp::<Tri<C>>(self.id)).or(self.tri_defaut)
     }
 
     /// L'en-tête puis `n` lignes ; `cellule(ui, ligne, colonne)` remplit
-    /// chaque case montrée, `colonne` comptée parmi toutes. Rend la ligne
-    /// cliquée.
-    pub fn show(self, ui: &mut Ui, n: usize, mut cellule: impl FnMut(&mut Ui, usize, usize)) -> Option<usize> {
+    /// chaque case montrée, `colonne` étant l'identifiant donné à
+    /// [`Tableau::colonne`]. Rend la ligne cliquée.
+    pub fn show(self, ui: &mut Ui, n: usize, mut cellule: impl FnMut(&mut Ui, usize, C)) -> Option<usize> {
         let largeur = ui.available_width();
         let ecart = espace::M;
         let cases = disposer(&self.colonnes, largeur - 2.0 * espace::M, ecart);
@@ -200,10 +227,10 @@ impl<'a> Tableau<'a> {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked();
             if clic {
-                let nouveau = basculer(tri, i, c.chiffre);
+                let nouveau = basculer(tri, self.identifiants[i], c.chiffre);
                 ui.data_mut(|d| d.insert_temp(self.id, nouveau));
             }
-            let trie = tri.filter(|t| t.colonne == i);
+            let trie = tri.filter(|t| t.colonne == self.identifiants[i]);
             let couleur = if trie.is_some() { theme::TEXT_DIM } else { theme::TEXT_FAINT };
             let (ancre, px) = if c.droite { (Align2::RIGHT_CENTER, case.right()) } else { (Align2::LEFT_CENTER, case.left()) };
             let titre = ui.painter().text(
@@ -262,7 +289,7 @@ impl<'a> Tableau<'a> {
                 dedans.set_clip_rect(case.intersect(ui.clip_rect()));
                 dedans.style_mut().interaction.selectable_labels = false;
                 dedans.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                cellule(&mut dedans, ligne, i);
+                cellule(&mut dedans, ligne, self.identifiants[i]);
             }
         }
         cliquee
@@ -310,13 +337,60 @@ mod tests {
     /// mots dans l'ordre ; un second renverse.
     #[test]
     fn un_clic_trie_un_second_renverse() {
-        let t = basculer(None, 3, true);
-        assert_eq!(t, Tri { colonne: 3, croissant: false });
-        assert_eq!(basculer(Some(t), 3, true), Tri { colonne: 3, croissant: true });
-        assert_eq!(basculer(Some(t), 0, false), Tri { colonne: 0, croissant: true });
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Col {
+            Membre,
+            Sept,
+        }
+        let t = basculer(None, Col::Sept, true);
+        assert_eq!(t, Tri { colonne: Col::Sept, croissant: false });
+        assert_eq!(basculer(Some(t), Col::Sept, true), Tri { colonne: Col::Sept, croissant: true });
+        assert_eq!(basculer(Some(t), Col::Membre, false), Tri { colonne: Col::Membre, croissant: true });
         // Un rang, à gauche, se trie pourtant comme un chiffre.
         let rang = Colonne::new("Rang", 90.0).chiffre();
         assert!(rang.chiffre && !rang.droite);
         assert!(Colonne::new("7 j", 50.0).droite().chiffre);
+    }
+
+    /// Le tableau rend à chaque case l'identifiant de sa colonne, et au tri
+    /// celui de la colonne triée — pas un rang : une colonne masquée par
+    /// manque de place, ou déplacée dans la déclaration, n'y change rien.
+    #[test]
+    fn les_cases_et_le_tri_parlent_par_identifiant() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Col {
+            Membre,
+            Rang,
+            Forme,
+            Sept,
+        }
+        let tableau = || {
+            Tableau::new("essai")
+                .colonne(Col::Membre, Colonne::new("Membre", 160.0).grandit())
+                .colonne(Col::Rang, Colonne::new("Rang", 90.0).priorite(1))
+                .colonne(Col::Forme, Colonne::new("Forme", 80.0).priorite(2))
+                .colonne(Col::Sept, Colonne::new("7 j", 50.0).droite().triable())
+                .tri_par_defaut(Col::Sept, false)
+        };
+        assert_eq!(tableau().tri_d_origine(), Some(Tri { colonne: Col::Sept, croissant: false }));
+        for (largeur, attendues) in [
+            (700.0, vec![Col::Membre, Col::Rang, Col::Forme, Col::Sept]),
+            (400.0, vec![Col::Membre, Col::Rang, Col::Sept]),
+            (260.0, vec![Col::Membre, Col::Sept]),
+        ] {
+            let ctx = egui::Context::default();
+            let mut vues = Vec::new();
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(largeur, 300.0))),
+                ..Default::default()
+            };
+            ctx.run_ui(entree, |ui| {
+                assert_eq!(tableau().tri(ui).map(|t| t.colonne), Some(Col::Sept));
+                vues.clear();
+                tableau().show(ui, 1, |_, _, colonne| vues.push(colonne));
+            })
+            .drop_without_applying_deltas();
+            assert_eq!(vues, attendues, "à {largeur} px");
+        }
     }
 }

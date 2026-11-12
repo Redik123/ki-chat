@@ -100,7 +100,7 @@ pub enum Role {
     Rien,
     /// Une commande pour l'interface ([`Commande::Rond`]).
     Commande,
-    /// Le push-to-talk : tenu tant qu'on appuie (voir [`Loupedeck::ptt`]).
+    /// Le push-to-talk : tenu tant qu'on appuie (voir `Loupedeck::ptt_tenu`).
     Ptt,
     /// Le clip, déclenché depuis le fil (voir [`Loupedeck::action_clip`]).
     Clip,

@@ -867,7 +867,7 @@ impl KiApp {
 
                         if let Some(info) = self.info.clone() {
                             ui.add_space(espace::L);
-                            if ui::banner(ui, Ton::Accent, &info, true) {
+                            if ui::bandeau_fermable(ui, Ton::Accent, &info) {
                                 self.info = None;
                             }
                         }
@@ -1163,7 +1163,7 @@ impl KiApp {
 
                 ui.horizontal(|ui| {
                     let me = self.username.clone();
-                    ui::avatar(ui, &me, 56.0, false, shown.as_ref(), theme::BG_RAISED);
+                    ui::Avatar::new(&me, 56.0).photo(shown.as_ref()).show(ui);
                     ui.add_space(espace::XS);
                     ui.vertical(|ui| {
                         ui.label(Texte::TitreSection.riche(ui, &me).color(color_for(&me)));
@@ -1214,14 +1214,10 @@ impl KiApp {
 
                 ui::group_title(ui, Icon::Key, "Changer mon mot de passe");
                 ui::field_label(ui, "Mot de passe actuel");
-                ui.add(ui::text_field(&mut self.old_password, "", true));
+                ui.add(ui::champ_secret(&mut self.old_password, ""));
                 ui.add_space(espace::M);
                 ui::field_label(ui, "Nouveau mot de passe");
-                ui.add(ui::text_field(
-                    &mut self.new_password,
-                    "6 caractères minimum",
-                    true,
-                ));
+                ui.add(ui::champ_secret(&mut self.new_password, "6 caractères minimum"));
                 if !self.new_password.is_empty() && self.new_password.len() < 6 {
                     ui.add_space(espace::XS);
                     ui::hint(ui, "6 caractères minimum");
@@ -1248,7 +1244,7 @@ impl KiApp {
                 }
                 if let Some(info) = self.info.clone() {
                     ui.add_space(espace::L);
-                    if ui::banner(ui, Ton::Accent, &info, true) {
+                    if ui::bandeau_fermable(ui, Ton::Accent, &info) {
                         self.info = None;
                     }
                 }

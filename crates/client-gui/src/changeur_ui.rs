@@ -458,7 +458,7 @@ impl KiApp {
                     self.audio.changeur_actif = true;
                     *apply = true;
                 }
-                if ui::icon_button(ui, Icon::Mic, "Réenregistrer ma voix").clicked() {
+                if ui::Bouton::icone_seule(Icon::Mic).bulle("Réenregistrer ma voix").show(ui).clicked() {
                     if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
                         e.enregistrer_essai();
                     }

@@ -333,10 +333,10 @@ impl KiApp {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, Icon::Hash, "Ouvrir le dossier").clicked() {
+                        if ui::Bouton::icone_seule(Icon::Hash).bulle("Ouvrir le dossier").show(ui).clicked() {
                             action = 5;
                         }
-                        if ui::icon_button(ui, Icon::Refresh, "Actualiser").clicked() {
+                        if ui::Bouton::icone_seule(Icon::Refresh).bulle("Actualiser").show(ui).clicked() {
                             action = 4;
                         }
                         if etat.is_some() {
@@ -638,7 +638,7 @@ impl KiApp {
                     });
                 ui.add_space(espace::S);
                 ui::field_label(ui, "Légende");
-                ui.add(ui::text_field(&mut p.legende, "un mot, si tu veux", false));
+                ui.add(ui::champ(&mut p.legende, "un mot, si tu veux"));
                 if p.fiche.as_ref().is_some_and(|f| f.pistes.as_ref().is_some_and(|p| p.iter().any(|x| x == "copains"))) {
                     ui.add_space(espace::S);
                     ui.checkbox(&mut p.voix, "avec les voix des copains");

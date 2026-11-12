@@ -239,18 +239,25 @@ fn les_actes_en_detail(ui: &mut Ui, vue: &Vue) {
         ui.add_space(espace::M);
         let mmr = mmr_par_acte(vue.fiche);
         let lignes: Vec<&StatsSaison> = saisons.iter().rev().collect();
+        #[derive(Clone, Copy, PartialEq)]
+        enum Col {
+            Acte,
+            Fin,
+            Victoires,
+            Mmr,
+        }
         let tableau = Tableau::new("progression_actes_tableau")
-            .colonne(Colonne::new("Acte", 70.0))
-            .colonne(Colonne::new("Fin d'acte", 150.0).grandit())
-            .colonne(Colonne::new("Victoires", 110.0).priorite(2))
-            .colonne(Colonne::new("MMR estimé", 200.0).priorite(1));
+            .colonne(Col::Acte, Colonne::new("Acte", 70.0))
+            .colonne(Col::Fin, Colonne::new("Fin d'acte", 150.0).grandit())
+            .colonne(Col::Victoires, Colonne::new("Victoires", 110.0).priorite(2))
+            .colonne(Col::Mmr, Colonne::new("MMR estimé", 200.0).priorite(1));
         tableau.show(ui, lignes.len(), |ui, i, colonne| {
             let s = lignes[i];
             match colonne {
-                0 => {
+                Col::Acte => {
                     cellule(ui, &s.saison, TEXT_DIM);
                 }
-                1 => {
+                Col::Fin => {
                     ui.spacing_mut().item_spacing.x = espace::XS;
                     if let Some(icone) = vue.rangs.texture(s.tier_fin).filter(|_| s.tier_fin >= 3) {
                         ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(20.0)));
@@ -260,11 +267,11 @@ fn les_actes_en_detail(ui: &mut Ui, vue: &Vue) {
                         cellule(ui, format!("{} RR", s.rr_fin), TEXT_DIM);
                     }
                 }
-                2 => {
+                Col::Victoires => {
                     let pct = (s.parties > 0).then(|| f32::from(s.victoires) * 100.0 / f32::from(s.parties));
                     cellule(ui, format!("{} / {} · {}", s.victoires, s.parties, opt_pct(pct)), TEXT);
                 }
-                _ => match mmr.get(s.saison.as_str()) {
+                Col::Mmr => match mmr.get(s.saison.as_str()) {
                     Some(e) => {
                         let (ou, teinte) = position_de(e);
                         cellule(ui, format!("+{} / −{} · {ou} du rang", opt_entier(Some(e.gain_moyen)), opt_entier(Some(e.perte_moyenne))), teinte)

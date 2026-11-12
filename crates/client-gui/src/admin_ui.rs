@@ -361,7 +361,7 @@ impl KiApp {
             ui.add_space(espace::XS);
             ui.vertical(|ui| {
                 ui::field_label(ui, "Nom du serveur");
-                ui.add(ui::text_field(&mut self.admin.nom, "ex. Chez Kévin", false));
+                ui.add(ui::champ(&mut self.admin.nom, "ex. Chez Kévin"));
                 ui.add_space(espace::S);
                 ui.horizontal(|ui| {
                     if ui::Bouton::new("Choisir un logo").icone(Icon::Pencil).show(ui).clicked() {
@@ -415,7 +415,7 @@ impl KiApp {
             ui.add_space(espace::M);
             ui::field_label(ui, "Adresse web publique — la base des liens des portes");
             let auto = self.http_base();
-            ui.add(ui::text_field(&mut self.admin.adresse_web, &format!("automatique : {auto}"), false));
+            ui.add(ui::champ(&mut self.admin.adresse_web, &format!("automatique : {auto}")));
             let normalisee = ki_protocol::normaliser_adresse_web(&self.admin.adresse_web);
             match &normalisee {
                 Err(e) => {
@@ -798,7 +798,7 @@ impl KiApp {
         match tableau {
             None => ui::hint(ui, "récupération de l'état du serveur…"),
             Some(Err(e)) => {
-                ui::banner(ui, Ton::Alerte, &format!("tableau indisponible : {e}"), false);
+                ui::bandeau(ui, Ton::Alerte, &format!("tableau indisponible : {e}"));
             }
             Some(Ok(t)) => self.peindre_tableau(ui, &t),
         }
@@ -1086,7 +1086,7 @@ impl KiApp {
                         }
                         if let Some(info) = self.info.clone() {
                             ui.add_space(espace::L);
-                            if ui::banner(ui, Ton::Accent, &info, true) {
+                            if ui::bandeau_fermable(ui, Ton::Accent, &info) {
                                 self.info = None;
                             }
                         }
@@ -1109,7 +1109,7 @@ impl KiApp {
             allowed_roles: Vec::new(),
             restricted: false,
         });
-        ui.add(ui::text_field(&mut draft.name, "nom du salon", false));
+        ui.add(ui::champ(&mut draft.name, "nom du salon"));
         ui.horizontal(|ui| {
             ui.selectable_value(&mut draft.kind, ChannelKind::Text, "Textuel");
             ui.selectable_value(&mut draft.kind, ChannelKind::Voice, "Vocal");
@@ -1157,10 +1157,10 @@ impl KiApp {
                     ui.label(Texte::Aide.riche_ton(ui, Ton::Alerte, "verrouillé"));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked() {
+                    if ui::Bouton::icone_seule(Icon::Trash).cote(24.0).bulle("Supprimer").show(ui).clicked() {
                         to_send.push(ClientMsg::AdminDeleteChannel { channel: ch.id });
                     }
-                    if ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Renommer", None).clicked() {
+                    if ui::Bouton::icone_seule(Icon::Pencil).cote(24.0).bulle("Renommer").show(ui).clicked() {
                         // Un formulaire déjà ouvert sur ce salon se referme :
                         // le crayon fait aller-retour, sans bouton « annuler »
                         // à chercher.
@@ -1184,7 +1184,7 @@ impl KiApp {
                     if ch.kind == ChannelKind::Voice {
                         let quoi = if ch.locked { "Changer le verrou" } else { "Verrouiller" };
                         let teinte = ch.locked.then_some(WARN);
-                        if ui::icon_button_ex(ui, Icon::Key, 24.0, quoi, teinte).clicked() {
+                        if ui::Bouton::icone_seule(Icon::Key).cote(24.0).couleur_si(teinte).bulle(quoi).show(ui).clicked() {
                             self.admin.verrou = match self.admin.verrou.take() {
                                 Some(v) if v.channel == ch.id => None,
                                 _ => Some(VerrouDraft {
@@ -1205,7 +1205,7 @@ impl KiApp {
                     };
                     if ui
                         .add_enabled_ui(i + 1 < ids.len(), |ui| {
-                            ui::icon_button_ex(ui, Icon::ArrowDown, 24.0, "Descendre", None)
+                            ui::Bouton::icone_seule(Icon::ArrowDown).cote(24.0).bulle("Descendre").show(ui)
                         })
                         .inner
                         .clicked()
@@ -1214,7 +1214,7 @@ impl KiApp {
                     }
                     if ui
                         .add_enabled_ui(i > 0, |ui| {
-                            ui::icon_button_ex(ui, Icon::ArrowUp, 24.0, "Monter", None)
+                            ui::Bouton::icone_seule(Icon::ArrowUp).cote(24.0).bulle("Monter").show(ui)
                         })
                         .inner
                         .clicked()
@@ -1231,7 +1231,7 @@ impl KiApp {
                 let mut annuler = false;
                 ui.indent(("edition", ch.id), |ui| {
                     let edit = self.admin.salon_edite.as_mut().expect("vérifié à l'instant");
-                    ui.add(ui::text_field(&mut edit.draft.name, "nom du salon", false));
+                    ui.add(ui::champ(&mut edit.draft.name, "nom du salon"));
                     restriction_par_roles(ui, &roles, &mut edit.draft);
                     let ok = !edit.draft.name.trim().is_empty()
                         && (!edit.draft.restricted || !edit.draft.allowed_roles.is_empty());
@@ -1277,7 +1277,7 @@ impl KiApp {
                 let mut retirer = false;
                 ui.indent(("verrou", ch.id), |ui| {
                     let v = self.admin.verrou.as_mut().expect("vérifié à l'instant");
-                    ui.add(ui::text_field(&mut v.mot_de_passe, "mot de passe", true));
+                    ui.add(ui::champ_secret(&mut v.mot_de_passe, "mot de passe"));
                     ui.horizontal_wrapped(|ui| {
                         for (label, secs) in VOICE_LOCK_DURATIONS {
                             ui.selectable_value(&mut v.ttl_secs, *secs, *label);
@@ -1362,7 +1362,7 @@ impl KiApp {
                     // propre rang : sinon on se donnerait des pouvoirs.
                     if self.outranks(role.rank)
                         && !role.system
-                        && ui::icon_button_ex(ui, Icon::Trash, 24.0, "Supprimer", None).clicked()
+                        && ui::Bouton::icone_seule(Icon::Trash).cote(24.0).bulle("Supprimer").show(ui).clicked()
                     {
                         to_send.push(ClientMsg::AdminDeleteRole { id: role.id });
                     }
@@ -1374,7 +1374,7 @@ impl KiApp {
                     let everyone = role.id == ki_protocol::ROLE_EVERYONE
                         && self.can(ki_protocol::perm::ADMINISTRATOR);
                     if ((self.outranks(role.rank) && !role.system) || everyone)
-                        && ui::icon_button_ex(ui, Icon::Pencil, 24.0, "Modifier", None).clicked()
+                        && ui::Bouton::icone_seule(Icon::Pencil).cote(24.0).bulle("Modifier").show(ui).clicked()
                     {
                         self.admin.role = Some(RoleDraft {
                             id: Some(role.id),
@@ -1420,7 +1420,7 @@ impl KiApp {
         let everyone = draft.id == Some(ki_protocol::ROLE_EVERYONE);
         ui::field_label(ui, "Nom");
         ui.add_enabled_ui(!everyone, |ui| {
-            ui.add(ui::text_field(&mut draft.name, "ex. Modérateur", false));
+            ui.add(ui::champ(&mut draft.name, "ex. Modérateur"));
         });
         ui.add_space(espace::S);
         ui.horizontal(|ui| {
@@ -1546,7 +1546,7 @@ impl KiApp {
     ) {
         ui::group_title(ui, Icon::Plus, "Nouveau code");
         ui::field_label(ui, "Étiquette (pour s'y retrouver plus tard)");
-        ui.add(ui::text_field(&mut self.admin.invitation_libelle, "ex. tournoi du samedi", false));
+        ui.add(ui::champ(&mut self.admin.invitation_libelle, "ex. tournoi du samedi"));
         ui.add_space(espace::M);
 
         ui::field_label(ui, "Nombre d'utilisations");
@@ -1583,7 +1583,7 @@ impl KiApp {
                             RichText::new(&code).color(ACCENT).strong().monospace().size(texte::TITRE),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui::icon_button(ui, Icon::Copy, "Copier « serveur + code »")
+                            if ui::Bouton::icone_seule(Icon::Copy).bulle("Copier « serveur + code »").show(ui)
                                 .clicked()
                             {
                                 ctx.copy_text(format!(
@@ -1591,7 +1591,7 @@ impl KiApp {
                                     self.url
                                 ));
                             }
-                            if ui::icon_button(ui, Icon::Key, "Copier le code").clicked() {
+                            if ui::Bouton::icone_seule(Icon::Key).bulle("Copier le code").show(ui).clicked() {
                                 ctx.copy_text(code.clone());
                             }
                         });
@@ -1645,12 +1645,12 @@ impl KiApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !invite.revoked
                             && revocable
-                            && ui::icon_button_ex(ui, Icon::Ban, 24.0, "Révoquer", None).clicked()
+                            && ui::Bouton::icone_seule(Icon::Ban).cote(24.0).bulle("Révoquer").show(ui).clicked()
                         {
                             to_send
                                 .push(ClientMsg::AdminRevokeInvite { code: invite.code.clone() });
                         }
-                        if ui::icon_button_ex(ui, Icon::Copy, 24.0, "Copier", None).clicked() {
+                        if ui::Bouton::icone_seule(Icon::Copy).cote(24.0).bulle("Copier").show(ui).clicked() {
                             ctx.copy_text(invite.code.clone());
                         }
                     });
@@ -1671,14 +1671,7 @@ impl KiApp {
         for account in &users {
             ui.horizontal(|ui| {
                 let photo = self.avatars.get(&account.user_id);
-                ui::avatar(
-                    ui,
-                    &account.username,
-                    26.0,
-                    false,
-                    photo.map(|(_, t)| t),
-                    theme::BG_RAISED,
-                );
+                ui::Avatar::new(&account.username, 26.0).photo(photo.map(|(_, t)| t)).show(ui);
                 let dot = if account.online { SPEAK } else { theme::BORDER };
                 ui::status_dot(ui, dot, "", 8.0);
 
@@ -1718,7 +1711,7 @@ impl KiApp {
                     // s'il aboutirait.
                     if self.can(ki_protocol::perm::MANAGE_ROLES)
                         && self.outranks(account.rank)
-                        && ui::icon_button_ex(ui, Icon::Crown, 26.0, "Rôles…", None).clicked()
+                        && ui::Bouton::icone_seule(Icon::Crown).cote(26.0).bulle("Rôles…").show(ui).clicked()
                     {
                         self.admin.roles_cible = Some(account.username.clone());
                         self.admin.roles_choisis = account.roles.clone();
@@ -1734,14 +1727,14 @@ impl KiApp {
                         && !myself;
                     if can_ban {
                         if account.banned {
-                            if ui::icon_button_ex(ui, Icon::Check, 26.0, "Annuler le ban", None)
+                            if ui::Bouton::icone_seule(Icon::Check).cote(26.0).bulle("Annuler le ban").show(ui)
                                 .clicked()
                             {
                                 to_send.push(ClientMsg::AdminUnban {
                                     username: account.username.clone(),
                                 });
                             }
-                        } else if ui::icon_button_ex(ui, Icon::Ban, 26.0, "Bannir…", None)
+                        } else if ui::Bouton::icone_seule(Icon::Ban).cote(26.0).bulle("Bannir…").show(ui)
                             .clicked()
                         {
                             self.admin.ban = Some(BanDraft {
@@ -1756,13 +1749,7 @@ impl KiApp {
                     let can_reset = self.can(ki_protocol::perm::RESET_PASSWORD)
                         && (myself || self.outranks(account.rank));
                     if can_reset
-                        && ui::icon_button_ex(
-                            ui,
-                            Icon::Key,
-                            26.0,
-                            "Réinitialiser le mot de passe",
-                            None,
-                        )
+                        && ui::Bouton::icone_seule(Icon::Key).cote(26.0).bulle("Réinitialiser le mot de passe").show(ui)
                         .clicked()
                     {
                         self.admin.reset_cible = Some(account.username.clone());
@@ -1980,7 +1967,7 @@ impl KiApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui::field_label(ui, "Motif (visible par la personne bannie)");
-                ui.add(ui::text_field(&mut draft.reason, "ex. spam répété", false));
+                ui.add(ui::champ(&mut draft.reason, "ex. spam répété"));
                 ui.add_space(espace::M);
 
                 ui::field_label(ui, "Durée");

@@ -18,50 +18,6 @@ pub use crate::typo::{texte, texte_ton, Texte, Ton};
 // Boutons
 // ---------------------------------------------------------------------
 
-/// Bouton carré ne contenant qu'une icône. Sans fond au repos, il ne
-/// s'allume qu'au survol — idéal pour les barres d'outils denses.
-pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
-    icon_button_ex(ui, icon, 32.0, tooltip, None)
-}
-
-/// Variante complète : taille du bouton et couleur imposée de l'icône
-/// (pour un état actif, par exemple micro coupé en rouge).
-pub fn icon_button_ex(
-    ui: &mut Ui,
-    icon: Icon,
-    size: f32,
-    tooltip: &str,
-    tint: Option<Color32>,
-) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    if ui.is_rect_visible(rect) {
-        let pressed = response.is_pointer_button_down_on();
-        let bg = if pressed {
-            theme::BG_ACTIVE
-        } else if response.hovered() {
-            theme::BG_HOVER
-        } else if let Some(c) = tint {
-            theme::translucide(c, 28)
-        } else {
-            Color32::TRANSPARENT
-        };
-        if bg != Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, CornerRadius::same(rayon::L), bg);
-        }
-        let fg = tint.unwrap_or(if response.hovered() {
-            theme::TEXT
-        } else {
-            theme::TEXT_DIM
-        });
-        icons::draw(ui.painter(), rect.shrink(size * 0.24), icon, fg);
-    }
-    if tooltip.is_empty() {
-        response
-    } else {
-        response.on_hover_text(tooltip)
-    }
-}
-
 /// La place d'un bouton dans la hiérarchie de l'écran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variante {
@@ -125,6 +81,12 @@ pub struct Bouton<'a> {
     actif: bool,
     en_charge: bool,
     bulle: Option<&'a str>,
+    /// Sans libellé : un carré qui ne s'allume qu'au survol.
+    seule: bool,
+    /// Le côté du carré d'une icône seule, quand la taille ne le dit pas.
+    cote: Option<f32>,
+    /// La couleur imposée à une icône seule.
+    couleur: Option<Color32>,
 }
 
 impl<'a> Bouton<'a> {
@@ -138,7 +100,44 @@ impl<'a> Bouton<'a> {
             actif: true,
             en_charge: false,
             bulle: None,
+            seule: false,
+            cote: None,
+            couleur: None,
         }
+    }
+
+    /// Un bouton fait de sa seule icône : un carré sans fond au repos, qui
+    /// ne s'allume qu'au survol — pour les barres d'outils et les lignes
+    /// denses. Sa [`Bouton::bulle`] dit ce qu'il fait, à l'écran comme aux
+    /// lecteurs d'écran.
+    ///
+    /// ```ignore
+    /// Bouton::icone_seule(Icon::Gear).bulle("Réglages").show(ui);
+    /// Bouton::icone_seule(Icon::MicOff).cote(38.0).couleur(DANGER).bulle("Micro coupé").show(ui);
+    /// ```
+    pub fn icone_seule(icone: Icon) -> Self {
+        Self { icone: Some(icone), seule: true, ..Self::new("") }
+    }
+
+    /// Le côté du carré d'une icône seule, en points. Sans lui, celui de la
+    /// taille : 24, 32 ou 40.
+    pub fn cote(mut self, cote: f32) -> Self {
+        self.cote = Some(cote);
+        self
+    }
+
+    /// La couleur d'une icône seule, à la place du gris qui s'éclaire au
+    /// survol : un état (micro coupé en rouge), une action mise en avant.
+    /// Un léger fond de la même teinte l'accompagne.
+    pub fn couleur(mut self, couleur: Color32) -> Self {
+        self.couleur = Some(couleur);
+        self
+    }
+
+    /// La couleur quand il y en a une : pour qui la calcule.
+    pub fn couleur_si(mut self, couleur: Option<Color32>) -> Self {
+        self.couleur = couleur;
+        self
     }
 
     /// L'icône, devant le libellé.
@@ -206,6 +205,9 @@ impl<'a> Bouton<'a> {
     }
 
     pub fn show(self, ui: &mut Ui) -> Response {
+        if self.seule {
+            return self.show_icone_seule(ui);
+        }
         let m = self.taille.mesures();
         let font = FontId::proportional(m.police);
         // Sans couleur à la mise en page : le libellé prend celle de sa variante
@@ -320,6 +322,60 @@ impl<'a> Bouton<'a> {
         match self.bulle {
             Some(bulle) if !bulle.is_empty() => response.on_hover_text(bulle).on_disabled_hover_text(bulle),
             _ => response,
+        }
+    }
+
+    fn show_icone_seule(self, ui: &mut Ui) -> Response {
+        let cote = self.cote.unwrap_or(match self.taille {
+            Taille::S => 24.0,
+            Taille::M => 32.0,
+            Taille::L => 40.0,
+        });
+        let enabled = ui.is_enabled() && self.actif;
+        let cliquable = enabled && !self.en_charge;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::splat(cote), if cliquable { Sense::click() } else { Sense::hover() });
+        let bulle = self.bulle.unwrap_or("");
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, cliquable, bulle));
+        if ui.is_rect_visible(rect) {
+            let hovered = response.hovered() && cliquable;
+            let pressed = response.is_pointer_button_down_on() && cliquable;
+            // Dans un `Ui` désactivé, egui estompe déjà tout ce qui s'y
+            // peint : on n'estompe ici que le bouton désactivé lui-même.
+            let alpha = if self.actif { 1.0 } else { 0.45 };
+            let bg = if pressed {
+                theme::BG_ACTIVE
+            } else if hovered {
+                theme::BG_HOVER
+            } else if let Some(c) = self.couleur {
+                theme::translucide(c, 28)
+            } else {
+                Color32::TRANSPARENT
+            };
+            if bg != Color32::TRANSPARENT {
+                ui.painter().rect_filled(rect, CornerRadius::same(rayon::L), bg.gamma_multiply(alpha));
+            }
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    rect.expand(2.0),
+                    CornerRadius::same(rayon::L + 2),
+                    Stroke::new(1.5_f32, theme::ACCENT),
+                    StrokeKind::Outside,
+                );
+            }
+            let fg = self.couleur.unwrap_or(if hovered { theme::TEXT } else { theme::TEXT_DIM }).gamma_multiply(alpha);
+            if self.en_charge {
+                let temps = ui.input(|i| i.time);
+                spinner(ui.painter(), rect.center(), cote * 0.22, temps, fg);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+            } else if let Some(icone) = self.icone {
+                icons::draw(ui.painter(), rect.shrink(cote * 0.24), icone, fg);
+            }
+        }
+        if bulle.is_empty() {
+            response
+        } else {
+            response.on_hover_text(bulle).on_disabled_hover_text(bulle)
         }
     }
 }
@@ -488,20 +544,53 @@ pub fn spinner(p: &Painter, center: egui::Pos2, radius: f32, time: f64, color: C
     p.add(egui::Shape::line(points, Stroke::new(1.6_f32, color)));
 }
 
-/// Réserve la place d'un avatar et le dessine.
-pub fn avatar(
-    ui: &mut Ui,
-    name: &str,
-    size: f32,
-    speaking: bool,
-    photo: Option<&egui::TextureHandle>,
-    backdrop: Color32,
-) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    if ui.is_rect_visible(rect) {
-        paint_avatar(ui.painter(), rect, name, speaking, photo, backdrop);
+/// L'avatar d'un membre : sa photo en rond, ou son initiale sur un disque à
+/// sa couleur. Il se clique.
+///
+/// ```ignore
+/// Avatar::new(&membre.pseudo, 32.0).parle(en_train_de_parler).photo(texture).show(ui);
+/// ```
+#[must_use = "un avatar se pose avec `.show(ui)`"]
+pub struct Avatar<'a> {
+    nom: &'a str,
+    taille: f32,
+    parle: bool,
+    photo: Option<&'a egui::TextureHandle>,
+    fond: Color32,
+}
+
+impl<'a> Avatar<'a> {
+    /// `nom` donne l'initiale et la couleur ; `taille` est le diamètre.
+    pub fn new(nom: &'a str, taille: f32) -> Self {
+        Self { nom, taille, parle: false, photo: None, fond: theme::BG_RAISED }
     }
-    response
+
+    /// L'anneau vert de qui est en train de parler.
+    pub fn parle(mut self, parle: bool) -> Self {
+        self.parle = parle;
+        self
+    }
+
+    /// Sa photo, quand il en a une.
+    pub fn photo(mut self, photo: Option<&'a egui::TextureHandle>) -> Self {
+        self.photo = photo;
+        self
+    }
+
+    /// La couleur sur laquelle il est posé, quand ce n'est pas celle d'une
+    /// surface en relief : l'anneau s'en détache par un liseré de ce fond.
+    pub fn fond(mut self, fond: Color32) -> Self {
+        self.fond = fond;
+        self
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(self.taille), Sense::click());
+        if ui.is_rect_visible(rect) {
+            paint_avatar(ui.painter(), rect, self.nom, self.parle, self.photo, self.fond);
+        }
+        response
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -611,9 +700,17 @@ pub fn encart<R>(ui: &mut Ui, couleur: Color32, contenu: impl FnOnce(&mut Ui) ->
         .show(ui, contenu)
 }
 
-/// Bandeau d'information coloré. Renvoie `true` si l'utilisateur l'a fermé
-/// (la croix n'apparaît que si `closable`).
-pub fn banner(ui: &mut Ui, tone: Ton, text: &str, closable: bool) -> bool {
+/// Un bandeau d'information, à la couleur de son ton.
+pub fn bandeau(ui: &mut Ui, ton: Ton, texte: &str) {
+    peindre_bandeau(ui, ton, texte, false);
+}
+
+/// Un bandeau avec sa croix : rend vrai quand on vient de le fermer.
+pub fn bandeau_fermable(ui: &mut Ui, ton: Ton, texte: &str) -> bool {
+    peindre_bandeau(ui, ton, texte, true)
+}
+
+fn peindre_bandeau(ui: &mut Ui, tone: Ton, text: &str, closable: bool) -> bool {
     let color = tone.couleur();
     let mut closed = false;
     encart(ui, color, |ui| {
@@ -630,7 +727,7 @@ pub fn banner(ui: &mut Ui, tone: Ton, text: &str, closable: bool) -> bool {
             });
             if closable {
                 f.ui(|ui| {
-                    closed = icon_button_ex(ui, Icon::Close, 22.0, "Masquer", None).clicked();
+                    closed = Bouton::icone_seule(Icon::Close).cote(22.0).bulle("Masquer").show(ui).clicked();
                 });
             }
         });
@@ -656,7 +753,7 @@ pub fn rappel(ui: &mut Ui, texte_rappel: &str, bulle: &str) -> bool {
                     );
                 });
                 f.ui(|ui| {
-                    ferme = icon_button_ex(ui, Icon::Close, 20.0, bulle, None).clicked();
+                    ferme = Bouton::icone_seule(Icon::Close).cote(20.0).bulle(bulle).show(ui).clicked();
                 });
             });
         });
@@ -1100,8 +1197,18 @@ pub fn signal_badge(ui: &mut Ui, lit: u8, text: &str, color: Color32) -> Respons
     response
 }
 
-/// Champ de saisie à l'allure maison : fond creusé, coins arrondis.
-pub fn text_field<'a>(text: &'a mut String, hint: &str, password: bool) -> egui::TextEdit<'a> {
+/// Un champ de saisie d'une ligne à l'allure maison : fond creusé, coins
+/// arrondis. `indice` s'affiche tant qu'il est vide.
+pub fn champ<'a>(texte: &'a mut String, indice: &str) -> egui::TextEdit<'a> {
+    champ_dessine(texte, indice, false)
+}
+
+/// Le même pour un mot de passe : ce qu'on y tape ne se lit pas.
+pub fn champ_secret<'a>(texte: &'a mut String, indice: &str) -> egui::TextEdit<'a> {
+    champ_dessine(texte, indice, true)
+}
+
+fn champ_dessine<'a>(text: &'a mut String, hint: &str, password: bool) -> egui::TextEdit<'a> {
     egui::TextEdit::singleline(text)
         .password(password)
         .hint_text(hint)

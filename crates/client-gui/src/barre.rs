@@ -44,7 +44,7 @@ pub(crate) fn niveau_de_barre(libelles: Option<f32>, icones: Option<f32>, droite
 /// réduit à son icône sinon — le libellé passe alors dans la bulle.
 pub(crate) fn bouton_de_barre(ui: &mut egui::Ui, compact: bool, icone: Icon, libelle: &str) -> egui::Response {
     if compact {
-        ui::icon_button_ex(ui, icone, 32.0, libelle, None)
+        ui::Bouton::icone_seule(icone).bulle(libelle).show(ui)
     } else {
         ui::Bouton::new(libelle).icone(icone).show(ui)
     }
@@ -75,17 +75,10 @@ impl KiApp {
                     // réouvertures tant qu'il le tient. La reconnexion seule
                     // n'y peut rien : c'est une case à décocher côté Windows,
                     // autant le dire ici plutôt que laisser mariner.
-                    ui::banner(
+                    ui::bandeau(
                         ui,
                         Ton::Alerte,
-                        &format!(
-                            "{what} — reconnexion automatique en cours… Si ça arrive \
-                             quand un jeu se lance et que ça dure : Paramètres son \
-                             Windows → ton micro → Propriétés → Avancé → décoche \
-                             « Autoriser les applications à prendre le contrôle \
-                             exclusif »."
-                        ),
-                        false,
+                        &format!( "{what} — reconnexion automatique en cours… Si ça arrive quand un jeu se lance et que ça dure : Paramètres son Windows → ton micro → Propriétés → Avancé → décoche « Autoriser les applications à prendre le contrôle exclusif »." ),
                     );
                     ui.add_space(espace::S);
                 }
@@ -100,13 +93,10 @@ impl KiApp {
                         (true, false) => "Le micro réglé",
                         _ => "La sortie audio réglée",
                     };
-                    ui::banner(
+                    ui::bandeau(
                         ui,
                         Ton::Info,
-                        &format!(
-                            "{what} n'a pas été trouvé — on utilise le périphérique par défaut, et on le reprend dès son retour."
-                        ),
-                        false,
+                        &format!( "{what} n'a pas été trouvé — on utilise le périphérique par défaut, et on le reprend dès son retour." ),
                     );
                     ui.add_space(espace::S);
                 }
@@ -142,7 +132,7 @@ impl KiApp {
                     } else {
                         "Couper le micro"
                     };
-                    let clicked = ui::icon_button_ex(ui, icon, 38.0, tip, tint).clicked();
+                    let clicked = ui::Bouton::icone_seule(icon).cote(38.0).couleur_si(tint).bulle(tip).show(ui).clicked();
                     if clicked && in_voice {
                         self.basculer_micro();
                     }
@@ -153,7 +143,7 @@ impl KiApp {
                         } else {
                             (Icon::Headphones, None, "Se rendre sourd (coupe aussi le micro)")
                         };
-                        if ui::icon_button_ex(ui, icon, 38.0, tip, tint).clicked() {
+                        if ui::Bouton::icone_seule(icon).cote(38.0).couleur_si(tint).bulle(tip).show(ui).clicked() {
                             self.basculer_sourd();
                         }
                     }
@@ -169,7 +159,7 @@ impl KiApp {
                     } else {
                         (Icon::Screen, None, "Diffuser mon écran au salon")
                     };
-                    if ui::icon_button_ex(ui, s_icon, 38.0, s_tip, s_tint).clicked() && in_voice {
+                    if ui::Bouton::icone_seule(s_icon).cote(38.0).couleur_si(s_tint).bulle(s_tip).show(ui).clicked() && in_voice {
                         if self.diffusion.live.is_some() {
                             self.arreter_diffusion();
                         } else if self.diffusion.attente.is_none() {
@@ -196,13 +186,7 @@ impl KiApp {
 
                     // Sortir du vocal sans quitter le serveur.
                     if in_voice
-                        && ui::icon_button_ex(
-                            ui,
-                            Icon::Logout,
-                            30.0,
-                            "Quitter le vocal",
-                            Some(DANGER),
-                        )
+                        && ui::Bouton::icone_seule(Icon::Logout).cote(30.0).couleur(DANGER).bulle("Quitter le vocal").show(ui)
                             .clicked()
                     {
                         self.leave_voice();

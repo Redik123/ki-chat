@@ -420,7 +420,7 @@ impl Portes {
                     }
                     if let Some(message) = self.message.clone() {
                         ui.add_space(espace::M);
-                        if ui::banner(ui, Ton::Info, &message, true) {
+                        if ui::bandeau_fermable(ui, Ton::Info, &message) {
                             self.message = None;
                         }
                     }
@@ -435,7 +435,7 @@ impl Portes {
     fn formulaire(&mut self, ui: &mut egui::Ui, contexte: &Contexte, actions: &mut Vec<Action>) {
         ui::group_title(ui, Icon::Plus, "Ouvrir une porte");
         ui::field_label(ui, "Nom de la porte (dans le lien)");
-        if ui.add(ui::text_field(&mut self.slug, "ex. salon1", false)).changed() {
+        if ui.add(ui::champ(&mut self.slug, "ex. salon1")).changed() {
             self.slug = slug_normalise(&self.slug);
         }
         let valide = ki_protocol::slug_valide(&self.slug);
@@ -458,7 +458,7 @@ impl Portes {
         }
         ui.add_space(espace::M);
         ui::field_label(ui, "Nom du salon temporaire (facultatif)");
-        ui.add(ui::text_field(&mut self.nom_salon, "sinon, celui de la porte", false));
+        ui.add(ui::champ(&mut self.nom_salon, "sinon, celui de la porte"));
         ui.add_space(espace::M);
         ui::field_label(ui, "Durée");
         ui::pastilles(ui, &mut self.duree_min, &DUREES);
@@ -527,7 +527,7 @@ fn carte_porte(
                     egui::Label::new(Texte::Corps.riche_ton(ui, Ton::Accent, &url).monospace())
                         .truncate(),
                 );
-                if ui::icon_button_ex(ui, Icon::Copy, 24.0, "Copier le lien", None).clicked() {
+                if ui::Bouton::icone_seule(Icon::Copy).cote(24.0).bulle("Copier le lien").show(ui).clicked() {
                     actions.push(Action::Copier(url.clone()));
                 }
             });

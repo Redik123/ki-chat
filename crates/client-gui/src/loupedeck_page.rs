@@ -253,7 +253,7 @@ impl KiApp {
                     onglet = Some(i);
                 }
             }
-            if ui::icon_button_ex(ui, Icon::Plus, 22.0, "ajouter une page", None).clicked() {
+            if ui::Bouton::icone_seule(Icon::Plus).cote(22.0).bulle("ajouter une page").show(ui).clicked() {
                 ajouter = true;
             }
         });
@@ -271,7 +271,7 @@ impl KiApp {
         ui.horizontal(|ui| {
             ui.label(Texte::Libelle.riche(ui, "Nom"));
             let page = &mut etat.config.pages[etat.onglet];
-            ui.add(ui::text_field(&mut page.nom, "nom de la page", false).desired_width(160.0));
+            ui.add(ui::champ(&mut page.nom, "nom de la page").desired_width(160.0));
             if page.nom.chars().count() > 20 {
                 page.nom = page.nom.chars().take(20).collect();
             }
@@ -507,14 +507,14 @@ impl KiApp {
                     ui.add_space(espace::S);
                     ui.horizontal(|ui| {
                         ui.label(Texte::Libelle.riche(ui, "Texte"));
-                        ui.add(ui::text_field(&mut b.texte, &origine, false).desired_width(170.0));
+                        ui.add(ui::champ(&mut b.texte, &origine).desired_width(170.0));
                         if b.texte.chars().count() > 16 {
                             b.texte = b.texte.chars().take(16).collect();
                         }
                         ui.add_space(espace::L);
                         ui.label(Texte::Libelle.riche(ui, "Icône"));
                         let icone = b.icone.unwrap_or(b.action.icone());
-                        if ui::icon_button_ex(ui, icone, 26.0, "choisir l'icône", Some(ACCENT)).clicked() {
+                        if ui::Bouton::icone_seule(icone).cote(26.0).couleur(ACCENT).bulle("choisir l'icône").show(ui).clicked() {
                             etat.choix_icone = !etat.choix_icone;
                         }
                         if b.icone.is_some() && ui.small_button("d'origine").clicked() {
@@ -524,7 +524,7 @@ impl KiApp {
                     if etat.choix_icone {
                         ui.horizontal_wrapped(|ui| {
                             for icone in Icon::TOUTES {
-                                if ui::icon_button_ex(ui, icone, 26.0, &format!("{icone:?}"), None).clicked() {
+                                if ui::Bouton::icone_seule(icone).cote(26.0).bulle(&format!("{icone:?}")).show(ui).clicked() {
                                     b.icone = Some(icone);
                                     etat.choix_icone = false;
                                 }

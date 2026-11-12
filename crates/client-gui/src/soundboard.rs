@@ -210,12 +210,7 @@ impl Soundboard {
                 });
                 if !en_vocal {
                     ui.add_space(espace::S);
-                    ui::banner(
-                        ui,
-                        Ton::Alerte,
-                        "rejoins un salon vocal : ici, personne d'autre n'entendrait",
-                        false,
-                    );
+                    ui::bandeau(ui, Ton::Alerte, "rejoins un salon vocal : ici, personne d'autre n'entendrait");
                 }
                 ui.add_space(espace::M);
                 if self.en_cours {

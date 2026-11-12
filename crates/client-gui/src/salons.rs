@@ -207,7 +207,7 @@ impl KiApp {
                             // Se déconnecter : à côté du serveur qu'on quitte.
                             f.ui(|ui| {
                                 deconnecter =
-                                    ui::icon_button(ui, Icon::Logout, "Se déconnecter de ce serveur").clicked();
+                                    ui::Bouton::icone_seule(Icon::Logout).bulle("Se déconnecter de ce serveur").show(ui).clicked();
                             });
                         });
                         if deconnecter {
@@ -232,14 +232,7 @@ impl KiApp {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let me = self.username.clone();
                             let mine = self.my_id.and_then(|id| self.avatars.get(&id));
-                            let clicked = ui::avatar(
-                                ui,
-                                &me,
-                                30.0,
-                                self.vocal.transmitting,
-                                mine.map(|(_, t)| t),
-                                theme::BG_SIDE,
-                            )
+                            let clicked = ui::Avatar::new(&me, 30.0).parle(self.vocal.transmitting).photo(mine.map(|(_, t)| t)).fond(theme::BG_SIDE).show(ui)
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked();
                             // Le pseudo et l'état, serrés l'un sur l'autre à
@@ -289,7 +282,7 @@ impl KiApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui::icon_button(ui, Icon::Gear, "Réglages").clicked()
+                                    if ui::Bouton::icone_seule(Icon::Gear).bulle("Réglages").show(ui).clicked()
                                     {
                                         // Fermer par l'engrenage range tout comme
                                         // la croix : calibration, « M'écouter »,
@@ -527,11 +520,11 @@ impl KiApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 if wrong {
-                    ui::banner(ui, Ton::Danger, "Mot de passe incorrect", false);
+                    ui::bandeau(ui, Ton::Danger, "Mot de passe incorrect");
                     ui.add_space(espace::S);
                 }
                 ui::field_label(ui, "Mot de passe du salon");
-                let response = ui.add(ui::text_field(&mut prompt.password, "", true));
+                let response = ui.add(ui::champ_secret(&mut prompt.password, ""));
                 menu_edition(&response, &mut prompt.password, true);
                 response.request_focus();
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {

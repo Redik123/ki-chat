@@ -588,7 +588,7 @@ impl Atelier {
                         ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, texte));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
+                        if ui::Bouton::icone_seule(Icon::Close).bulle("Fermer (Échap)").show(ui).clicked() {
                             fermer = true;
                         }
                     });
@@ -1633,7 +1633,7 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
         let ui = &mut ui_c;
         ui.spacing_mut().item_spacing.x = espace::M;
         let icone = if en_lecture { Icon::Pause } else { Icon::Play };
-        if ui::icon_button(ui, icone, "Lecture / pause (espace)").clicked() {
+        if ui::Bouton::icone_seule(icone).bulle("Lecture / pause (espace)").show(ui).clicked() {
             basculer_lecture(p);
         }
         ui.label(
@@ -1881,7 +1881,7 @@ fn panneau_reglages(
 
     ui.add_space(espace::M);
     ui::section_label(ui, "Titre");
-    ui.add(ui::text_field(&mut p.titre, "un titre, si tu veux", false));
+    ui.add(ui::champ(&mut p.titre, "un titre, si tu veux"));
     if p.titre.chars().count() > 80 {
         p.titre = p.titre.chars().take(80).collect();
     }
@@ -2033,7 +2033,7 @@ fn panneau_reglages(
                         ui.selectable_value(&mut r.salon, Some(*id), format!("#{nom}"));
                     }
                 });
-            ui.add(ui::text_field(&mut r.legende, "une légende, si tu veux", false));
+            ui.add(ui::champ(&mut r.legende, "une légende, si tu veux"));
             let envoi = r.envoi.is_some();
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!envoi && r.salon.is_some(), |ui| {

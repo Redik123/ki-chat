@@ -33,7 +33,7 @@ const RESULTATS: usize = 12 * COLONNES;
 /// choisi. Le panneau se ferme au choix — Maj le garde ouvert —, d'un clic
 /// ailleurs ou d'Échap.
 pub fn bouton(ui: &mut Ui, bulle: &str) -> Option<String> {
-    let reponse = c::icon_button(ui, Icon::Sourire, bulle);
+    let reponse = c::Bouton::icone_seule(Icon::Sourire).bulle(bulle).show(ui);
     let mut choisi = None;
     egui::Popup::from_toggle_button_response(&reponse)
         .align(egui::RectAlign::TOP_END)
@@ -92,7 +92,7 @@ pub fn panneau(ui: &mut Ui) -> Option<String> {
     // La recherche, et la teinte de peau à côté.
     ui.horizontal(|ui| {
         let champ = ui.add(
-            c::text_field(&mut etat.recherche, "Chercher un emoji", false)
+            c::champ(&mut etat.recherche, "Chercher un emoji")
                 .desired_width(largeur - CASE - espace::S),
         );
         if vient_de_s_ouvrir {

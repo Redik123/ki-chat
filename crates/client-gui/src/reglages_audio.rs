@@ -123,14 +123,13 @@ impl KiApp {
                 // coupé ne se rattrape plus, ni par la compression, ni par le
                 // gain. Dit clairement, avec le chemin du remède.
                 if self.vocal.alerte_saturation.is_some_and(|t| t.elapsed() < ALERTE_SATURATION) {
-                    ui::banner(
+                    ui::bandeau(
                         ui,
                         Ton::Alerte,
-                        "Ton micro sature avant même d'arriver dans ki-chat : quand tu parles \
-                         fort, sa carte son coupe le haut de ta voix. Baisse son niveau dans \
-                         Windows (ou sa molette sur le casque) jusqu'à ce que « saturé » ne \
-                         s'allume plus — le gain automatique remontera le reste.",
-                        false,
+                        "Ton micro sature avant même d'arriver dans ki-chat : quand tu parles fort, sa carte \
+                         son coupe le haut de ta voix. Baisse son niveau dans Windows (ou sa molette sur le \
+                         casque) jusqu'à ce que « saturé » ne s'allume plus — le gain automatique remontera \
+                         le reste.",
                     );
                     if cfg!(windows) {
                         ui.add_space(espace::S);
@@ -235,12 +234,11 @@ impl KiApp {
                             );
                             match stats.silero_etat {
                                 ki_voice::SILERO_ECHEC if self.audio.vad_neural => {
-                                    ui::banner(
+                                    ui::bandeau(
                                         ui,
                                         Ton::Alerte,
-                                        "Le réseau Silero n'a pas pu se charger : la détection se fait \
-                                         au seuil d'amplitude (voir le journal audio, onglet Aide).",
-                                        false,
+                                        "Le réseau Silero n'a pas pu se charger : la détection se fait au \
+                                         seuil d'amplitude (voir le journal audio, onglet Aide).",
                                     );
                                 }
                                 ki_voice::SILERO_CHARGEMENT if self.audio.vad_neural => {
@@ -608,7 +606,7 @@ impl KiApp {
 
     /// Le bouton qui relit la liste des périphériques.
     fn bouton_actualiser(&mut self, ui: &mut egui::Ui) {
-        if ui::icon_button(ui, Icon::Refresh, "Actualiser la liste des périphériques").clicked() {
+        if ui::Bouton::icone_seule(Icon::Refresh).bulle("Actualiser la liste des périphériques").show(ui).clicked() {
             let (inputs, outputs) = ki_voice::list_devices();
             self.input_devices = inputs;
             self.output_devices = outputs;
@@ -651,7 +649,7 @@ impl KiApp {
                     ui.label(
                         Texte::Libelle.riche(ui, format!("parle comme en partie… {reste:.0} s")),
                     );
-                    if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::icone_seule(Icon::Close).bulle("Annuler").show(ui).clicked() {
                         geste = Some(Geste::Arreter);
                     }
                 });
@@ -679,7 +677,7 @@ impl KiApp {
                             }
                         }
                     }
-                    if ui::icon_button(ui, Icon::Repeat, "Recommencer l'enregistrement").clicked() {
+                    if ui::Bouton::icone_seule(Icon::Repeat).bulle("Recommencer l'enregistrement").show(ui).clicked() {
                         geste = Some(Geste::Enregistrer);
                     }
                 });
@@ -834,7 +832,7 @@ impl KiApp {
                 ui.label(
                     Texte::Aide.riche(ui, "Les deux versions sont gardées en WAV, remplacées au prochain essai."),
                 );
-                if ui::icon_button(ui, Icon::Download, "Ouvrir le dossier").clicked() {
+                if ui::Bouton::icone_seule(Icon::Download).bulle("Ouvrir le dossier").show(ui).clicked() {
                     crate::soundboard::ouvrir_dossier(&dossier);
                 }
             });
@@ -882,7 +880,7 @@ impl KiApp {
                     ui.label(
                         Texte::Libelle.riche(ui, format!("chut… ambiance {:.1} %", peak * 100.0)),
                     );
-                    if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::icone_seule(Icon::Close).bulle("Annuler").show(ui).clicked() {
                         self.vocal.calibrating = None;
                         self.apply_audio_settings();
                     }

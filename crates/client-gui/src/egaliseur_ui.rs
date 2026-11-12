@@ -416,10 +416,10 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
             change |= ui.checkbox(&mut b.raide, "24 dB/oct").changed();
         }
         change |= ui.checkbox(&mut b.active, "active").changed();
-        if ui::icon_button(ui, Icon::Trash, "Retirer la bande").clicked() {
+        if ui::Bouton::icone_seule(Icon::Trash).bulle("Retirer la bande").show(ui).clicked() {
             retirer = true;
         }
-        if ui::icon_button(ui, Icon::Close, "Désélectionner").clicked() {
+        if ui::Bouton::icone_seule(Icon::Close).bulle("Désélectionner").show(ui).clicked() {
             *selection = None;
         }
     });

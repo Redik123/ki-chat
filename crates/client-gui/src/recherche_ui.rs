@@ -44,13 +44,13 @@ impl KiApp {
     /// La recherche en haut à droite du salon : on tape, Entrée cherche et
     /// ouvre les résultats ; la loupe ouvre la fenêtre sans chercher.
     pub(crate) fn recherche_en_tete(&mut self, ui: &mut egui::Ui) {
-        let champ = ui.add(ui::text_field(&mut self.recherche.requete, "chercher…", false).desired_width(190.0));
+        let champ = ui.add(ui::champ(&mut self.recherche.requete, "chercher…").desired_width(190.0));
         menu_edition(&champ, &mut self.recherche.requete, false);
         if champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             self.recherche.ouverte = true;
             self.lancer_recherche();
         }
-        if ui::icon_button_ex(ui, Icon::Loupe, 24.0, "chercher dans les messages", None).clicked() {
+        if ui::Bouton::icone_seule(Icon::Loupe).cote(24.0).bulle("chercher dans les messages").show(ui).clicked() {
             self.recherche.ouverte = !self.recherche.ouverte;
             if self.recherche.ouverte {
                 self.recherche.focus = true;
@@ -120,7 +120,7 @@ impl KiApp {
             .default_height(roomy)
             .min_width(320.0)
             .show(ctx, |ui| {
-                let champ = ui.add(ui::text_field(&mut self.recherche.requete, "chercher…", false));
+                let champ = ui.add(ui::champ(&mut self.recherche.requete, "chercher…"));
                 menu_edition(&champ, &mut self.recherche.requete, false);
                 if std::mem::take(&mut self.recherche.focus) {
                     champ.request_focus();

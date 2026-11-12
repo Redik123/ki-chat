@@ -281,7 +281,7 @@ impl KiApp {
                             Quoi::Elle => "tais-toi, elle parle…",
                         }),
                     );
-                    if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::icone_seule(Icon::Close).bulle("Annuler").show(ui).clicked() {
                         self.vocal.mesure_prox = None;
                     }
                 });
@@ -305,7 +305,7 @@ impl KiApp {
                         self.vocal.mesure_prox = Some(MesureProx { quoi: Quoi::Elle, debut: Instant::now() });
                         self.vocal.mesure_prox_verdict = None;
                     }
-                    if ancre.is_some() && ui::icon_button(ui, Icon::Trash, "Oublier ce que ki-chat sait de ma voix sur ce micro").clicked() {
+                    if ancre.is_some() && ui::Bouton::icone_seule(Icon::Trash).bulle("Oublier ce que ki-chat sait de ma voix sur ce micro").show(ui).clicked() {
                         self.audio.proximite_ancres.remove(&cle);
                         self.vocal.mesure_prox_verdict = None;
                         *apply = true;

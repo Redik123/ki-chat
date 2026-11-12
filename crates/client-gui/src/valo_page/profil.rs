@@ -225,15 +225,13 @@ impl PageValo {
                     (ColonneMatch::Rr, Colonne::new("RR", 44.0).droite()),
                 ]);
                 let mut tableau = Tableau::new("profil_matchs").hauteur_ligne(40.0);
-                let mut ordre = Vec::with_capacity(colonnes.len());
                 for (quoi, colonne) in colonnes {
-                    ordre.push(quoi);
-                    tableau = tableau.colonne(colonne);
+                    tableau = tableau.colonne(quoi, colonne);
                 }
                 // Le point survolé sur la courbe retrouve son match ici.
                 let survole = self.survol.as_deref().and_then(|id| montres.iter().position(|m| m.id == id));
                 let clic = tableau.surlignee(survole).show(ui, montres.len(), |ui, i, colonne| {
-                    cellule_de_match(ui, montres[i], ordre[colonne], vue);
+                    cellule_de_match(ui, montres[i], colonne, vue);
                 });
                 if let Some(i) = clic {
                     basculer = Some(montres[i].id.clone()).filter(|id| !id.is_empty());

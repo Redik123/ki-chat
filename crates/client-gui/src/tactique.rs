@@ -781,10 +781,10 @@ impl Tactique {
                 }
             }
             ui.add_space(espace::M);
-            if ui::icon_button(ui, Icon::Repeat, "Annuler mon dernier trait (Ctrl+Z)").clicked() {
+            if ui::Bouton::icone_seule(Icon::Repeat).bulle("Annuler mon dernier trait (Ctrl+Z)").show(ui).clicked() {
                 self.annuler(moi);
             }
-            if ui::icon_button(ui, Icon::Trash, "Effacer mes traits").clicked() {
+            if ui::Bouton::icone_seule(Icon::Trash).bulle("Effacer mes traits").show(ui).clicked() {
                 self.effacer_les_miens(moi);
             }
         });

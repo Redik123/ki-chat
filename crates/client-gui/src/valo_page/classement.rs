@@ -54,8 +54,6 @@ const COLONNES: [(Col, &str, f32, u8); 15] = [
     (Col::Comparer, "", 22.0, 0),
 ];
 
-/// La colonne des 7 jours : le tri tant qu'on n'a cliqué sur rien.
-const COL_SEPT: usize = 4;
 /// La hauteur d'une ligne : l'avatar et l'icône de rang y respirent.
 const HAUTEUR_LIGNE: f32 = 34.0;
 const AVATAR: f32 = 22.0;
@@ -108,12 +106,16 @@ impl Col {
     }
 }
 
-fn tableau() -> Tableau<'static> {
+/// Le tableau du classement. Trié par les 7 jours tant qu'on n'a cliqué
+/// sur aucun en-tête.
+fn tableau() -> Tableau<'static, Col> {
     COLONNES
         .iter()
-        .fold(Tableau::new("valo_classement"), |t, &(col, titre, largeur, priorite)| t.colonne(col.colonne(titre, largeur, priorite)))
+        .fold(Tableau::new("valo_classement"), |t, &(col, titre, largeur, priorite)| {
+            t.colonne(col, col.colonne(titre, largeur, priorite))
+        })
         .hauteur_ligne(HAUTEUR_LIGNE)
-        .tri_par_defaut(COL_SEPT, false)
+        .tri_par_defaut(Col::Sept, false)
 }
 
 impl PageValo {
@@ -164,7 +166,7 @@ impl PageValo {
             let moi = cx.moi == Some(f.user_id);
             let pale = l.sans_match(periode);
             let texte_ = if pale { TEXT_FAINT } else { TEXT };
-            match COLONNES[colonne].0 {
+            match colonne {
                 Col::Place => {
                     ui.label(RichText::new(format!("{}", i + 1)).color(if moi { ACCENT } else { TEXT_FAINT }).size(texte::PETIT));
                 }
@@ -283,9 +285,9 @@ fn cocher(liste: &mut Vec<UserId>, id: UserId, oui: bool) {
 /// Les lignes dans l'ordre du tri choisi : ceux qui ont joué sur la
 /// période d'abord, puis par la colonne, les sans-valeur derrière ; à
 /// égalité, et pour une colonne qui ne trie pas, l'ordre reçu.
-fn ordonner<'l, 'a>(lignes: &'l [Ligne<'a>], tri: Option<ki_ui::tableau::Tri>, periode: Periode) -> Vec<&'l Ligne<'a>> {
+fn ordonner<'l, 'a>(lignes: &'l [Ligne<'a>], tri: Option<ki_ui::tableau::Tri<Col>>, periode: Periode) -> Vec<&'l Ligne<'a>> {
     let mut ordre: Vec<&Ligne> = lignes.iter().collect();
-    let tri = tri.and_then(|t| COLONNES.get(t.colonne).map(|c| (c.0, !t.croissant)));
+    let tri = tri.map(|t| (t.colonne, !t.croissant));
     match tri.filter(|(col, _)| col.cle_possible()) {
         Some((col, desc)) => trier(&mut ordre, |l| l.sans_match(periode), |l| col.cle(l, periode).flatten(), desc),
         None => ordre.sort_by_key(|l| l.sans_match(periode)),
@@ -354,9 +356,9 @@ mod tests {
         let stats = super::super::tests::groupe(maintenant, false);
         let (lignes, _) = lignes_du_groupe(&stats, maintenant);
         let periode = Periode::Trente;
-        for (k, &(col, ..)) in COLONNES.iter().enumerate() {
+        for (col, ..) in COLONNES {
             for croissant in [false, true] {
-                let ordre = ordonner(&lignes, Some(Tri { colonne: k, croissant }), periode);
+                let ordre = ordonner(&lignes, Some(Tri { colonne: col, croissant }), periode);
                 assert_eq!(ordre.len(), lignes.len());
                 let pales: Vec<bool> = ordre.iter().map(|l| l.sans_match(periode)).collect();
                 assert!(pales.windows(2).all(|w| !w[0] || w[1]), "{col:?} : les pâles en bas");
@@ -370,7 +372,7 @@ mod tests {
         }
         // Le rang du plus haut au plus bas : Bob, Immortel, en tête ; Wam,
         // sans match, en bas.
-        let ordre = ordonner(&lignes, Some(Tri { colonne: 2, croissant: false }), periode);
+        let ordre = ordonner(&lignes, Some(Tri { colonne: Col::Rang, croissant: false }), periode);
         assert_eq!(ordre.first().map(|l| l.f.username.as_str()), Some("Bob"));
         assert_eq!(ordre.last().map(|l| l.f.username.as_str()), Some("Wam"));
         // Sans tri, l'ordre reçu, les pâles en bas.
@@ -381,7 +383,8 @@ mod tests {
     /// Le 7 jours trie par défaut ; les colonnes de dessin ne trient pas.
     #[test]
     fn seules_les_colonnes_de_chiffres_trient() {
-        assert_eq!(COLONNES[COL_SEPT].0, Col::Sept);
+        let origine = tableau().tri_d_origine().expect("le classement a un tri d'origine");
+        assert!(origine.colonne == Col::Sept && !origine.croissant);
         for (col, ..) in COLONNES {
             let attendu = !matches!(col, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan | Col::Comparer);
             assert_eq!(col.cle_possible(), attendu, "{col:?}");

@@ -669,13 +669,12 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
     }
     if o.exclusif {
         ui.add_space(espace::XS);
-        ui::banner(
+        ui::bandeau(
             ui,
             Ton::Alerte,
-            "en ce moment, un jeu tourne en plein écran exclusif : rien ne peut s'afficher \
-             au-dessus, l'overlay compris. Dans le jeu, mode d'affichage → « Fenêtré plein \
-             écran » (Valorant : Paramètres → Vidéo → Général).",
-            false,
+            "en ce moment, un jeu tourne en plein écran exclusif : rien ne peut s'afficher au-dessus, \
+             l'overlay compris. Dans le jeu, mode d'affichage → « Fenêtré plein écran » (Valorant : \
+             Paramètres → Vidéo → Général).",
         );
     }
     ui::hint(

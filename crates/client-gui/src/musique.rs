@@ -48,7 +48,7 @@ impl KiApp {
     /// L'étoile : la piste va dans la playlist « Favoris » du groupe.
     pub(crate) fn etoile_musique(&self, ui: &mut egui::Ui, piste: &ki_protocol::Piste, peut: bool) {
         ui.add_enabled_ui(peut, |ui| {
-            if ui::icon_button_ex(ui, Icon::Star, 18.0, "ajouter aux Favoris", None).clicked() {
+            if ui::Bouton::icone_seule(Icon::Star).cote(18.0).bulle("ajouter aux Favoris").show(ui).clicked() {
                 self.commander_musique(ki_protocol::CommandeMusique::PlaylistAjouterPiste {
                     nom: ki_protocol::PLAYLIST_FAVORIS.to_string(),
                     piste: piste.clone(),
@@ -150,7 +150,7 @@ impl KiApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let chevron = if self.musique.deroulee { Icon::ArrowUp } else { Icon::ArrowDown };
-                if ui::icon_button_ex(ui, chevron, 24.0, "détails", None).clicked() {
+                if ui::Bouton::icone_seule(chevron).cote(24.0).bulle("détails").show(ui).clicked() {
                     self.musique.deroulee = !self.musique.deroulee;
                 }
                 // Mon volume : le mien, pas celui du bot.
@@ -238,13 +238,13 @@ impl KiApp {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 self.etoile_musique(ui, p, peut);
                                 ui.add_enabled_ui(peut, |ui| {
-                                    if ui::icon_button_ex(ui, Icon::Close, 18.0, "retirer", None).clicked() {
+                                    if ui::Bouton::icone_seule(Icon::Close).cote(18.0).bulle("retirer").show(ui).clicked() {
                                         self.commander_musique(C::Retirer { index: i });
                                     }
-                                    if i + 1 < n && ui::icon_button_ex(ui, Icon::ArrowDown, 18.0, "descendre", None).clicked() {
+                                    if i + 1 < n && ui::Bouton::icone_seule(Icon::ArrowDown).cote(18.0).bulle("descendre").show(ui).clicked() {
                                         self.commander_musique(C::Deplacer { de: i, vers: i + 1 });
                                     }
-                                    if i > 0 && ui::icon_button_ex(ui, Icon::ArrowUp, 18.0, "monter", None).clicked() {
+                                    if i > 0 && ui::Bouton::icone_seule(Icon::ArrowUp).cote(18.0).bulle("monter").show(ui).clicked() {
                                         self.commander_musique(C::Deplacer { de: i, vers: i - 1 });
                                     }
                                 });
@@ -269,7 +269,7 @@ impl KiApp {
                             .on_hover_text(format!("{} pistes · {}", pl.pistes, mmss(pl.duree_s as u64)));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_enabled_ui(peut, |ui| {
-                                if ui::icon_button_ex(ui, Icon::Trash, 18.0, "supprimer la playlist", None).clicked() {
+                                if ui::Bouton::icone_seule(Icon::Trash).cote(18.0).bulle("supprimer la playlist").show(ui).clicked() {
                                     self.commander_musique(C::PlaylistSupprimer { nom: pl.nom.clone() });
                                 }
                                 if ui.small_button("+").on_hover_text("à la suite de la file").clicked() {
@@ -306,10 +306,9 @@ impl KiApp {
             {
                 let ui = &mut cols[2];
                 ui.add_enabled_ui(peut_ajouter, |ui| {
-                    let champ = ui.add(ui::text_field(
+                    let champ = ui.add(ui::champ(
                         &mut self.musique.recherche,
                         "chercher, ou coller l'adresse d'un morceau ou d'une playlist…",
-                        false,
                     ));
                     menu_edition(&champ, &mut self.musique.recherche, false);
                     let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -318,7 +317,7 @@ impl KiApp {
                         ui.selectable_value(&mut self.musique.soundcloud, false, "YouTube");
                         ui.selectable_value(&mut self.musique.soundcloud, true, "SoundCloud");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui::icon_button_ex(ui, Icon::Loupe, 24.0, "chercher (Entrée)", None).clicked() {
+                            if ui::Bouton::icone_seule(Icon::Loupe).cote(24.0).bulle("chercher (Entrée)").show(ui).clicked() {
                                 lancer = true;
                             }
                         });

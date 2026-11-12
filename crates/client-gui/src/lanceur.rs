@@ -318,7 +318,7 @@ impl KiApp {
                                         dans.as_secs() + 1
                                     )
                                 };
-                                ui::banner(ui, Ton::Alerte, &quoi, false);
+                                ui::bandeau(ui, Ton::Alerte, &quoi);
                                 ui.add_space(espace::S);
                                 ui.horizontal(|ui| {
                                     if ui::Bouton::new("Réessayer maintenant").icone(Icon::Refresh).show(ui)
@@ -343,7 +343,7 @@ impl KiApp {
                                 });
                             } else if let Some(err) = self.error.clone() {
                                 ui.add_space(espace::L);
-                                if ui::banner(ui, Ton::Danger, &err, true) {
+                                if ui::bandeau_fermable(ui, Ton::Danger, &err) {
                                     self.error = None;
                                 }
                             }
@@ -403,13 +403,13 @@ impl KiApp {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::icon_button_ex(ui, Icon::Plus, 26.0, "Ajouter un serveur", Some(ACCENT))
+                if ui::Bouton::icone_seule(Icon::Plus).cote(26.0).couleur(ACCENT).bulle("Ajouter un serveur").show(ui)
                     .clicked()
                 {
                     self.draft = Some(ServerDraft::new());
                 }
                 if !self.book.is_empty()
-                    && ui::icon_button_ex(ui, Icon::Refresh, 26.0, "Retester les serveurs", None)
+                    && ui::Bouton::icone_seule(Icon::Refresh).cote(26.0).bulle("Retester les serveurs").show(ui)
                         .clicked()
                 {
                     self.probes.sweep(&self.book, ctx, true);
@@ -467,13 +467,13 @@ impl KiApp {
         );
 
         ui::field_label(ui, "Adresse");
-        ui.add(ui::text_field(&mut draft.address, "hôte ou hôte:port", false));
+        ui.add(ui::champ(&mut draft.address, "hôte ou hôte:port"));
         ui.add_space(espace::XS);
         ui::hint(ui, "Port 9987 par défaut.");
 
         ui.add_space(espace::L);
         ui::field_label(ui, "Alias local (facultatif)");
-        ui.add(ui::text_field(&mut draft.name, "ex. Chez Kévin", false));
+        ui.add(ui::champ(&mut draft.name, "ex. Chez Kévin"));
         ui.add_space(espace::XS);
         // Le nom et le logo appartiennent au serveur ; l'alias n'est qu'un
         // pense-bête local, et le logo n'est pas modifiable ici du tout.
@@ -526,7 +526,7 @@ impl KiApp {
         // identifiants viennent du coffre et pas d'une saisie oubliée.
         let stored = self.active_server().is_some_and(|s| s.secret.is_some());
         ui::field_label(ui, "Pseudo");
-        let field = ui.add(ui::text_field(&mut self.username, "ton pseudo", false));
+        let field = ui.add(ui::champ(&mut self.username, "ton pseudo"));
         if stored {
             let galley = ui.fonts_mut(|f| {
                 f.layout_no_wrap(
@@ -548,7 +548,7 @@ impl KiApp {
         ui.add_space(espace::L);
 
         ui::field_label(ui, "Mot de passe");
-        ui.add(ui::text_field(&mut self.password, "ton mot de passe", true));
+        ui.add(ui::champ_secret(&mut self.password, "ton mot de passe"));
         ui.add_space(espace::L);
 
         // Sans coffre natif, on ne propose pas de mémoriser : pas de repli
@@ -592,7 +592,7 @@ impl KiApp {
         if self.show_invite {
             ui.add_space(espace::L);
             ui::field_label(ui, "Code d'invitation");
-            ui.add(ui::text_field(&mut self.invite, "fourni par un admin", false));
+            ui.add(ui::champ(&mut self.invite, "fourni par un admin"));
             ui::hint(ui, "Nécessaire uniquement à la première connexion.");
         }
 

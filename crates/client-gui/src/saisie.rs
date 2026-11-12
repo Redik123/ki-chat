@@ -135,7 +135,7 @@ impl KiApp {
                 Flex::ligne().ecart(ecart).show(ui, "saisie", |f| {
                     if can_upload {
                         f.ui(|ui| {
-                            if ui::icon_button(ui, Icon::Paperclip, "Envoyer un fichier (25 Mo max)").clicked() {
+                            if ui::Bouton::icone_seule(Icon::Paperclip).bulle("Envoyer un fichier (25 Mo max)").show(ui).clicked() {
                                 self.start_upload();
                             }
                         });
@@ -254,7 +254,7 @@ impl KiApp {
                             None if filled => (Some(ACCENT), "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
                             None => (None, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
                         };
-                        if ui::icon_button_ex(ui, Icon::Send, 32.0, aide, tint).clicked() {
+                        if ui::Bouton::icone_seule(Icon::Send).couleur_si(tint).bulle(aide).show(ui).clicked() {
                             submit = true;
                             self.focus_input = true;
                         }

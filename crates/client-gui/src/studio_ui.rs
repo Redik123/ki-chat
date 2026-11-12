@@ -239,7 +239,7 @@ impl KiApp {
                                 }
                             });
                         if let Some(nom) = &nom_actuel {
-                            if ui::icon_button(ui, Icon::Trash, "Supprimer ce profil").clicked() {
+                            if ui::Bouton::icone_seule(Icon::Trash).bulle("Supprimer ce profil").show(ui).clicked() {
                                 self.audio.profils_voix.retain(|p| &p.nom != nom);
                             }
                         }

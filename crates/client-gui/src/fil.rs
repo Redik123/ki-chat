@@ -698,17 +698,17 @@ impl KiApp {
                         let status = self.upload_status.lock().unwrap().clone();
                         if let Some(status) = status {
                             ui.add_space(espace::M);
-                            ui::banner(ui, Ton::Info, &status, false);
+                            ui::bandeau(ui, Ton::Info, &status);
                         }
                         if let Some(err) = self.error.clone() {
                             ui.add_space(espace::M);
-                            if ui::banner(ui, Ton::Alerte, &err, true) {
+                            if ui::bandeau_fermable(ui, Ton::Alerte, &err) {
                                 self.error = None;
                             }
                         }
                         if let Some(nom) = self.poke_en_cours() {
                             ui.add_space(espace::M);
-                            if ui::banner(ui, Ton::Accent, &format!("{nom} te poke"), true) {
+                            if ui::bandeau_fermable(ui, Ton::Accent, &format!("{nom} te poke")) {
                                 self.poke_recu = None;
                             }
                         }

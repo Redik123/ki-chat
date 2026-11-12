@@ -206,7 +206,7 @@ impl Vitrine {
     }
 
     fn boutons(&mut self, ui: &mut egui::Ui) {
-        c::section(ui, Icon::Play, "Boutons", Some("Bouton (surface, principal, teinté), icon_button"), |ui| {
+        c::section(ui, Icon::Play, "Boutons", Some("Bouton : surface, principal, teinté, icône seule"), |ui| {
             Flex::ligne().ecart(espace::S).passer_a_la_ligne().show(ui, "boutons", |f| {
                 f.ui(|ui| c::Bouton::new("Lecture").icone(Icon::Play).show(ui));
                 f.ui(|ui| c::Bouton::new("Envoyer").icone(Icon::Send).principal().show(ui));
@@ -214,8 +214,8 @@ impl Vitrine {
                 f.ui(|ui| c::Bouton::new("Danger").icone(Icon::Close).teinte(Ton::Danger).show(ui));
                 f.ui(|ui| c::Bouton::new("Attention").icone(Icon::Warning).teinte(Ton::Alerte).show(ui));
                 f.ui(|ui| c::Bouton::new("Info").icone(Icon::Info).teinte(Ton::Info).show(ui));
-                f.ui(|ui| c::icon_button(ui, Icon::Gear, "Réglages"));
-                f.ui(|ui| c::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer, teinté", Some(couleur::ACCENT)));
+                f.ui(|ui| c::Bouton::icone_seule(Icon::Gear).bulle("Réglages").show(ui));
+                f.ui(|ui| c::Bouton::icone_seule(Icon::Send).couleur(couleur::ACCENT).bulle("Envoyer, teinté").show(ui));
             });
         });
     }
@@ -289,7 +289,7 @@ impl Vitrine {
                 c::pastilles(ui, &mut self.qualite, &[(0, "720p"), (1, "1080p"), (2, "1440p")]);
             });
             c::ligne(ui, "Champ", |ui| {
-                ui.add(c::text_field(&mut self.pseudo, "Ton pseudo", false));
+                ui.add(c::champ(&mut self.pseudo, "Ton pseudo"));
             });
             c::ligne(ui, "Curseur", |ui| {
                 c::curseur(ui, &mut self.volume, 0.0..=200.0, " %", Some(1.0));
@@ -298,19 +298,19 @@ impl Vitrine {
     }
 
     fn bandeaux(&mut self, ui: &mut egui::Ui) {
-        c::section(ui, Icon::Info, "Bandeaux et repères", Some("banner, encart, rappel, etiquette, card…"), |ui| {
-            c::banner(ui, Ton::Info, "Un bandeau d'information.", false);
+        c::section(ui, Icon::Info, "Bandeaux et repères", Some("bandeau, encart, rappel, etiquette, card…"), |ui| {
+            c::bandeau(ui, Ton::Info, "Un bandeau d'information.");
             ui.add_space(espace::S);
-            c::banner(ui, Ton::Alerte, "Un bandeau d'avertissement.", false);
+            c::bandeau(ui, Ton::Alerte, "Un bandeau d'avertissement.");
             ui.add_space(espace::S);
-            c::banner(ui, Ton::Danger, "Un bandeau d'erreur.", false);
+            c::bandeau(ui, Ton::Danger, "Un bandeau d'erreur.");
             ui.add_space(espace::S);
             if !self.bandeau_ferme
-                && c::banner(
+                && c::bandeau_fermable(
                     ui,
                     Ton::Accent,
-                    "Un bandeau qu'on peut fermer, et dont le texte est assez long pour passer à la ligne quand la fenêtre se fait étroite : la croix garde sa place à droite.",
-                    true,
+                    "Un bandeau qu'on peut fermer, et dont le texte est assez long pour passer à la ligne \
+                     quand la fenêtre se fait étroite : la croix garde sa place à droite.",
                 )
             {
                 self.bandeau_ferme = true;
@@ -412,8 +412,8 @@ impl Vitrine {
                         texte::PETIT,
                     )
                 });
-                f.ui(|ui| c::avatar(ui, "Redik_", 40.0, niveau > 0.6, None, couleur::BG_RAISED));
-                f.ui(|ui| c::avatar(ui, "mg4230", 40.0, false, None, couleur::BG_RAISED));
+                f.ui(|ui| c::Avatar::new("Redik_", 40.0).parle(niveau > 0.6).show(ui));
+                f.ui(|ui| c::Avatar::new("mg4230", 40.0).show(ui));
                 f.ui(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
                     c::paint_server_badge(ui.painter(), rect, "ki-chat", "ts.baws.fun", None);
@@ -426,11 +426,11 @@ impl Vitrine {
         c::section(ui, Icon::Screen, "Mise en page flex", Some("ki_ui::flex"), |ui| {
             c::section_label(ui, "un champ qui prend la place qui reste");
             Flex::ligne().ecart(espace::S).show(ui, "saisie", |f| {
-                f.ui(|ui| c::icon_button(ui, Icon::Paperclip, "Joindre"));
+                f.ui(|ui| c::Bouton::icone_seule(Icon::Paperclip).bulle("Joindre").show(ui));
                 f.grandit(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.pseudo).margin(egui::Margin::symmetric(4, 5)).desired_width(ui.available_width()));
                 });
-                f.ui(|ui| c::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer", Some(couleur::ACCENT)));
+                f.ui(|ui| c::Bouton::icone_seule(Icon::Send).couleur(couleur::ACCENT).bulle("Envoyer").show(ui));
             });
             ui.add_space(espace::M);
             c::section_label(ui, "répartis : le premier au début, le dernier à la fin");
@@ -491,15 +491,22 @@ impl Vitrine {
                     ("Kevin", "Platine 1", -12, "DDVDV"),
                     ("Lina", "Argent 2", 0, "VDDVD"),
                 ];
+                #[derive(Clone, Copy, PartialEq)]
+                enum Col {
+                    Membre,
+                    Rang,
+                    Forme,
+                    SeptJours,
+                }
                 let tableau = Tableau::new("vitrine-classement")
-                    .colonne(Colonne::new("Membre", 140.0).grandit().triable())
-                    .colonne(Colonne::new("Rang", 100.0).priorite(1))
-                    .colonne(Colonne::new("Forme", 90.0).priorite(2))
-                    .colonne(Colonne::new("7 jours", 64.0).droite().triable())
-                    .tri_par_defaut(3, false);
+                    .colonne(Col::Membre, Colonne::new("Membre", 140.0).grandit().triable())
+                    .colonne(Col::Rang, Colonne::new("Rang", 100.0).priorite(1))
+                    .colonne(Col::Forme, Colonne::new("Forme", 90.0).priorite(2))
+                    .colonne(Col::SeptJours, Colonne::new("7 jours", 64.0).droite().triable())
+                    .tri_par_defaut(Col::SeptJours, false);
                 if let Some(tri) = tableau.tri(ui) {
                     match tri.colonne {
-                        0 => lignes.sort_by_key(|l| l.0.to_lowercase()),
+                        Col::Membre => lignes.sort_by_key(|l| l.0.to_lowercase()),
                         _ => lignes.sort_by_key(|l| l.2),
                     }
                     if !tri.croissant {
@@ -510,20 +517,20 @@ impl Vitrine {
                     tableau.show(ui, lignes.len(), |ui, i, colonne| {
                         let (nom, rang, rr, forme) = lignes[i];
                         match colonne {
-                            0 => {
+                            Col::Membre => {
                                 ui.label(RichText::new(nom).color(couleur::pour_pseudo(nom)));
                             }
-                            1 => {
+                            Col::Rang => {
                                 ui.label(RichText::new(rang).color(couleur::TEXT_DIM));
                             }
-                            2 => {
+                            Col::Forme => {
                                 for r in forme.chars() {
                                     let teinte = if r == 'V' { couleur::ACCENT } else { couleur::DANGER };
                                     let (rect, _) = ui.allocate_exact_size(vec2(9.0, 9.0), Sense::hover());
                                     ui.painter().rect_filled(rect, CornerRadius::same(2), teinte);
                                 }
                             }
-                            _ => {
+                            Col::SeptJours => {
                                 let teinte = match rr {
                                     r if r > 0 => couleur::ACCENT,
                                     r if r < 0 => couleur::DANGER,

@@ -297,7 +297,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
                     }
                 }
             });
-        if ui::icon_button(ui, crate::icons::Icon::Refresh, "relever les écrans et fenêtres")
+        if ui::Bouton::icone_seule(crate::icons::Icon::Refresh).bulle("relever les écrans et fenêtres").show(ui)
             .clicked()
         {
             sources.rafraichir();

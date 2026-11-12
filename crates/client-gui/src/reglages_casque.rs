@@ -303,20 +303,15 @@ impl KiApp {
                     return;
                 };
                 if etat.entree_repli {
-                    ui::banner(
+                    ui::bandeau(
                         ui,
                         Ton::Alerte,
-                        &format!(
-                            "Ton micro réglé est introuvable : ce que tu vois ici, ce sont les gains de \
-                             « {} », le micro par défaut de Windows.",
-                            etat.entree_nom.as_deref().unwrap_or("?")
-                        ),
-                        false,
+                        &format!( "Ton micro réglé est introuvable : ce que tu vois ici, ce sont les gains de « {} », le micro par défaut de Windows.", etat.entree_nom.as_deref().unwrap_or("?") ),
                     );
                     ui.add_space(espace::S);
                 }
                 if let Some(e) = &etat.derniere_erreur {
-                    ui::banner(ui, Ton::Alerte, e, false);
+                    ui::bandeau(ui, Ton::Alerte, e);
                     ui.add_space(espace::S);
                 }
                 // La position dans la plage de la carte : c'est elle qui dit
@@ -376,17 +371,10 @@ impl KiApp {
                     } else {
                         "Le niveau du micro est au maximum de la carte".to_string()
                     };
-                    ui::banner(
+                    ui::bandeau(
                         ui,
                         Ton::Alerte,
-                        &format!(
-                            "{constat} : ta voix sature dès que tu hausses le ton, et le fond de la \
-                             pièce — la personne à côté comprise — monte avec elle. Ça ne te rend pas \
-                             plus fort chez les autres : le gain automatique te ramène toujours au \
-                             même niveau. Clique « Régler mon micro », puis règle « Ton volume » \
-                             juste en dessous."
-                        ),
-                        false,
+                        &format!( "{constat} : ta voix sature dès que tu hausses le ton, et le fond de la pièce — la personne à côté comprise — monte avec elle. Ça ne te rend pas plus fort chez les autres : le gain automatique te ramène toujours au même niveau. Clique « Régler mon micro », puis règle « Ton volume » juste en dessous." ),
                     );
                     ui.add_space(espace::M);
                 }
@@ -459,12 +447,11 @@ impl KiApp {
                 }
                 let cables: Vec<String> = self.output_devices.iter().filter(|d| est_cable(d)).cloned().collect();
                 if cables.is_empty() {
-                    ui::banner(
+                    ui::bandeau(
                         ui,
                         Ton::Info,
-                        "Il faut un câble audio virtuel : VB-Cable, gratuit. Installe-le (Windows \
-                         demande de redémarrer), puis clique sur Actualiser.",
-                        false,
+                        "Il faut un câble audio virtuel : VB-Cable, gratuit. Installe-le (Windows demande de \
+                         redémarrer), puis clique sur Actualiser.",
                     );
                     ui.add_space(espace::S);
                     ui.horizontal(|ui| {
@@ -855,7 +842,7 @@ impl KiApp {
                         format!("parle fort… crête {:+.0} dB", en_db(crete))
                     };
                     ui.label(Texte::Libelle.riche(ui, texte));
-                    if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::icone_seule(Icon::Close).bulle("Annuler").show(ui).clicked() {
                         self.vocal.calibrage_micro = None;
                     }
                 });
@@ -864,7 +851,7 @@ impl KiApp {
         if let Some((quand, texte)) = &self.vocal.calibrage_verdict {
             if quand.elapsed() < VERDICT {
                 ui.add_space(espace::S);
-                ui::banner(ui, Ton::Info, texte, false);
+                ui::bandeau(ui, Ton::Info, texte);
             }
         }
     }
