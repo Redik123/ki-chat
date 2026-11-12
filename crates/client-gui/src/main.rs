@@ -75,6 +75,7 @@ mod audio;
 mod admin_ui;
 mod barre;
 mod claude_ui;
+mod clavier;
 mod demarrage;
 mod clips_ui;
 mod diag;
@@ -3997,6 +3998,8 @@ impl KiApp {
         let voice = self.instantane_voix.take().unwrap_or_else(|| self.voice_snapshot());
 
         if self.session.welcomed {
+            // D'un salon à l'autre et vers la recherche, au clavier.
+            self.navigation_au_clavier(ctx);
             // Avant tout le reste : ouvert, le panneau des suggestions garde Échap.
             self.suggestions.echap(ctx);
         }

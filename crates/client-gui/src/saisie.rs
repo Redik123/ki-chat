@@ -22,6 +22,11 @@ pub(crate) const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_m
 /// Ce qui vient du serveur lui-même : le fil de jeu (identifiant 0) et le
 /// bot musique. Jamais un compte, jamais un membre.
 /// La zone de saisie du salon : son curseur et son focus se manipulent par cet id.
+/// Ce que dit le bouton d'envoi au survol : comment envoyer, et les
+/// raccourcis de mise en forme, qu'on ne devine pas.
+const AIDE_ENVOI: &str = "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne
+Ctrl+B gras · Ctrl+I italique · Ctrl+E code";
+
 pub(crate) fn id_saisie() -> egui::Id {
     egui::Id::unique("saisie_du_chat")
 }
@@ -114,6 +119,8 @@ impl KiApp {
             return;
         }
         let can_upload = self.can(ki_protocol::perm::UPLOAD_FILE);
+        // Ctrl+B, Ctrl+I, Ctrl+E : avant la zone de saisie, comme la suite.
+        self.mise_en_forme_au_clavier(ui.ctx());
         // Avant la zone de saisie : elle prendrait ces touches pour elle.
         if let Some(choix) = self.suggestions.clavier(ui.ctx()) {
             self.appliquer_suggestion(ui.ctx(), &choix);
@@ -251,8 +258,8 @@ impl KiApp {
                                 ui.ctx().request_repaint_after(r);
                                 (Some(WARN), "un message toutes les 1,5 s — encore un instant")
                             }
-                            None if filled => (Some(ACCENT), "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
-                            None => (None, "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne"),
+                            None if filled => (Some(ACCENT), AIDE_ENVOI),
+                            None => (None, AIDE_ENVOI),
                         };
                         if ui::Bouton::icone_seule(Icon::Send).couleur_si(tint).bulle(aide).show(ui).clicked() {
                             submit = true;
