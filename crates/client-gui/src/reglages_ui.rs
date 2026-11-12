@@ -533,6 +533,20 @@ impl KiApp {
                                  pokes et vocal ; clic sur l'icône pour rouvrir, « Quitter » \
                                  dans son menu pour partir vraiment",
                             );
+
+                            // --- Affichage ---
+                            ui.add_space(espace::L);
+                            ui::group_title(ui, Icon::Screen, "Taille de l'interface");
+                            let libelles: Vec<String> = crate::reglages::ECHELLES.iter().map(|e| format!("{e} %")).collect();
+                            let choix: Vec<(u32, &str)> =
+                                crate::reglages::ECHELLES.iter().copied().zip(libelles.iter().map(String::as_str)).collect();
+                            ui::pastilles(ui, &mut self.reglages.echelle, &choix);
+                            ui::hint(
+                                ui,
+                                "Ctrl + et Ctrl − la changent aussi d'un cran, Ctrl 0 revient à 100 %. \
+                                 Sur un petit écran, les plus grandes tailles ne sont pas retenues : \
+                                 la fenêtre n'y tiendrait plus",
+                            );
                         }
                         if onglet == Onglet::Reseau {
                             // --- Réseau & qualité ---

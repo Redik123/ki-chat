@@ -203,7 +203,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 720.0])
-            .with_min_inner_size([900.0, 560.0])
+            .with_min_inner_size(reglages::FENETRE_MIN)
             .with_title("ki-chat")
             .with_icon(std::sync::Arc::new(theme::app_icon())),
         // eframe mémorisait la géométrie et la remettait au lancement — y
@@ -705,6 +705,12 @@ struct KiApp {
     recherche: recherche_ui::Recherche,
     /// Le salon privé de Claude, et l'onglet du propriétaire.
     claude: claude_ui::Claude,
+    /// L'échelle pour laquelle la taille minimale de la fenêtre a été posée :
+    /// agrandie, l'interface demande une fenêtre plus grande.
+    echelle_posee: f32,
+    /// Images pendant lesquelles on vérifie encore que la fenêtre n'est pas
+    /// devenue trop petite pour l'échelle qu'on vient de poser.
+    fenetre_a_verifier: u8,
     /// Relancé après un plantage : où l'instance d'avant était — son
     /// serveur, le salon lu, le salon vocal. Rendu au premier accueil de ce
     /// serveur, une fois.
@@ -1028,6 +1034,8 @@ impl KiApp {
             reprise: None,
             link: net::VoiceLink::default(),
             claude: claude_ui::Claude::default(),
+            echelle_posee: 1.0,
+            fenetre_a_verifier: 0,
             retour: secours::retour_demande(),
             recherche: recherche_ui::Recherche {
                 ouverte: false,
@@ -3811,8 +3819,68 @@ impl KiApp {
 
     /// Ce que l'image dessine. eframe ne l'appelle que si la fenêtre se
     /// voit, ou l'une des siennes (`App::ui`) — juste après `logique`.
+    /// La taille de l'interface : Ctrl + et Ctrl − d'un cran, Ctrl 0 pour
+    /// revenir à 100 %, et le réglage appliqué — borné à ce que l'écran
+    /// permet. egui a ses propres raccourcis de zoom, coupés : ils ne
+    /// connaissent ni nos crans ni nos bornes, et ne se sauvent pas avec les
+    /// réglages.
+    fn tenir_l_echelle(&mut self, ctx: &egui::Context) {
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let commande = egui::Modifiers::COMMAND;
+        let (plus, moins, zero) = ctx.input_mut(|i| {
+            (
+                i.consume_key(commande, egui::Key::Plus) || i.consume_key(commande, egui::Key::Equals),
+                i.consume_key(commande, egui::Key::Minus),
+                i.consume_key(commande, egui::Key::Num0),
+            )
+        });
+        let avant = self.reglages.echelle;
+        if zero {
+            self.reglages.echelle = 100;
+        } else if plus || moins {
+            self.reglages.echelle = reglages::echelle_voisine(avant, plus);
+        }
+        let actuelle = ctx.zoom_factor();
+        let ecran = ctx.input(|i| i.viewport().monitor_size).map(|e| [e.x, e.y]);
+        let bornee = reglages::echelle_bornee(self.reglages.echelle, actuelle, ecran);
+        if bornee != self.reglages.echelle && (plus || moins || zero) {
+            self.info = Some(format!("taille de l'interface : {bornee} % — cet écran n'en permet pas plus"));
+        } else if self.reglages.echelle != avant {
+            self.info = Some(format!("taille de l'interface : {bornee} %"));
+        }
+        self.reglages.echelle = bornee;
+        let voulue = bornee as f32 / 100.0;
+        if (actuelle - voulue).abs() > 0.001 {
+            ctx.set_zoom_factor(voulue);
+        }
+        // La fenêtre la plus petite suit : posée en points d'interface, une
+        // fois que l'échelle de cette image est bien la nouvelle.
+        if (self.echelle_posee - actuelle).abs() > 0.001 {
+            self.echelle_posee = actuelle;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::Vec2::from(reglages::FENETRE_MIN)));
+            self.fenetre_a_verifier = 12;
+        }
+        // Windows n'applique la taille minimale qu'au prochain
+        // redimensionnement : une fenêtre devenue trop petite pour
+        // l'interface agrandie grandit d'elle-même. Regardé sur quelques
+        // images : la taille que rapporte egui est encore, à la première,
+        // celle de l'échelle d'avant.
+        if self.fenetre_a_verifier > 0 {
+            self.fenetre_a_verifier -= 1;
+            ctx.request_repaint();
+            let (dedans, reduite) = ctx.input(|i| (i.viewport().inner_rect.map(|r| r.size()), i.viewport().minimized == Some(true)));
+            if let Some(dedans) = dedans.filter(|_| !reduite) {
+                let voulu = dedans.max(egui::Vec2::from(reglages::FENETRE_MIN));
+                if (voulu - dedans).length() > 0.5 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(voulu));
+                }
+            }
+        }
+    }
+
     fn interface(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        self.tenir_l_echelle(ctx);
         // Où l'on est, pour le successeur si cette instance plante.
         secours::situer(self.lanceur.selected.filter(|_| self.session.welcomed), self.session.current, self.session.voice_channel);
         if !self.premiere_image {

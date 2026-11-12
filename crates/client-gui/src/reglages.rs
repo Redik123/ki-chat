@@ -17,9 +17,40 @@ fn liste(valeur: &str) -> impl Iterator<Item = String> + '_ {
     valeur.split(',').filter(|e| !e.is_empty()).map(str::to_string)
 }
 
+/// Les tailles d'interface proposées, en pour cent : de quoi lire sur un
+/// portable serré comme sur un grand écran regardé de loin.
+pub(crate) const ECHELLES: [u32; 8] = [80, 90, 100, 110, 120, 130, 140, 150];
+
+/// La fenêtre la plus petite où l'interface tient, en points d'interface.
+pub(crate) const FENETRE_MIN: [f32; 2] = [900.0, 560.0];
+
+/// L'échelle à appliquer : celle qu'on veut, ramenée dans les bornes, et pas
+/// plus grande que ce que l'écran permet — agrandie, l'interface demande une
+/// fenêtre plus grande, et la plus petite fenêtre doit encore tenir à
+/// l'écran. `ecran` : sa taille en points d'interface à l'échelle `actuelle`.
+pub(crate) fn echelle_bornee(voulue: u32, actuelle: f32, ecran: Option<[f32; 2]>) -> u32 {
+    let (min, max) = (ECHELLES[0], ECHELLES[ECHELLES.len() - 1]);
+    let voulue = voulue.clamp(min, max);
+    let Some([largeur, hauteur]) = ecran.filter(|e| e[0] > 0.0 && e[1] > 0.0 && actuelle > 0.0) else { return voulue };
+    // L'écran, en points d'interface à 100 % ; un peu de marge pour la barre
+    // des tâches et les bords de la fenêtre.
+    let tient = (largeur * actuelle / FENETRE_MIN[0]).min(hauteur * actuelle * 0.92 / FENETRE_MIN[1]);
+    let plafond = ((tient * 10.0).floor() as u32 * 10).max(min);
+    voulue.min(plafond)
+}
+
+/// L'échelle d'un cran plus grande ou plus petite, sans sortir des bornes.
+pub(crate) fn echelle_voisine(actuelle: u32, plus: bool) -> u32 {
+    let rang = ECHELLES.iter().position(|e| *e >= actuelle).unwrap_or(ECHELLES.len() - 1);
+    let rang = if plus { (rang + 1).min(ECHELLES.len() - 1) } else { rang.saturating_sub(1) };
+    ECHELLES[rang]
+}
+
 /// Les réglages d'usage, hors audio : sons de l'interface, notifications,
 /// zone de notification, pokes, présence et VALORANT.
 pub(crate) struct Reglages {
+    /// La taille de l'interface, en pour cent (voir [`ECHELLES`]).
+    pub(crate) echelle: u32,
     /// Événements coupés individuellement dans les réglages.
     pub(crate) sfx_muted: HashSet<String>,
     pub(crate) sfx_on: bool,
@@ -61,6 +92,7 @@ impl Reglages {
     /// d'origine.
     pub(crate) fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
+            echelle: get("echelle", "100").parse().unwrap_or(100).clamp(ECHELLES[0], ECHELLES[ECHELLES.len() - 1]),
             sfx_muted: liste(&get("sfx_muted", "")).collect(),
             sfx_on: get("sfx_on", "on") == "on",
             sfx_volume: get("sfx_volume", "0.6").parse().unwrap_or(0.6),
@@ -87,6 +119,7 @@ impl Reglages {
         let mut coupes: Vec<&str> = self.sfx_muted.iter().map(String::as_str).collect();
         coupes.sort_unstable();
         storage.set_string("sfx_muted", coupes.join(","));
+        storage.set_string("echelle", self.echelle.to_string());
         storage.set_string("sfx_on", on_off(self.sfx_on));
         storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
         storage.set_string("notif", self.notif.cle().into());
@@ -142,6 +175,7 @@ mod tests {
     fn une_installation_neuve_a_ses_valeurs_d_origine() {
         let r = lire(&EnMemoire::default());
         assert!(r.sfx_on && r.sfx_muted.is_empty());
+        assert_eq!(r.echelle, 100);
         assert_eq!(r.sfx_volume, 0.6);
         assert_eq!(r.notif, Notif::Tout);
         assert!(r.pokes_accepter && r.reduire_zone && !r.zone_avertie);
@@ -149,16 +183,17 @@ mod tests {
         assert!(r.comptes_tus.is_empty() && !r.journal_parties && !r.journal_propose);
     }
 
-    /// Ce qui se sauve se relit tel quel : treize clés, et aucune qui reste
+    /// Ce qui se sauve se relit tel quel : quatorze clés, et aucune qui reste
     /// à sa valeur d'origine sans que le test le voie.
     #[test]
     fn ce_qui_se_sauve_se_relit_tel_quel() {
         let origine = sauver(&lire(&EnMemoire::default()));
-        assert_eq!(origine.0.len(), 13, "une clé de plus ou de moins : mettre ce test à jour");
+        assert_eq!(origine.0.len(), 14, "une clé de plus ou de moins : mettre ce test à jour");
 
         let mut r = lire(&EnMemoire::default());
         r.sfx_muted = HashSet::from(["poke".to_string(), "join".to_string()]);
         r.sfx_on = false;
+        r.echelle = 130;
         r.sfx_volume = 0.25;
         r.notif = Notif::Mentions;
         r.pokes_accepter = false;
@@ -185,6 +220,37 @@ mod tests {
         assert_eq!((relu.notif, relu.sfx_volume), (Notif::Mentions, 0.25));
     }
 
+    /// L'échelle ne dépasse pas ce que l'écran permet : agrandie, la plus
+    /// petite fenêtre doit encore y tenir.
+    #[test]
+    fn l_echelle_ne_depasse_pas_l_ecran() {
+        // Sans écran connu : seulement les bornes.
+        assert_eq!(echelle_bornee(150, 1.0, None), 150);
+        assert_eq!(echelle_bornee(40, 1.0, None), 80);
+        // Un grand écran (1920×1080 points à 100 %) : tout passe.
+        assert_eq!(echelle_bornee(150, 1.0, Some([1920.0, 1080.0])), 150);
+        // Un portable de 1366×768 points : 900×560 agrandi de moitié n'y
+        // tient pas en hauteur (768 × 0,92 / 560 = 1,26) — 120 % au plus.
+        assert_eq!(echelle_bornee(150, 1.0, Some([1366.0, 768.0])), 120);
+        assert_eq!(echelle_bornee(110, 1.0, Some([1366.0, 768.0])), 110);
+        // Le même écran vu depuis une interface déjà à 120 % : il paraît
+        // plus petit en points, le plafond reste le même.
+        assert_eq!(echelle_bornee(150, 1.2, Some([1366.0 / 1.2, 768.0 / 1.2])), 120);
+        // Un écran minuscule ne fait pas descendre sous la plus petite.
+        assert_eq!(echelle_bornee(100, 1.0, Some([640.0, 480.0])), 80);
+    }
+
+    #[test]
+    fn l_echelle_avance_d_un_cran() {
+        assert_eq!(echelle_voisine(100, true), 110);
+        assert_eq!(echelle_voisine(100, false), 90);
+        assert_eq!(echelle_voisine(150, true), 150);
+        assert_eq!(echelle_voisine(80, false), 80);
+        // Une valeur entre deux crans (réglages retouchés à la main).
+        assert_eq!(echelle_voisine(105, true), 120);
+        assert_eq!(echelle_voisine(105, false), 100);
+    }
+
     /// Une valeur abîmée ne casse rien : elle retombe sur l'origine.
     #[test]
     fn une_valeur_abimee_retombe_sur_l_origine() {
@@ -192,7 +258,9 @@ mod tests {
         rangement.0.insert("sfx_volume".into(), "fort".into());
         rangement.0.insert("notif".into(), "parfois".into());
         rangement.0.insert("sfx_muted".into(), ",,poke,".into());
+        rangement.0.insert("echelle".into(), "900".into());
         let r = lire(&rangement);
+        assert_eq!(r.echelle, 150, "hors bornes : ramenée à la plus grande");
         assert_eq!(r.sfx_volume, 0.6);
         assert_eq!(r.notif, Notif::Tout);
         assert_eq!(r.sfx_muted, HashSet::from(["poke".to_string()]));
