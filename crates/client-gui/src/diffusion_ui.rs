@@ -74,6 +74,9 @@ pub(crate) struct MonRegard {
     pub(crate) plein_ecran: bool,
     /// Sa fenêtre, tant qu'il est détaché.
     pub(crate) fenetre: Option<regard_detache::Fenetre>,
+    /// La place de cette fenêtre la dernière fois, retenue d'un stream à
+    /// l'autre et d'un lancement à l'autre.
+    pub(crate) place_detachee: Option<crate::place::Place>,
 }
 
 impl KiApp {
@@ -844,11 +847,17 @@ impl KiApp {
         let Some(r) = &self.regard.flux else { return };
         r.detache.store(true, std::sync::atomic::Ordering::Relaxed);
         let titre = format!("Écran de {}", r.streamer);
+        let place = self.regard.place_detachee;
         let fenetre = self.regard
             .fenetre
-            .get_or_insert_with(|| regard_detache::Fenetre::new(r, self.regard.texture.take()));
+            .get_or_insert_with(|| regard_detache::Fenetre::new(r, self.regard.texture.take(), place));
         let demandes = fenetre.echanger(self.regard.plein_ecran, self.regard.volume, self.regard.meme_machine);
         fenetre.montrer(ctx, &titre);
+        // Retenue à chaque image : la fenêtre peut disparaître de bien des
+        // façons (quitter, rattacher, fin du stream, fermeture de ki-chat).
+        if let Some(place) = fenetre.place() {
+            self.regard.place_detachee = Some(place);
+        }
         if let Some(volume) = demandes.volume {
             self.regard.volume = volume;
             self.appliquer_volume_regard();

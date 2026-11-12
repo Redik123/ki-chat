@@ -95,6 +95,13 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; Tasks: deskt
 [Run]
 Filename: "{app}\{#AppName}.exe"; Description: "Lancer {#AppName}"; Flags: nowait postinstall skipifsilent
 
+[Registry]
+; « Lancer ki-chat au démarrage de Windows » (demarrage.rs) : l'appli pose
+; cette valeur elle-même, quand on coche la case. L'installeur ne la crée
+; pas ; il l'efface à la désinstallation, pour que Windows ne cherche pas au
+; démarrage un programme qui n'est plus là.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "ki-chat"; Flags: uninsdeletevalue
+
 [UninstallDelete]
 ; Résidus possibles d'une mise à jour interrompue : l'ancien binaire écarté,
 ; ou un téléchargement resté en plan.

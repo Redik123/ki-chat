@@ -75,6 +75,7 @@ mod audio;
 mod admin_ui;
 mod barre;
 mod claude_ui;
+mod demarrage;
 mod clips_ui;
 mod diag;
 mod diffusion_ui;
@@ -716,6 +717,9 @@ struct KiApp {
     recherche: recherche_ui::Recherche,
     /// Le salon privé de Claude, et l'onglet du propriétaire.
     claude: claude_ui::Claude,
+    /// Ce que le registre dit du démarrage avec Windows, relu à l'ouverture
+    /// des réglages et après chaque changement.
+    demarrage_windows: Option<demarrage::Etat>,
     /// L'échelle pour laquelle la taille minimale de la fenêtre a été posée :
     /// agrandie, l'interface demande une fenêtre plus grande.
     echelle_posee: f32,
@@ -965,6 +969,7 @@ impl KiApp {
                     .filter(|v| v.is_finite())
                     .map_or(1.0, |v| v.clamp(0.0, 2.0)),
                 meme_machine: false,
+                place_detachee: place::Place::lire(&get("fenetre_stream", "")),
                 detache: false,
                 plein_ecran: false,
                 fenetre: None,
@@ -1047,6 +1052,7 @@ impl KiApp {
             reprise: None,
             link: net::VoiceLink::default(),
             claude: claude_ui::Claude::default(),
+            demarrage_windows: None,
             echelle_posee: 1.0,
             fenetre_a_verifier: 0,
             retour: secours::retour_demande(),
@@ -3640,8 +3646,18 @@ impl KiApp {
                     self.quitter = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
+                // Le vocal, depuis l'icône : sans rouvrir la fenêtre, donc
+                // sans quitter le jeu.
+                zone::Evenement::Micro => self.basculer_micro(),
+                zone::Evenement::Sourd => self.basculer_sourd(),
+                zone::Evenement::QuitterVocal => self.leave_voice(),
             }
         }
+        self.zone.dire_vocal(zone::EtatVocal {
+            en_vocal: self.session.voice_channel.is_some(),
+            muet: self.vocal.muted,
+            sourd: self.vocal.sourd,
+        });
         // Lancé `--reduit` : à la zone, mais pas avant que la fenêtre
         // existe pour le shell. eframe la crée cachée et ne la montre
         // qu'après la première image : réduire avant, c'est retirer un
@@ -4029,6 +4045,7 @@ impl KiApp {
         // Ces deux-là n'étaient jamais sauvés : le volume du son des streams
         // et « Ce salon / Partout » de la recherche repartaient de zéro.
         storage.set_string("regard_volume", format!("{}", self.regard.volume));
+        storage.set_string("fenetre_stream", self.regard.place_detachee.map(|p| p.ecrire()).unwrap_or_default());
         storage.set_string("search_ici", if self.recherche.ici { "on" } else { "off" }.into());
         servers::save(storage, &self.lanceur.book);
         storage.set_string(

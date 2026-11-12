@@ -172,4 +172,7 @@ windows = { version = "0.62", features = [
     # ITaskbarList (Win32_UI_Shell) retire et remet le bouton de la barre
     # des tâches quand ki-chat se réduit dans la zone de notification.
     "Win32_System_Com",
+    # RegSetKeyValueW, RegGetValueW : la case « Lancer ki-chat au démarrage
+    # de Windows » écrit et relit la clé Run de l'utilisateur (demarrage.rs).
+    "Win32_System_Registry",
 ] }

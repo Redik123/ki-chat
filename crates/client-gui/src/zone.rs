@@ -114,6 +114,29 @@ pub enum Evenement {
     Ouvrir,
     /// « Quitter » du menu : la fermeture normale doit suivre.
     Quitter,
+    /// « Couper le micro » ou « Rétablir le micro ».
+    Micro,
+    /// « Me rendre sourd » ou « Rétablir le son ».
+    Sourd,
+    /// « Quitter le vocal ».
+    QuitterVocal,
+}
+
+/// Où l'on en est du vocal : ce que le menu de l'icône doit proposer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EtatVocal {
+    pub en_vocal: bool,
+    pub muet: bool,
+    pub sourd: bool,
+}
+
+impl EtatVocal {
+    /// Les libellés du micro et du son : chacun dit ce que le clic fera.
+    /// Sourd, le micro est coupé aussi — le rétablir seul n'a pas de sens,
+    /// c'est le son qu'on rétablit.
+    pub fn libelles(self) -> (&'static str, &'static str) {
+        (if self.muet { "Rétablir le micro" } else { "Couper le micro" }, if self.sourd { "Rétablir le son" } else { "Me rendre sourd" })
+    }
 }
 
 /// Ce que `tick` rapporte à chaque image. Hors Windows, la fenêtre ne se
@@ -323,6 +346,8 @@ pub struct Zone {
     etat: Etat,
     /// Ce que l'icône montre en ce moment, pour ne la changer qu'au besoin.
     signal: (u32, Option<String>),
+    /// Ce que son menu propose du vocal en ce moment, pareil.
+    vocal: Option<EtatVocal>,
 }
 
 impl Zone {
@@ -353,7 +378,7 @@ impl Zone {
             hwnd: AtomicIsize::new(hwnd),
             arret: AtomicBool::new(false),
         });
-        Self { plateforme, rx, veille, hwnd, etat: Etat::Ouverte, signal: (0, None) }
+        Self { plateforme, rx, veille, hwnd, etat: Etat::Ouverte, signal: (0, None), vocal: None }
     }
 
     /// Une zone sans icône ni garde-fou, pour éprouver la logique d'état
@@ -530,6 +555,15 @@ impl Zone {
         v
     }
 
+    /// Le vocal vu du menu de l'icône : les articles suivent ce qui est, et
+    /// ne servent qu'en vocal. Ne touche au menu qu'au changement.
+    pub fn dire_vocal(&mut self, vocal: EtatVocal) {
+        if self.vocal != Some(vocal) {
+            self.plateforme.vocal(vocal);
+            self.vocal = Some(vocal);
+        }
+    }
+
     /// Pastille et tooltip selon ce qui attend ; ne touche à l'icône que
     /// si ça change.
     pub fn signaler(&mut self, non_lus: u32, poke: Option<&str>) {
@@ -562,20 +596,52 @@ impl Drop for Zone {
 /// L'icône réelle : Windows et macOS par `tray-icon`, rien ailleurs.
 #[cfg(any(windows, target_os = "macos"))]
 mod plateforme {
-    use super::{Etat, Evenement, Mode, OnceLock, Sender, TAILLE_ICONE};
+    use super::{Etat, EtatVocal, Evenement, Mode, OnceLock, Sender, TAILLE_ICONE};
     #[cfg(windows)]
     use super::Instant;
     use eframe::egui;
-    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     /// Les identifiants du menu, lus par le gestionnaire d'événements qui,
     /// lui, n'a pas accès à `Icone` (il est posé une fois pour tout le
     /// processus).
-    static IDS: OnceLock<(MenuId, MenuId)> = OnceLock::new();
+    static IDS: OnceLock<Ids> = OnceLock::new();
+
+    struct Ids {
+        ouvrir: MenuId,
+        micro: MenuId,
+        sourd: MenuId,
+        vocal: MenuId,
+        quitter: MenuId,
+    }
+
+    impl Ids {
+        /// L'article cliqué, s'il est des nôtres.
+        fn evenement(&self, id: &MenuId) -> Option<Evenement> {
+            [
+                (&self.ouvrir, Evenement::Ouvrir),
+                (&self.micro, Evenement::Micro),
+                (&self.sourd, Evenement::Sourd),
+                (&self.vocal, Evenement::QuitterVocal),
+                (&self.quitter, Evenement::Quitter),
+            ]
+            .into_iter()
+            .find_map(|(le_sien, evenement)| (le_sien == id).then_some(evenement))
+        }
+    }
+
+    /// Les articles du vocal, gardés pour changer leur libellé et les
+    /// griser hors vocal.
+    struct Articles {
+        micro: MenuItem,
+        sourd: MenuItem,
+        vocal: MenuItem,
+    }
 
     pub struct Icone {
         icone: Option<TrayIcon>,
+        articles: Option<Articles>,
         #[cfg(windows)]
         barre: Option<super::natif::Barre>,
     }
@@ -599,10 +665,30 @@ mod plateforme {
 
         pub fn creer(tx: Sender<Evenement>, ctx: egui::Context) -> Self {
             let ouvrir = MenuItem::new("Ouvrir ki-chat", true, None);
+            // Le vocal : grisé tant qu'on n'y est pas (`vocal`, appelé à la
+            // première image, pose les libellés du moment).
+            let (libelle_micro, libelle_sourd) = EtatVocal::default().libelles();
+            let micro = MenuItem::new(libelle_micro, false, None);
+            let sourd = MenuItem::new(libelle_sourd, false, None);
+            let vocal = MenuItem::new("Quitter le vocal", false, None);
             let quitter = MenuItem::new("Quitter", true, None);
-            let _ = IDS.set((ouvrir.id().clone(), quitter.id().clone()));
+            let _ = IDS.set(Ids {
+                ouvrir: ouvrir.id().clone(),
+                micro: micro.id().clone(),
+                sourd: sourd.id().clone(),
+                vocal: vocal.id().clone(),
+                quitter: quitter.id().clone(),
+            });
             let menu = Menu::new();
-            if let Err(e) = menu.append(&ouvrir).and_then(|()| menu.append(&quitter)) {
+            let pose = menu
+                .append(&ouvrir)
+                .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
+                .and_then(|()| menu.append(&micro))
+                .and_then(|()| menu.append(&sourd))
+                .and_then(|()| menu.append(&vocal))
+                .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
+                .and_then(|()| menu.append(&quitter));
+            if let Err(e) = pose {
                 tracing::warn!("zone : menu de l'icône incomplet : {e}");
             }
 
@@ -612,14 +698,7 @@ mod plateforme {
             // de `tray-icon` ne reçoivent plus rien : tout passe par ici.
             let (tx_menu, ctx_menu) = (tx.clone(), ctx.clone());
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-                let Some((ouvrir, quitter)) = IDS.get() else { return };
-                let ev = if e.id == *ouvrir {
-                    Evenement::Ouvrir
-                } else if e.id == *quitter {
-                    Evenement::Quitter
-                } else {
-                    return;
-                };
+                let Some(ev) = IDS.get().and_then(|ids| ids.evenement(&e.id)) else { return };
                 let _ = tx_menu.send(ev);
                 ctx_menu.request_repaint();
             }));
@@ -653,9 +732,24 @@ mod plateforme {
             };
             Self {
                 icone,
+                articles: Some(Articles { micro, sourd, vocal }),
                 #[cfg(windows)]
                 barre: super::natif::Barre::creer(),
             }
+        }
+
+        /// Les articles du vocal suivent ce qui est : leur libellé dit ce
+        /// que le clic fera, et ils ne servent qu'en vocal.
+        pub fn vocal(&self, etat: EtatVocal) {
+            let Some(a) = &self.articles else { return };
+            let (micro, sourd) = etat.libelles();
+            a.micro.set_text(micro);
+            a.sourd.set_text(sourd);
+            // Sourd, le micro est coupé d'office : c'est le son qu'on
+            // rétablit, l'article du micro attend.
+            a.micro.set_enabled(etat.en_vocal && !etat.sourd);
+            a.sourd.set_enabled(etat.en_vocal);
+            a.vocal.set_enabled(etat.en_vocal);
         }
 
         pub fn disponible(&self) -> bool {
@@ -675,6 +769,7 @@ mod plateforme {
         pub fn muette() -> Self {
             Self {
                 icone: None,
+                articles: None,
                 #[cfg(windows)]
                 barre: None,
             }
@@ -756,6 +851,7 @@ mod plateforme {
             false
         }
         pub fn signaler(&self, _pastille: bool, _tooltip: &str) {}
+        pub fn vocal(&self, _etat: super::EtatVocal) {}
         pub fn reduire(&self, _hwnd: isize, ctx: &egui::Context) -> Etat {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             Etat::Minimisation { depuis: Instant::now() }
@@ -942,6 +1038,31 @@ mod natif {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Chaque article du vocal dit ce que le clic fera.
+    #[test]
+    fn le_menu_dit_ce_que_le_clic_fera() {
+        let hors = EtatVocal::default();
+        assert_eq!(hors.libelles(), ("Couper le micro", "Me rendre sourd"));
+        let muet = EtatVocal { en_vocal: true, muet: true, sourd: false };
+        assert_eq!(muet.libelles(), ("Rétablir le micro", "Me rendre sourd"));
+        let sourd = EtatVocal { en_vocal: true, muet: true, sourd: true };
+        assert_eq!(sourd.libelles(), ("Rétablir le micro", "Rétablir le son"));
+    }
+
+    /// Le vocal n'est redit au menu qu'au changement, et une zone sans
+    /// icône l'accepte sans broncher.
+    #[test]
+    fn le_vocal_ne_se_redit_qu_au_changement() {
+        let mut zone = Zone::factice();
+        assert_eq!(zone.vocal, None);
+        let en_vocal = EtatVocal { en_vocal: true, muet: false, sourd: false };
+        zone.dire_vocal(en_vocal);
+        assert_eq!(zone.vocal, Some(en_vocal));
+        zone.dire_vocal(en_vocal);
+        zone.dire_vocal(EtatVocal::default());
+        assert_eq!(zone.vocal, Some(EtatVocal::default()));
+    }
 
     #[test]
     fn un_jeu_en_plein_ecran_recouvre_la_fenetre_meme_maximisee() {

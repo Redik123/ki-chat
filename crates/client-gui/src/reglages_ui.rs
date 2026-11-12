@@ -534,6 +534,38 @@ impl KiApp {
                                  dans son menu pour partir vraiment",
                             );
 
+                            // --- Démarrage ---
+                            if crate::demarrage::disponible() {
+                                ui.add_space(espace::L);
+                                ui::group_title(ui, Icon::Play, "Démarrage");
+                                let etat = self.demarrage_windows.get_or_insert_with(crate::demarrage::etat).clone();
+                                let mut actif = etat.actif();
+                                let mut a_regler = None;
+                                if ui.checkbox(&mut actif, "Lancer ki-chat au démarrage de Windows").changed() {
+                                    a_regler = Some(actif);
+                                }
+                                ui::hint(
+                                    ui,
+                                    "il s'ouvre réduit à côté de l'horloge, sans surgir, et se reconnecte \
+                                     au dernier serveur si son mot de passe est retenu",
+                                );
+                                if let crate::demarrage::Etat::Ailleurs(commande) = &etat {
+                                    ui::hint(ui, format!("Windows lance pour l'instant un autre ki-chat : {commande}"));
+                                    if ui::Bouton::new("Lancer plutôt celui-ci").icone(Icon::Check).show(ui).clicked() {
+                                        a_regler = Some(true);
+                                    }
+                                }
+                                if let Some(actif) = a_regler {
+                                    if let Err(e) = crate::demarrage::regler(actif) {
+                                        self.info = Some(format!("démarrage avec Windows : {e}"));
+                                    }
+                                    // Relu au registre à l'image suivante :
+                                    // la case montre ce qui est, pas ce
+                                    // qu'on a voulu.
+                                    self.demarrage_windows = None;
+                                }
+                            }
+
                             // --- Affichage ---
                             ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Screen, "Taille de l'interface");
@@ -901,6 +933,7 @@ impl KiApp {
 
     pub(crate) fn close_settings(&mut self) {
         self.show_settings = false;
+        self.demarrage_windows = None;
         self.info = None;
         self.vocal.calibrage_micro = None;
         self.vocal.mesure_prox = None;

@@ -48,6 +48,7 @@ const NON_TRANSPORTES: &[&str] = &[
     "window",
     "window_maximized",
     "fenetre",
+    "fenetre_stream",
     // Les périphériques et les dossiers de ce PC.
     "input_device",
     "output_device",

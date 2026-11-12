@@ -27,6 +27,7 @@ use eframe::egui::{self, Color32, Sense, Vec2};
 
 use crate::icons::Icon;
 use crate::partage::{self, Cadence};
+use crate::place::{Place, Rendu};
 use crate::theme::{self, TEXT_DIM};
 use crate::ui;
 
@@ -70,14 +71,22 @@ struct Etat {
     /// Le dernier mouvement de souris : la barre de commandes s'efface peu
     /// après.
     souris: Instant,
+    /// Ce qu'il reste à rendre de la place retenue la dernière fois : la
+    /// position, puis la taille (voir `place`).
+    place_a_rendre: Option<Rendu>,
     // De la fenêtre vers l'application.
     demandes: Demandes,
+    /// Sa place, tant qu'elle est ordinaire — ni plein écran, ni maximisée,
+    /// ni minimisée : ce que l'application retiendra pour la prochaine fois.
+    place: Option<Place>,
 }
 
 impl Fenetre {
     /// `tex` : l'image déjà affichée dans la fenêtre principale, reprise
-    /// telle quelle — pas d'écran d'attente au détachement.
-    pub fn new(r: &partage::Regard, tex: Option<egui::TextureHandle>) -> Self {
+    /// telle quelle — pas d'écran d'attente au détachement. `place` : celle
+    /// qu'avait la fenêtre la dernière fois ; rendue si elle touche encore
+    /// un écran, sa taille seule sinon.
+    pub fn new(r: &partage::Regard, tex: Option<egui::TextureHandle>, place: Option<Place>) -> Self {
         let etat = Etat {
             plein_voulu: false,
             volume: 1.0,
@@ -90,7 +99,9 @@ impl Fenetre {
             cadence: Cadence::new(),
             barre_sombre: false,
             souris: Instant::now(),
+            place_a_rendre: place.map(|p| Rendu::depuis(p, p.sur_un_ecran())),
             demandes: Demandes::default(),
+            place,
         };
         Self { etat: Arc::new(Mutex::new(etat)), icone: Arc::new(theme::app_icon()) }
     }
@@ -105,6 +116,11 @@ impl Fenetre {
             e.volume = volume;
         }
         std::mem::take(&mut e.demandes)
+    }
+
+    /// La place de la fenêtre, à retenir pour la prochaine fois.
+    pub fn place(&self) -> Option<Place> {
+        self.etat.lock().unwrap().place
     }
 
     /// L'image du stream, rendue à la fenêtre principale au rattachement.
@@ -128,6 +144,36 @@ impl Fenetre {
 }
 
 impl Etat {
+    /// La place de cette fenêtre : rendue à sa naissance, image après image,
+    /// puis relevée tant qu'elle est ordinaire. En plein écran — voulu ou
+    /// déjà là — on ne rend ni ne relève rien : ce serait retenir la taille
+    /// de l'écran.
+    fn tenir_la_place(&mut self, ctx: &egui::Context, plein: bool) {
+        let (dehors, dedans, minimisee, maximisee) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.minimized == Some(true), v.maximized == Some(true))
+        });
+        if plein || self.plein_voulu || minimisee {
+            return;
+        }
+        let pixels_par_point = ctx.pixels_per_point();
+        if let Some(rendu) = self.place_a_rendre.take() {
+            let (commande, suite) = rendu.avancer(pixels_par_point);
+            if let Some(commande) = commande {
+                ctx.send_viewport_cmd(commande);
+            }
+            self.place_a_rendre = suite;
+            ctx.request_repaint();
+            return;
+        }
+        if maximisee {
+            return;
+        }
+        if let Some(place) = dehors.zip(dedans).and_then(|(dehors, dedans)| Place::relevee(dehors, dedans, pixels_par_point)) {
+            self.place = Some(place);
+        }
+    }
+
     fn dessiner(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         if let Some(image) = self.image.lock().unwrap().take() {
@@ -153,6 +199,7 @@ impl Etat {
         if plein != self.plein_voulu {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.plein_voulu));
         }
+        self.tenir_la_place(ctx, plein);
         let mut d = Demandes::default();
         if ctx.input(|i| i.viewport().close_requested()) {
             d.quitter = true;
