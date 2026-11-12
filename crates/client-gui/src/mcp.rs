@@ -544,6 +544,7 @@ impl KiApp {
             "fenetres_ouvertes": ouvertes,
             "bandeau_erreur": self.error,
             "bandeau_info": self.info,
+            "toasts": self.toasts.textes(),
             "fenetre": {
                 "largeur": fenetre.x.round(),
                 "hauteur": fenetre.y.round(),

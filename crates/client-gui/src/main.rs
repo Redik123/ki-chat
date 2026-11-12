@@ -896,6 +896,8 @@ struct KiApp {
     /// Des réglages viennent d'être importés et ki-chat redémarre : ce qu'il
     /// a en mémoire ne doit plus s'écrire par-dessus.
     reglages_importes: bool,
+    /// Ce que l'appli a à dire et qu'aucune fenêtre ouverte ne montre.
+    toasts: ki_ui::toasts::Toasts,
     /// Le panneau des suggestions de la saisie : pseudos, commandes, emoji.
     suggestions: suggestions::Suggestions,
     show_settings: bool,
@@ -1607,6 +1609,7 @@ impl KiApp {
             reglages_demande: None,
             import_propose: None,
             reglages_importes: false,
+            toasts: Default::default(),
             suggestions: suggestions::Suggestions::default(),
             show_settings: false,
             show_audio_journal: false,
@@ -16154,6 +16157,20 @@ impl KiApp {
         }
         self.update_window(ctx);
         self.zone_dialogue_window(ctx);
+
+        // Ce que l'appli a à dire sans qu'on l'ait demandé — « connexion
+        // rétablie », « réglages exportés »… — ne s'affichait que dans une
+        // ligne des fenêtres Réglages, Mon compte et Administration : ces
+        // fenêtres fermées, le message n'était écrit nulle part. Il se pose
+        // maintenant dans un coin, le temps de se lire.
+        if !(self.show_settings || self.show_account || self.show_admin) {
+            if let Some(message) = self.info.take() {
+                self.toasts.ajouter(Tone::Info, message, ctx.input(|i| i.time));
+            }
+        }
+        // Au-dessus de la barre du bas et de la zone de saisie : un toast
+        // ne doit pas recouvrir ce qu'on est en train d'écrire.
+        self.toasts.show(ctx, 130.0);
 
         // Repeint périodique **seulement s'il y a quelque chose qui bouge**.
         //

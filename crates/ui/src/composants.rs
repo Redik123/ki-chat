@@ -22,7 +22,7 @@ pub enum Tone {
 }
 
 impl Tone {
-    fn color(self) -> Color32 {
+    pub(crate) fn color(self) -> Color32 {
         match self {
             Tone::Accent => theme::ACCENT,
             Tone::Danger => theme::DANGER,
@@ -31,7 +31,7 @@ impl Tone {
         }
     }
 
-    fn icon(self) -> Icon {
+    pub(crate) fn icon(self) -> Icon {
         match self {
             Tone::Accent => Icon::Check,
             Tone::Danger => Icon::Warning,

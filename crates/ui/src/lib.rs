@@ -19,6 +19,8 @@
 //!   et garde immobile la ligne qu'on lit quand le reste bouge.
 //! - [`tableau`] : un tableau de données décrit par ses colonnes — tri,
 //!   colonnes masquées par priorité, rayures, survol, clic.
+//! - [`toasts`] : les courts messages qui se posent dans un coin, se lisent
+//!   et s'en vont seuls.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
 //!   sombre), installée en un appel.
 //!
@@ -34,6 +36,7 @@ pub mod liste;
 pub mod selecteur_emoji;
 pub mod style;
 pub mod tableau;
+pub mod toasts;
 #[cfg(debug_assertions)]
 mod mouchard;
 
