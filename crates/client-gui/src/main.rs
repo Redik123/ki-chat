@@ -39,6 +39,7 @@ mod partage;
 mod perf;
 mod prefs;
 mod photos;
+mod place;
 mod porte_ui;
 mod boutique;
 mod ptt;
@@ -210,13 +211,18 @@ fn main() -> eframe::Result {
         // compris une origine sur un écran secondaire débranché depuis,
         // auquel cas la fenêtre revenait minuscule en haut à gauche.
         //
+        // Depuis la 0.2.0 la place est de nouveau retenue, mais par nos
+        // soins (`place`) : en pixels, et rendue seulement si elle touche un
+        // écran présent.
+        //
         // Attention : ce drapeau ne gouverne que la **sauvegarde**. La
         // relecture au démarrage n'est pas conditionnée par lui. C'est donc
         // `save()` qui fait le vrai travail, en vidant la clé « window » ;
         // sans valeur à relire, eframe laisse la position au système. Le
         // drapeau est ici pour qu'eframe ne la réécrive pas derrière nous.
         //
-        // Seul l'état « maximisée » est repris, par nos soins (`update`).
+        // L'état « maximisée » et la place sont repris par nos soins
+        // (`logique`, `tenir_la_place`).
         persist_window: false,
         ..Default::default()
     };
@@ -444,6 +450,11 @@ struct KiApp {
     maximized: bool,
     /// Vrai tant que `maximized` n'a pas été réappliqué au démarrage.
     restore_maximized: bool,
+    /// La place de la fenêtre quand elle n'est ni maximisée ni réduite :
+    /// relevée à chaque image, sauvée avec les réglages.
+    place: Option<place::Place>,
+    /// Ce qu'il reste à rendre de la place retenue au lancement précédent.
+    place_a_rendre: Option<place::Rendu>,
     /// Photos de profil montées : user_id -> (empreinte, texture).
     avatars: HashMap<UserId, (String, egui::TextureHandle)>,
     /// Vignettes (octets PNG) prêtes à monter, venues du réseau ou du
@@ -847,6 +858,8 @@ impl KiApp {
             previews: images::Previews::default(),
             maximized: get("window_maximized", "") == "on",
             restore_maximized: get("window_maximized", "") == "on",
+            place: place::Place::lire(&get("fenetre", "")),
+            place_a_rendre: None,
             avatars: HashMap::new(),
             incoming_avatars: HashMap::new(),
             account_avatar: IconChange::Keep,
@@ -1071,6 +1084,16 @@ impl KiApp {
             },
             veille: veille::Garde::default(),
         };
+        // La place d'avant, si elle touche encore un écran ; sa taille seule
+        // sinon. Le ki-chat de test s'ouvre toujours à la même taille — ses
+        // captures en dépendent — sauf si l'on essaie justement ceci.
+        #[cfg(all(debug_assertions, windows))]
+        let rendre_la_place = !mcp::demande() || std::env::var_os("KI_ESSAI_FENETRE").is_some();
+        #[cfg(not(all(debug_assertions, windows)))]
+        let rendre_la_place = true;
+        if rendre_la_place && !app.restore_maximized {
+            app.place_a_rendre = app.place.map(|p| place::Rendu::depuis(p, p.sur_un_ecran()));
+        }
         // Instance relancée par le dispositif de secours : le dire. Sans ce
         // bandeau, la fenêtre qui se ferme puis revient passe pour un caprice,
         // et personne ne sait qu'un journal attend d'être lu.
@@ -3583,6 +3606,7 @@ impl KiApp {
             // rapporte alors n'est pas l'état qu'on voudra retrouver.
             let was_maximized = self.maximized;
             self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(was_maximized));
+            self.tenir_la_place(ctx);
         }
 
         // La zone de notification. D'abord le cœur qui bat (le garde-fou
@@ -3819,6 +3843,32 @@ impl KiApp {
 
     /// Ce que l'image dessine. eframe ne l'appelle que si la fenêtre se
     /// voit, ou l'une des siennes (`App::ui`) — juste après `logique`.
+    /// La place de la fenêtre : rendue au lancement, image après image, puis
+    /// relevée tant que la fenêtre est ordinaire — ni maximisée, ni
+    /// minimisée. C'est ce relevé que `sauver` range.
+    fn tenir_la_place(&mut self, ctx: &egui::Context) {
+        let (dehors, dedans, minimisee) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().minimized == Some(true)));
+        if minimisee {
+            return;
+        }
+        let pixels_par_point = ctx.pixels_per_point();
+        if let Some(rendu) = self.place_a_rendre.take() {
+            let (commande, suite) = rendu.avancer(pixels_par_point);
+            if let Some(commande) = commande {
+                ctx.send_viewport_cmd(commande);
+            }
+            self.place_a_rendre = suite;
+            ctx.request_repaint();
+            return;
+        }
+        if self.maximized {
+            return;
+        }
+        if let Some(place) = dehors.zip(dedans).and_then(|(dehors, dedans)| place::Place::relevee(dehors, dedans, pixels_par_point)) {
+            self.place = Some(place);
+        }
+    }
+
     /// La taille de l'interface : Ctrl + et Ctrl − d'un cran, Ctrl 0 pour
     /// revenir à 100 %, et le réglage appliqué — borné à ce que l'écran
     /// permet. egui a ses propres raccourcis de zoom, coupés : ils ne
@@ -3989,6 +4039,7 @@ impl KiApp {
             "window_maximized",
             if self.maximized { "on" } else { "off" }.into(),
         );
+        storage.set_string("fenetre", self.place.map(|p| p.ecrire()).unwrap_or_default());
         // Géométrie héritée des versions qui laissaient eframe la persister.
         // La vider est ce qui corrige réellement la fenêtre minuscule : au
         // démarrage suivant, eframe ne trouve plus rien à désérialiser et
