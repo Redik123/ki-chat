@@ -1388,6 +1388,14 @@ struct KiApp {
     /// Le bouton « Soundboard » de la barre du bas (onglet Bêta). D'origine,
     /// visible pour qui a déjà des sons dans ses dossiers, caché sinon.
     soundboard_visible: bool,
+    /// La largeur de la partie gauche de la barre du bas quand ses boutons
+    /// portent leur libellé, puis quand ils sont réduits à leur icône —
+    /// chacune mesurée la dernière fois qu'elle a été dessinée ainsi — et
+    /// celle de sa partie droite entière (vumètre, paquets, ping). De quoi
+    /// savoir, d'une image à l'autre, ce qui tient : voir [`niveau_de_barre`].
+    barre_largeur_libelles: Option<f32>,
+    barre_largeur_icones: Option<f32>,
+    barre_largeur_droite: f32,
     /// La page VALORANT et ses fiches prennent la place du chat au lieu de
     /// leurs fenêtres (onglet Bêta, V9) : la nouvelle page, à côté de
     /// l'ancienne.
@@ -1837,6 +1845,9 @@ impl KiApp {
             loupedeck: None,
             loupedeck_etat: loupedeck_ui::Etat::new(get("loupedeck", "off") == "on", &get("loupedeck_config", "")),
             hauteur_saisie: 44.0,
+            barre_largeur_libelles: None,
+            barre_largeur_icones: None,
+            barre_largeur_droite: 0.0,
             soundboard_visible: match get("soundboard_visible", "").as_str() {
                 "on" => true,
                 "off" => false,
@@ -7413,6 +7424,19 @@ impl KiApp {
                     ui.add_space(espace::S);
                 }
                 ui.horizontal(|ui| {
+                    // À la taille par défaut de la fenêtre, les boutons et
+                    // leurs libellés ne tenaient pas : le ping recouvrait
+                    // « Portes », et « Admin » sortait de l'écran. Quand la
+                    // place manque, les boutons se réduisent à leur icône ;
+                    // quand elle manque encore, la droite ne garde que le ping.
+                    let (gauche, disponible) = (ui.max_rect().left(), ui.max_rect().width());
+                    let niveau = niveau_de_barre(
+                        self.barre_largeur_libelles,
+                        self.barre_largeur_icones,
+                        self.barre_largeur_droite,
+                        disponible,
+                    );
+                    let etroite = niveau != Barre::Large;
                     // --- Micro : gros bouton d'état ---
                     let in_voice = self.voice_channel.is_some();
                     let (icon, tint, state, state_color) = if !in_voice {
@@ -7525,17 +7549,17 @@ impl KiApp {
 
                     ui.add_space(espace::S);
                     if self.loupedeck_etat.actif
-                        && ui::button(ui, Icon::Sliders, "Loupedeck")
+                        && bouton_de_barre(ui, etroite, Icon::Sliders, "Loupedeck")
                             .on_hover_text("ce que font les boutons, les molettes et les écrans de ton Loupedeck Live")
                             .clicked()
                     {
                         self.loupedeck_etat.page_ouverte = !self.loupedeck_etat.page_ouverte;
                     }
-                    if ui::button(ui, Icon::Target, "Valorant").clicked() {
+                    if bouton_de_barre(ui, etroite, Icon::Target, "Valorant").clicked() {
                         self.ouvrir_stats();
                         self.valo.vers_accueil();
                     }
-                    if ui::button(ui, Icon::Film, "Clips").clicked() {
+                    if bouton_de_barre(ui, etroite, Icon::Film, "Clips").clicked() {
                         self.ouvrir_clips();
                     }
                     // La table de cartes du salon : « À toi ! » quand on
@@ -7544,7 +7568,7 @@ impl KiApp {
                         let bouton = if self.cartes.mon_tour(self.my_id) {
                             ui::tinted_button(ui, Some(Icon::Cartes), "À toi !", Tone::Accent)
                         } else {
-                            ui::button(ui, Icon::Cartes, "Cartes")
+                            bouton_de_barre(ui, etroite, Icon::Cartes, "Cartes")
                         };
                         if bouton
                             .on_hover_text("Dernière carte : un jeu de cartes avec ceux de ton salon vocal")
@@ -7553,7 +7577,7 @@ impl KiApp {
                             self.cartes.ouvert = !self.cartes.ouvert;
                         }
                     }
-                    if ui::button(ui, Icon::Pencil, "Tactique")
+                    if bouton_de_barre(ui, etroite, Icon::Pencil, "Tactique")
                         .on_hover_text("une carte de VALORANT où dessiner la prochaine manche ; chaque trait s'efface 15 s après")
                         .clicked()
                     {
@@ -7561,7 +7585,7 @@ impl KiApp {
                         self.catalogue.demarrer();
                     }
                     if self.soundboard_visible
-                        && ui::button(ui, Icon::Volume, "Soundboard")
+                        && bouton_de_barre(ui, etroite, Icon::Volume, "Soundboard")
                             .on_hover_text("des sons à la touche, entendus par tout le salon vocal")
                             .clicked()
                     {
@@ -7574,7 +7598,7 @@ impl KiApp {
                     let portes_visibles = self.portes.disponible
                         && (self.can(ki_protocol::perm::CREATE_INVITE) || !self.portes.est_vide());
                     if portes_visibles
-                        && ui::button(ui, Icon::Key, "Portes")
+                        && bouton_de_barre(ui, etroite, Icon::Key, "Portes")
                             .on_hover_text("un lien pour faire entrer quelqu'un par le web, sans compte, le temps d'une soirée")
                             .clicked()
                     {
@@ -7612,7 +7636,7 @@ impl KiApp {
                             self.demarrer_clips();
                         }
                     }
-                    if self.any_admin_power() && ui::button(ui, Icon::Crown, "Admin").clicked() {
+                    if self.any_admin_power() && bouton_de_barre(ui, etroite, Icon::Crown, "Admin").clicked() {
                         self.show_admin = !self.show_admin;
                         if self.show_admin {
                             self.admin_name = self.server_info.name.clone();
@@ -7648,6 +7672,15 @@ impl KiApp {
                         }
                     }
 
+                    // Ce que la partie gauche occupe, dans la forme où elle
+                    // vient d'être dessinée : la mesure de l'autre forme est
+                    // gardée — c'est elle qui dira qu'elle tient à nouveau.
+                    let occupe = ui.cursor().left() - gauche;
+                    if etroite {
+                        self.barre_largeur_icones = Some(occupe);
+                    } else {
+                        self.barre_largeur_libelles = Some(occupe);
+                    }
                     // --- Télémétrie, alignée à droite ---
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !voice.engine_up {
@@ -7659,32 +7692,36 @@ impl KiApp {
                             return;
                         }
                         let s = &voice.stats;
-                        let level = (s.mic_peak * 3.0).min(1.0);
-                        let color = if self.transmitting {
-                            SPEAK
-                        } else {
-                            theme::BG_ACTIVE
-                        };
-                        ui::meter(ui, level, Vec2::new(96.0, 7.0), color)
-                            .on_hover_text("niveau du micro");
+                        // Fenêtre très étroite : le ping seul. Le vumètre et
+                        // les compteurs de paquets se lisent dans les réglages.
+                        if niveau != Barre::TresEtroite {
+                            let level = (s.mic_peak * 3.0).min(1.0);
+                            let color = if self.transmitting {
+                                SPEAK
+                            } else {
+                                theme::BG_ACTIVE
+                            };
+                            ui::meter(ui, level, Vec2::new(96.0, 7.0), color)
+                                .on_hover_text("niveau du micro");
 
-                        ui.add_space(espace::XS);
-                        ui::stat_row(
-                            ui,
-                            &[
-                                (Icon::ArrowUp, compact(s.packets_sent), TEXT_FAINT),
-                                (Icon::ArrowDown, compact(s.packets_received), TEXT_FAINT),
-                                (
-                                    Icon::Close,
-                                    compact(s.packets_lost),
-                                    if s.packets_lost > 0 { WARN } else { TEXT_FAINT },
-                                ),
-                            ],
-                            11.0,
-                        )
-                        .on_hover_text("paquets voix envoyés · reçus · perdus");
+                            ui.add_space(espace::XS);
+                            ui::stat_row(
+                                ui,
+                                &[
+                                    (Icon::ArrowUp, compact(s.packets_sent), TEXT_FAINT),
+                                    (Icon::ArrowDown, compact(s.packets_received), TEXT_FAINT),
+                                    (
+                                        Icon::Close,
+                                        compact(s.packets_lost),
+                                        if s.packets_lost > 0 { WARN } else { TEXT_FAINT },
+                                    ),
+                                ],
+                                11.0,
+                            )
+                            .on_hover_text("paquets voix envoyés · reçus · perdus");
 
-                        ui.add_space(espace::XS);
+                            ui.add_space(espace::XS);
+                        }
                         match voice.ping {
                             Some(ping) => {
                                 let (lit, color) = if ping < 30 {
@@ -7702,6 +7739,11 @@ impl KiApp {
                             None => {
                                 ui::signal_badge(ui, 0, "— ms", TEXT_FAINT);
                             }
+                        }
+                        // La droite entière seulement : c'est elle qu'on
+                        // compare à la place disponible.
+                        if niveau != Barre::TresEtroite {
+                            self.barre_largeur_droite = ui.min_rect().width();
                         }
                     });
                 });
@@ -13774,6 +13816,42 @@ fn reaction_locale(reactions: &mut Vec<Reaction>, emoji: &str, by: UserId, on: b
     }
 }
 
+/// Ce que la barre du bas montre, selon la place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Barre {
+    /// Tout : boutons avec leur libellé, vumètre, paquets, ping.
+    Large,
+    /// Les boutons réduits à leur icône.
+    Etroite,
+    /// Et, à droite, le ping seul.
+    TresEtroite,
+}
+
+/// Le niveau le plus riche qui tient dans `disponible`. `libelles` et
+/// `icones` : la largeur de la partie gauche dans chacune de ses deux formes,
+/// `None` tant qu'elle n'a pas été dessinée ainsi — on l'essaie alors, pour
+/// la mesurer. `droite` : celle de la partie droite entière.
+fn niveau_de_barre(libelles: Option<f32>, icones: Option<f32>, droite: f32, disponible: f32) -> Barre {
+    let tient = |gauche: Option<f32>| gauche.is_none_or(|g| g + droite + espace::M <= disponible);
+    if tient(libelles) {
+        Barre::Large
+    } else if tient(icones) {
+        Barre::Etroite
+    } else {
+        Barre::TresEtroite
+    }
+}
+
+/// Un bouton de la barre du bas : avec son libellé quand la place le permet,
+/// réduit à son icône sinon — le libellé passe alors dans la bulle.
+fn bouton_de_barre(ui: &mut egui::Ui, compact: bool, icone: Icon, libelle: &str) -> egui::Response {
+    if compact {
+        ui::icon_button_ex(ui, icone, 32.0, libelle, None)
+    } else {
+        ui::button(ui, icone, libelle)
+    }
+}
+
 /// Prend Échap : vrai si la touche vient d'être pressée, et personne d'autre
 /// ne la lira dans cette image. Chaque lecteur la prenait pour lui sans la
 /// retirer, si bien qu'une seule pression fermait une fenêtre **et** annulait
@@ -16117,6 +16195,26 @@ impl KiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La barre du bas montre le plus qu'elle peut : libellés, puis icônes,
+    /// puis le ping seul à droite. Une forme jamais dessinée est essayée
+    /// d'abord — il faut bien la mesurer une fois.
+    #[test]
+    fn la_barre_du_bas_montre_ce_qui_tient() {
+        // Rien de mesuré : tout, pour mesurer.
+        assert_eq!(niveau_de_barre(None, None, 0.0, 900.0), Barre::Large);
+        // Les libellés tiennent (1 130 + 260 dans 1 700).
+        assert_eq!(niveau_de_barre(Some(1130.0), None, 260.0, 1700.0), Barre::Large);
+        // Ils ne tiennent plus à 1 120 : les icônes, à mesurer d'abord…
+        assert_eq!(niveau_de_barre(Some(1130.0), None, 260.0, 1120.0), Barre::Etroite);
+        // … elles tiennent (780 + 260 dans 1 120)…
+        assert_eq!(niveau_de_barre(Some(1130.0), Some(780.0), 260.0, 1120.0), Barre::Etroite);
+        // … mais plus à 900 : le ping seul à droite.
+        assert_eq!(niveau_de_barre(Some(1130.0), Some(780.0), 260.0, 900.0), Barre::TresEtroite);
+        // La fenêtre regrandit : on remonte d'un niveau, puis de deux.
+        assert_eq!(niveau_de_barre(Some(1130.0), Some(780.0), 260.0, 1100.0), Barre::Etroite);
+        assert_eq!(niveau_de_barre(Some(1130.0), Some(780.0), 260.0, 1500.0), Barre::Large);
+    }
 
     /// Sur un autre compte que celui de sa fiche, le badge prend le palier
     /// de la présence et la ligne de partie le dit ; un compte principal ou

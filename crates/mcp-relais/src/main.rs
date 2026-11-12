@@ -146,6 +146,16 @@ fn outils() -> Value {
             },
         },
         {
+            "name": "redimensionner",
+            "description": "Change la taille de la fenêtre de test, en points : pour voir l'interface étroite, \
+                large, ou à sa taille minimale. La capture suivante montre le résultat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "largeur": { "type": "number" }, "hauteur": { "type": "number" } },
+                "required": ["largeur", "hauteur"],
+            },
+        },
+        {
             "name": AUTRE,
             "description": "Un second membre, pour voir ki-chat réagir à quelqu'un d'autre : le client en ligne de \
                 commande, sans micro ni casque (il n'ouvre aucun périphérique audio). Serveur d'essai local \

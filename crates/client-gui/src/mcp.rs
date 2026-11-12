@@ -449,6 +449,16 @@ impl KiApp {
                     _ => Reponse::erreur("salon introuvable : donne son nom ou son numéro (voir `etat`)"),
                 }
             }
+            "redimensionner" => match (nombre(&d.arguments, "largeur"), nombre(&d.arguments, "hauteur")) {
+                (Some(l), Some(h)) if (200.0..=6000.0).contains(&l) && (200.0..=4000.0).contains(&h) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(l, h)));
+                    // La nouvelle taille n'arrive qu'aux images suivantes :
+                    // la demande d'après les attend, comme après un clic.
+                    s.repos = REPOS;
+                    Reponse::ok(format!("fenêtre demandée à {l}×{h} points (le minimum de l'appli s'applique)"))
+                }
+                _ => Reponse::erreur("il faut largeur et hauteur, en points"),
+            },
             "fermer_ki_chat" => {
                 self.quitter = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
