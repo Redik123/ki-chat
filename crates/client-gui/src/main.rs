@@ -70,6 +70,7 @@ mod zone;
 mod audio;
 mod admin_ui;
 mod barre;
+mod claude_ui;
 mod clips_ui;
 mod diag;
 mod diffusion_ui;
@@ -819,6 +820,8 @@ struct KiApp {
     /// La recherche dans l'historique : la requête, ses résultats, le saut dans
     /// le passé.
     recherche: recherche_ui::Recherche,
+    /// Le salon privé de Claude, et l'onglet du propriétaire.
+    claude: claude_ui::Claude,
 
     // Mon compte
     show_account: bool,
@@ -1206,6 +1209,7 @@ impl KiApp {
             mots_de_passe_vocaux: HashMap::new(),
             reprise: None,
             link: net::VoiceLink::default(),
+            claude: claude_ui::Claude::default(),
             recherche: recherche_ui::Recherche {
                 ouverte: false,
                 requete: String::new(),
@@ -1529,8 +1533,10 @@ impl KiApp {
     }
 
     /// La page VALORANT qui tient la place du chat se referme, avec sa
-    /// fiche : « Fermer », Échap, ou un clic sur un salon textuel.
+    /// fiche : « Fermer », Échap, ou un clic sur un salon textuel. Le salon
+    /// de Claude, qui tient la même place, aussi.
     fn retour_au_chat(&mut self) {
+        self.claude.ouvert = false;
         if self.valo.ouvert || self.fiche.is_some() {
             self.valo.ouvert = false;
             self.fiche = None;
@@ -1944,6 +1950,7 @@ impl KiApp {
     /// Ouvre la page de stats du groupe et demande les fiches au serveur —
     /// elles viennent de son cache, HenrikDev n'est pas sollicité.
     fn ouvrir_stats(&mut self) {
+        self.claude.ouvert = false;
         self.valo.ouvert = true;
         self.stats_recu = false;
         self.send(ClientMsg::StatsValorant);
@@ -2561,6 +2568,8 @@ impl KiApp {
         // La carte tactique : celle d'un salon de ce serveur.
         self.tactique.recevoir_etat(None);
         self.serveur_tactique = false;
+        // Claude : sa conversation et ses chiffres sont ceux de ce serveur.
+        self.claude.oublier();
         // La soirée et ma fiche : celles de ce serveur.
         self.serveur_soiree = false;
         self.soiree.clear();
@@ -3264,6 +3273,8 @@ impl KiApp {
         self.roster_panel(ui, voice);
         if self.valo.ouvert || self.fiche.is_some() {
             self.valo_panel(ui);
+        } else if self.claude.ouvert && self.claude.servi {
+            self.claude_panel(ui);
         } else {
             self.chat_panel(ui);
         }
@@ -3307,6 +3318,7 @@ impl KiApp {
         if self.admin.ban.is_some() {
             self.ban_window(ctx);
         }
+        self.claude_relue_window(ctx);
         if self.voice_prompt.is_some() {
             self.voice_password_window(ctx);
         }
@@ -4021,6 +4033,9 @@ impl KiApp {
                 prendre_echap(ctx);
             } else if self.welcomed && self.valo.ouvert {
                 self.valo.ouvert = false;
+                prendre_echap(ctx);
+            } else if self.welcomed && self.claude.ouvert {
+                self.claude.ouvert = false;
                 prendre_echap(ctx);
             }
         }

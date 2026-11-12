@@ -12,6 +12,8 @@
 //!   KI_SCHEMA_FORCER    1 : démarrer quand même sur des données écrites par
 //!                       une version plus récente (voir `sauvegarde`)
 //!   KI_HENRIK_KEY       clé HenrikDev pour les fiches VALORANT (sinon data/henrik.key ; absente : liaisons fermées)
+//!   KI_ANTHROPIC_KEY    clé d'API Anthropic pour le salon Claude (sinon
+//!                       data/anthropic.key ; absente : pas de salon Claude)
 //!   KI_FILES_MAX_BYTES  plafond global de data/files/ (défaut 2 Gio, 0 =
 //!                       illimité) — au-delà, les partages les plus anciens
 //!                       sont supprimés et les nouveaux envois refusés
@@ -47,6 +49,7 @@ mod accounts;
 mod audit;
 mod cartes;
 mod channels;
+mod claude;
 mod clips;
 mod diag;
 mod export;

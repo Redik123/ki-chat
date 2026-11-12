@@ -582,8 +582,102 @@ pub enum ClientMsg {
     /// système dans le salon, lien de téléchargement compris. Permission
     /// « Créer des invitations » — la même que pour un code ordinaire.
     PorteOffrir { invite_id: UserId },
+    /// Une question à Claude, dans son salon privé — seulement vers un
+    /// serveur qui l'a dit (`Welcome.claude`). La réponse arrive en
+    /// plusieurs temps : `ClaudeMessage` (sa question, retenue),
+    /// `ClaudeEtape` (ce que Claude fait), puis `ClaudeMessage` (sa réponse)
+    /// ou `ClaudeErreur`.
+    ClaudeDemander { texte: String },
+    /// Relire une conversation avec Claude : la sienne (`de` absent), ou
+    /// celle d'un membre — pour le propriétaire du serveur, et lui seul.
+    ClaudeHistorique {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        de: Option<UserId>,
+    },
+    /// Effacer sa propre conversation avec Claude.
+    ClaudeEffacer,
+    /// Propriétaire : qui se sert de Claude, et combien.
+    ClaudeMembres,
+    /// Propriétaire : couper ou rendre l'accès à Claude à un membre.
+    ClaudeAcces { user_id: UserId, bloque: bool },
+    /// Propriétaire : le modèle qui répond (un identifiant de
+    /// `ClaudeMembres.modeles`) et le nombre de questions par membre et par
+    /// jour. Retenu par le serveur d'un démarrage à l'autre.
+    ClaudeRegler { modele: String, par_jour: u32 },
     /// Keepalive.
     Ping,
+}
+
+/// La longueur maximale d'une question à Claude, en caractères.
+pub const CLAUDE_QUESTION_MAX: usize = 4_000;
+
+/// Un message d'une conversation avec Claude.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageClaude {
+    /// Vrai : la réponse de Claude ; faux : la question du membre.
+    pub de_claude: bool,
+    pub texte: String,
+    /// L'heure du serveur, en millisecondes.
+    pub ts: u64,
+}
+
+/// Où en est un membre avec Claude : ce qui décide si sa zone de saisie
+/// répond.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EtatClaude {
+    /// Le propriétaire lui a coupé l'accès.
+    #[serde(default)]
+    pub bloque: bool,
+    /// Les questions qu'il peut encore poser aujourd'hui, sur `par_jour`.
+    #[serde(default)]
+    pub reste: u32,
+    #[serde(default)]
+    pub par_jour: u32,
+    /// Claude est en train de lui répondre.
+    #[serde(default)]
+    pub en_cours: bool,
+    /// Le modèle qui répond (« claude-opus-5-5 »).
+    #[serde(default)]
+    pub modele: String,
+}
+
+/// Ce qu'un membre a consommé de Claude : la ligne du propriétaire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageClaude {
+    pub user_id: UserId,
+    pub pseudo: String,
+    #[serde(default)]
+    pub bloque: bool,
+    /// Ses questions : en tout, et aujourd'hui.
+    #[serde(default)]
+    pub questions: u32,
+    #[serde(default)]
+    pub aujourd_hui: u32,
+    /// Les jetons facturés pour lui : lus par le modèle, écrits par lui.
+    #[serde(default)]
+    pub jetons_entree: u64,
+    #[serde(default)]
+    pub jetons_sortie: u64,
+    /// Sa dernière question (millisecondes), 0 s'il n'en a jamais posé.
+    #[serde(default)]
+    pub dernier: u64,
+    /// Ce que ses questions ont coûté, en millionièmes de dollar : une
+    /// estimation, au prix public du modèle au moment de chaque question —
+    /// la facture d'Anthropic fait foi.
+    #[serde(default)]
+    pub cout_micro: u64,
+}
+
+/// Un modèle que le propriétaire peut choisir, avec son prix public.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModeleClaude {
+    /// L'identifiant de l'API (« claude-sonnet-5-5 »).
+    pub id: String,
+    /// Son nom à l'écran (« Sonnet 5.5 »).
+    pub nom: String,
+    /// Dollars par million de jetons lus, et écrits.
+    pub prix_entree: f32,
+    pub prix_sortie: f32,
 }
 
 /// Messages envoyés par le serveur au client (flux de contrôle, JSON).
@@ -668,6 +762,11 @@ pub enum ServerMsg {
         /// prendrait pour un message invalide.
         #[serde(default)]
         journal_lecture: bool,
+        /// Ce serveur a un Claude à qui parler (une clé d'API lui a été
+        /// donnée) et comprend les `ClientMsg::Claude*` ; un serveur
+        /// antérieur, ou sans clé, ne pose pas le champ et rien ne lui part.
+        #[serde(default)]
+        claude: bool,
         /// La version du protocole que parle le serveur ([`PROTOCOLE`]) ; 0
         /// pour un serveur antérieur. Plus haute que celle du client : le
         /// client est en retard, et le dit.
@@ -1081,6 +1180,42 @@ pub enum ServerMsg {
         /// « expirée », « plus personne depuis dix minutes »).
         #[serde(default)]
         motif: String,
+    },
+    /// Une conversation avec Claude, entière : la réponse à
+    /// `ClaudeHistorique` et à `ClaudeEffacer`. `de` : à qui elle est —
+    /// soi, ou le membre que le propriétaire relit.
+    ClaudeConversation {
+        de: UserId,
+        messages: Vec<MessageClaude>,
+        #[serde(default)]
+        etat: EtatClaude,
+    },
+    /// Un message de plus dans sa conversation : sa question telle que le
+    /// serveur l'a retenue, puis la réponse de Claude.
+    ClaudeMessage {
+        message: MessageClaude,
+        #[serde(default)]
+        etat: EtatClaude,
+    },
+    /// Ce que Claude est en train de faire pour répondre (« cherche
+    /// "haven" dans les messages »), le temps que ça dure.
+    ClaudeEtape { texte: String },
+    /// Claude n'a pas répondu, et pourquoi, en toutes lettres.
+    ClaudeErreur {
+        message: String,
+        #[serde(default)]
+        etat: EtatClaude,
+    },
+    /// Propriétaire : qui se sert de Claude et ce que ça a coûté, avec les
+    /// réglages du moment et les modèles entre lesquels choisir.
+    ClaudeMembres {
+        membres: Vec<UsageClaude>,
+        #[serde(default)]
+        modele: String,
+        #[serde(default)]
+        par_jour: u32,
+        #[serde(default)]
+        modeles: Vec<ModeleClaude>,
     },
     /// Réponse au Ping.
     Pong,

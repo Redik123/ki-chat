@@ -42,6 +42,28 @@ pub(crate) fn channel_row(
     non_lu: Option<NonLu>,
     temporaire: bool,
 ) -> egui::Response {
+    // Le pictogramme dit la nature du salon : on lit un « # », on parle
+    // dans un haut-parleur.
+    let symbole = match kind {
+        _ if temporaire => Icon::User,
+        // Un salon d'une nature inconnue n'est pas listé ; s'il l'était,
+        // un « # » ne promettrait rien de faux.
+        ChannelKind::Text | ChannelKind::Inconnu => Icon::Hash,
+        ChannelKind::Voice => Icon::Volume,
+    };
+    ligne_de_salon(ui, name, selected, symbole, non_lu, temporaire)
+}
+
+/// La ligne elle-même, avec le pictogramme qu'on lui donne : un salon, ou
+/// ce qui en tient lieu dans la colonne (Claude).
+pub(crate) fn ligne_de_salon(
+    ui: &mut egui::Ui,
+    name: &str,
+    selected: bool,
+    symbol: Icon,
+    non_lu: Option<NonLu>,
+    temporaire: bool,
+) -> egui::Response {
     let height = 34.0;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
@@ -75,15 +97,6 @@ pub(crate) fn channel_row(
             egui::pos2(rect.left() + 12.0, rect.center().y - 8.0),
             Vec2::splat(16.0),
         );
-        // Le pictogramme dit la nature du salon : on lit un « # », on parle
-        // dans un haut-parleur.
-        let symbol = match kind {
-            _ if temporaire => Icon::User,
-            // Un salon d'une nature inconnue n'est pas listé ; s'il l'était,
-            // un « # » ne promettrait rien de faux.
-            ChannelKind::Text | ChannelKind::Inconnu => Icon::Hash,
-            ChannelKind::Voice => Icon::Volume,
-        };
         icons::draw(painter, icon, symbol, if temporaire { theme::INVITE } else { fg });
         // La pastille d'abord : le nom se tronque à sa gauche, jamais
         // par-dessus.
@@ -323,20 +336,34 @@ impl KiApp {
 
                                 // --- Salons textuels : on les ouvre ---
                                 ui::section_label(ui, "Salons textuels");
+                                let ailleurs = self.claude.ouvert && self.claude.servi;
                                 for i in 0..self.channels.len() {
                                     let Some(ch) = self.channels.get(i) else { break };
                                     if ch.kind != ChannelKind::Text || ch.expire_le.is_some() {
                                         continue;
                                     }
                                     let id = ch.id;
-                                    let selected = self.current == Some(id);
+                                    // Le salon de Claude ou la page VALORANT
+                                    // tiennent la place du chat : aucun salon
+                                    // n'est alors « celui qu'on lit ».
+                                    let selected = self.current == Some(id) && !ailleurs;
                                     let pastille = self.non_lus.get(&id).filter(|n| n.nb > 0).copied();
                                     let row = channel_row(ui, &ch.name, selected, ChannelKind::Text, pastille, false);
                                     if row.clicked() {
                                         self.retour_au_chat();
-                                        if !selected {
+                                        if self.current != Some(id) {
                                             self.join(id);
                                         }
+                                    }
+                                }
+                                // Claude : un salon à soi, à la suite des
+                                // autres. Absent si le serveur n'en a pas.
+                                if self.claude.servi {
+                                    let pastille = self.claude.non_lu.then_some(NonLu { nb: 1, mention: true, depuis: 0 });
+                                    let row = ligne_de_salon(ui, "Claude", self.claude.ouvert, Icon::Star, pastille, false)
+                                        .on_hover_text("ton salon privé avec Claude : toi et le propriétaire du serveur le voyez");
+                                    if row.clicked() && !self.claude.ouvert {
+                                        self.ouvrir_claude();
                                     }
                                 }
 

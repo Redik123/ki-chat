@@ -173,7 +173,13 @@ async fn main() -> anyhow::Result<()> {
                 | ServerMsg::Tactique { .. }
                 | ServerMsg::TactiqueRefus { .. }
                 | ServerMsg::Soiree { .. }
-                | ServerMsg::MonJournal { .. } => {}
+                | ServerMsg::MonJournal { .. }
+                // Claude : le client en ligne de commande ne lui parle pas.
+                | ServerMsg::ClaudeConversation { .. }
+                | ServerMsg::ClaudeMessage { .. }
+                | ServerMsg::ClaudeEtape { .. }
+                | ServerMsg::ClaudeErreur { .. }
+                | ServerMsg::ClaudeMembres { .. } => {}
                 ServerMsg::History { messages } => {
                     for m in messages {
                         println!("  [ancien] <{}> {}", m.username, m.text);

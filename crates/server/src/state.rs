@@ -630,6 +630,8 @@ pub struct AppState {
     pub audit: crate::audit::Audit,
     /// Comptes Riot liés et fiches VALORANT (HenrikDev).
     pub valorant: crate::valorant::Valorant,
+    /// Claude : la clé d'API, les conversations, ce que chacun a consommé.
+    pub claude: crate::claude::Claude,
     /// Le bot musique.
     pub musique: crate::musique::Musique,
     /// Les vidéos partagées : téléversement par morceaux et conversion.
@@ -702,6 +704,7 @@ impl AppState {
             history,
             audit,
             valorant: crate::valorant::Valorant::open(data_dir),
+            claude: crate::claude::Claude::open(data_dir),
             musique: crate::musique::Musique::new(data_dir),
             medias: crate::medias::Fabrique::new(fichier_max_mb),
             jetons_telephone: Default::default(),
@@ -1685,6 +1688,7 @@ mod tests {
             tactique: true,
             soiree: true,
             journal_lecture: true,
+            claude: true,
             protocole: ki_protocol::PROTOCOLE,
         };
         assert!(encode(&welcome).is_some(), "le Welcome dépasse MAX_LINE");

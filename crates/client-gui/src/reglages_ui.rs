@@ -97,6 +97,11 @@ pub(crate) enum DemandeReglages {
 impl KiApp {
     /// Cet onglet de l'administration m'est-il ouvert ?
     pub(crate) fn onglet_ouvert(&self, tab: AdminTab) -> bool {
+        // Claude : ses conversations et ses dépenses ne regardent que le
+        // propriétaire — et il n'y a rien à montrer sans Claude.
+        if tab == AdminTab::Claude && !(self.claude.servi && self.suis_proprietaire()) {
+            return false;
+        }
         tab.needs().iter().any(|p| self.can(*p))
     }
 

@@ -89,11 +89,12 @@ pub(crate) enum AdminTab {
     Fichiers,
     Invites,
     Audit,
+    Claude,
     Diagnostics,
 }
 
 impl AdminTab {
-    const ALL: [AdminTab; 9] = [
+    const ALL: [AdminTab; 10] = [
         AdminTab::Tableau,
         AdminTab::Server,
         AdminTab::Channels,
@@ -102,6 +103,7 @@ impl AdminTab {
         AdminTab::Fichiers,
         AdminTab::Invites,
         AdminTab::Audit,
+        AdminTab::Claude,
         AdminTab::Diagnostics,
     ];
 
@@ -115,6 +117,7 @@ impl AdminTab {
             AdminTab::Fichiers => "Fichiers",
             AdminTab::Invites => "Invitations",
             AdminTab::Audit => "Journal",
+            AdminTab::Claude => "Claude",
             AdminTab::Diagnostics => "Diagnostics",
         }
     }
@@ -140,6 +143,9 @@ impl AdminTab {
             AdminTab::Fichiers => &[DELETE_MESSAGES],
             AdminTab::Invites => &[CREATE_INVITE, MANAGE_INVITES],
             AdminTab::Audit => &[VIEW_AUDIT_LOG],
+            // Au propriétaire seul, et seulement si le serveur a un
+            // Claude : `onglet_ouvert` le vérifie en plus.
+            AdminTab::Claude => &[ADMINISTRATOR],
             // Les journaux techniques des joueurs : réservé au super-admin,
             // pas à quiconque sait expulser quelqu'un.
             AdminTab::Diagnostics => &[ADMINISTRATOR],
@@ -1051,6 +1057,11 @@ impl KiApp {
                             if tab == AdminTab::Fichiers {
                                 to_send.push(self.admin.fichiers.demander());
                             }
+                            // Les chiffres de Claude bougent à chaque
+                            // question : relus à chaque ouverture.
+                            if tab == AdminTab::Claude {
+                                to_send.push(ClientMsg::ClaudeMembres);
+                            }
                         }
                     }
                 });
@@ -1078,6 +1089,7 @@ impl KiApp {
                             AdminTab::Fichiers => self.admin_fichiers_tab(ui, &mut to_send),
                             AdminTab::Invites => self.admin_invites_tab(ui, ctx, &mut to_send),
                             AdminTab::Audit => self.admin_audit_tab(ui),
+                            AdminTab::Claude => self.admin_claude_tab(ui, &mut to_send),
                             AdminTab::Diagnostics => self.admin_diag_tab(ui, ctx),
                         }
                         if let Some(info) = self.info.clone() {

@@ -474,6 +474,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         soiree: true,
         // Et la relecture de son journal des parties.
         journal_lecture: true,
+        // Et Claude, s'il a sa clé.
+        claude: state.claude.actif(),
         // Sa version du protocole : un client en retard le dira.
         protocole: ki_protocol::PROTOCOLE,
     });
@@ -648,6 +650,9 @@ fn classe_de(msg: &ClientMsg) -> Classe {
         | ClientMsg::AdminAuditLog { .. }
         | ClientMsg::AdminListFichiers
         | ClientMsg::AdminListRoles
+        | ClientMsg::ClaudeDemander { .. }
+        | ClientMsg::ClaudeHistorique { .. }
+        | ClientMsg::ClaudeMembres
         | ClientMsg::PorteOuvrir { .. } => Classe::Couteux,
         ClientMsg::Tactique { .. } => Classe::Dessin,
         ClientMsg::GameStatus { .. }
@@ -3627,6 +3632,104 @@ fn handle_msg(
         }
         ClientMsg::Ping => {
             let _ = tx.send(ServerMsg::Pong);
+        }
+        // Claude : chacun dans son salon privé. La clé, les droits de
+        // lecture et les plafonds sont dans `claude` ; ici, seulement qui a
+        // le droit de demander quoi. Tout écrit sur le disque : pool
+        // bloquant.
+        ClientMsg::ClaudeDemander { texte } => {
+            let state = state.clone();
+            let pseudo = username.to_string();
+            tokio::task::spawn_blocking(move || crate::claude::demander(&state, user_id, pseudo, texte));
+        }
+        ClientMsg::ClaudeHistorique { de } => {
+            let cible = de.unwrap_or(user_id);
+            // La conversation d'un autre : le propriétaire, et lui seul.
+            if cible != user_id && !state.est_proprietaire(user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "réservé au propriétaire du serveur".into(),
+                });
+                return;
+            }
+            let _ = tx.send(ServerMsg::ClaudeConversation {
+                de: cible,
+                messages: state.claude.conversation(cible),
+                etat: state.claude.etat(cible, state.est_proprietaire(cible)),
+            });
+        }
+        ClientMsg::ClaudeEffacer => {
+            let state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                state.claude.effacer(user_id);
+                // À tous ses appareils : la conversation est vide partout.
+                state.send_to(
+                    user_id,
+                    &ServerMsg::ClaudeConversation {
+                        de: user_id,
+                        messages: Vec::new(),
+                        etat: state.claude.etat(user_id, state.est_proprietaire(user_id)),
+                    },
+                );
+            });
+        }
+        ClientMsg::ClaudeMembres => {
+            if !state.est_proprietaire(user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "réservé au propriétaire du serveur".into(),
+                });
+                return;
+            }
+            let _ = tx.send(crate::claude::membres(state));
+        }
+        ClientMsg::ClaudeAcces { user_id: cible, bloque } => {
+            if !state.est_proprietaire(user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "réservé au propriétaire du serveur".into(),
+                });
+                return;
+            }
+            let (state, tx) = (state.clone(), tx.clone());
+            let acteur = username.to_string();
+            tokio::task::spawn_blocking(move || {
+                let Some(pseudo) = state.accounts.username_of(cible) else {
+                    let _ = tx.send(ServerMsg::Error {
+                        message: "compte introuvable".into(),
+                    });
+                    return;
+                };
+                state.claude.bloquer(cible, bloque);
+                state.audit.record("claude.acces", &acteur, &pseudo, if bloque { "accès coupé" } else { "accès rendu" });
+                // L'intéressé l'apprend tout de suite : sa saisie se ferme,
+                // ou se rouvre.
+                state.send_to(
+                    cible,
+                    &ServerMsg::ClaudeConversation {
+                        de: cible,
+                        messages: state.claude.conversation(cible),
+                        etat: state.claude.etat(cible, state.est_proprietaire(cible)),
+                    },
+                );
+                let _ = tx.send(crate::claude::membres(&state));
+            });
+        }
+        ClientMsg::ClaudeRegler { modele, par_jour } => {
+            if !state.est_proprietaire(user_id) {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "réservé au propriétaire du serveur".into(),
+                });
+                return;
+            }
+            let (state, tx) = (state.clone(), tx.clone());
+            let acteur = username.to_string();
+            tokio::task::spawn_blocking(move || match state.claude.regler(&modele, par_jour) {
+                Ok(()) => {
+                    state.audit.record("claude.reglages", &acteur, "", &format!("{modele}, {par_jour} questions par jour"));
+                    let _ = tx.send(crate::claude::membres(&state));
+                }
+                Err(message) => {
+                    let _ = tx.send(ServerMsg::Error { message });
+                }
+            });
         }
         // Les portes web : ouvrir, c'est déjà inviter — la permission des
         // invitations. Le reste (répondre, expulser, fermer) revient à

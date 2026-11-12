@@ -91,6 +91,7 @@ impl KiApp {
                 tactique,
                 soiree,
                 journal_lecture,
+                claude,
                 protocole,
                 ..
             } => {
@@ -133,6 +134,11 @@ impl KiApp {
                 self.serveur_soiree = soiree;
                 // Et pour la relecture de mon journal des parties.
                 self.serveur_journal_lecture = journal_lecture;
+                // Et pour Claude : sans clé d'API chez lui, pas de salon.
+                // Resté ouvert d'avant une coupure, il se recharge.
+                if self.claude.sur_bienvenue(claude) {
+                    self.send(ClientMsg::ClaudeHistorique { de: None });
+                }
                 // Et pour nos comptes Riot, qu'il envoie juste après.
                 self.serveur_comptes_joues = comptes_joues;
                 self.mes_comptes.clear();
@@ -842,6 +848,16 @@ impl KiApp {
                 self.on_net_quality(loss_pct);
             }
             ServerMsg::Pong => {}
+            // --- Claude ---
+            ServerMsg::ClaudeConversation { de, messages, etat } => {
+                self.claude.sur_conversation(self.my_id, de, messages, etat);
+            }
+            ServerMsg::ClaudeMessage { message, etat } => self.claude.sur_message(message, etat),
+            ServerMsg::ClaudeEtape { texte } => self.claude.sur_etape(texte),
+            ServerMsg::ClaudeErreur { message, etat } => self.claude.sur_erreur(message, etat),
+            ServerMsg::ClaudeMembres { membres, modele, par_jour, modeles } => {
+                self.claude.sur_membres(membres, modele, par_jour, modeles);
+            }
             // --- Les portes web ---
             ServerMsg::PorteOuverte { slug, url, salon, expire_le } => {
                 // Ma porte : le lien et son QR dans le panneau, et le
