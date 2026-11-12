@@ -552,11 +552,10 @@ impl KiApp {
                     // vient de cocher, dont le roster n'est pas encore revenu :
                     // deux clics rapides partaient de la même liste, et le
                     // second défaisait le premier.
-                    let actuels = self
-                        .members
-                        .iter()
-                        .find(|x| x.user_id == m.user_id)
-                        .map_or_else(|| m.roles.clone(), |x| x.roles.clone());
+                    let actuels = match &self.admin.roles_coches {
+                        Some((qui, coches)) if *qui == m.user_id => coches.clone(),
+                        _ => self.members.iter().find(|x| x.user_id == m.user_id).map_or_else(|| m.roles.clone(), |x| x.roles.clone()),
+                    };
                     // Ce qu'il détient déjà : n'est vérifié que ce qu'un rôle
                     // lui **ajoute**, comme au serveur.
                     let detient = self
@@ -590,9 +589,10 @@ impl KiApp {
                             } else {
                                 new_roles.retain(|id| *id != role.id);
                             }
-                            if let Some(x) = self.members.iter_mut().find(|x| x.user_id == m.user_id) {
-                                x.roles = new_roles.clone();
-                            }
+                            // Montré sans attendre le serveur — mais pas
+                            // écrit ici : la liste des membres est peut-être
+                            // empruntée par la colonne qui nous dessine.
+                            self.admin.roles_coches = Some((m.user_id, new_roles.clone()));
                             self.send(ClientMsg::AdminSetUserRoles {
                                 username: m.username.clone(),
                                 roles: new_roles,
@@ -882,7 +882,19 @@ impl KiApp {
                 });
                 drop((online, offline, invites));
                 self.members = members;
+                self.porter_les_roles_coches();
             });
+    }
+
+    /// Les rôles cochés pendant que la liste des membres était empruntée y
+    /// entrent maintenant qu'elle est revenue. Une fois : la réponse du
+    /// serveur fait foi ensuite, refus compris.
+    fn porter_les_roles_coches(&mut self) {
+        if let Some((qui, roles)) = self.admin.roles_coches.take() {
+            if let Some(membre) = self.members.iter_mut().find(|m| m.user_id == qui) {
+                membre.roles = roles;
+            }
+        }
     }
 
     /// La fiche d'un bot : ce qu'il est, ce qu'il fait, qui le pilote, et

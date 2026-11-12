@@ -21,6 +21,11 @@
 //!   fenêtre, plus la soirée. Le compteur `--relance N` transmis à l'instance
 //!   suivante borne le cas pathologique : une erreur qui revient dès le
 //!   démarrage épuise son budget et rend la main.
+//! - la même relance **après un panic** : le hook, une fois le plantage
+//!   écrit, lance le successeur avant que l'abort n'emporte le processus,
+//!   et lui dit où l'on était (`--retour serveur:salon:vocal`) pour qu'il y
+//!   revienne — un plantage en plein vocal coûte quelques secondes de
+//!   silence, plus la soirée.
 //!
 //! S'y ajoute un **rapport de plantage** dédié (`ki-chat.crash`) : chaque
 //! panic et chaque raté graphique y laissent leur trace, à part du journal
@@ -33,7 +38,8 @@
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Taille au-delà de laquelle le journal est archivé au démarrage. L'archive
@@ -53,6 +59,38 @@ const SESSION_SAINE: Duration = Duration::from_secs(60);
 /// Argument passé à l'exécutable relancé, pour compter les relances.
 const ARG_RELANCE: &str = "--relance";
 
+/// Argument passé au successeur d'une instance morte d'un panic : c'est un
+/// plantage, pas un hoquet graphique, et le bandeau du démarrage le dit.
+const ARG_PLANTAGE: &str = "--plantage";
+
+/// Argument qui dit au successeur où l'on était : `serveur:salon:vocal`, le
+/// serveur par son numéro dans le carnet, 0 pour « nulle part ».
+const ARG_RETOUR: &str = "--retour";
+
+/// Le démarrage de cette instance : une session qui a duré est saine, et le
+/// plantage qui la termine repart d'un budget de relances entier.
+static DEPART: OnceLock<Instant> = OnceLock::new();
+
+/// Où l'on est, tenu à jour par l'interface à chaque image : le hook de
+/// panic n'a que ça à lire, sans verrou — il peut courir sur n'importe quel
+/// fil, pendant que celui de l'interface tient les siens. 0 : nulle part.
+static ICI_SERVEUR: AtomicU64 = AtomicU64::new(0);
+static ICI_SALON: AtomicU32 = AtomicU32::new(0);
+static ICI_VOCAL: AtomicU32 = AtomicU32::new(0);
+
+/// Un successeur est déjà lancé : deux fils qui paniquent ensemble n'en
+/// lancent pas deux.
+static SUCCESSEUR_LANCE: AtomicBool = AtomicBool::new(false);
+
+/// Où revenir après une relance : le serveur du carnet, le salon lu, le
+/// salon vocal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Retour {
+    pub serveur: u64,
+    pub salon: Option<u32>,
+    pub vocal: Option<u32>,
+}
+
 /// Taille de poche du rapport de plantage : au-delà, seule la fin survit
 /// avant l'ajout suivant. Les plantages sont rares, mais une pile complète
 /// pèse, et ce fichier n'a pas vocation à raconter des mois.
@@ -67,6 +105,7 @@ const RAPPORT_ENVOI_MAX: usize = 32 * 1024;
 /// journal, `None` si le disque n'en veut pas — l'application démarre quand
 /// même, avec stderr pour seul témoin, comme avant.
 pub fn installer() -> Option<PathBuf> {
+    DEPART.get_or_init(Instant::now);
     let ouvert = ouvrir_journal();
     let fichier = ouvert.as_ref().map(|(f, _)| f.clone());
 
@@ -323,18 +362,104 @@ pub fn decision_relance(essais: u32, vecu: Duration) -> Option<u32> {
 /// `reduit` : on était réduit dans la zone de notification — l'instance
 /// suivante y repart (`--reduit`), plutôt que de surgir en plein jeu.
 pub fn relancer(essais: u32, reduit: bool) {
-    match std::env::current_exe() {
-        Ok(exe) => match std::process::Command::new(exe)
-            .arg(ARG_RELANCE)
-            .arg(essais.to_string())
-            .args(reduit.then_some(crate::zone::ARG_REDUIT))
-            .spawn()
-        {
-            Ok(_) => tracing::info!("relance automatique (tentative {essais}, réduit : {reduit})"),
-            Err(e) => tracing::error!("relance impossible : {e}"),
-        },
-        Err(e) => tracing::error!("exécutable introuvable : {e}"),
+    match lancer_successeur(&arguments_du_successeur(essais, reduit, None, std::env::args())) {
+        Ok(()) => tracing::info!("relance automatique (tentative {essais}, réduit : {reduit})"),
+        Err(e) => tracing::error!("relance impossible : {e}"),
     }
+}
+
+/// Où l'on est, dit par l'interface à chaque image : le serveur (son numéro
+/// dans le carnet) seulement une fois accueilli, le salon lu, le salon
+/// vocal. C'est ce que le hook de panic transmettra au successeur.
+pub fn situer(serveur: Option<u64>, salon: Option<u32>, vocal: Option<u32>) {
+    ICI_SERVEUR.store(serveur.unwrap_or(0), Ordering::Relaxed);
+    ICI_SALON.store(salon.unwrap_or(0), Ordering::Relaxed);
+    ICI_VOCAL.store(vocal.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Où l'on était, d'après ce que l'interface a dit en dernier.
+fn ici() -> Option<Retour> {
+    let non_nul = |v: u32| Some(v).filter(|v| *v != 0);
+    let serveur = ICI_SERVEUR.load(Ordering::Relaxed);
+    (serveur != 0).then(|| Retour {
+        serveur,
+        salon: non_nul(ICI_SALON.load(Ordering::Relaxed)),
+        vocal: non_nul(ICI_VOCAL.load(Ordering::Relaxed)),
+    })
+}
+
+/// Les arguments du successeur : le compteur, l'état réduit, où revenir, et
+/// ce qui doit se transmettre tel quel de `args` — le ki-chat de test reste
+/// un ki-chat de test, et une seconde instance voulue le reste aussi : sans
+/// ça, son successeur trouverait la première et se retirerait devant elle.
+fn arguments_du_successeur(essais: u32, reduit: bool, retour: Option<Retour>, args: impl Iterator<Item = String>) -> Vec<String> {
+    let mut suite = vec![ARG_RELANCE.to_string(), essais.to_string()];
+    if reduit {
+        suite.push(crate::zone::ARG_REDUIT.to_string());
+    }
+    if let Some(r) = retour {
+        suite.push(ARG_RETOUR.to_string());
+        suite.push(format!("{}:{}:{}", r.serveur, r.salon.unwrap_or(0), r.vocal.unwrap_or(0)));
+    }
+    suite.extend(args.filter(|a| a == "--mcp" || a == crate::instance::ARG_NOUVELLE));
+    suite
+}
+
+fn lancer_successeur(arguments: &[String]) -> std::io::Result<()> {
+    std::process::Command::new(std::env::current_exe()?).args(arguments).spawn().map(|_| ())
+}
+
+/// Après un panic, depuis le hook : lance le successeur, une fois, si le
+/// budget de relances le permet. Rend ce qui s'est passé, à écrire au
+/// journal — pas de `tracing` ici : le panic a pu naître sous son verrou.
+///
+/// Seulement quand un panic tue le processus (`panic = "abort"`, le binaire
+/// publié). En version de développement un panic ne défait que son fil : le
+/// processus vit, et un successeur ferait deux ki-chat.
+fn relancer_apres_panic() -> String {
+    if !cfg!(panic = "abort") {
+        return "pas de relance : ce binaire survit à un panic".into();
+    }
+    if SUCCESSEUR_LANCE.swap(true, Ordering::SeqCst) {
+        return "relance déjà lancée par un autre fil".into();
+    }
+    let vecu = DEPART.get().map(|d| d.elapsed()).unwrap_or_default();
+    let Some(essais) = decision_relance(essais_actuels(), vecu) else {
+        return "pas de relance : le plantage revient dès le démarrage, budget épuisé".into();
+    };
+    let reduit = crate::zone::repartir_reduit();
+    let mut arguments = arguments_du_successeur(essais, reduit, ici(), std::env::args());
+    arguments.push(ARG_PLANTAGE.to_string());
+    match lancer_successeur(&arguments) {
+        Ok(()) => format!("relance après plantage : {}", arguments.join(" ")),
+        Err(e) => format!("relance impossible : {e}"),
+    }
+}
+
+/// Cette instance succède-t-elle à un plantage (et non à un hoquet
+/// graphique) ?
+pub fn apres_plantage() -> bool {
+    std::env::args().any(|a| a == ARG_PLANTAGE)
+}
+
+/// Où cette instance doit revenir, si celle d'avant le lui a dit.
+pub fn retour_demande() -> Option<Retour> {
+    retour_dans(std::env::args())
+}
+
+/// Cherche `--retour serveur:salon:vocal`. Abîmé, incomplet ou sans
+/// serveur : rien — on ne revient pas à moitié.
+fn retour_dans(mut args: impl Iterator<Item = String>) -> Option<Retour> {
+    args.find(|a| a == ARG_RETOUR)?;
+    let valeur = args.next()?;
+    let mut morceaux = valeur.split(':');
+    let serveur: u64 = morceaux.next()?.parse().ok()?;
+    let salon: u32 = morceaux.next()?.parse().ok()?;
+    let vocal: u32 = morceaux.next()?.parse().ok()?;
+    if serveur == 0 || morceaux.next().is_some() {
+        return None;
+    }
+    Some(Retour { serveur, salon: Some(salon).filter(|s| *s != 0), vocal: Some(vocal).filter(|v| *v != 0) })
 }
 
 /// Au-delà, une fermeture est tenue pour bloquée : un fil qu'on attend et
@@ -501,6 +626,9 @@ fn installer_panic_hook(fichier: Arc<File>) {
         // Le rapport dédié reçoit la même histoire, citations masquées :
         // c'est lui qui part au serveur à la connexion suivante.
         consigner_crash(&format!("panic : {}\n{pile}", masquer_citations(&info.to_string())));
+        // Le successeur, avant que l'abort n'emporte tout : il attendra le
+        // verrou d'instance, que notre mort lui rend.
+        let _ = writeln!(&*fichier, "{}", relancer_apres_panic());
         precedent(info);
     }));
 }
@@ -552,6 +680,47 @@ mod tests {
         // Abîmé ou incomplet : zéro, jamais un budget inventé.
         assert_eq!(essais_dans(args(&["ki-chat.exe", "--relance", "beaucoup"])), 0);
         assert_eq!(essais_dans(args(&["ki-chat.exe", "--relance"])), 0);
+    }
+
+    /// Ce que le successeur d'un plantage reçoit, et ce qu'il en relit : le
+    /// compteur, l'état réduit, où revenir — et le ki-chat de test le reste.
+    #[test]
+    fn le_successeur_sait_d_ou_l_on_vient() {
+        let ici = Retour { serveur: 3, salon: Some(2), vocal: Some(7) };
+        let suite =
+            arguments_du_successeur(1, true, Some(ici), args(&["ki-chat.exe", "--relance", "4", "--mcp", "--nouvelle-instance", "--reduit"]));
+        assert_eq!(suite, ["--relance", "1", "--reduit", "--retour", "3:2:7", "--mcp", "--nouvelle-instance"]);
+        // Relus par le successeur.
+        let relus = std::iter::once("ki-chat.exe".to_string()).chain(suite);
+        let relus: Vec<String> = relus.collect();
+        assert_eq!(essais_dans(relus.iter().cloned()), 1);
+        assert_eq!(retour_dans(relus.iter().cloned()), Some(ici));
+
+        // Sans vocal, sans rien : les zéros ne sont pas des salons.
+        let seul = Retour { serveur: 3, salon: None, vocal: None };
+        let suite = arguments_du_successeur(2, false, Some(seul), args(&["ki-chat.exe"]));
+        assert_eq!(suite, ["--relance", "2", "--retour", "3:0:0"]);
+        assert_eq!(retour_dans(suite.into_iter()), Some(seul));
+        assert_eq!(arguments_du_successeur(1, false, None, args(&["ki-chat.exe"])), ["--relance", "1"]);
+        // Abîmé, incomplet, sans serveur : on ne revient pas à moitié.
+        for abime in [&["--retour"][..], &["--retour", "3:2"], &["--retour", "0:2:7"], &["--retour", "a:b:c"], &["--retour", "3:2:7:9"], &["ki-chat.exe"]] {
+            assert_eq!(retour_dans(args(abime)), None, "{abime:?}");
+        }
+    }
+
+    /// Ce que l'interface dit de l'endroit où l'on est se relit tel quel, et
+    /// « nulle part » ne fabrique pas de retour.
+    #[test]
+    fn l_endroit_ou_l_on_est_se_relit() {
+        situer(Some(5), Some(1), None);
+        assert_eq!(ici(), Some(Retour { serveur: 5, salon: Some(1), vocal: None }));
+        situer(None, Some(1), Some(4));
+        assert_eq!(ici(), None, "pas accueilli : pas de retour");
+        // En version de développement, un panic ne tue pas le processus :
+        // aucun successeur n'est lancé.
+        if !cfg!(panic = "abort") {
+            assert!(relancer_apres_panic().starts_with("pas de relance"));
+        }
     }
 
     #[test]

@@ -57,6 +57,12 @@ pub(crate) struct Admin {
     /// Compte dont on modifie les rôles, et la sélection en cours.
     pub(crate) roles_cible: Option<String>,
     pub(crate) roles_choisis: Vec<ki_protocol::RoleId>,
+    /// Les rôles qu'on vient de cocher dans le menu d'un membre, à porter
+    /// dans la liste des membres dès qu'elle est de retour : le menu se
+    /// dessine pendant que la colonne des membres l'a empruntée, et l'écrire
+    /// à ce moment-là n'écrivait nulle part — la case ne bougeait qu'à la
+    /// réponse du serveur.
+    pub(crate) roles_coches: Option<(ki_protocol::UserId, Vec<ki_protocol::RoleId>)>,
     /// Onglet admin « Diagnostics » : le dernier lot récupéré du serveur,
     /// rempli par un thread de récupération.
     pub(crate) diag: std::sync::Arc<std::sync::Mutex<Option<String>>>,

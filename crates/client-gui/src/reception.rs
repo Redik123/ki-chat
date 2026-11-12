@@ -210,6 +210,33 @@ impl KiApp {
                         return;
                     }
                 }
+                // Relancé après un plantage : même raisonnement, c'était
+                // décidé — c'est ki-chat qui en a décidé autrement. Une
+                // fois, et seulement chez le serveur d'avant.
+                if let Some(r) = self.retour.take().filter(|r| self.selected == Some(r.serveur)) {
+                    let salon = r.salon.filter(|c| self.channels.iter().any(|k| k.id == *c));
+                    let vocal = r.vocal.filter(|c| self.channels.iter().any(|k| k.id == *c));
+                    if let Some(c) = salon {
+                        self.join(c);
+                    }
+                    if let Some(c) = vocal {
+                        self.join_voice(c);
+                    }
+                    tracing::info!("retour après plantage : salon {salon:?}, vocal {vocal:?}");
+                    // Le bandeau du démarrage s'efface à la connexion : sans
+                    // ce mot, la fenêtre qui clignote passe pour un caprice.
+                    self.info = Some(
+                        if vocal.is_some() {
+                            "ki-chat a planté et s'est relancé : te revoilà dans ton salon vocal"
+                        } else {
+                            "ki-chat a planté et s'est relancé : te revoilà où tu étais"
+                        }
+                        .into(),
+                    );
+                    if salon.is_some() {
+                        return;
+                    }
+                }
                 // On ouvre le premier salon textuel pour avoir de quoi lire,
                 // mais on n'entre dans aucun vocal : ça se décide.
                 let first_text = self

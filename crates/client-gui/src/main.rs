@@ -171,6 +171,16 @@ fn main() -> eframe::Result {
     if relances > 0 {
         tracing::info!("instance relancée automatiquement (tentative {relances})");
     }
+    // Pour essayer la relance après un plantage, en version de développement
+    // seulement : `KI_ESSAI_PLANTAGE=20` fait paniquer un fil au bout de
+    // vingt secondes — une fois : le successeur, lui, ne replante pas.
+    #[cfg(debug_assertions)]
+    if let Some(secondes) = std::env::var("KI_ESSAI_PLANTAGE").ok().and_then(|s| s.parse::<u64>().ok()).filter(|_| relances == 0) {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secondes));
+            panic!("plantage d'essai demandé par KI_ESSAI_PLANTAGE");
+        });
+    }
     // Un seul ki-chat par session : lancé une seconde fois — depuis
     // l'icône du Bureau, alors qu'il est réduit à côté de l'horloge —, on
     // ramène le premier au premier plan et l'on se retire. S'il ne répond
@@ -822,6 +832,10 @@ struct KiApp {
     recherche: recherche_ui::Recherche,
     /// Le salon privé de Claude, et l'onglet du propriétaire.
     claude: claude_ui::Claude,
+    /// Relancé après un plantage : où l'instance d'avant était — son
+    /// serveur, le salon lu, le salon vocal. Rendu au premier accueil de ce
+    /// serveur, une fois.
+    retour: Option<secours::Retour>,
 
     // Mon compte
     show_account: bool,
@@ -995,6 +1009,7 @@ impl KiApp {
                 salon_edite: None,
                 verrou: None,
                 roles_cible: None,
+                roles_coches: None,
                 roles_choisis: Vec::new(),
                 diag: Default::default(),
                 diag_versions: Default::default(),
@@ -1210,6 +1225,7 @@ impl KiApp {
             reprise: None,
             link: net::VoiceLink::default(),
             claude: claude_ui::Claude::default(),
+            retour: secours::retour_demande(),
             recherche: recherche_ui::Recherche {
                 ouverte: false,
                 requete: String::new(),
@@ -1258,16 +1274,16 @@ impl KiApp {
         // bandeau, la fenêtre qui se ferme puis revient passe pour un caprice,
         // et personne ne sait qu'un journal attend d'être lu.
         if secours::essais_actuels() > 0 {
+            let cause = if secours::apres_plantage() {
+                "ki-chat a planté et s'est relancé tout seul. Le rapport partira à l'administrateur \
+                 de ton serveur à la prochaine connexion"
+            } else {
+                "ki-chat s'est relancé : la fenêtre précédente s'est fermée sur une \
+                 erreur graphique (pilote réinitialisé par un jeu, veille…)"
+            };
             app.error = Some(match secours::chemin_journal() {
-                Some(chemin) => format!(
-                    "ki-chat s'est relancé : la fenêtre précédente s'est fermée sur une \
-                     erreur graphique (pilote réinitialisé par un jeu, veille…). \
-                     Détails : {}",
-                    chemin.display()
-                ),
-                None => "ki-chat s'est relancé : la fenêtre précédente s'est fermée sur \
-                         une erreur graphique (pilote réinitialisé par un jeu, veille…)"
-                    .into(),
+                Some(chemin) => format!("{cause}. Détails : {}", chemin.display()),
+                None => cause.into(),
             });
         }
         // L'atelier partage la file « médias » de la visionneuse : une seule
@@ -2935,6 +2951,12 @@ impl KiApp {
             return;
         }
         self.auto_tente = true;
+        // Sans reconnexion automatique vers le serveur d'avant le plantage,
+        // il n'y a nulle part où revenir : un salon d'un autre serveur
+        // porterait le même numéro.
+        if self.retour.is_some_and(|r| self.session_auto != Some(r.serveur)) {
+            self.retour = None;
+        }
         let Some(id) = self.session_auto else { return };
         if self.conn.is_some() || self.connecting {
             return;
@@ -2942,6 +2964,7 @@ impl KiApp {
         let memorise = self.book.iter().any(|s| s.id == id && s.secret.is_some());
         if !memorise {
             self.session_auto = None;
+            self.retour = None;
             return;
         }
         self.select_server(id);
@@ -3997,6 +4020,8 @@ impl KiApp {
     /// voit, ou l'une des siennes (`App::ui`) — juste après `logique`.
     fn interface(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        // Où l'on est, pour le successeur si cette instance plante.
+        secours::situer(self.selected.filter(|_| self.welcomed), self.current, self.voice_channel);
         if !self.premiere_image {
             self.premiere_image = true;
             tracing::info!("interface prête : première image");
