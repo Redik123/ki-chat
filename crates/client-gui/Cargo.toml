@@ -69,6 +69,9 @@ epaint_default_fonts = "0.37"
 device_query = "4"
 # Dialogue natif de sélection de fichier (partage de fichiers).
 rfd = "0.17"
+# Le fichier de réglages d'eframe est du RON : on le relit pour la copie
+# d'avant mise à jour, la migration et l'export. La même version qu'eframe.
+ron = "0.12"
 # Client HTTP bloquant pour l'upload de fichiers.
 ureq = { version = "2", features = ["json"] }
 # Lire le presse-papiers pour « Coller » au clic droit : egui ne le lit

@@ -250,6 +250,14 @@ pub fn relaunch_if_requested(reduit: bool) {
     match std::env::current_exe().map(std::process::Command::new) {
         Ok(mut cmd) => {
             cmd.args(reduit.then_some(crate::zone::ARG_REDUIT));
+            // Le ki-chat de test (`--mcp`) redémarre en ki-chat de test, sur
+            // son profil à part : sans ça il s'ouvrirait sur les réglages de
+            // l'utilisateur, et se connecterait avec son compte.
+            let args: Vec<String> = std::env::args().collect();
+            if args.iter().any(|a| a == "--mcp") {
+                cmd.arg("--mcp");
+                cmd.args(args.iter().any(|a| a == crate::instance::ARG_NOUVELLE).then_some(crate::instance::ARG_NOUVELLE));
+            }
             if let Err(e) = cmd.spawn() {
                 tracing::error!("redémarrage impossible : {e}");
             }

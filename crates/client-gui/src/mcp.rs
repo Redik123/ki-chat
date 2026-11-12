@@ -459,6 +459,27 @@ impl KiApp {
                 }
                 _ => Reponse::erreur("il faut largeur et hauteur, en points"),
             },
+            // Les deux boutons de « Mes réglages », sans leur fenêtre de choix
+            // de fichier (elle est à Windows, on ne la pilote pas d'ici).
+            "exporter_reglages" => match d.arguments.get("chemin").and_then(Value::as_str) {
+                Some(chemin) if !chemin.is_empty() => {
+                    self.reglages_demande = Some(crate::DemandeReglages::Exporter(chemin.into()));
+                    s.repos = REPOS;
+                    Reponse::ok(format!("export demandé vers {chemin} : `etat` dira s'il a réussi (bandeau_info ou bandeau_erreur)"))
+                }
+                _ => Reponse::erreur("il faut un chemin"),
+            },
+            "importer_reglages" => match d.arguments.get("chemin").and_then(Value::as_str) {
+                Some(chemin) => match std::fs::read_to_string(chemin).map_err(|e| e.to_string()).and_then(|t| crate::prefs::lire_export(&t)) {
+                    Ok(table) => {
+                        let combien = table.len();
+                        self.reglages_demande = Some(crate::DemandeReglages::Importer(table));
+                        Reponse::ok(format!("{combien} réglages posés : ki-chat de test redémarre, attendre quelques secondes"))
+                    }
+                    Err(e) => Reponse::erreur(e),
+                },
+                None => Reponse::erreur("il faut un chemin"),
+            },
             "fermer_ki_chat" => {
                 self.quitter = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

@@ -156,6 +156,26 @@ fn outils() -> Value {
             },
         },
         {
+            "name": "exporter_reglages",
+            "description": "Exporte les réglages du ki-chat de test dans un fichier JSON, comme le bouton Exporter \
+                de Réglages → Aide (sans la fenêtre de choix de fichier).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "chemin": { "type": "string", "description": "Chemin complet du fichier à écrire" } },
+                "required": ["chemin"],
+            },
+        },
+        {
+            "name": "importer_reglages",
+            "description": "Importe un fichier de réglages dans le ki-chat de test, qui redémarre aussitôt : attendre \
+                quelques secondes avant l'appel suivant.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "chemin": { "type": "string", "description": "Chemin complet du fichier à lire" } },
+                "required": ["chemin"],
+            },
+        },
+        {
             "name": AUTRE,
             "description": "Un second membre, pour voir ki-chat réagir à quelqu'un d'autre : le client en ligne de \
                 commande, sans micro ni casque (il n'ouvre aucun périphérique audio). Serveur d'essai local \

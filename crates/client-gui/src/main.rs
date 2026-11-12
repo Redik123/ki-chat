@@ -30,6 +30,7 @@ use net::EmissionVideo as _;
 mod overlay;
 mod partage;
 mod perf;
+mod prefs;
 mod photos;
 mod porte_ui;
 mod boutique;
@@ -215,6 +216,12 @@ fn main() -> eframe::Result {
     } else {
         options
     };
+    // Les réglages, avant qu'eframe ne les ouvre : une copie quand ki-chat a
+    // changé de version depuis qu'ils ont été écrits, puis leur migration.
+    if let Some(chemin) = options.persistence_path.clone().or_else(|| Some(eframe::storage_dir("ki-chat")?.join("app.ron"))) {
+        prefs::avant_demarrage(&chemin, update::current());
+        prefs::designer(chemin);
+    }
     let depart = std::time::Instant::now();
     let outcome = eframe::run_native(
         "ki-chat",
@@ -880,6 +887,15 @@ struct KiApp {
     /// où il était — au début d'un champ vide —, et ce qu'on tapait pour
     /// compléter s'écrivait devant le message.
     curseur_a_la_fin: bool,
+    /// Un export ou un import de réglages demandé par l'interface, à faire
+    /// là où le fichier des réglages est à portée (`traiter_reglages`).
+    reglages_demande: Option<DemandeReglages>,
+    /// Un fichier de réglages choisi, en attente de confirmation : ce qu'il
+    /// porte, et d'où il vient.
+    import_propose: Option<(std::collections::BTreeMap<String, String>, String)>,
+    /// Des réglages viennent d'être importés et ki-chat redémarre : ce qu'il
+    /// a en mémoire ne doit plus s'écrire par-dessus.
+    reglages_importes: bool,
     /// Le panneau des suggestions de la saisie : pseudos, commandes, emoji.
     suggestions: suggestions::Suggestions,
     show_settings: bool,
@@ -1588,6 +1604,9 @@ impl KiApp {
             input: String::new(),
             focus_input: false,
             curseur_a_la_fin: false,
+            reglages_demande: None,
+            import_propose: None,
+            reglages_importes: false,
             suggestions: suggestions::Suggestions::default(),
             show_settings: false,
             show_audio_journal: false,
@@ -1675,7 +1694,11 @@ impl KiApp {
             presence_jeux: get("presence_jeux", "on") == "on",
             veilleur_jeux: None,
             jeu_envoye: None,
-            regard_volume: 1.0,
+            regard_volume: get("regard_volume", "1")
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map_or(1.0, |v| v.clamp(0.0, 2.0)),
             regard_meme_machine: false,
             regard_detache: false,
             regard_plein_ecran: false,
@@ -1733,7 +1756,7 @@ impl KiApp {
             link: net::VoiceLink::default(),
             show_search: false,
             search_query: String::new(),
-            search_ici: true,
+            search_ici: get("search_ici", "on") != "off",
             search_hits: Vec::new(),
             search_more: false,
             search_envoyee: None,
@@ -4993,6 +5016,48 @@ impl KiApp {
             return Some(Duration::from_secs(1));
         }
         None
+    }
+
+    /// Exporte ou importe les réglages, là où leur stockage est à portée.
+    fn traiter_reglages(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(demande) = self.reglages_demande.take() else { return };
+        let Some(stockage) = frame.storage_mut() else {
+            self.error = Some("les réglages ne sont pas enregistrés sur ce poste : rien à exporter ni à importer".into());
+            return;
+        };
+        match demande {
+            DemandeReglages::Exporter(destination) => {
+                // Ce que l'appli a en mémoire d'abord : le fichier peut avoir
+                // trente secondes de retard. Et comme le stockage ne sait pas
+                // dire ses clés, on note celles qui s'écrivent — toutes celles
+                // de l'appli, modules compris, même jamais encore sur le disque.
+                let mut temoin = prefs::Temoin::sur(stockage);
+                self.sauver(&mut temoin);
+                let mut cles = temoin.cles();
+                cles.extend(prefs::fichier().and_then(|f| prefs::lire(f).ok()).unwrap_or_default().into_keys());
+                let table: std::collections::BTreeMap<String, String> =
+                    cles.into_iter().filter_map(|cle| stockage.get_string(&cle).map(|valeur| (cle, valeur))).collect();
+                if table.is_empty() {
+                    self.error = Some("rien à exporter pour l'instant : réessaie dans une minute".into());
+                    return;
+                }
+                match std::fs::write(&destination, prefs::exporter(&table, update::current())) {
+                    Ok(()) => self.info = Some(format!("réglages exportés dans {}", destination.display())),
+                    Err(e) => self.error = Some(format!("export impossible : {e}")),
+                }
+            }
+            DemandeReglages::Importer(importes) => {
+                for (cle, valeur) in prefs::a_poser(importes, self.book.is_empty()) {
+                    stockage.set_string(&cle, valeur);
+                }
+                // Tout est relu au démarrage : on redémarre, sans rien
+                // réécrire entre-temps.
+                self.reglages_importes = true;
+                update::request_restart();
+                self.quitter = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 
     /// Faut-il animer à plein rythme ? Oui dès que quelqu'un peut voir la
@@ -9531,6 +9596,85 @@ impl KiApp {
         ki_voice::journal("envoi refusé par le serveur : rendu au champ de saisie".into());
     }
 
+    /// « Mes réglages » : les emporter dans un fichier, ou reprendre ceux
+    /// d'un autre PC.
+    fn reglages_a_emporter(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(espace::M);
+        ui::section(
+            ui,
+            Icon::Download,
+            "Mes réglages",
+            Some("Pour changer de PC sans tout refaire : serveurs, raccourcis, égaliseurs, profils de voix, volumes."),
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui::button(ui, Icon::Download, "Exporter…")
+                        .on_hover_text("un fichier à garder ou à envoyer sur ton autre PC — sans aucun mot de passe")
+                        .clicked()
+                    {
+                        if let Some(destination) =
+                            rfd::FileDialog::new().set_file_name("ki-chat-reglages.json").add_filter("Réglages ki-chat", &["json"]).save_file()
+                        {
+                            self.reglages_demande = Some(DemandeReglages::Exporter(destination));
+                        }
+                    }
+                    if ui::button(ui, Icon::ArrowUp, "Importer…")
+                        .on_hover_text("reprendre les réglages exportés depuis un autre PC")
+                        .clicked()
+                    {
+                        if let Some(source) = rfd::FileDialog::new().add_filter("Réglages ki-chat", &["json"]).pick_file() {
+                            let lu = std::fs::read_to_string(&source).map_err(|e| e.to_string()).and_then(|t| prefs::lire_export(&t));
+                            match lu {
+                                Ok(table) => {
+                                    let nom = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                    self.import_propose = Some((table, nom));
+                                }
+                                Err(e) => self.error = Some(e),
+                            }
+                        }
+                    }
+                });
+                ui::hint(
+                    ui,
+                    "Les mots de passe ne sont pas exportés, ni ce qui dépend du PC : micro et casque choisis, place de la fenêtre, dossier des clips.",
+                );
+                if let Some((table, nom)) = &self.import_propose {
+                    ui.add_space(espace::S);
+                    let serveurs = if self.book.is_empty() {
+                        "Tes serveurs seront repris aussi, sans leurs mots de passe."
+                    } else {
+                        "Tes serveurs enregistrés ici ne changent pas."
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{nom} : {} réglages vont remplacer ceux de ce PC. {serveurs} ki-chat redémarre ensuite.",
+                            table.len()
+                        ))
+                        .color(TEXT)
+                        .size(texte::COURANT),
+                    );
+                    let mut choix = None;
+                    ui.horizontal(|ui| {
+                        if ui::tinted_button(ui, Some(Icon::Check), "Importer et redémarrer", Tone::Accent).clicked() {
+                            choix = Some(true);
+                        }
+                        if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                            choix = Some(false);
+                        }
+                    });
+                    match choix {
+                        Some(true) => {
+                            if let Some((table, _)) = self.import_propose.take() {
+                                self.reglages_demande = Some(DemandeReglages::Importer(table));
+                            }
+                        }
+                        Some(false) => self.import_propose = None,
+                        None => {}
+                    }
+                }
+            },
+        );
+    }
+
     /// Reprendre un de ses messages dans la zone de saisie pour le
     /// corriger. Une réponse en cours s'efface : on ne fait pas les deux.
     fn commencer_edition(&mut self, msg: &ChatRecord) {
@@ -10100,6 +10244,7 @@ impl KiApp {
                             self.onglet_beta(ui);
                         }
                         if onglet == Onglet::Aide {
+                            self.reglages_a_emporter(ui);
                             // --- Journal audio ---
                             // Ce que l'audio a vécu (ouvertures, pertes, replis,
                             // réouvertures) : les bugs « au lancement d'un jeu »
@@ -13816,6 +13961,14 @@ fn reaction_locale(reactions: &mut Vec<Reaction>, emoji: &str, by: UserId, on: b
     }
 }
 
+/// Ce que l'interface demande pour les réglages, exécuté par la logique.
+enum DemandeReglages {
+    /// Écrire l'export dans ce fichier.
+    Exporter(std::path::PathBuf),
+    /// Poser ces réglages, puis redémarrer.
+    Importer(std::collections::BTreeMap<String, String>),
+}
+
 /// Ce que la barre du bas montre, selon la place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Barre {
@@ -15874,6 +16027,7 @@ impl KiApp {
         // pas le clavier se mettait en veille en pleine conversation.
         self.veille.actualiser(self.voice_channel.is_some());
 
+        self.traiter_reglages(ctx, frame);
         self.poll_events();
         // Les demandes de Claude, après les messages reçus : `etat` les voit.
         #[cfg(all(debug_assertions, windows))]
@@ -16022,6 +16176,18 @@ impl KiApp {
     }
 
     fn sauver(&mut self, storage: &mut dyn eframe::Storage) {
+        // Des réglages viennent d'être importés : ils sont déjà dans le
+        // fichier, et ce que l'appli a encore en mémoire — ceux d'avant — ne
+        // doit pas les recouvrir avant le redémarrage.
+        if self.reglages_importes {
+            return;
+        }
+        storage.set_string(prefs::CLE_VERSION, prefs::VERSION.to_string());
+        storage.set_string(prefs::CLE_APPLI, update::current().to_string());
+        // Ces deux-là n'étaient jamais sauvés : le volume du son des streams
+        // et « Ce salon / Partout » de la recherche repartaient de zéro.
+        storage.set_string("regard_volume", format!("{}", self.regard_volume));
+        storage.set_string("search_ici", if self.search_ici { "on" } else { "off" }.into());
         servers::save(storage, &self.book);
         storage.set_string(
             "session_auto",
