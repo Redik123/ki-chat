@@ -16,7 +16,7 @@
 //! membre avec Claude, et ce que les outils ont lu pour y répondre.
 //!
 //! Ce que Claude sait de ki-chat lui-même — ce que c'est, comment il se
-//! protège et où il s'arrête — est écrit dans `claude_savoir.md`, joint à ses
+//! protège et où il s'arrête — est écrit dans `claude_savoir.txt`, joint à ses
 //! consignes. Les notes de version, il les lit sur GitHub par un outil.
 //!
 //! Claude peut aussi chercher sur internet, par l'outil de recherche de
@@ -600,7 +600,9 @@ graves, et des listes à tirets. Pas de titres, pas de tableaux.";
 
 /// Ce que Claude sait de ki-chat lui-même : sa nature, sa sécurité, ses
 /// limites. Écrit d'après la documentation du dépôt ; à tenir à jour avec.
-const SAVOIR: &str = include_str!("claude_savoir.md");
+/// En `.txt` et non en `.md` : `.dockerignore` écarte toute la documentation du
+/// contexte de build, et ce fichier-ci fait partie du binaire.
+const SAVOIR: &str = include_str!("claude_savoir.txt");
 
 /// Le bloc stable des consignes : la place de Claude, puis ce qu'il sait.
 fn consignes() -> String {
