@@ -263,7 +263,7 @@ impl Soundboard {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::splat(espace::S);
                             for (i, son) in self.sons.iter().enumerate() {
-                                let nom = crate::ellipsize(&son.nom, 22);
+                                let nom = crate::formats::ellipsize(&son.nom, 22);
                                 let libelle = if i < 9 {
                                     format!("{}  {nom}", i + 1)
                                 } else {

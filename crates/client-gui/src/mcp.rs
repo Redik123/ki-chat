@@ -515,11 +515,11 @@ impl KiApp {
             .collect();
         let ouvertes: Vec<&str> = [
             (self.show_settings, "réglages"),
-            (self.show_admin, "administration"),
+            (self.admin.ouverte, "administration"),
             (self.show_account, "mon compte"),
-            (self.show_search, "recherche"),
-            (self.show_clips, "clips"),
-            (self.show_diffusion, "diffusion"),
+            (self.recherche.ouverte, "recherche"),
+            (self.clips.ouverte, "clips"),
+            (self.diffusion.ouverte, "diffusion"),
             (self.menu_message.is_some(), "menu d'un message"),
         ]
         .into_iter()

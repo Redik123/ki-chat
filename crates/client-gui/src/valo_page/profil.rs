@@ -271,7 +271,7 @@ impl PageValo {
 fn en_tete(ui: &mut Ui, vue: &Vue) {
     identite(ui, vue.fiche, vue.catalogue);
     if vue.fiche.maj > 0 {
-        ui::hint(ui, format!("mise à jour {} · HenrikDev", crate::il_y_a(vue.fiche.maj)));
+        ui::hint(ui, format!("mise à jour {} · HenrikDev", crate::formats::il_y_a(vue.fiche.maj)));
     }
     ui.add_space(espace::S);
     let r = &vue.fiche.rang;
@@ -643,7 +643,7 @@ fn bloc_forme(ui: &mut Ui, vue: &Vue) {
         let info = |i: usize| -> String {
             recents
                 .get(i)
-                .map(|m| format!("{} · {}-{} · {} · {}", m.carte, m.manches.0, m.manches.1, m.agent, crate::il_y_a(m.date)))
+                .map(|m| format!("{} · {}-{} · {} · {}", m.carte, m.manches.0, m.manches.1, m.agent, crate::formats::il_y_a(m.date)))
                 .unwrap_or_default()
         };
         graphes::bande_forme(ui, &resultats, Vec2::new(12.0, 18.0), Some(&info));
@@ -875,7 +875,7 @@ fn medailles(ui: &mut Ui, vue: &Vue) {
             (m.nom(), format!("×{fois}"), record, couleur)
         })
         .collect();
-    let aide = format!("{quand} · mises à jour {}", crate::il_y_a(md.maj));
+    let aide = format!("{quand} · mises à jour {}", crate::formats::il_y_a(md.maj));
     ui::section(ui, Icon::Star, "Médailles", Some(&aide), |ui| {
         ui::grille(ui, tuiles.len(), largeur::TUILE_MIN, espace::L, |ui, i| {
             let (nom, fois, record, couleur) = &tuiles[i];
@@ -942,7 +942,7 @@ fn cellule_de_match(ui: &mut Ui, m: &MatchResume, colonne: ColonneMatch, vue: &V
             ui.vertical(|ui| {
                 ui.add_space(espace::XXS);
                 carte_cellule(ui, &m.carte, vue.catalogue);
-                ui.label(RichText::new(crate::il_y_a(m.date)).color(TEXT_FAINT).size(texte::MINUSCULE));
+                ui.label(RichText::new(crate::formats::il_y_a(m.date)).color(TEXT_FAINT).size(texte::MINUSCULE));
             });
         }
         ColonneMatch::Mode => {

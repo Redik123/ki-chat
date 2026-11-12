@@ -481,7 +481,7 @@ fn carte_de_membre(ui: &mut Ui, place: usize, l: &Ligne, cx: &Contexte<'_>) -> R
     let f = &l.f.fiche;
     let membre = cx.membres.iter().find(|m| m.user_id == l.f.user_id);
     let mien = cx.moi == Some(l.f.user_id);
-    let couleur = membre.map_or_else(|| theme::color_for(&l.f.username), crate::couleur_de_membre);
+    let couleur = membre.map_or_else(|| theme::color_for(&l.f.username), crate::membres::couleur_de_membre);
     let cadre = egui::Frame::NONE
         .fill(theme::BG_RAISED)
         .stroke(egui::Stroke::new(if mien { 1.5 } else { 1.0 }, if mien { ACCENT } else { theme::BORDER_SOFT }))

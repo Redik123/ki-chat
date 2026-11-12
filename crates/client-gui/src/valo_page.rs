@@ -659,7 +659,7 @@ fn info_de_point(x: &PointRR) -> String {
         signe(x.delta).0,
         nom_de_rang(x.tier),
         x.rr,
-        crate::il_y_a(x.date)
+        crate::formats::il_y_a(x.date)
     );
     if x.bonus != 0 {
         texte.push_str(&format!(" · dont {} de bonus de performance", signe(x.bonus).0));
@@ -954,7 +954,7 @@ fn lignes_en_direct(
                 }
                 // Sur un autre compte que celui de sa fiche, le palier est
                 // celui de la présence.
-                let palier = if crate::sur_un_autre_compte(m) { statut.rang } else { m.rang_valorant.unwrap_or(statut.rang) };
+                let palier = if crate::membres::sur_un_autre_compte(m) { statut.rang } else { m.rang_valorant.unwrap_or(statut.rang) };
                 if let Some(icone) = rangs.texture(palier).filter(|_| palier >= 3) {
                     ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(16.0)))
                         .on_hover_text(nom_de_rang(palier));
@@ -1203,7 +1203,7 @@ fn medailles_du_groupe(
                     }
                 }
                 cellule(ui, total(md).to_string(), TEXT_DIM);
-                cellule(ui, crate::il_y_a(md.maj), TEXT_FAINT);
+                cellule(ui, crate::formats::il_y_a(md.maj), TEXT_FAINT);
                 ui.end_row();
             }
         });
@@ -1292,7 +1292,7 @@ fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
             let quand = if m.etat == "inProgress" {
                 RichText::new("en cours").color(SPEAK).strong().size(texte::PETIT)
             } else {
-                RichText::new(format!("{} · {}", crate::day_label(m.date), crate::format_time(m.date)))
+                RichText::new(format!("{} · {}", crate::formats::day_label(m.date), crate::formats::format_time(m.date)))
                     .color(TEXT_DIM)
                     .size(texte::PETIT)
             };

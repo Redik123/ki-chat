@@ -282,7 +282,7 @@ impl Fichiers {
                         ui.label(qui.size(texte::PETIT));
                         let mut details: Vec<String> = f.salons.iter().map(|s| format!("#{}", ki_protocol::safe_display(s, 40))).collect();
                         if f.date_ms > 0 {
-                            details.push(crate::il_y_a(f.date_ms));
+                            details.push(crate::formats::il_y_a(f.date_ms));
                         }
                         details.push(match f.messages {
                             0 => "dans aucun message".to_string(),

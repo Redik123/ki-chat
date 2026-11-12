@@ -573,7 +573,7 @@ fn carte_porte(
                 pastille_invite(ui);
                 if invite.depuis != 0 {
                     ui.label(
-                        RichText::new(format!("entré {}", crate::il_y_a(invite.depuis)))
+                        RichText::new(format!("entré {}", crate::formats::il_y_a(invite.depuis)))
                             .color(TEXT_FAINT)
                             .size(texte::PETIT),
                     );
@@ -610,7 +610,7 @@ fn carte_porte(
                     ui.label(RichText::new(&demande.nom).color(TEXT).strong());
                     if demande.depuis != 0 {
                         ui.label(
-                            RichText::new(format!("a frappé {}", crate::il_y_a(demande.depuis)))
+                            RichText::new(format!("a frappé {}", crate::formats::il_y_a(demande.depuis)))
                                 .color(TEXT_FAINT)
                                 .size(texte::PETIT),
                         );

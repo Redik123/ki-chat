@@ -278,7 +278,7 @@ impl KiApp {
             }
             if self.loupedeck_etat.clips_releve.is_none_or(|t| t.elapsed() > RELIRE_CLIPS) {
                 self.loupedeck_etat.clips_releve = Some(Instant::now());
-                let dossier = self.clips_reglages.dossier_effectif();
+                let dossier = self.clips.reglages.dossier_effectif();
                 let lus = self.loupedeck_etat.clips_lus.clone();
                 let ctx = ctx.clone();
                 std::thread::Builder::new()
@@ -694,9 +694,9 @@ impl KiApp {
             Action::Partage => {
                 if !en_vocal {
                     self.info = Some("rejoins un salon vocal pour diffuser ton écran".into());
-                } else if self.go_live.is_some() {
+                } else if self.diffusion.live.is_some() {
                     self.arreter_diffusion();
-                } else if self.go_live_attente.is_none() {
+                } else if self.diffusion.attente.is_none() {
                     // Avec les réglages de la dernière diffusion : la source
                     // et la qualité se choisissent dans la fenêtre.
                     self.demarrer_diffusion();
@@ -704,7 +704,7 @@ impl KiApp {
             }
             Action::Changeur => self.basculer_changeur(),
             Action::Enregistreur => {
-                if self.enregistreur.is_some() {
+                if self.clips.enregistreur.is_some() {
                     self.arreter_clips();
                 } else {
                     self.demarrer_clips();
@@ -747,10 +747,10 @@ impl KiApp {
             Action::DureeClip => {
                 // La durée suivante ; l'enregistreur en marche repart (le
                 // tampon en cours est perdu, comme depuis les réglages).
-                let avant = self.clips_reglages.clone();
+                let avant = self.clips.reglages.clone();
                 let i = clips::DUREES.iter().position(|d| *d == avant.duree_s).map_or(0, |i| i + 1);
-                self.clips_reglages.duree_s = clips::DUREES[i % clips::DUREES.len()];
-                if self.enregistreur.is_some() && self.clips_reglages.relance_necessaire(&avant) {
+                self.clips.reglages.duree_s = clips::DUREES[i % clips::DUREES.len()];
+                if self.clips.enregistreur.is_some() && self.clips.reglages.relance_necessaire(&avant) {
                     self.arreter_clips();
                     self.demarrer_clips();
                 }
@@ -793,12 +793,12 @@ impl KiApp {
             Action::Ptt if !en_vocal || self.mode != MicMode::Ptt => Eteinte,
             Action::Ptt => selon(self.armed),
             // Les clips marchent aussi hors vocal.
-            Action::Clip => if self.enregistreur.is_some() { Veille } else { Eteinte },
+            Action::Clip => if self.clips.enregistreur.is_some() { Veille } else { Eteinte },
             Action::Partage if !en_vocal => Eteinte,
-            Action::Partage if self.go_live.is_some() => Alerte,
-            Action::Partage => selon(self.go_live_attente.is_some()),
+            Action::Partage if self.diffusion.live.is_some() => Alerte,
+            Action::Partage => selon(self.diffusion.attente.is_some()),
             Action::Changeur => selon(self.changeur_actif),
-            Action::Enregistreur => selon(self.enregistreur.is_some()),
+            Action::Enregistreur => selon(self.clips.enregistreur.is_some()),
             Action::QuitterVocal => if en_vocal { Veille } else { Eteinte },
             Action::Page(n) => selon(self.loupedeck_etat.ecran == *n),
             Action::Salon(nom) => {
@@ -831,7 +831,7 @@ impl KiApp {
         let en_vocal = self.voice_channel.is_some();
         let hors_vocal = || "hors vocal".to_string();
         let pages = &self.loupedeck_etat.config.pages;
-        let duree = self.clips_reglages.duree_s;
+        let duree = self.clips.reglages.duree_s;
         let titre = action.court(pages);
         let detail = match action {
             Action::Rien | Action::Ptt => String::new(),
@@ -842,14 +842,14 @@ impl KiApp {
             Action::Sourd if !en_vocal => hors_vocal(),
             Action::Sourd if self.sourd => "tu n'entends rien".into(),
             Action::Sourd => "tu entends".into(),
-            Action::Clip if self.enregistreur.is_some() => format!("les {duree} dernières s"),
+            Action::Clip if self.clips.enregistreur.is_some() => format!("les {duree} dernières s"),
             Action::Clip => "enregistreur arrêté".into(),
             Action::Partage if !en_vocal => hors_vocal(),
-            Action::Partage if self.go_live.is_some() => "en direct".into(),
-            Action::Partage if self.go_live_attente.is_some() => "démarrage…".into(),
+            Action::Partage if self.diffusion.live.is_some() => "en direct".into(),
+            Action::Partage if self.diffusion.attente.is_some() => "démarrage…".into(),
             Action::Partage => "toucher : diffuser".into(),
             Action::Changeur => if self.changeur_actif { "allumé" } else { "coupé" }.into(),
-            Action::Enregistreur if self.enregistreur.is_some() => "en marche".into(),
+            Action::Enregistreur if self.clips.enregistreur.is_some() => "en marche".into(),
             Action::Enregistreur => "arrêté".into(),
             Action::QuitterVocal => self.voice_channel_name().map(str::to_string).unwrap_or_else(hors_vocal),
             Action::Page(_) => "page".into(),

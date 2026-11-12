@@ -287,7 +287,7 @@ impl Relecture {
             Err(e) => {
                 let depuis = *self.muet_depuis.get_or_insert_with(Instant::now);
                 if depuis.elapsed() > SERVEUR_MUET_MAX {
-                    return Err(format!("le serveur ne répond plus : {}", crate::erreur_http(e)));
+                    return Err(format!("le serveur ne répond plus : {}", crate::televersement::erreur_http(e)));
                 }
                 Ok(None)
             }
@@ -987,7 +987,7 @@ impl Atelier {
                     .set("Content-Type", "application/json")
                     .timeout(Duration::from_secs(30))
                     .send_string(&corps.to_string())
-                    .map_err(crate::erreur_http)?;
+                    .map_err(crate::televersement::erreur_http)?;
                 let json: serde_json::Value = rep.into_json().map_err(|e| e.to_string())?;
                 json["url"]
                     .as_str()
@@ -1052,7 +1052,7 @@ impl Atelier {
                             "la session a été perdue entre-temps — reconnecte-toi, puis ferme et rouvre l'atelier"
                                 .to_string()
                         }
-                        autre => crate::erreur_http(autre),
+                        autre => crate::televersement::erreur_http(autre),
                     })?;
                 Ok(())
             })();
@@ -1151,7 +1151,7 @@ fn demander_export(
                 "la session a été perdue entre-temps — reconnecte-toi, puis ferme et rouvre l'atelier"
                     .into(),
             ),
-            autre => Echec::Autre(crate::erreur_http(autre)),
+            autre => Echec::Autre(crate::televersement::erreur_http(autre)),
         })?;
     let json: serde_json::Value = reponse
         .into_json()
@@ -1292,7 +1292,7 @@ impl Depot<'_> {
                 s.phase = format!("dépôt du clip · morceau {morceau}/{total}");
             }
         };
-        let (upload, parts) = match crate::envoyer_morceaux(
+        let (upload, parts) = match crate::televersement::envoyer_morceaux(
             &reseau.agent,
             &reseau.base,
             &|| reseau.token_hex(),
@@ -1300,8 +1300,8 @@ impl Depot<'_> {
             taille,
             &progres,
         )? {
-            crate::EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
-            crate::EnvoiMorceaux::ServeurAncien => {
+            crate::televersement::EnvoiMorceaux::Envoye { upload, parts } => (upload, parts),
+            crate::televersement::EnvoiMorceaux::ServeurAncien => {
                 return Err("le serveur n'a pas encore l'atelier (mise à jour nécessaire)".into())
             }
         };
@@ -1323,11 +1323,11 @@ impl Depot<'_> {
                     _ => "réseau".into(),
                 };
                 let texte = match e {
-                    ureq::Error::Status(401, _) => crate::SESSION_PERDUE.to_string(),
+                    ureq::Error::Status(401, _) => crate::televersement::SESSION_PERDUE.to_string(),
                     ureq::Error::Status(404, _) => {
                         "le serveur n'a pas encore l'atelier (mise à jour nécessaire)".to_string()
                     }
-                    autre => crate::erreur_http(autre),
+                    autre => crate::televersement::erreur_http(autre),
                 };
                 journal(format!("dépôt de {} : /clips/fin refusé ({code}) : {texte}", self.nom));
                 texte

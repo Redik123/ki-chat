@@ -206,7 +206,7 @@ fn courbe_entiere(ui: &mut Ui, vue: &Vue) {
         Some(premier) => format!(
             "{} gardés, depuis {} · les traits marquent les actes",
             pluriel(points.len() as u32, "classé"),
-            crate::il_y_a(premier.date)
+            crate::formats::il_y_a(premier.date)
         ),
         None => "les classés que le serveur garde".to_string(),
     };
