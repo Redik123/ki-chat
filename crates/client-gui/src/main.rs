@@ -4380,7 +4380,7 @@ impl KiApp {
         self.separateur_nouveaux = if meme_salon { repere.or(self.separateur_nouveaux) } else { repere };
         self.programmer_lu(channel);
         self.send(ClientMsg::Join { channel });
-        self.send(ClientMsg::History { limit: 100 });
+        self.send(ClientMsg::History { limit: HISTORIQUE_PREMIERE_PAGE });
     }
 
     /// Prévoit de tenir le salon pour lu dans [`DELAI_LU`] : la pastille
@@ -5873,7 +5873,22 @@ impl KiApp {
                 }
             }
             ServerMsg::History { messages } => {
+                let courte = messages.len() < HISTORIQUE_PREMIERE_PAGE as usize;
                 self.messages = messages.into_iter().map(clean_record).collect();
+                // Une première page moins pleine que demandé : le plus
+                // souvent, il n'y a rien avant — et « Charger les messages
+                // plus anciens » restait affiché dans un salon de trois
+                // messages. Mais le serveur raccourcit aussi une page de
+                // messages très longs : on ne conclut donc pas, on demande la
+                // page d'avant. Sa réponse dit s'il en reste (`more`), et le
+                // bouton s'en va de lui-même quand il n'y en a pas.
+                if courte {
+                    if self.messages.is_empty() {
+                        self.history_more = false;
+                    } else {
+                        self.load_older_history();
+                    }
+                }
             }
             ServerMsg::Reaction { channel, message, emoji, by, on } => {
                 if self.current != Some(channel) {
@@ -13963,6 +13978,10 @@ fn reaction_locale(reactions: &mut Vec<Reaction>, emoji: &str, by: UserId, on: b
         None => {}
     }
 }
+
+/// Les messages demandés à l'entrée dans un salon. Une page moins pleine
+/// laisse penser qu'il n'y a rien avant : on le vérifie aussitôt.
+const HISTORIQUE_PREMIERE_PAGE: u32 = 100;
 
 /// Ce que l'interface demande pour les réglages, exécuté par la logique.
 enum DemandeReglages {
