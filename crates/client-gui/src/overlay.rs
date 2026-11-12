@@ -11,6 +11,12 @@
 //! Elle ne se montre que quand ki-chat n'a pas le focus (on est ailleurs :
 //! dans le jeu) et qu'on est en salon vocal ; elle se repeint quand ça
 //! change, à dix fois par seconde pendant qu'on parle, jamais plus.
+//!
+//! Elle se pose sur l'écran de la fenêtre qui est devant — celui du jeu —,
+//! pas sur celui de ki-chat : avec deux écrans, elle partait dans le coin
+//! du mauvais. Sa place se calcule en pixels, écran par écran ; egui la
+//! reçoit en points, et Windows la corrige au pixel si les deux écrans
+//! n'ont pas la même échelle.
 
 use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, rayon, texte};
@@ -23,8 +29,38 @@ use crate::theme::TEXT;
 use crate::ui::{self, Ton};
 
 /// Le titre de la fenêtre de l'overlay — c'est par lui qu'on la retrouve
-/// pour la remettre au-dessus.
+/// pour la remettre au-dessus, **parmi les fenêtres de ce processus** :
+/// deux ki-chat ouverts ont chacun la leur, sous le même titre.
 const TITRE: &str = "ki-chat — qui parle";
+
+/// Un écran, en pixels du bureau de Windows (le coin haut gauche de l'écran
+/// principal est à 0,0 ; un écran à sa gauche a des abscisses négatives).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcranPx {
+    pub gauche: i32,
+    pub haut: i32,
+    pub largeur: i32,
+    pub hauteur: i32,
+}
+
+/// Le coin haut gauche de l'overlay, en pixels : dans le coin voulu de
+/// `ecran`, à 16 points des bords — 64 du bas, pour la barre des tâches
+/// quand elle est là. `taille` : celle de l'overlay, en pixels ; `echelle` :
+/// ses pixels par point.
+fn coin_px(coin: Coin, ecran: EcranPx, taille: (i32, i32), echelle: f32) -> (i32, i32) {
+    let marge = (16.0 * echelle).round() as i32;
+    let pied = (64.0 * echelle).round() as i32;
+    let gauche = ecran.gauche + marge;
+    let droite = ecran.gauche + ecran.largeur - taille.0 - marge;
+    let haut = ecran.haut + marge;
+    let bas = ecran.haut + ecran.hauteur - taille.1 - pied;
+    match coin {
+        Coin::HautGauche => (gauche, haut),
+        Coin::HautDroite => (droite, haut),
+        Coin::BasGauche => (gauche, bas),
+        Coin::BasDroite => (droite, bas),
+    }
+}
 
 /// Le fond des fenêtres : un noir presque pur. Sur l'overlay, on ne le voit
 /// qu'au ras des ronds (la fenêtre est découpée à leur forme), où il fond
@@ -49,22 +85,82 @@ mod win {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::Graphics::Gdi::{
-        CombineRgn, CreateEllipticRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, HGDIOBJ,
-        SetWindowRgn, RGN_OR,
+        CombineRgn, CreateEllipticRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW,
+        MonitorFromWindow, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SetWindowRgn, RGN_OR,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+        FindWindowExW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
         GetWindowThreadProcessId, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
 
+    /// La fenêtre `titre` **de ce processus**. Chercher par le titre seul
+    /// rendait la première venue : avec deux ki-chat ouverts, l'un découpait
+    /// et déplaçait l'overlay de l'autre.
     fn fenetre(titre: &str) -> Option<HWND> {
         let large: Vec<u16> = titre.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe { FindWindowW(None, PCWSTR(large.as_ptr())).ok().filter(|h| !h.is_invalid()) }
+        // SAFETY : `large` est terminée par un zéro et vit le temps des
+        // appels ; les poignées rendues ne sont que comparées et relues.
+        unsafe {
+            let moi = GetCurrentProcessId();
+            let mut apres: Option<HWND> = None;
+            // Borne : une fenêtre par instance porte ce titre.
+            for _ in 0..64 {
+                let trouvee = FindWindowExW(None, apres, None, PCWSTR(large.as_ptr())).ok().filter(|h| !h.is_invalid())?;
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(trouvee, Some(&mut pid));
+                if pid == moi {
+                    return Some(trouvee);
+                }
+                apres = Some(trouvee);
+            }
+            None
+        }
+    }
+
+    /// L'écran de la fenêtre qui est devant — celui où l'on regarde.
+    pub fn ecran_du_premier_plan() -> Option<super::EcranPx> {
+        // SAFETY : `info` est à nous, sa taille est posée avant l'appel.
+        unsafe {
+            let devant = GetForegroundWindow();
+            if devant.is_invalid() {
+                return None;
+            }
+            let ecran = MonitorFromWindow(devant, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(ecran, &mut info).as_bool() {
+                return None;
+            }
+            let r = info.rcMonitor;
+            Some(super::EcranPx { gauche: r.left, haut: r.top, largeur: r.right - r.left, hauteur: r.bottom - r.top })
+        }
+    }
+
+    /// Pose l'overlay dans son coin de `ecran`, au pixel, sans l'activer ni
+    /// changer sa taille — seulement s'il n'y est pas déjà. Rend ses pixels
+    /// par point, d'après sa taille réelle : c'est avec eux que la place se
+    /// calcule à l'image suivante. `None` : la fenêtre n'existe pas (encore).
+    pub fn placer(titre: &str, taille: (f32, f32), coin: super::Coin, ecran: super::EcranPx) -> Option<f32> {
+        let hwnd = fenetre(titre)?;
+        // SAFETY : `r` est à nous ; `hwnd` vient d'être trouvée.
+        unsafe {
+            let mut r = RECT::default();
+            GetWindowRect(hwnd, &mut r).ok()?;
+            let px = (r.right - r.left, r.bottom - r.top);
+            if taille.0 <= 0.0 || px.0 <= 0 {
+                return None;
+            }
+            let echelle = px.0 as f32 / taille.0;
+            let (x, y) = super::coin_px(coin, ecran, px, echelle);
+            if (x - r.left).abs() > 1 || (y - r.top).abs() > 1 {
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            Some(echelle)
+        }
     }
 
     /// Remet la fenêtre `titre` au sommet des « toujours au-dessus », sans
@@ -190,6 +286,24 @@ mod win {
     pub fn premier_plan() -> (String, String, bool) {
         (String::new(), String::new(), false)
     }
+    pub fn ecran_du_premier_plan() -> Option<super::EcranPx> {
+        None
+    }
+    pub fn placer(_titre: &str, _taille: (f32, f32), _coin: super::Coin, _ecran: super::EcranPx) -> Option<f32> {
+        None
+    }
+}
+
+/// Pour essayer l'overlay sans vocal, en version de développement :
+/// `KI_ESSAI_OVERLAY=<texte>` l'allume et y tient ce texte.
+#[cfg(debug_assertions)]
+fn essai() -> Option<String> {
+    std::env::var("KI_ESSAI_OVERLAY").ok().filter(|t| !t.is_empty())
+}
+
+#[cfg(not(debug_assertions))]
+fn essai() -> Option<String> {
+    None
 }
 
 /// Le coin de l'écran où l'overlay se pose.
@@ -256,6 +370,11 @@ pub struct Overlay {
     /// Une ligne à montrer quelques secondes (« Clip enregistré »), même
     /// quand personne ne parle.
     annonce: Option<(String, Instant)>,
+    /// L'écran de la fenêtre qui est devant, relevé toutes les deux
+    /// secondes : c'est là que l'overlay se pose.
+    ecran: Option<EcranPx>,
+    /// Les pixels par point de l'overlay, d'après sa taille réelle.
+    echelle: Option<f32>,
 }
 
 /// Windows le sait : `SHQueryUserNotificationState` rend « un programme
@@ -285,7 +404,7 @@ const TENUE: Duration = Duration::from_millis(1200);
 impl Overlay {
     pub fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
-            actif: get("overlay", "off") == "on",
+            actif: get("overlay", "off") == "on" || essai().is_some(),
             coin: Coin::depuis(&get("overlay_coin", "haut-gauche")),
             // Par défaut, rien à l'écran tant que personne ne parle : la
             // discrétion d'abord.
@@ -298,6 +417,8 @@ impl Overlay {
             devant: (String::new(), false),
             decoupe: None,
             annonce: None,
+            ecran: None,
+            echelle: None,
         }
     }
 
@@ -343,6 +464,9 @@ impl Overlay {
     }
 
     pub fn montrer(&mut self, ctx: &egui::Context, lignes: Vec<Ligne>, focus_principal: bool) {
+        if let Some(texte) = essai() {
+            self.annonce = Some((texte, Instant::now()));
+        }
         let annonce = self
             .annonce
             .clone()
@@ -350,7 +474,8 @@ impl Overlay {
         if annonce.is_none() {
             self.annonce = None;
         }
-        if !self.actif || focus_principal || (lignes.is_empty() && annonce.is_none()) {
+        // À l'essai, l'overlay se montre même fenêtre devant : c'est sa place qu'on regarde.
+        if !self.actif || (focus_principal && essai().is_none()) || (lignes.is_empty() && annonce.is_none()) {
             // La fenêtre va disparaître : sa découpe repartira de zéro.
             self.decoupe = None;
             return;
@@ -377,6 +502,10 @@ impl Overlay {
                     if devant.1 { "oui" } else { "non" }
                 ));
                 self.devant = devant;
+            }
+            // Et sur quel écran : l'overlay le suit.
+            if let Some(ecran) = win::ecran_du_premier_plan() {
+                self.ecran = Some(ecran);
             }
             let exclusif = plein_ecran_exclusif();
             if exclusif != self.exclusif {
@@ -485,16 +614,19 @@ impl Overlay {
                 rayon: 14.0,
             });
         }
-        let ecran = ctx
-            .input(|i| i.viewport().monitor_size)
-            .unwrap_or(Vec2::new(1920.0, 1080.0));
-        let pos = match self.coin {
-            Coin::HautGauche => Pos2::new(16.0, 16.0),
-            Coin::HautDroite => Pos2::new(ecran.x - largeur - 16.0, 16.0),
-            // 64 px du bas : la barre des tâches, quand elle est là.
-            Coin::BasGauche => Pos2::new(16.0, ecran.y - hauteur - 64.0),
-            Coin::BasDroite => Pos2::new(ecran.x - largeur - 16.0, ecran.y - hauteur - 64.0),
-        };
+        // L'écran où l'on regarde, en pixels ; à défaut — hors de Windows,
+        // ou avant la première sonde — celui de la fenêtre principale, tenu
+        // pour l'écran principal.
+        let echelle = self.echelle.unwrap_or_else(|| ctx.pixels_per_point());
+        let ecran = self.ecran.unwrap_or_else(|| {
+            let points = ctx.input(|i| i.viewport().monitor_size).unwrap_or(Vec2::new(1920.0, 1080.0));
+            let px = points * ctx.pixels_per_point();
+            EcranPx { gauche: 0, haut: 0, largeur: px.x.round() as i32, hauteur: px.y.round() as i32 }
+        });
+        let taille_px = ((largeur * echelle).round() as i32, (hauteur * echelle).round() as i32);
+        let (x, y) = coin_px(self.coin, ecran, taille_px, echelle);
+        // egui veut des points : ceux de l'overlay lui-même.
+        let pos = Pos2::new(x as f32 / echelle, y as f32 / echelle);
         let anime = affichees.iter().any(|(_, parle, _)| *parle) || annonce.is_some();
         let annonce_dessin = annonce.clone();
         let id = egui::ViewportId::from_hash_of("overlay-qui-parle");
@@ -602,6 +734,12 @@ impl Overlay {
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
         });
+        // Au pixel, sur l'écran voulu : egui a posé la fenêtre avec les
+        // points d'un écran, Windows la corrige si celui d'arrivée n'a pas
+        // la même échelle — et nous dit la vraie, pour l'image suivante.
+        if let Some(echelle) = win::placer(TITRE, (largeur, hauteur), self.coin, ecran) {
+            self.echelle = Some(echelle);
+        }
         // La découpe suit la forme, et ne se refait qu'au changement.
         if self.decoupe.as_ref() != Some(&formes) && win::decouper(TITRE, (largeur, hauteur), &formes) {
             self.decoupe = Some(formes);
@@ -689,6 +827,23 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L'overlay se pose dans le coin de l'écran qu'on lui donne, où que
+    /// soit cet écran sur le bureau, et ses marges suivent son échelle.
+    #[test]
+    fn l_overlay_se_pose_dans_le_coin_de_son_ecran() {
+        let principal = EcranPx { gauche: 0, haut: 0, largeur: 1920, hauteur: 1080 };
+        let taille = (200, 60);
+        assert_eq!(coin_px(Coin::HautGauche, principal, taille, 1.0), (16, 16));
+        assert_eq!(coin_px(Coin::HautDroite, principal, taille, 1.0), (1920 - 200 - 16, 16));
+        assert_eq!(coin_px(Coin::BasGauche, principal, taille, 1.0), (16, 1080 - 60 - 64));
+        assert_eq!(coin_px(Coin::BasDroite, principal, taille, 1.0), (1704, 956));
+        // Un second écran à gauche du principal, plus grand, à 150 %.
+        let second = EcranPx { gauche: -2560, haut: -200, largeur: 2560, hauteur: 1440 };
+        let taille = (300, 90);
+        assert_eq!(coin_px(Coin::HautGauche, second, taille, 1.5), (-2560 + 24, -200 + 24));
+        assert_eq!(coin_px(Coin::BasDroite, second, taille, 1.5), (-300 - 24, -200 + 1440 - 90 - 96));
+    }
 
     #[test]
     fn les_coins_font_l_aller_retour_par_leur_identifiant() {
