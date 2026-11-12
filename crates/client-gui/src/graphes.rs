@@ -659,6 +659,22 @@ fn teinte_de_resultat(r: i8) -> Color32 {
     }
 }
 
+/// La place d'un résultat dans sa case : une victoire tient le haut, une
+/// défaite le bas, un nul un trait au milieu. La couleur ne porte plus le
+/// sens à elle seule — une personne sur douze distingue mal le vert du
+/// rouge, et une bande de cases toutes pareilles ne lui disait rien.
+fn place_de_resultat(case: Rect, r: i8) -> Rect {
+    let pleine = (case.height() * 0.64).round();
+    match r {
+        1.. => Rect::from_min_max(case.min, Pos2::new(case.right(), case.top() + pleine)),
+        ..=-1 => Rect::from_min_max(Pos2::new(case.left(), case.bottom() - pleine), case.max),
+        0 => {
+            let trait_ = (case.height() * 0.22).round().max(2.0);
+            Rect::from_center_size(case.center(), Vec2::new(case.width(), trait_))
+        }
+    }
+}
+
 /// Les cases d'une forme, `resultats` du plus récent au plus ancien comme
 /// `FicheValorant::forme` les rend, la plus récente dessinée **à droite**.
 /// Une case de `case` pixels par résultat (1 victoire SPEAK, -1 défaite
@@ -677,7 +693,8 @@ pub fn bande_forme(ui: &mut Ui, resultats: &[i8], case: Vec2, info: Option<&dyn 
     for colonne in 0..n {
         let x = rect.left() + colonne as f32 * (case.x + ECART_CASES);
         let r = Rect::from_min_size(Pos2::new(x, rect.top()), case);
-        painter.rect_filled(r, CornerRadius::same(rayon::S), teinte_de_resultat(resultats[indice(colonne)]));
+        let resultat = resultats[indice(colonne)];
+        painter.rect_filled(place_de_resultat(r, resultat), CornerRadius::same(rayon::S), teinte_de_resultat(resultat));
     }
     if let (Some(info), Some(souris)) = (info, reponse.hover_pos()) {
         if let Some(colonne) = case_sous(souris.x - rect.left(), case.x, ECART_CASES, n) {
@@ -919,8 +936,8 @@ pub(crate) fn manche_sous(x: f32, n: usize) -> Option<usize> {
     })
 }
 
-/// Une case par manche du `deroule` (`V` gagnée SPEAK, `D` perdue DANGER,
-/// autre lettre en gris), dans l'ordre, un espace après la douzième pour
+/// Une case par manche du `deroule` (`V` gagnée SPEAK en haut, `D` perdue
+/// DANGER en bas, autre lettre : un trait gris), dans l'ordre, un espace après la douzième pour
 /// marquer la mi-temps ; « manche 13 · gagnée » au survol. Un déroulé
 /// vide ne dessine rien.
 pub fn cases_manches(ui: &mut Ui, deroule: &str) {
@@ -940,9 +957,15 @@ pub fn cases_manches(ui: &mut Ui, deroule: &str) {
         'D' => DANGER,
         _ => BORDER_STRONG,
     };
+    // Gagnée en haut, perdue en bas : comme la forme, lisible sans couleur.
+    let issue = |c: char| match c.to_ascii_uppercase() {
+        'V' => 1,
+        'D' => -1,
+        _ => 0,
+    };
     for (i, &c) in manches.iter().enumerate() {
         let case = Rect::from_min_size(Pos2::new(rect.left() + x_de_manche(i), rect.top()), CASE_MANCHE);
-        painter.rect_filled(case, CornerRadius::same(rayon::S), teinte(c));
+        painter.rect_filled(place_de_resultat(case, issue(c)), CornerRadius::same(rayon::S), teinte(c));
     }
     if let Some(i) = reponse.hover_pos().and_then(|souris| manche_sous(souris.x - rect.left(), n)) {
         let case = Rect::from_min_size(Pos2::new(rect.left() + x_de_manche(i), rect.top()), CASE_MANCHE);
@@ -1309,6 +1332,22 @@ pub fn courbes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une victoire tient le haut de sa case, une défaite le bas, un nul le
+    /// milieu : trois places qui se distinguent sans la couleur.
+    #[test]
+    fn un_resultat_se_lit_a_sa_place_dans_la_case() {
+        let case = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(12.0, 18.0));
+        let (v, d, n) = (place_de_resultat(case, 1), place_de_resultat(case, -1), place_de_resultat(case, 0));
+        assert_eq!((v.top(), d.bottom()), (case.top(), case.bottom()));
+        assert!(v.bottom() < case.bottom() && d.top() > case.top());
+        // Elles se chevauchent au milieu, mais aucune ne couvre l'autre.
+        assert!(v.bottom() > d.top() && v.top() < d.top() && d.bottom() > v.bottom());
+        assert!(n.top() > v.top() && n.bottom() < d.bottom() && n.height() < v.height());
+        for r in [v, d, n] {
+            assert_eq!((r.left(), r.right()), (case.left(), case.right()));
+        }
+    }
 
     fn point(date: u64, valeur: f32) -> PointCourbe {
         PointCourbe { date, valeur, monte: None, marque: false }
