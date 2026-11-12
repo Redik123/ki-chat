@@ -786,8 +786,8 @@ impl KiApp {
 
                 // --- Le journal des parties, proposé une fois ---
                 if self.serveur_journal
-                    && !self.journal_propose
-                    && !self.journal_parties
+                    && !self.reglages.journal_propose
+                    && !self.reglages.journal_parties
                     && self.jeu_envoye.as_ref().is_some_and(|j| j.est_valorant())
                 {
                     egui::Panel::top("chat_journal")
@@ -807,14 +807,14 @@ impl KiApp {
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui::Bouton::new("Non merci").icone(Icon::Close).show(ui).clicked() {
-                                        self.journal_propose = true;
+                                        self.reglages.journal_propose = true;
                                     }
                                     if ui::Bouton::new("Oui").icone(Icon::Check).principal().show(ui)
                                         .on_hover_text("ça se décoche quand tu veux : ⚙ → Jeu")
                                         .clicked()
                                     {
-                                        self.journal_parties = true;
-                                        self.journal_propose = true;
+                                        self.reglages.journal_parties = true;
+                                        self.reglages.journal_propose = true;
                                     }
                                 });
                             });
@@ -851,10 +851,10 @@ impl KiApp {
                                         .on_hover_text("ki-chat ne t'en reparlera plus pour ce compte, sur cet ordinateur")
                                         .clicked()
                                     {
-                                        self.comptes_tus.push(empreinte_compte(&session.puuid));
+                                        self.reglages.comptes_tus.push(empreinte_compte(&session.puuid));
                                         // Les plus anciens s'oublient : la liste reste courte.
-                                        let trop = self.comptes_tus.len().saturating_sub(COMPTES_TUS_MAX);
-                                        self.comptes_tus.drain(..trop);
+                                        let trop = self.reglages.comptes_tus.len().saturating_sub(COMPTES_TUS_MAX);
+                                        self.reglages.comptes_tus.drain(..trop);
                                     }
                                     if rien_de_lie
                                         && ui::Bouton::new("Lier ce compte").icone(Icon::Check).principal().show(ui)

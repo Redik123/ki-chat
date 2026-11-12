@@ -518,7 +518,7 @@ impl KiApp {
                         chiffre(&carte(j, "PARTIE"), "—".into(), "choix de l'agent".into(), blanc)
                     }
                     Some(j) => chiffre("PARTIE", "—".into(), partie_courte(j), gris),
-                    None if !self.valorant_presence => chiffre("PARTIE", "—".into(), "toucher : suivre".into(), gris),
+                    None if !self.reglages.valorant_presence => chiffre("PARTIE", "—".into(), "toucher : suivre".into(), gris),
                     None => chiffre("PARTIE", "—".into(), "VALORANT fermé".into(), gris),
                 }
             }
@@ -633,7 +633,7 @@ impl KiApp {
         }
         match w {
             Widget::Rang => self.executer(&Action::Fiche, ctx),
-            Widget::Partie if !self.valorant_presence => self.valorant_presence = true,
+            Widget::Partie if !self.reglages.valorant_presence => self.reglages.valorant_presence = true,
             Widget::Partie => {}
             _ => self.executer(&Action::Stats, ctx),
         }
@@ -973,7 +973,7 @@ impl KiApp {
                 self.set_volume(ki_protocol::MUSIQUE_ID, v);
             }
             // Les sons de ki-chat vont de 0 à 100 %.
-            ActionMolette::Sons => self.sfx_volume = cran(self.sfx_volume, crans).min(1.0),
+            ActionMolette::Sons => self.reglages.sfx_volume = cran(self.reglages.sfx_volume, crans).min(1.0),
         }
     }
 
@@ -996,7 +996,7 @@ impl KiApp {
                 }
             }
             ActionMolette::Musique => self.set_volume(ki_protocol::MUSIQUE_ID, 1.0),
-            ActionMolette::Sons => self.sfx_volume = 1.0,
+            ActionMolette::Sons => self.reglages.sfx_volume = 1.0,
         }
     }
 
@@ -1041,7 +1041,7 @@ impl KiApp {
                 }
             }
             ActionMolette::Musique => volume("MUSIQUE", self.volume_of(ki_protocol::MUSIQUE_ID), 2.0, true),
-            ActionMolette::Sons => volume("SONS", self.sfx_volume, 1.0, true),
+            ActionMolette::Sons => volume("SONS", self.reglages.sfx_volume, 1.0, true),
         }
     }
 

@@ -385,9 +385,9 @@ impl KiApp {
                                     if engine_ok { "active" } else { "INACTIVE — connecte-toi" },
                                 ),
                             );
-                            ui.checkbox(&mut self.sfx_on, "Jouer les sons");
-                            if self.sfx_on {
-                                let mut pct = self.sfx_volume * 100.0;
+                            ui.checkbox(&mut self.reglages.sfx_on, "Jouer les sons");
+                            if self.reglages.sfx_on {
+                                let mut pct = self.reglages.sfx_volume * 100.0;
                                 if ui
                                     .add(
                                         egui::Slider::new(&mut pct, 0.0..=100.0)
@@ -397,7 +397,7 @@ impl KiApp {
                                     )
                                     .changed()
                                 {
-                                    self.sfx_volume = pct / 100.0;
+                                    self.reglages.sfx_volume = pct / 100.0;
                                 }
                                 ui.add_space(espace::S);
 
@@ -422,12 +422,12 @@ impl KiApp {
                                     (sfx::UNMUTE, "Micro réactivé"),
                                 ] {
                                     ui.horizontal(|ui| {
-                                        let mut enabled = !self.sfx_muted.contains(name);
+                                        let mut enabled = !self.reglages.sfx_muted.contains(name);
                                         if ui.checkbox(&mut enabled, label).changed() {
                                             if enabled {
-                                                self.sfx_muted.remove(name);
+                                                self.reglages.sfx_muted.remove(name);
                                             } else {
-                                                self.sfx_muted.insert(name.to_string());
+                                                self.reglages.sfx_muted.insert(name.to_string());
                                             }
                                         }
                                         if self.custom_sfx.contains(name) {
@@ -443,7 +443,7 @@ impl KiApp {
                                                 if let Some(engine) =
                                                     self.link.engine.lock().unwrap().as_ref()
                                                 {
-                                                    engine.play_effect(pcm, self.sfx_volume);
+                                                    engine.play_effect(pcm, self.reglages.sfx_volume);
                                                 }
                                             }
                                         }
@@ -485,12 +485,12 @@ impl KiApp {
                             ui.horizontal(|ui| {
                                 ui.label(Texte::Libelle.riche(ui, "Notifications :"));
                                 for n in Notif::TOUS {
-                                    ui.selectable_value(&mut self.notif, n, n.label());
+                                    ui.selectable_value(&mut self.reglages.notif, n, n.label());
                                 }
                             });
                             ui::hint(
                                 ui,
-                                match self.notif {
+                                match self.reglages.notif {
                                     Notif::Tout => {
                                         "son et clignotement pour tout message reçu dans un \
                                          autre salon, ou fenêtre à l'arrière-plan"
@@ -511,7 +511,7 @@ impl KiApp {
                             // outre « rien » ci-dessus. Le serveur refuse
                             // pour nous quand on le décoche.
                             ui.add_space(espace::S);
-                            ui.checkbox(&mut self.pokes_accepter, "Accepter les pokes");
+                            ui.checkbox(&mut self.reglages.pokes_accepter, "Accepter les pokes");
                             ui::hint(
                                 ui,
                                 "un membre peut te « poker » depuis la liste : un son et un \
@@ -523,7 +523,7 @@ impl KiApp {
                             ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Info, "Fermeture");
                             ui.checkbox(
-                                &mut self.reduire_zone,
+                                &mut self.reglages.reduire_zone,
                                 "Réduire dans la zone de notification à la fermeture \
                                  (la croix ne quitte pas ki-chat)",
                             );
@@ -699,7 +699,7 @@ impl KiApp {
                         }
                         if onglet == Onglet::Jeu {
                             ui::group_title(ui, Icon::Target, "Valorant");
-                            ui.checkbox(&mut self.valorant_presence, "Partager mon activité Valorant")
+                            ui.checkbox(&mut self.reglages.valorant_presence, "Partager mon activité Valorant")
                                 .on_hover_text(
                                     "lu dans ton propre client Riot, sur ce PC, en lecture seule : \
                                      l'état de ta partie, la file, la carte, le score de ton équipe, \
@@ -720,7 +720,7 @@ impl KiApp {
                             ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, format!("état : {etat}")));
                             ui.add_space(espace::S);
                             if ui
-                                .checkbox(&mut self.journal_parties, "Garder l'historique de mes parties (durée, mode, carte)")
+                                .checkbox(&mut self.reglages.journal_parties, "Garder l'historique de mes parties (durée, mode, carte)")
                                 .on_hover_text(
                                     "pour tes statistiques de demain : le temps de jeu par mode, par compte, par \
                                      soirée. Le serveur note chaque partie que ta présence montre — le début, la \
@@ -729,11 +729,11 @@ impl KiApp {
                                 )
                                 .changed()
                             {
-                                self.journal_propose = true;
+                                self.reglages.journal_propose = true;
                             }
-                            let pourquoi_pas = if !self.journal_parties {
+                            let pourquoi_pas = if !self.reglages.journal_parties {
                                 Some("décoché, le serveur n'en garde rien — et efface ce qu'il avait")
-                            } else if !self.valorant_presence {
+                            } else if !self.reglages.valorant_presence {
                                 Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui montre les parties")
                             } else if self.welcomed && !self.serveur_journal {
                                 Some("le serveur ne le tient pas encore : il doit être mis à jour")
@@ -776,18 +776,18 @@ impl KiApp {
                                         }
                                     });
                                     ui.add_space(espace::XS);
-                                    ui.checkbox(&mut self.valorant_medailles, "Ajouter mes médailles à ma fiche").on_hover_text(
+                                    ui.checkbox(&mut self.reglages.valorant_medailles, "Ajouter mes médailles à ma fiche").on_hover_text(
                                         "MVP, top frag, aces, clutchs, records de l'acte… Le serveur les lit \
                                          chez HenrikDev ; avec « Partager mon activité Valorant », ton client \
                                          Riot les donne dès la fin de chaque partie. Les tiennes seulement — \
                                          celles des autres joueurs du match ne partent jamais. Décoche, et \
                                          elles s'effacent de ta fiche.",
                                     );
-                                    let pourquoi_pas = if !self.valorant_medailles || self.serveur_choix_medailles {
+                                    let pourquoi_pas = if !self.reglages.valorant_medailles || self.serveur_choix_medailles {
                                         // Un serveur qui les lit chez HenrikDev n'a
                                         // besoin de rien : la présence les avance.
                                         None
-                                    } else if !self.valorant_presence {
+                                    } else if !self.reglages.valorant_presence {
                                         Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui dit quand une partie finit")
                                     } else if !self.serveur_medailles {
                                         Some("le serveur ne les garde pas encore : il doit être mis à jour")
@@ -840,7 +840,7 @@ impl KiApp {
                             // le jeu, et c'est pour ça qu'il est coché de base.
                             ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Play, "Les autres jeux");
-                            ui.checkbox(&mut self.presence_jeux, "Dire aux membres à quoi je joue")
+                            ui.checkbox(&mut self.reglages.presence_jeux, "Dire aux membres à quoi je joue")
                                 .on_hover_text(
                                     "le jeu est reconnu à sa fenêtre — rien n'est lu dedans. Les \
                                      membres voient « joue à Rocket League » sous ton pseudo.",

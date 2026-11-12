@@ -500,6 +500,7 @@ mod tests {
         let modules = [
             principal,
             include_str!("audio.rs"),
+            include_str!("reglages.rs"),
             include_str!("clips.rs"),
             include_str!("soundboard.rs"),
             include_str!("valo_page.rs"),
@@ -510,6 +511,7 @@ mod tests {
         let audio = include_str!("audio.rs");
         let mut lues = cles(principal, "get(");
         lues.extend(cles(audio, "get("));
+        lues.extend(cles(include_str!("reglages.rs"), "get("));
         let ecrites: std::collections::BTreeSet<String> = modules.iter().flat_map(|m| cles(m, "set_string(")).collect();
         assert!(lues.len() > 50, "la lecture des réglages a changé de forme : ce test ne voit plus rien");
         // Relues pour reprendre l'état d'une version d'avant, plus jamais écrites.

@@ -67,6 +67,7 @@ mod valo_page;
 mod veille;
 mod visionneuse;
 mod zone;
+mod reglages;
 mod audio;
 mod admin_ui;
 mod barre;
@@ -532,10 +533,9 @@ struct KiApp {
     sounds: HashMap<String, Vec<f32>>,
     /// Événements dont le son vient d'un fichier (pour l'afficher).
     custom_sfx: std::collections::HashSet<String>,
-    /// Événements coupés individuellement dans les réglages.
-    sfx_muted: std::collections::HashSet<String>,
-    sfx_on: bool,
-    sfx_volume: f32,
+    /// Les réglages d'usage, hors audio : sons de l'interface, notifications,
+    /// zone de notification, pokes, présence et VALORANT.
+    reglages: reglages::Reglages,
     /// La fenêtre a-t-elle le focus ? (sons de message + notification)
     window_focused: bool,
     /// Demande de clignotement de la barre des tâches à honorer.
@@ -546,11 +546,6 @@ struct KiApp {
     /// L'icône de la zone de notification et l'état « réduite » de la
     /// fenêtre (voir `zone.rs`).
     zone: zone::Zone,
-    /// Réglage ⚙ : la croix réduit dans la zone au lieu de quitter.
-    reduire_zone: bool,
-    /// L'avertissement « ki-chat continue à côté de l'horloge » a été lu
-    /// une fois ; persisté.
-    zone_avertie: bool,
     /// L'avertissement est à l'écran : la croix attend la réponse.
     zone_dialogue: bool,
     /// On veut vraiment quitter (menu de l'icône, « Plutôt quitter », mise
@@ -578,8 +573,6 @@ struct KiApp {
     /// Où poser « nouveaux messages » dans le fil du salon courant : avant
     /// le premier message d'horodatage supérieur. `None` : rien de neuf.
     separateur_nouveaux: Option<u64>,
-    /// De quoi prévenir : tout, les mentions, rien.
-    notif: Notif,
     /// Le titre envoyé à la fenêtre, pour ne le renvoyer que s'il change.
     titre_fenetre: String,
     /// « X te poke » : qui, et depuis quand — le bandeau s'efface tout
@@ -588,8 +581,6 @@ struct KiApp {
     poke_recu: Option<(String, std::time::Instant)>,
     /// Les portes web : bannières de demande, panneau, portes connues.
     portes: porte_ui::Portes,
-    /// Est-ce que j'accepte les pokes ? Réglage ⚙, persisté.
-    pokes_accepter: bool,
     /// Ce que le serveur sait de ce réglage : on ne lui envoie que les
     /// changements, comme `jeu_envoye`. `None` = rien envoyé encore.
     pokes_envoye: Option<bool>,
@@ -668,15 +659,6 @@ struct KiApp {
     diffusion: diffusion_ui::MaDiffusion,
     /// L'overlay « qui parle » par-dessus le jeu.
     overlay: overlay::Overlay,
-    /// Partager son activité VALORANT (lue dans son propre client Riot).
-    /// Désactivé de base : personne ne partage sans l'avoir choisi.
-    valorant_presence: bool,
-    /// Ajouter ses médailles à sa fiche : le serveur les lit chez HenrikDev
-    /// (0.1.63), et son client Riot les donne dès la fin de chaque partie —
-    /// sous « Partager mon activité », qui dit quand une partie finit.
-    /// Décoché, le serveur l'apprend et les efface. Coché de base : lier
-    /// son compte, c'est déjà montrer ses statistiques au groupe.
-    valorant_medailles: bool,
     /// Les lectures de médailles prévues, et la dernière.
     medailles: medailles::Lecteur,
     /// Le serveur garde les médailles (`Welcome.medailles`) : sans cette
@@ -697,14 +679,6 @@ struct KiApp {
     /// Nos comptes Riot liés, d'après le serveur (`MesComptes`) : de quoi
     /// reconnaître, ici, celui qui est ouvert dans le client Riot.
     mes_comptes: Vec<ki_protocol::MonCompte>,
-    /// Les comptes non liés dont on ne veut plus entendre parler : des
-    /// empreintes de puuid ([`empreinte_compte`]), gardées sur cette
-    /// machine seulement.
-    comptes_tus: Vec<String>,
-    /// « Garder l'historique de mes parties » : décoché d'origine.
-    journal_parties: bool,
-    /// La bannière qui le propose a déjà eu sa réponse.
-    journal_propose: bool,
     /// Le serveur tient ce journal (`Welcome.journal_parties`).
     serveur_journal: bool,
     /// Le choix déjà dit à ce serveur depuis la connexion.
@@ -766,9 +740,6 @@ struct KiApp {
     barre_sombre: bool,
     /// Le fil qui lit le client Riot, tant que l'option est cochée.
     veilleur_valorant: Option<valorant::Veilleur>,
-    /// Dire aux membres à quoi je joue — le jeu reconnu à sa fenêtre,
-    /// sans rien lire dedans. Coché de base : c'est un nom, pas une partie.
-    presence_jeux: bool,
     /// Le fil qui regarde les fenêtres, tant que l'option est cochée.
     veilleur_jeux: Option<jeux::Veilleur>,
     /// Le statut de jeu que le serveur connaît : on ne lui envoie que les
@@ -1045,19 +1016,11 @@ impl KiApp {
             messages: Vec::new(),
             sounds: HashMap::new(),   // rempli par reload_sounds() ci-dessous
             custom_sfx: std::collections::HashSet::new(),
-            sfx_muted: get("sfx_muted", "")
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
-            sfx_on: get("sfx_on", "on") == "on",
-            sfx_volume: get("sfx_volume", "0.6").parse().unwrap_or(0.6),
+            reglages: reglages::Reglages::load(get),
             window_focused: true,
             wants_attention: false,
             attention_critique: false,
             zone: zone::Zone::creer(hwnd_de(cc), cc.egui_ctx.clone()),
-            reduire_zone: get("reduire_zone", "on") == "on",
-            zone_avertie: get("zone_avertie", "off") == "on",
             zone_dialogue: false,
             quitter: false,
             reduire_au_demarrage: zone::demande_au_demarrage(),
@@ -1067,11 +1030,9 @@ impl KiApp {
             lu_a_envoyer: None,
             fil_en_bas: true,
             separateur_nouveaux: None,
-            notif: Notif::depuis(&get("notif", "tout")),
             titre_fenetre: String::new(),
             poke_recu: None,
             portes: porte_ui::Portes::new(),
-            pokes_accepter: get("pokes", "on") == "on",
             pokes_envoye: None,
             pokes_refuses: HashMap::new(),
             prev_voice_peers: std::collections::HashSet::new(),
@@ -1126,8 +1087,6 @@ impl KiApp {
                 plein_ecran: false,
                 fenetre: None,
             },
-            valorant_presence: get("valorant_presence", "off") == "on",
-            valorant_medailles: get("valorant_medailles", "on") == "on",
             medailles: medailles::Lecteur::new(),
             serveur_medailles: false,
             serveur_choix_medailles: false,
@@ -1135,9 +1094,6 @@ impl KiApp {
             serveur_tactique: false,
             serveur_comptes_joues: false,
             mes_comptes: Vec::new(),
-            comptes_tus: get("comptes_tus", "").split(',').filter(|e| !e.is_empty()).map(str::to_string).collect(),
-            journal_parties: get("journal_parties", "off") == "on",
-            journal_propose: get("journal_propose", "non") == "oui",
             serveur_journal: false,
             choix_journal_dit: None,
             cartes: cartes::Cartes::default(),
@@ -1194,7 +1150,6 @@ impl KiApp {
             demarrage_verifie: false,
             barre_sombre: false,
             veilleur_valorant: None,
-            presence_jeux: get("presence_jeux", "on") == "on",
             veilleur_jeux: None,
             jeu_envoye: None,
             show_docteur: false,
@@ -1532,7 +1487,7 @@ impl KiApp {
                 ma_fiche: self.ma_fiche.as_ref(),
                 photos: &self.avatars,
                 comparee: self.comparee.as_ref(),
-                journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.journal_parties, jours: self.mon_journal.as_deref() },
+                journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.mon_journal.as_deref() },
             };
             let fiche = self.fiche.as_ref();
             let valo = &mut self.valo;
@@ -1681,7 +1636,7 @@ impl KiApp {
         match decision {
             Some(true) => {
                 self.zone_dialogue = false;
-                self.zone_avertie = true;
+                self.reglages.zone_avertie = true;
                 self.zone.reduire(ctx);
             }
             Some(false) => {
@@ -2128,7 +2083,7 @@ impl KiApp {
     /// Son et clignotement pour un message reçu, selon le réglage : une
     /// mention a son propre son et insiste jusqu'au retour du focus.
     fn notifier(&mut self, pour_moi: bool) {
-        if !self.notif.previent(pour_moi) {
+        if !self.reglages.notif.previent(pour_moi) {
             return;
         }
         self.play_sfx(if pour_moi { sfx::MENTION } else { sfx::MESSAGE });
@@ -2214,7 +2169,7 @@ impl KiApp {
     /// Silencieux quand le son n'existe pas : chacun dépose les fichiers
     /// qu'il veut, et il ne manque rien à celui qui n'en met aucun.
     fn play_sfx(&self, name: &str) {
-        if !self.sfx_on || self.sfx_muted.contains(name) {
+        if !self.reglages.sfx_on || self.reglages.sfx_muted.contains(name) {
             return;
         }
         // Le ki-chat de test ne joue rien : le casque est celui de
@@ -2225,7 +2180,7 @@ impl KiApp {
         }
         let Some(pcm) = self.sounds.get(name) else { return };
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-            engine.play_effect(pcm, self.sfx_volume);
+            engine.play_effect(pcm, self.reglages.sfx_volume);
         }
     }
 
@@ -2805,14 +2760,14 @@ impl KiApp {
     /// que les changements, y compris « plus rien » quand le jeu se ferme
     /// ou qu'on décoche.
     fn tick_presence(&mut self) {
-        if self.valorant_presence {
+        if self.reglages.valorant_presence {
             if self.veilleur_valorant.is_none() {
                 self.veilleur_valorant = Some(valorant::Veilleur::demarrer(self.app_ctx.clone()));
             }
         } else {
             self.veilleur_valorant = None;
         }
-        if self.presence_jeux {
+        if self.reglages.presence_jeux {
             if self.veilleur_jeux.is_none() {
                 self.veilleur_jeux = Some(jeux::Veilleur::demarrer(self.app_ctx.clone()));
             }
@@ -2847,9 +2802,9 @@ impl KiApp {
         // serveur qui a prouvé qu'il est récent (il tient les lus) : un
         // serveur antérieur répondrait « message invalide », en bannière,
         // à chaque connexion.
-        if self.serveur_gere_lus && self.pokes_envoye != Some(self.pokes_accepter) {
-            self.send(ClientMsg::AccepterPokes { accepter: self.pokes_accepter });
-            self.pokes_envoye = Some(self.pokes_accepter);
+        if self.serveur_gere_lus && self.pokes_envoye != Some(self.reglages.pokes_accepter) {
+            self.send(ClientMsg::AccepterPokes { accepter: self.reglages.pokes_accepter });
+            self.pokes_envoye = Some(self.reglages.pokes_accepter);
         }
     }
 
@@ -2863,7 +2818,7 @@ impl KiApp {
         }
         let session = self.veilleur_valorant.as_ref()?.session()?;
         let autre = valorant::classer_compte(Some(&session), &self.mes_comptes) == ki_protocol::CompteLocal::Autre;
-        (autre && !self.comptes_tus.contains(&empreinte_compte(&session.puuid))).then_some(session)
+        (autre && !self.reglages.comptes_tus.contains(&empreinte_compte(&session.puuid))).then_some(session)
     }
 
     /// Mon Riot ID lié, d'après le roster.
@@ -2882,14 +2837,14 @@ impl KiApp {
         // Le choix d'abord, compte lié ou pas encore : il vaut aussi pour
         // la liaison à venir, et pour les médailles que le serveur lit
         // lui-même chez HenrikDev.
-        if self.serveur_choix_medailles && self.choix_medailles_dit != Some(self.valorant_medailles) {
-            self.send(ClientMsg::ChoixMedailles { oui: self.valorant_medailles });
-            self.choix_medailles_dit = Some(self.valorant_medailles);
+        if self.serveur_choix_medailles && self.choix_medailles_dit != Some(self.reglages.valorant_medailles) {
+            self.send(ClientMsg::ChoixMedailles { oui: self.reglages.valorant_medailles });
+            self.choix_medailles_dit = Some(self.reglages.valorant_medailles);
         }
         // Le journal de nos parties, sur le même modèle.
-        if self.serveur_journal && self.choix_journal_dit != Some(self.journal_parties) {
-            self.send(ClientMsg::ChoixJournal { oui: self.journal_parties });
-            self.choix_journal_dit = Some(self.journal_parties);
+        if self.serveur_journal && self.choix_journal_dit != Some(self.reglages.journal_parties) {
+            self.send(ClientMsg::ChoixJournal { oui: self.reglages.journal_parties });
+            self.choix_journal_dit = Some(self.reglages.journal_parties);
             // Effacé ou repris : la Progression le relira.
             self.mon_journal = None;
             self.mon_journal_demande = None;
@@ -2899,7 +2854,7 @@ impl KiApp {
             .my_id
             .and_then(|id| self.members.iter().find(|m| m.user_id == id))
             .is_some_and(|m| m.riot_id.is_some());
-        let voulu = self.valorant_medailles && self.serveur_medailles && lie_existe;
+        let voulu = self.reglages.valorant_medailles && self.serveur_medailles && lie_existe;
         if voulu {
             match (self.valorant_avant, etat) {
                 (None, Some(_)) => self.medailles.au_lancement(),
@@ -3840,12 +3795,12 @@ impl KiApp {
         // marqueurs levés). `CancelClose` doit partir dans la même image.
         // Et sans icône pour revenir, elle ferme comme avant.
         if ctx.input(|i| i.viewport().close_requested())
-            && self.reduire_zone
+            && self.reglages.reduire_zone
             && self.zone.disponible()
             && !self.quitter
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if self.zone_avertie {
+            if self.reglages.zone_avertie {
                 self.zone.reduire(ctx);
             } else {
                 self.zone_dialogue = true;
@@ -4134,29 +4089,14 @@ impl KiApp {
         // laisse la position au système. On ne touche à rien d'autre — le
         // carnet de serveurs vit dans le même fichier.
         storage.set_string("window", String::new());
-        storage.set_string("sfx_on", if self.sfx_on { "on" } else { "off" }.into());
-        storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
+        self.reglages.save(storage);
         storage.set_string("visionneuse_volume", format!("{}", self.visionneuse.volume));
         self.audio.save(storage);
         self.clips.reglages.save(storage);
-        storage.set_string(
-            "sfx_muted",
-            self.sfx_muted.iter().cloned().collect::<Vec<_>>().join(","),
-        );
-        storage.set_string("notif", self.notif.cle().into());
-        storage.set_string("pokes", if self.pokes_accepter { "on" } else { "off" }.into());
-        storage.set_string("reduire_zone", if self.reduire_zone { "on" } else { "off" }.into());
-        storage.set_string("zone_avertie", if self.zone_avertie { "on" } else { "off" }.into());
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
-        storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
-        storage.set_string("valorant_medailles", if self.valorant_medailles { "on" } else { "off" }.into());
-        storage.set_string("comptes_tus", self.comptes_tus.join(","));
-        storage.set_string("journal_parties", if self.journal_parties { "on" } else { "off" }.into());
-        storage.set_string("journal_propose", if self.journal_propose { "oui" } else { "non" }.into());
-        storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
         self.soundboard.save(storage);
         self.valo.save(storage);
         storage.set_string("loupedeck", if self.loupedeck_etat.actif { "on" } else { "off" }.into());

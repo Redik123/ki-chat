@@ -141,11 +141,11 @@ impl KiApp {
             let d = e.declencheur();
             l.action_clip(Some(std::sync::Arc::new(move || d.appuyer())));
         }
-        let son = (self.clips.reglages.son && self.sfx_on && !self.sfx_muted.contains("clip"))
+        let son = (self.clips.reglages.son && self.reglages.sfx_on && !self.reglages.sfx_muted.contains("clip"))
             .then(|| self.sounds.get("clip").cloned())
             .flatten();
         let engine = self.link.engine.clone();
-        let volume = self.sfx_volume;
+        let volume = self.reglages.sfx_volume;
         e.quand_fini(Some(std::sync::Arc::new(move |r: &Result<clips::Clip, String>| {
             if r.is_err() {
                 return;
