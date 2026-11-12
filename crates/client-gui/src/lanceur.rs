@@ -269,7 +269,7 @@ impl KiApp {
         let ready = self.selected.is_some()
             && !self.username.trim().is_empty()
             && !self.password.is_empty()
-            && !self.connecting;
+            && !self.session.connecting;
         let enter = !editing && ctx.input(|i| i.key_pressed(egui::Key::Enter));
         let mut go = false;
 
@@ -309,7 +309,7 @@ impl KiApp {
                                 let essais =
                                     self.reprise.as_ref().map_or(0, |r| r.essais);
                                 ui.add_space(espace::L);
-                                let quoi = if self.connecting {
+                                let quoi = if self.session.connecting {
                                     format!("Connexion perdue — tentative {essais}…")
                                 } else {
                                     format!(
@@ -603,8 +603,8 @@ impl KiApp {
         // délai de `DELAI_CONNEXION` finit par trancher, mais vingt secondes
         // sans pouvoir revenir en arrière, c'est vingt secondes de trop quand
         // on vient de taper la mauvaise adresse.
-        if self.connecting {
-            let reste = self
+        if self.session.connecting {
+            let reste = self.session
                 .connect_started
                 .map(|d| Self::DELAI_CONNEXION.saturating_sub(d.elapsed()).as_secs() + 1)
                 .unwrap_or(0);

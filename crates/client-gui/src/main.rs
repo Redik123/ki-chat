@@ -67,6 +67,7 @@ mod valo_page;
 mod veille;
 mod visionneuse;
 mod zone;
+mod session;
 mod reglages;
 mod audio;
 mod admin_ui;
@@ -102,7 +103,7 @@ use audio::{MicMode, BITRATES};
 use eframe::egui::{self, RichText};
 use ki_core::markup;
 use ki_protocol::{
-    ChannelId, ChannelInfo, ChatRecord, ClientMsg, IconChange, Member, MsgRef, ReplyRef, ServerInfo,
+    ChannelId, ClientMsg, IconChange, Member, MsgRef, ReplyRef, ServerInfo,
     UserId,
 };
 use ki_ui::jetons::{espace, marge, texte};
@@ -472,22 +473,12 @@ struct KiApp {
     invite: String,
     /// Le champ « code d'invitation » n'est affiché qu'à la demande.
     show_invite: bool,
-    conn: Option<net::NetHandle>,
-    connecting: bool,
-    /// Début de la tentative en cours, pour la borner (voir
-    /// `DELAI_CONNEXION`). `None` = pas de tentative en vol.
-    connect_started: Option<std::time::Instant>,
-    welcomed: bool,
+    /// La session en cours : la connexion, qui l'on est chez ce serveur, ce qu'il
+    /// nous a donné à voir — salons, rôles, membres, messages.
+    session: session::Session,
     error: Option<String>,
 
     // État serveur
-    my_id: Option<UserId>,
-    /// Permissions effectives, annoncées par le serveur. L'interface s'en
-    /// sert pour ne montrer que ce qui aboutira.
-    my_perms: ki_protocol::Perms,
-    /// Mon rang : on n'agit que sur strictement plus bas que soi.
-    my_rank: u16,
-    voice_token: u64,
     /// Le même jeton, en hexadécimal, partagé avec les fils qui durent
     /// (l'atelier : un export prend des minutes) — relu à chaque requête,
     /// mis à jour à chaque `Welcome`. Un fil qui aurait copié le jeton à
@@ -509,17 +500,6 @@ struct KiApp {
     /// Ce qui s'écrivait dans les salons qu'on ne regarde pas : chacun
     /// retrouve son texte, sa réponse ou sa modification quand on y revient.
     brouillons: brouillons::Brouillons,
-    channels: Vec<ChannelInfo>,
-    /// Tous les rôles du serveur, pour les couleurs et les badges.
-    roles: Vec<ki_protocol::RoleInfo>,
-    /// Salon textuel ouvert.
-    current: Option<ChannelId>,
-    /// Salon vocal où l'on se trouve. `None` = connecté au serveur sans
-    /// être en vocal, ce qui est l'état à l'arrivée.
-    voice_channel: Option<ChannelId>,
-    /// Tout le monde sur le serveur, pas seulement le salon courant.
-    members: Vec<Member>,
-    messages: Vec<ChatRecord>,
     /// Le message auquel on est en train de répondre, rappelé au-dessus de
     /// la zone de saisie jusqu'à l'envoi (ou Échap).
     reponse_a: Option<ReplyRef>,
@@ -557,14 +537,6 @@ struct KiApp {
     /// Un poke reçu pendant la réduction : nommé dans le tooltip de
     /// l'icône jusqu'à la réouverture, là où le bandeau expire tout seul.
     zone_poke: Option<String>,
-    /// Ce qui n'a pas été lu, par salon. Le salon courant y figure aussi
-    /// quand on ne le regarde pas — fenêtre à l'arrière-plan, ou fil
-    /// remonté dans le passé.
-    non_lus: HashMap<ChannelId, NonLu>,
-    /// Le serveur tient les repères de lecture : vrai dès le premier
-    /// `NonLus` reçu. Avant ça — ou face à un serveur antérieur — on
-    /// n'envoie jamais de `Lu`, qu'il prendrait pour un message invalide.
-    serveur_gere_lus: bool,
     /// Le `Lu` en attente : le salon, et l'instant où l'envoyer.
     lu_a_envoyer: Option<(ChannelId, std::time::Instant)>,
     /// Le fil est-il collé en bas ? Un message qui arrive alors est vu ;
@@ -587,20 +559,6 @@ struct KiApp {
     /// Les cibles dont le poke vient d'être refusé, et quand : leur bouton
     /// reste grisé [`DELAI_REFUS_POKE`], le temps de lire le motif.
     pokes_refuses: HashMap<UserId, std::time::Instant>,
-    /// Occupants du salon vocal à l'image précédente : c'est leur écart qui
-    /// révèle une arrivée ou un départ. Les messages `UserJoined`/`UserLeft`
-    /// portent sur le serveur entier, pas sur le salon vocal.
-    prev_voice_peers: std::collections::HashSet<UserId>,
-    /// Salon vocal de l'image précédente : quand il change, les occupants du
-    /// nouveau salon sont adoptés EN SILENCE (entrer dans un salon peuplé ne
-    /// déclenche pas six sons d'arrivée) — sans fenêtre temporelle, qui
-    /// mangeait les sons dès qu'on changeait de salon rapidement.
-    prev_voice_channel: Option<ChannelId>,
-    /// Reste-t-il du passé à remonter dans ce salon ?
-    history_more: bool,
-    /// Une page est déjà demandée : on n'en réclame pas une seconde à
-    /// chaque image tant que celle-ci n'est pas arrivée.
-    history_pending: bool,
     /// Empreinte du certificat du serveur courant, pour épingler le HTTPS
     /// du partage de fichiers sur la même identité que le QUIC.
     server_fingerprint: String,
@@ -611,16 +569,6 @@ struct KiApp {
     /// posée, l'écran de connexion propose d'accepter la nouvelle — c'est la
     /// seule façon de se reconnecter à un serveur réinstallé.
     identity_alarm: Option<String>,
-    /// Ce qu'on veut du vocal : un salon, ou en sortir.
-    ///
-    /// L'affichage suit cette intention le temps que le serveur la traite,
-    /// puis c'est la liste des membres qui fait foi. Sans cette fenêtre, une
-    /// liste produite avant notre clic nous remettait dans le salon qu'on
-    /// venait de quitter ; sans sa **péremption**, un refus jamais notifié
-    /// figeait l'affichage pour le reste de la session.
-    voice_intent: Option<Option<ChannelId>>,
-    /// Fin de la fenêtre pendant laquelle l'intention prime.
-    voice_intent_until: std::time::Instant,
     /// Le fil doit descendre tout en bas à sa prochaine image : on vient
     /// d'entrer dans un salon, ou d'y sauter.
     fil_au_bas: bool,
@@ -993,27 +941,14 @@ impl KiApp {
             },
             invite: String::new(),
             show_invite: false,
-            conn: None,
-            connecting: false,
-            connect_started: None,
-            welcomed: false,
+            session: session::Session::nouvelle(),
             error: None,
-            my_id: None,
-            my_perms: 0,
-            my_rank: 0,
-            roles: Vec::new(),
-            voice_token: 0,
             jeton_http: Default::default(),
             liens_prets: Default::default(),
             envoi_en_attente: None,
             #[cfg(all(debug_assertions, windows))]
             mcp: mcp::demande().then(|| mcp::Serveur::demarrer(cc.egui_ctx.clone())),
             brouillons: Default::default(),
-            channels: Vec::new(),
-            current: None,
-            voice_channel: None,
-            members: Vec::new(),
-            messages: Vec::new(),
             sounds: HashMap::new(),   // rempli par reload_sounds() ci-dessous
             custom_sfx: std::collections::HashSet::new(),
             reglages: reglages::Reglages::load(get),
@@ -1025,8 +960,6 @@ impl KiApp {
             quitter: false,
             reduire_au_demarrage: zone::demande_au_demarrage(),
             zone_poke: None,
-            non_lus: HashMap::new(),
-            serveur_gere_lus: false,
             lu_a_envoyer: None,
             fil_en_bas: true,
             separateur_nouveaux: None,
@@ -1035,15 +968,9 @@ impl KiApp {
             portes: porte_ui::Portes::new(),
             pokes_envoye: None,
             pokes_refuses: HashMap::new(),
-            prev_voice_peers: std::collections::HashSet::new(),
-            prev_voice_channel: None,
-            history_more: false,
-            history_pending: false,
             server_fingerprint: String::new(),
             agent_http: std::cell::RefCell::new(None),
             identity_alarm: None,
-            voice_intent: None,
-            voice_intent_until: std::time::Instant::now(),
             fil_au_bas: true,
             input: String::new(),
             focus_input: false,
@@ -1348,7 +1275,7 @@ impl KiApp {
         // Le ping n'existe que connecté ; le moteur, lui, tourne même
         // pendant une coupure — et c'est voulu : le vumètre du micro
         // continue de bouger, les réglages audio restent utilisables.
-        let ping = self.conn.as_ref().and_then(|c| c.rtt_ms());
+        let ping = self.session.conn.as_ref().and_then(|c| c.rtt_ms());
         match self.link.engine.lock().unwrap().as_ref() {
             Some(engine) => {
                 let comms_proposal = engine.comms_proposal();
@@ -1376,8 +1303,8 @@ impl KiApp {
     /// rogne, et une mention se compare à ce qu'il diffuse, pas à ce qu'on a
     /// saisi.
     fn my_pseudo(&self) -> Option<&str> {
-        let id = self.my_id?;
-        self.members
+        let id = self.session.my_id?;
+        self.session.members
             .iter()
             .find(|m| m.user_id == id)
             .map(|m| m.username.as_str())
@@ -1466,7 +1393,7 @@ impl KiApp {
         }
         // Ma fiche, une fois : « Moi » sur la carte de chaleur.
         if !self.ma_fiche_demandee {
-            if let Some(moi) = self.my_id.filter(|_| !self.mes_comptes.is_empty()) {
+            if let Some(moi) = self.session.my_id.filter(|_| !self.mes_comptes.is_empty()) {
                 self.ma_fiche_demandee = true;
                 self.send(ClientMsg::FicheValorant { user_id: moi });
             }
@@ -1478,8 +1405,8 @@ impl KiApp {
                 recu: self.stats_recu,
                 esports: &self.esports,
                 activite: &self.activite,
-                moi: self.my_id,
-                membres: &self.members,
+                moi: self.session.my_id,
+                membres: &self.session.members,
                 rangs: &self.rangs,
                 catalogue: &self.catalogue,
                 soiree: &self.soiree,
@@ -1658,8 +1585,8 @@ impl KiApp {
         porte_ui::Contexte {
             peut_ouvrir: self.can(CREATE_INVITE),
             peut_expulser: self.can(KICK),
-            mon_vocal: self.voice_channel,
-            salons: &self.channels,
+            mon_vocal: self.session.voice_channel,
+            salons: &self.session.channels,
             base_web: self.base_web(),
         }
     }
@@ -1684,7 +1611,7 @@ impl KiApp {
                 porte_ui::Action::Envoyer(msg) => self.send(msg),
                 porte_ui::Action::Copier(texte) => self.app_ctx.copy_text(texte),
                 porte_ui::Action::Lire(salon) => {
-                    if self.current != Some(salon) {
+                    if self.session.current != Some(salon) {
                         self.join(salon);
                     }
                 }
@@ -1704,8 +1631,8 @@ impl KiApp {
         if !self.serveur_cartes {
             return;
         }
-        let en_vocal = self.voice_channel.is_some();
-        let membres = &self.members;
+        let en_vocal = self.session.voice_channel.is_some();
+        let membres = &self.session.members;
         let avatars = &self.avatars;
         let qui = |id: UserId| {
             let m = membres.iter().find(|m| m.user_id == id);
@@ -1715,7 +1642,7 @@ impl KiApp {
                 photo: avatars.get(&id).map(|(_, t)| t.clone()),
             }
         };
-        let actions = self.cartes.fenetre(ctx, self.my_id, en_vocal, &qui);
+        let actions = self.cartes.fenetre(ctx, self.session.my_id, en_vocal, &qui);
         for action in actions {
             self.send(ClientMsg::Cartes { action });
         }
@@ -1726,14 +1653,14 @@ impl KiApp {
     /// viennent du catalogue, mes traits ont la couleur de mon pseudo, et
     /// mes gestes partent au serveur.
     fn tactique_window(&mut self, ctx: &egui::Context) {
-        let lien = match (self.serveur_tactique, self.voice_channel) {
+        let lien = match (self.serveur_tactique, self.session.voice_channel) {
             (false, _) => tactique::Lien::SansServeur,
             (true, None) => tactique::Lien::HorsVocal,
             (true, Some(_)) => tactique::Lien::Salon,
         };
         self.tactique.relier(lien);
-        let moi = self.my_id.unwrap_or(0);
-        let mien = self.members.iter().find(|m| Some(m.user_id) == self.my_id);
+        let moi = self.session.my_id.unwrap_or(0);
+        let mien = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id);
         self.tactique.muet = mien.is_some_and(|m| m.force_muted);
         if self.tactique.ouvert {
             let couleur = mien.map_or(ACCENT, couleur_de_membre);
@@ -1752,7 +1679,7 @@ impl KiApp {
             self.soundboard.ouvert = false;
             return;
         }
-        let en_vocal = self.voice_channel.is_some();
+        let en_vocal = self.session.voice_channel.is_some();
         let Some(commande) = self.soundboard.fenetre(ctx, en_vocal) else { return };
         let joue = {
             let engine = self.link.engine.lock().unwrap();
@@ -1778,7 +1705,7 @@ impl KiApp {
     /// pour passer de l'un à l'autre.
     fn ouvrir_visionneuse(&mut self, cible: visionneuse::Cible) {
         let mut liste = Vec::new();
-        for msg in &self.messages {
+        for msg in &self.session.messages {
             for (is_link, chunk) in split_links(&msg.text) {
                 if !is_link || !self.previews.is_ours(chunk) {
                     continue;
@@ -1937,7 +1864,7 @@ impl KiApp {
             }
         }
         // « En direct » montre le rang de ceux qui jouent, fiche ou pas.
-        for m in &self.members {
+        for m in &self.session.members {
             if let Some(tier) = palier_de(m) {
                 self.rangs.preparer(ctx, tier);
             }
@@ -1961,14 +1888,14 @@ impl KiApp {
     }
 
     fn send(&self, msg: ClientMsg) {
-        if let Some(conn) = &self.conn {
+        if let Some(conn) = &self.session.conn {
             conn.send(msg);
         }
     }
 
     /// Ouvre un salon textuel : on change ce qu'on lit, rien d'autre.
     fn join(&mut self, channel: ChannelId) {
-        let meme_salon = self.current == Some(channel);
+        let meme_salon = self.session.current == Some(channel);
         // Ce qui s'écrivait reste dans le salon qu'on quitte, et celui où
         // l'on entre rend ce qu'on y avait laissé. Le champ unique faisait
         // suivre le texte d'un salon à l'autre, et envoyait une modification
@@ -1980,7 +1907,7 @@ impl KiApp {
             // justement). Un brouillon rangé ne le remplace que s'il est vide.
             let champ_libre =
                 self.input.trim().is_empty() && self.reponse_a.is_none() && self.edition.is_none();
-            if let Some(quitte) = self.current {
+            if let Some(quitte) = self.session.current {
                 self.brouillons.ranger(
                     quitte,
                     brouillons::Brouillon {
@@ -1990,7 +1917,7 @@ impl KiApp {
                     },
                 );
             }
-            if self.current.is_some() || champ_libre {
+            if self.session.current.is_some() || champ_libre {
                 let repris = self.brouillons.reprendre(channel);
                 self.curseur_a_la_fin = !repris.texte.is_empty();
                 self.input = repris.texte;
@@ -2000,12 +1927,12 @@ impl KiApp {
             // Le menu ouvert sur un message de l'autre salon n'a plus d'objet.
             self.menu_message = None;
         }
-        self.current = Some(channel);
-        self.messages.clear();
+        self.session.current = Some(channel);
+        self.session.messages.clear();
         // On repart du principe qu'il y a un passé à remonter : le serveur
         // dira le contraire dès la première page s'il n'y en a pas.
-        self.history_more = true;
-        self.history_pending = false;
+        self.session.history_more = true;
+        self.session.history_pending = false;
         // Entrer normalement dans un salon, c'est en voir la fin : le pied de
         // fil « tu regardes un message retrouvé » n'a plus lieu d'être.
         self.recherche.retour_present = None;
@@ -2016,7 +1943,7 @@ impl KiApp {
         // Entrer, c'est lire : la pastille tombe, et « nouveaux messages »
         // se posera là où l'on en était. Le serveur l'apprend dans une
         // seconde — s'il tient les lus.
-        let repere = self
+        let repere = self.session
             .non_lus
             .remove(&channel)
             .filter(|n| n.nb > 0)
@@ -2062,22 +1989,22 @@ impl KiApp {
             return;
         }
         self.lu_a_envoyer = None;
-        if !lecture_effective(self.window_focused, self.fil_en_bas, self.current, channel) {
+        if !lecture_effective(self.window_focused, self.fil_en_bas, self.session.current, channel) {
             return;
         }
-        self.non_lus.remove(&channel);
-        if !self.serveur_gere_lus {
+        self.session.non_lus.remove(&channel);
+        if !self.session.serveur_gere_lus {
             return;
         }
         // Jusqu'au dernier message affiché ; fil vide, jusqu'au dernier que
         // le serveur connaît — il borne de toute façon.
-        let ts = self.messages.iter().map(|m| m.ts).max().unwrap_or(u64::MAX);
+        let ts = self.session.messages.iter().map(|m| m.ts).max().unwrap_or(u64::MAX);
         self.send(ClientMsg::Lu { channel, ts });
     }
 
     /// Un message non lu de plus dans `channel`.
     fn compter_non_lu(&mut self, channel: ChannelId, ts: u64, mention: bool) {
-        self.non_lus.entry(channel).or_default().ajouter(ts, mention);
+        self.session.non_lus.entry(channel).or_default().ajouter(ts, mention);
     }
 
     /// Son et clignotement pour un message reçu, selon le réglage : une
@@ -2093,29 +2020,29 @@ impl KiApp {
 
     /// Ce message me nomme-t-il ? Même règle que le surlignage du fil.
     fn me_nomme(&self, user_id: UserId, text: &str) -> bool {
-        Some(user_id) != self.my_id
+        Some(user_id) != self.session.my_id
             && !est_bot(user_id)
             && self.my_pseudo().is_some_and(|moi| {
-                let membres: Vec<&str> = self.members.iter().map(|m| m.username.as_str()).collect();
+                let membres: Vec<&str> = self.session.members.iter().map(|m| m.username.as_str()).collect();
                 markup::me_mentionne(text, &membres, moi)
             })
     }
 
     /// Le total des non-lus, pour le titre de la fenêtre.
     fn total_non_lus(&self) -> u32 {
-        self.non_lus.values().fold(0u32, |n, v| n.saturating_add(v.nb))
+        self.session.non_lus.values().fold(0u32, |n, v| n.saturating_add(v.nb))
     }
 
     /// Ai-je cette permission ?
     fn can(&self, need: ki_protocol::Perms) -> bool {
-        ki_protocol::perm::has(self.my_perms, need)
+        ki_protocol::perm::has(self.session.my_perms, need)
     }
 
     /// Puis-je agir sur cette personne ? Le rang tranche, jamais la
     /// permission : c'est ce qui empêche un second administrateur de bannir
     /// le propriétaire.
     fn outranks(&self, member_rank: u16) -> bool {
-        ki_protocol::perm::outranks(self.my_rank, member_rank)
+        ki_protocol::perm::outranks(self.session.my_rank, member_rank)
     }
 
     /// Ai-je de quoi ouvrir le panneau d'administration ?
@@ -2159,7 +2086,7 @@ impl KiApp {
         member
             .roles
             .iter()
-            .filter_map(|id| self.roles.iter().find(|r| r.id == *id))
+            .filter_map(|id| self.session.roles.iter().find(|r| r.id == *id))
             .max_by_key(|r| r.rank)
             .map(|r| r.name.as_str())
     }
@@ -2201,21 +2128,21 @@ impl KiApp {
     /// sans jamais correspondre — refus, message perdu — c'est le serveur qui
     /// reprend la main, ce qui évite tout affichage figé.
     fn after_roster_change(&mut self) {
-        if let Some(me) = self.members.iter().find(|m| Some(m.user_id) == self.my_id) {
+        if let Some(me) = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id) {
             // Un compte n'a qu'une voix : si elle passe par l'appli mobile,
             // ce PC n'est plus en vocal, même si le compte l'est.
             let mine = if me.mobile { None } else { me.voice };
-            let waiting = self.voice_intent.is_some()
-                && std::time::Instant::now() < self.voice_intent_until;
-            match self.voice_intent {
+            let waiting = self.session.voice_intent.is_some()
+                && std::time::Instant::now() < self.session.voice_intent_until;
+            match self.session.voice_intent {
                 Some(want) if mine == want => {
-                    self.voice_intent = None;
-                    self.voice_channel = mine;
+                    self.session.voice_intent = None;
+                    self.session.voice_channel = mine;
                 }
                 _ if waiting => {}
                 _ => {
-                    self.voice_intent = None;
-                    self.voice_channel = mine;
+                    self.session.voice_intent = None;
+                    self.session.voice_channel = mine;
                 }
             }
         }
@@ -2223,47 +2150,47 @@ impl KiApp {
     }
 
     fn update_voice_peers(&mut self) {
-        let Some(mine) = self.voice_channel else {
-            self.prev_voice_peers.clear();
-            self.prev_voice_channel = None;
+        let Some(mine) = self.session.voice_channel else {
+            self.session.prev_voice_peers.clear();
+            self.session.prev_voice_channel = None;
             return;
         };
-        let now: std::collections::HashSet<UserId> = self
+        let now: std::collections::HashSet<UserId> = self.session
             .members
             .iter()
-            .filter(|m| m.voice == Some(mine) && Some(m.user_id) != self.my_id)
+            .filter(|m| m.voice == Some(mine) && Some(m.user_id) != self.session.my_id)
             .map(|m| m.user_id)
             .collect();
         // Je viens d'arriver dans CE salon : ses occupants sont adoptés en
         // silence — seuls les mouvements ULTÉRIEURS feront du bruit.
-        if self.prev_voice_channel != Some(mine) {
-            self.prev_voice_channel = Some(mine);
-            self.prev_voice_peers = now;
+        if self.session.prev_voice_channel != Some(mine) {
+            self.session.prev_voice_channel = Some(mine);
+            self.session.prev_voice_peers = now;
             return;
         }
-        if now.difference(&self.prev_voice_peers).next().is_some() {
+        if now.difference(&self.session.prev_voice_peers).next().is_some() {
             self.play_sfx(sfx::PEER_JOIN);
         }
-        if self.prev_voice_peers.difference(&now).next().is_some() {
+        if self.session.prev_voice_peers.difference(&now).next().is_some() {
             self.play_sfx(sfx::PEER_LEAVE);
         }
-        self.prev_voice_peers = now;
+        self.session.prev_voice_peers = now;
     }
 
     /// Demande la page d'historique précédant le plus ancien message affiché.
     fn load_older_history(&mut self) {
-        if self.history_pending || !self.history_more {
+        if self.session.history_pending || !self.session.history_more {
             return;
         }
-        let Some(oldest) = self.messages.first().map(|m| m.ts) else { return };
-        let Some(channel) = self.current else { return };
-        self.history_pending = true;
+        let Some(oldest) = self.session.messages.first().map(|m| m.ts) else { return };
+        let Some(channel) = self.session.current else { return };
+        self.session.history_pending = true;
         self.send(ClientMsg::HistoryBefore { before_ts: oldest, limit: 100, channel });
     }
 
     /// Entre dans un salon vocal, ou en change.
     fn join_voice(&mut self, channel: ChannelId) {
-        if self.voice_channel == Some(channel) {
+        if self.session.voice_channel == Some(channel) {
             return;
         }
         // Le serveur refuserait : autant le dire tout de suite, plutôt que
@@ -2277,13 +2204,13 @@ impl KiApp {
         // refuser, et la liste des membres qu'il diffuse fait foi. Sans cette
         // réconciliation, un refus laissait l'interface montrer le salon et
         // armer le micro dans le vide, indéfiniment.
-        self.voice_channel = Some(channel);
+        self.session.voice_channel = Some(channel);
         self.set_voice_intent(Some(channel));
         self.play_sfx(sfx::SELF_JOIN);
         // Le prochain passage d'update_voice_peers adoptera les occupants du
         // nouveau salon en silence (voir prev_voice_channel).
-        self.prev_voice_channel = None;
-        self.prev_voice_peers.clear();
+        self.session.prev_voice_channel = None;
+        self.session.prev_voice_peers.clear();
         let password = self.mots_de_passe_vocaux.get(&channel).cloned();
         self.send(ClientMsg::JoinVoice { channel, password });
     }
@@ -2291,28 +2218,28 @@ impl KiApp {
     /// Annonce ce qu'on veut du vocal, et laisse à l'affichage le temps que le
     /// serveur le confirme. Passé ce délai, c'est lui qui décide de nouveau.
     fn set_voice_intent(&mut self, want: Option<ChannelId>) {
-        self.voice_intent = Some(want);
-        self.voice_intent_until =
+        self.session.voice_intent = Some(want);
+        self.session.voice_intent_until =
             std::time::Instant::now() + std::time::Duration::from_secs(3);
     }
 
     /// Quitte le vocal, sans quitter le serveur.
     fn leave_voice(&mut self) {
         self.set_voice_intent(None);
-        if self.voice_channel.take().is_none() {
+        if self.session.voice_channel.take().is_none() {
             return;
         }
         self.vocal.armed = false;
         self.vocal.transmitting = false;
         self.play_sfx(sfx::SELF_LEAVE);
-        self.prev_voice_peers.clear();
+        self.session.prev_voice_peers.clear();
         self.send(ClientMsg::LeaveVoice);
     }
 
     /// Nom du salon vocal occupé.
     fn voice_channel_name(&self) -> Option<&str> {
-        let id = self.voice_channel?;
-        self.channels.iter().find(|c| c.id == id).map(|c| c.name.as_str())
+        let id = self.session.voice_channel?;
+        self.session.channels.iter().find(|c| c.id == id).map(|c| c.name.as_str())
     }
 
     /// Referme la connexion et **efface tout ce qui appartenait au serveur
@@ -2348,7 +2275,7 @@ impl KiApp {
         // premier essai qui échoue, c'est une adresse mal tapée ou un serveur
         // qu'on n'a jamais eu : réessayer en boucle n'y changerait rien et
         // masquerait l'erreur derrière un décompte.
-        if !self.welcomed && self.reprise.is_none() {
+        if !self.session.welcomed && self.reprise.is_none() {
             self.disconnect(error);
             return;
         }
@@ -2360,7 +2287,7 @@ impl KiApp {
         // courant est déjà vide.
         let (salon, vocal, adresse) = match &self.reprise {
             Some(r) => (r.salon, r.vocal, r.adresse.clone()),
-            None => (self.current, self.voice_channel, self.url.trim().to_string()),
+            None => (self.session.current, self.session.voice_channel, self.url.trim().to_string()),
         };
         self.fermer_session(error);
         if essais > Reprise::MAX {
@@ -2392,7 +2319,7 @@ impl KiApp {
             self.reprise = None;
             return;
         }
-        if self.connecting || std::time::Instant::now() < r.quand {
+        if self.session.connecting || std::time::Instant::now() < r.quand {
             return;
         }
         self.connect(ctx);
@@ -2436,39 +2363,39 @@ impl KiApp {
             self.arreter_diffusion();
         }
         self.fermer_regard(false);
-        if let Some(mut conn) = self.conn.take() {
+        if let Some(mut conn) = self.session.conn.take() {
             conn.quit();
         }
-        self.connecting = false;
-        self.connect_started = None;
-        self.welcomed = false;
+        self.session.connecting = false;
+        self.session.connect_started = None;
+        self.session.welcomed = false;
 
         // --- Identité et droits ---
-        self.my_id = None;
-        self.my_perms = 0;
-        self.my_rank = 0;
-        self.roles.clear();
-        self.voice_token = 0;
+        self.session.my_id = None;
+        self.session.my_perms = 0;
+        self.session.my_rank = 0;
+        self.session.roles.clear();
+        self.session.voice_token = 0;
         *self.jeton_http.lock().unwrap() = net::JetonHttp::default();
         self.server_fingerprint.clear();
 
         // --- Salons, présence, conversation ---
-        self.channels.clear();
+        self.session.channels.clear();
         // Le serveur suivant ne connaît pas notre jeu : il le réapprendra.
         self.jeu_envoye = None;
-        self.current = None;
-        self.voice_channel = None;
-        self.voice_intent = None;
-        self.members.clear();
+        self.session.current = None;
+        self.session.voice_channel = None;
+        self.session.voice_intent = None;
+        self.session.members.clear();
         self.diffusion.spectateurs.clear();
-        self.messages.clear();
+        self.session.messages.clear();
         self.edition = None;
-        self.history_more = false;
-        self.history_pending = false;
+        self.session.history_more = false;
+        self.session.history_pending = false;
         // Les non-lus sont ceux d'un serveur : le prochain redira les siens,
         // et redira s'il tient les lus.
-        self.non_lus.clear();
-        self.serveur_gere_lus = false;
+        self.session.non_lus.clear();
+        self.session.serveur_gere_lus = false;
         self.lu_a_envoyer = None;
         self.separateur_nouveaux = None;
         // Les pokes sont ceux d'un serveur, et le suivant ne connaît pas
@@ -2596,9 +2523,9 @@ impl KiApp {
         /// toute façon qu'un niveau toutes les vingt millisecondes.
         const ANIME: Duration = Duration::from_millis(50);
 
-        if !self.welcomed {
+        if !self.session.welcomed {
             // Écran de connexion.
-            if self.connecting {
+            if self.session.connecting {
                 // Le décompte du bouton d'annulation descend seconde après
                 // seconde.
                 return Some(Duration::from_millis(250));
@@ -2633,7 +2560,7 @@ impl KiApp {
         let anime = if self.plein_rythme() { ANIME } else { zone::CADENCE_REDUITE };
 
         // En vocal : vumètres par locuteur, indicateur d'émission, ping.
-        if self.voice_channel.is_some() {
+        if self.session.voice_channel.is_some() {
             return Some(anime);
         }
         // Quelqu'un parle dans un salon qu'on regarde sans y être : son
@@ -2698,8 +2625,8 @@ impl KiApp {
 
     /// Abandonne une connexion qui n'aboutit pas.
     fn check_connect_timeout(&mut self) {
-        let Some(depuis) = self.connect_started else { return };
-        if self.connecting && depuis.elapsed() >= Self::DELAI_CONNEXION {
+        let Some(depuis) = self.session.connect_started else { return };
+        if self.session.connecting && depuis.elapsed() >= Self::DELAI_CONNEXION {
             self.connexion_perdue(Some(
                 "le serveur n'a pas répondu — vérifie l'adresse, ou réessaie".into(),
             ));
@@ -2708,10 +2635,10 @@ impl KiApp {
 
     fn connect(&mut self, ctx: &egui::Context) {
         self.error = None;
-        self.connecting = true;
-        self.connect_started = Some(std::time::Instant::now());
+        self.session.connecting = true;
+        self.session.connect_started = Some(std::time::Instant::now());
         let invite = self.invite.trim();
-        self.conn = Some(net::connect(
+        self.session.conn = Some(net::connect(
             self.url.trim().to_string(),
             net::Credentials {
                 username: self.username.trim().to_string(),
@@ -2774,7 +2701,7 @@ impl KiApp {
         } else {
             self.veilleur_jeux = None;
         }
-        if !self.welcomed {
+        if !self.session.welcomed {
             return;
         }
         // VALORANT d'abord : sa présence dit plus qu'un nom de fenêtre.
@@ -2802,7 +2729,7 @@ impl KiApp {
         // serveur qui a prouvé qu'il est récent (il tient les lus) : un
         // serveur antérieur répondrait « message invalide », en bannière,
         // à chaque connexion.
-        if self.serveur_gere_lus && self.pokes_envoye != Some(self.reglages.pokes_accepter) {
+        if self.session.serveur_gere_lus && self.pokes_envoye != Some(self.reglages.pokes_accepter) {
             self.send(ClientMsg::AccepterPokes { accepter: self.reglages.pokes_accepter });
             self.pokes_envoye = Some(self.reglages.pokes_accepter);
         }
@@ -2823,8 +2750,8 @@ impl KiApp {
 
     /// Mon Riot ID lié, d'après le roster.
     fn mon_riot_id(&self) -> Option<String> {
-        let id = self.my_id?;
-        self.members.iter().find(|m| m.user_id == id)?.riot_id.clone()
+        let id = self.session.my_id?;
+        self.session.members.iter().find(|m| m.user_id == id)?.riot_id.clone()
     }
 
     /// Les médailles VALORANT : une lecture prévue quand le jeu arrive et
@@ -2850,9 +2777,9 @@ impl KiApp {
             self.mon_journal_demande = None;
         }
         // À chaque image : rien n'est copié tant qu'aucune lecture n'arrive.
-        let lie_existe = self
+        let lie_existe = self.session
             .my_id
-            .and_then(|id| self.members.iter().find(|m| m.user_id == id))
+            .and_then(|id| self.session.members.iter().find(|m| m.user_id == id))
             .is_some_and(|m| m.riot_id.is_some());
         let voulu = self.reglages.valorant_medailles && self.serveur_medailles && lie_existe;
         if voulu {
@@ -2913,7 +2840,7 @@ impl KiApp {
             self.retour = None;
         }
         let Some(id) = self.session_auto else { return };
-        if self.conn.is_some() || self.connecting {
+        if self.session.conn.is_some() || self.session.connecting {
             return;
         }
         let memorise = self.book.iter().any(|s| s.id == id && s.secret.is_some());
@@ -2931,7 +2858,7 @@ impl KiApp {
         // Pendant une connexion, la cible ne change pas : le `Welcome` qui
         // arrive écrirait nom, logo et empreinte du premier serveur dans la
         // fiche du second.
-        if self.connecting {
+        if self.session.connecting {
             return;
         }
         let Some(server) = self.book.iter().find(|s| s.id == id) else { return };
@@ -3210,7 +3137,7 @@ impl KiApp {
         }
         let ptt_active = self.audio.mode == MicMode::Ptt && self.touche_ptt.tenue();
         // Hors d'un salon vocal, le micro reste fermé quoi qu'il arrive.
-        let autorise = !self.vocal.muted && self.voice_channel.is_some();
+        let autorise = !self.vocal.muted && self.session.voice_channel.is_some();
         let armed = autorise && (matches!(self.audio.mode, MicMode::Open | MicMode::Vad) || ptt_active);
         // Le moteur est réglé **à chaque image**, et non sur la seule
         // transition. `self.vocal.armed` était écrit hors d'ici — en quittant le
@@ -3308,7 +3235,7 @@ impl KiApp {
     /// Suis-je le propriétaire du serveur ? Son rôle est seul au rang le
     /// plus haut.
     fn suis_proprietaire(&self) -> bool {
-        self.my_rank == u16::MAX
+        self.session.my_rank == u16::MAX
     }
 
     /// Allumer ou couper le changeur de voix — par le raccourci global ou le
@@ -3409,16 +3336,16 @@ impl KiApp {
     /// reçu pour les autres).
     fn overlay_en_jeu(&mut self, ctx: &egui::Context, voice: &VoiceSnapshot) {
         self.overlay.veiller(ctx);
-        let Some(channel) = self.voice_channel else {
+        let Some(channel) = self.session.voice_channel else {
             self.overlay.montrer(ctx, Vec::new(), self.window_focused);
             return;
         };
-        let lignes: Vec<overlay::Ligne> = self
+        let lignes: Vec<overlay::Ligne> = self.session
             .members
             .iter()
             .filter(|m| m.voice == Some(channel))
             .map(|m| {
-                let is_me = Some(m.user_id) == self.my_id;
+                let is_me = Some(m.user_id) == self.session.my_id;
                 let level = if is_me {
                     voice.stats.mic_peak
                 } else {
@@ -3821,7 +3748,7 @@ impl KiApp {
         // Le focus revient : ce qu'on avait sous les yeux sans le regarder
         // — le salon ouvert, fenêtre à l'arrière-plan — est lu maintenant.
         if focused && !self.window_focused {
-            if let Some(c) = self.current {
+            if let Some(c) = self.session.current {
                 self.programmer_lu(c);
             }
         }
@@ -3881,7 +3808,7 @@ impl KiApp {
                 pressions.1.wrapping_sub(self.vocal.hotkey_vues.1) % 2 == 1,
             );
             self.vocal.hotkey_vues = pressions;
-            if self.voice_channel.is_some() {
+            if self.session.voice_channel.is_some() {
                 if sourd {
                     self.basculer_sourd();
                 }
@@ -3893,7 +3820,7 @@ impl KiApp {
         self.tick_clips(ctx);
         // Sortir du vocal rend l'écoute : sourd hors vocal, ce serait des
         // notifications muettes sans qu'on sache pourquoi.
-        if self.vocal.sourd && self.voice_channel.is_none() {
+        if self.vocal.sourd && self.session.voice_channel.is_none() {
             self.vocal.sourd = false;
             self.apply_audio_settings();
         }
@@ -3901,7 +3828,7 @@ impl KiApp {
         // En vocal, la machine ne doit pas s'endormir : parler ne compte pas
         // comme de l'activité pour Windows, et un portable dont on ne touche
         // pas le clavier se mettait en veille en pleine conversation.
-        self.veille.actualiser(self.voice_channel.is_some());
+        self.veille.actualiser(self.session.voice_channel.is_some());
 
         self.traiter_reglages(ctx, frame);
         self.poll_events();
@@ -3976,7 +3903,7 @@ impl KiApp {
     fn interface(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         // Où l'on est, pour le successeur si cette instance plante.
-        secours::situer(self.selected.filter(|_| self.welcomed), self.current, self.voice_channel);
+        secours::situer(self.selected.filter(|_| self.session.welcomed), self.session.current, self.session.voice_channel);
         if !self.premiere_image {
             self.premiere_image = true;
             tracing::info!("interface prête : première image");
@@ -3986,7 +3913,7 @@ impl KiApp {
         self.catalogue.preparer(ctx);
         let voice = self.instantane_voix.take().unwrap_or_else(|| self.voice_snapshot());
 
-        if self.welcomed {
+        if self.session.welcomed {
             // Avant tout le reste : ouvert, le panneau des suggestions garde Échap.
             self.suggestions.echap(ctx);
         }
@@ -3998,28 +3925,28 @@ impl KiApp {
         // sait laquelle, toutes les fenêtres y sont, plus besoin de les
         // nommer ici —, puis la page qui a pris la place du chat.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.welcomed && self.atelier.est_ouvert() {
+            if self.session.welcomed && self.atelier.est_ouvert() {
                 self.atelier.fermer();
                 prendre_echap(ctx);
-            } else if self.welcomed && self.visionneuse.est_ouverte() {
+            } else if self.session.welcomed && self.visionneuse.est_ouverte() {
                 self.visionneuse.fermer();
                 prendre_echap(ctx);
             } else if ki_ui::fenetre::echap(ctx) {
                 // La modale ou la fenêtre se fermera en se dessinant.
-            } else if self.welcomed && self.fiche.is_some() {
+            } else if self.session.welcomed && self.fiche.is_some() {
                 self.fiche = None;
                 self.comparee = None;
                 self.valo.fermer_fiche();
                 prendre_echap(ctx);
-            } else if self.welcomed && self.valo.ouvert {
+            } else if self.session.welcomed && self.valo.ouvert {
                 self.valo.ouvert = false;
                 prendre_echap(ctx);
-            } else if self.welcomed && self.claude.ouvert {
+            } else if self.session.welcomed && self.claude.ouvert {
                 self.claude.ouvert = false;
                 prendre_echap(ctx);
             }
         }
-        if self.welcomed {
+        if self.session.welcomed {
             self.main_screen(ui, &voice);
         } else {
             self.login_screen(ui);
@@ -4132,7 +4059,7 @@ impl KiApp {
         if let Some(r) = &regard {
             self.send(ClientMsg::Unwatch { stream_id: r.stream_id });
         }
-        if let Some(mut conn) = self.conn.take() {
+        if let Some(mut conn) = self.session.conn.take() {
             conn.quitter_borne(FERMETURE_CONNEXION);
         }
         tracing::info!("fermeture : connexion rendue");

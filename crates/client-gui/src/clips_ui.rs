@@ -514,7 +514,7 @@ impl KiApp {
     /// « Partager dans un salon… » depuis la galerie : la boîte s'ouvre sur
     /// le salon courant.
     pub(crate) fn ouvrir_partage_clip(&mut self, c: clips::ClipInfo) {
-        if self.conn.is_none() {
+        if self.session.conn.is_none() {
             self.info = Some("connecte-toi d'abord pour partager un clip".into());
             return;
         }
@@ -523,8 +523,8 @@ impl KiApp {
             return;
         }
         let textuels: Vec<&ChannelInfo> =
-            self.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
-        let salon = self
+            self.session.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
+        let salon = self.session
             .current
             .filter(|id| textuels.iter().any(|ch| ch.id == *id))
             .or_else(|| textuels.iter().min_by_key(|ch| ch.position).map(|ch| ch.id));
@@ -544,7 +544,7 @@ impl KiApp {
     /// sans le droit de partager des fichiers, on regarde et l'on règle,
     /// sans exporter.
     pub(crate) fn ouvrir_atelier(&mut self, c: clips::ClipInfo, ctx: &egui::Context) {
-        let reseau = (self.conn.is_some() && self.can(ki_protocol::perm::UPLOAD_FILE)).then(|| {
+        let reseau = (self.session.conn.is_some() && self.can(ki_protocol::perm::UPLOAD_FILE)).then(|| {
             atelier::Reseau {
                 base: self.http_base(),
                 jeton: self.jeton_http.clone(),
@@ -561,10 +561,10 @@ impl KiApp {
             return;
         }
         let mut textuels: Vec<&ChannelInfo> =
-            self.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
+            self.session.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
         textuels.sort_by_key(|ch| ch.position);
         let salons: Vec<(ChannelId, String)> = textuels.iter().map(|ch| (ch.id, ch.name.clone())).collect();
-        self.atelier.ui(ctx, &salons, self.current);
+        self.atelier.ui(ctx, &salons, self.session.current);
     }
 
     /// La boîte « Partager le clip » : le salon, une légende, les voix des
@@ -581,7 +581,7 @@ impl KiApp {
                 .partage
                 .as_ref()
                 .and_then(|p| p.salon)
-                .and_then(|id| self.channels.iter().find(|ch| ch.id == id))
+                .and_then(|id| self.session.channels.iter().find(|ch| ch.id == id))
                 .map(|ch| ch.name.clone())
                 .unwrap_or_default();
             self.info = Some(format!(
@@ -592,7 +592,7 @@ impl KiApp {
         }
         let salons: Vec<(ChannelId, String)> = {
             let mut v: Vec<&ChannelInfo> =
-                self.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
+                self.session.channels.iter().filter(|ch| ch.kind == ChannelKind::Text).collect();
             v.sort_by_key(|ch| ch.position);
             v.iter().map(|ch| (ch.id, ch.name.clone())).collect()
         };
@@ -829,7 +829,7 @@ impl KiApp {
     pub(crate) fn lancer_retrait_clip(&mut self, c: clips::ClipInfo) {
         let Some(fiche) = c.fiche.clone() else { return };
         let Some(id) = fiche.serveur.clone() else { return };
-        if self.conn.is_none() {
+        if self.session.conn.is_none() {
             self.info = Some("connecte-toi d'abord".into());
             return;
         }
@@ -839,7 +839,7 @@ impl KiApp {
             return;
         }
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        let token_hex = format!("{:x}", self.session.voice_token);
         let resultat = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.clips.retrait_resultat = Some(resultat.clone());
         let (chemin, nom) = (c.chemin.clone(), c.nom.clone());

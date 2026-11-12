@@ -642,9 +642,9 @@ impl KiApp {
     /// Zone centrale : en-tête du salon, conversation, saisie.
     pub(crate) fn chat_panel(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
-        let channel_name = self
+        let channel_name = self.session
             .current
-            .and_then(|id| self.channels.iter().find(|c| c.id == id))
+            .and_then(|id| self.session.channels.iter().find(|c| c.id == id))
             .map(|c| c.name.clone())
             .unwrap_or_default();
 
@@ -717,9 +717,9 @@ impl KiApp {
 
                 // --- Musique : la bannière, quand le bot est quelque part — ou
                 // quand on peut le faire venir : en vocal, avec la permission.
-                let en_vocal = self
+                let en_vocal = self.session
                     .my_id
-                    .and_then(|me| self.members.iter().find(|m| m.user_id == me))
+                    .and_then(|me| self.session.members.iter().find(|m| m.user_id == me))
                     .is_some_and(|m| m.voice.is_some());
                 let peut_appeler = self.musique.etat.disponible && en_vocal && self.can(ki_protocol::perm::CONTROL_MUSIC);
                 if self.musique.etat.salon.is_some() || peut_appeler {
@@ -739,9 +739,9 @@ impl KiApp {
                     self.cartes.table().map(|t| (t.phase, t.joueurs.len()))
                 };
                 if let Some((phase, assis)) = table_cartes {
-                    let mon_tour = self.cartes.mon_tour(self.my_id);
-                    let place_libre = self.cartes.place_libre(self.my_id);
-                    let au_bot = self.cartes.ma_place_au_bot(self.my_id);
+                    let mon_tour = self.cartes.mon_tour(self.session.my_id);
+                    let place_libre = self.cartes.place_libre(self.session.my_id);
+                    let au_bot = self.cartes.ma_place_au_bot(self.session.my_id);
                     egui::Panel::top("chat_cartes")
                         .frame(
                             egui::Frame::NONE
@@ -915,7 +915,7 @@ impl KiApp {
     }
 
     pub(crate) fn chat_log(&mut self, ui: &mut egui::Ui, channel_name: &str) {
-        if self.messages.is_empty() {
+        if self.session.messages.is_empty() {
             empty_state(ui, channel_name);
             return;
         }
@@ -926,26 +926,26 @@ impl KiApp {
         // Les pseudos connus, empruntés le temps du rendu comme les
         // messages : c'est ce qui permet de reconnaître une mention
         // sans allouer une chaîne par membre et par image.
-        let membres_source = std::mem::take(&mut self.members);
+        let membres_source = std::mem::take(&mut self.session.members);
         let membres: Vec<&str> = membres_source.iter().map(|m| m.username.as_str()).collect();
-        let moi = self
+        let moi = self.session
             .my_id
             .and_then(|id| membres_source.iter().find(|m| m.user_id == id))
             .map(|m| m.username.clone());
-        let moi_id = self.my_id;
+        let moi_id = self.session.my_id;
         // Ce qu'un clic sur un message a demandé : exécuté après le
         // rendu, quand les messages sont revenus dans l'état.
         let mut demande: Option<(MsgRef, MessageAction)> = None;
 
-        let messages = std::mem::take(&mut self.messages);
+        let messages = std::mem::take(&mut self.session.messages);
         let n = messages.len();
         // « Nouveaux messages » : avant le premier message postérieur au
         // repère. Posé à l'entrée du salon, il reste jusqu'au prochain
         // changement de salon — on veut le retrouver en remontant.
         let nouveaux = self.separateur_nouveaux.and_then(|depuis| messages.iter().position(|m| m.ts > depuis));
-        let (history_pending, history_more) = (self.history_pending, self.history_more);
+        let (history_pending, history_more) = (self.session.history_pending, self.session.history_more);
         // On a sauté au milieu du passé : ce qui a suivi n'est pas affiché.
-        let retour = self.recherche.retour_present == self.current;
+        let retour = self.recherche.retour_present == self.session.current;
         let previews = &mut self.previews;
         let avatars = &self.avatars;
         let author_colors = &self.author_colors;
@@ -1069,10 +1069,10 @@ impl KiApp {
                     }
                 },
             );
-        self.messages = messages;
+        self.session.messages = messages;
         drop(membres);
-        self.members = membres_source;
-        self.perf.fin_fil(sortie.dessines, self.messages.len());
+        self.session.members = membres_source;
+        self.perf.fin_fil(sortie.dessines, self.session.messages.len());
 
         if let Some((message, action)) = demande {
             match action {
@@ -1083,7 +1083,7 @@ impl KiApp {
                     self.send(ClientMsg::React { message, emoji, on });
                 }
                 MessageAction::Aller(ts) => {
-                    if let Some(c) = self.current {
+                    if let Some(c) = self.session.current {
                         self.sauter_a(c, ts);
                     }
                 }
@@ -1102,8 +1102,8 @@ impl KiApp {
         // ça, la pastille posée sur le salon courant restait jusqu'au message
         // suivant.
         if self.fil_en_bas && !etait_en_bas && self.window_focused {
-            if let Some(c) = self.current {
-                if self.non_lus.contains_key(&c) {
+            if let Some(c) = self.session.current {
+                if self.session.non_lus.contains_key(&c) {
                     self.programmer_lu(c);
                 }
             }
@@ -1126,7 +1126,7 @@ impl KiApp {
             self.load_older_history();
         }
         if revenir {
-            if let Some(channel) = self.current {
+            if let Some(channel) = self.session.current {
                 self.join(channel);
             }
         }
@@ -1137,7 +1137,7 @@ impl KiApp {
     /// ferme sur Échap, sur un clic ailleurs, ou une fois la chose faite.
     pub(crate) fn menu_message_ui(&mut self, ctx: &egui::Context) {
         let Some(menu) = self.menu_message.clone() else { return };
-        let Some(msg) = self
+        let Some(msg) = self.session
             .messages
             .iter()
             .find(|m| m.user_id == menu.message.user_id && m.ts == menu.message.ts)
@@ -1147,7 +1147,7 @@ impl KiApp {
             return;
         };
         let peut_supprimer =
-            Some(msg.user_id) == self.my_id || self.can(ki_protocol::perm::DELETE_MESSAGES);
+            Some(msg.user_id) == self.session.my_id || self.can(ki_protocol::perm::DELETE_MESSAGES);
         let mut fermer = false;
         let zone = egui::Area::new(egui::Id::unique("menu-message"))
             .order(egui::Order::Foreground)
@@ -1169,7 +1169,7 @@ impl KiApp {
                             let deja = msg
                                 .reactions
                                 .iter()
-                                .any(|r| r.emoji == *emoji && self.my_id.is_some_and(|me| r.users.contains(&me)));
+                                .any(|r| r.emoji == *emoji && self.session.my_id.is_some_and(|me| r.users.contains(&me)));
                             let bouton = match ki_ui::emoji::image(ui.ctx(), emoji) {
                                 Some(image) => egui::Button::image(image.fit_to_exact_size(Vec2::splat(22.0))),
                                 None => egui::Button::new(RichText::new(*emoji).size(texte::TITRE)),
@@ -1204,7 +1204,7 @@ impl KiApp {
                     }
                     // Les siens seulement : le serveur refuse le reste, et
                     // un bouton qui échoue n'apprend rien.
-                    if Some(msg.user_id) == self.my_id && ui.button("✎ Modifier").clicked() {
+                    if Some(msg.user_id) == self.session.my_id && ui.button("✎ Modifier").clicked() {
                         self.commencer_edition(&msg);
                         fermer = true;
                     }

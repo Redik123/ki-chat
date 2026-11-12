@@ -147,7 +147,7 @@ impl KiApp {
     /// Le serveur a accordé le stream : la capture démarre, l'émission aussi.
     pub(crate) fn diffusion_accordee(&mut self, stream_id: u32) {
         let Some(key) = self.diffusion.attente.take() else { return };
-        let Some(conn) = &self.conn else { return };
+        let Some(conn) = &self.session.conn else { return };
         let force_idr = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cadence = std::sync::Arc::new(std::sync::Mutex::new(self.diffusion.reglages.meta(&key)));
         let stats = std::sync::Arc::new(ki_video::StageStats::default());
@@ -242,7 +242,7 @@ impl KiApp {
         seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
         origine: std::time::Instant,
     ) -> Option<ki_voice::jeu::GameAudio> {
-        let emit = self.conn.as_ref()?.game_audio_emit(stream_id, key, seq);
+        let emit = self.session.conn.as_ref()?.game_audio_emit(stream_id, key, seq);
         match ki_voice::jeu::GameAudio::start(96_000, emit, origine) {
             Ok(a) => Some(a),
             Err(e) => {
@@ -371,14 +371,14 @@ impl KiApp {
     /// condition que le serveur accepte. Un second clic ferme.
     pub(crate) fn regarder(&mut self, m: &Member) {
         let Some(stream_id) = m.streaming else { return };
-        if Some(m.user_id) == self.my_id {
+        if Some(m.user_id) == self.session.my_id {
             return;
         }
         if self.regard.flux.as_ref().map(|r| r.stream_id) == Some(stream_id) {
             self.fermer_regard(true);
             return;
         }
-        if m.voice.is_none() || m.voice != self.voice_channel {
+        if m.voice.is_none() || m.voice != self.session.voice_channel {
             self.info = Some(format!(
                 "rejoins le salon vocal de {} pour regarder son écran",
                 m.username
@@ -431,14 +431,14 @@ impl KiApp {
         // entasser le retard en mémoire (voir `partage::FILE_TRAMES_MAX`).
         let (tx, rx) = std::sync::mpsc::sync_channel(partage::FILE_TRAMES_MAX);
         let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel(partage::FILE_SON_MAX);
-        if let Some(conn) = &self.conn {
+        if let Some(conn) = &self.session.conn {
             conn.set_video_feed(Some(tx));
             conn.set_game_audio_feed(Some(audio_tx));
         }
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             engine.set_aux_gain(if meme_machine { 0.0 } else { self.regard.volume });
         }
-        let streamer = self
+        let streamer = self.session
             .members
             .iter()
             .find(|m| m.streaming == Some(stream_id))
@@ -463,7 +463,7 @@ impl KiApp {
             if prevenir {
                 self.send(ClientMsg::Unwatch { stream_id: r.stream_id });
             }
-            if let Some(conn) = &self.conn {
+            if let Some(conn) = &self.session.conn {
                 conn.set_video_feed(None);
                 conn.set_game_audio_feed(None);
             }
@@ -487,7 +487,7 @@ impl KiApp {
             return;
         }
         let en_direct = self.diffusion.live.is_some();
-        let in_voice = self.voice_channel.is_some();
+        let in_voice = self.session.voice_channel.is_some();
         let mut ouvert = true;
         let mut lancer = false;
         let mut arreter = false;
@@ -638,7 +638,7 @@ impl KiApp {
             let qui_regarde = self.diffusion.spectateurs.get(&g.stream_id).map(|ids| {
                 let noms: Vec<&str> = ids
                     .iter()
-                    .filter_map(|id| self.members.iter().find(|m| m.user_id == *id))
+                    .filter_map(|id| self.session.members.iter().find(|m| m.user_id == *id))
                     .map(|m| m.username.as_str())
                     .collect();
                 match noms.as_slice() {

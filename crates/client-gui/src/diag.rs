@@ -35,7 +35,7 @@ impl KiApp {
     /// serveur (même authentification que le partage de fichiers), dans un
     /// thread — l'interface ne l'attend jamais.
     pub(crate) fn flush_diag(&mut self, manual: bool) {
-        if self.conn.is_none() {
+        if self.session.conn.is_none() {
             return;
         }
         let journal = ki_voice::journal_snapshot();
@@ -104,7 +104,7 @@ impl KiApp {
         }
         let base = self.http_base();
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        let token_hex = format!("{:x}", self.session.voice_token);
         std::thread::spawn(move || {
             if let Err(e) = agent
                 .post(&format!("{base}/diag"))
@@ -146,7 +146,7 @@ impl KiApp {
         ki_voice::journal("rapport de plantage de la session précédente envoyé au serveur".into());
         let base = self.http_base();
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        let token_hex = format!("{:x}", self.session.voice_token);
         std::thread::spawn(move || {
             if let Err(e) = agent
                 .post(&format!("{base}/diag"))
@@ -162,7 +162,7 @@ impl KiApp {
     /// La cadence du diagnostic partagé : dix minutes, et seulement s'il y a
     /// du neuf. Appelée à chaque image ; le garde-fou coûte deux lectures.
     pub(crate) fn maybe_flush_diag(&mut self) {
-        if self.conn.is_none() || !self.welcomed {
+        if self.session.conn.is_none() || !self.session.welcomed {
             return;
         }
         if !self.diag.crash_verifie {

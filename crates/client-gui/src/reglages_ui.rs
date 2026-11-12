@@ -449,7 +449,7 @@ impl KiApp {
                                         }
                                     });
                                 }
-                                if self.conn.is_none() {
+                                if self.session.conn.is_none() {
                                     ui::hint(ui, "connecte-toi pour la préécoute ▶");
                                 }
                             }
@@ -735,7 +735,7 @@ impl KiApp {
                                 Some("décoché, le serveur n'en garde rien — et efface ce qu'il avait")
                             } else if !self.reglages.valorant_presence {
                                 Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui montre les parties")
-                            } else if self.welcomed && !self.serveur_journal {
+                            } else if self.session.welcomed && !self.serveur_journal {
                                 Some("le serveur ne le tient pas encore : il doit être mis à jour")
                             } else {
                                 None
@@ -750,9 +750,9 @@ impl KiApp {
                             // part — délier chez l'admin s'y voit aussi.
                             ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Target, "Compte Riot");
-                            let moi = self
+                            let moi = self.session
                                 .my_id
-                                .and_then(|id| self.members.iter().find(|m| m.user_id == id))
+                                .and_then(|id| self.session.members.iter().find(|m| m.user_id == id))
                                 .map(|m| (m.user_id, m.username.clone(), m.riot_id.clone(), m.rang_valorant));
                             match moi {
                                 Some((user_id, username, Some(riot), rang)) => {
@@ -1147,7 +1147,7 @@ impl KiApp {
                     IconChange::Keep => None,
                 };
                 let staged = self.preview_texture(ctx, Apercu::Avatar, pending.as_deref());
-                let mine = self
+                let mine = self.session
                     .my_id
                     .and_then(|id| self.avatars.get(&id))
                     .map(|(_, texture)| texture.clone());
@@ -1165,10 +1165,10 @@ impl KiApp {
                         ui.label(Texte::TitreSection.riche(ui, &me).color(color_for(&me)));
                         // Le rôle vaut mieux qu'un « administrateur/membre »
                         // binaire : c'est lui que les autres voient.
-                        let role = self
+                        let role = self.session
                             .members
                             .iter()
-                            .find(|m| Some(m.user_id) == self.my_id)
+                            .find(|m| Some(m.user_id) == self.session.my_id)
                             .and_then(|m| self.top_role_name(m))
                             .unwrap_or("membre")
                             .to_string();

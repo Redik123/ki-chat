@@ -437,11 +437,11 @@ impl KiApp {
             }
             "aller_salon" => {
                 let voulu = d.arguments.get("salon").map(|v| match v {
-                    Value::String(nom) => self.channels.iter().find(|c| c.name.eq_ignore_ascii_case(nom)).map(|c| c.id),
-                    autre => autre.as_u64().map(|n| n as u32).filter(|id| self.channels.iter().any(|c| c.id == *id)),
+                    Value::String(nom) => self.session.channels.iter().find(|c| c.name.eq_ignore_ascii_case(nom)).map(|c| c.id),
+                    autre => autre.as_u64().map(|n| n as u32).filter(|id| self.session.channels.iter().any(|c| c.id == *id)),
                 });
                 match voulu {
-                    Some(Some(id)) if self.welcomed => {
+                    Some(Some(id)) if self.session.welcomed => {
                         self.join(id);
                         Reponse::ok(format!("salon {id} ouvert"))
                     }
@@ -493,7 +493,7 @@ impl KiApp {
     /// Ce que l'appli sait d'elle-même, pour qui ne la voit pas.
     fn mcp_etat(&self, ctx: &egui::Context) -> Value {
         let fenetre = ctx.content_rect().size();
-        let salons: Vec<Value> = self
+        let salons: Vec<Value> = self.session
             .channels
             .iter()
             .map(|c| {
@@ -501,11 +501,11 @@ impl KiApp {
                     "id": c.id,
                     "nom": c.name,
                     "genre": format!("{:?}", c.kind),
-                    "non_lus": self.non_lus.get(&c.id).map_or(0, |n| n.nb),
+                    "non_lus": self.session.non_lus.get(&c.id).map_or(0, |n| n.nb),
                 })
             })
             .collect();
-        let derniers: Vec<Value> = self
+        let derniers: Vec<Value> = self.session
             .messages
             .iter()
             .rev()
@@ -527,20 +527,20 @@ impl KiApp {
         .collect();
         json!({
             "version": crate::update::current(),
-            "connecte": self.welcomed,
-            "connexion_en_cours": self.connecting,
+            "connecte": self.session.welcomed,
+            "connexion_en_cours": self.session.connecting,
             "serveur": self.url,
             "pseudo": self.username,
-            "salon_courant": self.current,
+            "salon_courant": self.session.current,
             "salons": salons,
-            "messages_charges": self.messages.len(),
+            "messages_charges": self.session.messages.len(),
             "derniers_messages": derniers,
             "saisie": {
                 "texte": self.input,
                 "modifie_le_message": self.edition.map(|m| json!({ "auteur": m.user_id, "ts": m.ts })),
                 "repond_a": self.reponse_a.as_ref().map(|r| json!({ "de": r.username, "extrait": r.excerpt })),
             },
-            "vocal": { "salon": self.voice_channel, "micro_coupe": self.vocal.muted },
+            "vocal": { "salon": self.session.voice_channel, "micro_coupe": self.vocal.muted },
             "fenetres_ouvertes": ouvertes,
             "bandeau_erreur": self.error,
             "bandeau_info": self.info,

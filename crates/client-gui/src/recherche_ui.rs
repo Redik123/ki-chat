@@ -66,7 +66,7 @@ impl KiApp {
             self.recherche.envoyee = None;
             return;
         }
-        let channel = self.recherche.ici.then_some(self.current).flatten();
+        let channel = self.recherche.ici.then_some(self.session.current).flatten();
         self.recherche.envoyee = Some(query.clone());
         self.send(ClientMsg::Search {
             query,
@@ -83,10 +83,10 @@ impl KiApp {
     /// défilement — et sans afficher ce qui a suivi, d'où le retour au
     /// présent proposé en bas du fil.
     pub(crate) fn sauter_a(&mut self, channel: ChannelId, ts: u64) {
-        self.current = Some(channel);
-        self.messages.clear();
-        self.history_more = true;
-        self.history_pending = true;
+        self.session.current = Some(channel);
+        self.session.messages.clear();
+        self.session.history_more = true;
+        self.session.history_pending = true;
         self.fil_au_bas = true;
         self.recherche.retour_present = Some(channel);
         // C'est bien entrer dans le salon, comme `join` : la pastille tombe
@@ -94,7 +94,7 @@ impl KiApp {
         // bougerait plus), et « nouveaux messages » se pose à **son** repère
         // — pas à celui du salon qu'on quitte, qui se dessinerait ici au
         // mauvais endroit. Il reste posé pour le retour au présent.
-        self.separateur_nouveaux = self
+        self.separateur_nouveaux = self.session
             .non_lus
             .remove(&channel)
             .filter(|n| n.nb > 0)
@@ -170,7 +170,7 @@ impl KiApp {
                     self.recherche.resultats.iter().rev().cloned().collect();
                 // Jusqu'à cent résultats : seuls ceux à l'écran sont
                 // construits.
-                let channels = &self.channels;
+                let channels = &self.session.channels;
                 Liste::new("recherche").ecart(espace::XS).show(
                     ui,
                     hits.len(),

@@ -434,7 +434,7 @@ impl KiApp {
             Some(_) => ctx.request_repaint_after(Duration::from_secs(1)),
             None => {}
         }
-        let moi = self.my_id.unwrap_or(0);
+        let moi = self.session.my_id.unwrap_or(0);
         let pseudo = self.username.clone();
         let illimite = self.suis_proprietaire();
         let mut fermer = false;
@@ -649,7 +649,7 @@ impl KiApp {
                     }
                     // Pas sur soi : le propriétaire ne se coupe pas l'accès
                     // (mais se le rend, s'il l'a fait depuis un autre client).
-                    let moi = Some(u.user_id) == self.my_id;
+                    let moi = Some(u.user_id) == self.session.my_id;
                     let bascule = if u.bloque {
                         ui::Bouton::new("Rendre l'accès").icone(Icon::Check).show(ui).clicked()
                     } else {

@@ -154,7 +154,7 @@ impl KiApp {
     /// connexion de son départ : après une reprise, dans une connexion
     /// morte — perdus, le bandeau s'effaçant comme si tout allait bien.
     pub(crate) fn envoyer_liens_prets(&mut self) {
-        if !self.welcomed || self.dernier_envoi.is_some_and(|t| t.elapsed() < CADENCE_CHAT) {
+        if !self.session.welcomed || self.dernier_envoi.is_some_and(|t| t.elapsed() < CADENCE_CHAT) {
             return;
         }
         let pret = {
@@ -182,7 +182,7 @@ impl KiApp {
     /// sans fichier, le dialogue natif en demande un. C'est le même chemin
     /// pour le trombone et pour un fichier lâché sur la fenêtre.
     pub(crate) fn televerser(&self, fichiers: Vec<std::path::PathBuf>) {
-        if self.conn.is_none() {
+        if self.session.conn.is_none() {
             return;
         }
         let base = self.http_base();
@@ -191,7 +191,7 @@ impl KiApp {
         let status = self.upload_status.clone();
         // Le salon d'où l'on envoie : c'est là que le lien partira, même si
         // l'on en a changé pendant les minutes de l'envoi.
-        let salon = self.current;
+        let salon = self.session.current;
         let prets = self.liens_prets.clone();
         std::thread::spawn(move || {
             // Relu à chaque requête : un gros fichier part par morceaux

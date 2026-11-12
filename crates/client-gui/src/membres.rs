@@ -335,7 +335,7 @@ impl KiApp {
         !est_bot(m.user_id)
             && !est_invite_membre(m)
             && m.online
-            && m.voice.is_some_and(|c| self.channels.iter().any(|k| k.id == c))
+            && m.voice.is_some_and(|c| self.session.channels.iter().any(|k| k.id == c))
             && self.outranks(m.rank)
             && self.can(ki_protocol::perm::MOVE_MEMBERS)
     }
@@ -505,7 +505,7 @@ impl KiApp {
             // Seulement face à un serveur qui a prouvé qu'il est récent —
             // un serveur antérieur répondrait « message invalide ». Grisé
             // avec le motif quand on sait d'avance que ça ne partira pas.
-            if self.serveur_gere_lus {
+            if self.session.serveur_gere_lus {
                 ui.add_space(espace::XS);
                 let motif = self.poke_impossible(m);
                 ui.add_enabled_ui(motif.is_none(), |ui| {
@@ -530,7 +530,7 @@ impl KiApp {
                     ui,
                     format!(
                         "rang {}, le tien {} : on n'agit que sur plus bas que soi",
-                        m.rank, self.my_rank
+                        m.rank, self.session.my_rank
                     ),
                 );
             }
@@ -539,14 +539,14 @@ impl KiApp {
             // rang — on ne donne pas un rôle au-dessus de soi.
             let can_roles = self.can(ki_protocol::perm::MANAGE_ROLES)
                 && self.outranks(m.rank)
-                && !self.roles.is_empty();
+                && !self.session.roles.is_empty();
             if can_roles {
                 ui.add_space(espace::XS);
                 ui::hairline(ui);
                 ui.add_space(espace::XS);
                 ui.menu_button("Rôles", |ui| {
                     ui.set_width(200.0);
-                    let mut roles_sorted = self.roles.clone();
+                    let mut roles_sorted = self.session.roles.clone();
                     roles_sorted.sort_by_key(|r| std::cmp::Reverse(r.rank));
                     // Ses rôles tels qu'on les connaît — y compris ce qu'on
                     // vient de cocher, dont le roster n'est pas encore revenu :
@@ -554,11 +554,11 @@ impl KiApp {
                     // second défaisait le premier.
                     let actuels = match &self.admin.roles_coches {
                         Some((qui, coches)) if *qui == m.user_id => coches.clone(),
-                        _ => self.members.iter().find(|x| x.user_id == m.user_id).map_or_else(|| m.roles.clone(), |x| x.roles.clone()),
+                        _ => self.session.members.iter().find(|x| x.user_id == m.user_id).map_or_else(|| m.roles.clone(), |x| x.roles.clone()),
                     };
                     // Ce qu'il détient déjà : n'est vérifié que ce qu'un rôle
                     // lui **ajoute**, comme au serveur.
-                    let detient = self
+                    let detient = self.session
                         .roles
                         .iter()
                         .filter(|r| r.id == ki_protocol::ROLE_EVERYONE || actuels.contains(&r.id))
@@ -643,7 +643,7 @@ impl KiApp {
                 }
             }
             if peut_deplacer {
-                let vocaux: Vec<ki_protocol::ChannelInfo> = self
+                let vocaux: Vec<ki_protocol::ChannelInfo> = self.session
                     .channels
                     .iter()
                     .filter(|c| c.kind == ChannelKind::Voice && Some(c.id) != m.voice)
@@ -689,7 +689,7 @@ impl KiApp {
             // Il diffuse son écran et l'on partage son salon vocal : le
             // visionnage est à un clic — c'est la porte d'entrée du S1b.
             if let Some(stream_id) = m.streaming {
-                if !is_me && m.voice.is_some() && m.voice == self.voice_channel {
+                if !is_me && m.voice.is_some() && m.voice == self.session.voice_channel {
                     let deja = self.regard.flux.as_ref().map(|r| r.stream_id) == Some(stream_id);
                     let libelle =
                         if deja { "Arrêter de regarder" } else { "Regarder son écran" };
@@ -760,7 +760,7 @@ impl KiApp {
                 // à chaque image, pour lire des champs qu'on ne modifie pas.
                 // C'est la technique déjà employée par le fil de discussion ;
                 // la remise a lieu plus bas, avant de sortir de la fermeture.
-                let members = std::mem::take(&mut self.members);
+                let members = std::mem::take(&mut self.session.members);
                 // Trois listes : les membres en ligne, les invités web (à
                 // part — pas des comptes), les hors-ligne.
                 let (invites, comptes): (Vec<&Member>, Vec<&Member>) =
@@ -778,10 +778,10 @@ impl KiApp {
 
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     for m in &online {
-                        let is_me = Some(m.user_id) == self.my_id;
+                        let is_me = Some(m.user_id) == self.session.my_id;
                         // Le vumètre n'a de sens que si l'on partage le salon
                         // vocal de la personne : sinon on ne l'entend pas.
-                        let audible = m.voice.is_some() && m.voice == self.voice_channel;
+                        let audible = m.voice.is_some() && m.voice == self.session.voice_channel;
                         let level = if !audible {
                             0.0
                         } else if is_me {
@@ -832,7 +832,7 @@ impl KiApp {
                         });
                         ui.add_space(espace::XXS);
                         for m in &invites {
-                            let audible = m.voice.is_some() && m.voice == self.voice_channel;
+                            let audible = m.voice.is_some() && m.voice == self.session.voice_channel;
                             let level = if audible {
                                 voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
                             } else {
@@ -881,7 +881,7 @@ impl KiApp {
                     }
                 });
                 drop((online, offline, invites));
-                self.members = members;
+                self.session.members = members;
                 self.porter_les_roles_coches();
             });
     }
@@ -891,7 +891,7 @@ impl KiApp {
     /// serveur fait foi ensuite, refus compris.
     fn porter_les_roles_coches(&mut self) {
         if let Some((qui, roles)) = self.admin.roles_coches.take() {
-            if let Some(membre) = self.members.iter_mut().find(|m| m.user_id == qui) {
+            if let Some(membre) = self.session.members.iter_mut().find(|m| m.user_id == qui) {
                 membre.roles = roles;
             }
         }
@@ -903,7 +903,7 @@ impl KiApp {
         let Some(id) = self.fiche_bot else { return };
         let mut open = true;
         let etat = self.musique.etat.clone();
-        let pilotes: Vec<String> = self
+        let pilotes: Vec<String> = self.session
             .roles
             .iter()
             .filter(|r| r.perms & (ki_protocol::perm::CONTROL_MUSIC | ki_protocol::perm::ADMINISTRATOR) != 0)

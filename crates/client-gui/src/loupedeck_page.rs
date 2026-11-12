@@ -430,7 +430,7 @@ impl KiApp {
     fn reglage_selection_ui(&mut self, ui: &mut egui::Ui) {
         // Les listes des choix, lues avant de prêter la configuration.
         let noms_pages: Vec<String> = self.loupedeck_etat.config.pages.iter().map(|p| p.nom.clone()).collect();
-        let salons: Vec<String> = self
+        let salons: Vec<String> = self.session
             .channels
             .iter()
             .filter(|c| c.kind == ki_protocol::ChannelKind::Voice)

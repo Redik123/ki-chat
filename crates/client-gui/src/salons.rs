@@ -244,7 +244,7 @@ impl KiApp {
                     .show(ui, |ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let me = self.username.clone();
-                            let mine = self.my_id.and_then(|id| self.avatars.get(&id));
+                            let mine = self.session.my_id.and_then(|id| self.avatars.get(&id));
                             let clicked = ui::Avatar::new(&me, 30.0).parle(self.vocal.transmitting).photo(mine.map(|(_, t)| t)).fond(theme::BG_SIDE).show(ui)
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked();
@@ -329,7 +329,7 @@ impl KiApp {
                                 // retirer ni copier : les menus ouverts depuis
                                 // cette barre — « Déplacer en vocal » d'un
                                 // occupant, le vocal d'un invité web — lisent
-                                // `self.channels` pendant le rendu et doivent le
+                                // `self.session.channels` pendant le rendu et doivent le
                                 // trouver entier. La liste en était retirée le
                                 // temps du rendu (`mem::take`), et le sous-menu
                                 // « Déplacer en vocal » s'ouvrait vide.
@@ -337,8 +337,8 @@ impl KiApp {
                                 // --- Salons textuels : on les ouvre ---
                                 ui::section_label(ui, "Salons textuels");
                                 let ailleurs = self.claude.ouvert && self.claude.servi;
-                                for i in 0..self.channels.len() {
-                                    let Some(ch) = self.channels.get(i) else { break };
+                                for i in 0..self.session.channels.len() {
+                                    let Some(ch) = self.session.channels.get(i) else { break };
                                     if ch.kind != ChannelKind::Text || ch.expire_le.is_some() {
                                         continue;
                                     }
@@ -346,12 +346,12 @@ impl KiApp {
                                     // Le salon de Claude ou la page VALORANT
                                     // tiennent la place du chat : aucun salon
                                     // n'est alors « celui qu'on lit ».
-                                    let selected = self.current == Some(id) && !ailleurs;
-                                    let pastille = self.non_lus.get(&id).filter(|n| n.nb > 0).copied();
+                                    let selected = self.session.current == Some(id) && !ailleurs;
+                                    let pastille = self.session.non_lus.get(&id).filter(|n| n.nb > 0).copied();
                                     let row = channel_row(ui, &ch.name, selected, ChannelKind::Text, pastille, false);
                                     if row.clicked() {
                                         self.retour_au_chat();
-                                        if self.current != Some(id) {
+                                        if self.session.current != Some(id) {
                                             self.join(id);
                                         }
                                     }
@@ -371,8 +371,8 @@ impl KiApp {
                                 // avec ce qu'il leur reste à vivre. Un client
                                 // antérieur les voit parmi les textuels, c'est
                                 // voulu : `expire_le` lui est inconnu.
-                                let temporaires: Vec<usize> = (0..self.channels.len())
-                                    .filter(|&i| self.channels[i].expire_le.is_some())
+                                let temporaires: Vec<usize> = (0..self.session.channels.len())
+                                    .filter(|&i| self.session.channels[i].expire_le.is_some())
                                     .collect();
                                 if !temporaires.is_empty() {
                                     ui.add_space(espace::L);
@@ -383,9 +383,9 @@ impl KiApp {
                                     let mut lire = None;
                                     let mut clique = false;
                                     for i in temporaires {
-                                        let Some(ch) = self.channels.get(i) else { continue };
-                                        let selected = self.current == Some(ch.id);
-                                        let pastille = self.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
+                                        let Some(ch) = self.session.channels.get(i) else { continue };
+                                        let selected = self.session.current == Some(ch.id);
+                                        let pastille = self.session.non_lus.get(&ch.id).filter(|n| n.nb > 0).copied();
                                         let reste = porte_ui::reste_texte(ch.expire_le.unwrap_or(0), maintenant);
                                         let slug = self.portes.slug_du_salon(ch.id);
                                         let bulle = match slug {
@@ -431,13 +431,13 @@ impl KiApp {
                                 // --- Salons vocaux : on y entre ---
                                 ui.add_space(espace::L);
                                 ui::section_label(ui, "Salons vocaux");
-                                for i in 0..self.channels.len() {
-                                    let Some(ch) = self.channels.get(i) else { break };
+                                for i in 0..self.session.channels.len() {
+                                    let Some(ch) = self.session.channels.get(i) else { break };
                                     if ch.kind != ChannelKind::Voice {
                                         continue;
                                     }
                                     let id = ch.id;
-                                    let here = self.voice_channel == Some(id);
+                                    let here = self.session.voice_channel == Some(id);
                                     let row = channel_row(ui, &ch.name, here, ChannelKind::Voice, None, false);
                                     if row.clicked() {
                                         if here {
@@ -464,7 +464,7 @@ impl KiApp {
     /// Occupants d'un salon vocal, listés sous son intitulé. Rend la place
     /// qu'ils prennent : la cible du glisser-déposer les couvre aussi.
     pub(crate) fn voice_occupants(&mut self, ui: &mut egui::Ui, channel: ChannelId, voice: &VoiceSnapshot) -> Option<egui::Rect> {
-        let members: Vec<Member> = self
+        let members: Vec<Member> = self.session
             .members
             .iter()
             .filter(|m| m.voice == Some(channel))
@@ -476,7 +476,7 @@ impl KiApp {
 
         let mut place: Option<egui::Rect> = None;
         for m in &members {
-            let is_me = Some(m.user_id) == self.my_id;
+            let is_me = Some(m.user_id) == self.session.my_id;
             let level = if is_me {
                 voice.stats.mic_peak
             } else {
@@ -528,7 +528,7 @@ impl KiApp {
     pub(crate) fn voice_password_window(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.voice_prompt.as_mut() else { return };
         let channel = prompt.channel;
-        let name = self
+        let name = self.session
             .channels
             .iter()
             .find(|c| c.id == channel)
@@ -567,7 +567,7 @@ impl KiApp {
             if let Some(prompt) = self.voice_prompt.take() {
                 // Même intention que par le clic ordinaire : sans elle, un
                 // refus laissait l'affichage dans un salon où l'on n'est pas.
-                self.voice_channel = Some(channel);
+                self.session.voice_channel = Some(channel);
                 self.set_voice_intent(Some(channel));
                 self.mots_de_passe_vocaux.insert(channel, prompt.password.clone());
                 self.send(ClientMsg::JoinVoice {

@@ -115,7 +115,7 @@ impl KiApp {
                     );
                     let etroite = niveau != Barre::Large;
                     // --- Micro : gros bouton d'état ---
-                    let in_voice = self.voice_channel.is_some();
+                    let in_voice = self.session.voice_channel.is_some();
                     let (icon, tint, state, state_color) = if !in_voice {
                         (Icon::MicOff, None, "Hors vocal", TEXT_FAINT)
                     } else if self.vocal.muted {
@@ -236,7 +236,7 @@ impl KiApp {
                     // La table de cartes du salon : « À toi ! » quand on
                     // attend après moi.
                     if self.serveur_cartes {
-                        let bouton = if self.cartes.mon_tour(self.my_id) {
+                        let bouton = if self.cartes.mon_tour(self.session.my_id) {
                             ui::Bouton::new("À toi !").icone(Icon::Cartes).teinte(Ton::Accent).show(ui)
                         } else {
                             bouton_de_barre(ui, etroite, Icon::Cartes, "Cartes")
@@ -325,8 +325,8 @@ impl KiApp {
                     // à côté du micro, pas au fond d'une liste. Sans ça on
                     // croit son matériel en panne et l'on part démonter ses
                     // réglages audio — ou son casque.
-                    if let Some(moi) = self.my_id.and_then(|id| {
-                        self.members.iter().find(|m| m.user_id == id)
+                    if let Some(moi) = self.session.my_id.and_then(|id| {
+                        self.session.members.iter().find(|m| m.user_id == id)
                     }) {
                         let sanction = match (moi.force_muted, moi.force_deafened) {
                             (true, true) => Some("micro coupé et sourd (modérateur)"),

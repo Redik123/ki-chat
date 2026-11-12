@@ -469,7 +469,7 @@ impl KiApp {
         ui::field_label(ui, "Fil de jeu VALORANT");
         let actuel = self.server_info.fil_valorant;
         let nom_du_salon = |id: ChannelId| -> String {
-            self.channels
+            self.session.channels
                 .iter()
                 .find(|c| c.id == id)
                 .map(|c| format!("#{}", c.name))
@@ -484,7 +484,7 @@ impl KiApp {
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut choix, None, "aucun — fil éteint");
-                for c in self.channels.iter().filter(|c| c.kind == ki_protocol::ChannelKind::Text) {
+                for c in self.session.channels.iter().filter(|c| c.kind == ki_protocol::ChannelKind::Text) {
                     ui.selectable_value(&mut choix, Some(c.id), format!("#{}", c.name));
                 }
             });
@@ -535,7 +535,7 @@ impl KiApp {
         if ui::Bouton::new("Récupérer tous les diagnostics").icone(Icon::Refresh).show(ui).clicked() {
             let base = self.http_base();
             let agent = self.http_agent();
-            let token_hex = format!("{:x}", self.voice_token);
+            let token_hex = format!("{:x}", self.session.voice_token);
             let slot = self.admin.diag.clone();
             let versions_slot = self.admin.diag_versions.clone();
             *slot.lock().unwrap() = Some("récupération en cours…".into());
@@ -607,7 +607,7 @@ impl KiApp {
         if ui::Bouton::new("Résumé par version").icone(Icon::Info).show(ui).clicked() {
             let base = self.http_base();
             let agent = self.http_agent();
-            let token_hex = format!("{:x}", self.voice_token);
+            let token_hex = format!("{:x}", self.session.voice_token);
             let slot = self.admin.diag.clone();
             std::thread::spawn(move || {
                 let resume = match agent
@@ -648,7 +648,7 @@ impl KiApp {
                     if ui::Bouton::new(version).icone(Icon::Trash).show(ui).clicked() {
                         let base = self.http_base();
                         let agent = self.http_agent();
-                        let token_hex = format!("{:x}", self.voice_token);
+                        let token_hex = format!("{:x}", self.session.voice_token);
                         let slot = self.admin.diag.clone();
                         let versions_slot = self.admin.diag_versions.clone();
                         let version = version.clone();
@@ -716,7 +716,7 @@ impl KiApp {
         self.admin.tableau_demande = Some(std::time::Instant::now());
         let base = self.http_base();
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        let token_hex = format!("{:x}", self.session.voice_token);
         let slot = self.admin.tableau.clone();
         let en_vol = self.admin.tableau_en_vol.clone();
         let ctx = self.app_ctx.clone();
@@ -745,7 +745,7 @@ impl KiApp {
         self.admin.reseau_demande = Some(std::time::Instant::now());
         let base = self.http_base();
         let agent = self.http_agent();
-        let token_hex = format!("{:x}", self.voice_token);
+        let token_hex = format!("{:x}", self.session.voice_token);
         let slot = self.admin.reseau.clone();
         let en_vol = self.admin.reseau_en_vol.clone();
         let ctx = self.app_ctx.clone();
@@ -867,7 +867,7 @@ impl KiApp {
     /// Le tableau lui-même, carte par carte.
     pub(crate) fn peindre_tableau(&self, ui: &mut egui::Ui, t: &ki_protocol::TableauAdmin) {
         let nom_salon = |id: ChannelId| {
-            self.channels
+            self.session.channels
                 .iter()
                 .find(|c| c.id == id)
                 .map(|c| c.name.clone())
@@ -1128,7 +1128,7 @@ impl KiApp {
             ui.selectable_value(&mut draft.kind, ChannelKind::Text, "Textuel");
             ui.selectable_value(&mut draft.kind, ChannelKind::Voice, "Vocal");
         });
-        let roles = self.roles.clone();
+        let roles = self.session.roles.clone();
         restriction_par_roles(ui, &roles, draft);
         let ready = !draft.name.trim().is_empty()
             && (!draft.restricted || !draft.allowed_roles.is_empty());
@@ -1149,7 +1149,7 @@ impl KiApp {
         ui::hairline(ui);
         ui.add_space(espace::L);
         ui::group_title(ui, Icon::Hash, "Salons existants");
-        let channels = self.channels.clone();
+        let channels = self.session.channels.clone();
         // L'ordre affiché **est** l'ordre du serveur : la liste arrive déjà
         // triée par position, et qui gère les salons les voit tous. C'est ce
         // qui permet d'envoyer une permutation exacte — le serveur refuse
@@ -1338,7 +1338,7 @@ impl KiApp {
     pub(crate) fn admin_roles_tab(&mut self, ui: &mut egui::Ui, to_send: &mut Vec<ClientMsg>) {
         // Du plus haut au plus bas : l'ordre est ce qui décide qui agit sur
         // qui, autant qu'il se lise.
-        let mut roles = self.roles.clone();
+        let mut roles = self.session.roles.clone();
         roles.sort_by_key(|r| std::cmp::Reverse(r.rank));
         ui::group_title(ui, Icon::Crown, "Rôles");
         ui::hint(ui, "du plus haut au plus bas : on n'agit que sur qui est plus bas que soi");
@@ -1354,7 +1354,7 @@ impl KiApp {
                 // Qui le porte : @everyone, tout le monde ; les autres, la
                 // liste au survol.
                 if role.id != ki_protocol::ROLE_EVERYONE {
-                    let porteurs: Vec<&str> = self
+                    let porteurs: Vec<&str> = self.session
                         .members
                         .iter()
                         .filter(|m| !m.invite && m.roles.contains(&role.id))
@@ -1418,7 +1418,7 @@ impl KiApp {
                 // portent hors de portée de la modération, sans que rien ne
                 // le dise. Libre, parce que deux rôles ne partagent pas un
                 // rang : à égalité, personne n'agit sur l'autre.
-                rank: ki_protocol::lowest_free_rank(&self.roles, self.my_rank.saturating_sub(1)).unwrap_or(0),
+                rank: ki_protocol::lowest_free_rank(&self.session.roles, self.session.my_rank.saturating_sub(1)).unwrap_or(0),
                 rank_saved: None,
                 perms: ki_protocol::perm::DEFAULT,
             });
@@ -1450,13 +1450,13 @@ impl KiApp {
         if everyone {
             ui::hint(ui, "ce que reçoit tout le monde, y compris les comptes sans rôle");
         } else {
-            let ceiling = self.my_rank.saturating_sub(1);
+            let ceiling = self.session.my_rank.saturating_sub(1);
             ui.add(egui::Slider::new(&mut draft.rank, 0..=ceiling.max(1)).text("rang"));
             ui::hint(ui, "un rang supérieur l'emporte : on n'agit que sur plus bas que soi");
             // Où il tombe parmi les autres : un nombre seul ne dit pas s'il
             // passe au-dessus des modérateurs.
             let autres: Vec<&ki_protocol::RoleInfo> =
-                self.roles.iter().filter(|r| Some(r.id) != draft.id).collect();
+                self.session.roles.iter().filter(|r| Some(r.id) != draft.id).collect();
             let dessous = autres.iter().filter(|r| r.rank < draft.rank).max_by_key(|r| r.rank);
             let dessus = autres.iter().filter(|r| r.rank > draft.rank).min_by_key(|r| r.rank);
             let place = match (dessous, dessus) {
@@ -1469,7 +1469,7 @@ impl KiApp {
                 ui::hint(ui, place);
             }
             if Some(draft.rank) != draft.rank_saved {
-                taken = ki_protocol::rank_holder(&self.roles, draft.rank, draft.id)
+                taken = ki_protocol::rank_holder(&self.session.roles, draft.rank, draft.id)
                     .map(|r| r.name.clone());
             }
             if let Some(other) = &taken {
@@ -1680,7 +1680,7 @@ impl KiApp {
         let users = self.admin.comptes.clone();
         let my_name = users
             .iter()
-            .find(|u| Some(u.user_id) == self.my_id)
+            .find(|u| Some(u.user_id) == self.session.my_id)
             .map(|u| u.username.clone());
         for account in &users {
             ui.horizontal(|ui| {
@@ -1692,7 +1692,7 @@ impl KiApp {
                 // La couleur du compte vient de son rôle le mieux classé,
                 // comme partout ailleurs dans l'application.
                 let account_color = theme::member_color(
-                    self.roles
+                    self.session.roles
                         .iter()
                         .filter(|r| account.roles.contains(&r.id))
                         .max_by_key(|r| r.rank)
@@ -1708,7 +1708,7 @@ impl KiApp {
                 if account.admin {
                     ui::glyph(ui, Icon::Crown, 13.0, ACCENT);
                 }
-                for role in self.roles.iter().filter(|r| account.roles.contains(&r.id)) {
+                for role in self.session.roles.iter().filter(|r| account.roles.contains(&r.id)) {
                     ui.label(
                         RichText::new(&role.name)
                             .color(theme::member_color(role.color, &role.name))
@@ -1797,7 +1797,7 @@ impl KiApp {
             ui::hairline(ui);
             ui.add_space(espace::M);
             ui::field_label(ui, &format!("Rôles de {target}"));
-            let roles = self.roles.clone();
+            let roles = self.session.roles.clone();
             let mut assignable = 0;
             for role in &roles {
                 // `@everyone` est implicite : il n'est jamais stocké sur un

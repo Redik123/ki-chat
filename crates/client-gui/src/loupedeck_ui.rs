@@ -252,7 +252,7 @@ impl KiApp {
     /// portraits d'agents — téléchargés une fois par l'appli, lus sur le
     /// disque par le dessin.
     pub(crate) fn preparer_page(&mut self, ctx: &egui::Context, n: usize) {
-        for m in &self.members {
+        for m in &self.session.members {
             if let Some(tier) = palier_de(m) {
                 self.rangs.preparer(ctx, tier);
             }
@@ -260,7 +260,7 @@ impl KiApp {
         let maintenant = Instant::now();
         if self.loupedeck_etat.relances_stats.iter().any(|t| *t <= maintenant) {
             self.loupedeck_etat.relances_stats.retain(|t| *t > maintenant);
-            if self.welcomed {
+            if self.session.welcomed {
                 self.loupedeck_etat.stats_demandees = Some(maintenant);
                 self.send(ClientMsg::StatsValorant);
             }
@@ -292,7 +292,7 @@ impl KiApp {
             }
         }
         if valo_voulu {
-            if self.welcomed
+            if self.session.welcomed
                 && self.loupedeck_etat.stats_demandees.is_none_or(|t| t.elapsed() > REDEMANDER_STATS)
             {
                 self.loupedeck_etat.stats_demandees = Some(Instant::now());
@@ -302,7 +302,7 @@ impl KiApp {
             let agents: Vec<String> = self
                 .stats
                 .iter()
-                .find(|f| Some(f.user_id) == self.my_id)
+                .find(|f| Some(f.user_id) == self.session.my_id)
                 .map(|f| f.fiche.matchs.iter().map(|m| m.agent.clone()).collect())
                 .unwrap_or_default();
             for agent in agents {
@@ -356,11 +356,11 @@ impl KiApp {
     /// m'y range —, puis les autres occupants dans l'ordre de la liste des
     /// membres. Sans le bot de musique : il a sa molette.
     fn loupedeck_grille(&self) -> Vec<&Member> {
-        let Some(salon) = self.voice_channel else { return Vec::new() };
-        let moi = self.members.iter().find(|m| Some(m.user_id) == self.my_id);
+        let Some(salon) = self.session.voice_channel else { return Vec::new() };
+        let moi = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id);
         moi.into_iter()
-            .chain(self.members.iter().filter(|m| {
-                m.voice == Some(salon) && Some(m.user_id) != self.my_id && !est_bot(m.user_id)
+            .chain(self.session.members.iter().filter(|m| {
+                m.voice == Some(salon) && Some(m.user_id) != self.session.my_id && !est_bot(m.user_id)
             }))
             .collect()
     }
@@ -368,7 +368,7 @@ impl KiApp {
     /// Ceux qu'on peut choisir pour régler leur volume : la grille sans moi.
     fn loupedeck_membres(&self) -> Vec<&Member> {
         let mut grille = self.loupedeck_grille();
-        grille.retain(|m| Some(m.user_id) != self.my_id);
+        grille.retain(|m| Some(m.user_id) != self.session.my_id);
         grille
     }
 
@@ -388,19 +388,19 @@ impl KiApp {
         // Plus de douze en vocal : les places montrent la douzaine de la
         // personne choisie.
         let decalage = grille.iter().position(|m| Some(m.user_id) == choisi).map_or(0, |i| i / 12 * 12);
-        let salons = self.channels.iter().filter(|c| c.kind == ChannelKind::Voice).collect();
+        let salons = self.session.channels.iter().filter(|c| c.kind == ChannelKind::Voice).collect();
         Places { grille, decalage, choisi, salons }
     }
 
     fn tuile_place(&self, n: usize, places: &Places, voice: &VoiceSnapshot) -> Tuile {
-        if !self.welcomed {
+        if !self.session.welcomed {
             return if n == 0 { Tuile::Texte("hors ligne".into()) } else { Tuile::Vide };
         }
-        if self.voice_channel.is_none() {
+        if self.session.voice_channel.is_none() {
             return match places.salons.get(n) {
                 Some(c) => Tuile::Salon {
                     nom: c.name.clone(),
-                    occupants: self.members.iter().filter(|m| m.voice == Some(c.id)).count(),
+                    occupants: self.session.members.iter().filter(|m| m.voice == Some(c.id)).count(),
                 },
                 None if n == 0 => Tuile::Texte("aucun salon vocal".into()),
                 None => Tuile::Vide,
@@ -409,7 +409,7 @@ impl KiApp {
         let Some(m) = places.grille.get(places.decalage + n) else { return Tuile::Vide };
         // Pour moi, l'état local fait foi, comme dans la liste des membres :
         // l'écho du serveur peut avoir un aller de retard.
-        let (parle, muet) = if Some(m.user_id) == self.my_id {
+        let (parle, muet) = if Some(m.user_id) == self.session.my_id {
             (self.vocal.transmitting, self.vocal.muted || m.force_muted)
         } else {
             let niveau = voice.levels.get(&m.user_id).copied().unwrap_or(0.0);
@@ -426,15 +426,15 @@ impl KiApp {
     }
 
     fn toucher_place(&mut self, n: usize) {
-        if self.voice_channel.is_some() {
+        if self.session.voice_channel.is_some() {
             // Ma propre place ne se choisit pas : mon volume ne se règle pas.
             let places = self.places();
             let touche = places.grille.get(places.decalage + n).map(|m| m.user_id);
-            if let Some(id) = touche.filter(|id| Some(*id) != self.my_id) {
+            if let Some(id) = touche.filter(|id| Some(*id) != self.session.my_id) {
                 self.loupedeck_etat.choix = Some(id);
             }
-        } else if self.welcomed {
-            let salon = self.channels.iter().filter(|c| c.kind == ChannelKind::Voice).nth(n).map(|c| c.id);
+        } else if self.session.welcomed {
+            let salon = self.session.channels.iter().filter(|c| c.kind == ChannelKind::Voice).nth(n).map(|c| c.id);
             if let Some(id) = salon {
                 self.join_voice(id);
             }
@@ -446,8 +446,8 @@ impl KiApp {
     // -----------------------------------------------------------------
 
     fn valo(&self) -> Valo<'_> {
-        let moi = self.members.iter().find(|m| Some(m.user_id) == self.my_id);
-        let membre = self.stats.iter().find(|f| Some(f.user_id) == self.my_id);
+        let moi = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id);
+        let membre = self.stats.iter().find(|f| Some(f.user_id) == self.session.my_id);
         let fiche = membre.map(|f| &f.fiche);
         let mut matchs: Vec<&MatchResume> = fiche.map(|f| f.matchs.iter().collect()).unwrap_or_default();
         matchs.sort_by_key(|m| std::cmp::Reverse(m.date));
@@ -466,7 +466,7 @@ impl KiApp {
     /// le reste. Riot ne dit rien des kills d'une partie en cours : son
     /// K/D/A arrive avec la fiche, une fois le match fini.
     fn tuile_valo(&self, w: Widget, v: &Valo) -> Tuile {
-        if !self.welcomed {
+        if !self.session.welcomed {
             return if w == Widget::Rang { Tuile::Texte("hors ligne".into()) } else { Tuile::Vide };
         }
         let (gris, blanc, vert, rouge) = (rgb(TEXT_FAINT), rgb(theme::TEXT), rgb(SPEAK), rgb(theme::DANGER));
@@ -628,7 +628,7 @@ impl KiApp {
     /// partage — c'est elle qui donne le score en direct ; le reste ouvre
     /// la page des stats du groupe.
     fn toucher_valo(&mut self, w: Widget, ctx: &egui::Context) {
-        if !self.welcomed {
+        if !self.session.welcomed {
             return;
         }
         match w {
@@ -682,7 +682,7 @@ impl KiApp {
     /// ne passe pas par ici (le fil le tient), ni le clip d'un rond quand
     /// l'enregistreur tourne (le fil le déclenche).
     fn executer(&mut self, action: &Action, ctx: &egui::Context) {
-        let en_vocal = self.voice_channel.is_some();
+        let en_vocal = self.session.voice_channel.is_some();
         match action {
             Action::Rien | Action::Ptt => {}
             // Comme les raccourcis : hors vocal, micro et écoute n'ont pas
@@ -720,7 +720,7 @@ impl KiApp {
                 }
             }
             Action::Salon(nom) => {
-                let salon = self.channels.iter().find(|c| c.kind == ChannelKind::Voice && &c.name == nom).map(|c| c.id);
+                let salon = self.session.channels.iter().find(|c| c.kind == ChannelKind::Voice && &c.name == nom).map(|c| c.id);
                 match salon {
                     Some(id) => self.join_voice(id),
                     None => self.info = Some(format!("pas de salon vocal « {nom} » sur ce serveur")),
@@ -728,13 +728,13 @@ impl KiApp {
             }
             Action::Son(nom) => self.jouer_son(nom),
             Action::Stats => {
-                if self.welcomed {
+                if self.session.welcomed {
                     self.ouvrir_stats();
                     self.ramener_ki_chat(ctx);
                 }
             }
             Action::Fiche => {
-                let moi = self.members.iter().find(|m| Some(m.user_id) == self.my_id);
+                let moi = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id);
                 if let Some((id, nom)) = moi.map(|m| (m.user_id, m.username.clone())) {
                     self.ouvrir_fiche(id, nom);
                     self.ramener_ki_chat(ctx);
@@ -768,7 +768,7 @@ impl KiApp {
             self.info = Some(format!("pas de son « {nom} » dans la soundboard"));
             return;
         };
-        if self.voice_channel.is_none() {
+        if self.session.voice_channel.is_none() {
             self.info = Some("rejoins un salon vocal pour jouer un son".into());
             return;
         }
@@ -781,7 +781,7 @@ impl KiApp {
     /// Ce que dit la lumière d'une action, rond ou touche.
     fn lumiere(&self, action: &Action) -> Lumiere {
         use Lumiere::*;
-        let en_vocal = self.voice_channel.is_some();
+        let en_vocal = self.session.voice_channel.is_some();
         let selon = |allumee: bool| if allumee { Allumee } else { Veille };
         match action {
             Action::Rien => Eteinte,
@@ -802,8 +802,8 @@ impl KiApp {
             Action::QuitterVocal => if en_vocal { Veille } else { Eteinte },
             Action::Page(n) => selon(self.loupedeck_etat.ecran == *n),
             Action::Salon(nom) => {
-                match self.channels.iter().find(|c| c.kind == ChannelKind::Voice && &c.name == nom) {
-                    Some(c) => selon(self.voice_channel == Some(c.id)),
+                match self.session.channels.iter().find(|c| c.kind == ChannelKind::Voice && &c.name == nom) {
+                    Some(c) => selon(self.session.voice_channel == Some(c.id)),
                     None => Eteinte,
                 }
             }
@@ -828,7 +828,7 @@ impl KiApp {
 
     /// Le titre d'origine d'une touche-bouton, et sa ligne d'état.
     fn textes_action(&self, action: &Action) -> (String, String) {
-        let en_vocal = self.voice_channel.is_some();
+        let en_vocal = self.session.voice_channel.is_some();
         let hors_vocal = || "hors vocal".to_string();
         let pages = &self.loupedeck_etat.config.pages;
         let duree = self.clips.reglages.duree_s;
@@ -853,8 +853,8 @@ impl KiApp {
             Action::Enregistreur => "arrêté".into(),
             Action::QuitterVocal => self.voice_channel_name().map(str::to_string).unwrap_or_else(hors_vocal),
             Action::Page(_) => "page".into(),
-            Action::Salon(nom) => match self.channels.iter().find(|c| c.kind == ChannelKind::Voice && &c.name == nom) {
-                Some(c) => match self.members.iter().filter(|m| m.voice == Some(c.id)).count() {
+            Action::Salon(nom) => match self.session.channels.iter().find(|c| c.kind == ChannelKind::Voice && &c.name == nom) {
+                Some(c) => match self.session.members.iter().filter(|m| m.voice == Some(c.id)).count() {
                     0 => "vide".into(),
                     n => format!("{n} en vocal"),
                 },
@@ -1002,7 +1002,7 @@ impl KiApp {
 
     /// La case de la bande en face d'une molette.
     fn jauge(&self, action: ActionMolette) -> Jauge {
-        let en_vocal = self.voice_channel.is_some();
+        let en_vocal = self.session.voice_channel.is_some();
         let volume = |titre: &str, v: f32, max: f32, actif: bool| Jauge {
             titre: titre.into(),
             valeur: pct(v),
@@ -1033,7 +1033,7 @@ impl KiApp {
             ActionMolette::VolumeChoisi => {
                 let choisi = self.loupedeck_choisi();
                 let nom = choisi
-                    .and_then(|id| self.members.iter().find(|m| m.user_id == id))
+                    .and_then(|id| self.session.members.iter().find(|m| m.user_id == id))
                     .map(|m| m.username.clone());
                 match (choisi, nom) {
                     (Some(id), Some(nom)) => volume(&nom, self.volume_of(id), 2.0, true),

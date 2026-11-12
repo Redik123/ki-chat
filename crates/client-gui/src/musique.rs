@@ -76,10 +76,10 @@ impl KiApp {
         }
         let salon_nom = etat
             .salon
-            .and_then(|id| self.channels.iter().find(|c| c.id == id))
+            .and_then(|id| self.session.channels.iter().find(|c| c.id == id))
             .map(|c| c.name.clone())
             .unwrap_or_default();
-        let mon_salon = self.my_id.and_then(|me| self.members.iter().find(|m| m.user_id == me)).and_then(|m| m.voice);
+        let mon_salon = self.session.my_id.and_then(|me| self.session.members.iter().find(|m| m.user_id == me)).and_then(|m| m.voice);
         let ailleurs = etat.salon.is_some() && mon_salon != etat.salon;
 
         // --- La ligne ---

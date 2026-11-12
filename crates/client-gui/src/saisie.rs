@@ -212,9 +212,9 @@ impl KiApp {
                             && self.edition.is_none()
                             && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
                         {
-                            let dernier = self
+                            let dernier = self.session
                                 .my_id
-                                .and_then(|me| self.messages.iter().rev().find(|m| m.user_id == me))
+                                .and_then(|me| self.session.messages.iter().rev().find(|m| m.user_id == me))
                                 .cloned();
                             if let Some(m) = dernier {
                                 self.commencer_edition(&m);
@@ -296,7 +296,7 @@ impl KiApp {
                     // Modifier : un texte inchangé ne repart pas, mais
                     // l'édition se ferme quand même.
                     Some(message) => {
-                        let inchange = self.messages.iter().any(|m| {
+                        let inchange = self.session.messages.iter().any(|m| {
                             m.user_id == message.user_id && m.ts == message.ts && m.text == text
                         });
                         if !inchange {
@@ -307,7 +307,7 @@ impl KiApp {
                                 brut: text.clone(),
                                 propre: ki_protocol::clean_chat(&text).unwrap_or_else(|_| text.clone()),
                                 quand: std::time::Instant::now(),
-                                salon: self.current,
+                                salon: self.session.current,
                                 reponse_a: None,
                                 edition: Some(message),
                                 rendu: false,
@@ -326,7 +326,7 @@ impl KiApp {
                             brut: text.clone(),
                             propre,
                             quand: std::time::Instant::now(),
-                            salon: self.current,
+                            salon: self.session.current,
                             reponse_a,
                             edition: None,
                             rendu: false,
@@ -353,10 +353,10 @@ impl KiApp {
     /// Ce que le panneau des suggestions peut proposer : tous les membres sauf
     /// soi et les bots, et les commandes qu'on a le droit de lancer.
     pub(crate) fn sources_suggestions(&self) -> suggestions::Sources {
-        let membres = self
+        let membres = self.session
             .members
             .iter()
-            .filter(|m| Some(m.user_id) != self.my_id && !est_bot(m.user_id))
+            .filter(|m| Some(m.user_id) != self.session.my_id && !est_bot(m.user_id))
             .map(|m| suggestions::Membre {
                 pseudo: m.username.clone(),
                 couleur: couleur_de_membre(m),
@@ -379,7 +379,7 @@ impl KiApp {
     pub(crate) fn commandes_disponibles(&self) -> Vec<suggestions::Commande> {
         let mut commandes = Vec::new();
         // Même condition que le bouton Poke du profil.
-        if self.serveur_gere_lus {
+        if self.session.serveur_gere_lus {
             commandes.push(suggestions::POKE);
         }
         let musique = &self.musique.etat;
@@ -425,12 +425,12 @@ impl KiApp {
                     return Err("/poke : qui ? Écris /poke @pseudo".into());
                 }
                 let nom = ki_protocol::safe_display(pseudo, 32);
-                let membre = self
+                let membre = self.session
                     .members
                     .iter()
                     .find(|m| !est_bot(m.user_id) && m.username.eq_ignore_ascii_case(pseudo))
                     .ok_or_else(|| format!("/poke : personne ne s'appelle « {nom} »"))?;
-                if Some(membre.user_id) == self.my_id {
+                if Some(membre.user_id) == self.session.my_id {
                     return Err("/poke : tu ne peux pas te poke toi-même".into());
                 }
                 if let Some(motif) = self.poke_impossible(membre) {
@@ -467,7 +467,7 @@ impl KiApp {
     /// il en ressort — tant qu'on n'y a pas touché.
     pub(crate) fn envoi_confirme(&mut self) {
         let Some(envoi) = self.envoi_en_attente.take() else { return };
-        if !envoi.rendu || self.current != envoi.salon || self.input != envoi.brut {
+        if !envoi.rendu || self.session.current != envoi.salon || self.input != envoi.brut {
             return;
         }
         if self.edition == envoi.edition {
@@ -485,7 +485,7 @@ impl KiApp {
     pub(crate) fn rendre_l_envoi_refuse(&mut self) {
         let champ_libre = self.input.trim().is_empty() && self.edition.is_none();
         let maintenant = std::time::Instant::now();
-        let salon = self.current;
+        let salon = self.session.current;
         let Some(envoi) = self
             .envoi_en_attente
             .as_mut()
