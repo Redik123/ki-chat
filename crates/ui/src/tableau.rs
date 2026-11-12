@@ -137,6 +137,7 @@ pub struct Tableau<'a> {
     colonnes: Vec<Colonne<'a>>,
     hauteur_ligne: f32,
     tri_defaut: Option<Tri>,
+    surlignee: Option<usize>,
 }
 
 impl<'a> Tableau<'a> {
@@ -144,7 +145,7 @@ impl<'a> Tableau<'a> {
     pub const HAUTEUR_TETE: f32 = 26.0;
 
     pub fn new(id_salt: impl egui::AsIdSalt) -> Self {
-        Self { id: Id::unique(("ki-tableau", id_salt)), colonnes: Vec::new(), hauteur_ligne: 32.0, tri_defaut: None }
+        Self { id: Id::unique(("ki-tableau", id_salt)), colonnes: Vec::new(), hauteur_ligne: 32.0, tri_defaut: None, surlignee: None }
     }
 
     pub fn colonne(mut self, colonne: Colonne<'a>) -> Self {
@@ -154,6 +155,13 @@ impl<'a> Tableau<'a> {
 
     pub fn hauteur_ligne(mut self, hauteur: f32) -> Self {
         self.hauteur_ligne = hauteur;
+        self
+    }
+
+    /// La ligne à mettre en avant, s'il y en a une : celle dont on parle
+    /// ailleurs sur la page — le point survolé d'une courbe, par exemple.
+    pub fn surlignee(mut self, ligne: Option<usize>) -> Self {
+        self.surlignee = ligne;
         self
     }
 
@@ -228,7 +236,9 @@ impl<'a> Tableau<'a> {
                 continue;
             }
             let reponse = ui.interact(bande, self.id.with(("ligne", ligne)), Sense::click());
-            let fond = if reponse.hovered() {
+            let fond = if self.surlignee == Some(ligne) {
+                theme::translucide(theme::ACCENT, 30)
+            } else if reponse.hovered() {
                 theme::BG_HOVER
             } else if ligne % 2 == 1 {
                 theme::translucide(Color32::WHITE, 5)

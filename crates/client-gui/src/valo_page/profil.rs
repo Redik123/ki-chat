@@ -59,6 +59,7 @@ impl PageValo {
     /// le banc d'essai le photographie ainsi. Rend `false` quand on le
     /// referme : le bouton retour, ou Échap. Ce qu'il demande se perd —
     /// la page au centre, elle, le rend ([`Self::profil_contenu`]).
+    #[cfg(debug_assertions)]
     pub fn profil(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>) -> bool {
         let mut ouvert = true;
         ui.horizontal(|ui| {
@@ -71,9 +72,6 @@ impl PageValo {
                     .font(police::moyenne(ui.ctx(), texte::TITRE_PAGE))
                     .color(TEXT),
             );
-            if let Some(fiche) = ouverte.fiche.as_ref().filter(|f| f.maj > 0) {
-                ui::hint(ui, format!("mise à jour {} · HenrikDev", crate::il_y_a(fiche.maj)));
-            }
         });
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !ui.ctx().egui_wants_keyboard_input() {
             ouvert = false;
@@ -207,22 +205,34 @@ impl PageValo {
                     ui::hint(ui, "Aucun match sur cette période.");
                     return;
                 }
-                let tableau = Tableau::new("profil_matchs")
-                    .hauteur_ligne(40.0)
-                    .colonne(Colonne::new("Carte", 130.0).grandit())
-                    .colonne(Colonne::new("Agent", 104.0).priorite(2))
-                    .colonne(Colonne::new("Score", 52.0))
-                    .colonne(Colonne::new("K / D / A", 80.0))
-                    .colonne(Colonne::new("ACS", 44.0).droite().priorite(3))
-                    .colonne(Colonne::new("ADR", 44.0).droite().priorite(4))
-                    .colonne(Colonne::new("KAST", 48.0).droite().priorite(4))
-                    .colonne(Colonne::new("FK", 34.0).droite().priorite(5))
-                    .colonne(Colonne::new("Note", 46.0).droite().priorite(3))
-                    .colonne(Colonne::new("Médailles", 84.0).priorite(5))
-                    .colonne(Colonne::new("RR", 44.0).droite());
-                let clic = tableau.show(ui, montres.len(), |ui, i, colonne| {
-                    let m = montres[i];
-                    cellule_de_match(ui, m, colonne, vue);
+                // Le mode n'a de sens que tous modes confondus : en
+                // compétitif, toutes les lignes diraient la même chose.
+                let mut colonnes = vec![(ColonneMatch::Carte, Colonne::new("Carte", 130.0).grandit())];
+                if !vue.classe {
+                    colonnes.push((ColonneMatch::Mode, Colonne::new("Mode", 92.0).priorite(2)));
+                }
+                colonnes.extend([
+                    (ColonneMatch::Agent, Colonne::new("Agent", 104.0).priorite(2)),
+                    (ColonneMatch::Score, Colonne::new("Score", 52.0)),
+                    (ColonneMatch::Kda, Colonne::new("K / D / A", 80.0)),
+                    (ColonneMatch::Acs, Colonne::new("ACS", 44.0).droite().priorite(3)),
+                    (ColonneMatch::Adr, Colonne::new("ADR", 44.0).droite().priorite(4)),
+                    (ColonneMatch::Kast, Colonne::new("KAST", 48.0).droite().priorite(4)),
+                    (ColonneMatch::PremiersSangs, Colonne::new("FK / FD", 60.0).droite().priorite(5)),
+                    (ColonneMatch::Note, Colonne::new("Note", 46.0).droite().priorite(3)),
+                    (ColonneMatch::Medailles, Colonne::new("Médailles", 84.0).priorite(5)),
+                    (ColonneMatch::Rr, Colonne::new("RR", 44.0).droite()),
+                ]);
+                let mut tableau = Tableau::new("profil_matchs").hauteur_ligne(40.0);
+                let mut ordre = Vec::with_capacity(colonnes.len());
+                for (quoi, colonne) in colonnes {
+                    ordre.push(quoi);
+                    tableau = tableau.colonne(colonne);
+                }
+                // Le point survolé sur la courbe retrouve son match ici.
+                let survole = self.survol.as_deref().and_then(|id| montres.iter().position(|m| m.id == id));
+                let clic = tableau.surlignee(survole).show(ui, montres.len(), |ui, i, colonne| {
+                    cellule_de_match(ui, montres[i], ordre[colonne], vue);
                 });
                 if let Some(i) = clic {
                     basculer = Some(montres[i].id.clone()).filter(|id| !id.is_empty());
@@ -260,6 +270,9 @@ impl PageValo {
 /// vers le palier suivant, ce qu'il reste à gagner, le pic, le MMR.
 fn en_tete(ui: &mut Ui, vue: &Vue) {
     identite(ui, vue.fiche, vue.catalogue);
+    if vue.fiche.maj > 0 {
+        ui::hint(ui, format!("mise à jour {} · HenrikDev", crate::il_y_a(vue.fiche.maj)));
+    }
     ui.add_space(espace::S);
     let r = &vue.fiche.rang;
     ui::surface(ui, |ui| {
@@ -297,7 +310,8 @@ fn en_tete(ui: &mut Ui, vue: &Vue) {
                     ligne.push(format!("≈ {} pour {}", pluriel(n, "victoire"), nom_de_rang(r.tier + 1)));
                 }
                 if let Some(pic) = vue.fiche.pic.as_ref().filter(|p| p.tier >= 3) {
-                    ligne.push(format!("pic {} · {} RR", nom_de_rang(pic.tier), pic.rr));
+                    let acte = if pic.saison.is_empty() { String::new() } else { format!(" ({})", pic.saison.to_uppercase()) };
+                    ligne.push(format!("pic {} · {} RR{acte}", nom_de_rang(pic.tier), pic.rr));
                 }
                 if r.placements_restants > 0 {
                     ligne.push(format!("encore {}", pluriel(u32::from(r.placements_restants), "placement")));
@@ -307,6 +321,21 @@ fn en_tete(ui: &mut Ui, vue: &Vue) {
                 }
                 if !ligne.is_empty() {
                     ui.label(RichText::new(ligne.join(" · ")).color(TEXT_DIM).size(texte::PETIT));
+                }
+                // L'acte en cours : son bilan, à part de la période choisie
+                // plus bas.
+                if let Some(s) = vue.fiche.saisons.last().filter(|s| s.parties > 0) {
+                    ui.label(
+                        RichText::new(format!(
+                            "acte {} : {} V sur {} · {} %",
+                            s.saison.to_uppercase(),
+                            s.victoires,
+                            pluriel(u32::from(s.parties), "partie"),
+                            u32::from(s.victoires) * 100 / u32::from(s.parties)
+                        ))
+                        .color(TEXT_DIM)
+                        .size(texte::PETIT),
+                    );
                 }
                 if let Some(e) = estimation {
                     let (ou, teinte, phrase) = match e.position {
@@ -347,6 +376,8 @@ struct Chiffre {
     ecart: Option<ui::Ecart>,
     precision: String,
     jauge: Option<(f32, Option<f32>, Color32)>,
+    /// Comment le chiffre se calcule, avec ses nombres : au survol.
+    info: String,
 }
 
 /// Le taux de clutchs gagnés, en pourcentage.
@@ -412,32 +443,142 @@ fn chiffres(ui: &mut Ui, vue: &Vue) {
         let couleur = if moi >= med { SPEAK } else { DANGER };
         Some(((moi / echelle, Some(med / echelle), couleur), format!("médiane {}{unite}", dec(med, decimales))))
     };
-    let mut tuiles: Vec<Chiffre> = Vec::new();
-    let mut ajouter = |intitule, valeur: String, f: fn(&Bilan) -> Option<f32>, decimales, unite: &str, sinon: String| {
-        let repere = mediane(f, f(b), decimales, unite);
-        tuiles.push(Chiffre {
-            intitule,
-            valeur,
-            ecart: ecart_de(f, &recents, &avant, decimales, true),
-            precision: repere.as_ref().map(|(_, t)| t.clone()).unwrap_or(sinon),
-            jauge: repere.map(|(j, _)| j),
-        });
+    // Pourquoi une valeur manque, quand elle manque : des dégâts à zéro ne
+    // viennent que d'un match résumé avant 0.1.40, un détail absent d'un
+    // match d'avant ou d'un match archivé. Sans ça, un tiret ne dit rien.
+    let sur = |n: u16| format!("sur {}", pluriel(u32::from(n), "match"));
+    let sous_degats = if b.matchs_degats == 0 {
+        "matchs d'avant 0.1.40".to_string()
+    } else if b.matchs_degats < b.matchs {
+        sur(b.matchs_degats)
+    } else {
+        String::new()
     };
-    ajouter("K/D", opt_dec(b.kd(), 2), Bilan::kd, 2, "", format!("KDA {}", opt_dec(b.kda(), 2)));
-    ajouter("ACS", opt_entier(b.acs()), Bilan::acs, 0, "", format!("sur {}", pluriel(u32::from(b.manches), "manche")));
-    ajouter("ADR", opt_entier(b.adr()), Bilan::adr, 0, "", String::new());
-    ajouter("KAST", opt_pct(b.kast_pct()), Bilan::kast_pct, 0, " %", String::new());
-    ajouter("Tête", opt_pct(b.tete_pct()), Bilan::tete_pct, 0, " %", format!("{} tirs", milliers(b.tirs)));
+    let sous_detail = if b.matchs_detailles == 0 {
+        "manches non lues".to_string()
+    } else if b.matchs_detailles < b.matchs {
+        sur(b.matchs_detailles)
+    } else {
+        String::new()
+    };
+    let sous_tirs = if b.tirs > 0 { format!("{} tirs", milliers(b.tirs)) } else { "tirs non comptés".to_string() };
+
+    let mut tuiles: Vec<Chiffre> = Vec::new();
+    let mut ajouter =
+        |intitule, valeur: String, f: fn(&Bilan) -> Option<f32>, decimales, unite: &str, sinon: String, info: String| {
+            let repere = mediane(f, f(b), decimales, unite);
+            tuiles.push(Chiffre {
+                intitule,
+                valeur,
+                ecart: ecart_de(f, &recents, &avant, decimales, true),
+                precision: repere.as_ref().map(|(_, t)| t.clone()).unwrap_or(sinon),
+                jauge: repere.map(|(j, _)| j),
+                info,
+            });
+        };
+    ajouter(
+        "K/D",
+        opt_dec(b.kd(), 2),
+        Bilan::kd,
+        2,
+        "",
+        format!("KDA {}", opt_dec(b.kda(), 2)),
+        format!(
+            "kills / morts = {} / {} ; KDA = (kills + assists) / morts = ({} + {}) / {}",
+            b.kills, b.deaths, b.kills, b.assists, b.deaths
+        ),
+    );
+    ajouter(
+        "ACS",
+        opt_entier(b.acs()),
+        Bilan::acs,
+        0,
+        "",
+        format!("sur {}", pluriel(u32::from(b.manches), "manche")),
+        format!("score / manches = {} / {}", milliers(b.score), b.manches),
+    );
+    ajouter(
+        "ADR",
+        opt_entier(b.adr()),
+        Bilan::adr,
+        0,
+        "",
+        sous_degats,
+        format!("dégâts / manches des matchs qui les ont = {} / {}", milliers(b.degats), b.manches_degats),
+    );
+    ajouter(
+        "KAST",
+        opt_pct(b.kast_pct()),
+        Bilan::kast_pct,
+        0,
+        " %",
+        sous_detail.clone(),
+        format!("manches avec kill, assist, survie ou échange / manches lues = {} / {}", b.kast, b.manches_detaillees),
+    );
+    ajouter(
+        "Tête",
+        opt_pct(b.tete_pct()),
+        Bilan::tete_pct,
+        0,
+        " %",
+        sous_tirs,
+        format!("tirs à la tête / tirs = {} / {}", milliers(b.tetes), milliers(b.tirs)),
+    );
     let bilan = format!("{} V – {} D", b.victoires, b.defaites);
-    ajouter("Victoires", opt_pct(b.victoires_pct()), Bilan::victoires_pct, 0, " %", bilan.clone());
-    ajouter("Premiers sangs", opt_dec(b.fk_par_match(), 1), Bilan::fk_par_match, 1, "", "par match".into());
+    ajouter(
+        "Victoires",
+        opt_pct(b.victoires_pct()),
+        Bilan::victoires_pct,
+        0,
+        " %",
+        bilan.clone(),
+        format!(
+            "victoires / (victoires + défaites) = {} / {} sur {} à manches",
+            b.victoires,
+            u32::from(b.victoires) + u32::from(b.defaites),
+            pluriel(u32::from(b.matchs), "match")
+        ),
+    );
+    let morts = format!("{} premières morts", b.premieres_morts);
+    ajouter(
+        "Premiers sangs",
+        opt_dec(b.fk_par_match(), 1),
+        Bilan::fk_par_match,
+        1,
+        "",
+        if b.matchs_detailles > 0 { format!("par match · {morts}") } else { sous_detail.clone() },
+        format!(
+            "premiers sangs / matchs lus = {} / {} ; en face, {morts}",
+            b.premiers_sangs, b.matchs_detailles
+        ),
+    );
     let clutchs = if b.clutchs_tentes > 0 { format!("{} / {}", b.clutchs, b.clutchs_tentes) } else { TIRET.to_string() };
     let meilleur = if b.meilleur_clutch > 0 { format!(" · meilleur 1 v {}", b.meilleur_clutch) } else { String::new() };
-    ajouter("Clutchs", clutchs, taux_de_clutch, 0, " %", format!("{} gagnés{meilleur}", opt_pct(taux_de_clutch(b))));
-    // Les victoires disent aussi le bilan, même avec une médiane.
-    if let Some(t) = tuiles.iter_mut().find(|t| t.intitule == "Victoires") {
-        if t.jauge.is_some() {
-            t.precision = format!("{bilan} · {}", t.precision);
+    ajouter(
+        "Clutchs",
+        clutchs,
+        taux_de_clutch,
+        0,
+        " %",
+        if b.matchs_detailles > 0 { format!("{} gagnés{meilleur}", opt_pct(taux_de_clutch(b))) } else { sous_detail },
+        format!(
+            "situations 1 contre X gagnées / tentées{meilleur} ; manches à 3, 4, 5 kills ou plus : {} triple(s), {} \
+             quadruple(s), {} ace(s)",
+            b.triples, b.quadruples, b.aces
+        ),
+    );
+    // Avec une médiane, la précision ne dit plus que la médiane : ces trois
+    // tuiles gardent devant ce qu'elles disaient sans elle.
+    let devant = [
+        ("Victoires", bilan),
+        ("Premiers sangs", format!("{} FD", b.premieres_morts)),
+        ("Clutchs", if b.triples + b.quadruples + b.aces > 0 { multi_kills(b.triples, b.quadruples, b.aces) } else { String::new() }),
+    ];
+    for (intitule, texte_) in devant {
+        if let Some(t) = tuiles.iter_mut().find(|t| t.intitule == intitule && t.jauge.is_some()) {
+            if !texte_.is_empty() {
+                t.precision = format!("{texte_} · {}", t.precision);
+            }
         }
     }
 
@@ -460,7 +601,7 @@ fn chiffres(ui: &mut Ui, vue: &Vue) {
             if let Some((part, repere, couleur)) = t.jauge {
                 kpi = kpi.jauge(part, repere, couleur);
             }
-            kpi.show(ui);
+            kpi.show(ui).on_hover_text(&t.info);
         });
     });
 }
@@ -777,42 +918,67 @@ fn les_actes(ui: &mut Ui, vue: &Vue) {
 // Une case du tableau des matchs
 // ---------------------------------------------------------------------
 
-fn cellule_de_match(ui: &mut Ui, m: &MatchResume, colonne: usize, vue: &Vue) {
+/// Les colonnes de la table des matchs. Par leur nom, pas par leur rang :
+/// la colonne Mode va et vient avec le filtre, et un numéro aurait glissé.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColonneMatch {
+    Carte,
+    Mode,
+    Agent,
+    Score,
+    Kda,
+    Acs,
+    Adr,
+    Kast,
+    PremiersSangs,
+    Note,
+    Medailles,
+    Rr,
+}
+
+fn cellule_de_match(ui: &mut Ui, m: &MatchResume, colonne: ColonneMatch, vue: &Vue) {
     match colonne {
-        0 => {
+        ColonneMatch::Carte => {
             ui.vertical(|ui| {
                 ui.add_space(espace::XXS);
                 carte_cellule(ui, &m.carte, vue.catalogue);
                 ui.label(RichText::new(crate::il_y_a(m.date)).color(TEXT_FAINT).size(texte::MINUSCULE));
             });
         }
-        1 => {
+        ColonneMatch::Mode => {
+            cellule(ui, &m.mode, TEXT_DIM);
+        }
+        ColonneMatch::Agent => {
             agent_cellule(ui, &m.agent, vue.catalogue);
         }
-        2 => {
+        ColonneMatch::Score => {
             ui.label(
                 RichText::new(format!("{}-{}", m.manches.0, m.manches.1))
                     .font(police::moyenne(ui.ctx(), texte::COURANT))
                     .color(teinte_de_score(m.gagne)),
             );
         }
-        3 => {
-            cellule(ui, format!("{} / {} / {}", m.kills, m.deaths, m.assists), TEXT);
+        ColonneMatch::Kda => {
+            cellule(ui, format!("{} / {} / {}", m.kills, m.deaths, m.assists), TEXT)
+                .on_hover_text(format!("éliminations / morts / assistances — {} points", milliers(m.score)));
         }
-        4 => {
+        ColonneMatch::Acs => {
             cellule(ui, opt_entier(acs_de(m)), TEXT_DIM);
         }
-        5 => {
+        ColonneMatch::Adr => {
             cellule(ui, opt_entier(adr_de(m)), TEXT_DIM);
         }
-        6 => {
+        ColonneMatch::Kast => {
             cellule(ui, opt_pct(kast_de(m)), TEXT_DIM);
         }
-        7 => {
-            let fk = m.manches_detail.as_ref().map_or_else(|| TIRET.to_string(), |d| d.premiers_sangs.to_string());
-            cellule(ui, fk, TEXT_DIM);
+        ColonneMatch::PremiersSangs => {
+            let fk = m
+                .manches_detail
+                .as_ref()
+                .map_or_else(|| TIRET.to_string(), |d| format!("{} / {}", d.premiers_sangs, d.premieres_morts));
+            cellule(ui, fk, TEXT_DIM).on_hover_text("premiers sangs / premières morts");
         }
-        8 => {
+        ColonneMatch::Note => {
             let (note, couleur) = if m.perf > 0 { (m.perf.to_string(), TEXT_DIM) } else { (TIRET.to_string(), TEXT_FAINT) };
             let mvp = match m.mvp {
                 ki_protocol::MVP_DU_MATCH => Some("MVP du match"),
@@ -824,13 +990,27 @@ fn cellule_de_match(ui: &mut Ui, m: &MatchResume, colonne: usize, vue: &Vue) {
                 reponse.on_hover_text(mvp);
             }
         }
-        9 => {
+        ColonneMatch::Medailles => {
             medailles_cellule(ui, vue.medailles_du(&m.id));
         }
-        _ => match vue.point_de(&m.id) {
+        ColonneMatch::Rr => match vue.point_de(&m.id) {
             Some(p) => {
                 let (t, c) = signe(p.delta);
-                ui.label(RichText::new(t).font(police::moyenne(ui.ctx(), texte::COURANT)).color(c));
+                let reponse = ui.label(RichText::new(t).font(police::moyenne(ui.ctx(), texte::COURANT)).color(c));
+                // Ce que ce delta a de particulier, quand il en a.
+                let mut details = Vec::new();
+                if p.bonus != 0 {
+                    details.push(format!("dont {} de bonus de performance", signe(p.bonus).0));
+                }
+                if p.placement {
+                    details.push("match de placement".to_string());
+                }
+                if p.protege {
+                    details.push("descente protégée".to_string());
+                }
+                if !details.is_empty() {
+                    reponse.on_hover_text(details.join(" · "));
+                }
             }
             None => {
                 cellule(ui, TIRET, TEXT_FAINT);

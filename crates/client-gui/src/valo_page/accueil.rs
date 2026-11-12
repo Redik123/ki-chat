@@ -150,6 +150,14 @@ impl PageValo {
     pub(super) fn accueil(&mut self, ui: &mut Ui, cx: &Contexte<'_>, lignes: &[Ligne], noms: &Annuaire, demandes: &mut Vec<Demande>) {
         affiche(ui, cx, noms);
         ui.add_space(espace::L);
+        // Tous ceux qui sont sur VALORANT, toutes les parties en cours : le
+        // bandeau du dessus n'en montre qu'une. Rien quand personne ne joue.
+        let en_jeu = joueurs_en_direct(cx.membres, cx.catalogue);
+        if !en_jeu.is_empty() {
+            ui::section(ui, Icon::Play, "En direct", Some(&resume_en_direct(&en_jeu)), |ui| {
+                lignes_en_direct(ui, &en_jeu, noms, cx.rangs, cx.catalogue, cx.moi, demandes);
+            });
+        }
         if !cx.recu {
             ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
             return;

@@ -1014,50 +1014,45 @@ fn badge_d_etat(j: &JeuStatut) -> (&'static str, Color32) {
     }
 }
 
-/// « En direct » : qui est sur VALORANT en ce moment, d'après la présence
-/// que chacun partage — rien de plus que ce que la liste des membres dit
-/// déjà, rangé et illustré. Ceux qui jouent ensemble tiennent sur une
-/// ligne.
-#[allow(clippy::too_many_arguments)]
-fn en_direct(
-    ui: &mut Ui,
-    membres: &[Member],
-    noms: &Annuaire,
-    rangs: &rangs::Rangs,
-    catalogue: &Catalogue,
-    my_id: Option<UserId>,
-    demandes: &mut Vec<Demande>,
-) {
+/// Qui est sur VALORANT en ce moment, d'après la présence que chacun
+/// partage : les parties d'abord, puis la sélection, les files, les menus.
+fn joueurs_en_direct<'a>(membres: &'a [Member], catalogue: &'a Catalogue) -> Vec<(&'a Member, Cow<'a, JeuStatut>)> {
     let mut joueurs: Vec<(&Member, Cow<JeuStatut>)> = membres
         .iter()
         .filter(|m| m.online)
         .filter_map(|m| m.jeu.as_ref().filter(|j| j.est_valorant()).map(|j| (m, catalogue.nommer(j))))
         .collect();
     joueurs.sort_by_key(|(m, j)| (rang_d_etat(j), m.username.to_lowercase()));
-    let en_partie = joueurs.iter().filter(|(_, j)| j.etat == JeuEtat::EnJeu).count();
+    joueurs
+}
 
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("En direct").strong().size(texte::CORPS));
-        if !joueurs.is_empty() {
-            let (point, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-            icons::dot(ui.painter(), point.center(), 3.5, if en_partie > 0 { SPEAK } else { TEXT_FAINT });
-            let texte = match (joueurs.len(), en_partie) {
-                (n, 0) => format!("{} sur VALORANT", pluriel(n as u32, "membre")),
-                (n, p) if p == n => format!("{} en partie", pluriel(n as u32, "membre")),
-                (n, p) => format!("{} sur VALORANT, {p} en partie", pluriel(n as u32, "membre")),
-            };
-            ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
-        }
-    });
-    if joueurs.is_empty() {
-        ui::hint(ui, "personne sur VALORANT en ce moment — chacun peut partager sa partie dans ⚙ → Jeu");
-        return;
+/// « 3 membres sur VALORANT, 2 en partie ».
+fn resume_en_direct(joueurs: &[(&Member, Cow<JeuStatut>)]) -> String {
+    let en_partie = joueurs.iter().filter(|(_, j)| j.etat == JeuEtat::EnJeu).count();
+    match (joueurs.len(), en_partie) {
+        (n, 0) => format!("{} sur VALORANT", pluriel(n as u32, "membre")),
+        (n, p) if p == n => format!("{} en partie", pluriel(n as u32, "membre")),
+        (n, p) => format!("{} sur VALORANT, {p} en partie", pluriel(n as u32, "membre")),
     }
-    ui.add_space(espace::XS);
+}
+
+/// « En direct », ligne par ligne : rien de plus que ce que la liste des
+/// membres dit déjà, rangé et illustré. Ceux qui jouent ensemble tiennent
+/// sur une ligne ; toutes les parties en cours y sont, liées ou non à un
+/// compte Riot.
+fn lignes_en_direct(
+    ui: &mut Ui,
+    joueurs: &[(&Member, Cow<JeuStatut>)],
+    noms: &Annuaire,
+    rangs: &rangs::Rangs,
+    catalogue: &Catalogue,
+    my_id: Option<UserId>,
+    demandes: &mut Vec<Demande>,
+) {
     let statuts: Vec<&JeuStatut> = joueurs.iter().map(|(_, j)| j.as_ref()).collect();
     for ligne in regrouper_en_direct(&statuts) {
         let j = statuts[ligne[0]];
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = espace::S;
             // Le bandeau de la carte en tête, ou sa place vide : les noms
             // s'alignent d'une ligne à l'autre.
@@ -1090,7 +1085,7 @@ fn en_direct(
                 }
                 let mut pseudo = RichText::new(&m.username).color(noms.couleur(m.user_id)).size(texte::COURANT);
                 if my_id == Some(m.user_id) {
-                    pseudo = pseudo.strong();
+                    pseudo = pseudo.font(ki_ui::jetons::police::moyenne(ui.ctx(), texte::COURANT));
                 }
                 let lie = m.riot_id.is_some();
                 let reponse = ui.add(egui::Label::new(pseudo).sense(if lie { Sense::click() } else { Sense::hover() }));
@@ -1107,7 +1102,7 @@ fn en_direct(
             }
             let (texte, score) = etat_en_direct(j);
             if let Some((score, teinte)) = score {
-                ui.label(RichText::new(score).color(teinte).strong().size(texte::COURANT));
+                ui.label(RichText::new(score).color(teinte).font(ki_ui::jetons::police::moyenne(ui.ctx(), texte::COURANT)));
             }
             if !texte.is_empty() {
                 ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
@@ -1229,7 +1224,14 @@ impl PageValo {
                         // fiches — ça se montre avant qu'elles arrivent, et
                         // même si personne n'a lié de compte.
                         if self.onglet == Onglet::Groupe {
-                            en_direct(ui, membres, &noms, rangs, catalogue, my_id, &mut demandes);
+                            let en_jeu = joueurs_en_direct(membres, catalogue);
+                            ui.label(RichText::new("En direct").strong().size(texte::CORPS));
+                            if en_jeu.is_empty() {
+                                ui::hint(ui, "personne sur VALORANT en ce moment — chacun peut partager sa partie dans ⚙ → Jeu");
+                            } else {
+                                ui::hint(ui, resume_en_direct(&en_jeu));
+                                lignes_en_direct(ui, &en_jeu, &noms, rangs, catalogue, my_id, &mut demandes);
+                            }
                             ui.add_space(espace::XL);
                         }
                         if !recu {
