@@ -19,6 +19,9 @@
 //!   et garde immobile la ligne qu'on lit quand le reste bouge.
 //! - [`tableau`] : un tableau de données décrit par ses colonnes — tri,
 //!   colonnes masquées par priorité, rayures, survol, clic.
+//! - [`fenetre`] : les fenêtres et les modales — identifiant fixe, taille
+//!   bornée à l'écran, confirmations qui bloquent ce qui est derrière — et
+//!   la touche Échap, qui ferme ce qui est au-dessus.
 //! - [`toasts`] : les courts messages qui se posent dans un coin, se lisent
 //!   et s'en vont seuls.
 //! - [`typo`] : les rôles de texte (aide, libellé, corps, titres) et les
@@ -32,6 +35,7 @@
 
 pub mod composants;
 pub mod emoji;
+pub mod fenetre;
 pub mod flex;
 pub mod icones;
 pub mod jetons;
