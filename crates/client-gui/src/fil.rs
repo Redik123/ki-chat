@@ -933,6 +933,8 @@ impl KiApp {
             .and_then(|id| membres_source.iter().find(|m| m.user_id == id))
             .map(|m| m.username.clone());
         let moi_id = self.session.my_id;
+        // PageHaut, PageBas, Échap : lus ici, la saisie étant déjà passée.
+        let pages = self.fil_au_clavier(ui.ctx());
         // Ce qu'un clic sur un message a demandé : exécuté après le
         // rendu, quand les messages sont revenus dans l'état.
         let mut demande: Option<(MsgRef, MessageAction)> = None;
@@ -958,6 +960,7 @@ impl KiApp {
         let sortie = Liste::new("fil")
             .coller_en_bas(true)
             .aller_en_bas(std::mem::take(&mut self.fil_au_bas))
+            .defiler_de(pages)
             .hauteur_estimee(48.0)
             .show(
                 ui,

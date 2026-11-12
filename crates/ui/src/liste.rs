@@ -46,6 +46,7 @@ pub struct Liste {
     marge: Option<f32>,
     coller_en_bas: bool,
     aller_en_bas: bool,
+    pages: f32,
 }
 
 /// Ce que la liste a fait à cette image.
@@ -113,6 +114,7 @@ impl Liste {
             marge: None,
             coller_en_bas: false,
             aller_en_bas: false,
+            pages: 0.0,
         }
     }
 
@@ -153,6 +155,15 @@ impl Liste {
         self
     }
 
+    /// Défile de `pages` hauteurs de vue à cette image, d'un coup : négatif
+    /// vers le haut, positif vers le bas — PageHaut et PageBas. Collée en
+    /// bas, la liste s'en décolle pour remonter ; redescendue au fond, elle
+    /// s'y recolle.
+    pub fn defiler_de(mut self, pages: f32) -> Self {
+        self.pages = pages;
+        self
+    }
+
     /// Affiche les `nombre` éléments : `cle(i)` identifie le i-ème,
     /// `element(ui, i)` le dessine. `element` n'est appelé que pour ceux
     /// qui sont à l'écran, et pour mesurer, sans les montrer, ceux qui en
@@ -170,7 +181,9 @@ impl Liste {
             etat.deja_vue = true;
             etat.en_bas = self.coller_en_bas;
         }
-        let au_bas = self.aller_en_bas || (self.coller_en_bas && etat.en_bas);
+        // Une page vers le haut décolle du bas : sans ça, on y serait remis
+        // à chaque image.
+        let au_bas = self.aller_en_bas || (self.pages >= 0.0 && self.coller_en_bas && etat.en_bas);
         let ecart = self.ecart.unwrap_or(ui.spacing().item_spacing.y);
 
         // Le plan : la hauteur de chacun, mesurée ou estimée, et où il
@@ -203,6 +216,12 @@ impl Liste {
             .stick_to_bottom(self.coller_en_bas);
         if let Some(d) = impose {
             zone = zone.vertical_scroll_offset(d);
+        }
+        // Une page au clavier se fait d'un coup : animé, le défilement vise
+        // un décalage fixé au départ, que le recalage de l'ancre déplace en
+        // chemin — on arrivait jusqu'à une page trop loin.
+        if self.pages != 0.0 {
+            zone = zone.animated(false);
         }
 
         let marge_voulue = self.marge;
@@ -325,6 +344,14 @@ impl Liste {
                 ui.ctx().request_repaint();
             }
             etat.hauteur_contenu = hauteur_contenu;
+
+            // La page demandée au clavier, en dernier : une zone qui défile
+            // dans un élément l'aurait prise pour elle. Passer par la
+            // demande de défilement d'egui — et non par le décalage imposé —
+            // est ce qui décolle une zone collée en bas.
+            if self.pages != 0.0 {
+                ui.scroll_with_delta(vec2(0.0, -self.pages * vue.height()));
+            }
         });
 
         #[cfg(debug_assertions)]
@@ -641,6 +668,54 @@ mod tests {
         let apres = banc.images(2, &elements, |l| l);
         assert!(!apres.sortie.en_bas);
         assert!((apres.ou(cle).top() - rect.top()).abs() < 0.5);
+    }
+
+    /// PageHaut décolle un fil collé en bas et remonte d'autant ; ce qui
+    /// arrive pendant ce temps ne le fait pas redescendre ; PageBas le
+    /// ramène au fond, où il se recolle.
+    #[test]
+    fn une_page_au_clavier_decolle_du_bas_puis_y_revient() {
+        let banc = Banc::new(500.0, 400.0);
+        let mut elements = serie(0..200);
+        let colle = |l: Liste| l.coller_en_bas(true);
+        let bas = banc.images(4, &elements, colle);
+        assert!(bas.sortie.en_bas);
+        let (lu, ou_il_etait) = bas.lu();
+
+        // Une demi-page vers le haut, demandée par une seule image : de 200
+        // points tout juste, même si ce qu'on découvre au-dessus n'a pas la
+        // hauteur estimée — une page qui dérape saute des lignes.
+        banc.image(&elements, |l| colle(l).defiler_de(-0.5));
+        let haut = banc.images(6, &elements, colle);
+        assert!(!haut.sortie.en_bas, "resté collé en bas");
+        let descendu = haut.ou(lu).top() - ou_il_etait.top();
+        assert!((descendu - 200.0).abs() < 1.0, "remonté de {descendu} points au lieu de 200");
+        bien_range(&haut);
+
+        // Un message arrive : on lit toujours le même endroit.
+        let (cle, rect) = haut.lu();
+        elements.push(200);
+        let apres = banc.images(3, &elements, colle);
+        assert!(!apres.sortie.en_bas);
+        assert!((apres.ou(cle).top() - rect.top()).abs() < 0.5);
+
+        // Une page vers le bas : au fond, et recollé — le prochain message
+        // se voit.
+        banc.image(&elements, |l| colle(l).defiler_de(1.0));
+        let fond = banc.images(6, &elements, colle);
+        assert!(fond.sortie.en_bas);
+        assert_eq!(fond.montres.last().unwrap().0, 200);
+        elements.push(201);
+        let suivi = banc.images(3, &elements, colle);
+        assert_eq!(suivi.montres.last().unwrap().0, 201);
+
+        // Tout en haut, PageHaut ne fait rien de travers.
+        for _ in 0..80 {
+            banc.image(&elements, |l| colle(l).defiler_de(-1.0));
+        }
+        let sommet = banc.images(6, &elements, colle);
+        assert_eq!(sommet.montres[0].0, 0);
+        assert!(sommet.sortie.decalage.abs() < 0.5);
     }
 
     #[test]

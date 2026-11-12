@@ -6,6 +6,8 @@
 //!   milieu. Refaits, ils la déballent.
 //! - Partout : Alt+↑ / Alt+↓ vont au salon textuel d'à côté, Alt+Maj+↑ / ↓
 //!   au prochain qui a du non-lu ; Ctrl+F ouvre la recherche.
+//! - Dans le fil : PageHaut / PageBas remontent ou redescendent d'un écran,
+//!   Échap revient tout en bas — et marque lu, puisqu'on y est.
 //!
 //! Ce module ne tient que le calcul, qui se teste sans fenêtre ; les touches
 //! elles-mêmes se lisent dans `saisie` et dans `main`.
@@ -108,7 +110,39 @@ pub(crate) fn salon_voisin(salons: &[(ChannelId, bool)], courant: Option<Channel
         .map(|(id, _)| id)
 }
 
+/// Ce qu'une page du clavier fait défiler, en hauteurs de vue : un peu moins
+/// qu'un écran, pour garder sous les yeux la ligne où l'on en était.
+const PAGE: f32 = 0.85;
+
 impl KiApp {
+    /// Les touches du fil, à lire **après** la saisie — Échap y renonce
+    /// d'abord à une réponse ou à une modification — et avant de dessiner
+    /// le fil. Rend de combien de pages défiler ; Échap, lui, demande le
+    /// retour en bas. Rien quand quelque chose recouvre le fil.
+    pub(crate) fn fil_au_clavier(&mut self, ctx: &egui::Context) -> f32 {
+        let recouvert = ki_ui::fenetre::une_est_ouverte(ctx)
+            || egui::Popup::is_any_open(ctx)
+            || self.visionneuse.est_ouverte()
+            || self.atelier.est_ouvert();
+        if recouvert {
+            return 0.0;
+        }
+        if !self.fil_en_bas && crate::prendre_echap(ctx) {
+            self.fil_au_bas = true;
+            return 0.0;
+        }
+        let aucune = egui::Modifiers::NONE;
+        ctx.input_mut(|i| {
+            if i.consume_key(aucune, egui::Key::PageUp) {
+                -PAGE
+            } else if i.consume_key(aucune, egui::Key::PageDown) {
+                PAGE
+            } else {
+                0.0
+            }
+        })
+    }
+
     /// Les raccourcis de mise en forme, à lire **avant** de dessiner la
     /// saisie : elle prendrait ces touches pour elle. Seulement quand c'est
     /// elle qui a le clavier.
