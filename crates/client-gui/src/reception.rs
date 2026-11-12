@@ -71,7 +71,80 @@ impl KiApp {
         }
     }
 
+    /// Un message du serveur, aiguillé vers son domaine. Pas de bras « tout le
+    /// reste » ici : un message ajouté au protocole ne compile pas tant qu'il
+    /// n'a pas sa place.
     pub(crate) fn handle_server_msg(&mut self, msg: ServerMsg) {
+        match msg {
+            ServerMsg::Welcome { .. } => self.recu_accueil(msg),
+            ServerMsg::Chat { .. }
+            | ServerMsg::Nouveau { .. }
+            | ServerMsg::NonLus { .. }
+            | ServerMsg::History { .. }
+            | ServerMsg::Reaction { .. }
+            | ServerMsg::MessageDeleted { .. }
+            | ServerMsg::MessageEdited { .. }
+            | ServerMsg::SearchResults { .. }
+            | ServerMsg::HistoryPage { .. } => self.recu_fil(msg),
+            ServerMsg::Members { .. }
+            | ServerMsg::MemberUpdate { .. }
+            | ServerMsg::UserJoined { .. }
+            | ServerMsg::UserLeft { .. }
+            | ServerMsg::VoiceState { .. } => self.recu_membres(msg),
+            ServerMsg::StreamGranted { .. }
+            | ServerMsg::StreamStarted { .. }
+            | ServerMsg::StreamStopped { .. }
+            | ServerMsg::WatchDenied { .. }
+            | ServerMsg::WatchAccepted { .. }
+            | ServerMsg::KeyframeNeeded { .. }
+            | ServerMsg::StreamMetaChanged { .. }
+            | ServerMsg::StreamViewers { .. }
+            | ServerMsg::StreamBudget { .. } => self.recu_streams(msg),
+            ServerMsg::LiaisonRiot { .. }
+            | ServerMsg::MesComptes { .. }
+            | ServerMsg::FicheValorant { .. }
+            | ServerMsg::MusiqueEtat { .. }
+            | ServerMsg::MusiqueResultats { .. }
+            | ServerMsg::Cartes { .. }
+            | ServerMsg::CartesRefus { .. }
+            | ServerMsg::TactiqueEtat { .. }
+            | ServerMsg::Tactique { .. }
+            | ServerMsg::TactiqueRefus { .. }
+            | ServerMsg::MonJournal { .. }
+            | ServerMsg::Soiree { .. }
+            | ServerMsg::StatsValorant { .. } => self.recu_jeux(msg),
+            ServerMsg::Poke { .. }
+            | ServerMsg::PokeRefuse { .. }
+            | ServerMsg::Error { .. }
+            | ServerMsg::Kicked { .. }
+            | ServerMsg::AdminInfo { .. }
+            | ServerMsg::AuditLog { .. }
+            | ServerMsg::Perms { .. }
+            | ServerMsg::Roles { .. }
+            | ServerMsg::ChannelsUpdated { .. }
+            | ServerMsg::VoiceLocked { .. }
+            | ServerMsg::InviteCreated { .. }
+            | ServerMsg::AdminFichiers { .. }
+            | ServerMsg::Info { .. }
+            | ServerMsg::ServerInfo { .. }
+            | ServerMsg::Avatar { .. }
+            | ServerMsg::NetQuality { .. }
+            | ServerMsg::Pong => self.recu_serveur(msg),
+            ServerMsg::ClaudeConversation { .. }
+            | ServerMsg::ClaudeMessage { .. }
+            | ServerMsg::ClaudeEtape { .. }
+            | ServerMsg::ClaudeErreur { .. }
+            | ServerMsg::ClaudeMembres { .. } => self.recu_claude(msg),
+            ServerMsg::PorteOuverte { .. }
+            | ServerMsg::PorteDemande { .. }
+            | ServerMsg::PorteEtat { .. }
+            | ServerMsg::PorteFermee { .. }
+            | ServerMsg::PorteInvitation { .. } => self.recu_portes(msg),
+        }
+    }
+
+    /// L'accueil du serveur : qui l'on est, ce qu'il sait faire, où l'on arrive.
+    fn recu_accueil(&mut self, msg: ServerMsg) {
         match msg {
             ServerMsg::Welcome {
                 user_id,
@@ -248,6 +321,14 @@ impl KiApp {
                     self.join(first);
                 }
             }
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// Le fil des salons : messages, pastilles, historique, réactions, recherche.
+    fn recu_fil(&mut self, msg: ServerMsg) {
+        match msg {
             ServerMsg::Chat {
                 user_id,
                 username,
@@ -479,6 +560,14 @@ impl KiApp {
                 older.append(&mut self.messages);
                 self.messages = older;
             }
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// Les membres : qui est là, qui arrive, qui part, qui parle.
+    fn recu_membres(&mut self, msg: ServerMsg) {
+        match msg {
             ServerMsg::Members { members } => {
                 self.fetch_missing_avatars(&members);
                 self.members = members
@@ -540,6 +629,14 @@ impl KiApp {
                     m.muted = muted;
                 }
             }
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// Les partages d'écran : le sien, ceux qu'on regarde.
+    fn recu_streams(&mut self, msg: ServerMsg) {
+        match msg {
             ServerMsg::StreamGranted { stream_id } => {
                 self.diffusion.palier = None;
                 self.diffusion.montant = false;
@@ -635,6 +732,14 @@ impl KiApp {
                     self.budget_de_diffusion(kbps, basse, montant);
                 }
             }
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// VALORANT, la musique, les cartes, la carte tactique.
+    fn recu_jeux(&mut self, msg: ServerMsg) {
+        match msg {
             ServerMsg::LiaisonRiot { ok, message, .. } => {
                 self.riot_message = Some((ok, message));
             }
@@ -703,6 +808,15 @@ impl KiApp {
                 self.activite = activite;
                 self.stats_recu = true;
             }
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// Ce que le serveur dit de lui-même et de nos droits : pokes, erreurs, expulsion,
+    /// administration, rôles, salons, avatars, qualité du lien.
+    fn recu_serveur(&mut self, msg: ServerMsg) {
+        match msg {
             ServerMsg::Poke { user_id: _, username } => {
                 // Quelqu'un me veut : son, clignotement insistant (jusqu'au
                 // retour du focus), bandeau dans le salon, et une ligne
@@ -875,6 +989,14 @@ impl KiApp {
                 self.on_net_quality(loss_pct);
             }
             ServerMsg::Pong => {}
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// Claude : sa conversation, ses étapes, ses chiffres.
+    fn recu_claude(&mut self, msg: ServerMsg) {
+        match msg {
             // --- Claude ---
             ServerMsg::ClaudeConversation { de, messages, etat } => {
                 self.claude.sur_conversation(self.my_id, de, messages, etat);
@@ -885,6 +1007,14 @@ impl KiApp {
             ServerMsg::ClaudeMembres { membres, modele, par_jour, modeles } => {
                 self.claude.sur_membres(membres, modele, par_jour, modeles);
             }
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
+        }
+    }
+
+    /// Les portes web : ouvertures, demandes d'entrée, fermetures.
+    fn recu_portes(&mut self, msg: ServerMsg) {
+        match msg {
             // --- Les portes web ---
             ServerMsg::PorteOuverte { slug, url, salon, expire_le } => {
                 // Ma porte : le lien et son QR dans le panneau, et le
@@ -945,6 +1075,8 @@ impl KiApp {
             // À l'invité web seulement, par sa porte : un client ki-chat
             // ne le reçoit jamais.
             ServerMsg::PorteInvitation { .. } => {}
+            // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
+            autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
         }
     }
 }
