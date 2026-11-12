@@ -347,6 +347,16 @@ impl History {
         }
     }
 
+    /// Le texte d'un message tel qu'il se lit aujourd'hui : celui de sa
+    /// dernière modification s'il y en a une, rien s'il est supprimé.
+    fn texte_courant<'a>(etats: &'a Etats, rec: &'a ChatRecord) -> Option<&'a str> {
+        match etats.get(&MsgRef { user_id: rec.user_id, ts: rec.ts }) {
+            Some(e) if e.supprime => None,
+            Some(e) => Some(e.texte.as_deref().unwrap_or(&rec.text)),
+            None => Some(&rec.text),
+        }
+    }
+
     /// Pose l'état après coup sur un message lu : ses réactions, et « garder
     /// ou non » — un message supprimé ne se rend plus.
     fn habiller(etats: &Etats, mut rec: ChatRecord) -> Option<ChatRecord> {
@@ -843,6 +853,7 @@ impl History {
                 .chars()
                 .any(|c| c == '"' || c == '\\' || c.is_control());
         let tamis = tamisable.then(|| besoin.as_bytes().to_vec());
+        let correspond = |texte: &str| texte.to_lowercase().contains(&besoin);
 
         let mut trouves: Vec<(ChannelId, ChatRecord)> = Vec::new();
         let mut deborde = false;
@@ -859,6 +870,18 @@ impl History {
             // correspondances. Chercher « le » dans dix ans d'archives ne doit
             // pas rapatrier dix ans d'archives.
             let mut par_salon: VecDeque<ChatRecord> = VecDeque::with_capacity(limit);
+
+            // Les messages modifiés dont le texte d'aujourd'hui correspond.
+            // Leur ligne du journal porte encore l'ancien texte : le tamis
+            // l'écarterait. On les repère par leur horodatage, tel qu'il
+            // s'écrit dans la ligne — un second tamis, qui peut laisser
+            // passer trop (un horodatage préfixe d'un autre), jamais trop
+            // peu ; la vérification après lecture tranche.
+            let modifies: Vec<Vec<u8>> = etats
+                .iter()
+                .filter(|(_, e)| !e.supprime && e.texte.as_deref().is_some_and(correspond))
+                .map(|(m, _)| format!("\"ts\":{}", m.ts).into_bytes())
+                .collect();
 
             // Le cache mémoire est la **queue du fichier** : les mêmes
             // messages s'y trouvent deux fois. On relève donc d'abord ce
@@ -880,7 +903,9 @@ impl History {
                     Some(recent) => (
                         recent
                             .iter()
-                            .filter(|r| r.text.to_lowercase().contains(&besoin))
+                            // Le texte d'aujourd'hui : un message modifié se
+                            // cherche par ce qu'il dit maintenant.
+                            .filter(|r| Self::texte_courant(&etats, r).is_some_and(correspond))
                             .cloned()
                             .filter_map(|r| Self::habiller(&etats, r))
                             .collect::<Vec<ChatRecord>>(),
@@ -913,7 +938,7 @@ impl History {
                     if let Some(tamis) = &tamis {
                         minuscules.clear();
                         minuscules.extend(buf.iter().map(u8::to_ascii_lowercase));
-                        if !contient(&minuscules, tamis) {
+                        if !contient(&minuscules, tamis) && !modifies.iter().any(|m| contient(&buf, m)) {
                             continue;
                         }
                     }
@@ -926,10 +951,10 @@ impl History {
                         if en_memoire.contains(&(rec.user_id, rec.ts)) {
                             continue;
                         }
-                        if rec.text.to_lowercase().contains(&besoin) {
-                            if let Some(rec) = Self::habiller(&etats, rec) {
-                                garder(&mut par_salon, limit, rec, &mut deborde);
-                            }
+                        // Habillé d'abord : c'est le texte modifié qui se
+                        // compare, pas celui du journal.
+                        if let Some(rec) = Self::habiller(&etats, rec).filter(|r| correspond(&r.text)) {
+                            garder(&mut par_salon, limit, rec, &mut deborde);
                         }
                     }
                 }
@@ -1457,6 +1482,53 @@ mod tests {
                 "« {besoin} » aurait dû être trouvé"
             );
         }
+    }
+
+    /// Un message modifié se cherche par ce qu'il dit **aujourd'hui** : son
+    /// nouveau texte le fait trouver, l'ancien ne le fait plus sortir.
+    ///
+    /// Deux chemins, comme toujours ici : le cache mémoire, et le fichier
+    /// au-delà du cache — où la ligne du journal porte encore l'ancien
+    /// texte, que le tamis en octets ne laisserait pas passer.
+    #[test]
+    fn la_recherche_lit_le_texte_modifie() {
+        let cle = |ts| MsgRef { user_id: 1, ts };
+        // Dans le cache.
+        let dir = scratch("recherche-modifie");
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        history.append(1, &dit(1, 10, "rendez-vous a 20h"));
+        history.append(1, &dit(1, 20, "ca marche"));
+        assert!(history.edit(1, cle(10), "rendez-vous a 21h30".into()));
+        let trouves = |besoin: &str| history.search(&dir, &[1], besoin, 10).0.iter().map(|(_, r)| (r.ts, r.text.clone())).collect::<Vec<_>>();
+        assert_eq!(trouves("21h30"), vec![(10, "rendez-vous a 21h30".to_string())]);
+        assert_eq!(trouves("20h"), vec![], "l'ancien texte ne fait plus sortir le message");
+        assert_eq!(trouves("rendez-vous").len(), 1);
+
+        // Dans le fichier, au-delà du cache : écrit à la main, la
+        // modification à la suite du message, puis de quoi remplir le cache.
+        let dir = scratch("recherche-modifie-fichier");
+        let path = PathBuf::from(&dir).join("channel-1.jsonl");
+        let mut bytes = Vec::new();
+        let mut ligne = |texte: String| {
+            bytes.extend_from_slice(texte.as_bytes());
+            bytes.push(b'\n');
+        };
+        ligne(serde_json::to_string(&dit(1, 1, "on joue sur Ascent")).unwrap());
+        ligne(serde_json::to_string(&dit(1, 2, "ou sur Bind")).unwrap());
+        ligne(serde_json::to_string(&Ligne::Edition { edit: EvEdition { message: cle(1), text: "on joue sur Lotus".into() } }).unwrap());
+        for n in 100..(100 + MEM_CAP as u64) {
+            ligne(serde_json::to_string(&stamped(n)).unwrap());
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let history = History::open(&dir, &[text_channel(1)]).unwrap();
+        let trouves = |besoin: &str| history.search(&dir, &[1], besoin, 10).0.iter().map(|(_, r)| (r.ts, r.text.clone(), r.edited)).collect::<Vec<_>>();
+        assert_eq!(trouves("lotus"), vec![(1, "on joue sur Lotus".to_string(), true)]);
+        assert_eq!(trouves("ascent"), vec![]);
+        assert_eq!(trouves("bind"), vec![(2, "ou sur Bind".to_string(), false)]);
+        // Hors du tamis (une majuscule accentuée) : tout se désérialise, et
+        // c'est encore le texte d'aujourd'hui qui compte.
+        assert_eq!(trouves("LOTUS"), vec![(1, "on joue sur Lotus".to_string(), true)]);
+        assert_eq!(trouves("É"), vec![]);
     }
 
     /// Le pseudo n'est pas le texte : chercher un nom ne doit pas rendre tout

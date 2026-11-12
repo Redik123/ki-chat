@@ -292,6 +292,11 @@ pub struct ConnectedUser {
     pub admin: bool,
     /// Anti-spam du chat.
     pub chat_budget: TokenBucket,
+    /// Anti-spam des réactions, à part : elles puisaient dans le budget du
+    /// chat, si bien qu'une réaction posée juste après un message était
+    /// refusée sans un mot — et qu'un message écrit juste après une
+    /// réaction s'entendait dire « tu écris trop vite ».
+    pub reaction_budget: TokenBucket,
     /// Les choix que le client redit à chaque connexion (médailles, journal
     /// des parties). Ils puisaient dans le budget du chat : deux jetons
     /// partis dès l'arrivée, et le premier message écrit dans la seconde
@@ -442,6 +447,15 @@ impl TokenBucket {
     /// faire réécrire le disque en rafale.
     pub fn des_choix() -> Self {
         Self::new(0.5, 4.0)
+    }
+}
+
+impl TokenBucket {
+    /// Le budget des réactions : deux par seconde en régime, huit d'un
+    /// coup au plus. On réagit en rafale à ce qu'on vient de lire — un
+    /// clic, pas une phrase — ; au-delà, c'est un script.
+    pub fn reactions() -> Self {
+        Self::new(2.0, 8.0)
     }
 }
 
@@ -1633,6 +1647,24 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Les réactions ont leur budget à elles : une rafale de huit passe,
+    /// la neuvième attend, et rien de tout ça ne touche au budget du chat.
+    #[test]
+    fn les_reactions_ne_puisent_pas_dans_le_budget_du_chat() {
+        let mut chat = TokenBucket::default();
+        let mut reactions = TokenBucket::reactions();
+        // Un message vient de partir, puis un second : le chat est à sec.
+        assert!(chat.take() && chat.take() && !chat.take());
+        // Réagir reste possible, huit fois d'affilée.
+        for n in 1..=8 {
+            assert!(reactions.take(), "réaction {n}");
+        }
+        assert!(!reactions.take(), "la neuvième, dans la même seconde, attend");
+        // Et les réactions n'ont rien coûté au chat, qui n'a rien regagné
+        // non plus : les deux seaux s'ignorent.
+        assert!(!chat.take());
+    }
 
     /// Le `Welcome` le plus lourd que les plafonds permettent — tous les
     /// rôles, tous les salons, aux noms les plus longs en caractères de

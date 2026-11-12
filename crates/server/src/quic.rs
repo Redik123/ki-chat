@@ -397,6 +397,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 color,
                 admin: is_admin,
                 chat_budget: Default::default(),
+                reaction_budget: crate::state::TokenBucket::reactions(),
                 choix_budget: crate::state::TokenBucket::des_choix(),
                 voice_budget: crate::state::TokenBucket::new(3.0, 8.0),
                 pokes_ok: None,
@@ -1581,16 +1582,24 @@ fn handle_msg(
                 });
                 return;
             };
-            // Une réaction coûte un jeton du budget de chat : réagir en
-            // rafale remplirait le journal et la bande passante comme des
-            // messages.
+            // Les réactions ont leur propre budget : réagir en rafale
+            // remplirait le journal et la bande passante comme des messages,
+            // mais une réaction n'est pas un message — elle ne doit ni
+            // attendre derrière celui qu'on vient d'écrire, ni faire refuser
+            // le suivant. Et un refus se dit : sans rien, le clic paraît
+            // n'avoir pas pris. Une `Info`, pas une `Error` : le client rend
+            // au champ de saisie le message en attente sur toute erreur, et
+            // celui-là n'a rien à voir.
             let allowed = {
                 let mut users = state.users.lock().unwrap();
                 users
                     .get_mut(&user_id)
-                    .is_some_and(|u| u.chat_budget.take())
+                    .is_some_and(|u| u.reaction_budget.take())
             };
             if !allowed {
+                let _ = tx.send(ServerMsg::Info {
+                    message: "tu réagis trop vite — encore un instant".into(),
+                });
                 return;
             }
             let Some(emoji) = ki_protocol::clean_emoji(&emoji) else {
