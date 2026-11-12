@@ -3,7 +3,7 @@
 //! mode studio, chaque réglage à la main.
 
 use ki_ui::typo::{Texte, Ton};
-use ki_ui::jetons::{espace, texte};
+use ki_ui::jetons::espace;
 use std::time::Duration;
 
 use eframe::egui::{self, RichText, Vec2};
@@ -14,7 +14,7 @@ use ki_voice::{EtatEssai, ESSAI_SECONDES};
 use crate::icons::Icon;
 use crate::ptt::PttKey;
 use crate::reglages_audio::curseur;
-use crate::theme::{ACCENT, DANGER, SPEAK, TEXT};
+use crate::theme::{DANGER, SPEAK, TEXT};
 use crate::ui;
 use crate::KiApp;
 
@@ -179,7 +179,7 @@ impl KiApp {
                 }
                 // --- Le détail, en mode studio ---
                 ui.add_space(espace::XS);
-                ui.label(RichText::new("Réglages").color(TEXT).size(texte::CORPS).strong());
+                ui.label(Texte::Corps.gras(ui, "Réglages"));
                 ui.label(
                     Texte::Aide.riche(ui, "Toucher un réglage fait ton propre personnage."),
                 );
@@ -430,14 +430,11 @@ impl KiApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(Texte::Libelle.riche(ui, "Pour t'en rapprocher :"));
                 ui.label(
-                    RichText::new(format!(
+                    Texte::Libelle.gras_ton(ui, Ton::Accent, format!(
                         "hauteur {:+.1} demi-tons, timbre {:+.0} %",
                         r.hauteur,
                         (r.formants - 1.0) * 100.0
-                    ))
-                    .color(ACCENT)
-                    .size(texte::COURANT)
-                    .strong(),
+                    )),
                 );
             });
             if r.bornee {

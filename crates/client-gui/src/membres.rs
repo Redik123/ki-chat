@@ -12,7 +12,7 @@ use crate::{
 };
 use crate::admin_ui::BanDraft;
 use crate::icons::Icon;
-use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::theme::{ACCENT, DANGER, SPEAK, TEXT_DIM, TEXT_FAINT, WARN};
 use crate::ui::Ton;
 
 /// Ce qu'une ligne de membre montre en plus du compte lui-même : l'état
@@ -123,7 +123,7 @@ pub(crate) fn fantome_deplacement(ctx: &egui::Context) {
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.label(RichText::new(&glisse.username).color(TEXT).strong());
+                ui.label(Texte::Corps.gras(ui, &glisse.username));
             });
         });
 }
@@ -403,7 +403,7 @@ impl KiApp {
             response.context_menu(|ui| {
                 ui.set_width(228.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&m.username).color(theme::INVITE).strong());
+                    ui.label(Texte::Corps.gras(ui, &m.username).color(theme::INVITE));
                     porte_ui::pastille_invite(ui);
                 });
                 let porte = self.portes.porte_de_l_invite(m.user_id).map(|p| p.slug.clone());
@@ -435,7 +435,7 @@ impl KiApp {
             response.context_menu(|ui| {
                 ui.set_width(228.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&m.username).color(ACCENT).strong());
+                    ui.label(Texte::Corps.gras_ton(ui, Ton::Accent, &m.username));
                     pastille_bot(ui);
                 });
                 ui::hint(ui, "le serveur, qui joue de la musique dans ce salon");
@@ -456,7 +456,7 @@ impl KiApp {
         }
         response.context_menu(|ui| {
             ui.set_width(228.0);
-            ui.label(RichText::new(&m.username).color(self.color_of(m)).strong());
+            ui.label(Texte::Corps.gras(ui, &m.username).color(self.color_of(m)));
             if let Some(role) = self.top_role_name(m) {
                 ui::hint(ui, role);
             }
@@ -771,10 +771,7 @@ impl KiApp {
                 ui.horizontal(|ui| {
                     ui::section_label(ui, "En ligne");
                     ui.label(
-                        RichText::new(online.len().to_string())
-                            .color(theme::BORDER_STRONG)
-                            .size(texte::PETIT)
-                            .strong(),
+                        Texte::Aide.gras(ui, online.len().to_string()).color(theme::BORDER_STRONG),
                     );
                 });
                 ui.add_space(espace::XXS);
@@ -830,10 +827,7 @@ impl KiApp {
                         ui.horizontal(|ui| {
                             ui::section_label(ui, "Invités");
                             ui.label(
-                                RichText::new(invites.len().to_string())
-                                    .color(theme::BORDER_STRONG)
-                                    .size(texte::PETIT)
-                                    .strong(),
+                                Texte::Aide.gras(ui, invites.len().to_string()).color(theme::BORDER_STRONG),
                             );
                         });
                         ui.add_space(espace::XXS);
@@ -870,10 +864,7 @@ impl KiApp {
                         ui.horizontal(|ui| {
                             ui::section_label(ui, "Hors ligne");
                             ui.label(
-                                RichText::new(offline.len().to_string())
-                                    .color(theme::BORDER_STRONG)
-                                    .size(texte::PETIT)
-                                    .strong(),
+                                Texte::Aide.gras(ui, offline.len().to_string()).color(theme::BORDER_STRONG),
                             );
                         });
                         ui.add_space(espace::XXS);
@@ -921,7 +912,7 @@ impl KiApp {
                 ui.label(Texte::Libelle.riche(ui, "Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe."));
                 ui.add_space(espace::M);
                 if id == ki_protocol::MUSIQUE_ID {
-                    ui.label(RichText::new("Ce qu'il fait").strong());
+                    ui.label(Texte::Corps.gras(ui, "Ce qu'il fait"));
                     match &etat.en_cours {
                         Some(p) => {
                             ui.label(format!("joue « {} » {}", p.titre, if p.artiste.is_empty() { String::new() } else { format!("de {}", p.artiste) }));
@@ -932,16 +923,16 @@ impl KiApp {
                     }
                     ui.label(Texte::Libelle.riche(ui, format!("{} en file · volume global {} %", etat.longueur_file(), etat.volume)));
                     ui.add_space(espace::M);
-                    ui.label(RichText::new("Qui le pilote").strong());
+                    ui.label(Texte::Corps.gras(ui, "Qui le pilote"));
                     ui.label(Texte::Libelle.riche(ui, if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }));
                     ui.add_space(espace::M);
-                    ui.label(RichText::new("Comment il marche").strong());
+                    ui.label(Texte::Corps.gras(ui, "Comment il marche"));
                     ui.label(Texte::Libelle.riche(ui, "Le serveur tire le flux audio de YouTube ou SoundCloud avec yt-dlp, le décode avec ffmpeg, \
                          l'encode en Opus et l'envoie dans le salon chiffré comme la voix de n'importe qui. Aucun fichier \
                          audio n'est écrit, aucun client ne télécharge rien, et le flux brut ne contient pas de publicité. \
                          Chacun le règle ou le coupe comme un membre.",));
                     ui.add_space(espace::M);
-                    ui.label(RichText::new("Depuis le démarrage du serveur").strong());
+                    ui.label(Texte::Corps.gras(ui, "Depuis le démarrage du serveur"));
                     let c = &etat.compteurs;
                     ui.label(Texte::Libelle.riche(ui, format!(
                         "{} piste{} jouée{} · {} échec{} · premier son en {:.1} s en moyenne",
@@ -950,10 +941,10 @@ impl KiApp {
                         c.premier_son_ms as f32 / 1000.0
                     )));
                 } else {
-                    ui.label(RichText::new("Ce qu'il fait").strong());
+                    ui.label(Texte::Corps.gras(ui, "Ce qu'il fait"));
                     ui.label(Texte::Libelle.riche(ui, "Il poste le fil de jeu : à chaque partie finie d'un membre qui a lié son compte Riot, le résultat, sa ligne et ses RR."));
                     ui.add_space(espace::M);
-                    ui.label(RichText::new("Comment il marche").strong());
+                    ui.label(Texte::Corps.gras(ui, "Comment il marche"));
                     ui.label(Texte::Libelle.riche(ui, "Les données viennent de HenrikDev, à partir du Riot ID que chacun a lié lui-même. Le serveur ne garde que la ligne du membre dans ses matchs, jamais celles des adversaires, et délier efface tout."));
                 }
             });

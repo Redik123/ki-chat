@@ -25,13 +25,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Vec2};
 use ki_protocol::ChannelId;
 use ki_voice::medias::File;
 
 use crate::clips::{self, ClipInfo, Fiche};
 use crate::icons::Icon;
-use crate::theme::{self, ACCENT, TEXT, TEXT_DIM, TEXT_FAINT};
+use crate::theme::{self, ACCENT, TEXT_DIM, TEXT_FAINT};
 use crate::ui;
 use crate::visionneuse::{mmss, Lecture};
 
@@ -582,7 +582,7 @@ impl Atelier {
                     ui.spacing_mut().item_spacing.x = espace::S;
                     ui::glyph(ui, Icon::Pencil, 16.0, TEXT_DIM);
                     ui.label(Texte::Corps.riche_ton(ui, Ton::Discret, "Atelier"));
-                    ui.label(RichText::new(&p.nom).color(TEXT).size(texte::CORPS).strong());
+                    ui.label(Texte::Corps.gras(ui, &p.nom));
                     if let Some((texte, _)) = &info {
                         ui.add_space(espace::L);
                         ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, texte));

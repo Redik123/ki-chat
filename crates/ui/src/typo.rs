@@ -161,6 +161,19 @@ impl Texte {
             riche.size(self.taille())
         }
     }
+
+    /// Le texte à la taille du rôle, mais qui pèse : un pseudo dans une
+    /// liste, un nom de fichier, le mot qui compte dans une ligne. Sur le
+    /// ton neutre — ce qu'on appuie se lit en clair ; pour une autre
+    /// couleur, [`Texte::gras_ton`] ou `.color(…)`.
+    pub fn gras(self, ui: &Ui, contenu: impl Into<String>) -> RichText {
+        self.gras_ton(ui, Ton::Neutre, contenu)
+    }
+
+    /// Le même, sur le ton donné.
+    pub fn gras_ton(self, ui: &Ui, ton: Ton, contenu: impl Into<String>) -> RichText {
+        RichText::new(contenu).color(ton.couleur()).font(police::moyenne(ui.ctx(), self.taille()))
+    }
 }
 
 /// Pose un texte dans son rôle, sur son ton d'origine.

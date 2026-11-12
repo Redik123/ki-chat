@@ -16,7 +16,7 @@ use crate::formats::{day_label, debit_lisible, duree_lisible, format_time, megab
 use crate::icons::Icon;
 use crate::saisie::menu_edition;
 use crate::televersement::erreur_http;
-use crate::theme::{ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::theme::{ACCENT, DANGER, INFO, SPEAK, TEXT_DIM, TEXT_FAINT, WARN};
 use crate::ui::Ton;
 
 /// L'administration : la fenêtre, ses onglets, et ce qu'on y saisit.
@@ -825,10 +825,10 @@ impl KiApp {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = espace::XS;
                 ui.label(Texte::Libelle.riche_ton(ui, Ton::Info, "entrant"));
-                ui.label(RichText::new(debit_lisible(r.entrant_kbps)).color(TEXT).size(texte::COURANT).strong());
+                ui.label(Texte::Libelle.gras(ui, debit_lisible(r.entrant_kbps)));
                 ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, "·"));
                 ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, "sortant"));
-                ui.label(RichText::new(debit_lisible(r.sortant_kbps)).color(TEXT).size(texte::COURANT).strong());
+                ui.label(Texte::Libelle.gras(ui, debit_lisible(r.sortant_kbps)));
                 ui::hint(ui, format!("sur les {} dernières secondes", r.periode_s));
             });
             ui.add_space(espace::XS);
@@ -1332,7 +1332,7 @@ impl KiApp {
             ui.horizontal(|ui| {
                 let color = theme::member_color(role.color, &role.name);
                 ui::status_dot(ui, color, "", 10.0);
-                ui.label(RichText::new(&role.name).color(color).size(texte::CORPS).strong());
+                ui.label(Texte::Corps.gras(ui, &role.name).color(color));
                 ui::hint(ui, format!("rang {}", role.rank));
                 if role.system {
                     ui::hint(ui, "système");
@@ -1909,10 +1909,7 @@ impl KiApp {
                     Texte::Aide.riche(ui, format!("{} {}", day_label(record.ts), format_time(record.ts))).monospace(),
                 );
                 ui.label(
-                    RichText::new(audit_label(&record.action))
-                        .color(audit_tone(&record.action))
-                        .size(texte::COURANT)
-                        .strong(),
+                    Texte::Libelle.gras(ui, audit_label(&record.action)).color(audit_tone(&record.action)),
                 );
                 let actor = if record.actor.is_empty() {
                     "le serveur".to_string()

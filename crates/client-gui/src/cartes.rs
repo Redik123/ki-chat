@@ -1053,7 +1053,7 @@ impl Cartes {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         sous.set_clip_rect(rect);
-        sous.label(RichText::new(format!("Manche {}", t.manche.max(1))).color(c::TEXT_FAINT).size(texte::PETIT).strong());
+        sous.label(Texte::Aide.gras_ton(ui, Ton::Pale, format!("Manche {}", t.manche.max(1))));
         if let Some(liste) = liste_des_regles(t.regles) {
             sous.label(Texte::Aide.riche(ui, format!("En plus : {liste}")));
         }
@@ -1603,7 +1603,7 @@ fn regles(ui: &mut egui::Ui) {
         // La colonne qui l'accueille centre tout : les règles se lisent
         // mieux alignées à gauche.
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.label(RichText::new("Les règles de la maison").color(c::TEXT).strong());
+            ui.label(Texte::Corps.gras(ui, "Les règles de la maison"));
             ui.add_space(espace::XS);
             for ligne in [
                 "Pose une carte de même couleur, de même valeur, ou un joker.",
@@ -1626,7 +1626,7 @@ fn regles_en_plus(ui: &mut egui::Ui, t: &TableCartes, moi: UserId, nom_hote: &st
         // Toute la largeur, comme les règles de la maison en dessous.
         ui.set_min_width(ui.available_width());
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.label(RichText::new("Les règles en plus").color(c::TEXT).strong());
+            ui.label(Texte::Corps.gras(ui, "Les règles en plus"));
             ui.add_space(espace::XS);
             if hote {
                 let mut regles = t.regles;

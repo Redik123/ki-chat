@@ -225,10 +225,7 @@ pub(crate) fn message_block(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = espace::M;
                         ui.label(
-                            RichText::new(&msg.username)
-                                .color(color)
-                                .size(texte::CORPS)
-                                .strong(),
+                            Texte::Corps.gras(ui, &msg.username).color(color),
                         );
                         if est_bot(msg.user_id) {
                             pastille_bot(ui).on_hover_text(
@@ -542,7 +539,7 @@ pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
                 .on_hover_text(*url);
         }
         F::Gras(t) => {
-            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS).strong());
+            ki_ui::emoji::label(ui, Texte::Corps.gras(ui, *t));
         }
         F::Italique(t) => {
             ki_ui::emoji::label(ui, Texte::Corps.riche(ui, *t).italics());
@@ -1158,7 +1155,7 @@ impl KiApp {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(232.0);
-                    ui.label(RichText::new(&msg.username).strong());
+                    ui.label(Texte::Corps.gras(ui, &msg.username));
                     ki_ui::emoji::label_tronque(
                         ui,
                         Texte::Aide.riche(ui, ki_protocol::excerpt_of(&msg.text)),

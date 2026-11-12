@@ -7,7 +7,7 @@
 //! ici reste actif quand on y revient.
 
 use ki_ui::typo::{Texte, Ton};
-use ki_ui::jetons::{espace, texte};
+use ki_ui::jetons::espace;
 use eframe::egui::{self, RichText, Vec2};
 use ki_voice::dynamique::{
     ReglagesCompresseur, ReglagesDeesser, ReglagesPorte, ReglagesStudio, COMPRESSION_AUCUNE, COMPRESSION_DOUCE,
@@ -160,7 +160,7 @@ fn aiguille(ui: &mut egui::Ui, niveau: f32, couleur: egui::Color32, texte: &str)
 /// Le titre d'un bloc, et ce qu'il fait quand les explications sont montrées.
 fn titre_bloc(ui: &mut egui::Ui, numero: usize, titre: &str, description: &str, montrer: bool) {
     ui.add_space(espace::M);
-    ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(texte::CORPS).strong())
+    ui.label(Texte::Corps.gras(ui, format!("{numero}. {titre}")))
         .on_hover_text(description);
     if montrer {
         ui.add(egui::Label::new(Texte::Aide.riche_ton(ui, Ton::Discret, description)).wrap());

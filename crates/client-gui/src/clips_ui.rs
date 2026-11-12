@@ -613,7 +613,7 @@ impl KiApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_width(440.0);
-                ui.label(RichText::new(&p.nom).color(TEXT).strong());
+                ui.label(Texte::Corps.gras(ui, &p.nom));
                 let duree = p
                     .fiche
                     .as_ref()
@@ -807,7 +807,7 @@ impl KiApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(RichText::new(&c.nom).color(TEXT).strong());
+                ui.label(Texte::Corps.gras(ui, &c.nom));
                 ui::hint(
                     ui,
                     "la copie partagée et ses exports disparaissent du serveur ; le message du fil garde un \
@@ -887,7 +887,7 @@ impl KiApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(RichText::new(&nom).color(TEXT).strong());
+                ui.label(Texte::Corps.gras(ui, &nom));
                 ui::hint(ui, "le fichier sera effacé de ce PC ; il n'y a pas de corbeille");
                 ui.add_space(espace::M);
                 ui.horizontal(|ui| {
@@ -962,7 +962,7 @@ impl KiApp {
                     }
                 }
             } else {
-                ui.label(RichText::new(self.clips.reglages.raccourci.label()).color(TEXT).strong());
+                ui.label(Texte::Corps.gras(ui, self.clips.reglages.raccourci.label()));
                 if ui::Bouton::new("Changer").icone(Icon::Pencil).show(ui).clicked() {
                     if let Some(p) = &self.ptt {
                         p.capturer(true);

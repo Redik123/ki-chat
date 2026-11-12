@@ -19,7 +19,7 @@ use eframe::egui::{self, RichText};
 use ki_protocol::{ClientMsg, FichierPartage};
 
 use crate::icons::Icon;
-use crate::theme::{self, TEXT, TEXT_DIM, TEXT_FAINT};
+use crate::theme::{self, TEXT_DIM, TEXT_FAINT};
 use crate::ui::{self, Ton};
 
 /// Ce que l'onglet demande à l'application.
@@ -268,7 +268,7 @@ impl Fichiers {
                         let nom = if f.nom.is_empty() { f.id.as_str() } else { f.nom.as_str() };
                         ui.add(
                             egui::Label::new(
-                                RichText::new(ki_protocol::safe_display(nom, 80)).color(TEXT).size(texte::CORPS).strong(),
+                                Texte::Corps.gras(ui, ki_protocol::safe_display(nom, 80)),
                             )
                             .truncate(),
                         );

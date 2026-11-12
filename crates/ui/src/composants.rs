@@ -650,10 +650,7 @@ pub fn meter_with_threshold(
 pub fn section_label(ui: &mut Ui, text: &str) {
     ui.add_space(espace::XS);
     ui.label(
-        RichText::new(text.to_uppercase())
-            .color(theme::TEXT_FAINT)
-            .size(texte::MINUSCULE)
-            .strong(),
+        Texte::Minuscule.gras_ton(ui, Ton::Pale, text.to_uppercase()),
     );
     ui.add_space(espace::XXS);
 }
@@ -1097,7 +1094,7 @@ pub fn etiquette(ui: &mut Ui, mot: &str, fond: Color32) -> Response {
         .inner_margin(marge::symetrique(espace::XS, 1.0))
         .show(ui, |ui| {
             ui.add(
-                egui::Label::new(RichText::new(mot).size(texte::MINUSCULE).strong().color(theme::BG_DEEP))
+                egui::Label::new(Texte::Minuscule.gras(ui, mot).color(theme::BG_DEEP))
                     .selectable(false),
             );
         })
@@ -1136,7 +1133,7 @@ pub fn status_dot(ui: &mut Ui, color: Color32, label: &str, size: f32) {
         icons::dot(ui.painter(), rect.center(), size * 0.32, color);
     }
     if !label.is_empty() {
-        ui.label(RichText::new(label).color(color).size(texte::COURANT).strong());
+        ui.label(Texte::Libelle.gras(ui, label).color(color));
     }
 }
 

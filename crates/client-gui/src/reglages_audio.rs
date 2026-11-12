@@ -114,7 +114,7 @@ impl KiApp {
                         if !engine_up {
                             ui.label(Texte::Aide.riche_ton(ui, Ton::Alerte, "vocal inactif"));
                         } else if stats.micro_sature {
-                            ui.label(RichText::new("saturé").color(DANGER).size(texte::PETIT).strong());
+                            ui.label(Texte::Aide.gras_ton(ui, Ton::Danger, "saturé"));
                         }
                     });
                 });
@@ -757,7 +757,7 @@ impl KiApp {
         };
         ui.horizontal_wrapped(|ui| {
             ui.label(Texte::Libelle.riche(ui, "Ta voix chez les autres :"));
-            ui.label(RichText::new(mot).color(couleur).size(texte::COURANT).strong());
+            ui.label(Texte::Libelle.gras(ui, mot).color(couleur));
             ui.label(
                 Texte::Libelle.riche(ui, format!(
                     "aigus {presence:+.0} dB, graves {graves:+.0} dB par rapport à une voix moyenne"
@@ -1031,7 +1031,7 @@ fn volume_en_mots(ui: &mut egui::Ui, ecart_db: f32) {
     };
     ui.horizontal_wrapped(|ui| {
         ui.label(Texte::Libelle.riche(ui, "Le volume de ta voix chez les autres :"));
-        ui.label(RichText::new(mot).color(couleur).size(texte::COURANT).strong());
+        ui.label(Texte::Libelle.gras(ui, mot).color(couleur));
         if (-30.0..=-5.0).contains(&ecart_db) || ecart_db > 4.0 {
             ui.label(
                 Texte::Libelle.riche(ui, format!("{ecart_db:+.0} dB par rapport à une voix réglée par défaut")),

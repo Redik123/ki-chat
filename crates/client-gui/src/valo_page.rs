@@ -1155,7 +1155,7 @@ fn medailles_du_groupe(
     let acte = acte_du_groupe(avec.iter().map(|(_, m)| *m));
     ui.add_space(espace::XL);
     let titre = if acte.is_empty() { "Médailles de l'acte".to_string() } else { format!("Médailles — {acte}") };
-    ui.label(RichText::new(titre).strong().size(texte::CORPS));
+    ui.label(Texte::Corps.gras(ui, titre));
     if avec.is_empty() {
         ui::hint(
             ui,
@@ -1184,10 +1184,13 @@ fn medailles_du_groupe(
             en_tete(ui, "Lues");
             ui.end_row();
             for (l, md) in ordre {
-                let mut pseudo = RichText::new(&l.f.username).color(noms.couleur(l.f.user_id));
-                if my_id == Some(l.f.user_id) {
-                    pseudo = pseudo.strong();
-                }
+                // Sa propre ligne se repère : son pseudo pèse.
+                let couleur = noms.couleur(l.f.user_id);
+                let pseudo = if my_id == Some(l.f.user_id) {
+                    Texte::Corps.gras(ui, &l.f.username).color(couleur)
+                } else {
+                    RichText::new(&l.f.username).color(couleur)
+                };
                 if ui.add(egui::Label::new(pseudo).sense(Sense::click())).on_hover_text("ouvrir sa fiche").clicked() {
                     demandes.push(Demande::OuvrirFiche(l.f.user_id, l.f.username.clone()));
                 }
@@ -1198,7 +1201,7 @@ fn medailles_du_groupe(
                         continue;
                     }
                     let couleur = if matches!(m, Medaille::Mvp | Medaille::Distinction) { theme::WARN } else { TEXT };
-                    let reponse = ui.label(RichText::new(n.to_string()).color(couleur).strong().size(texte::PETIT));
+                    let reponse = ui.label(Texte::Aide.gras(ui, n.to_string()).color(couleur));
                     if let Some(c) = md.cet_acte.iter().find(|c| c.medaille == m) {
                         reponse.on_hover_text(format!("record de l'acte : {}", m.valeur(c.meilleur)));
                     }
@@ -1278,7 +1281,7 @@ fn regrouper(ids: &[&str]) -> Vec<Vec<usize>> {
 /// Les prochains matchs d'esport, tels que le serveur les a lus chez
 /// HenrikDev — un mot si le serveur n'en a pas.
 fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
-    ui.label(RichText::new("Esports — prochains matchs").strong().size(texte::CORPS));
+    ui.label(Texte::Corps.gras(ui, "Esports — prochains matchs"));
     ui.add_space(espace::XS);
     if matchs.is_empty() {
         ui.label(RichText::new("rien de prévu chez HenrikDev pour l'instant").color(TEXT_DIM));
@@ -1291,12 +1294,12 @@ fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
         ui.end_row();
         for m in matchs {
             let quand = if m.etat == "inProgress" {
-                RichText::new("en cours").color(SPEAK).strong().size(texte::PETIT)
+                Texte::Aide.gras(ui, "en cours").color(SPEAK)
             } else {
                 Texte::Aide.riche_ton(ui, Ton::Discret, format!("{} · {}", crate::formats::day_label(m.date), crate::formats::format_time(m.date)))
             };
             ui.label(quand);
-            ui.label(RichText::new(m.equipes.join("  vs  ")).strong());
+            ui.label(Texte::Corps.gras(ui, m.equipes.join("  vs  ")));
             let ligue = if m.region.is_empty() { m.ligue.clone() } else { format!("{} · {}", m.ligue, m.region) };
             ui.label(RichText::new(ligue).color(TEXT_DIM));
             ui::hint(ui, &m.tournoi);

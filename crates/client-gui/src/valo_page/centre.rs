@@ -6,6 +6,7 @@
 //! L'accueil, le classement, les matchs et le profil sont les pages
 //! neuves ; l'esport et la boutique reprennent ceux de la fenêtre.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::police;
 
 use super::*;
@@ -127,7 +128,7 @@ impl PageValo {
                         OngletCentre::Matchs => self.matchs_du_groupe(ui, &lignes, &noms, cx, maintenant, &mut demandes),
                         OngletCentre::Esport => esports_ui(ui, cx.esports),
                         OngletCentre::Boutique => {
-                            ui.label(RichText::new("Ma boutique du jour").strong().size(texte::CORPS));
+                            ui.label(Texte::Corps.gras(ui, "Ma boutique du jour"));
                             ui::hint(
                                 ui,
                                 "lue dans ton client Riot, sur ce PC, pour toi seul — rien ne part vers le \

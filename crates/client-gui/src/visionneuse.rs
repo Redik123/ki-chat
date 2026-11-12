@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 use ki_media::{Flux, Paquet};
 use ki_voice::medias::File;
 
@@ -731,7 +731,7 @@ impl Visionneuse {
                     ui.spacing_mut().item_spacing.x = espace::S;
                     let icone = if est_video { Icon::Film } else { Icon::Copy };
                     ui::glyph(ui, icone, 16.0, TEXT_DIM);
-                    ui.label(RichText::new(cible.nom()).color(TEXT).size(texte::CORPS).strong());
+                    ui.label(Texte::Corps.gras(ui, cible.nom()));
                     if self.liste.len() > 1 {
                         ui.label(
                             Texte::Libelle.riche_ton(ui, Ton::Pale, format!("{} / {}", self.index + 1, self.liste.len())),

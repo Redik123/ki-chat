@@ -396,10 +396,7 @@ impl KiApp {
             ui::section_label(ui, "Serveurs");
             if !self.book.is_empty() {
                 ui.label(
-                    RichText::new(self.book.len().to_string())
-                        .color(theme::BORDER_STRONG)
-                        .size(texte::PETIT)
-                        .strong(),
+                    Texte::Aide.gras(ui, self.book.len().to_string()).color(theme::BORDER_STRONG),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

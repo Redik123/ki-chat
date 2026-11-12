@@ -172,7 +172,7 @@ impl KiApp {
                     ui.add_space(espace::XXS);
                     ui.vertical(|ui| {
                         ui.add_space(1.0);
-                        ui.label(RichText::new(state).color(state_color).size(texte::CORPS).strong());
+                        ui.label(Texte::Corps.gras(ui, state).color(state_color));
                         // Sous-titre : le salon vocal occupé, ou la touche.
                         let detail = match (self.voice_channel_name(), self.audio.mode) {
                             (None, _) => "aucun salon vocal".to_string(),

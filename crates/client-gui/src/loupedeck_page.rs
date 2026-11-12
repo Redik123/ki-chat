@@ -442,7 +442,7 @@ impl KiApp {
         self.soundboard.preparer();
         let sons: Vec<String> = self.soundboard.sons.iter().map(|s| s.nom.clone()).collect();
         let titre = |ui: &mut egui::Ui, texte: &str| {
-            ui.label(RichText::new(texte).color(TEXT).size(texte::CORPS).strong());
+            ui.label(Texte::Corps.gras(ui, texte));
             ui.add_space(espace::XS);
         };
 
@@ -546,7 +546,7 @@ impl KiApp {
     fn reglages_generaux_ui(&mut self, ui: &mut egui::Ui) {
         let etat = &mut self.loupedeck_etat;
         let config = &mut etat.config;
-        ui.label(RichText::new("Couleurs de l'écran").color(TEXT).size(texte::CORPS).strong());
+        ui.label(Texte::Corps.gras(ui, "Couleurs de l'écran"));
         ui.add_space(espace::XS);
         ui.horizontal(|ui| {
             ui.label(Texte::Libelle.riche(ui, "Fond"));

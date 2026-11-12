@@ -253,7 +253,7 @@ impl KiApp {
             };
             jauge_db(ui, stats.prox_niveau_db, stats.prox_seuil_db, stats.prox_reference_db, couleur);
             if !mot.is_empty() {
-                ui.label(RichText::new(mot).color(couleur).size(texte::PETIT).strong());
+                ui.label(Texte::Aide.gras(ui, mot).color(couleur));
             }
         });
         ui::precision(

@@ -26,7 +26,7 @@ use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Vec2};
 use ki_protocol::{ChannelId, ChannelInfo, ClientMsg, DemandeWeb, InviteWeb, UserId};
 
 use crate::icons::{self, Icon};
-use crate::theme::{self, ACCENT, TEXT, WARN};
+use crate::theme::{self, ACCENT, WARN};
 use crate::ui::{self, Ton};
 
 /// Combien de temps une demande reste affichée sans nouvelles : le serveur
@@ -566,7 +566,7 @@ fn carte_porte(
         let invites = porte.invites.clone();
         for invite in &invites {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&invite.nom).color(theme::INVITE).strong());
+                ui.label(Texte::Corps.gras(ui, &invite.nom).color(theme::INVITE));
                 pastille_invite(ui);
                 if invite.depuis != 0 {
                     ui.label(
@@ -598,7 +598,7 @@ fn carte_porte(
             );
             for demande in &porte.demandes {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&demande.nom).color(TEXT).strong());
+                    ui.label(Texte::Corps.gras(ui, &demande.nom));
                     if demande.depuis != 0 {
                         ui.label(
                             Texte::Aide.riche(ui, format!("a frappé {}", crate::formats::il_y_a(demande.depuis))),

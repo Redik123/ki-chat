@@ -97,7 +97,7 @@ impl KiApp {
             match &en_cours {
                 // Le bot n'est nulle part : on peut le faire venir.
                 None if etat.salon.is_none() => {
-                    ui.label(RichText::new("Musique").color(ACCENT).strong().size(texte::CORPS));
+                    ui.label(Texte::Corps.gras_ton(ui, Ton::Accent, "Musique"));
                     pastille_bot(ui);
                     ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, "le bot n'est dans aucun salon"));
                     if peut && ui.button("Venir dans mon salon").clicked() {
@@ -184,7 +184,7 @@ impl KiApp {
                                 ui.add(egui::Image::new(&tex).fit_to_exact_size(Vec2::new(200.0, 112.0)).corner_radius(6.0));
                             }
                         }
-                        ui.label(RichText::new(&p.titre).strong().size(texte::CORPS));
+                        ui.label(Texte::Corps.gras(ui, &p.titre));
                         if !p.artiste.is_empty() {
                             ui.label(Texte::Libelle.riche(ui, &p.artiste));
                         }
@@ -219,7 +219,7 @@ impl KiApp {
             {
                 let ui = &mut cols[1];
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("File d'attente · {}", etat.longueur_file())).strong().size(texte::CORPS));
+                    ui.label(Texte::Corps.gras(ui, format!("File d'attente · {}", etat.longueur_file())));
                     if peut && !etat.file.is_empty() && ui.small_button("vider").clicked() {
                         self.commander_musique(C::Vider);
                     }
@@ -262,7 +262,7 @@ impl KiApp {
             {
                 let ui = &mut cols[1];
                 ui.add_space(espace::S);
-                ui.label(RichText::new(format!("Playlists · {}", etat.playlists.len())).strong().size(texte::CORPS));
+                ui.label(Texte::Corps.gras(ui, format!("Playlists · {}", etat.playlists.len())));
                 for pl in &etat.playlists {
                     ui.horizontal(|ui| {
                         ui.add(egui::Label::new(RichText::new(&pl.nom).size(texte::COURANT)).truncate())

@@ -23,7 +23,6 @@ use std::time::Duration;
 use eframe::egui;
 use egui::RichText;
 
-use crate::theme::ACCENT;
 use crate::valorant;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -160,7 +159,7 @@ impl Lecteur {
                                         }
                                     }
                                     ui.add(egui::Label::new(RichText::new(&offre.nom).size(texte::PETIT)).truncate());
-                                    ui.label(RichText::new(format!("{} VP", offre.prix)).color(ACCENT).strong().size(texte::COURANT));
+                                    ui.label(Texte::Libelle.gras_ton(ui, Ton::Accent, format!("{} VP", offre.prix)));
                                 });
                             });
                     }

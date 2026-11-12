@@ -14,7 +14,7 @@ use crate::admin_ui::AdminTab;
 use crate::formats::{format_time_secs, megabytes};
 use crate::icons::Icon;
 use crate::saisie::menu_edition;
-use crate::theme::{color_for, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM};
+use crate::theme::{color_for, DANGER, SPEAK, TEXT, TEXT_DIM};
 use crate::ui::Ton;
 
 /// Les onglets de la fenêtre de réglages. Elle s'appelait « Réglages audio »
@@ -280,10 +280,7 @@ impl KiApp {
                                         for (i, conseil) in d.conseils().iter().enumerate() {
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.label(
-                                                    RichText::new(format!("{}.", i + 1))
-                                                        .color(ACCENT)
-                                                        .strong()
-                                                        .size(texte::PETIT),
+                                                    Texte::Aide.gras_ton(ui, Ton::Accent, format!("{}.", i + 1)),
                                                 );
                                                 ui.label(
                                                     Texte::Aide.riche_ton(ui, Ton::Neutre, conseil.as_str()),
