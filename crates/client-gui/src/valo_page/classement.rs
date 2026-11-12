@@ -4,6 +4,7 @@
 //! colonnes se masquent par priorité quand la place manque. Jamais de
 //! défilement de côté.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::police;
 use ki_ui::tableau::{Colonne, Tableau};
 
@@ -141,7 +142,7 @@ impl PageValo {
         match *self.a_comparer.as_slice() {
             [a, b] => {
                 let (na, nb) = (nom(a), nom(b));
-                if ui::button(ui, Icon::Target, &format!("Comparer {na} et {nb}")).clicked() {
+                if ui::Bouton::new(&format!("Comparer {na} et {nb}")).icone(Icon::Target).show(ui).clicked() {
                     demandes.push(Demande::OuvrirFiche(a, na));
                     demandes.push(Demande::Comparer(b, nb));
                     self.a_comparer.clear();
@@ -194,7 +195,7 @@ impl PageValo {
                     }
                     if r.tier >= 3 {
                         ui.label(RichText::new(nom_de_rang(r.tier)).color(graphes::couleur_de_rang(r.tier)).size(texte::PETIT));
-                        ui.label(RichText::new(format!("{} RR", r.rr)).color(TEXT_DIM).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, format!("{} RR", r.rr)));
                     } else {
                         ui::hint(ui, nom_de_rang(0));
                     }

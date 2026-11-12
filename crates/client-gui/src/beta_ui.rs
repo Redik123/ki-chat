@@ -4,11 +4,11 @@
 //! ailleurs. Aujourd'hui : le Loupedeck Live, l'overlay en jeu, et le
 //! bouton de la soundboard (visible d'origine pour qui a déjà des sons).
 
-use ki_ui::jetons::{espace, texte};
-use eframe::egui::{self, RichText};
+use ki_ui::typo::{Texte, Ton};
+use ki_ui::jetons::espace;
+use eframe::egui::{self};
 
 use crate::icons::Icon;
-use crate::theme::TEXT_FAINT;
 use crate::ui;
 use crate::overlay;
 use crate::KiApp;
@@ -16,12 +16,8 @@ use crate::KiApp;
 impl KiApp {
     pub(crate) fn onglet_beta(&mut self, ui: &mut egui::Ui) {
         ui.label(
-            RichText::new(
-                "Des fonctions encore en essai, coupées d'origine : allume celles qui te servent. Elles \
-                 peuvent changer d'une version à l'autre.",
-            )
-            .color(TEXT_FAINT)
-            .size(texte::COURANT),
+            Texte::Libelle.riche_ton(ui, Ton::Pale, "Des fonctions encore en essai, coupées d'origine : allume celles qui te servent. Elles \
+                 peuvent changer d'une version à l'autre.",),
         );
         ui.add_space(espace::L);
 

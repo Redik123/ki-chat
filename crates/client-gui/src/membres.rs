@@ -1,6 +1,7 @@
 //! La colonne des membres : une ligne par personne, son menu au clic droit, le
 //! glisser-déposer d'un salon vocal à l'autre, la fiche d'un bot.
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use ki_protocol::{ChannelId, ChannelKind, ClientMsg, Member, UserId};
 use ki_ui::jetons::{espace, marge, rayon, texte};
@@ -12,7 +13,7 @@ use crate::{
 use crate::admin_ui::BanDraft;
 use crate::icons::Icon;
 use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::Tone;
+use crate::ui::Ton;
 
 /// Ce qu'une ligne de membre montre en plus du compte lui-même : l'état
 /// « ici et maintenant », qui ne vient pas du roster mais du moteur audio et
@@ -446,7 +447,7 @@ impl KiApp {
                 {
                     self.set_volume(m.user_id, pct / 100.0);
                 }
-                if ui::button(ui, Icon::Info, "Fiche du bot").clicked() {
+                if ui::Bouton::new("Fiche du bot").icone(Icon::Info).show(ui).clicked() {
                     self.fiche_bot = Some(m.user_id);
                     ui.close();
                 }
@@ -469,13 +470,13 @@ impl KiApp {
                 let rang = m.rang_valorant.map(ki_protocol::nom_de_rang).unwrap_or_default();
                 let texte = if rang.is_empty() { riot.clone() } else { format!("{riot} · {rang}") };
                 ui::hint(ui, texte);
-                if ui::button(ui, Icon::Screen, "Fiche VALORANT").clicked() {
+                if ui::Bouton::new("Fiche VALORANT").icone(Icon::Screen).show(ui).clicked() {
                     self.ouvrir_fiche(m.user_id, m.username.clone());
                 }
                 // Un admin délie le compte d'un autre — audité côté serveur.
                 if !is_me
                     && self.can(ki_protocol::perm::MANAGE_SERVER)
-                    && ui::tinted_button(ui, Some(Icon::Close), "Délier son compte Riot", Tone::Danger).clicked()
+                    && ui::Bouton::new("Délier son compte Riot").icone(Icon::Close).teinte(Ton::Danger).show(ui).clicked()
                 {
                     self.send(ClientMsg::DelierRiot { user_id: Some(m.user_id) });
                     ui.close();
@@ -496,7 +497,7 @@ impl KiApp {
                 {
                     self.set_volume(m.user_id, pct / 100.0);
                 }
-                if ui::button(ui, Icon::Refresh, "Remettre à 100 %").clicked() {
+                if ui::Bouton::new("Remettre à 100 %").icone(Icon::Refresh).show(ui).clicked() {
                     self.set_volume(m.user_id, 1.0);
                 }
             }
@@ -508,7 +509,7 @@ impl KiApp {
                 ui.add_space(espace::XS);
                 let motif = self.poke_impossible(m);
                 ui.add_enabled_ui(motif.is_none(), |ui| {
-                    let bouton = ui::button(ui, Icon::Send, "Poke");
+                    let bouton = ui::Bouton::new("Poke").icone(Icon::Send).show(ui);
                     let bouton = match motif {
                         Some(motif) => bouton.on_disabled_hover_text(motif),
                         None => bouton.on_hover_text("un son et un clignotement chez lui, rien d'autre"),
@@ -617,11 +618,11 @@ impl KiApp {
                 // « Couper le micro » sur quelqu'un déjà coupé le rendrait
                 // muet une seconde fois, ce qui ne veut rien dire.
                 let (mute_txt, mute_ton) = if m.force_muted {
-                    ("Rendre le micro", Tone::Accent)
+                    ("Rendre le micro", Ton::Accent)
                 } else {
-                    ("Couper le micro", Tone::Danger)
+                    ("Couper le micro", Ton::Danger)
                 };
-                if ui::tinted_button(ui, Some(Icon::MicOff), mute_txt, mute_ton).clicked() {
+                if ui::Bouton::new(mute_txt).icone(Icon::MicOff).teinte(mute_ton).show(ui).clicked() {
                     self.send(ClientMsg::AdminVoiceMute {
                         username: m.username.clone(),
                         muted: !m.force_muted,
@@ -629,11 +630,11 @@ impl KiApp {
                     ui.close();
                 }
                 let (deaf_txt, deaf_ton) = if m.force_deafened {
-                    ("Lui rendre l'écoute", Tone::Accent)
+                    ("Lui rendre l'écoute", Ton::Accent)
                 } else {
-                    ("Rendre sourd", Tone::Danger)
+                    ("Rendre sourd", Ton::Danger)
                 };
-                if ui::tinted_button(ui, Some(Icon::HeadphonesOff), deaf_txt, deaf_ton).clicked() {
+                if ui::Bouton::new(deaf_txt).icone(Icon::HeadphonesOff).teinte(deaf_ton).show(ui).clicked() {
                     self.send(ClientMsg::AdminVoiceDeafen {
                         username: m.username.clone(),
                         deafened: !m.force_deafened,
@@ -655,14 +656,14 @@ impl KiApp {
                         // Un salon fermé par un mot de passe n'est qu'à ceux
                         // qui ont le code : seul le propriétaire y amène.
                         if c.locked && !proprietaire {
-                            ui.add_enabled_ui(false, |ui| ui::button(ui, Icon::Key, &c.name))
+                            ui.add_enabled_ui(false, |ui| ui::Bouton::new(&c.name).icone(Icon::Key).show(ui))
                                 .response
                                 .on_disabled_hover_text(
                                     "fermé par un mot de passe : seul le propriétaire y amène quelqu'un",
                                 );
                             continue;
                         }
-                        if ui::button(ui, Icon::Volume, &c.name).clicked() {
+                        if ui::Bouton::new(&c.name).icone(Icon::Volume).show(ui).clicked() {
                             self.send(ClientMsg::AdminVoiceMove {
                                 username: m.username.clone(),
                                 channel: Some(c.id),
@@ -673,7 +674,7 @@ impl KiApp {
                     // Sortir quelqu'un du vocal n'est proposé que s'il y est :
                     // ailleurs, le bouton ne ferait rien de visible.
                     if m.voice.is_some()
-                        && ui::tinted_button(ui, Some(Icon::Logout), "Sortir du vocal", Tone::Danger)
+                        && ui::Bouton::new("Sortir du vocal").icone(Icon::Logout).teinte(Ton::Danger).show(ui)
                             .clicked()
                     {
                         self.send(ClientMsg::AdminVoiceMove {
@@ -692,7 +693,7 @@ impl KiApp {
                     let deja = self.regard.flux.as_ref().map(|r| r.stream_id) == Some(stream_id);
                     let libelle =
                         if deja { "Arrêter de regarder" } else { "Regarder son écran" };
-                    if ui::button(ui, Icon::Play, libelle).clicked() {
+                    if ui::Bouton::new(libelle).icone(Icon::Play).show(ui).clicked() {
                         if deja {
                             self.fermer_regard(true);
                         } else {
@@ -717,7 +718,7 @@ impl KiApp {
             }
             // Expulser met dehors ; la personne peut revenir aussitôt.
             if show_kick
-                && ui::tinted_button(ui, Some(Icon::Logout), "Expulser", Tone::Danger).clicked()
+                && ui::Bouton::new("Expulser").icone(Icon::Logout).teinte(Ton::Danger).show(ui).clicked()
             {
                 self.send(ClientMsg::Kick {
                     user_id: m.user_id,
@@ -728,7 +729,7 @@ impl KiApp {
             // Bannir l'empêche de revenir : motif et durée se saisissent
             // dans une petite fenêtre, plutôt qu'au fond d'un menu.
             if show_ban
-                && ui::tinted_button(ui, Some(Icon::Ban), "Bannir…", Tone::Danger).clicked()
+                && ui::Bouton::new("Bannir…").icone(Icon::Ban).teinte(Ton::Danger).show(ui).clicked()
             {
                 self.admin.ban = Some(BanDraft {
                     username: m.username.clone(),
@@ -917,7 +918,7 @@ impl KiApp {
                     ui.label(RichText::new(titre).strong().size(texte::TITRE));
                     pastille_bot(ui);
                 });
-                ui.label(RichText::new("Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe.").color(TEXT_DIM).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche(ui, "Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe."));
                 ui.add_space(espace::M);
                 if id == ki_protocol::MUSIQUE_ID {
                     ui.label(RichText::new("Ce qu'il fait").strong());
@@ -929,33 +930,31 @@ impl KiApp {
                             ui.label(RichText::new("rien en ce moment").color(TEXT_DIM));
                         }
                     }
-                    ui.label(RichText::new(format!("{} en file · volume global {} %", etat.longueur_file(), etat.volume)).color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, format!("{} en file · volume global {} %", etat.longueur_file(), etat.volume)));
                     ui.add_space(espace::M);
                     ui.label(RichText::new("Qui le pilote").strong());
-                    ui.label(RichText::new(if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }).color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, if pilotes.is_empty() { "personne pour l'instant — la permission « Contrôler la musique » se donne dans les rôles".to_string() } else { format!("les rôles {} (permission « Contrôler la musique »)", pilotes.join(", ")) }));
                     ui.add_space(espace::M);
                     ui.label(RichText::new("Comment il marche").strong());
-                    ui.label(RichText::new(
-                        "Le serveur tire le flux audio de YouTube ou SoundCloud avec yt-dlp, le décode avec ffmpeg, \
+                    ui.label(Texte::Libelle.riche(ui, "Le serveur tire le flux audio de YouTube ou SoundCloud avec yt-dlp, le décode avec ffmpeg, \
                          l'encode en Opus et l'envoie dans le salon chiffré comme la voix de n'importe qui. Aucun fichier \
                          audio n'est écrit, aucun client ne télécharge rien, et le flux brut ne contient pas de publicité. \
-                         Chacun le règle ou le coupe comme un membre.",
-                    ).color(TEXT_DIM).size(texte::COURANT));
+                         Chacun le règle ou le coupe comme un membre.",));
                     ui.add_space(espace::M);
                     ui.label(RichText::new("Depuis le démarrage du serveur").strong());
                     let c = &etat.compteurs;
-                    ui.label(RichText::new(format!(
+                    ui.label(Texte::Libelle.riche(ui, format!(
                         "{} piste{} jouée{} · {} échec{} · premier son en {:.1} s en moyenne",
                         c.pistes_jouees, if c.pistes_jouees > 1 { "s" } else { "" }, if c.pistes_jouees > 1 { "s" } else { "" },
                         c.echecs, if c.echecs > 1 { "s" } else { "" },
                         c.premier_son_ms as f32 / 1000.0
-                    )).color(TEXT_DIM).size(texte::COURANT));
+                    )));
                 } else {
                     ui.label(RichText::new("Ce qu'il fait").strong());
-                    ui.label(RichText::new("Il poste le fil de jeu : à chaque partie finie d'un membre qui a lié son compte Riot, le résultat, sa ligne et ses RR.").color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, "Il poste le fil de jeu : à chaque partie finie d'un membre qui a lié son compte Riot, le résultat, sa ligne et ses RR."));
                     ui.add_space(espace::M);
                     ui.label(RichText::new("Comment il marche").strong());
-                    ui.label(RichText::new("Les données viennent de HenrikDev, à partir du Riot ID que chacun a lié lui-même. Le serveur ne garde que la ligne du membre dans ses matchs, jamais celles des adversaires, et délier efface tout.").color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, "Les données viennent de HenrikDev, à partir du Riot ID que chacun a lié lui-même. Le serveur ne garde que la ligne du membre dans ses matchs, jamais celles des adversaires, et délier efface tout."));
                 }
             });
         if !open {

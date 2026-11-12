@@ -1,15 +1,16 @@
 //! La zone de saisie : le champ, la réponse et la modification en cours, les
 //! commandes, ce qu'on y insère, et le sort d'un message envoyé.
 
-use eframe::egui::{self, RichText, Vec2};
+use ki_ui::typo::Texte;
+use eframe::egui::{self, Vec2};
 use ki_protocol::{ChatRecord, ClientMsg, MsgRef};
 use ki_ui::flex::Flex;
-use ki_ui::jetons::{espace, marge, rayon, texte};
+use ki_ui::jetons::{espace, marge, rayon};
 
 use crate::{brouillons, prendre_echap, suggestions, theme, ui, KiApp};
 use crate::icons::Icon;
 use crate::membres::{couleur_de_membre, est_bot};
-use crate::theme::{ACCENT, TEXT_DIM, WARN};
+use crate::theme::{ACCENT, WARN};
 
 /// Ligne de membre : avatar, pseudo, badges, vumètre pendant qu'il parle.
 /// Rend la réponse de la ligne, et `true` si l'on a cliqué l'icône
@@ -107,9 +108,7 @@ impl KiApp {
                 .inner_margin(marge::symetrique(espace::L, espace::L))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("Tu n'as pas le droit d'écrire dans ce serveur.")
-                            .color(TEXT_DIM)
-                            .size(texte::COURANT),
+                        Texte::Libelle.riche(ui, "Tu n'as pas le droit d'écrire dans ce serveur."),
                     );
                 });
             return;

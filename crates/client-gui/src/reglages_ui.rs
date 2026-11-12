@@ -1,6 +1,7 @@
 //! Les fenêtres de réglages : les réglages et leurs onglets, « Mon compte », la
 //! mise à jour, l'export et l'import de ses réglages.
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, RichText, Vec2};
 use ki_protocol::{ClientMsg, IconChange};
 use ki_ui::jetons::{espace, texte};
@@ -13,8 +14,8 @@ use crate::admin_ui::AdminTab;
 use crate::formats::{format_time_secs, megabytes};
 use crate::icons::Icon;
 use crate::saisie::menu_edition;
-use crate::theme::{color_for, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::Tone;
+use crate::theme::{color_for, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM};
+use crate::ui::Ton;
 
 /// Les onglets de la fenêtre de réglages. Elle s'appelait « Réglages audio »
 /// et empilait huit sections dans une seule colonne à faire défiler : la
@@ -163,7 +164,7 @@ impl KiApp {
                             } else {
                                 "Journal audio"
                             };
-                            if ui::button(ui, Icon::Info, label).clicked() {
+                            if ui::Bouton::new(label).icone(Icon::Info).show(ui).clicked() {
                                 self.show_audio_journal = !self.show_audio_journal;
                             }
                             if self.show_audio_journal {
@@ -171,7 +172,7 @@ impl KiApp {
                                 if events.is_empty() {
                                     ui::hint(ui, "rien à signaler pour l'instant");
                                 } else {
-                                    if ui::button(ui, Icon::Copy, "Copier le journal").clicked() {
+                                    if ui::Bouton::new("Copier le journal").icone(Icon::Copy).show(ui).clicked() {
                                         let text: String = events
                                             .iter()
                                             .map(|(ts, m)| {
@@ -187,13 +188,10 @@ impl KiApp {
                                     for (ts, msg) in events.iter().rev().take(12) {
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label(
-                                                RichText::new(format_time_secs(*ts))
-                                                    .color(TEXT_DIM)
-                                                    .monospace()
-                                                    .size(texte::PETIT),
+                                                Texte::Aide.riche_ton(ui, Ton::Discret, format_time_secs(*ts)).monospace(),
                                             );
                                             ui.label(
-                                                RichText::new(msg.as_str()).color(TEXT).size(texte::PETIT),
+                                                Texte::Aide.riche_ton(ui, Ton::Neutre, msg.as_str()),
                                             );
                                         });
                                     }
@@ -232,7 +230,7 @@ impl KiApp {
                                  c'est ce qui permet de corriger un crash sans rien te demander",
                             );
                             if self.diag.partage
-                                && ui::button(ui, Icon::Send, "Envoyer le diagnostic maintenant")
+                                && ui::Bouton::new("Envoyer le diagnostic maintenant").icone(Icon::Send).show(ui)
                                     .clicked()
                             {
                                 self.flush_diag(true);
@@ -252,7 +250,7 @@ impl KiApp {
                             } else {
                                 "Docteur audio — pourquoi mon micro bugue ?"
                             };
-                            if ui::button(ui, Icon::Info, label).clicked() {
+                            if ui::Bouton::new(label).icone(Icon::Info).show(ui).clicked() {
                                 self.show_docteur = !self.show_docteur;
                                 if self.show_docteur {
                                     // Établi au clic : l'énumération des processus
@@ -270,7 +268,7 @@ impl KiApp {
                                          salon vocal, puis reviens",
                                     ),
                                     Some(d) => {
-                                        if ui::button(ui, Icon::Copy, "Copier le diagnostic")
+                                        if ui::Bouton::new("Copier le diagnostic").icone(Icon::Copy).show(ui)
                                             .clicked()
                                         {
                                             ctx.copy_text(d.rapport());
@@ -288,9 +286,7 @@ impl KiApp {
                                                         .size(texte::PETIT),
                                                 );
                                                 ui.label(
-                                                    RichText::new(conseil.as_str())
-                                                        .color(TEXT)
-                                                        .size(texte::PETIT),
+                                                    Texte::Aide.riche_ton(ui, Ton::Neutre, conseil.as_str()),
                                                 );
                                             });
                                             ui.add_space(espace::XS);
@@ -316,12 +312,12 @@ impl KiApp {
                             } else {
                                 "Relevé de performance"
                             };
-                            if ui::button(ui, Icon::Info, label).clicked() {
+                            if ui::Bouton::new(label).icone(Icon::Info).show(ui).clicked() {
                                 self.show_perf = !self.show_perf;
                             }
                             if self.show_perf {
                                 let lignes = self.perf.lignes();
-                                if ui::button(ui, Icon::Copy, "Copier le relevé").clicked() {
+                                if ui::Bouton::new("Copier le relevé").icone(Icon::Copy).show(ui).clicked() {
                                     let mut texte = format!(
                                         "ki-chat {} — relevé de performance\n",
                                         env!("CARGO_PKG_VERSION")
@@ -347,13 +343,10 @@ impl KiApp {
                                 for (quoi, valeur) in &lignes {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
-                                            RichText::new(quoi.as_str()).color(TEXT_DIM).size(texte::PETIT),
+                                            Texte::Aide.riche_ton(ui, Ton::Discret, quoi.as_str()),
                                         );
                                         ui.label(
-                                            RichText::new(valeur.as_str())
-                                                .color(TEXT)
-                                                .monospace()
-                                                .size(texte::PETIT),
+                                            Texte::Aide.riche_ton(ui, Ton::Neutre, valeur.as_str()).monospace(),
                                         );
                                     });
                                 }
@@ -367,7 +360,7 @@ impl KiApp {
                                     ("Carte son à sec (audio)", voice.stats.sortie_a_sec),
                                 ] {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.label(RichText::new(quoi).color(TEXT_DIM).size(texte::PETIT));
+                                        ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, quoi));
                                         ui.label(
                                             RichText::new(combien.to_string())
                                                 .color(if combien == 0 { SPEAK } else { DANGER })
@@ -441,9 +434,7 @@ impl KiApp {
                                         }
                                         if self.custom_sfx.contains(name) {
                                             ui.label(
-                                                RichText::new("perso")
-                                                    .color(ACCENT)
-                                                    .size(texte::MINUSCULE),
+                                                Texte::Minuscule.riche_ton(ui, Ton::Accent, "perso"),
                                             );
                                         }
                                         if ui.small_button("▶").on_hover_text("écouter").clicked()
@@ -467,7 +458,7 @@ impl KiApp {
 
                             ui.add_space(espace::S);
                             ui.horizontal(|ui| {
-                                if ui::button(ui, Icon::Paperclip, "Dossier des sons").clicked() {
+                                if ui::Bouton::new("Dossier des sons").icone(Icon::Paperclip).show(ui).clicked() {
                                     if let Some(dir) = sound_dirs().into_iter().nth(1) {
                                         let _ = std::fs::create_dir_all(&dir);
                                         let _ = std::process::Command::new("explorer")
@@ -475,7 +466,7 @@ impl KiApp {
                                             .spawn();
                                     }
                                 }
-                                if ui::button(ui, Icon::Refresh, "Recharger").clicked() {
+                                if ui::Bouton::new("Recharger").icone(Icon::Refresh).show(ui).clicked() {
                                     self.reload_sounds();
                                 }
                             });
@@ -494,7 +485,7 @@ impl KiApp {
                             ui.add_space(espace::L);
                             ui::group_title(ui, Icon::Info, "Notifications");
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Notifications :").color(TEXT_DIM).size(texte::COURANT));
+                                ui.label(Texte::Libelle.riche(ui, "Notifications :"));
                                 for n in Notif::TOUS {
                                     ui.selectable_value(&mut self.notif, n, n.label());
                                 }
@@ -549,7 +540,7 @@ impl KiApp {
                             // --- Réseau & qualité ---
                             ui::group_title(ui, Icon::Info, "Réseau & qualité");
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("débit voix").color(TEXT_DIM).size(texte::COURANT));
+                                ui.label(Texte::Libelle.riche(ui, "débit voix"));
                                 let selected = if self.audio.bitrate == 0 {
                                     format!("Auto ({} kbps)", self.vocal.auto_bitrate / 1000)
                                 } else {
@@ -581,9 +572,7 @@ impl KiApp {
                             ui.add_space(espace::S);
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("protection pertes (DRED)")
-                                        .color(TEXT_DIM)
-                                        .size(texte::COURANT),
+                                    Texte::Libelle.riche(ui, "protection pertes (DRED)"),
                                 );
                                 let dred_label = |m: u8| match m {
                                     0 => "Désactivée".to_string(),
@@ -623,7 +612,7 @@ impl KiApp {
                             );
                             ui.add_space(espace::S);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("tampon de gigue").color(TEXT_DIM).size(texte::COURANT));
+                                ui.label(Texte::Libelle.riche(ui, "tampon de gigue"));
                                 let jitter_label = |frames: usize| match frames {
                                     0 => "Auto (adaptatif)".to_string(),
                                     f => format!("{} ms", f * 20),
@@ -689,7 +678,7 @@ impl KiApp {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("🧪 labo vidéo").color(TEXT_DIM).size(texte::COURANT),
+                                    Texte::Libelle.riche(ui, "🧪 labo vidéo"),
                                 );
                                 let running = self.labo.is_some();
                                 let label = if running { "Arrêter le test" } else { "Se voir (test local)" };
@@ -730,7 +719,7 @@ impl KiApp {
                                     Some(j) => valo_catalogue::ligne(&j),
                                 },
                             };
-                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(texte::PETIT));
+                            ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, format!("état : {etat}")));
                             ui.add_space(espace::S);
                             if ui
                                 .checkbox(&mut self.journal_parties, "Garder l'historique de mes parties (durée, mode, carte)")
@@ -780,10 +769,10 @@ impl KiApp {
                                         "le serveur garde ton rang, tes derniers RR et tes derniers matchs — ta ligne seulement — et les montre aux membres au clic droit sur ton pseudo.",
                                     );
                                     ui.horizontal(|ui| {
-                                        if ui::button(ui, Icon::Screen, "Ma fiche").clicked() {
+                                        if ui::Bouton::new("Ma fiche").icone(Icon::Screen).show(ui).clicked() {
                                             self.ouvrir_fiche(user_id, username.clone());
                                         }
-                                        if ui::button(ui, Icon::Close, "Délier").clicked() {
+                                        if ui::Bouton::new("Délier").icone(Icon::Close).show(ui).clicked() {
                                             self.send(ClientMsg::DelierRiot { user_id: None });
                                             self.riot_message = None;
                                         }
@@ -828,7 +817,7 @@ impl KiApp {
                                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                         let valide = ki_protocol::parser_riot_id(&self.riot_saisie).is_some();
                                         let clic = ui
-                                            .add_enabled_ui(valide, |ui| ui::button(ui, Icon::Check, "Lier"))
+                                            .add_enabled_ui(valide, |ui| ui::Bouton::new("Lier").icone(Icon::Check).show(ui))
                                             .inner
                                             .clicked();
                                         if (clic || entree) && valide {
@@ -865,7 +854,7 @@ impl KiApp {
                                     None => "aucun jeu connu en cours".to_string(),
                                 },
                             };
-                            ui.label(RichText::new(format!("état : {etat}")).color(TEXT_DIM).size(texte::PETIT));
+                            ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, format!("état : {etat}")));
                             ui::hint(
                                 ui,
                                 format!(
@@ -878,7 +867,7 @@ impl KiApp {
 
                         if let Some(info) = self.info.clone() {
                             ui.add_space(espace::L);
-                            if ui::banner(ui, Tone::Accent, &info, true) {
+                            if ui::banner(ui, Ton::Accent, &info, true) {
                                 self.info = None;
                             }
                         }
@@ -934,7 +923,7 @@ impl KiApp {
             Some("Pour changer de PC sans tout refaire : serveurs, raccourcis, égaliseurs, profils de voix, volumes."),
             |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    if ui::button(ui, Icon::Download, "Exporter…")
+                    if ui::Bouton::new("Exporter…").icone(Icon::Download).show(ui)
                         .on_hover_text("un fichier à garder ou à envoyer sur ton autre PC — sans aucun mot de passe")
                         .clicked()
                     {
@@ -944,7 +933,7 @@ impl KiApp {
                             self.reglages_demande = Some(DemandeReglages::Exporter(destination));
                         }
                     }
-                    if ui::button(ui, Icon::ArrowUp, "Importer…")
+                    if ui::Bouton::new("Importer…").icone(Icon::ArrowUp).show(ui)
                         .on_hover_text("reprendre les réglages exportés depuis un autre PC")
                         .clicked()
                     {
@@ -972,19 +961,17 @@ impl KiApp {
                         "Tes serveurs enregistrés ici ne changent pas."
                     };
                     ui.label(
-                        RichText::new(format!(
+                        Texte::Libelle.riche_ton(ui, Ton::Neutre, format!(
                             "{nom} : {} réglages vont remplacer ceux de ce PC. {serveurs} ki-chat redémarre ensuite.",
                             table.len()
-                        ))
-                        .color(TEXT)
-                        .size(texte::COURANT),
+                        )),
                     );
                     let mut choix = None;
                     ui.horizontal(|ui| {
-                        if ui::tinted_button(ui, Some(Icon::Check), "Importer et redémarrer", Tone::Accent).clicked() {
+                        if ui::Bouton::new("Importer et redémarrer").icone(Icon::Check).teinte(Ton::Accent).show(ui).clicked() {
                             choix = Some(true);
                         }
-                        if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                        if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                             choix = Some(false);
                         }
                     });
@@ -1078,16 +1065,14 @@ impl KiApp {
                             .max_height(160.0)
                             .show(ui, |ui| {
                                 ui.label(
-                                    RichText::new(release.notes.as_str())
-                                        .color(TEXT_DIM)
-                                        .size(texte::CORPS),
+                                    Texte::Corps.riche_ton(ui, Ton::Discret, release.notes.as_str()),
                                 );
                             });
                     }
 
                     ui.add_space(espace::L);
                     ui.horizontal(|ui| {
-                        if ui::primary_button(ui, Some(Icon::ArrowDown), "Mettre à jour", None)
+                        if ui::Bouton::new("Mettre à jour").icone(Icon::ArrowDown).principal().show(ui)
                             .clicked()
                         {
                             self.updater.accept(&release, ctx.clone());
@@ -1095,7 +1080,7 @@ impl KiApp {
                         // Libellé franc : le refus est mémorisé, on ne
                         // redemandera qu'à la version suivante. « Plus tard »
                         // promettrait une relance qui n'aura pas lieu.
-                        if ui::button(ui, Icon::Close, "Ignorer cette version").clicked() {
+                        if ui::Bouton::new("Ignorer cette version").icone(Icon::Close).show(ui).clicked() {
                             self.updater.skip(&release.version);
                         }
                     });
@@ -1129,14 +1114,14 @@ impl KiApp {
                 }
                 update::Status::Failed(message) => {
                     ui.label(RichText::new("Mise à jour impossible").size(texte::TITRE).strong());
-                    ui.label(RichText::new(message.as_str()).color(DANGER).size(texte::CORPS));
+                    ui.label(Texte::Corps.riche_ton(ui, Ton::Danger, message.as_str()));
                     ui.add_space(espace::M);
                     ui.hyperlink_to(
                         "Télécharger depuis GitHub",
                         update::Updater::releases_page(),
                     );
                     ui.add_space(espace::M);
-                    if ui::button(ui, Icon::Close, "Fermer").clicked() {
+                    if ui::Bouton::new("Fermer").icone(Icon::Close).show(ui).clicked() {
                         self.updater.dismiss();
                     }
                 }
@@ -1193,14 +1178,14 @@ impl KiApp {
                             .and_then(|m| self.top_role_name(m))
                             .unwrap_or("membre")
                             .to_string();
-                        ui.label(RichText::new(role).color(TEXT_FAINT).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, role));
                         ui.add_space(espace::S);
                         ui.horizontal(|ui| {
-                            if ui::button(ui, Icon::Pencil, "Photo").clicked() {
+                            if ui::Bouton::new("Photo").icone(Icon::Pencil).show(ui).clicked() {
                                 self.pick_image(ctx, "Photo de profil", &self.picked_avatar);
                             }
                             if shown.is_some()
-                                && ui::button(ui, Icon::Trash, "Retirer").clicked()
+                                && ui::Bouton::new("Retirer").icone(Icon::Trash).show(ui).clicked()
                             {
                                 self.account_avatar = IconChange::Clear;
                             }
@@ -1212,7 +1197,7 @@ impl KiApp {
                 if dirty {
                     ui.add_space(espace::M);
                     let clicked =
-                        ui::primary_button(ui, Some(Icon::Check), "Enregistrer la photo", None)
+                        ui::Bouton::new("Enregistrer la photo").icone(Icon::Check).principal().show(ui)
                             .clicked();
                     if clicked {
                         to_send = Some(ClientMsg::SetAvatar {
@@ -1247,12 +1232,11 @@ impl KiApp {
                 let ready = !self.old_password.is_empty() && self.new_password.len() >= 6;
                 let clicked = ui
                     .add_enabled_ui(ready, |ui| {
-                        ui::primary_button(
-                            ui,
-                            Some(Icon::Check),
-                            "Changer le mot de passe",
-                            Some(ui.available_width()),
-                        )
+                        ui::Bouton::new("Changer le mot de passe")
+                            .icone(Icon::Check)
+                            .principal()
+                            .largeur(ui.available_width())
+                            .show(ui)
                     })
                     .inner
                     .clicked();
@@ -1266,7 +1250,7 @@ impl KiApp {
                 }
                 if let Some(info) = self.info.clone() {
                     ui.add_space(espace::L);
-                    if ui::banner(ui, Tone::Accent, &info, true) {
+                    if ui::banner(ui, Ton::Accent, &info, true) {
                         self.info = None;
                     }
                 }

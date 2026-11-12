@@ -13,6 +13,7 @@
 //! Le module ne dépend que d'egui, de ki-ui et du protocole : le banc
 //! `examples/banc_cartes.rs` le photographie sans ki-chat autour.
 
+use ki_ui::typo::Texte;
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use ki_protocol::{
     ActionCartes, Carte, CouleurCarte, EvenementCartes, JoueurCartes, PhaseCartes, ReglesCartes, TableCartes,
     UserId, ValeurCarte, MAX_JOUEURS_CARTES, PENALITE_ANNONCE, TOUR_CARTES_S,
 };
-use ki_ui::composants::{self as ui, Tone};
+use ki_ui::composants::{self as ui, Ton};
 use ki_ui::icones::{self, Icon};
 use ki_ui::jetons::{couleur as c, espace, rayon, texte};
 
@@ -273,7 +274,7 @@ impl Cartes {
         if en_vocal {
             ui.label(RichText::new("Personne n'a encore ouvert de table dans ton salon.").color(c::TEXT_DIM));
             ui.add_space(espace::L);
-            if ui::primary_button(&mut ui, Some(Icon::Cartes), "Ouvrir une table", None).clicked() {
+            if ui::Bouton::new("Ouvrir une table").icone(Icon::Cartes).principal().show(&mut ui).clicked() {
                 actions.push(ActionCartes::Ouvrir);
             }
         } else {
@@ -341,15 +342,15 @@ impl Cartes {
                 if moi == t.hote && assis {
                     let libelle = if t.manche == 0 { "Distribuer" } else { "Redistribuer" };
                     let pret = n >= 2;
-                    if ui.add_enabled_ui(pret, |ui| ui::primary_button(ui, Some(Icon::Play), libelle, None)).inner.clicked() {
+                    if ui.add_enabled_ui(pret, |ui| ui::Bouton::new(libelle).icone(Icon::Play).principal().show(ui)).inner.clicked() {
                         actions.push(ActionCartes::Lancer);
                     }
                 }
                 if assis {
-                    if ui::button(ui, Icon::Logout, "Me lever").clicked() {
+                    if ui::Bouton::new("Me lever").icone(Icon::Logout).show(ui).clicked() {
                         actions.push(ActionCartes::Quitter);
                     }
-                } else if n < MAX_JOUEURS_CARTES && ui::primary_button(ui, Some(Icon::Plus), "M'asseoir", None).clicked() {
+                } else if n < MAX_JOUEURS_CARTES && ui::Bouton::new("M'asseoir").icone(Icon::Plus).principal().show(ui).clicked() {
                     actions.push(ActionCartes::Rejoindre);
                 }
             });
@@ -708,17 +709,17 @@ impl Cartes {
                 if moi == t.hote
                     && assis
                     && ui
-                        .add_enabled_ui(t.joueurs.len() >= 2, |ui| ui::primary_button(ui, Some(Icon::Repeat), "Redistribuer", None))
+                        .add_enabled_ui(t.joueurs.len() >= 2, |ui| ui::Bouton::new("Redistribuer").icone(Icon::Repeat).principal().show(ui))
                         .inner
                         .clicked()
                 {
                     actions.push(ActionCartes::Lancer);
                 }
                 if assis {
-                    if ui::button(ui, Icon::Logout, "Me lever").clicked() {
+                    if ui::Bouton::new("Me lever").icone(Icon::Logout).show(ui).clicked() {
                         actions.push(ActionCartes::Quitter);
                     }
-                } else if t.joueurs.len() < MAX_JOUEURS_CARTES && ui::primary_button(ui, Some(Icon::Plus), "M'asseoir", None).clicked() {
+                } else if t.joueurs.len() < MAX_JOUEURS_CARTES && ui::Bouton::new("M'asseoir").icone(Icon::Plus).principal().show(ui).clicked() {
                     actions.push(ActionCartes::Rejoindre);
                 }
             });
@@ -767,17 +768,17 @@ impl Cartes {
             // barre (mon compte, l'abandon) passe sous le contre.
             let etroit = barre.width() < 760.0;
             let libelle = if t.cumul > 0 && a_moi { format!("Piocher {}", t.cumul) } else { "Piocher".to_string() };
-            if ligne.add_enabled_ui(a_moi && t.piochee.is_none(), |ui| ui::button(ui, Icon::Download, &libelle)).inner.clicked() {
+            if ligne.add_enabled_ui(a_moi && t.piochee.is_none(), |ui| ui::Bouton::new(&libelle).icone(Icon::Download).show(ui)).inner.clicked() {
                 actions.push(ActionCartes::Piocher);
             }
-            if a_moi && t.piochee.is_some() && ui::button(&mut ligne, Icon::ChevronRight, "Passer").clicked() {
+            if a_moi && t.piochee.is_some() && ui::Bouton::new("Passer").icone(Icon::ChevronRight).show(&mut ligne).clicked() {
                 actions.push(ActionCartes::Passer);
             }
             let deja = t.joueur(moi).is_some_and(|j| j.annonce);
             let peut_annoncer = ma_main <= 2 && !deja;
-            let ton = if t.expose == Some(moi) { Tone::Danger } else { Tone::Warn };
+            let ton = if t.expose == Some(moi) { Ton::Danger } else { Ton::Alerte };
             if ligne
-                .add_enabled_ui(peut_annoncer, |ui| ui::tinted_button(ui, Some(Icon::Chat), "Dernière carte !", ton))
+                .add_enabled_ui(peut_annoncer, |ui| ui::Bouton::new("Dernière carte !").icone(Icon::Chat).teinte(ton).show(ui))
                 .inner
                 .on_hover_text("à dire à deux cartes ou moins — sinon, le premier qui te contre te fait piocher 2")
                 .clicked()
@@ -789,7 +790,7 @@ impl Cartes {
             if let Some(expose) = t.expose.filter(|e| *e != moi) {
                 let nom = qui(expose).nom;
                 let libelle = if etroit { "Contrer !".to_string() } else { format!("Contrer {} !", abreger(&nom, 12)) };
-                if ui::tinted_button(&mut ligne, Some(Icon::Warning), &libelle, Tone::Danger)
+                if ui::Bouton::new(&libelle).icone(Icon::Warning).teinte(Ton::Danger).show(&mut ligne)
                     .on_hover_text(format!("{nom} n'a pas dit « Dernière carte ! » : il pioche {PENALITE_ANNONCE} cartes"))
                     .clicked()
                 {
@@ -797,7 +798,10 @@ impl Cartes {
                 }
             }
             ligne.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::tinted_button(ui, Some(Icon::Logout), if etroit { "" } else { "Abandonner" }, Tone::Danger)
+                if ui::Bouton::new(if etroit { "" } else { "Abandonner" })
+                    .icone(Icon::Logout)
+                    .teinte(Ton::Danger)
+                    .show(ui)
                     .on_hover_text("un bot finit la manche avec ta main — tu pourras la reprendre, ou un pote la prendra")
                     .clicked()
                 {
@@ -836,9 +840,9 @@ impl Cartes {
         let mut ligne = ui.new_child(
             egui::UiBuilder::new().max_rect(barre).layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        ligne.label(RichText::new("Un bot joue ta main à ta place.").color(c::WARN).size(texte::CORPS));
+        ligne.label(Texte::Corps.riche_ton(ui, Ton::Alerte, "Un bot joue ta main à ta place."));
         ligne.add_space(espace::M);
-        if ui::primary_button(&mut ligne, Some(Icon::Play), "Reprendre ma place", None).clicked() {
+        if ui::Bouton::new("Reprendre ma place").icone(Icon::Play).principal().show(&mut ligne).clicked() {
             actions.push(ActionCartes::Reprendre { place: moi });
         }
         self.peindre_main(ui, p, main, t, moi, false, false, actions);
@@ -972,7 +976,7 @@ impl Cartes {
         }
         let annuler = Rect::from_center_size(centre + vec2(0.0, 82.0), vec2(120.0, 30.0));
         let mut sous = ui.new_child(egui::UiBuilder::new().max_rect(annuler).layout(egui::Layout::top_down(egui::Align::Center)));
-        if ui::button(&mut sous, Icon::Close, "Annuler").clicked() {
+        if ui::Bouton::new("Annuler").icone(Icon::Close).show(&mut sous).clicked() {
             self.choix_couleur = None;
         }
     }
@@ -1035,7 +1039,7 @@ impl Cartes {
         }
         let annuler = Rect::from_center_size(pos2(rect.center().x, haut + lignes as f32 * case.y + 22.0), vec2(120.0, 30.0));
         let mut sous = ui.new_child(egui::UiBuilder::new().max_rect(annuler).layout(egui::Layout::top_down(egui::Align::Center)));
-        if ui::button(&mut sous, Icon::Close, "Annuler").clicked() {
+        if ui::Bouton::new("Annuler").icone(Icon::Close).show(&mut sous).clicked() {
             self.choix_cible = None;
         }
     }
@@ -1051,7 +1055,7 @@ impl Cartes {
         sous.set_clip_rect(rect);
         sous.label(RichText::new(format!("Manche {}", t.manche.max(1))).color(c::TEXT_FAINT).size(texte::PETIT).strong());
         if let Some(liste) = liste_des_regles(t.regles) {
-            sous.label(RichText::new(format!("En plus : {liste}")).color(c::TEXT_FAINT).size(texte::PETIT));
+            sous.label(Texte::Aide.riche(ui, format!("En plus : {liste}")));
         }
         sous.add_space(espace::XS);
         let nom = |id: UserId| qui(id).nom;
@@ -1529,30 +1533,24 @@ fn spectateur(
     if t.en_attente {
         ui.add_space(espace::XL);
         ui.label(
-            RichText::new("Quelqu'un a pris ta place pendant ton absence : tu rejoues à la manche suivante.")
-                .color(c::TEXT_DIM)
-                .size(texte::CORPS),
+            Texte::Corps.riche_ton(&ui, Ton::Discret, "Quelqu'un a pris ta place pendant ton absence : tu rejoues à la manche suivante."),
         );
         return;
     }
     if bots.is_empty() {
         ui.add_space(espace::XL);
         ui.label(
-            RichText::new("Tu regardes la manche — tu pourras t'asseoir à la suivante.")
-                .color(c::TEXT_DIM)
-                .size(texte::CORPS),
+            Texte::Corps.riche_ton(&ui, Ton::Discret, "Tu regardes la manche — tu pourras t'asseoir à la suivante."),
         );
         return;
     }
     ui.label(
-        RichText::new("Un bot tient une place : prends-la, tu récupères sa main.")
-            .color(c::TEXT)
-            .size(texte::CORPS),
+        Texte::Corps.riche(&ui, "Un bot tient une place : prends-la, tu récupères sa main."),
     );
     ui.add_space(espace::S);
     for id in bots {
         let nom = abreger(&qui(id).nom, 16);
-        if ui::primary_button(&mut ui, Some(Icon::Cartes), &format!("Prendre la place de {nom}"), None).clicked() {
+        if ui::Bouton::new(&format!("Prendre la place de {nom}")).icone(Icon::Cartes).principal().show(&mut ui).clicked() {
             actions.push(ActionCartes::Reprendre { place: id });
         }
         ui.add_space(espace::XS);
@@ -1614,7 +1612,7 @@ fn regles(ui: &mut egui::Ui) {
                 "30 secondes par tour, sinon tu pioches et ton tour passe. Trois fois de suite, et un bot joue à ta place.",
                 "Qui part laisse sa main à un bot ; un pote qui arrive peut prendre sa place, cartes comprises.",
             ] {
-                ui.label(RichText::new(format!("•  {ligne}")).color(c::TEXT_DIM).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche(ui, format!("•  {ligne}")));
             }
         });
     });
@@ -1642,7 +1640,7 @@ fn regles_en_plus(ui: &mut egui::Ui, t: &TableCartes, moi: UserId, nom_hote: &st
                     ),
                 ] {
                     change |= ui::interrupteur(ui, en_jeu, titre).changed();
-                    ui.label(RichText::new(detail).color(c::TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, detail));
                     ui.add_space(espace::XS);
                 }
                 if change {
@@ -1653,7 +1651,7 @@ fn regles_en_plus(ui: &mut egui::Ui, t: &TableCartes, moi: UserId, nom_hote: &st
                     Some(liste) => format!("En jeu : {liste}."),
                     None => "Aucune : les règles de la maison, rien de plus.".to_string(),
                 };
-                ui.label(RichText::new(texte).color(c::TEXT_DIM).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche(ui, texte));
                 ui::hint(ui, format!("{nom_hote} les choisit entre deux manches."));
             }
         });

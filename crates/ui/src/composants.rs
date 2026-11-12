@@ -12,34 +12,7 @@ use crate::icones::{self as icons, Icon};
 use crate::jetons::couleur as theme;
 use crate::jetons::{espace, marge, rayon, texte};
 
-/// Ton d'un bandeau ou d'un bouton accentué.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Accent,
-    Danger,
-    Warn,
-    Info,
-}
-
-impl Tone {
-    pub(crate) fn color(self) -> Color32 {
-        match self {
-            Tone::Accent => theme::ACCENT,
-            Tone::Danger => theme::DANGER,
-            Tone::Warn => theme::WARN,
-            Tone::Info => theme::INFO,
-        }
-    }
-
-    pub(crate) fn icon(self) -> Icon {
-        match self {
-            Tone::Accent => Icon::Check,
-            Tone::Danger => Icon::Warning,
-            Tone::Warn => Icon::Warning,
-            Tone::Info => Icon::Info,
-        }
-    }
-}
+pub use crate::typo::{texte, texte_ton, Texte, Ton};
 
 // ---------------------------------------------------------------------
 // Boutons
@@ -89,137 +62,270 @@ pub fn icon_button_ex(
     }
 }
 
-/// Bouton « icône + libellé », posé sur une surface en relief.
-pub fn button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
-    styled_button(ui, Some(icon), label, Fill::Surface, None)
-}
-
-/// Bouton principal, fond plein accent. `width` à `None` = largeur du contenu.
-pub fn primary_button(
-    ui: &mut Ui,
-    icon: Option<Icon>,
-    label: &str,
-    width: Option<f32>,
-) -> Response {
-    styled_button(ui, icon, label, Fill::Solid(theme::ACCENT), width)
-}
-
-/// Bouton teinté (danger, info…) : fond très léger, texte coloré.
-pub fn tinted_button(ui: &mut Ui, icon: Option<Icon>, label: &str, tone: Tone) -> Response {
-    styled_button(ui, icon, label, Fill::Tinted(tone.color()), None)
-}
-
-enum Fill {
+/// La place d'un bouton dans la hiérarchie de l'écran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Variante {
+    /// Posé sur une surface en relief : le bouton ordinaire.
     Surface,
-    Solid(Color32),
-    Tinted(Color32),
+    /// Fond plein, à la couleur d'accent : l'action principale de l'écran.
+    Principal,
+    /// Fond très léger, texte coloré : un geste qui détruit, une alerte,
+    /// une information.
+    Teinte(Ton),
 }
 
-fn styled_button(
-    ui: &mut Ui,
-    icon: Option<Icon>,
-    label: &str,
-    fill: Fill,
-    width: Option<f32>,
-) -> Response {
-    let font = FontId::proportional(texte::CORPS);
-    let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font, theme::TEXT));
-    let icon_size = 16.0;
-    let gap = if icon.is_some() && !label.is_empty() {
-        7.0
-    } else {
-        0.0
-    };
-    let icon_w = if icon.is_some() { icon_size } else { 0.0 };
-    let pad = Vec2::new(13.0, 8.0);
-    let desired = Vec2::new(
-        width.unwrap_or(icon_w + gap + galley.size().x + pad.x * 2.0),
-        (galley.size().y).max(icon_size) + pad.y * 2.0,
-    );
+/// La taille d'un contrôle : serrée dans une barre ou une ligne de tableau,
+/// ordinaire partout ailleurs, grande pour l'action d'une page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taille {
+    S,
+    M,
+    L,
+}
 
-    let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
-    if ui.is_rect_visible(rect) {
-        let enabled = ui.is_enabled();
-        let hovered = response.hovered() && enabled;
-        let pressed = response.is_pointer_button_down_on() && enabled;
+/// Ce que la taille fixe d'un bouton.
+struct Mesures {
+    police: f32,
+    icone: f32,
+    /// Entre l'icône et le libellé.
+    ecart: f32,
+    /// Autour du contenu.
+    marge: Vec2,
+}
 
-        let (bg, border, fg) = match fill {
-            // Bouton principal : fond plein qui s'éclaircit au survol.
-            Fill::Solid(c) => {
-                let base = if pressed {
-                    theme::melanger(c, Color32::BLACK, 0.18)
-                } else if hovered {
-                    theme::melanger(c, Color32::WHITE, 0.12)
-                } else {
-                    c
-                };
-                (base, Stroke::NONE, theme::BG_DEEP)
-            }
-            Fill::Tinted(c) => {
-                let bg = theme::translucide(
-                    c,
-                    if pressed {
-                        66
-                    } else if hovered {
-                        44
-                    } else {
-                        24
-                    },
-                );
-                (bg, Stroke::new(1.0_f32, theme::translucide(c, 90)), c)
-            }
-            Fill::Surface => {
-                let bg = if pressed {
-                    theme::BG_ACTIVE
-                } else if hovered {
-                    theme::BG_HOVER
-                } else {
-                    theme::BG_RAISED
-                };
-                let edge = if hovered {
-                    theme::melanger(theme::BORDER, theme::ACCENT, 0.3)
-                } else {
-                    theme::BORDER
-                };
-                (
-                    bg,
-                    Stroke::new(1.0_f32, edge),
-                    if hovered {
-                        theme::TEXT
-                    } else {
-                        theme::TEXT_DIM
-                    },
-                )
-            }
-        };
-
-        let alpha = if enabled { 1.0 } else { 0.45 };
-        let painter = ui.painter();
-        painter.rect(
-            rect,
-            CornerRadius::same(rayon::L),
-            bg.gamma_multiply(alpha),
-            Stroke::new(border.width, border.color.gamma_multiply(alpha)),
-            StrokeKind::Inside,
-        );
-
-        let content_w = icon_w + gap + galley.size().x;
-        let mut x = rect.center().x - content_w / 2.0;
-        if let Some(icon) = icon {
-            let icon_rect = Rect::from_min_size(
-                egui::pos2(x, rect.center().y - icon_size / 2.0),
-                Vec2::splat(icon_size),
-            );
-            icons::draw(painter, icon_rect, icon, fg.gamma_multiply(alpha));
-            x += icon_w + gap;
+impl Taille {
+    const fn mesures(self) -> Mesures {
+        match self {
+            Taille::S => Mesures { police: texte::COURANT, icone: 14.0, ecart: 6.0, marge: Vec2::new(10.0, 5.0) },
+            Taille::M => Mesures { police: texte::CORPS, icone: 16.0, ecart: 7.0, marge: Vec2::new(13.0, 8.0) },
+            Taille::L => Mesures { police: texte::TITRE, icone: 18.0, ecart: 8.0, marge: Vec2::new(18.0, 11.0) },
         }
-        painter.galley(
-            egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-            galley,
-            fg.gamma_multiply(alpha),
-        );
     }
-    response
+}
+
+/// Un bouton à libellé, avec ou sans icône.
+///
+/// ```ignore
+/// if Bouton::new("Envoyer").icone(Icon::Send).principal().show(ui).clicked() { … }
+/// Bouton::new("Supprimer").teinte(Ton::Danger).actif(peut_supprimer).show(ui);
+/// Bouton::new("Exporter…").en_charge(export_en_cours).bulle("vers un fichier").show(ui);
+/// ```
+///
+/// Il n'y avait que des fonctions, trois, aux signatures différentes, et
+/// l'état désactivé n'existait que par l'`Ui` qui les portait. Un seul
+/// constructeur : ce qu'on ne dit pas garde sa valeur d'origine (variante
+/// [`Variante::Surface`], taille [`Taille::M`], largeur du contenu, actif).
+#[must_use = "un bouton se pose avec `.show(ui)`"]
+pub struct Bouton<'a> {
+    libelle: &'a str,
+    icone: Option<Icon>,
+    variante: Variante,
+    taille: Taille,
+    largeur: Option<f32>,
+    actif: bool,
+    en_charge: bool,
+    bulle: Option<&'a str>,
+}
+
+impl<'a> Bouton<'a> {
+    pub fn new(libelle: &'a str) -> Self {
+        Self {
+            libelle,
+            icone: None,
+            variante: Variante::Surface,
+            taille: Taille::M,
+            largeur: None,
+            actif: true,
+            en_charge: false,
+            bulle: None,
+        }
+    }
+
+    /// L'icône, devant le libellé.
+    pub fn icone(mut self, icone: Icon) -> Self {
+        self.icone = Some(icone);
+        self
+    }
+
+    /// L'icône quand il y en a une : pour qui la calcule.
+    pub fn icone_si(mut self, icone: Option<Icon>) -> Self {
+        self.icone = icone;
+        self
+    }
+
+    pub fn variante(mut self, variante: Variante) -> Self {
+        self.variante = variante;
+        self
+    }
+
+    /// L'action principale de l'écran : fond plein, à la couleur d'accent.
+    pub fn principal(self) -> Self {
+        self.variante(Variante::Principal)
+    }
+
+    /// Teinté par un ton : danger, alerte, information.
+    pub fn teinte(self, ton: Ton) -> Self {
+        self.variante(Variante::Teinte(ton))
+    }
+
+    pub fn taille(mut self, taille: Taille) -> Self {
+        self.taille = taille;
+        self
+    }
+
+    /// Une largeur imposée ; sans elle, celle du contenu.
+    pub fn largeur(mut self, largeur: f32) -> Self {
+        self.largeur = Some(largeur);
+        self
+    }
+
+    /// Une largeur imposée quand il y en a une : pour qui la calcule.
+    pub fn largeur_si(mut self, largeur: Option<f32>) -> Self {
+        self.largeur = largeur;
+        self
+    }
+
+    /// Désactivé (`false`) : estompé, il ne se clique pas. Un `Ui`
+    /// désactivé le désactive aussi.
+    pub fn actif(mut self, actif: bool) -> Self {
+        self.actif = actif;
+        self
+    }
+
+    /// Ce que le bouton a lancé est en cours : un sablier tourne à la place
+    /// de l'icône, et il ne se clique pas une seconde fois.
+    pub fn en_charge(mut self, en_charge: bool) -> Self {
+        self.en_charge = en_charge;
+        self
+    }
+
+    /// Ce que le survol dit du bouton — y compris quand il est désactivé.
+    pub fn bulle(mut self, bulle: &'a str) -> Self {
+        self.bulle = Some(bulle);
+        self
+    }
+
+    pub fn show(self, ui: &mut Ui) -> Response {
+        let m = self.taille.mesures();
+        let font = FontId::proportional(m.police);
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap(self.libelle.to_owned(), font, theme::TEXT));
+        let gap = if self.icone.is_some() && !self.libelle.is_empty() { m.ecart } else { 0.0 };
+        let icon_w = if self.icone.is_some() { m.icone } else { 0.0 };
+        let desired = Vec2::new(
+            self.largeur.unwrap_or(icon_w + gap + galley.size().x + m.marge.x * 2.0),
+            (galley.size().y).max(m.icone) + m.marge.y * 2.0,
+        );
+
+        let enabled = ui.is_enabled() && self.actif;
+        let cliquable = enabled && !self.en_charge;
+        let (rect, response) =
+            ui.allocate_exact_size(desired, if cliquable { Sense::click() } else { Sense::hover() });
+        let libelle = self.libelle;
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, cliquable, libelle));
+
+        if ui.is_rect_visible(rect) {
+            let hovered = response.hovered() && cliquable;
+            let pressed = response.is_pointer_button_down_on() && cliquable;
+
+            let (bg, border, fg) = match self.variante {
+                // Bouton principal : fond plein qui s'éclaircit au survol.
+                Variante::Principal => {
+                    let c = theme::ACCENT;
+                    let base = if pressed {
+                        theme::melanger(c, Color32::BLACK, 0.18)
+                    } else if hovered {
+                        theme::melanger(c, Color32::WHITE, 0.12)
+                    } else {
+                        c
+                    };
+                    (base, Stroke::NONE, theme::BG_DEEP)
+                }
+                Variante::Teinte(ton) => {
+                    let c = ton.couleur();
+                    let bg = theme::translucide(
+                        c,
+                        if pressed {
+                            66
+                        } else if hovered {
+                            44
+                        } else {
+                            24
+                        },
+                    );
+                    (bg, Stroke::new(1.0_f32, theme::translucide(c, 90)), c)
+                }
+                Variante::Surface => {
+                    let bg = if pressed {
+                        theme::BG_ACTIVE
+                    } else if hovered {
+                        theme::BG_HOVER
+                    } else {
+                        theme::BG_RAISED
+                    };
+                    let edge = if hovered { theme::melanger(theme::BORDER, theme::ACCENT, 0.3) } else { theme::BORDER };
+                    (bg, Stroke::new(1.0_f32, edge), if hovered { theme::TEXT } else { theme::TEXT_DIM })
+                }
+            };
+
+            let alpha = if enabled { 1.0 } else { 0.45 };
+            let painter = ui.painter();
+            painter.rect(
+                rect,
+                CornerRadius::same(rayon::L),
+                bg.gamma_multiply(alpha),
+                Stroke::new(border.width, border.color.gamma_multiply(alpha)),
+                StrokeKind::Inside,
+            );
+            // Au clavier, on voit où l'on est.
+            if response.has_focus() {
+                painter.rect_stroke(
+                    rect.expand(2.0),
+                    CornerRadius::same(rayon::L + 2),
+                    Stroke::new(1.5_f32, theme::ACCENT),
+                    StrokeKind::Outside,
+                );
+            }
+
+            let content_w = icon_w + gap + galley.size().x;
+            let mut x = rect.center().x - content_w / 2.0;
+            let sablier = |centre: egui::Pos2| {
+                let temps = ui.input(|i| i.time);
+                spinner(painter, centre, m.icone * 0.42, temps, fg.gamma_multiply(alpha));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+            };
+            if let Some(icon) = self.icone {
+                let icon_rect =
+                    Rect::from_min_size(egui::pos2(x, rect.center().y - m.icone / 2.0), Vec2::splat(m.icone));
+                if self.en_charge {
+                    sablier(icon_rect.center());
+                } else {
+                    icons::draw(painter, icon_rect, icon, fg.gamma_multiply(alpha));
+                }
+                x += icon_w + gap;
+            }
+            // Sans icône, le sablier prend la place du libellé : le bouton
+            // garde sa largeur.
+            if self.en_charge && self.icone.is_none() {
+                sablier(rect.center());
+            } else {
+                painter.galley(
+                    egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    fg.gamma_multiply(alpha),
+                );
+            }
+        }
+        match self.bulle {
+            Some(bulle) if !bulle.is_empty() => response.on_hover_text(bulle).on_disabled_hover_text(bulle),
+            _ => response,
+        }
+    }
+}
+
+impl egui::Widget for Bouton<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        self.show(ui)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -482,13 +588,13 @@ pub fn hairline(ui: &mut Ui) {
 
 /// Petite étiquette au-dessus d'un champ de saisie.
 pub fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::TEXT_DIM).size(texte::COURANT));
+    ui.label(Texte::Libelle.riche(ui, text));
     ui.add_space(espace::XS);
 }
 
 /// Explication en petit sous un réglage.
 pub fn hint(ui: &mut Ui, text: impl Into<String>) {
-    ui.label(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT));
+    ui.label(Texte::Aide.riche(ui, text));
 }
 
 /// Un encart teinté de `couleur` : fond translucide, filet de la même
@@ -505,8 +611,8 @@ pub fn encart<R>(ui: &mut Ui, couleur: Color32, contenu: impl FnOnce(&mut Ui) ->
 
 /// Bandeau d'information coloré. Renvoie `true` si l'utilisateur l'a fermé
 /// (la croix n'apparaît que si `closable`).
-pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
-    let color = tone.color();
+pub fn banner(ui: &mut Ui, tone: Ton, text: &str, closable: bool) -> bool {
+    let color = tone.couleur();
     let mut closed = false;
     encart(ui, color, |ui| {
         // Le texte passe à la ligne dans la largeur qui reste : posé tel
@@ -515,7 +621,7 @@ pub fn banner(ui: &mut Ui, tone: Tone, text: &str, closable: bool) -> bool {
         Flex::ligne().ecart(espace::S).show(ui, "bandeau", |f| {
             f.ui(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                icons::draw(ui.painter(), rect, tone.icon(), color);
+                icons::draw(ui.painter(), rect, tone.icone(), color);
             });
             f.grandit(|ui| {
                 ui.add(egui::Label::new(RichText::new(text).color(color).size(texte::CORPS)).wrap());
@@ -544,7 +650,7 @@ pub fn rappel(ui: &mut Ui, texte_rappel: &str, bulle: &str) -> bool {
                 f.grandit(|ui| {
                     crate::emoji::label_tronque(
                         ui,
-                        RichText::new(texte_rappel).color(theme::TEXT_DIM).size(texte::COURANT),
+                        Texte::Libelle.riche(ui, texte_rappel),
                     );
                 });
                 f.ui(|ui| {
@@ -589,7 +695,7 @@ pub fn section(
             });
             if let Some(s) = sous_titre {
                 ui.add_space(espace::XXS);
-                ui.label(RichText::new(s).color(theme::TEXT_FAINT).size(texte::PETIT));
+                ui.label(Texte::Aide.riche(ui, s));
             }
             ui.add_space(espace::L);
             add(ui);
@@ -602,7 +708,7 @@ pub fn section(
 /// à côte. Ce que `add` ajoute s'empile dans la colonne du contrôle (une
 /// explication sous un curseur, par exemple).
 pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
-    let libelle_texte = RichText::new(libelle).color(theme::TEXT_DIM).size(texte::COURANT);
+    let libelle_texte = Texte::Libelle.riche(ui, libelle);
     // Le passage à la ligne, c'est le flex qui en décide (le contrôle a sa
     // largeur minimale), plus un seuil de largeur de fenêtre.
     Flex::ligne()
@@ -632,7 +738,7 @@ pub fn ligne(ui: &mut Ui, libelle: &str, add: impl FnOnce(&mut Ui)) {
 /// Explication sous un contrôle, dans la colonne de la ligne.
 pub fn precision(ui: &mut Ui, text: &str) {
     ui.add_space(espace::XXS);
-    ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT_FAINT).size(texte::PETIT)).wrap());
+    ui.add(egui::Label::new(Texte::Aide.riche(ui, text)).wrap());
 }
 
 /// Choix exclusif en pastilles jointes (« Aucune · Douce · Forte ») :
@@ -790,7 +896,7 @@ pub fn interrupteur(ui: &mut Ui, on: &mut bool, libelle: &str) -> Response {
         .horizontal(|ui| {
             let (rect, mut r) = ui.allocate_exact_size(taille, Sense::click());
             let texte = ui.add(
-                egui::Label::new(RichText::new(libelle).color(theme::TEXT).size(texte::CORPS))
+                egui::Label::new(Texte::Corps.riche(ui, libelle))
                     .sense(Sense::click()),
             );
             if r.clicked() || texte.clicked() {
@@ -1234,6 +1340,54 @@ pub fn grille(ui: &mut Ui, n: usize, largeur_min: f32, ecart: f32, mut case: imp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pose ce que `dessin` dessine dans un contexte neuf et rend ce qu'il
+    /// rend.
+    fn poser<R>(mut dessin: impl FnMut(&mut Ui) -> R) -> R {
+        let ctx = egui::Context::default();
+        let mut rendu = None;
+        ctx.run_ui(Default::default(), |ui| rendu = Some(dessin(ui))).drop_without_applying_deltas();
+        rendu.expect("l'image a été dessinée")
+    }
+
+    #[test]
+    fn un_bouton_grandit_avec_sa_taille() {
+        let [s, m, l] = [Taille::S, Taille::M, Taille::L]
+            .map(|t| poser(|ui| Bouton::new("Envoyer").icone(Icon::Send).taille(t).show(ui).rect.size()));
+        assert!(s.y < m.y && m.y < l.y, "{s:?} {m:?} {l:?}");
+        assert!(s.x < m.x && m.x < l.x, "{s:?} {m:?} {l:?}");
+    }
+
+    #[test]
+    fn un_bouton_prend_la_largeur_de_son_contenu_ou_celle_qu_on_impose() {
+        let court = poser(|ui| Bouton::new("OK").show(ui).rect.width());
+        let long = poser(|ui| Bouton::new("Un libellé nettement plus long").show(ui).rect.width());
+        let avec_icone = poser(|ui| Bouton::new("OK").icone(Icon::Check).show(ui).rect.width());
+        assert!(court < avec_icone && avec_icone < long);
+        assert_eq!(poser(|ui| Bouton::new("OK").largeur(220.0).show(ui).rect.width()), 220.0);
+        // La variante ne change pas la place prise : passer un bouton en
+        // principal ne décale pas ses voisins.
+        let principal = poser(|ui| Bouton::new("OK").principal().show(ui).rect.size());
+        let teinte = poser(|ui| Bouton::new("OK").teinte(Ton::Danger).show(ui).rect.size());
+        assert_eq!(principal, poser(|ui| Bouton::new("OK").show(ui).rect.size()));
+        assert_eq!(principal, teinte);
+    }
+
+    #[test]
+    fn un_bouton_desactive_ou_en_charge_ne_se_clique_pas() {
+        assert!(poser(|ui| Bouton::new("OK").show(ui).sense.senses_click()));
+        assert!(!poser(|ui| Bouton::new("OK").actif(false).show(ui).sense.senses_click()));
+        assert!(!poser(|ui| Bouton::new("OK").en_charge(true).show(ui).sense.senses_click()));
+        // Un `Ui` désactivé le désactive aussi.
+        let dans_un_ui_desactive = poser(|ui| {
+            ui.add_enabled_ui(false, |ui| Bouton::new("OK").show(ui).sense.senses_click()).inner
+        });
+        assert!(!dans_un_ui_desactive);
+        // En charge, il garde sa place : rien ne saute quand le travail commence.
+        let au_repos = poser(|ui| Bouton::new("Exporter").icone(Icon::Download).show(ui).rect.size());
+        let en_charge = poser(|ui| Bouton::new("Exporter").icone(Icon::Download).en_charge(true).show(ui).rect.size());
+        assert_eq!(au_repos, en_charge);
+    }
 
     /// Autant de colonnes qu'il en tient, en rangées aussi égales que
     /// possible.

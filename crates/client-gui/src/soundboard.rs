@@ -7,15 +7,16 @@
 //! est fermé ; on l'entend aussi chez soi. Le protocole n'en sait rien,
 //! c'est de la voix — et le serveur le relaie et le coupe comme telle.
 
-use ki_ui::jetons::{espace, rayon, texte};
+use ki_ui::typo::Texte;
+use ki_ui::jetons::{espace, rayon};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{self, RichText, Vec2};
+use eframe::egui::{self, Vec2};
 
 use crate::icons::Icon;
-use crate::theme::{self, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::{self, Tone};
+use crate::theme::{self};
+use crate::ui::{self, Ton};
 
 /// Au-delà, un son est coupé : c'est un soundboard, pas un lecteur.
 pub const DUREE_MAX_S: usize = 30;
@@ -191,13 +192,13 @@ impl Soundboard {
                     {
                         self.volume = pct / 100.0;
                     }
-                    if ui::button(ui, Icon::Close, "Stop").on_hover_text("coupe ce qui joue").clicked() {
+                    if ui::Bouton::new("Stop").icone(Icon::Close).show(ui).on_hover_text("coupe ce qui joue").clicked() {
                         commande = Some(Commande::Arreter);
                     }
-                    if ui::button(ui, Icon::Refresh, "Recharger").clicked() {
+                    if ui::Bouton::new("Recharger").icone(Icon::Refresh).show(ui).clicked() {
                         recharger = true;
                     }
-                    if ui::button(ui, Icon::Download, "Ouvrir le dossier")
+                    if ui::Bouton::new("Ouvrir le dossier").icone(Icon::Download).show(ui)
                         .on_hover_text("dépose-y des .wav ou des .mp3 (30 s au plus)")
                         .clicked()
                     {
@@ -211,14 +212,14 @@ impl Soundboard {
                     ui.add_space(espace::S);
                     ui::banner(
                         ui,
-                        Tone::Warn,
+                        Ton::Alerte,
                         "rejoins un salon vocal : ici, personne d'autre n'entendrait",
                         false,
                     );
                 }
                 ui.add_space(espace::M);
                 if self.en_cours {
-                    ui.label(RichText::new("chargement des sons…").color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, "chargement des sons…"));
                 } else if self.sons.is_empty() {
                     let dossier = Self::dossiers()
                         .into_iter()
@@ -226,15 +227,11 @@ impl Soundboard {
                         .map(|d| d.display().to_string())
                         .unwrap_or_default();
                     ui.label(
-                        RichText::new("Aucun son. Dépose des .wav ou des .mp3 dans :")
-                            .color(TEXT_DIM)
-                            .size(texte::COURANT),
+                        Texte::Libelle.riche(ui, "Aucun son. Dépose des .wav ou des .mp3 dans :"),
                     );
-                    ui.label(RichText::new(dossier).color(TEXT).size(texte::PETIT).monospace());
+                    ui.label(Texte::Aide.riche_ton(ui, Ton::Neutre, dossier).monospace());
                     ui.label(
-                        RichText::new("puis « Recharger ». Trente secondes au plus par son.")
-                            .color(TEXT_FAINT)
-                            .size(texte::PETIT),
+                        Texte::Aide.riche(ui, "puis « Recharger ». Trente secondes au plus par son."),
                     );
                 } else {
                     // Les touches 1 à 9 : les neuf premiers sons, tant
@@ -269,7 +266,7 @@ impl Soundboard {
                                 } else {
                                     nom
                                 };
-                                let bouton = egui::Button::new(RichText::new(libelle).size(texte::COURANT).color(TEXT))
+                                let bouton = egui::Button::new(Texte::Libelle.riche_ton(ui, Ton::Neutre, libelle))
                                     .min_size(Vec2::new(124.0, 44.0))
                                     .fill(theme::BG_RAISED)
                                     .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))

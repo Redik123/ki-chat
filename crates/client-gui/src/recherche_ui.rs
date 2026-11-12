@@ -1,16 +1,16 @@
 //! La recherche dans l'historique : le champ en haut du salon, la fenêtre des
 //! résultats, et le saut vers un message ancien.
 
-use eframe::egui::{self, RichText};
+use ki_ui::typo::{Texte, Ton};
+use eframe::egui::{self};
 use ki_protocol::{ChannelId, ClientMsg};
-use ki_ui::jetons::{espace, texte};
+use ki_ui::jetons::espace;
 use ki_ui::liste::Liste;
 
 use crate::{ui, KiApp};
 use crate::formats::day_label;
 use crate::icons::Icon;
 use crate::saisie::menu_edition;
-use crate::theme::{ACCENT, TEXT, TEXT_DIM, TEXT_FAINT};
 
 /// La recherche dans l'historique : la requête, ses résultats, le saut dans
 /// le passé.
@@ -139,7 +139,7 @@ impl KiApp {
                         lancer = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::button(ui, Icon::Loupe, "Chercher").clicked() {
+                        if ui::Bouton::new("Chercher").icone(Icon::Loupe).show(ui).clicked() {
                             lancer = true;
                         }
                     });
@@ -151,7 +151,7 @@ impl KiApp {
                 ui.add_space(espace::M);
 
                 if self.recherche.envoyee.is_some() && self.recherche.resultats.is_empty() {
-                    ui.label(RichText::new("Recherche en cours…").color(TEXT_FAINT).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, "Recherche en cours…"));
                     return;
                 }
                 if self.recherche.resultats.is_empty() {
@@ -160,7 +160,7 @@ impl KiApp {
                     } else {
                         "Aucun message ne contient ça."
                     };
-                    ui.label(RichText::new(quoi).color(TEXT_FAINT).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, quoi));
                     return;
                 }
                 if self.recherche.encore {
@@ -191,15 +191,13 @@ impl KiApp {
                         let bloc = ui.scope(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(format!("#{nom}")).color(ACCENT).size(texte::PETIT),
+                                    Texte::Aide.riche_ton(ui, Ton::Accent, format!("#{nom}")),
                                 );
                                 ui.label(
-                                    RichText::new(&hit.record.username).color(TEXT_DIM).size(texte::PETIT),
+                                    Texte::Aide.riche_ton(ui, Ton::Discret, &hit.record.username),
                                 );
                                 ui.label(
-                                    RichText::new(day_label(hit.record.ts))
-                                        .color(TEXT_FAINT)
-                                        .size(texte::PETIT),
+                                    Texte::Aide.riche(ui, day_label(hit.record.ts)),
                                 );
                             });
                             // Une seule ligne : un résultat sert à reconnaître
@@ -213,7 +211,7 @@ impl KiApp {
                                 .chars()
                                 .take(160)
                                 .collect();
-                            ki_ui::emoji::label(ui, RichText::new(apercu).color(TEXT).size(texte::CORPS));
+                            ki_ui::emoji::label(ui, Texte::Corps.riche(ui, apercu));
                         });
                         if bloc
                             .response

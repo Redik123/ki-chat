@@ -71,10 +71,10 @@ impl PageValo {
                 ui::hint(ui, format!("{n} joueur{s} lié{s}"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::button(ui, Icon::Close, "Fermer").on_hover_text("retour au chat (Échap)").clicked() {
+                if ui::Bouton::new("Fermer").icone(Icon::Close).show(ui).on_hover_text("retour au chat (Échap)").clicked() {
                     ouvert = false;
                 }
-                if ui::button(ui, Icon::Refresh, "Actualiser").clicked() {
+                if ui::Bouton::new("Actualiser").icone(Icon::Refresh).show(ui).clicked() {
                     demandes.push(Demande::Actualiser);
                 }
             });

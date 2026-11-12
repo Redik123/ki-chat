@@ -7,6 +7,7 @@
 //! S'y ajoute ce que ki-chat fait lui-même : le retour de sa voix dans le
 //! casque, et l'égaliseur des voix qu'on entend.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, marge, texte};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use ki_voice::materiel::{scinder_nom, EtatMateriel, Gain, Materiel, Ordre};
 use crate::icons::Icon;
 use crate::reglages_audio::curseur;
 use crate::theme::{self, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::{self, Tone};
+use crate::ui::{self, Ton};
 use crate::egaliseur_ui;
 use crate::{KiApp, VoiceSnapshot};
 
@@ -218,13 +219,11 @@ impl KiApp {
         ui.horizontal_wrapped(|ui| {
             ui::segmente(ui, &mut self.audio.mode_studio, &[(false, "Simple"), (true, "Studio")]);
             ui.label(
-                RichText::new(if self.audio.mode_studio {
+                Texte::Aide.riche(ui, if self.audio.mode_studio {
                     "toute la chaîne de ta voix, réglage par réglage"
                 } else {
                     "l'essentiel, en préréglages"
-                })
-                .color(TEXT_FAINT)
-                .size(texte::PETIT),
+                }),
             );
         });
         ui.add_space(espace::L);
@@ -279,7 +278,7 @@ impl KiApp {
                         } else {
                             format!("{crete_db:+.0} dB")
                         };
-                        ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, texte));
                     });
                     ui::precision(
                         ui,
@@ -306,7 +305,7 @@ impl KiApp {
                 if etat.entree_repli {
                     ui::banner(
                         ui,
-                        Tone::Warn,
+                        Ton::Alerte,
                         &format!(
                             "Ton micro réglé est introuvable : ce que tu vois ici, ce sont les gains de \
                              « {} », le micro par défaut de Windows.",
@@ -317,7 +316,7 @@ impl KiApp {
                     ui.add_space(espace::S);
                 }
                 if let Some(e) = &etat.derniere_erreur {
-                    ui::banner(ui, Tone::Warn, e, false);
+                    ui::banner(ui, Ton::Alerte, e, false);
                     ui.add_space(espace::S);
                 }
                 // La position dans la plage de la carte : c'est elle qui dit
@@ -379,7 +378,7 @@ impl KiApp {
                     };
                     ui::banner(
                         ui,
-                        Tone::Warn,
+                        Ton::Alerte,
                         &format!(
                             "{constat} : ta voix sature dès que tu hausses le ton, et le fond de la \
                              pièce — la personne à côté comprise — monte avec elle. Ça ne te rend pas \
@@ -462,17 +461,17 @@ impl KiApp {
                 if cables.is_empty() {
                     ui::banner(
                         ui,
-                        Tone::Info,
+                        Ton::Info,
                         "Il faut un câble audio virtuel : VB-Cable, gratuit. Installe-le (Windows \
                          demande de redémarrer), puis clique sur Actualiser.",
                         false,
                     );
                     ui.add_space(espace::S);
                     ui.horizontal(|ui| {
-                        if ui::button(ui, Icon::Download, "Télécharger VB-Cable").clicked() {
+                        if ui::Bouton::new("Télécharger VB-Cable").icone(Icon::Download).show(ui).clicked() {
                             ui.ctx().open_url(egui::OpenUrl::new_tab("https://vb-audio.com/Cable/"));
                         }
-                        if ui::button(ui, Icon::Refresh, "Actualiser").clicked() {
+                        if ui::Bouton::new("Actualiser").icone(Icon::Refresh).show(ui).clicked() {
                             let (entrees, sorties) = ki_voice::list_devices();
                             self.input_devices = entrees;
                             self.output_devices = sorties;
@@ -544,9 +543,7 @@ impl KiApp {
                         .cloned()
                         .unwrap_or_else(|| "CABLE Output (VB-Audio Virtual Cable)".into());
                     ui.label(
-                        RichText::new(format!("Prends « {entree} » comme micro."))
-                            .color(TEXT)
-                            .size(texte::COURANT),
+                        Texte::Libelle.riche_ton(ui, Ton::Neutre, format!("Prends « {entree} » comme micro.")),
                     );
                     ui::precision(
                         ui,
@@ -623,9 +620,7 @@ impl KiApp {
                         }
                         if !engine_up {
                             ui.label(
-                                RichText::new("actif dès que tu es connecté à un serveur")
-                                    .color(WARN)
-                                    .size(texte::PETIT),
+                                Texte::Aide.riche_ton(ui, Ton::Alerte, "actif dès que tu es connecté à un serveur"),
                             );
                         }
                     }
@@ -777,9 +772,9 @@ impl KiApp {
                             ui.horizontal_wrapped(|ui| {
                                 ui::glyph(ui, icone, 14.0, TEXT_DIM);
                                 let (point, carte) = scinder_nom(nom);
-                                ui.label(RichText::new(point).color(TEXT).size(texte::COURANT));
+                                ui.label(Texte::Libelle.riche_ton(ui, Ton::Neutre, point));
                                 if let Some(carte) = carte {
-                                    ui.label(RichText::new(format!("sur {carte}")).color(TEXT_FAINT).size(texte::COURANT));
+                                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, format!("sur {carte}")));
                                 }
                             });
                         }
@@ -812,7 +807,7 @@ impl KiApp {
                 // ne réglerait que la moitié du chemin.
                 let pret = voice.engine_up && topologie_lue;
                 ui.add_enabled_ui(pret, |ui| {
-                    if ui::button(ui, Icon::Target, "Régler mon micro (5 s)")
+                    if ui::Bouton::new("Régler mon micro (5 s)").icone(Icon::Target).show(ui)
                         .on_hover_text("parle aussi fort qu'en jeu — crie un bon coup")
                         .clicked()
                     {
@@ -859,7 +854,7 @@ impl KiApp {
                     } else {
                         format!("parle fort… crête {:+.0} dB", en_db(crete))
                     };
-                    ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, texte));
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         self.vocal.calibrage_micro = None;
                     }
@@ -869,7 +864,7 @@ impl KiApp {
         if let Some((quand, texte)) = &self.vocal.calibrage_verdict {
             if quand.elapsed() < VERDICT {
                 ui.add_space(espace::S);
-                ui::banner(ui, Tone::Info, texte, false);
+                ui::banner(ui, Ton::Info, texte, false);
             }
         }
     }

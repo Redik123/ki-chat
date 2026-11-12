@@ -7,6 +7,7 @@
 //! chiffre près. Et « Comparer » coupe l'égaliseur le temps d'entendre la
 //! différence — ce qui manquait pour savoir ce qu'on change.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, rayon, texte};
 use std::sync::Arc;
 
@@ -209,7 +210,7 @@ pub(crate) fn editeur(
         if ui::interrupteur(ui, &mut etat.comparer, "Comparer sans égaliseur").changed() {
             change = true;
         }
-        if !bandes.is_empty() && ui::button(ui, Icon::Refresh, "À plat").clicked() {
+        if !bandes.is_empty() && ui::Bouton::new("À plat").icone(Icon::Refresh).show(ui).clicked() {
             bandes.clear();
             etat.selection = None;
             change = true;
@@ -343,18 +344,14 @@ pub(crate) fn editeur(
         }
         None => {
             ui.horizontal_wrapped(|ui| {
-                if bandes.len() < BANDES_MAX && ui::button(ui, Icon::Plus, "Ajouter une bande").clicked() {
+                if bandes.len() < BANDES_MAX && ui::Bouton::new("Ajouter une bande").icone(Icon::Plus).show(ui).clicked() {
                     bandes.push(Bande::new(Forme::Cloche, 1_000.0, 0.0, 1.0));
                     etat.selection = Some(bandes.len() - 1);
                     change = true;
                 }
                 ui.label(
-                    RichText::new(
-                        "Glisse les points · molette : largeur · double-clic : ajouter une bande · \
-                         clic droit : forme, retirer",
-                    )
-                    .color(TEXT_FAINT)
-                    .size(texte::PETIT),
+                    Texte::Aide.riche(ui, "Glisse les points · molette : largeur · double-clic : ajouter une bande · \
+                         clic droit : forme, retirer",),
                 );
             });
         }
@@ -380,7 +377,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
                     }
                 }
             });
-        ui.label(RichText::new("fréquence").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "fréquence"));
         let vitesse = b.frequence as f64 * 0.005;
         change |= ui
             .add(
@@ -398,7 +395,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
             )
             .changed();
         if b.forme.a_un_gain() {
-            ui.label(RichText::new("gain").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "gain"));
             change |= ui
                 .add(
                     egui::DragValue::new(&mut b.gain_db)
@@ -410,7 +407,7 @@ fn reglages_bande(ui: &mut egui::Ui, i: usize, b: &mut Bande, selection: &mut Op
                 .changed();
         }
         if !(b.forme.a_une_pente() && b.raide) {
-            ui.label(RichText::new("largeur (Q)").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "largeur (Q)"));
             change |= ui
                 .add(egui::DragValue::new(&mut b.q).speed(0.01).range(Q_MIN..=Q_MAX).fixed_decimals(2))
                 .changed();

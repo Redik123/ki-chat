@@ -1088,7 +1088,7 @@ impl KiApp {
             if let Some(e) = detail {
                 r.on_hover_text(e);
             }
-            if ui::button(ui, Icon::Sliders, "Régler ses boutons et ses écrans").clicked() {
+            if ui::Bouton::new("Régler ses boutons et ses écrans").icone(Icon::Sliders).show(ui).clicked() {
                 self.loupedeck_etat.page_ouverte = true;
             }
         }

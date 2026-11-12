@@ -7,6 +7,7 @@
 //! le bouton « Loupedeck » de la barre du bas, qui n'apparaît que si le
 //! pilotage est allumé dans les réglages (onglet Bêta).
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, texte};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 
@@ -15,7 +16,7 @@ use crate::loupedeck::Peintre;
 use crate::loupedeck_config::{self, Action, ActionMolette, Bouton, Case, Config, Widget, GENRES};
 use crate::loupedeck_ui::{Apercu, Selection};
 use crate::theme::{self, ACCENT, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::{self, Tone};
+use crate::ui::{self, Ton};
 use crate::{KiApp, VoiceSnapshot};
 
 /// La place d'une colonne de molettes, de chaque côté de l'écran, et celle
@@ -110,7 +111,7 @@ fn choix_action(
         });
     let parametre = |ui: &mut egui::Ui, valeur: &mut String, liste: &[String], vide: &str| {
         if liste.is_empty() {
-            ui.label(RichText::new(vide).color(TEXT_FAINT).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, vide));
             return;
         }
         egui::ComboBox::from_id_salt((id, "parametre"))
@@ -216,7 +217,7 @@ impl KiApp {
                 if ui.add(egui::Slider::new(&mut l, 0.0..=10.0).step_by(1.0).show_value(false)).changed() {
                     self.loupedeck_etat.config.luminosite = l as u8;
                 }
-                ui.label(RichText::new("Luminosité").color(TEXT_DIM).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche(ui, "Luminosité"));
             });
         });
         ui.add_space(espace::S);
@@ -268,17 +269,17 @@ impl KiApp {
 
         let mut retirer = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Nom").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "Nom"));
             let page = &mut etat.config.pages[etat.onglet];
             ui.add(ui::text_field(&mut page.nom, "nom de la page", false).desired_width(160.0));
             if page.nom.chars().count() > 20 {
                 page.nom = page.nom.chars().take(20).collect();
             }
-            if etat.onglet != etat.ecran && ui::button(ui, Icon::Screen, "La montrer sur l'appareil").clicked() {
+            if etat.onglet != etat.ecran && ui::Bouton::new("La montrer sur l'appareil").icone(Icon::Screen).show(ui).clicked() {
                 etat.ecran = etat.onglet;
             }
             if etat.config.pages.len() > 1
-                && ui::tinted_button(ui, Some(Icon::Trash), "Retirer la page", Tone::Danger).clicked()
+                && ui::Bouton::new("Retirer la page").icone(Icon::Trash).teinte(Ton::Danger).show(ui).clicked()
             {
                 retirer = true;
             }
@@ -449,12 +450,8 @@ impl KiApp {
         match etat.selection {
             None => {
                 ui.label(
-                    RichText::new(
-                        "Clique sur une touche de l'écran, un bouton rond ou une molette pour choisir ce qu'il \
-                         fait.",
-                    )
-                    .color(TEXT_DIM)
-                    .size(texte::COURANT),
+                    Texte::Libelle.riche(ui, "Clique sur une touche de l'écran, un bouton rond ou une molette pour choisir ce qu'il \
+                         fait.",),
                 );
             }
             Some(Selection::Rond(i)) => {
@@ -467,7 +464,7 @@ impl KiApp {
                 ui::precision(ui, config.ronds[i].aide());
                 ui.add_space(espace::S);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Lumière").color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, "Lumière"));
                     let origine = config.ronds[i].couleur();
                     couleur_ui(ui, &mut config.couleurs_ronds[i], origine);
                 });
@@ -503,19 +500,19 @@ impl KiApp {
                 if let Case::Bouton(b) = case {
                     ui.add_space(espace::S);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Action").color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, "Action"));
                         choix_action(ui, "loupedeck_case", &mut b.action, false, &noms_pages, &salons, &sons);
                     });
                     ui::precision(ui, b.action.aide());
                     ui.add_space(espace::S);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Texte").color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, "Texte"));
                         ui.add(ui::text_field(&mut b.texte, &origine, false).desired_width(170.0));
                         if b.texte.chars().count() > 16 {
                             b.texte = b.texte.chars().take(16).collect();
                         }
                         ui.add_space(espace::L);
-                        ui.label(RichText::new("Icône").color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, "Icône"));
                         let icone = b.icone.unwrap_or(b.action.icone());
                         if ui::icon_button_ex(ui, icone, 26.0, "choisir l'icône", Some(ACCENT)).clicked() {
                             etat.choix_icone = !etat.choix_icone;
@@ -536,7 +533,7 @@ impl KiApp {
                     }
                     ui.add_space(espace::XS);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Couleur").color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, "Couleur"));
                         let origine = b.action.couleur();
                         couleur_ui(ui, &mut b.couleur, origine);
                     });
@@ -552,10 +549,10 @@ impl KiApp {
         ui.label(RichText::new("Couleurs de l'écran").color(TEXT).size(texte::CORPS).strong());
         ui.add_space(espace::XS);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Fond").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "Fond"));
             ui.color_edit_button_srgb(&mut config.fond);
             ui.add_space(espace::L);
-            ui.label(RichText::new("Jauges").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "Jauges"));
             ui.color_edit_button_srgb(&mut config.accent);
             if (config.fond, config.accent) != (loupedeck_config::FOND, loupedeck_config::ACCENT)
                 && ui.small_button("d'origine").clicked()
@@ -567,13 +564,13 @@ impl KiApp {
         ui.add_space(espace::M);
         ui.checkbox(&mut config.valo_auto, "Montrer la première page VALORANT quand une partie commence");
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Toucher un clip :").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "Toucher un clip :"));
             ui.radio_value(&mut config.toucher_partage, true, "le partager");
             ui.radio_value(&mut config.toucher_partage, false, "le lire");
         });
         ui::precision(ui, "Glisser le doigt sur la bande de gauche règle le volume général.");
         ui.add_space(espace::M);
-        if ui::button(ui, Icon::Refresh, "Tout remettre d'origine").clicked() {
+        if ui::Bouton::new("Tout remettre d'origine").icone(Icon::Refresh).show(ui).clicked() {
             *config = Config::default();
             etat.onglet = 0;
             etat.ecran = 0;
@@ -595,7 +592,7 @@ fn contenu_ui(ui: &mut egui::Ui, case: &mut Case, t: usize) {
         }
     };
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Contenu").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "Contenu"));
         egui::ComboBox::from_id_salt("loupedeck_contenu")
             .width(280.0)
             .selected_text(RichText::new(nom(case)).color(TEXT))

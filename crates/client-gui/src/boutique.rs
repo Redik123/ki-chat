@@ -14,6 +14,7 @@
 //! Rien de tout cela n'est supporté par Riot : un jour ça casse, et ce
 //! jour-là la section dit « indisponible », sans plus.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, marge, rayon, texte};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -22,7 +23,7 @@ use std::time::Duration;
 use eframe::egui;
 use egui::RichText;
 
-use crate::theme::{ACCENT, TEXT_DIM, TEXT_FAINT};
+use crate::theme::ACCENT;
 use crate::valorant;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -121,10 +122,10 @@ impl Lecteur {
         let mut etat = self.etat.lock().unwrap();
         match &mut *etat {
             Etat::Vide | Etat::EnCours => {
-                ui.label(RichText::new("lecture dans ton client Riot…").color(TEXT_DIM).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, "lecture dans ton client Riot…"));
             }
             Etat::Erreur(e, _) => {
-                ui.label(RichText::new(format!("indisponible : {e}")).color(TEXT_DIM).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, format!("indisponible : {e}")));
                 ui.ctx().request_repaint_after(NOUVEL_ESSAI);
                 if ui.button("Réessayer").clicked() {
                     *etat = Etat::Vide;
@@ -166,9 +167,7 @@ impl Lecteur {
                 });
                 let reste = b.expire_ms.saturating_sub(maintenant) / 1000;
                 ui.label(
-                    RichText::new(format!("se renouvelle dans {} h {:02} min", reste / 3600, (reste % 3600) / 60))
-                        .color(TEXT_FAINT)
-                        .size(texte::MINUSCULE),
+                    Texte::Minuscule.riche(ui, format!("se renouvelle dans {} h {:02} min", reste / 3600, (reste % 3600) / 60)),
                 );
                 if ui.button("Relire").clicked() {
                     *etat = Etat::Vide;

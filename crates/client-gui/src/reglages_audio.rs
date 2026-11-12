@@ -6,6 +6,7 @@
 //! bas. Les choix courts se font en pastilles (tout se voit d'un coup), les
 //! marches/arrêts par interrupteur.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, texte};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use eframe::egui::{self, Color32, Pos2, RichText, Stroke, Vec2};
 use crate::icons::Icon;
 use crate::ptt::PttKey;
 use crate::theme::{self, ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::{self, Tone};
+use crate::ui::{self, Ton};
 use crate::{KiApp, MicMode, VoiceSnapshot};
 use ki_voice::dynamique::{COMPRESSION_AUCUNE, COMPRESSION_DOUCE, COMPRESSION_FORTE, COMPRESSION_PERSO};
 use ki_voice::egaliseur;
@@ -111,7 +112,7 @@ impl KiApp {
                             couleur,
                         );
                         if !engine_up {
-                            ui.label(RichText::new("vocal inactif").color(WARN).size(texte::PETIT));
+                            ui.label(Texte::Aide.riche_ton(ui, Ton::Alerte, "vocal inactif"));
                         } else if stats.micro_sature {
                             ui.label(RichText::new("saturé").color(DANGER).size(texte::PETIT).strong());
                         }
@@ -124,7 +125,7 @@ impl KiApp {
                 if self.vocal.alerte_saturation.is_some_and(|t| t.elapsed() < ALERTE_SATURATION) {
                     ui::banner(
                         ui,
-                        Tone::Warn,
+                        Ton::Alerte,
                         "Ton micro sature avant même d'arriver dans ki-chat : quand tu parles \
                          fort, sa carte son coupe le haut de ta voix. Baisse son niveau dans \
                          Windows (ou sa molette sur le casque) jusqu'à ce que « saturé » ne \
@@ -133,7 +134,7 @@ impl KiApp {
                     );
                     if cfg!(windows) {
                         ui.add_space(espace::S);
-                        if ui::button(ui, Icon::Gear, "Ouvrir le réglage du micro dans Windows")
+                        if ui::Bouton::new("Ouvrir le réglage du micro dans Windows").icone(Icon::Gear).show(ui)
                             .clicked()
                         {
                             ouvrir_reglage_micro_windows();
@@ -154,9 +155,7 @@ impl KiApp {
                     }
                     if self.vocal.loopback {
                         ui.label(
-                            RichText::new("les autres ne t'entendent pas pendant l'essai")
-                                .color(WARN)
-                                .size(texte::PETIT),
+                            Texte::Aide.riche_ton(ui, Ton::Alerte, "les autres ne t'entendent pas pendant l'essai"),
                         );
                     }
                     ui::precision(
@@ -238,14 +237,14 @@ impl KiApp {
                                 ki_voice::SILERO_ECHEC if self.audio.vad_neural => {
                                     ui::banner(
                                         ui,
-                                        Tone::Warn,
+                                        Ton::Alerte,
                                         "Le réseau Silero n'a pas pu se charger : la détection se fait \
                                          au seuil d'amplitude (voir le journal audio, onglet Aide).",
                                         false,
                                     );
                                 }
                                 ki_voice::SILERO_CHARGEMENT if self.audio.vad_neural => {
-                                    ui.label(RichText::new("chargement du réseau…").color(TEXT_DIM).size(texte::PETIT));
+                                    ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, "chargement du réseau…"));
                                 }
                                 _ => {}
                             }
@@ -320,7 +319,7 @@ impl KiApp {
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     ui.set_min_width(118.0);
-                                    ui.label(RichText::new(intitule).color(TEXT).size(texte::COURANT));
+                                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Neutre, intitule));
                                 },
                             );
                             let actuel = choix.map(|k| k.label()).unwrap_or("aucun");
@@ -335,9 +334,7 @@ impl KiApp {
                                 });
                             if choix.is_some() && *choix == touche_ptt {
                                 ui.label(
-                                    RichText::new("c'est la touche du push-to-talk")
-                                        .color(WARN)
-                                        .size(texte::PETIT),
+                                    Texte::Aide.riche_ton(ui, Ton::Alerte, "c'est la touche du push-to-talk"),
                                 );
                             }
                         });
@@ -526,7 +523,7 @@ impl KiApp {
                     );
                 });
                 ui::ligne(ui, "Tester", |ui| {
-                    if ui::button(ui, Icon::Play, "Jouer un son de test").clicked() {
+                    if ui::Bouton::new("Jouer un son de test").icone(Icon::Play).show(ui).clicked() {
                         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
                             engine.play_test_tone();
                         }
@@ -537,13 +534,13 @@ impl KiApp {
 
         // --- Avancé ---------------------------------------------------
         egui::CollapsingHeader::new(
-            RichText::new("Avancé — moteur et dépannage").color(TEXT_DIM).size(texte::CORPS),
+            Texte::Corps.riche_ton(ui, Ton::Discret, "Avancé — moteur et dépannage"),
         )
         .id_salt("reglages_audio_avance")
         .default_open(false)
         .show(ui, |ui| {
             ui.add_space(espace::S);
-            if ui::button(ui, Icon::Refresh, "Réinitialiser l'audio").clicked() {
+            if ui::Bouton::new("Réinitialiser l'audio").icone(Icon::Refresh).show(ui).clicked() {
                 if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
                     engine.reset_audio_devices();
                     self.info = Some(
@@ -640,7 +637,7 @@ impl KiApp {
         let mut geste = None;
         match etat {
             EtatEssai::Vide => {
-                if ui::button(ui, Icon::Mic, &format!("Enregistrer {ESSAI_SECONDES} s et réécouter"))
+                if ui::Bouton::new(&format!("Enregistrer {ESSAI_SECONDES} s et réécouter")).icone(Icon::Mic).show(ui)
                     .clicked()
                 {
                     geste = Some(Geste::Enregistrer);
@@ -652,9 +649,7 @@ impl KiApp {
                     ui::meter(ui, avancement, Vec2::new(150.0, 8.0), DANGER);
                     let reste = ((1.0 - avancement) * ESSAI_SECONDES as f32).ceil().max(1.0);
                     ui.label(
-                        RichText::new(format!("parle comme en partie… {reste:.0} s"))
-                            .color(TEXT_DIM)
-                            .size(texte::COURANT),
+                        Texte::Libelle.riche(ui, format!("parle comme en partie… {reste:.0} s")),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         geste = Some(Geste::Arreter);
@@ -672,13 +667,13 @@ impl KiApp {
                     ] {
                         match lecture {
                             Some((v, avancement)) if v == version => {
-                                if ui::button(ui, Icon::Pause, libelle).clicked() {
+                                if ui::Bouton::new(libelle).icone(Icon::Pause).show(ui).clicked() {
                                     geste = Some(Geste::Arreter);
                                 }
                                 ui::meter(ui, avancement, Vec2::new(60.0, 6.0), ACCENT);
                             }
                             _ => {
-                                if ui::button(ui, Icon::Play, libelle).clicked() {
+                                if ui::Bouton::new(libelle).icone(Icon::Play).show(ui).clicked() {
                                     geste = Some(Geste::Rejouer(version));
                                 }
                             }
@@ -763,14 +758,12 @@ impl KiApp {
             ("étouffée", DANGER)
         };
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Ta voix chez les autres :").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "Ta voix chez les autres :"));
             ui.label(RichText::new(mot).color(couleur).size(texte::COURANT).strong());
             ui.label(
-                RichText::new(format!(
+                Texte::Libelle.riche(ui, format!(
                     "aigus {presence:+.0} dB, graves {graves:+.0} dB par rapport à une voix moyenne"
-                ))
-                .color(TEXT_DIM)
-                .size(texte::COURANT),
+                )),
             );
         });
         // Qui retire les aigus : le micro, l'égaliseur, ou le reste.
@@ -825,7 +818,7 @@ impl KiApp {
             );
         } else if a_corriger {
             ui.add_space(espace::XS);
-            if ui::button(ui, Icon::Sliders, "Corriger ma voix")
+            if ui::Bouton::new("Corriger ma voix").icone(Icon::Sliders).show(ui)
                 .on_hover_text(
                     "règle l'égaliseur de ta voix sur cette mesure, à la place du réglage actuel",
                 )
@@ -839,9 +832,7 @@ impl KiApp {
         if let Some(dossier) = self.vocal.essai_dossier.clone() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("Les deux versions sont gardées en WAV, remplacées au prochain essai.")
-                        .color(TEXT_FAINT)
-                        .size(texte::PETIT),
+                    Texte::Aide.riche(ui, "Les deux versions sont gardées en WAV, remplacées au prochain essai."),
                 );
                 if ui::icon_button(ui, Icon::Download, "Ouvrir le dossier").clicked() {
                     crate::soundboard::ouvrir_dossier(&dossier);
@@ -874,7 +865,7 @@ impl KiApp {
         match self.vocal.calibrating {
             None => {
                 if engine_up
-                    && ui::button(ui, Icon::Target, "Régler sur le bruit de la pièce (5 s)")
+                    && ui::Bouton::new("Régler sur le bruit de la pièce (5 s)").icone(Icon::Target).show(ui)
                         .on_hover_text(
                             "reste silencieux : la porte (et le seuil d'activation) se posent \
                              juste au-dessus du bruit ambiant",
@@ -889,9 +880,7 @@ impl KiApp {
                 ui.horizontal(|ui| {
                     ui::meter(ui, progression, Vec2::new(150.0, 8.0), ACCENT);
                     ui.label(
-                        RichText::new(format!("chut… ambiance {:.1} %", peak * 100.0))
-                            .color(TEXT_DIM)
-                            .size(texte::COURANT),
+                        Texte::Libelle.riche(ui, format!("chut… ambiance {:.1} %", peak * 100.0)),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         self.vocal.calibrating = None;
@@ -948,8 +937,8 @@ fn courbe_de_voix(ui: &mut egui::Ui, brute: &[f32; NB_TIERS], envoyee: &[f32; NB
     p.add(egui::Shape::line(points(brute), Stroke::new(1.5_f32, theme::alpha(INFO, 200))));
     p.add(egui::Shape::line(points(envoyee), Stroke::new(2.0_f32, ACCENT)));
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("— ton micro brut").color(INFO).size(texte::PETIT));
-        ui.label(RichText::new("— ce que les autres entendent").color(ACCENT).size(texte::PETIT));
+        ui.label(Texte::Aide.riche_ton(ui, Ton::Info, "— ton micro brut"));
+        ui.label(Texte::Aide.riche_ton(ui, Ton::Accent, "— ce que les autres entendent"));
     });
 }
 
@@ -1003,7 +992,7 @@ impl KiApp {
             _ => {
                 ui.add_space(espace::XS);
                 let libelle = if self.audio.agc { "Mettre ma voix au niveau des autres" } else { "Rallumer le gain automatique" };
-                if ui::button(ui, Icon::Volume, libelle)
+                if ui::Bouton::new(libelle).icone(Icon::Volume).show(ui)
                     .on_hover_text(
                         "il règle ta voix sur le niveau des voix réglées par défaut, quelle que \
                          soit ta carte son",
@@ -1043,13 +1032,11 @@ fn volume_en_mots(ui: &mut egui::Ui, ecart_db: f32) {
         ("fort", WARN)
     };
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Le volume de ta voix chez les autres :").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "Le volume de ta voix chez les autres :"));
         ui.label(RichText::new(mot).color(couleur).size(texte::COURANT).strong());
         if (-30.0..=-5.0).contains(&ecart_db) || ecart_db > 4.0 {
             ui.label(
-                RichText::new(format!("{ecart_db:+.0} dB par rapport à une voix réglée par défaut"))
-                    .color(TEXT_DIM)
-                    .size(texte::COURANT),
+                Texte::Libelle.riche(ui, format!("{ecart_db:+.0} dB par rapport à une voix réglée par défaut")),
             );
         }
     });

@@ -17,16 +17,17 @@
 //! sort du plein écran, puis rattache ; F11 et le double-clic basculent le
 //! plein écran ; la croix quitte le visionnage, comme dans ki-chat.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, texte};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, Sense, Vec2};
 
 use crate::icons::Icon;
 use crate::partage::{self, Cadence};
-use crate::theme::{self, TEXT_DIM, TEXT_FAINT};
+use crate::theme::{self, TEXT_DIM};
 use crate::ui;
 
 /// La fenêtre du stream détaché, pour qui veut la réveiller.
@@ -214,17 +215,17 @@ impl Etat {
                         .max_rect(barre.shrink2(Vec2::new(12.0, 7.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
-                if ui::button(&mut ligne, Icon::Close, "Quitter").clicked() {
+                if ui::Bouton::new("Quitter").icone(Icon::Close).show(&mut ligne).clicked() {
                     d.quitter = true;
                 }
-                if ui::button(&mut ligne, Icon::ChevronLeft, "Rattacher")
+                if ui::Bouton::new("Rattacher").icone(Icon::ChevronLeft).show(&mut ligne)
                     .on_hover_text("revenir dans la fenêtre de ki-chat (Échap)")
                     .clicked()
                 {
                     d.rattacher = true;
                 }
                 let mot = if plein { "Quitter le plein écran" } else { "Plein écran" };
-                if ui::button(&mut ligne, Icon::Screen, mot)
+                if ui::Bouton::new(mot).icone(Icon::Screen).show(&mut ligne)
                     .on_hover_text("F11, ou double-clic sur l'image")
                     .clicked()
                 {
@@ -233,9 +234,7 @@ impl Etat {
                 ligne.add_space(espace::M);
                 if self.meme_machine {
                     ligne.label(
-                        RichText::new("son du jeu coupé : le streamer est sur ce PC")
-                            .color(TEXT_FAINT)
-                            .size(texte::PETIT),
+                        Texte::Aide.riche(ui, "son du jeu coupé : le streamer est sur ce PC"),
                     );
                 } else {
                     let mut pct = self.volume * 100.0;
@@ -252,7 +251,7 @@ impl Etat {
                     }
                 }
                 if !etat.is_empty() {
-                    ligne.label(RichText::new(etat).color(TEXT_FAINT).size(texte::PETIT).monospace());
+                    ligne.label(Texte::Aide.riche(ui, etat).monospace());
                 }
             });
 

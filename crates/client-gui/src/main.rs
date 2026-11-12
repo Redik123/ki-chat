@@ -114,7 +114,7 @@ use reglages_ui::{DemandeReglages, Onglet};
 use salons::VoicePrompt;
 use televersement::LienPret;
 use theme::{ACCENT, TEXT, TEXT_DIM};
-use ui::Tone;
+use ui::Ton;
 
 /// Les colonnes des salons (à gauche) et des membres (à droite) : leur
 /// largeur d'origine, et ce qu'on peut leur retirer ou leur ajouter en
@@ -1651,10 +1651,10 @@ impl KiApp {
                 );
                 ui.add_space(espace::M);
                 ui.horizontal(|ui| {
-                    if ui::primary_button(ui, Some(Icon::Check), "Compris", None).clicked() {
+                    if ui::Bouton::new("Compris").icone(Icon::Check).principal().show(ui).clicked() {
                         decision = Some(true);
                     }
-                    if ui::button(ui, Icon::Logout, "Plutôt quitter").clicked() {
+                    if ui::Bouton::new("Plutôt quitter").icone(Icon::Logout).show(ui).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -3501,10 +3501,10 @@ impl KiApp {
                 );
                 ui.add_space(espace::L);
                 ui.horizontal(|ui| {
-                    if ui::button(ui, Icon::Check, "Basculer (cette session)").clicked() {
+                    if ui::Bouton::new("Basculer (cette session)").icone(Icon::Check).show(ui).clicked() {
                         reponse = Some(true);
                     }
-                    if ui::button(ui, Icon::Close, "Non — je vérifie mon micro").clicked() {
+                    if ui::Bouton::new("Non — je vérifie mon micro").icone(Icon::Close).show(ui).clicked() {
                         reponse = Some(false);
                     }
                 });
@@ -4050,7 +4050,7 @@ impl KiApp {
         // maintenant dans un coin, le temps de se lire.
         if !(self.show_settings || self.show_account || self.admin.ouverte) {
             if let Some(message) = self.info.take() {
-                self.toasts.ajouter(Tone::Info, message, ctx.input(|i| i.time));
+                self.toasts.ajouter(Ton::Info, message, ctx.input(|i| i.time));
             }
         }
         // Au-dessus de la barre du bas et de la zone de saisie : un toast

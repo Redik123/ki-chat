@@ -19,6 +19,7 @@
 //! les records et le classement des fiches de `StatsValorant` ; « en
 //! direct » de la présence. Rien de neuf n'est demandé à HenrikDev.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::police;
 
 use super::*;
@@ -526,7 +527,7 @@ fn carte_de_membre(ui: &mut Ui, place: usize, l: &Ligne, cx: &Contexte<'_>) -> R
                 }
                 if let Some((agent, _, _)) = l.bilan.agents.first() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(agent).color(TEXT_DIM).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, agent));
                         if let Some(portrait) = cx.catalogue.agent(agent) {
                             ui.add(egui::Image::new(portrait).fit_to_exact_size(Vec2::splat(20.0)));
                         }
@@ -552,15 +553,15 @@ fn fil(ui: &mut Ui, cx: &Contexte<'_>, noms: &Annuaire, demandes: &mut Vec<Deman
                 if let Some(bandeau) = cx.catalogue.bandeau(&j.carte).filter(|_| !j.carte.is_empty()) {
                     pastille_carte(ui, &j.carte, bandeau, HAUTEUR_PASTILLE, texte::PETIT);
                 } else if !j.carte.is_empty() {
-                    ui.label(RichText::new(&j.carte).color(TEXT).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Neutre, &j.carte));
                 }
                 let (texte_, score) = etat_en_direct(&j);
                 if let Some((score, teinte)) = score {
                     ui.label(RichText::new(score).font(police::moyenne(ui.ctx(), texte::CORPS)).color(teinte));
                 }
-                ui.label(RichText::new(texte_).color(TEXT_DIM).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, texte_));
                 let qui = joueurs.iter().map(|m| m.username.as_str()).collect::<Vec<_>>().join(", ");
-                ui.label(RichText::new(qui).color(TEXT_DIM).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, qui));
             });
             ui.add_space(espace::S);
         }
@@ -628,7 +629,7 @@ fn ligne_de_duo(ui: &mut Ui, noms: &Annuaire, a: UserId, b: UserId, parties: u32
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = espace::XS;
         ui.label(RichText::new(noms.nom(a)).color(noms.couleur(a)).size(texte::COURANT));
-        ui.label(RichText::new("&").color(TEXT_FAINT).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, "&"));
         ui.label(RichText::new(noms.nom(b)).color(noms.couleur(b)).size(texte::COURANT));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let defaites = parties - victoires;

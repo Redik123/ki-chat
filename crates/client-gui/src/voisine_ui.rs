@@ -9,6 +9,7 @@
 //! force. L'ancre est rangée par micro : une autre carte son, c'est un autre
 //! niveau, et c'est à réapprendre.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, texte};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -262,9 +263,7 @@ impl KiApp {
         );
         if engine_up && stats.prox_gain < 0.9 {
             ui.label(
-                RichText::new(format!("en ce moment : {:+.0} dB", 20.0 * stats.prox_gain.max(1e-4).log10()))
-                    .color(TEXT_DIM)
-                    .size(texte::PETIT),
+                Texte::Aide.riche_ton(ui, Ton::Discret, format!("en ce moment : {:+.0} dB", 20.0 * stats.prox_gain.max(1e-4).log10())),
             );
         }
 
@@ -277,12 +276,10 @@ impl KiApp {
                 ui.horizontal(|ui| {
                     ui::meter(ui, progression, Vec2::new(150.0, 8.0), ACCENT);
                     ui.label(
-                        RichText::new(match quoi {
+                        Texte::Libelle.riche(ui, match quoi {
                             Quoi::Moi => "parle comme en partie…",
                             Quoi::Elle => "tais-toi, elle parle…",
-                        })
-                        .color(TEXT_DIM)
-                        .size(texte::COURANT),
+                        }),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
                         self.vocal.mesure_prox = None;
@@ -292,7 +289,7 @@ impl KiApp {
             None => {
                 ui.horizontal_wrapped(|ui| {
                     if engine_up
-                        && ui::button(ui, Icon::Mic, "Apprendre ma voix (5 s)")
+                        && ui::Bouton::new("Apprendre ma voix (5 s)").icone(Icon::Mic).show(ui)
                             .on_hover_text("parle normalement pendant cinq secondes : c'est le niveau de référence de ce micro")
                             .clicked()
                     {
@@ -301,7 +298,7 @@ impl KiApp {
                     }
                     if engine_up
                         && ancre.is_some()
-                        && ui::button(ui, Icon::Target, "Mesurer la voix d'à côté (5 s)")
+                        && ui::Bouton::new("Mesurer la voix d'à côté (5 s)").icone(Icon::Target).show(ui)
                             .on_hover_text("tais-toi et fais parler la personne à côté, un peu fort : ki-chat mesure l'écart et choisit la force")
                             .clicked()
                     {
@@ -318,7 +315,7 @@ impl KiApp {
         }
         if let Some(v) = &self.vocal.mesure_prox_verdict {
             ui.add_space(espace::XS);
-            ui.label(RichText::new(v).color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, v));
         }
         if ancre.is_none() {
             ui::precision(

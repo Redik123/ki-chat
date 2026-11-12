@@ -8,6 +8,7 @@
 //! `valo_page`, il en reprend les calculs et les petits dessins tels
 //! quels.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{largeur, police};
 use ki_ui::tableau::{Colonne, Tableau};
 
@@ -63,7 +64,7 @@ impl PageValo {
     pub fn profil(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>) -> bool {
         let mut ouvert = true;
         ui.horizontal(|ui| {
-            if ui::button(ui, Icon::ChevronLeft, "Retour au chat").clicked() {
+            if ui::Bouton::new("Retour au chat").icone(Icon::ChevronLeft).show(ui).clicked() {
                 ouvert = false;
             }
             ui.add_space(espace::M);
@@ -246,12 +247,12 @@ impl PageValo {
                             graphes::cases_manches(ui, deroule);
                             ui.add_space(espace::XS);
                         }
-                        ui.add(egui::Label::new(RichText::new(recit_du_match(m, &vue.noms)).color(TEXT_DIM).size(texte::PETIT)).wrap());
+                        ui.add(egui::Label::new(Texte::Aide.riche_ton(ui, Ton::Discret, recit_du_match(m, &vue.noms))).wrap());
                     });
                 }
                 if reste > 0 {
                     ui.add_space(espace::S);
-                    tout_voir = ui::button(ui, Icon::ChevronRight, &format!("Voir les {reste} autres")).clicked();
+                    tout_voir = ui::Bouton::new(&format!("Voir les {reste} autres")).icone(Icon::ChevronRight).show(ui).clicked();
                 }
             },
         );
@@ -320,21 +321,19 @@ fn en_tete(ui: &mut Ui, vue: &Vue) {
                     ligne.push(pluriel(u32::from(r.boucliers), "bouclier"));
                 }
                 if !ligne.is_empty() {
-                    ui.label(RichText::new(ligne.join(" · ")).color(TEXT_DIM).size(texte::PETIT));
+                    ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, ligne.join(" · ")));
                 }
                 // L'acte en cours : son bilan, à part de la période choisie
                 // plus bas.
                 if let Some(s) = vue.fiche.saisons.last().filter(|s| s.parties > 0) {
                     ui.label(
-                        RichText::new(format!(
+                        Texte::Aide.riche_ton(ui, Ton::Discret, format!(
                             "acte {} : {} V sur {} · {} %",
                             s.saison.to_uppercase(),
                             s.victoires,
                             pluriel(u32::from(s.parties), "partie"),
                             u32::from(s.victoires) * 100 / u32::from(s.parties)
-                        ))
-                        .color(TEXT_DIM)
-                        .size(texte::PETIT),
+                        )),
                     );
                 }
                 if let Some(e) = estimation {
@@ -348,14 +347,12 @@ fn en_tete(ui: &mut Ui, vue: &Vue) {
                         ui.label(RichText::new(format!("MMR estimé : {ou}")).color(teinte).size(texte::PETIT))
                             .on_hover_text(POURQUOI_MMR);
                         ui.label(
-                            RichText::new(format!(
+                            Texte::Aide.riche(ui, format!(
                                 "— {phrase} (+{} / −{} sur {})",
                                 opt_entier(Some(e.gain_moyen)),
                                 opt_entier(Some(e.perte_moyenne)),
                                 pluriel(u32::from(e.points), "classé")
-                            ))
-                            .color(TEXT_FAINT)
-                            .size(texte::PETIT),
+                            )),
                         )
                         .on_hover_text(POURQUOI_MMR);
                     });
@@ -677,7 +674,7 @@ fn bloc_forme(ui: &mut Ui, vue: &Vue) {
             }
             egui::Grid::new("profil_forme").num_columns(2).spacing([espace::L, espace::XS]).show(ui, |ui| {
                 for (libelle, valeur, couleur) in &lignes {
-                    ui.label(RichText::new(libelle).color(TEXT_FAINT).size(texte::PETIT));
+                    ui.label(Texte::Aide.riche(ui, libelle));
                     ui.label(RichText::new(valeur).font(police::moyenne(ui.ctx(), texte::CORPS)).color(*couleur));
                     ui.end_row();
                 }
@@ -779,9 +776,7 @@ fn agents(ui: &mut Ui, vue: &Vue, n: Option<usize>) -> bool {
                 });
                 ui.add_space(espace::S);
                 ui.label(
-                    RichText::new(format!("{} · K/D {}", pluriel(u32::from(b.matchs), "partie"), opt_dec(b.kd(), 2)))
-                        .color(TEXT_DIM)
-                        .size(texte::PETIT),
+                    Texte::Aide.riche_ton(ui, Ton::Discret, format!("{} · K/D {}", pluriel(u32::from(b.matchs), "partie"), opt_dec(b.kd(), 2))),
                 );
                 victoires_en_grand(ui, b);
                 barre_du_bilan(ui, b);
@@ -789,7 +784,7 @@ fn agents(ui: &mut Ui, vue: &Vue, n: Option<usize>) -> bool {
         });
         if montres < liste.len() {
             ui.add_space(espace::S);
-            tout_voir = ui::button(ui, Icon::ChevronRight, &format!("Voir les {} agents", liste.len())).clicked();
+            tout_voir = ui::Bouton::new(&format!("Voir les {} agents", liste.len())).icone(Icon::ChevronRight).show(ui).clicked();
         }
     });
     tout_voir
@@ -834,14 +829,14 @@ fn cartes(ui: &mut Ui, vue: &Vue, n: Option<usize>) -> bool {
                     if image.is_some() { Color32::WHITE } else { TEXT },
                 );
                 ui.add_space(espace::S);
-                ui.label(RichText::new(pluriel(u32::from(b.matchs), "partie")).color(TEXT_DIM).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, pluriel(u32::from(b.matchs), "partie")));
                 victoires_en_grand(ui, b);
                 barre_du_bilan(ui, b);
             });
         });
         if montres < liste.len() {
             ui.add_space(espace::S);
-            tout_voir = ui::button(ui, Icon::ChevronRight, &format!("Voir les {} cartes", liste.len())).clicked();
+            tout_voir = ui::Bouton::new(&format!("Voir les {} cartes", liste.len())).icone(Icon::ChevronRight).show(ui).clicked();
         }
     });
     tout_voir
@@ -942,7 +937,7 @@ fn cellule_de_match(ui: &mut Ui, m: &MatchResume, colonne: ColonneMatch, vue: &V
             ui.vertical(|ui| {
                 ui.add_space(espace::XXS);
                 carte_cellule(ui, &m.carte, vue.catalogue);
-                ui.label(RichText::new(crate::formats::il_y_a(m.date)).color(TEXT_FAINT).size(texte::MINUSCULE));
+                ui.label(Texte::Minuscule.riche(ui, crate::formats::il_y_a(m.date)));
             });
         }
         ColonneMatch::Mode => {

@@ -1,14 +1,15 @@
 //! L'écran d'avant la connexion : le carnet de serveurs, l'éditeur d'un serveur,
 //! les identifiants.
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use ki_ui::jetons::{espace, rayon, texte};
 
 use crate::{icons, secret, servers, theme, ui, KiApp};
 use crate::formats::ellipsize;
 use crate::icons::Icon;
-use crate::theme::{ACCENT, DANGER, INFO, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::Tone;
+use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::ui::Ton;
 
 /// Formulaire d'ajout ou de modification d'un serveur.
 pub(crate) struct ServerDraft {
@@ -74,9 +75,7 @@ pub(crate) fn brand(ui: &mut egui::Ui) {
 
     ui.add_space(espace::S);
     ui.label(
-        RichText::new("chat & vocal basse latence — 100 % Rust")
-            .color(TEXT_FAINT)
-            .size(texte::CORPS),
+        Texte::Corps.riche_ton(ui, Ton::Pale, "chat & vocal basse latence — 100 % Rust"),
     );
 }
 
@@ -319,10 +318,10 @@ impl KiApp {
                                         dans.as_secs() + 1
                                     )
                                 };
-                                ui::banner(ui, Tone::Warn, &quoi, false);
+                                ui::banner(ui, Ton::Alerte, &quoi, false);
                                 ui.add_space(espace::S);
                                 ui.horizontal(|ui| {
-                                    if ui::button(ui, Icon::Refresh, "Réessayer maintenant")
+                                    if ui::Bouton::new("Réessayer maintenant").icone(Icon::Refresh).show(ui)
                                         .clicked()
                                     {
                                         if let Some(r) = &mut self.reprise {
@@ -331,7 +330,7 @@ impl KiApp {
                                     }
                                     // Renoncer rend la main sans rien perdre :
                                     // le formulaire est déjà rempli.
-                                    if ui::button(ui, Icon::Close, "Arrêter d'essayer")
+                                    if ui::Bouton::new("Arrêter d'essayer").icone(Icon::Close).show(ui)
                                         .clicked()
                                     {
                                         // Renoncer rend aussi les
@@ -344,7 +343,7 @@ impl KiApp {
                                 });
                             } else if let Some(err) = self.error.clone() {
                                 ui.add_space(espace::L);
-                                if ui::banner(ui, Tone::Danger, &err, true) {
+                                if ui::banner(ui, Ton::Danger, &err, true) {
                                     self.error = None;
                                 }
                             }
@@ -355,20 +354,12 @@ impl KiApp {
                             if let Some(address) = self.identity_alarm.clone() {
                                 ui.add_space(espace::M);
                                 ui.label(
-                                    RichText::new(
-                                        "Si le serveur vient d'être réinstallé, c'est \
+                                    Texte::Aide.riche_ton(ui, Ton::Discret, "Si le serveur vient d'être réinstallé, c'est \
                                          normal. Sinon, quelqu'un s'interpose : demande \
-                                         son empreinte à l'hébergeur avant d'accepter.",
-                                    )
-                                    .color(TEXT_DIM)
-                                    .size(texte::PETIT),
+                                         son empreinte à l'hébergeur avant d'accepter.",),
                                 );
                                 ui.add_space(espace::S);
-                                if ui::button(
-                                    ui,
-                                    Icon::Key,
-                                    "Accepter la nouvelle identité du serveur",
-                                )
+                                if ui::Bouton::new("Accepter la nouvelle identité du serveur").icone(Icon::Key).show(ui)
                                 .clicked()
                                 {
                                     if let Some(s) = self
@@ -434,12 +425,12 @@ impl KiApp {
                 ui::glyph(ui, Icon::Server, 30.0, theme::BORDER);
                 ui.add_space(espace::M);
                 ui.label(
-                    RichText::new("Aucun serveur enregistré").color(TEXT_DIM).size(texte::CORPS),
+                    Texte::Corps.riche_ton(ui, Ton::Discret, "Aucun serveur enregistré"),
                 );
                 ui.add_space(espace::XXS);
                 ui::hint(ui, "Demande son adresse à l'admin du serveur.");
                 ui.add_space(espace::L);
-                add = ui::primary_button(ui, Some(Icon::Plus), "Ajouter un serveur", None)
+                add = ui::Bouton::new("Ajouter un serveur").icone(Icon::Plus).principal().show(ui)
                     .clicked();
             });
             if add {
@@ -501,7 +492,7 @@ impl KiApp {
         ui.horizontal(|ui| {
             let save = ui
                 .add_enabled_ui(valid, |ui| {
-                    ui::primary_button(ui, Some(Icon::Check), "Enregistrer", None)
+                    ui::Bouton::new("Enregistrer").icone(Icon::Check).principal().show(ui)
                 })
                 .inner
                 .clicked();
@@ -509,12 +500,12 @@ impl KiApp {
                 self.commit_draft(&draft, ctx);
                 close = true;
             }
-            if ui::button(ui, Icon::Close, "Annuler").clicked() || cancel {
+            if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() || cancel {
                 close = true;
             }
             if let Some(id) = draft.id {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui::tinted_button(ui, Some(Icon::Trash), "Supprimer", Tone::Danger).clicked()
+                    if ui::Bouton::new("Supprimer").icone(Icon::Trash).teinte(Ton::Danger).show(ui).clicked()
                     {
                         self.delete_server(id);
                         close = true;
@@ -585,7 +576,7 @@ impl KiApp {
                     open_invite = ui
                         .add(
                             egui::Label::new(
-                                RichText::new("Code d'invitation").color(INFO).size(texte::COURANT),
+                                Texte::Libelle.riche_ton(ui, Ton::Info, "Code d'invitation"),
                             )
                             .sense(Sense::click()),
                         )
@@ -644,7 +635,7 @@ impl KiApp {
             None => "Se connecter".to_string(),
         };
         ui.add_enabled_ui(ready, |ui| {
-            ui::primary_button(ui, None, &label, Some(ui.available_width()))
+            ui::Bouton::new(&label).principal().largeur(ui.available_width()).show(ui)
         })
         .inner
         .clicked()

@@ -13,6 +13,7 @@
 //! vers la carte. L'interface ne fait que prendre la dernière image et la
 //! peindre. Sans piste audio, l'horloge murale tient lieu de son.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, rayon, texte};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -733,14 +734,12 @@ impl Visionneuse {
                     ui.label(RichText::new(cible.nom()).color(TEXT).size(texte::CORPS).strong());
                     if self.liste.len() > 1 {
                         ui.label(
-                            RichText::new(format!("{} / {}", self.index + 1, self.liste.len()))
-                                .color(TEXT_FAINT)
-                                .size(texte::COURANT),
+                            Texte::Libelle.riche_ton(ui, Ton::Pale, format!("{} / {}", self.index + 1, self.liste.len())),
                         );
                     }
                     if let Some((texte, _)) = &self.info {
                         ui.add_space(espace::L);
-                        ui.label(RichText::new(texte).color(ACCENT).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, texte));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
@@ -809,11 +808,7 @@ impl Visionneuse {
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     );
                     pied_ui.label(
-                        RichText::new(
-                            "molette : zoom · glisser : déplacer · double-clic : ajuster",
-                        )
-                        .color(TEXT_FAINT)
-                        .size(texte::PETIT),
+                        Texte::Aide.riche(ui, "molette : zoom · glisser : déplacer · double-clic : ajuster",),
                     );
                     if gauche {
                         aller = -1;
@@ -1015,10 +1010,7 @@ impl Visionneuse {
             }
         }
         ui.label(
-            RichText::new(format!("{} / {}", mmss(affichee), mmss(duree)))
-                .color(TEXT_DIM)
-                .size(texte::COURANT)
-                .monospace(),
+            Texte::Libelle.riche(ui, format!("{} / {}", mmss(affichee), mmss(duree))).monospace(),
         );
 
         // Le curseur : ce qui reste après le volume et les deux boutons.

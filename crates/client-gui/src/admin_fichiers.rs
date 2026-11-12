@@ -10,6 +10,7 @@
 //! Tout ce qu'il sait vient du serveur (`AdminFichiers`) ; la permission
 //! est « Supprimer les messages » — c'est de la modération.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, texte};
 use std::cmp::Reverse;
 use std::collections::HashSet;
@@ -18,8 +19,8 @@ use eframe::egui::{self, RichText};
 use ki_protocol::{ClientMsg, FichierPartage};
 
 use crate::icons::Icon;
-use crate::theme::{self, DANGER, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::{self, Tone};
+use crate::theme::{self, TEXT, TEXT_DIM, TEXT_FAINT};
+use crate::ui::{self, Ton};
 
 /// Ce que l'onglet demande à l'application.
 pub enum Action {
@@ -203,7 +204,7 @@ impl Fichiers {
         // Les filtres : qui, quoi, dans quel ordre.
         ui.add_space(espace::M);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Envoyé par").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "Envoyé par"));
             let choisi = match &self.auteur {
                 None => "tout le monde".to_string(),
                 Some(a) => nom_affiche(a),
@@ -271,7 +272,7 @@ impl Fichiers {
                             )
                             .truncate(),
                         );
-                        ui.label(RichText::new(taille_lisible(f.octets)).color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, taille_lisible(f.octets)));
                     });
                     ui.horizontal_wrapped(|ui| {
                         let qui = if f.auteur.is_empty() {
@@ -289,7 +290,7 @@ impl Fichiers {
                             1 => "1 message".to_string(),
                             n => format!("{n} messages"),
                         });
-                        ui.label(RichText::new(format!("· {}", details.join(" · "))).color(TEXT_FAINT).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche(ui, format!("· {}", details.join(" · "))));
                         if !f.chemin.is_empty() {
                             if (f.genre == "video" || f.genre == "image") && ui.small_button("voir").clicked() {
                                 actions.push(Action::Voir { chemin: f.chemin.clone(), video: f.genre == "video" });
@@ -316,9 +317,7 @@ impl Fichiers {
             return actions;
         }
         ui.label(
-            RichText::new(format!("{} sélectionné(s) · {}", n, taille_lisible(octets)))
-                .color(TEXT)
-                .size(texte::CORPS),
+            Texte::Corps.riche(ui, format!("{} sélectionné(s) · {}", n, taille_lisible(octets))),
         );
         ui.checkbox(
             &mut self.avec_messages,
@@ -329,22 +328,20 @@ impl Fichiers {
         );
         ui.add_space(espace::XS);
         if !self.confirmer {
-            if ui::tinted_button(ui, Some(Icon::Trash), "Supprimer la sélection", Tone::Danger).clicked() {
+            if ui::Bouton::new("Supprimer la sélection").icone(Icon::Trash).teinte(Ton::Danger).show(ui).clicked() {
                 self.confirmer = true;
             }
         } else {
             ui.label(
-                RichText::new(format!(
+                Texte::Libelle.riche_ton(ui, Ton::Danger, format!(
                     "Supprimer {} ({}) du serveur ? C'est définitif, pour tout le monde{}.",
                     nombre_de_fichiers(n),
                     taille_lisible(octets),
                     if self.avec_messages && messages > 0 { ", messages compris" } else { "" }
-                ))
-                .color(DANGER)
-                .size(texte::COURANT),
+                )),
             );
             ui.horizontal(|ui| {
-                if ui::tinted_button(ui, Some(Icon::Trash), "Oui, supprimer", Tone::Danger).clicked() {
+                if ui::Bouton::new("Oui, supprimer").icone(Icon::Trash).teinte(Ton::Danger).show(ui).clicked() {
                     let mut ids: Vec<String> = self.selection.iter().cloned().collect();
                     ids.sort();
                     for lot in ids.chunks(ki_protocol::FICHIERS_PAR_LOT) {
@@ -357,7 +354,7 @@ impl Fichiers {
                     self.confirmer = false;
                     self.en_attente = true;
                 }
-                if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                     self.confirmer = false;
                 }
             });

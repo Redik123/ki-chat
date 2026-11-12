@@ -12,14 +12,15 @@
 //! dans le jeu) et qu'on est en salon vocal ; elle se repeint quand ça
 //! change, à dix fois par seconde pendant qu'on parle, jamais plus.
 
+use ki_ui::typo::Texte;
 use ki_ui::jetons::{espace, rayon, texte};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Vec2, ViewportBuilder};
 
-use crate::theme::{TEXT, TEXT_DIM};
-use crate::ui::{self, Tone};
+use crate::theme::TEXT;
+use crate::ui::{self, Ton};
 
 /// Le titre de la fenêtre de l'overlay — c'est par lui qu'on la retrouve
 /// pour la remettre au-dessus.
@@ -635,7 +636,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
     }
     if o.actif {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("position").color(TEXT_DIM).size(texte::COURANT));
+            ui.label(Texte::Libelle.riche(ui, "position"));
             egui::ComboBox::from_id_salt("overlay_coin")
                 .width(170.0)
                 .selected_text(RichText::new(o.coin.libelle()).color(TEXT))
@@ -670,7 +671,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, o: &mut Overlay) -> bool {
         ui.add_space(espace::XS);
         ui::banner(
             ui,
-            Tone::Warn,
+            Ton::Alerte,
             "en ce moment, un jeu tourne en plein écran exclusif : rien ne peut s'afficher \
              au-dessus, l'overlay compris. Dans le jeu, mode d'affichage → « Fenêtré plein \
              écran » (Valorant : Paramètres → Vidéo → Général).",

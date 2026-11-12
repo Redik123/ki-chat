@@ -4,6 +4,7 @@
 //! Les fonctions de dessin ne tiennent aucun état : elles reçoivent une ligne à
 //! peindre et rendent ce qu'on y a fait ([`MessageAction`]).
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use ki_core::markup;
 use ki_protocol::{ChannelId, ChatRecord, ClientMsg, MsgRef, Reaction, ReplyRef, UserId};
@@ -18,7 +19,7 @@ use crate::formats::{day_key, day_label, format_time, shorten};
 use crate::icons::Icon;
 use crate::membres::{empreinte_compte, est_bot, pastille_bot};
 use crate::theme::{color_for, ACCENT, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::Tone;
+use crate::ui::Ton;
 
 /// Deux messages du même auteur espacés de moins de ça sont regroupés.
 pub(crate) const GROUP_WINDOW_MS: u64 = 5 * 60 * 1000;
@@ -237,9 +238,7 @@ pub(crate) fn message_block(
                             porte_ui::pastille_invite(ui);
                         }
                         ui.label(
-                            RichText::new(format_time(msg.ts))
-                                .color(TEXT_FAINT)
-                                .size(texte::PETIT),
+                            Texte::Aide.riche(ui, format_time(msg.ts)),
                         );
                     });
                     ui.add_space(1.0);
@@ -249,9 +248,7 @@ pub(crate) fn message_block(
                 if let Some(r) = &msg.reply_to {
                     let rappel = ki_ui::emoji::label_avec(
                         ui,
-                        RichText::new(format!("↩ {} — {}", r.username, r.excerpt))
-                            .color(TEXT_DIM)
-                            .size(texte::PETIT),
+                        Texte::Aide.riche_ton(ui, Ton::Discret, format!("↩ {} — {}", r.username, r.excerpt)),
                         |l| l.sense(Sense::click()).truncate(),
                     );
                     if rappel
@@ -264,7 +261,7 @@ pub(crate) fn message_block(
                 }
                 message_body(ui, &msg.text, membres, moi, (msg.user_id, msg.ts));
                 if msg.edited {
-                    ui.label(RichText::new("(modifié)").color(TEXT_FAINT).size(texte::MINUSCULE));
+                    ui.label(Texte::Minuscule.riche(ui, "(modifié)"));
                 }
                 // Les images partagées s'affichent sous le message.
                 for (is_link, chunk) in split_links(&msg.text) {
@@ -510,7 +507,7 @@ pub(crate) fn message_body(
     // widget par fragment.
     if let [markup::Bloc::Ligne(frags)] = blocs.as_slice() {
         if let [markup::Fragment::Texte(t)] = frags.as_slice() {
-            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS));
+            ki_ui::emoji::label(ui, Texte::Corps.riche(ui, *t));
             return;
         }
     }
@@ -538,7 +535,7 @@ pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
     use markup::Fragment as F;
     match frag {
         F::Texte(t) => {
-            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS));
+            ki_ui::emoji::label(ui, Texte::Corps.riche(ui, *t));
         }
         F::Lien(url) => {
             ui.hyperlink_to(RichText::new(shorten(url)).size(texte::CORPS), *url)
@@ -548,17 +545,13 @@ pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
             ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS).strong());
         }
         F::Italique(t) => {
-            ki_ui::emoji::label(ui, RichText::new(*t).color(TEXT).size(texte::CORPS).italics());
+            ki_ui::emoji::label(ui, Texte::Corps.riche(ui, *t).italics());
         }
         F::Code(t) => {
             // Fond discret : ce qui distingue du code d'une phrase, c'est
             // la chasse fixe et un léger relief, pas une couleur criarde.
             ui.label(
-                RichText::new(*t)
-                    .monospace()
-                    .size(texte::CORPS)
-                    .color(TEXT)
-                    .background_color(theme::BG_RAISED),
+                Texte::Corps.riche(ui, *t).monospace().background_color(theme::BG_RAISED),
             );
         }
         F::Mention { pseudo, moi } => {
@@ -596,7 +589,7 @@ pub(crate) fn bloc_de_code(ui: &mut egui::Ui, code: &str, cle: ((UserId, u64), u
                 .id_salt(("bloc-code", cle))
                 .max_height(260.0)
                 .show(ui, |ui| {
-                    ui.label(RichText::new(code).monospace().size(texte::CORPS).color(TEXT));
+                    ui.label(Texte::Corps.riche(ui, code).monospace());
                 });
         });
     ui.add_space(espace::XS);
@@ -610,15 +603,11 @@ pub(crate) fn empty_state(ui: &mut egui::Ui, channel: &str) {
         icons::draw(ui.painter(), rect, Icon::Chat, theme::BORDER);
         ui.add_space(espace::L);
         ui.label(
-            RichText::new(format!("Personne n'a encore parlé dans #{channel}"))
-                .color(TEXT_DIM)
-                .size(texte::CORPS),
+            Texte::Corps.riche_ton(ui, Ton::Discret, format!("Personne n'a encore parlé dans #{channel}")),
         );
         ui.add_space(espace::XS);
         ui.label(
-            RichText::new("Lance la conversation.")
-                .color(TEXT_FAINT)
-                .size(texte::COURANT),
+            Texte::Libelle.riche_ton(ui, Ton::Pale, "Lance la conversation."),
         );
     });
 }
@@ -709,17 +698,17 @@ impl KiApp {
                         let status = self.upload_status.lock().unwrap().clone();
                         if let Some(status) = status {
                             ui.add_space(espace::M);
-                            ui::banner(ui, Tone::Info, &status, false);
+                            ui::banner(ui, Ton::Info, &status, false);
                         }
                         if let Some(err) = self.error.clone() {
                             ui.add_space(espace::M);
-                            if ui::banner(ui, Tone::Warn, &err, true) {
+                            if ui::banner(ui, Ton::Alerte, &err, true) {
                                 self.error = None;
                             }
                         }
                         if let Some(nom) = self.poke_en_cours() {
                             ui.add_space(espace::M);
-                            if ui::banner(ui, Tone::Accent, &format!("{nom} te poke"), true) {
+                            if ui::banner(ui, Ton::Accent, &format!("{nom} te poke"), true) {
                                 self.poke_recu = None;
                             }
                         }
@@ -790,7 +779,7 @@ impl KiApp {
                                         .size(texte::COURANT),
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui::button(ui, Icon::Cartes, "Voir la table").clicked() {
+                                    if ui::Bouton::new("Voir la table").icone(Icon::Cartes).show(ui).clicked() {
                                         self.cartes.ouvert = true;
                                     }
                                 });
@@ -815,19 +804,15 @@ impl KiApp {
                                 ui::glyph(ui, Icon::Target, 16.0, theme::INFO);
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(
-                                            "Garder l'historique de tes parties pour tes statistiques ? Durée, mode, carte, compte — rien d'autre",
-                                        )
-                                        .color(TEXT)
-                                        .size(texte::COURANT),
+                                        Texte::Libelle.riche_ton(ui, Ton::Neutre, "Garder l'historique de tes parties pour tes statistiques ? Durée, mode, carte, compte — rien d'autre",),
                                     )
                                     .truncate(),
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui::button(ui, Icon::Close, "Non merci").clicked() {
+                                    if ui::Bouton::new("Non merci").icone(Icon::Close).show(ui).clicked() {
                                         self.journal_propose = true;
                                     }
-                                    if ui::primary_button(ui, Some(Icon::Check), "Oui", None)
+                                    if ui::Bouton::new("Oui").icone(Icon::Check).principal().show(ui)
                                         .on_hover_text("ça se décoche quand tu veux : ⚙ → Jeu")
                                         .clicked()
                                     {
@@ -862,10 +847,10 @@ impl KiApp {
                                         session.riot_id
                                     )
                                 };
-                                ui.add(egui::Label::new(RichText::new(phrase).color(TEXT).size(texte::COURANT)).truncate());
+                                ui.add(egui::Label::new(Texte::Libelle.riche_ton(ui, Ton::Neutre, phrase)).truncate());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let taire = if rien_de_lie { "Non merci" } else { "Ne plus me le dire" };
-                                    if ui::button(ui, Icon::Close, taire)
+                                    if ui::Bouton::new(taire).icone(Icon::Close).show(ui)
                                         .on_hover_text("ki-chat ne t'en reparlera plus pour ce compte, sur cet ordinateur")
                                         .clicked()
                                     {
@@ -875,7 +860,7 @@ impl KiApp {
                                         self.comptes_tus.drain(..trop);
                                     }
                                     if rien_de_lie
-                                        && ui::primary_button(ui, Some(Icon::Check), "Lier ce compte", None)
+                                        && ui::Bouton::new("Lier ce compte").icone(Icon::Check).principal().show(ui)
                                             .on_hover_text("le serveur le retrouve chez HenrikDev et ouvre ta fiche")
                                             .clicked()
                                     {
@@ -996,9 +981,7 @@ impl KiApp {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(espace::S);
                                 ui.label(
-                                    RichText::new("Chargement des messages plus anciens…")
-                                        .color(TEXT_FAINT)
-                                        .size(texte::PETIT),
+                                    Texte::Aide.riche(ui, "Chargement des messages plus anciens…"),
                                 );
                                 ui.add_space(espace::S);
                             });
@@ -1007,9 +990,7 @@ impl KiApp {
                                 ui.add_space(espace::S);
                                 if ui
                                     .button(
-                                        RichText::new("Charger les messages plus anciens")
-                                            .color(TEXT_DIM)
-                                            .size(texte::PETIT),
+                                        Texte::Aide.riche_ton(ui, Ton::Discret, "Charger les messages plus anciens"),
                                     )
                                     .clicked()
                                 {
@@ -1030,12 +1011,10 @@ impl KiApp {
                             ui.add_space(espace::S);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    RichText::new("tu regardes un message retrouvé")
-                                        .color(TEXT_FAINT)
-                                        .size(texte::PETIT),
+                                    Texte::Aide.riche(ui, "tu regardes un message retrouvé"),
                                 );
                                 if ui
-                                    .button(RichText::new("Revenir au présent").color(TEXT_DIM).size(texte::PETIT))
+                                    .button(Texte::Aide.riche_ton(ui, Ton::Discret, "Revenir au présent"))
                                     .clicked()
                                 {
                                     revenir = true;
@@ -1182,7 +1161,7 @@ impl KiApp {
                     ui.label(RichText::new(&msg.username).strong());
                     ki_ui::emoji::label_tronque(
                         ui,
-                        RichText::new(ki_protocol::excerpt_of(&msg.text)).color(TEXT_FAINT).size(texte::PETIT),
+                        Texte::Aide.riche(ui, ki_protocol::excerpt_of(&msg.text)),
                     );
                     ui.add_space(espace::XS);
                     // Réagir : les emojis du protocole, d'un clic. Celui

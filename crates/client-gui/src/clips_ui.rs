@@ -4,6 +4,7 @@
 //! L'enregistreur lui-même est dans [`crate::clips`] ; ici vit ce que la fenêtre en
 //! retient ([`Clips`]) et ce qu'elle dessine.
 
+use ki_ui::typo::Texte;
 use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
@@ -13,8 +14,8 @@ use ki_ui::jetons::{espace, rayon, texte};
 use crate::{atelier, clips, icons, images, partage, raccourci, theme, ui, visionneuse, KiApp};
 use crate::icons::Icon;
 use crate::televersement::{envoyer_morceaux, erreur_http, EnvoiMorceaux, SESSION_PERDUE};
-use crate::theme::{ACCENT, DANGER, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::Tone;
+use crate::theme::{ACCENT, DANGER, TEXT, TEXT_DIM, TEXT_FAINT};
+use crate::ui::Ton;
 
 /// Les clips : l'enregistreur et ses réglages, la galerie, le partage et le retrait.
 pub(crate) struct Clips {
@@ -318,15 +319,13 @@ impl KiApp {
                         Some(e) => {
                             ui::status_dot(ui, DANGER, "enregistreur en marche", 10.0);
                             ui.label(
-                                RichText::new(format!(
+                                Texte::Libelle.riche(ui, format!(
                                     "{:.0} s en mémoire · {:.0} Mo · {} · {}",
                                     e.secondes, e.megaoctets, e.encodeur, e.source
-                                ))
-                                .color(TEXT_DIM)
-                                .size(texte::COURANT),
+                                )),
                             );
                             if e.ecriture_en_cours {
-                                ui.label(RichText::new("écriture…").color(ACCENT).size(texte::COURANT));
+                                ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, "écriture…"));
                             }
                         }
                         None => {
@@ -341,15 +340,15 @@ impl KiApp {
                             action = 4;
                         }
                         if etat.is_some() {
-                            if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                            if ui::Bouton::new("Arrêter").icone(Icon::Close).teinte(Ton::Danger).show(ui).clicked() {
                                 action = 2;
                             }
-                            if ui::primary_button(ui, Some(Icon::Film), &format!("Clip ! ({raccourci})"), None)
+                            if ui::Bouton::new(&format!("Clip ! ({raccourci})")).icone(Icon::Film).principal().show(ui)
                                 .clicked()
                             {
                                 action = 3;
                             }
-                        } else if ui::primary_button(ui, Some(Icon::Play), "Démarrer l'enregistreur", None)
+                        } else if ui::Bouton::new("Démarrer l'enregistreur").icone(Icon::Play).principal().show(ui)
                             .clicked()
                         {
                             action = 1;
@@ -662,22 +661,22 @@ impl KiApp {
                         );
                     }
                     Some(EnvoiClip { fini: Some(Err(e)), .. }) => {
-                        ui.label(RichText::new(format!("échec : {e}")).color(DANGER).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche_ton(ui, Ton::Danger, format!("échec : {e}")));
                     }
                     _ => {}
                 }
                 ui.add_space(espace::XS);
                 ui.horizontal(|ui| {
                     if en_cours {
-                        ui.label(RichText::new("envoi en cours…").color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, "envoi en cours…"));
                         return;
                     }
                     ui.add_enabled_ui(p.salon.is_some(), |ui| {
-                        if ui::primary_button(ui, Some(Icon::Film), "Partager", None).clicked() {
+                        if ui::Bouton::new("Partager").icone(Icon::Film).principal().show(ui).clicked() {
                             lancer = true;
                         }
                     });
-                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                         fermer = true;
                     }
                 });
@@ -816,10 +815,10 @@ impl KiApp {
                 );
                 ui.add_space(espace::M);
                 ui.horizontal(|ui| {
-                    if ui::tinted_button(ui, Some(Icon::Trash), "Retirer", Tone::Danger).clicked() {
+                    if ui::Bouton::new("Retirer").icone(Icon::Trash).teinte(Ton::Danger).show(ui).clicked() {
                         decision = Some(true);
                     }
-                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -892,10 +891,10 @@ impl KiApp {
                 ui::hint(ui, "le fichier sera effacé de ce PC ; il n'y a pas de corbeille");
                 ui.add_space(espace::M);
                 ui.horizontal(|ui| {
-                    if ui::tinted_button(ui, Some(Icon::Trash), "Supprimer", Tone::Danger).clicked() {
+                    if ui::Bouton::new("Supprimer").icone(Icon::Trash).teinte(Ton::Danger).show(ui).clicked() {
                         decision = Some(true);
                     }
-                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -933,10 +932,10 @@ impl KiApp {
         );
         ui.horizontal(|ui| {
             if en_marche {
-                if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                if ui::Bouton::new("Arrêter").icone(Icon::Close).teinte(Ton::Danger).show(ui).clicked() {
                     action = 2;
                 }
-            } else if ui::primary_button(ui, Some(Icon::Play), "Démarrer", None).clicked() {
+            } else if ui::Bouton::new("Démarrer").icone(Icon::Play).principal().show(ui).clicked() {
                 action = 1;
             }
             ui.checkbox(&mut self.clips.reglages.au_demarrage, "Démarrer avec ki-chat");
@@ -957,14 +956,14 @@ impl KiApp {
             let capture = self.ptt.as_ref().is_some_and(|p| p.en_capture());
             if capture {
                 ui.label(RichText::new("appuie sur ta combinaison…").color(ACCENT));
-                if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                     if let Some(p) = &self.ptt {
                         p.capturer(false);
                     }
                 }
             } else {
                 ui.label(RichText::new(self.clips.reglages.raccourci.label()).color(TEXT).strong());
-                if ui::button(ui, Icon::Pencil, "Changer").clicked() {
+                if ui::Bouton::new("Changer").icone(Icon::Pencil).show(ui).clicked() {
                     if let Some(p) = &self.ptt {
                         p.capturer(true);
                     }
@@ -984,12 +983,8 @@ impl KiApp {
             }
             Some(raccourci::Etat::Refuse) => {
                 ui.label(
-                    RichText::new(
-                        "cette combinaison est déjà prise par un autre programme (NVIDIA ?) : \
-                         ki-chat la lit quand même, mais pas au-dessus d'un jeu — choisis-en une autre",
-                    )
-                    .color(WARN)
-                    .size(texte::PETIT),
+                    Texte::Aide.riche_ton(ui, Ton::Alerte, "cette combinaison est déjà prise par un autre programme (NVIDIA ?) : \
+                         ki-chat la lit quand même, mais pas au-dessus d'un jeu — choisis-en une autre",),
                 );
             }
             _ => {}
@@ -1065,11 +1060,9 @@ impl KiApp {
         ui::field_label(ui, "Dossier");
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(self.clips.reglages.dossier_effectif().display().to_string())
-                    .color(TEXT_DIM)
-                    .size(texte::COURANT),
+                Texte::Libelle.riche(ui, self.clips.reglages.dossier_effectif().display().to_string()),
             );
-            if ui::button(ui, Icon::Pencil, "Changer…").clicked() {
+            if ui::Bouton::new("Changer…").icone(Icon::Pencil).show(ui).clicked() {
                 let slot = self.clips.dossier_choisi.clone();
                 std::thread::spawn(move || {
                     if let Some(d) = rfd::FileDialog::new().pick_folder() {
@@ -1077,7 +1070,7 @@ impl KiApp {
                     }
                 });
             }
-            if self.clips.reglages.dossier.is_some() && ui::button(ui, Icon::Refresh, "Par défaut").clicked() {
+            if self.clips.reglages.dossier.is_some() && ui::Bouton::new("Par défaut").icone(Icon::Refresh).show(ui).clicked() {
                 self.clips.reglages.dossier = None;
             }
         });

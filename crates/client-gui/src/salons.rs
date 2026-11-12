@@ -1,6 +1,7 @@
 //! La colonne des salons : textuels et vocaux, leurs occupants, le mot de passe
 //! d'un salon vocal verrouillé.
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use ki_protocol::{ChannelId, ChannelKind, ClientMsg, Member};
 use ki_ui::flex::Flex;
@@ -13,8 +14,8 @@ use crate::{
 use crate::icons::Icon;
 use crate::membres::{fantome_deplacement, member_row, DeplacementVocal, MemberRow};
 use crate::saisie::menu_edition;
-use crate::theme::{color_for, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::Tone;
+use crate::theme::{color_for, ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM};
+use crate::ui::Ton;
 
 /// Saisie du mot de passe d'un salon vocal verrouillé.
 pub(crate) struct VoicePrompt {
@@ -198,7 +199,7 @@ impl KiApp {
                                 );
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(self.url.trim()).color(TEXT_FAINT).size(texte::PETIT),
+                                        Texte::Aide.riche(ui, self.url.trim()),
                                     )
                                     .truncate(),
                                 );
@@ -385,7 +386,10 @@ impl KiApp {
                                             let slug = slug.to_string();
                                             row.context_menu(|ui| {
                                                 ui.set_width(200.0);
-                                                if ui::tinted_button(ui, Some(Icon::Ban), "Fermer la porte", Tone::Danger)
+                                                if ui::Bouton::new("Fermer la porte")
+                                                    .icone(Icon::Ban)
+                                                    .teinte(Ton::Danger)
+                                                    .show(ui)
                                                     .on_hover_text("les invités sont congédiés et le salon effacé")
                                                     .clicked()
                                                 {
@@ -523,7 +527,7 @@ impl KiApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 if wrong {
-                    ui::banner(ui, Tone::Danger, "Mot de passe incorrect", false);
+                    ui::banner(ui, Ton::Danger, "Mot de passe incorrect", false);
                     ui.add_space(espace::S);
                 }
                 ui::field_label(ui, "Mot de passe du salon");
@@ -535,10 +539,10 @@ impl KiApp {
                 }
                 ui.add_space(espace::M);
                 ui.horizontal(|ui| {
-                    if ui::primary_button(ui, Some(Icon::Check), "Entrer", None).clicked() {
+                    if ui::Bouton::new("Entrer").icone(Icon::Check).principal().show(ui).clicked() {
                         submit = true;
                     }
-                    if ui::button(ui, Icon::Close, "Annuler").clicked() {
+                    if ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                         cancel = true;
                     }
                 });

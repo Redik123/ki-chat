@@ -3,6 +3,7 @@
 //! L'état vit dans [`Musique`] ; le bandeau le dessine et envoie les commandes au
 //! serveur, qui pilote le bot.
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, RichText, Sense, Vec2};
 use ki_protocol::ClientMsg;
 use ki_ui::jetons::{espace, rayon, texte};
@@ -12,8 +13,8 @@ use crate::formats::mmss;
 use crate::icons::Icon;
 use crate::membres::pastille_bot;
 use crate::saisie::menu_edition;
-use crate::theme::{ACCENT, DANGER, TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::Tone;
+use crate::theme::{ACCENT, TEXT, TEXT_FAINT};
+use crate::ui::Ton;
 
 /// Le bot musique : son état poussé par le serveur, et ce qu'on prépare pour lui
 /// (la recherche, ses résultats, le nom d'une playlist).
@@ -98,7 +99,7 @@ impl KiApp {
                 None if etat.salon.is_none() => {
                     ui.label(RichText::new("Musique").color(ACCENT).strong().size(texte::CORPS));
                     pastille_bot(ui);
-                    ui.label(RichText::new("le bot n'est dans aucun salon").color(TEXT_FAINT).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, "le bot n'est dans aucun salon"));
                     if peut && ui.button("Venir dans mon salon").clicked() {
                         self.commander_musique(C::Rejoindre);
                     }
@@ -134,18 +135,18 @@ impl KiApp {
                     let temps = if duree > 0 { format!("{} / {}", mmss(position), mmss(duree)) } else { mmss(position) };
                     ui::hint(ui, temps);
                     let titre = if p.artiste.is_empty() { p.titre.clone() } else { format!("{} — {}", p.artiste, p.titre) };
-                    ui.add(egui::Label::new(RichText::new(titre).color(TEXT).size(texte::CORPS)).truncate());
+                    ui.add(egui::Label::new(Texte::Corps.riche(ui, titre)).truncate());
                     self.etoile_musique(ui, p, peut);
                 }
                 None => {
-                    ui.label(RichText::new("rien en cours").color(TEXT_FAINT).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche_ton(ui, Ton::Pale, "rien en cours"));
                     if !etat.file.is_empty() {
-                        ui.label(RichText::new(format!("{} en file", etat.longueur_file())).color(TEXT_FAINT).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche(ui, format!("{} en file", etat.longueur_file())));
                     }
                 }
             }
             if let Some(e) = &etat.erreur {
-                ui.label(RichText::new(e).color(DANGER).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Danger, e));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let chevron = if self.musique.deroulee { Icon::ArrowUp } else { Icon::ArrowDown };
@@ -185,7 +186,7 @@ impl KiApp {
                         }
                         ui.label(RichText::new(&p.titre).strong().size(texte::CORPS));
                         if !p.artiste.is_empty() {
-                            ui.label(RichText::new(&p.artiste).color(TEXT_DIM).size(texte::COURANT));
+                            ui.label(Texte::Libelle.riche(ui, &p.artiste));
                         }
                         let mut infos = p.source.clone();
                         if let Some(qui) = &p.ajoute_par {
@@ -208,7 +209,7 @@ impl KiApp {
                         if ailleurs && ui.button("Venir dans mon salon").clicked() {
                             self.commander_musique(C::Rejoindre);
                         }
-                        if ui::tinted_button(ui, Some(Icon::Close), "Arrêter", Tone::Danger).clicked() {
+                        if ui::Bouton::new("Arrêter").icone(Icon::Close).teinte(Ton::Danger).show(ui).clicked() {
                             self.commander_musique(C::Arreter);
                         }
                     });
@@ -253,7 +254,7 @@ impl KiApp {
                     // Le serveur n'envoie que le début d'une longue file.
                     let reste = n.saturating_sub(etat.file.len());
                     if reste > 0 {
-                        ui.label(RichText::new(format!("… et {reste} autre(s)")).color(TEXT_FAINT).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche(ui, format!("… et {reste} autre(s)")));
                     }
                 });
             }
@@ -278,7 +279,7 @@ impl KiApp {
                                     self.commander_musique(C::PlaylistCharger { nom: pl.nom.clone(), remplacer: true });
                                 }
                             });
-                            ui.label(RichText::new(format!("{}", pl.pistes)).color(TEXT_FAINT).size(texte::MINUSCULE));
+                            ui.label(Texte::Minuscule.riche(ui, format!("{}", pl.pistes)));
                         });
                     });
                 }
@@ -359,7 +360,7 @@ impl KiApp {
                                     }
                                 });
                                 self.etoile_musique(ui, p, peut);
-                                ui.label(RichText::new(mmss(p.duree_s as u64)).color(TEXT_FAINT).size(texte::MINUSCULE));
+                                ui.label(Texte::Minuscule.riche(ui, mmss(p.duree_s as u64)));
                             });
                         });
                     }

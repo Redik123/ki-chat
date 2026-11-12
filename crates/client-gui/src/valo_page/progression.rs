@@ -9,6 +9,7 @@
 //!   semaine par semaine, mode par mode, et par compte. Le serveur ne
 //!   relit jamais le journal d'un autre.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_protocol::{EstimationMmr, JourDeJeu, StatsSaison};
 use ki_ui::jetons::{largeur, police};
 use ki_ui::tableau::{Colonne, Tableau};
@@ -390,7 +391,7 @@ fn temps_de_jeu_ui(ui: &mut Ui, t: &TempsDeJeu) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = espace::M;
             ui.allocate_ui_with_layout(Vec2::new(150.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.label(RichText::new(nom_du_compte(compte)).color(TEXT).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche_ton(ui, Ton::Neutre, nom_du_compte(compte)));
             });
             graphes::jauge(ui, *secondes as f32 / total as f32, None, 160.0, ACCENT);
             ui.label(RichText::new(heures_minutes(*secondes)).font(police::moyenne(ui.ctx(), texte::COURANT)).color(TEXT));
@@ -420,8 +421,8 @@ fn legende(ui: &mut Ui, couleur: Color32, nom: &str, secondes: u32) {
         ui.spacing_mut().item_spacing.x = espace::XS;
         let (point, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
         ui.painter().rect_filled(point.shrink(1.0), egui::CornerRadius::same(rayon::S), couleur);
-        ui.label(RichText::new(nom).color(TEXT_DIM).size(texte::PETIT));
-        ui.label(RichText::new(heures_minutes(secondes)).color(TEXT).size(texte::PETIT));
+        ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, nom));
+        ui.label(Texte::Aide.riche_ton(ui, Ton::Neutre, heures_minutes(secondes)));
     });
 }
 

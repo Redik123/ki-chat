@@ -22,6 +22,7 @@
 //! bilan ni activité, donne une page calculée ici sur les cinq matchs et
 //! dix points qu'il envoie, avec un mot pour le dire.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, rayon, texte};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -576,7 +577,7 @@ fn tuile(ui: &mut Ui, largeur: f32, hauteur: f32, t: Tuile, bas: impl FnOnce(&mu
                 ui.set_min_size(Vec2::new(interieur, hauteur - 2.0 * MARGE_TUILE));
                 ui.set_max_width(interieur);
                 ui.spacing_mut().item_spacing.y = espace::XXS;
-                ui.add(egui::Label::new(RichText::new(t.titre).color(TEXT_FAINT).size(texte::PETIT)).truncate());
+                ui.add(egui::Label::new(Texte::Aide.riche(ui, t.titre)).truncate());
                 ui.horizontal(|ui| {
                     if let Some(icone) = t.icone {
                         ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(18.0)));
@@ -584,7 +585,7 @@ fn tuile(ui: &mut Ui, largeur: f32, hauteur: f32, t: Tuile, bas: impl FnOnce(&mu
                     ui.add(egui::Label::new(RichText::new(&t.valeur).color(t.teinte).strong().size(texte::GRAND)).truncate());
                 });
                 if !t.sous.is_empty() {
-                    ui.add(egui::Label::new(RichText::new(&t.sous).color(TEXT_DIM).size(texte::PETIT)).truncate());
+                    ui.add(egui::Label::new(Texte::Aide.riche_ton(ui, Ton::Discret, &t.sous)).truncate());
                 }
                 bas(ui);
             });
@@ -778,7 +779,7 @@ fn medailles_cellule(ui: &mut Ui, md: Option<&MedaillesDuMatch>) -> Response {
             badge(ui, &texte, teinte_de_medaille(g.medaille)).on_hover_text(&detail);
         }
         if liste.len() > 3 {
-            ui.label(RichText::new(format!("+{}", liste.len() - 3)).color(TEXT_FAINT).size(texte::MINUSCULE)).on_hover_text(&detail);
+            ui.label(Texte::Minuscule.riche(ui, format!("+{}", liste.len() - 3))).on_hover_text(&detail);
         }
     })
     .response
@@ -965,7 +966,7 @@ fn lignes_en_direct(
                 ui.label(RichText::new(score).color(teinte).font(ki_ui::jetons::police::moyenne(ui.ctx(), texte::COURANT)));
             }
             if !texte.is_empty() {
-                ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, texte));
             }
         });
         ui.add_space(espace::XXS);
@@ -1292,9 +1293,7 @@ fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
             let quand = if m.etat == "inProgress" {
                 RichText::new("en cours").color(SPEAK).strong().size(texte::PETIT)
             } else {
-                RichText::new(format!("{} · {}", crate::formats::day_label(m.date), crate::formats::format_time(m.date)))
-                    .color(TEXT_DIM)
-                    .size(texte::PETIT)
+                Texte::Aide.riche_ton(ui, Ton::Discret, format!("{} · {}", crate::formats::day_label(m.date), crate::formats::format_time(m.date)))
             };
             ui.label(quand);
             ui.label(RichText::new(m.equipes.join("  vs  ")).strong());
@@ -1470,7 +1469,7 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
     if fiche.carte_joueur.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&fiche.riot_id).strong().size(texte::TITRE));
-            ui.label(RichText::new(&detail).color(TEXT_DIM).size(texte::PETIT));
+            ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, &detail));
             if let Some(titre) = &titre {
                 ui::hint(ui, titre);
             }

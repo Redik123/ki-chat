@@ -17,6 +17,7 @@
 //! et aucun de ces messages n'arrive : le panneau ne se montre pas, et
 //! rien de nouveau ne part.
 
+use ki_ui::typo::Texte;
 use ki_ui::flex::Flex;
 use ki_ui::jetons::{espace, rayon, texte};
 use std::time::{Duration, Instant};
@@ -25,8 +26,8 @@ use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Vec2};
 use ki_protocol::{ChannelId, ChannelInfo, ClientMsg, DemandeWeb, InviteWeb, UserId};
 
 use crate::icons::{self, Icon};
-use crate::theme::{self, ACCENT, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::{self, Tone};
+use crate::theme::{self, ACCENT, TEXT, WARN};
+use crate::ui::{self, Ton};
 
 /// Combien de temps une demande reste affichée sans nouvelles : le serveur
 /// laisse cinq minutes à celui qui frappe, puis ferme sa page. Passé ce
@@ -419,7 +420,7 @@ impl Portes {
                     }
                     if let Some(message) = self.message.clone() {
                         ui.add_space(espace::M);
-                        if ui::banner(ui, Tone::Info, &message, true) {
+                        if ui::banner(ui, Ton::Info, &message, true) {
                             self.message = None;
                         }
                     }
@@ -467,7 +468,7 @@ impl Portes {
             ui::hint(ui, format!("{} portes ouvertes, c'est le maximum", ki_protocol::PORTES_MAX));
         }
         ui.add_enabled_ui(valide && !deja && !plafond, |ui| {
-            if ui::primary_button(ui, Some(Icon::Key), "Ouvrir la porte", None).clicked() {
+            if ui::Bouton::new("Ouvrir la porte").icone(Icon::Key).principal().show(ui).clicked() {
                 actions.push(Action::Envoyer(ClientMsg::PorteOuvrir {
                     slug: self.slug.clone(),
                     nom_salon: self.nom_salon.trim().to_string(),
@@ -509,13 +510,11 @@ fn carte_porte(
             ui::glyph(ui, Icon::Key, 16.0, WARN);
             ui.label(RichText::new(format!("porte « {} »", porte.slug)).color(TEXT).size(texte::TITRE).strong());
             ui.label(
-                RichText::new(format!("· #{}", contexte.nom_salon(porte.salon)))
-                    .color(TEXT_DIM)
-                    .size(texte::COURANT),
+                Texte::Libelle.riche(ui, format!("· #{}", contexte.nom_salon(porte.salon))),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new(reste_texte(porte.expire_le, maintenant)).color(TEXT_FAINT).size(texte::PETIT),
+                    Texte::Aide.riche(ui, reste_texte(porte.expire_le, maintenant)),
                 );
             });
         });
@@ -525,7 +524,7 @@ fn carte_porte(
             ui.add_space(espace::S);
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::Label::new(RichText::new(&url).color(ACCENT).monospace().size(texte::CORPS))
+                    egui::Label::new(Texte::Corps.riche_ton(ui, Ton::Accent, &url).monospace())
                         .truncate(),
                 );
                 if ui::icon_button_ex(ui, Icon::Copy, 24.0, "Copier le lien", None).clicked() {
@@ -558,13 +557,11 @@ fn carte_porte(
         // Les invités présents.
         ui.add_space(espace::M);
         ui.label(
-            RichText::new(match porte.invites.len() {
+            Texte::Libelle.riche(ui, match porte.invites.len() {
                 0 => "aucun invité pour l'instant".to_string(),
                 1 => "1 invité".to_string(),
                 n => format!("{n} invités"),
-            })
-            .color(TEXT_DIM)
-            .size(texte::COURANT),
+            }),
         );
         let invites = porte.invites.clone();
         for invite in &invites {
@@ -573,16 +570,12 @@ fn carte_porte(
                 pastille_invite(ui);
                 if invite.depuis != 0 {
                     ui.label(
-                        RichText::new(format!("entré {}", crate::formats::il_y_a(invite.depuis)))
-                            .color(TEXT_FAINT)
-                            .size(texte::PETIT),
+                        Texte::Aide.riche(ui, format!("entré {}", crate::formats::il_y_a(invite.depuis))),
                     );
                 }
                 if let Some(v) = invite.vocal {
                     ui.label(
-                        RichText::new(format!("· en vocal dans {}", contexte.nom_salon(v)))
-                            .color(ACCENT)
-                            .size(texte::PETIT),
+                        Texte::Aide.riche_ton(ui, Ton::Accent, format!("· en vocal dans {}", contexte.nom_salon(v))),
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -598,33 +591,29 @@ fn carte_porte(
         if !porte.demandes.is_empty() {
             ui.add_space(espace::M);
             ui.label(
-                RichText::new(match porte.demandes.len() {
+                Texte::Libelle.riche_ton(ui, Ton::Alerte, match porte.demandes.len() {
                     1 => "1 demande en attente".to_string(),
                     n => format!("{n} demandes en attente"),
-                })
-                .color(WARN)
-                .size(texte::COURANT),
+                }),
             );
             for demande in &porte.demandes {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&demande.nom).color(TEXT).strong());
                     if demande.depuis != 0 {
                         ui.label(
-                            RichText::new(format!("a frappé {}", crate::formats::il_y_a(demande.depuis)))
-                                .color(TEXT_FAINT)
-                                .size(texte::PETIT),
+                            Texte::Aide.riche(ui, format!("a frappé {}", crate::formats::il_y_a(demande.depuis))),
                         );
                     }
                     if droits.agir {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui::tinted_button(ui, Some(Icon::Close), "Refuser", Tone::Danger).clicked() {
+                            if ui::Bouton::new("Refuser").icone(Icon::Close).teinte(Ton::Danger).show(ui).clicked() {
                                 actions.push(Action::Envoyer(ClientMsg::PorteRepondre {
                                     demande_id: demande.demande_id,
                                     accepter: false,
                                     motif: String::new(),
                                 }));
                             }
-                            if ui::tinted_button(ui, Some(Icon::Check), "Accepter", Tone::Accent).clicked() {
+                            if ui::Bouton::new("Accepter").icone(Icon::Check).teinte(Ton::Accent).show(ui).clicked() {
                                 actions.push(Action::Envoyer(ClientMsg::PorteRepondre {
                                     demande_id: demande.demande_id,
                                     accepter: true,
@@ -640,11 +629,11 @@ fn carte_porte(
 
         ui.add_space(espace::M);
         ui.horizontal(|ui| {
-            if ui::button(ui, Icon::Chat, "Ouvrir le salon").clicked() {
+            if ui::Bouton::new("Ouvrir le salon").icone(Icon::Chat).show(ui).clicked() {
                 actions.push(Action::Lire(porte.salon));
             }
             if droits.agir
-                && ui::tinted_button(ui, Some(Icon::Ban), "Fermer la porte", Tone::Danger)
+                && ui::Bouton::new("Fermer la porte").icone(Icon::Ban).teinte(Ton::Danger).show(ui)
                     .on_hover_text("les invités sont congédiés et le salon temporaire est effacé")
                     .clicked()
             {
@@ -668,7 +657,7 @@ fn boutons_invite(
     if droits.deplacer {
         match contexte.mon_vocal {
             Some(mien) if vocal != Some(mien) => {
-                if ui::button(ui, Icon::Volume, "L'inviter dans mon vocal")
+                if ui::Bouton::new("L'inviter dans mon vocal").icone(Icon::Volume).show(ui)
                     .on_hover_text("il n'a pas de compte, donc pas de bouton : c'est toi qui l'y mets")
                     .clicked()
                 {
@@ -679,21 +668,21 @@ fn boutons_invite(
             Some(_) => {}
             None if vocal.is_none() => {
                 ui.add_enabled_ui(false, |ui| {
-                    let _ = ui::button(ui, Icon::Volume, "L'inviter dans mon vocal")
+                    let _ = ui::Bouton::new("L'inviter dans mon vocal").icone(Icon::Volume).show(ui)
                         .on_disabled_hover_text("entre d'abord dans un salon vocal");
                 });
             }
             None => {}
         }
         if vocal.is_some()
-            && ui::tinted_button(ui, Some(Icon::Logout), "Le sortir du vocal", Tone::Warn).clicked()
+            && ui::Bouton::new("Le sortir du vocal").icone(Icon::Logout).teinte(Ton::Alerte).show(ui).clicked()
         {
             actions.push(Action::Envoyer(ClientMsg::PorteVocal { invite_id, channel: None }));
             ui.close();
         }
     }
     if droits.offrir
-        && ui::button(ui, Icon::Download, "Lui offrir ki-chat")
+        && ui::Bouton::new("Lui offrir ki-chat").icone(Icon::Download).show(ui)
             .on_hover_text("une invitation à usage unique, valable sept jours : le lien de téléchargement dans le salon, le code sur sa page")
             .clicked()
     {
@@ -701,7 +690,7 @@ fn boutons_invite(
         ui.close();
     }
     if droits.agir
-        && ui::tinted_button(ui, Some(Icon::Ban), "Expulser", Tone::Danger)
+        && ui::Bouton::new("Expulser").icone(Icon::Ban).teinte(Ton::Danger).show(ui)
             .on_hover_text("sa page se ferme ; il peut frapper à nouveau")
             .clicked()
     {
@@ -728,12 +717,12 @@ fn banniere_demande(ui: &mut egui::Ui, texte: &str, survol: &str) -> Option<bool
                     .on_hover_text(survol);
             });
             f.ui(|ui| {
-                if ui::tinted_button(ui, Some(Icon::Check), "Accepter", Tone::Accent).clicked() {
+                if ui::Bouton::new("Accepter").icone(Icon::Check).teinte(Ton::Accent).show(ui).clicked() {
                     reponse = Some(true);
                 }
             });
             f.ui(|ui| {
-                if ui::tinted_button(ui, Some(Icon::Close), "Refuser", Tone::Danger).clicked() {
+                if ui::Bouton::new("Refuser").icone(Icon::Close).teinte(Ton::Danger).show(ui).clicked() {
                     reponse = Some(false);
                 }
             });

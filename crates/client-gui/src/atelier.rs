@@ -19,6 +19,7 @@
 //! (`ki_voice::journal`, lignes « clips : atelier … »), pour que le prochain
 //! rapport dise autre chose que « ça charge à l'infini ».
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, rayon, texte};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,7 +31,7 @@ use ki_voice::medias::File;
 
 use crate::clips::{self, ClipInfo, Fiche};
 use crate::icons::Icon;
-use crate::theme::{self, ACCENT, DANGER, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::theme::{self, ACCENT, TEXT, TEXT_DIM, TEXT_FAINT};
 use crate::ui;
 use crate::visionneuse::{mmss, Lecture};
 
@@ -580,11 +581,11 @@ impl Atelier {
                     let ui = &mut haut_ui;
                     ui.spacing_mut().item_spacing.x = espace::S;
                     ui::glyph(ui, Icon::Pencil, 16.0, TEXT_DIM);
-                    ui.label(RichText::new("Atelier").color(TEXT_DIM).size(texte::CORPS));
+                    ui.label(Texte::Corps.riche_ton(ui, Ton::Discret, "Atelier"));
                     ui.label(RichText::new(&p.nom).color(TEXT).size(texte::CORPS).strong());
                     if let Some((texte, _)) = &info {
                         ui.add_space(espace::L);
-                        ui.label(RichText::new(texte).color(ACCENT).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche_ton(ui, Ton::Accent, texte));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui::icon_button(ui, Icon::Close, "Fermer (Échap)").clicked() {
@@ -1636,21 +1637,16 @@ fn peindre_bande(ui: &mut egui::Ui, p: &mut Projet, zone: Rect) {
             basculer_lecture(p);
         }
         ui.label(
-            RichText::new(format!("{} / {}", mmss(position), mmss(p.duree_ms)))
-                .color(TEXT_DIM)
-                .size(texte::COURANT)
-                .monospace(),
+            Texte::Libelle.riche(ui, format!("{} / {}", mmss(position), mmss(p.duree_ms))).monospace(),
         );
         ui.add_space(espace::L);
         ui.label(
-            RichText::new(format!(
+            Texte::Libelle.riche_ton(ui, Ton::Neutre, format!(
                 "coupe : {} → {}  ({:.1} s)",
                 mmss(p.debut_ms),
                 mmss(p.fin_ms),
                 (p.fin_ms.saturating_sub(p.debut_ms)) as f32 / 1000.0
-            ))
-            .color(TEXT)
-            .size(texte::COURANT),
+            )),
         );
         if ui
             .small_button("début ici")
@@ -1834,9 +1830,7 @@ fn panneau_reglages(
                     );
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("glisser l'aperçu déplace")
-                                .color(TEXT_FAINT)
-                                .size(texte::PETIT),
+                            Texte::Aide.riche(ui, "glisser l'aperçu déplace"),
                         );
                         ui.selectable_value(&mut p.glisse_fin, false, "le début");
                         ui.selectable_value(&mut p.glisse_fin, true, "la fin");
@@ -1946,9 +1940,7 @@ fn panneau_reglages(
         }
         Export::Erreur(e) => {
             ui.label(
-                RichText::new(format!("échec : {e}"))
-                    .color(DANGER)
-                    .size(texte::COURANT),
+                Texte::Libelle.riche_ton(ui, Ton::Danger, format!("échec : {e}")),
             );
         }
         _ => {}
@@ -1959,13 +1951,11 @@ fn panneau_reglages(
         && !matches!(p.export, Export::EnCours(_));
     if p.reseau.is_none() {
         ui.label(
-            RichText::new("connecte-toi pour exporter")
-                .color(WARN)
-                .size(texte::COURANT),
+            Texte::Libelle.riche_ton(ui, Ton::Alerte, "connecte-toi pour exporter"),
         );
     }
     ui.add_enabled_ui(peut_exporter, |ui| {
-        if ui::primary_button(ui, Some(Icon::Film), "Exporter", None).clicked() {
+        if ui::Bouton::new("Exporter").icone(Icon::Film).principal().show(ui).clicked() {
             actions.exporter = true;
         }
     });
@@ -2003,7 +1993,7 @@ fn panneau_reglages(
         }
         let en_cours = p.enregistrement.is_some();
         ui.add_enabled_ui(!en_cours, |ui| {
-            if ui::button(ui, Icon::Download, "Enregistrer sous…").clicked() {
+            if ui::Bouton::new("Enregistrer sous…").icone(Icon::Download).show(ui).clicked() {
                 actions.enregistrer = true;
             }
         });
@@ -2019,7 +2009,7 @@ fn panneau_reglages(
         // Partager dans un salon.
         let mut annuler_repartage = false;
         if p.repartage.is_none() {
-            if ui::button(ui, Icon::Hash, "Partager dans un salon").clicked() {
+            if ui::Bouton::new("Partager dans un salon").icone(Icon::Hash).show(ui).clicked() {
                 let salon = salon_courant
                     .filter(|id| salons.iter().any(|(s, _)| s == id))
                     .or_else(|| salons.first().map(|(id, _)| *id));
@@ -2047,15 +2037,15 @@ fn panneau_reglages(
             let envoi = r.envoi.is_some();
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!envoi && r.salon.is_some(), |ui| {
-                    if ui::primary_button(ui, Some(Icon::Hash), "Partager", None).clicked() {
+                    if ui::Bouton::new("Partager").icone(Icon::Hash).principal().show(ui).clicked() {
                         actions.repartager = true;
                     }
                 });
-                if !envoi && ui::button(ui, Icon::Close, "Annuler").clicked() {
+                if !envoi && ui::Bouton::new("Annuler").icone(Icon::Close).show(ui).clicked() {
                     annuler_repartage = true;
                 }
                 if envoi {
-                    ui.label(RichText::new("envoi…").color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, "envoi…"));
                 }
             });
         }
@@ -2065,7 +2055,7 @@ fn panneau_reglages(
         // Le téléphone.
         let demande = p.demande_qr.is_some();
         ui.add_enabled_ui(!demande, |ui| {
-            if ui::button(ui, Icon::Screen, "Envoyer sur le téléphone").clicked() {
+            if ui::Bouton::new("Envoyer sur le téléphone").icone(Icon::Screen).show(ui).clicked() {
                 actions.telephone = true;
             }
         });

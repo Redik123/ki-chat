@@ -21,6 +21,9 @@
 //!   colonnes masquées par priorité, rayures, survol, clic.
 //! - [`toasts`] : les courts messages qui se posent dans un coin, se lisent
 //!   et s'en vont seuls.
+//! - [`typo`] : les rôles de texte (aide, libellé, corps, titres) et les
+//!   tons (neutre, discret, alerte, danger…), à la place d'une taille et
+//!   d'une couleur recomposées à chaque ligne.
 //! - [`style`] : l'allure d'ensemble (polices, palette, espacements, thème
 //!   sombre), installée en un appel.
 //!
@@ -37,6 +40,7 @@ pub mod selecteur_emoji;
 pub mod style;
 pub mod tableau;
 pub mod toasts;
+pub mod typo;
 #[cfg(debug_assertions)]
 mod mouchard;
 

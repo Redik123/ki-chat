@@ -9,7 +9,7 @@
 //! changement sans ouvrir la fenêtre soi-même.
 
 use eframe::egui::{self, vec2, Color32, CornerRadius, RichText, Sense};
-use ki_ui::composants::{self as c, Tone};
+use ki_ui::composants::{self as c, Bouton, Taille, Texte, Ton};
 use ki_ui::flex::{Case, Flex, Repartit};
 use ki_ui::icones::{self, Icon};
 use ki_ui::jetons::{couleur, espace, largeur, police, rayon, texte};
@@ -87,6 +87,7 @@ impl eframe::App for Vitrine {
                 self.palette(ui);
                 self.echelles(ui);
                 self.boutons(ui);
+                self.typage(ui);
                 self.icones(ui);
                 self.reglages(ui);
                 self.bandeaux(ui);
@@ -205,16 +206,54 @@ impl Vitrine {
     }
 
     fn boutons(&mut self, ui: &mut egui::Ui) {
-        c::section(ui, Icon::Play, "Boutons", Some("button, primary_button, tinted_button, icon_button"), |ui| {
+        c::section(ui, Icon::Play, "Boutons", Some("Bouton (surface, principal, teinté), icon_button"), |ui| {
             Flex::ligne().ecart(espace::S).passer_a_la_ligne().show(ui, "boutons", |f| {
-                f.ui(|ui| c::button(ui, Icon::Play, "Lecture"));
-                f.ui(|ui| c::primary_button(ui, Some(Icon::Send), "Envoyer", None));
-                f.ui(|ui| c::tinted_button(ui, Some(Icon::Check), "Accent", Tone::Accent));
-                f.ui(|ui| c::tinted_button(ui, Some(Icon::Close), "Danger", Tone::Danger));
-                f.ui(|ui| c::tinted_button(ui, Some(Icon::Warning), "Attention", Tone::Warn));
-                f.ui(|ui| c::tinted_button(ui, Some(Icon::Info), "Info", Tone::Info));
+                f.ui(|ui| c::Bouton::new("Lecture").icone(Icon::Play).show(ui));
+                f.ui(|ui| c::Bouton::new("Envoyer").icone(Icon::Send).principal().show(ui));
+                f.ui(|ui| c::Bouton::new("Accent").icone(Icon::Check).teinte(Ton::Accent).show(ui));
+                f.ui(|ui| c::Bouton::new("Danger").icone(Icon::Close).teinte(Ton::Danger).show(ui));
+                f.ui(|ui| c::Bouton::new("Attention").icone(Icon::Warning).teinte(Ton::Alerte).show(ui));
+                f.ui(|ui| c::Bouton::new("Info").icone(Icon::Info).teinte(Ton::Info).show(ui));
                 f.ui(|ui| c::icon_button(ui, Icon::Gear, "Réglages"));
                 f.ui(|ui| c::icon_button_ex(ui, Icon::Send, 32.0, "Envoyer, teinté", Some(couleur::ACCENT)));
+            });
+        });
+    }
+
+    fn typage(&mut self, ui: &mut egui::Ui) {
+        c::section(ui, Icon::Pencil, "Rôles de texte", Some("typo::Texte × typo::Ton — ce qu'un texte est, et ce qu'il dit"), |ui| {
+            for role in Texte::TOUS {
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(vec2(110.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(110.0);
+                        c::texte(ui, Texte::Aide, format!("{role:?} · {}", role.taille()));
+                    });
+                    c::texte(ui, role, "Portez ce vieux whisky au juge blond");
+                });
+            }
+            ui.add_space(espace::M);
+            c::section_label(ui, "tons");
+            Flex::ligne().ecart(espace::L).passer_a_la_ligne().show(ui, "tons", |f| {
+                for ton in Ton::TOUS {
+                    f.ui(|ui| c::texte_ton(ui, Texte::Corps, ton, format!("{ton:?}")));
+                }
+            });
+        });
+        c::section(ui, Icon::Play, "Bouton : tailles et états", Some("Bouton::new(…).taille(…).actif(…).en_charge(…).bulle(…)"), |ui| {
+            Flex::ligne().ecart(espace::S).aligner(ki_ui::flex::Aligne::Centre).passer_a_la_ligne().show(ui, "tailles", |f| {
+                for (taille, nom) in [(Taille::S, "Taille S"), (Taille::M, "Taille M"), (Taille::L, "Taille L")] {
+                    f.ui(|ui| Bouton::new(nom).icone(Icon::Check).taille(taille).show(ui));
+                    f.ui(|ui| Bouton::new(nom).principal().taille(taille).show(ui));
+                }
+            });
+            ui.add_space(espace::M);
+            Flex::ligne().ecart(espace::S).passer_a_la_ligne().show(ui, "etats", |f| {
+                f.ui(|ui| Bouton::new("Désactivé").icone(Icon::Send).actif(false).bulle("il manque un destinataire").show(ui));
+                f.ui(|ui| Bouton::new("Désactivé").principal().actif(false).show(ui));
+                f.ui(|ui| Bouton::new("Désactivé").teinte(Ton::Danger).actif(false).show(ui));
+                f.ui(|ui| Bouton::new("Export en cours").icone(Icon::Download).en_charge(true).show(ui));
+                f.ui(|ui| Bouton::new("Envoi en cours").principal().en_charge(true).show(ui));
+                f.ui(|ui| Bouton::new("Largeur imposée").largeur(220.0).show(ui));
             });
         });
     }
@@ -260,16 +299,16 @@ impl Vitrine {
 
     fn bandeaux(&mut self, ui: &mut egui::Ui) {
         c::section(ui, Icon::Info, "Bandeaux et repères", Some("banner, encart, rappel, etiquette, card…"), |ui| {
-            c::banner(ui, Tone::Info, "Un bandeau d'information.", false);
+            c::banner(ui, Ton::Info, "Un bandeau d'information.", false);
             ui.add_space(espace::S);
-            c::banner(ui, Tone::Warn, "Un bandeau d'avertissement.", false);
+            c::banner(ui, Ton::Alerte, "Un bandeau d'avertissement.", false);
             ui.add_space(espace::S);
-            c::banner(ui, Tone::Danger, "Un bandeau d'erreur.", false);
+            c::banner(ui, Ton::Danger, "Un bandeau d'erreur.", false);
             ui.add_space(espace::S);
             if !self.bandeau_ferme
                 && c::banner(
                     ui,
-                    Tone::Accent,
+                    Ton::Accent,
                     "Un bandeau qu'on peut fermer, et dont le texte est assez long pour passer à la ligne quand la fenêtre se fait étroite : la croix garde sa place à droite.",
                     true,
                 )
@@ -396,9 +435,9 @@ impl Vitrine {
             ui.add_space(espace::M);
             c::section_label(ui, "répartis : le premier au début, le dernier à la fin");
             Flex::ligne().repartir(Repartit::Entre).show(ui, "entre", |f| {
-                f.ui(|ui| c::button(ui, Icon::ChevronLeft, "Précédent"));
+                f.ui(|ui| c::Bouton::new("Précédent").icone(Icon::ChevronLeft).show(ui));
                 f.ui(|ui| ui.label(RichText::new("page 2 / 5").color(couleur::TEXT_DIM)));
-                f.ui(|ui| c::button(ui, Icon::ChevronRight, "Suivant"));
+                f.ui(|ui| c::Bouton::new("Suivant").icone(Icon::ChevronRight).show(ui));
             });
             ui.add_space(espace::M);
             c::section_label(ui, "passer à la ligne");
@@ -515,8 +554,8 @@ impl Vitrine {
             let mut en_haut = false;
             let mut en_bas = false;
             ui.horizontal(|ui| {
-                en_haut = c::button(ui, Icon::ArrowUp, "500 plus anciens").clicked();
-                en_bas = c::button(ui, Icon::ArrowDown, "Un nouveau").clicked();
+                en_haut = c::Bouton::new("500 plus anciens").icone(Icon::ArrowUp).show(ui).clicked();
+                en_bas = c::Bouton::new("Un nouveau").icone(Icon::ArrowDown).show(ui).clicked();
             });
             if en_haut {
                 let debut = self.plus_ancien - 500;

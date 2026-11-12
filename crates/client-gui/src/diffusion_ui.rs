@@ -4,17 +4,18 @@
 //! ce que l'interface en retient — [`MaDiffusion`] pour ce que j'émets, [`MonRegard`]
 //! pour ce que je regarde — et les fenêtres qui vont avec.
 
+use ki_ui::typo::Texte;
 use std::collections::HashMap;
 
 use eframe::egui::{self, RichText};
 use ki_protocol::{ClientMsg, Member, UserId};
-use ki_ui::jetons::{espace, texte};
+use ki_ui::jetons::espace;
 
 use crate::{partage, regard_detache, secours, ui, KiApp};
 use crate::icons::Icon;
 use crate::net::EmissionVideo as _;
-use crate::theme::{TEXT, TEXT_DIM, TEXT_FAINT};
-use crate::ui::Tone;
+use crate::theme::TEXT_DIM;
+use crate::ui::Ton;
 
 /// Ma diffusion d'écran : ses réglages, le flux en cours, ce que le serveur en demande.
 pub(crate) struct MaDiffusion {
@@ -506,22 +507,20 @@ impl KiApp {
                 ui.add_space(espace::L);
                 ui.horizontal(|ui| {
                     if en_direct {
-                        if ui::tinted_button(ui, Some(Icon::Close), "Arrêter la diffusion", Tone::Danger)
+                        if ui::Bouton::new("Arrêter la diffusion").icone(Icon::Close).teinte(Ton::Danger).show(ui)
                             .clicked()
                         {
                             arreter = true;
                         }
                     } else if in_voice {
-                        if ui::primary_button(ui, Some(Icon::Screen), "Démarrer la diffusion", None)
+                        if ui::Bouton::new("Démarrer la diffusion").icone(Icon::Screen).principal().show(ui)
                             .clicked()
                         {
                             lancer = true;
                         }
                     } else {
                         ui.label(
-                            RichText::new("rejoins un salon vocal pour diffuser")
-                                .color(TEXT_DIM)
-                                .size(texte::COURANT),
+                            Texte::Libelle.riche(ui, "rejoins un salon vocal pour diffuser"),
                         );
                     }
                 });
@@ -678,15 +677,15 @@ impl KiApp {
                     }
                     ui.add_space(espace::XS);
                     if let Some(qui) = &qui_regarde {
-                        ui.label(RichText::new(qui).color(TEXT).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche_ton(ui, Ton::Neutre, qui));
                     }
-                    ui.label(RichText::new(etat).color(TEXT_FAINT).size(texte::PETIT).monospace());
+                    ui.label(Texte::Aide.riche(ui, etat).monospace());
                     ui.add_space(espace::S);
                     ui.horizontal(|ui| {
-                        if ui::button(ui, Icon::Close, "Arrêter").clicked() {
+                        if ui::Bouton::new("Arrêter").icone(Icon::Close).show(ui).clicked() {
                             arreter = true;
                         }
-                        if ui::button(ui, Icon::Sliders, "Réglages").clicked() {
+                        if ui::Bouton::new("Réglages").icone(Icon::Sliders).show(ui).clicked() {
                             reglages = true;
                         }
                     });
@@ -772,18 +771,18 @@ impl KiApp {
                 }
                 ui.add_space(espace::S);
                 ui.horizontal_wrapped(|ui| {
-                    if ui::button(ui, Icon::Close, "Quitter le visionnage").clicked() {
+                    if ui::Bouton::new("Quitter le visionnage").icone(Icon::Close).show(ui).clicked() {
                         quitter = true;
                     }
                     // Sa propre fenêtre : sur le second écran, ou en plein
                     // écran — là où un stream se regarde vraiment.
-                    if ui::button(ui, Icon::Screen, "Détacher")
+                    if ui::Bouton::new("Détacher").icone(Icon::Screen).show(ui)
                         .on_hover_text("dans sa propre fenêtre, à poser sur un second écran")
                         .clicked()
                     {
                         detacher = true;
                     }
-                    if ui::button(ui, Icon::Screen, "Plein écran")
+                    if ui::Bouton::new("Plein écran").icone(Icon::Screen).show(ui)
                         .on_hover_text("Échap pour en sortir, F11 ou double-clic pour y revenir")
                         .clicked()
                     {
@@ -795,9 +794,7 @@ impl KiApp {
                     // général et la mise en sourdine.
                     if self.regard.meme_machine {
                         ui.label(
-                            RichText::new("son du jeu coupé : le streamer est sur ce PC")
-                                .color(TEXT_FAINT)
-                                .size(texte::PETIT),
+                            Texte::Aide.riche(ui, "son du jeu coupé : le streamer est sur ce PC"),
                         )
                         .on_hover_text(
                             "sa capture exclut son propre ki-chat, pas celui-ci : \
@@ -820,7 +817,7 @@ impl KiApp {
                         }
                     }
                     if !etat.is_empty() {
-                        ui.label(RichText::new(&etat).color(TEXT_FAINT).size(texte::PETIT).monospace());
+                        ui.label(Texte::Aide.riche(ui, &etat).monospace());
                     }
                 });
             });

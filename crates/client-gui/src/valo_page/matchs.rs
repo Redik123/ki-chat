@@ -8,6 +8,7 @@
 //! lit d'une `PartieSoiree` ([`Partie::de_la_soiree`]) comme des
 //! `MatchResume` des fiches ([`parties_du_groupe`]).
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::police;
 
 use super::*;
@@ -308,7 +309,7 @@ fn contenu(
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = espace::S;
-        ui.label(RichText::new(heure_de(p.date)).color(TEXT_FAINT).size(texte::PETIT));
+        ui.label(Texte::Aide.riche(ui, heure_de(p.date)));
         let mut titre = issue.texte().to_string();
         if let Some((a, b)) = score {
             titre.push_str(&format!(" {a}-{b}"));
@@ -390,9 +391,9 @@ fn pastille_de_joueur(ui: &mut Ui, j: &Joueur, cx: &Contexte<'_>, noms: &Annuair
                     });
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = espace::XS;
-                        ui.label(RichText::new(format!("{} / {} / {}", j.kda.0, j.kda.1, j.kda.2)).color(TEXT).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche_ton(ui, Ton::Neutre, format!("{} / {} / {}", j.kda.0, j.kda.1, j.kda.2)));
                         if let Some(acs) = j.acs {
-                            ui.label(RichText::new(format!("{acs} ACS")).color(TEXT_DIM).size(texte::PETIT));
+                            ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, format!("{acs} ACS")));
                         }
                         if j.mvp {
                             badge(ui, "MVP", theme::WARN);
@@ -402,7 +403,7 @@ fn pastille_de_joueur(ui: &mut Ui, j: &Joueur, cx: &Contexte<'_>, noms: &Annuair
                             badge(ui, &texte_, teinte_de_medaille(g.medaille));
                         }
                         if j.medailles.len() > 2 {
-                            ui.label(RichText::new(format!("+{}", j.medailles.len() - 2)).color(TEXT_FAINT).size(texte::MINUSCULE));
+                            ui.label(Texte::Minuscule.riche(ui, format!("+{}", j.medailles.len() - 2)));
                         }
                     });
                 });
@@ -532,7 +533,7 @@ impl PageValo {
                 n if n <= CARTES_PAR_PAGE => format!("voir les {n} autres"),
                 n => format!("voir {CARTES_PAR_PAGE} de plus, sur {n}"),
             };
-            if ui::button(ui, Icon::Plus, &libelle).clicked() {
+            if ui::Bouton::new(&libelle).icone(Icon::Plus).show(ui).clicked() {
                 self.cartes_matchs += CARTES_PAR_PAGE;
             }
         }

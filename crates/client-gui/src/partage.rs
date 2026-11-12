@@ -10,6 +10,7 @@
 //!   flux QUIC, dans le désordre) ; le fil de ce module déchiffre, remet en
 //!   ordre par numéro de séquence, décode, et dépose l'image pour l'UI.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, texte};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -281,7 +282,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
                 }
                 if !sources.fenetres.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new("Fenêtres").color(TEXT_DIM).size(texte::PETIT));
+                    ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, "Fenêtres"));
                 }
                 for f in &sources.fenetres {
                     let s = CaptureSource::Window(f.title.clone());
@@ -308,7 +309,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
 
     ui.add_space(espace::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("résolution").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "résolution"));
         let actuel = HAUTEURS
             .iter()
             .find(|(h, _)| *h == r.max_height)
@@ -326,7 +327,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
                 }
             });
         ui.add_space(espace::M);
-        ui.label(RichText::new("images/s").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "images/s"));
         egui::ComboBox::from_id_salt("stream_fps")
             .width(64.0)
             .selected_text(RichText::new(r.fps.to_string()).color(TEXT))
@@ -342,7 +343,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
 
     ui.add_space(espace::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("encodeur").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "encodeur"));
         let actuel = ENCODEURS
             .iter()
             .find(|(e, _, _)| *e == r.encodeur)
@@ -380,7 +381,7 @@ pub fn reglages_ui(ui: &mut egui::Ui, r: &mut Reglages, sources: &mut Sources) -
 
     ui.add_space(espace::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("débit").color(TEXT_DIM).size(texte::COURANT));
+        ui.label(Texte::Libelle.riche(ui, "débit"));
         let mut mbit = r.kbps as f32 / 1000.0;
         if ui
             .add(

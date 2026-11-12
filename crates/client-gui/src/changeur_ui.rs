@@ -2,6 +2,7 @@
 //! personnages, où part la voix changée, un raccourci pour basculer — et, en
 //! mode studio, chaque réglage à la main.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, texte};
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use ki_voice::{EtatEssai, ESSAI_SECONDES};
 use crate::icons::Icon;
 use crate::ptt::PttKey;
 use crate::reglages_audio::curseur;
-use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
+use crate::theme::{ACCENT, DANGER, SPEAK, TEXT};
 use crate::ui;
 use crate::KiApp;
 
@@ -168,7 +169,7 @@ impl KiApp {
                     let prise = [self.audio.hotkey_micro, self.audio.hotkey_sourd].contains(&self.audio.hotkey_changeur)
                         || (self.audio.hotkey_changeur.is_some() && self.audio.hotkey_changeur == Some(self.audio.ptt_key));
                     if self.audio.hotkey_changeur.is_some() && prise {
-                        ui.label(RichText::new("cette touche sert déjà ailleurs").color(WARN).size(texte::PETIT));
+                        ui.label(Texte::Aide.riche_ton(ui, Ton::Alerte, "cette touche sert déjà ailleurs"));
                     }
                     ui::precision(ui, "Une pression allume ou coupe le changeur, même en jeu.");
                 });
@@ -180,7 +181,7 @@ impl KiApp {
                 ui.add_space(espace::XS);
                 ui.label(RichText::new("Réglages").color(TEXT).size(texte::CORPS).strong());
                 ui.label(
-                    RichText::new("Toucher un réglage fait ton propre personnage.").color(TEXT_FAINT).size(texte::PETIT),
+                    Texte::Aide.riche(ui, "Toucher un réglage fait ton propre personnage."),
                 );
                 ui.add_space(espace::XS);
                 let montrer = self.audio.explications;
@@ -207,7 +208,7 @@ impl KiApp {
                     }
                     let bande = 2f32.powf(r.hauteur / 12.0);
                     if (r.formants - bande).abs() > 0.005
-                        && ui::button(ui, Icon::Repeat, "Suivre la hauteur (effet écureuil)").clicked()
+                        && ui::Bouton::new("Suivre la hauteur (effet écureuil)").icone(Icon::Repeat).show(ui).clicked()
                     {
                         r.formants = bande;
                     }
@@ -318,9 +319,7 @@ impl KiApp {
                 }
                 if !self.audio.changeur_actif {
                     ui.label(
-                        RichText::new("Le changeur est coupé : allume-le pour entendre ces réglages.")
-                            .color(TEXT_DIM)
-                            .size(texte::PETIT),
+                        Texte::Aide.riche_ton(ui, Ton::Discret, "Le changeur est coupé : allume-le pour entendre ces réglages."),
                     );
                 }
             },
@@ -354,12 +353,12 @@ impl KiApp {
             if self.vocal.imitation_calcul.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("analyse de l'extrait…").color(TEXT_DIM).size(texte::COURANT));
+                    ui.label(Texte::Libelle.riche(ui, "analyse de l'extrait…"));
                 });
             } else {
                 let libelle =
                     if self.vocal.imitation_cible.is_some() { "Choisir un autre extrait…" } else { "Choisir l'extrait d'une voix…" };
-                if ui::button(ui, Icon::Paperclip, libelle).clicked() {
+                if ui::Bouton::new(libelle).icone(Icon::Paperclip).show(ui).clicked() {
                     if let Some(chemin) = rfd::FileDialog::new().add_filter("Son", &EXTENSIONS_SON).pick_file() {
                         let (tx, rx) = std::sync::mpsc::channel();
                         self.vocal.imitation_calcul = Some(rx);
@@ -380,7 +379,7 @@ impl KiApp {
                 }
             }
             if let Some(erreur) = &self.vocal.imitation_erreur {
-                ui.label(RichText::new(erreur).color(WARN).size(texte::PETIT));
+                ui.label(Texte::Aide.riche_ton(ui, Ton::Alerte, erreur));
             }
             let Some((nom, cible)) = self.vocal.imitation_cible.clone() else {
                 ui::precision(
@@ -405,7 +404,7 @@ impl KiApp {
                     ui.horizontal(|ui| {
                         ui::meter(ui, avancement, Vec2::new(150.0, 8.0), DANGER);
                         let reste = ((1.0 - avancement) * ESSAI_SECONDES as f32).ceil().max(1.0);
-                        ui.label(RichText::new(format!("parle normalement… {reste:.0} s")).color(TEXT_DIM).size(texte::COURANT));
+                        ui.label(Texte::Libelle.riche(ui, format!("parle normalement… {reste:.0} s")));
                     });
                     return;
                 }
@@ -413,7 +412,7 @@ impl KiApp {
                 Some(EtatEssai::Vide) => None,
             };
             let Some(moi) = moi else {
-                if ui::button(ui, Icon::Mic, &format!("Enregistrer ma voix ({ESSAI_SECONDES} s)")).clicked() {
+                if ui::Bouton::new(&format!("Enregistrer ma voix ({ESSAI_SECONDES} s)")).icone(Icon::Mic).show(ui).clicked() {
                     if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
                         e.enregistrer_essai();
                     }
@@ -429,7 +428,7 @@ impl KiApp {
             // 3. Le rapprochement.
             let r = rapprocher(&moi, &cible);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Pour t'en rapprocher :").color(TEXT_DIM).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche(ui, "Pour t'en rapprocher :"));
                 ui.label(
                     RichText::new(format!(
                         "hauteur {:+.1} demi-tons, timbre {:+.0} %",
@@ -452,7 +451,7 @@ impl KiApp {
                 );
             }
             ui.horizontal_wrapped(|ui| {
-                if ui::button(ui, Icon::Check, "Appliquer au changeur").clicked() {
+                if ui::Bouton::new("Appliquer au changeur").icone(Icon::Check).show(ui).clicked() {
                     self.audio.changeur.hauteur = r.hauteur;
                     self.audio.changeur.formants = r.formants;
                     self.audio.changeur = self.audio.changeur.bornes();

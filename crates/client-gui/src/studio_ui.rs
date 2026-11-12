@@ -6,6 +6,7 @@
 //! Le mode simple règle les mêmes choses, en moins de gestes : ce qu'on règle
 //! ici reste actif quand on y revient.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, texte};
 use eframe::egui::{self, RichText, Vec2};
 use ki_voice::dynamique::{
@@ -124,7 +125,7 @@ fn parametre(ui: &mut egui::Ui, nom: &str, aide: &str, montrer: bool, add: impl 
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.set_min_width(LARGEUR_NOM);
-                ui.label(RichText::new(nom).color(TEXT_DIM).size(texte::COURANT)).on_hover_text(aide);
+                ui.label(Texte::Libelle.riche(ui, nom)).on_hover_text(aide);
             },
         );
         add(ui);
@@ -139,7 +140,7 @@ fn explication(ui: &mut egui::Ui, texte: &str) {
     ui.horizontal_top(|ui| {
         ui.add_space(LARGEUR_NOM + ui.spacing().item_spacing.x);
         ui.vertical(|ui| {
-            ui.add(egui::Label::new(RichText::new(texte).color(TEXT_FAINT).size(texte::PETIT)).wrap());
+            ui.add(egui::Label::new(Texte::Aide.riche(ui, texte)).wrap());
         });
     });
     ui.add_space(espace::XS);
@@ -162,7 +163,7 @@ fn titre_bloc(ui: &mut egui::Ui, numero: usize, titre: &str, description: &str, 
     ui.label(RichText::new(format!("{numero}. {titre}")).color(TEXT).size(texte::CORPS).strong())
         .on_hover_text(description);
     if montrer {
-        ui.add(egui::Label::new(RichText::new(description).color(TEXT_DIM).size(texte::PETIT)).wrap());
+        ui.add(egui::Label::new(Texte::Aide.riche_ton(ui, Ton::Discret, description)).wrap());
     }
     ui.add_space(espace::XS);
 }

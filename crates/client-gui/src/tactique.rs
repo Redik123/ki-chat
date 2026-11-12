@@ -772,9 +772,9 @@ impl Tactique {
             for (outil, nom, touche) in Outil::TOUS {
                 let libelle = format!("{nom}  {touche}");
                 let bouton = if self.outil == outil {
-                    ui::tinted_button(ui, Some(outil.icone()), &libelle, ui::Tone::Accent)
+                    ui::Bouton::new(&libelle).icone(outil.icone()).teinte(ui::Ton::Accent).show(ui)
                 } else {
-                    ui::button(ui, outil.icone(), &libelle)
+                    ui::Bouton::new(&libelle).icone(outil.icone()).show(ui)
                 };
                 if bouton.clicked() {
                     self.outil = outil;

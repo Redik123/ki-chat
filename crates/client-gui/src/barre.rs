@@ -1,6 +1,7 @@
 //! La barre du bas : micro, casque, salon vocal, les boutons des fenêtres, le
 //! vumètre et le ping — sur trois largeurs, selon ce qui tient.
 
+use ki_ui::typo::Texte;
 use eframe::egui::{self, RichText, Sense, Vec2};
 use ki_protocol::{ClientMsg, IconChange};
 use ki_ui::jetons::{espace, marge, rayon, texte};
@@ -11,7 +12,7 @@ use crate::formats::compact;
 use crate::icons::Icon;
 use crate::ptt::PttKey;
 use crate::theme::{ACCENT, DANGER, SPEAK, TEXT, TEXT_DIM, TEXT_FAINT, WARN};
-use crate::ui::Tone;
+use crate::ui::Ton;
 
 /// Ce que la barre du bas montre, selon la place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub(crate) fn bouton_de_barre(ui: &mut egui::Ui, compact: bool, icone: Icon, lib
     if compact {
         ui::icon_button_ex(ui, icone, 32.0, libelle, None)
     } else {
-        ui::button(ui, icone, libelle)
+        ui::Bouton::new(libelle).icone(icone).show(ui)
     }
 }
 
@@ -76,7 +77,7 @@ impl KiApp {
                     // autant le dire ici plutôt que laisser mariner.
                     ui::banner(
                         ui,
-                        Tone::Warn,
+                        Ton::Alerte,
                         &format!(
                             "{what} — reconnexion automatique en cours… Si ça arrive \
                              quand un jeu se lance et que ça dure : Paramètres son \
@@ -101,7 +102,7 @@ impl KiApp {
                     };
                     ui::banner(
                         ui,
-                        Tone::Info,
+                        Ton::Info,
                         &format!(
                             "{what} n'a pas été trouvé — on utilise le périphérique par défaut, et on le reprend dès son retour."
                         ),
@@ -252,7 +253,7 @@ impl KiApp {
                     // attend après moi.
                     if self.serveur_cartes {
                         let bouton = if self.cartes.mon_tour(self.my_id) {
-                            ui::tinted_button(ui, Some(Icon::Cartes), "À toi !", Tone::Accent)
+                            ui::Bouton::new("À toi !").icone(Icon::Cartes).teinte(Ton::Accent).show(ui)
                         } else {
                             bouton_de_barre(ui, etroite, Icon::Cartes, "Cartes")
                         };
@@ -352,7 +353,7 @@ impl KiApp {
                         if let Some(texte) = sanction {
                             ui.add_space(espace::S);
                             ui::glyph(ui, Icon::MicOff, 13.0, WARN);
-                            ui.label(RichText::new(texte).color(WARN).size(texte::COURANT)).on_hover_text(
+                            ui.label(Texte::Libelle.riche_ton(ui, Ton::Alerte, texte)).on_hover_text(
                                 "ce n'est pas ton matériel : quelqu'un l'a décidé côté serveur",
                             );
                         }
@@ -370,7 +371,7 @@ impl KiApp {
                     // --- Télémétrie, alignée à droite ---
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !voice.engine_up {
-                            ui.label(RichText::new("vocal indisponible").color(WARN).size(texte::COURANT))
+                            ui.label(Texte::Libelle.riche_ton(ui, Ton::Alerte, "vocal indisponible"))
                                 .on_hover_text(
                                     "aucun périphérique audio n'a pu être ouvert — \
                                  vérifie les réglages audio",

@@ -9,6 +9,7 @@
 //!
 //! L'autre se choisit ici, ou en cochant deux lignes du classement.
 
+use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{largeur, police};
 
 use super::*;
@@ -340,7 +341,7 @@ fn ensemble_ui(ui: &mut Ui, a: &Vue, a_id: UserId, b: &Vue, b_id: UserId) {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = espace::S;
                 ui.label(RichText::new(pluriel(u32::from(v.matchs), "partie")).font(police::moyenne(ui.ctx(), texte::TITRE)).color(TEXT));
-                ui.label(RichText::new("ensemble").color(TEXT_DIM).size(texte::CORPS));
+                ui.label(Texte::Corps.riche_ton(ui, Ton::Discret, "ensemble"));
                 ui.label(
                     RichText::new(format!("{} V – {} D · {}", v.victoires, v.defaites, opt_pct(v.victoires_pct())))
                         .font(police::moyenne(ui.ctx(), texte::CORPS))
@@ -364,15 +365,13 @@ fn ensemble_ui(ui: &mut Ui, a: &Vue, a_id: UserId, b: &Vue, b_id: UserId) {
                     ui.spacing_mut().item_spacing.x = espace::XS;
                     ui.label(RichText::new(nom).font(police::moyenne(ui.ctx(), texte::COURANT)).color(couleur));
                     ui.label(
-                        RichText::new(format!(
+                        Texte::Libelle.riche(ui, format!(
                             ": K/D {} avec {autre}, {} sans · victoires {} avec, {} sans",
                             opt_dec(avec.kd(), 2),
                             opt_dec(sans.kd(), 2),
                             opt_pct(avec.victoires_pct()),
                             opt_pct(sans.victoires_pct())
-                        ))
-                        .color(TEXT_DIM)
-                        .size(texte::COURANT),
+                        )),
                     );
                 });
             }
@@ -381,7 +380,7 @@ fn ensemble_ui(ui: &mut Ui, a: &Vue, a_id: UserId, b: &Vue, b_id: UserId) {
             ui.add_space(espace::S);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = espace::XS;
-                ui.label(RichText::new("L'un contre l'autre :").color(TEXT_DIM).size(texte::COURANT));
+                ui.label(Texte::Libelle.riche(ui, "L'un contre l'autre :"));
                 ui.label(RichText::new(a.username).color(COULEUR_A).size(texte::COURANT));
                 ui.label(RichText::new(format!("{} – {}", e.contre.0, e.contre.1)).font(police::moyenne(ui.ctx(), texte::CORPS)).color(TEXT));
                 ui.label(RichText::new(b.username).color(COULEUR_B).size(texte::COURANT));
@@ -461,7 +460,7 @@ fn ligne_en_commun(ui: &mut Ui, nom: &str, couleur: Color32, b: &Bilan, mieux: b
         icons::dot(ui.painter(), point.center(), 3.0, couleur);
         ui.label(RichText::new(nom).color(couleur).size(texte::PETIT));
         ui.label(
-            RichText::new(format!("{} · K/D {}", pluriel(u32::from(b.matchs), "partie"), opt_dec(b.kd(), 2))).color(TEXT_DIM).size(texte::PETIT),
+            Texte::Aide.riche_ton(ui, Ton::Discret, format!("{} · K/D {}", pluriel(u32::from(b.matchs), "partie"), opt_dec(b.kd(), 2))),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let police_ = if mieux { police::moyenne(ui.ctx(), texte::COURANT) } else { FontId::proportional(texte::COURANT) };
