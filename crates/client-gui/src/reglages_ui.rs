@@ -1053,9 +1053,7 @@ impl KiApp {
                 update::Status::Idle => {}
                 update::Status::Available(release) => {
                     ui.label(
-                        RichText::new(format!("Version {} disponible", release.version))
-                            .size(texte::TITRE)
-                            .strong(),
+                        Texte::TitreSection.riche(ui, format!("Version {} disponible", release.version)),
                     );
                     ui::hint(ui, format!("Version installée : {}", update::current()));
 
@@ -1087,7 +1085,7 @@ impl KiApp {
                     ui::hint(ui, "L'application redémarrera d'elle-même une fois à jour.");
                 }
                 update::Status::Downloading { done, total } => {
-                    ui.label(RichText::new("Téléchargement…").size(texte::TITRE).strong());
+                    ui.label(Texte::TitreSection.riche(ui, "Téléchargement…"));
                     ui.add_space(espace::M);
                     let ratio = if total > 0 {
                         done as f32 / total as f32
@@ -1101,7 +1099,7 @@ impl KiApp {
                     );
                 }
                 update::Status::Ready => {
-                    ui.label(RichText::new("Mise à jour installée").size(texte::TITRE).strong());
+                    ui.label(Texte::TitreSection.riche(ui, "Mise à jour installée"));
                     ui::hint(ui, "Redémarrage…");
                     // L'utilisateur a déjà dit oui : on ne lui redemande pas
                     // s'il veut bien relancer. La fenêtre se ferme, eframe
@@ -1113,7 +1111,7 @@ impl KiApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 update::Status::Failed(message) => {
-                    ui.label(RichText::new("Mise à jour impossible").size(texte::TITRE).strong());
+                    ui.label(Texte::TitreSection.riche(ui, "Mise à jour impossible"));
                     ui.label(Texte::Corps.riche_ton(ui, Ton::Danger, message.as_str()));
                     ui.add_space(espace::M);
                     ui.hyperlink_to(
@@ -1168,7 +1166,7 @@ impl KiApp {
                     ui::avatar(ui, &me, 56.0, false, shown.as_ref(), theme::BG_RAISED);
                     ui.add_space(espace::XS);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(&me).color(color_for(&me)).size(texte::TITRE).strong());
+                        ui.label(Texte::TitreSection.riche(ui, &me).color(color_for(&me)));
                         // Le rôle vaut mieux qu'un « administrateur/membre »
                         // binaire : c'est lui que les autres voient.
                         let role = self

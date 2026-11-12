@@ -686,7 +686,7 @@ impl KiApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui::glyph(ui, Icon::Hash, 17.0, TEXT_FAINT);
-                            ui.label(RichText::new(&channel_name).color(TEXT).size(texte::TITRE).strong());
+                            ui.label(Texte::TitreSection.riche(ui, &channel_name));
                             // Plus de compteur ici : un salon textuel n'a pas
                             // de membres, et la colonne de droite dit déjà qui
                             // est connecté au serveur.

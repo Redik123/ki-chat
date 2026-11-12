@@ -582,7 +582,7 @@ fn tuile(ui: &mut Ui, largeur: f32, hauteur: f32, t: Tuile, bas: impl FnOnce(&mu
                     if let Some(icone) = t.icone {
                         ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(18.0)));
                     }
-                    ui.add(egui::Label::new(RichText::new(&t.valeur).color(t.teinte).strong().size(texte::GRAND)).truncate());
+                    ui.add(egui::Label::new(Texte::TitreFenetre.riche(ui, &t.valeur).color(t.teinte)).truncate());
                 });
                 if !t.sous.is_empty() {
                     ui.add(egui::Label::new(Texte::Aide.riche_ton(ui, Ton::Discret, &t.sous)).truncate());
@@ -1468,7 +1468,7 @@ fn identite(ui: &mut Ui, fiche: &FicheValorant, catalogue: &Catalogue) {
     let titre = catalogue.titre(&fiche.titre_joueur).map(|t| format!("« {t} »"));
     if fiche.carte_joueur.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&fiche.riot_id).strong().size(texte::TITRE));
+            ui.label(Texte::TitreSection.riche(ui, &fiche.riot_id));
             ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, &detail));
             if let Some(titre) = &titre {
                 ui::hint(ui, titre);

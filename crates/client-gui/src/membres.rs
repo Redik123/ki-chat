@@ -915,7 +915,7 @@ impl KiApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(titre).strong().size(texte::TITRE));
+                    ui.label(Texte::TitreSection.riche(ui, titre));
                     pastille_bot(ui);
                 });
                 ui.label(Texte::Libelle.riche(ui, "Ce n'est pas un membre : c'est le serveur ki-chat lui-même, qui n'a ni compte ni mot de passe."));

@@ -208,7 +208,9 @@ impl<'a> Bouton<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let m = self.taille.mesures();
         let font = FontId::proportional(m.police);
-        let galley = ui.fonts_mut(|f| f.layout_no_wrap(self.libelle.to_owned(), font, theme::TEXT));
+        // Sans couleur à la mise en page : le libellé prend celle de sa variante
+        // au moment d'être peint, estompée quand le bouton est désactivé.
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap(self.libelle.to_owned(), font, Color32::PLACEHOLDER));
         let gap = if self.icone.is_some() && !self.libelle.is_empty() { m.ecart } else { 0.0 };
         let icon_w = if self.icone.is_some() { m.icone } else { 0.0 };
         let desired = Vec2::new(
@@ -573,7 +575,7 @@ pub fn group_title(ui: &mut Ui, icon: Icon, text: &str) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
         icons::draw(ui.painter(), rect, icon, theme::ACCENT);
-        ui.label(RichText::new(text).color(theme::TEXT).size(texte::TITRE).strong());
+        ui.label(Texte::TitreSection.riche(ui, text));
     });
     ui.add_space(espace::S);
 }
@@ -691,7 +693,7 @@ pub fn section(
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
                 icons::draw(ui.painter(), rect, icon, theme::ACCENT);
                 ui.add_space(espace::XXS);
-                ui.label(RichText::new(titre).color(theme::TEXT).size(texte::TITRE).strong());
+                ui.label(Texte::TitreSection.riche(ui, titre));
             });
             if let Some(s) = sous_titre {
                 ui.add_space(espace::XXS);

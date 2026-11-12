@@ -269,7 +269,7 @@ impl Cartes {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
         icones::draw(ui.painter(), r, Icon::Cartes, c::TEXT_DIM);
         ui.add_space(espace::M);
-        ui.label(RichText::new("Dernière carte").size(texte::GRAND).color(c::TEXT).strong());
+        ui.label(Texte::TitreFenetre.riche(&ui, "Dernière carte"));
         ui.add_space(espace::S);
         if en_vocal {
             ui.label(RichText::new("Personne n'a encore ouvert de table dans ton salon.").color(c::TEXT_DIM));
@@ -303,7 +303,7 @@ impl Cartes {
         colonne_defilante(ui, colonne, "attente", |ui| {
             ui.add_space((zone.height() * 0.06).max(espace::L));
             let hote = qui(t.hote);
-            ui.label(RichText::new(format!("La table de {}", hote.nom)).size(texte::GRAND).color(c::TEXT).strong());
+            ui.label(Texte::TitreFenetre.riche(ui, format!("La table de {}", hote.nom)));
             ui.add_space(espace::S);
             let n = t.joueurs.len();
             ui::hint(ui, format!("{n} joueur{} assis sur {MAX_JOUEURS_CARTES} places", if n > 1 { "s" } else { "" }));
@@ -688,7 +688,7 @@ impl Cartes {
                 } else {
                     format!("{} gagne la manche !", qui(g).nom)
                 };
-                ui.label(RichText::new(titre).size(texte::GRAND).color(c::TEXT).strong());
+                ui.label(Texte::TitreFenetre.riche(ui, titre));
             }
             ui.add_space(espace::M);
             let mut scores: Vec<&JoueurCartes> = t.joueurs.iter().collect();

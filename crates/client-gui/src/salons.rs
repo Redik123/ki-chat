@@ -2,7 +2,7 @@
 //! d'un salon vocal verrouillé.
 
 use ki_ui::typo::Texte;
-use eframe::egui::{self, Color32, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, Sense, Vec2};
 use ki_protocol::{ChannelId, ChannelKind, ClientMsg, Member};
 use ki_ui::flex::Flex;
 use ki_ui::jetons::{espace, marge, rayon, texte};
@@ -193,7 +193,7 @@ impl KiApp {
                             f.grandit(|ui| {
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(&header_name).color(TEXT).size(texte::TITRE).strong(),
+                                        Texte::TitreSection.riche(ui, &header_name),
                                     )
                                     .truncate(),
                                 );

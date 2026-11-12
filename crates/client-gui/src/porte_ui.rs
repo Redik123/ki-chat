@@ -508,7 +508,7 @@ fn carte_porte(
     ui::card(ui, |ui| {
         ui.horizontal(|ui| {
             ui::glyph(ui, Icon::Key, 16.0, WARN);
-            ui.label(RichText::new(format!("porte « {} »", porte.slug)).color(TEXT).size(texte::TITRE).strong());
+            ui.label(Texte::TitreSection.riche(ui, format!("porte « {} »", porte.slug)));
             ui.label(
                 Texte::Libelle.riche(ui, format!("· #{}", contexte.nom_salon(porte.salon))),
             );
