@@ -303,16 +303,13 @@ impl KiApp {
         let total: u64 = self.clips.liste.iter().map(|c| c.taille).sum();
         let dossier = self.clips.reglages.dossier_effectif();
         let raccourci = self.clips.reglages.raccourci.label();
-        let roomy = (ctx.content_rect().height() - 120.0).clamp(360.0, 780.0);
         let liste = &self.clips.liste;
         let vignettes = &self.clips.vignettes;
-        egui::Window::new("Clips")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(880.0)
-            .default_height(roomy)
-            .min_width(520.0)
+        ki_ui::fenetre::Fenetre::new("clips", "Clips")
+            .ouverte(&mut open)
+            .largeur(880.0)
+            .haute()
+            .taille_min(520.0, 0.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     match &etat {
@@ -607,12 +604,7 @@ impl KiApp {
         }
         let mut lancer = false;
         let mut fermer = false;
-        egui::Window::new("Partager le clip")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_width(440.0);
+        let boite = ki_ui::fenetre::Modale::new("partager_clip", "Partager le clip").largeur(440.0).show(ctx, |ui| {
                 ui.label(Texte::Corps.gras(ui, &p.nom));
                 let duree = p
                     .fiche
@@ -681,7 +673,9 @@ impl KiApp {
                     }
                 });
             });
-        if fermer {
+        // Échap ou un clic à côté : comme « Annuler », sauf pendant l'envoi —
+        // la boîte le suit jusqu'au bout.
+        if fermer || (boite.fermee && !en_cours) {
             self.clips.partage = None;
         }
         if lancer {
@@ -802,11 +796,7 @@ impl KiApp {
     pub(crate) fn confirmer_retrait_clip(&mut self, ctx: &egui::Context) {
         let Some(c) = self.clips.retrait.clone() else { return };
         let mut decision: Option<bool> = None;
-        egui::Window::new("Retirer ce clip du serveur ?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let boite = ki_ui::fenetre::Modale::new("retirer_clip", "Retirer ce clip du serveur ?").largeur(400.0).show(ctx, |ui| {
                 ui.label(Texte::Corps.gras(ui, &c.nom));
                 ui::hint(
                     ui,
@@ -829,6 +819,7 @@ impl KiApp {
                 self.lancer_retrait_clip(c);
             }
             Some(false) => self.clips.retrait = None,
+            None if boite.fermee => self.clips.retrait = None,
             None => {}
         }
     }
@@ -882,11 +873,7 @@ impl KiApp {
         let Some(chemin) = self.clips.suppression.clone() else { return };
         let nom = chemin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut decision: Option<bool> = None;
-        egui::Window::new("Supprimer ce clip ?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let boite = ki_ui::fenetre::Modale::new("supprimer_clip", "Supprimer ce clip ?").largeur(380.0).show(ctx, |ui| {
                 ui.label(Texte::Corps.gras(ui, &nom));
                 ui::hint(ui, "le fichier sera effacé de ce PC ; il n'y a pas de corbeille");
                 ui.add_space(espace::M);
@@ -915,6 +902,7 @@ impl KiApp {
                 self.rafraichir_clips();
             }
             Some(false) => self.clips.suppression = None,
+            None if boite.fermee => self.clips.suppression = None,
             None => {}
         }
     }

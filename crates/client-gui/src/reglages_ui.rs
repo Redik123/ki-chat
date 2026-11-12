@@ -122,15 +122,11 @@ impl KiApp {
         // Hauteur d'ouverture : large sur un grand écran, sans jamais
         // déborder d'un petit. L'utilisateur peut ensuite redimensionner,
         // et egui retient la taille d'une session à l'autre.
-        let roomy = (ctx.content_rect().height() - 120.0).clamp(320.0, 900.0);
-        egui::Window::new("Réglages")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(520.0)
-            .default_height(roomy)
-            .min_width(340.0)
-            .min_height(260.0)
+        ki_ui::fenetre::Fenetre::new("reglages", "Réglages")
+            .ouverte(&mut open)
+            .largeur(520.0)
+            .haute()
+            .taille_min(340.0, 260.0)
             .show(ctx, |ui| {
                 // Onglets : une seule colonne à faire défiler ne se lisait
                 // plus une fois l'overlay, les sons et la diffusion venus se
@@ -1041,11 +1037,10 @@ impl KiApp {
 
         // Titre figé : le changer d'un état à l'autre ferait repartir la
         // fenêtre au centre à chaque transition.
-        egui::Window::new("Mise à jour")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(380.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        ki_ui::fenetre::Fenetre::new("mise_a_jour", "Mise à jour")
+            .fixe()
+            .largeur(380.0)
+            .ancree(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| match status {
                 update::Status::Idle => {}
                 update::Status::Available(release) => {
@@ -1127,11 +1122,10 @@ impl KiApp {
     pub(crate) fn account_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut to_send: Option<ClientMsg> = None;
-        egui::Window::new("Mon compte")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(300.0)
+        ki_ui::fenetre::Fenetre::new("mon_compte", "Mon compte")
+            .ouverte(&mut open)
+            .fixe()
+            .largeur(300.0)
             .show(ctx, |ui| {
                 // Photo rapportée par le thread du sélecteur de fichier.
                 if let Some(outcome) = self.picked_avatar.lock().unwrap().take() {

@@ -152,11 +152,10 @@ impl Soundboard {
         let mut commande = None;
         let mut ouvert = true;
         let mut recharger = false;
-        egui::Window::new("Soundboard")
-            .open(&mut ouvert)
-            .default_width(540.0)
-            .default_height(360.0)
-            .resizable(true)
+        ki_ui::fenetre::Fenetre::new("soundboard", "Soundboard")
+            .ouverte(&mut ouvert)
+            .largeur(540.0)
+            .hauteur(360.0)
             .show(ctx, |ui| {
                 // Le message (« 5 sons »…) réservé d'abord, en bas : la liste
                 // prend toute la hauteur qui reste. Écrit après elle, il

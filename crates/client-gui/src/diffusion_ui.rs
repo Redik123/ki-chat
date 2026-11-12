@@ -493,12 +493,11 @@ impl KiApp {
         let mut arreter = false;
         let mut change = false;
         let titre = if en_direct { "Réglages de la diffusion" } else { "Diffuser mon écran" };
-        egui::Window::new(titre)
-            .open(&mut ouvert)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(360.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
+        ki_ui::fenetre::Fenetre::new("diffuser", titre)
+            .ouverte(&mut ouvert)
+            .fixe()
+            .largeur(360.0)
+            .ancree(egui::Align2::CENTER_CENTER, [0.0, -20.0])
             .show(ctx, |ui| {
                 if self.diffusion.sources.perimees() {
                     self.diffusion.sources.rafraichir();
@@ -654,10 +653,9 @@ impl KiApp {
             let avec_apercu = g.reglages.preview;
             // La croix de la barre de titre arrête la diffusion : cette
             // fenêtre est son tableau de bord, la fermer c'est finir.
-            egui::Window::new("Tu diffuses ton écran")
-                .open(&mut ouvert)
-                .default_width(380.0)
-                .resizable(true)
+            ki_ui::fenetre::Fenetre::new("ma_diffusion", "Tu diffuses ton écran")
+                .ouverte(&mut ouvert)
+                .largeur(380.0)
                 .show(ctx, |ui| {
                     if let Some(tex) = &self.diffusion.texture {
                         let dispo = ui.available_size();
@@ -747,10 +745,9 @@ impl KiApp {
         // La croix de la barre de titre quitte le visionnage, comme le
         // bouton en bas — que l'on ne voit plus quand la fenêtre est
         // agrandie au-delà de l'écran.
-        egui::Window::new(titre)
-            .open(&mut ouvert)
-            .default_width(900.0)
-            .resizable(true)
+        ki_ui::fenetre::Fenetre::new("regard", titre)
+            .ouverte(&mut ouvert)
+            .largeur(900.0)
             .show(ctx, |ui| {
                 if let Some(tex) = &self.regard.texture {
                     let dispo = ui.available_size();

@@ -1023,15 +1023,11 @@ impl KiApp {
     pub(crate) fn admin_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut to_send: Vec<ClientMsg> = Vec::new();
-        let roomy = (ctx.content_rect().height() - 120.0).clamp(320.0, 900.0);
-        egui::Window::new("Administration")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(460.0)
-            .default_height(roomy)
-            .min_width(360.0)
-            .min_height(260.0)
+        ki_ui::fenetre::Fenetre::new("administration", "Administration")
+            .ouverte(&mut open)
+            .largeur(460.0)
+            .haute()
+            .taille_min(360.0, 260.0)
             .show(ctx, |ui| {
                 // Onglets : tout tenait auparavant dans une seule colonne
                 // déroulante, qui ne se lisait plus une fois les
@@ -1945,24 +1941,17 @@ impl KiApp {
 
     /// Saisie d'un bannissement : motif et durée.
     ///
-    /// Une fenêtre plutôt qu'un menu : bannir se justifie, et le motif est
+    /// Une boîte plutôt qu'un menu : bannir se justifie, et le motif est
     /// relu par la personne bannie comme par les autres admins dans le
     /// journal. Lui demander de le taper à la volée dans un menu contextuel
     /// donnerait des motifs vides.
     pub(crate) fn ban_window(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.admin.ban.as_mut() else { return };
         let username = draft.username.clone();
-        let mut open = true;
         let mut confirm = false;
         let mut cancel = false;
 
-        egui::Window::new(format!("Bannir {username}"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(320.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let boite = ki_ui::fenetre::Modale::new("bannir", format!("Bannir {username}")).largeur(320.0).show(ctx, |ui| {
                 ui::field_label(ui, "Motif (visible par la personne bannie)");
                 ui.add(ui::champ(&mut draft.reason, "ex. spam répété"));
                 ui.add_space(espace::M);
@@ -1992,7 +1981,7 @@ impl KiApp {
                     duration_secs: draft.duration_secs,
                 });
             }
-        } else if cancel || !open {
+        } else if cancel || boite.fermee {
             self.admin.ban = None;
         }
     }

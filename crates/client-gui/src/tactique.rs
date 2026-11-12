@@ -681,17 +681,12 @@ impl Tactique {
         if !self.ouvert {
             return;
         }
-        let ecran = ctx.content_rect();
-        let (max_l, max_h) = ((ecran.width() - 40.0).max(380.0), (ecran.height() - 40.0).max(360.0));
         let mut ouvert = true;
-        egui::Window::new("Carte tactique")
-            .id(egui::Id::unique("carte_tactique"))
-            .open(&mut ouvert)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([760.0_f32.min(max_l), 820.0_f32.min(max_h)])
-            .min_size([420.0_f32.min(max_l), 460.0_f32.min(max_h)])
-            .max_size([max_l, max_h])
+        ki_ui::fenetre::Fenetre::new("carte_tactique", "Carte tactique")
+            .ouverte(&mut ouvert)
+            .largeur(760.0)
+            .hauteur(820.0)
+            .taille_min(420.0, 460.0)
             .show(ctx, |ui| self.contenu(ui, plans, minimap, moi, ma_couleur));
         self.ouvert = ouvert;
     }

@@ -207,17 +207,12 @@ impl Cartes {
         if !self.ouvert {
             return actions;
         }
-        let ecran = ctx.content_rect();
-        let (max_l, max_h) = ((ecran.width() - 40.0).max(360.0), (ecran.height() - 40.0).max(300.0));
         let mut ouvert = true;
-        egui::Window::new("Dernière carte")
-            .id(egui::Id::unique("table_cartes"))
-            .open(&mut ouvert)
-            .collapsible(false)
-            .resizable(true)
-            .default_size([920.0_f32.min(max_l), 640.0_f32.min(max_h)])
-            .min_size([660.0_f32.min(max_l), 560.0_f32.min(max_h)])
-            .max_size([max_l, max_h])
+        ki_ui::fenetre::Fenetre::new("table_cartes", "Dernière carte")
+            .ouverte(&mut ouvert)
+            .largeur(920.0)
+            .hauteur(640.0)
+            .taille_min(660.0, 560.0)
             .show(ctx, |ui| self.contenu(ui, moi, en_vocal, qui, &mut actions));
         self.ouvert = ouvert;
         if self.table.as_ref().is_some_and(|t| t.phase == PhaseCartes::EnCours) {

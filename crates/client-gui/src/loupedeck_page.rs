@@ -157,16 +157,13 @@ impl KiApp {
 
         // On la déplace et on l'agrandit à volonté ; egui retient sa place
         // et sa taille d'une session à l'autre.
-        let ecran = ctx.content_rect();
         let mut ouvert = true;
-        egui::Window::new("Loupedeck Live")
-            .open(&mut ouvert)
-            .collapsible(false)
-            .resizable(true)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ecran.center())
-            .default_size([780.0_f32.min(ecran.width() - 40.0), 860.0_f32.min(ecran.height() - 60.0)])
-            .min_size([560.0, 420.0])
+        ki_ui::fenetre::Fenetre::new("loupedeck", "Loupedeck Live")
+            .ouverte(&mut ouvert)
+            .centree()
+            .largeur(780.0)
+            .hauteur(860.0)
+            .taille_min(560.0, 420.0)
             .show(ctx, |ui| self.loupedeck_page_ui(ui));
         if !ouvert {
             self.loupedeck_etat.page_ouverte = false;

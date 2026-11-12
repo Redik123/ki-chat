@@ -898,12 +898,10 @@ impl KiApp {
             .map(|r| r.name.clone())
             .collect();
         let titre = if id == ki_protocol::MUSIQUE_ID { "Musique" } else { "VALORANT" };
-        egui::Window::new(format!("{titre} · bot"))
-            .id(egui::Id::unique("fiche_bot"))
-            .collapsible(false)
-            .resizable(false)
-            .default_width(440.0)
-            .open(&mut open)
+        ki_ui::fenetre::Fenetre::new("fiche_bot", format!("{titre} · bot"))
+            .ouverte(&mut open)
+            .fixe()
+            .largeur(440.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(Texte::TitreSection.riche(ui, titre));

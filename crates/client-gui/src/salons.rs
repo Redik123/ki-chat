@@ -508,16 +508,11 @@ impl KiApp {
             .map(|c| c.name.clone())
             .unwrap_or_default();
         let wrong = prompt.wrong;
-        let mut open = true;
         let mut submit = false;
         let mut cancel = false;
 
-        egui::Window::new(format!("Salon verrouillé — {name}"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(300.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        let boite = ki_ui::fenetre::Modale::new("salon_verrouille", format!("Salon verrouillé — {name}"))
+            .largeur(300.0)
             .show(ctx, |ui| {
                 if wrong {
                     ui::bandeau(ui, Ton::Danger, "Mot de passe incorrect");
@@ -553,7 +548,7 @@ impl KiApp {
                     password: Some(prompt.password),
                 });
             }
-        } else if cancel || !open {
+        } else if cancel || boite.fermee {
             self.voice_prompt = None;
         }
     }

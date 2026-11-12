@@ -389,12 +389,11 @@ impl Portes {
         let mut actions = Vec::new();
         let mut ouvert = true;
         let maintenant = maintenant_ms();
-        egui::Window::new("Portes web")
-            .open(&mut ouvert)
-            .default_width(500.0)
-            .default_height(460.0)
-            .min_width(380.0)
-            .resizable(true)
+        ki_ui::fenetre::Fenetre::new("portes", "Portes web")
+            .ouverte(&mut ouvert)
+            .largeur(500.0)
+            .hauteur(460.0)
+            .taille_min(380.0, 0.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui::hint(

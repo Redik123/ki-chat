@@ -1346,9 +1346,9 @@ impl KiApp {
         }
 
         let mut open = true;
-        egui::Window::new("🧪 Labo vidéo — aller-retour H.264 local")
-            .open(&mut open)
-            .default_width(820.0)
+        ki_ui::fenetre::Fenetre::new("labo_video", "🧪 Labo vidéo — aller-retour H.264 local")
+            .ouverte(&mut open)
+            .largeur(820.0)
             .show(ctx, |ui| {
                 if let Some(tex) = &self.labo_texture {
                     let [w, h] = tex.size();
@@ -1631,11 +1631,8 @@ impl KiApp {
             return;
         }
         let mut decision: Option<bool> = None;
-        egui::Window::new("ki-chat continue dans la zone de notification")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(380.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        let boite = ki_ui::fenetre::Modale::new("zone_de_notification", "ki-chat continue dans la zone de notification")
+            .largeur(400.0)
             .show(ctx, |ui| {
                 ui.label(
                     RichText::new(
@@ -1670,6 +1667,8 @@ impl KiApp {
                 self.quitter = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            // Échap ou un clic à côté : on renonce à fermer, la fenêtre reste.
+            None if boite.fermee => self.zone_dialogue = false,
             None => {}
         }
     }
@@ -3464,10 +3463,9 @@ impl KiApp {
             return;
         }
         let mut reponse: Option<bool> = None;
-        egui::Window::new("Ton micro ne livre rien")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+        ki_ui::fenetre::Fenetre::new("micro_muet", "Ton micro ne livre rien")
+            .fixe()
+            .ancree(egui::Align2::CENTER_CENTER, [0.0, -40.0])
             .show(ctx, |ui| {
                 ui.set_max_width(380.0);
                 // Nommer le micro change tout : « ton micro ne capte rien » ne
@@ -3999,43 +3997,34 @@ impl KiApp {
         if self.welcomed {
             // Avant tout le reste : ouvert, le panneau des suggestions garde Échap.
             self.suggestions.echap(ctx);
-            // Échap ferme la fenêtre la plus « en avant » — et elle seule : la
-            // touche est prise, pour que la zone de saisie derrière ne la
-            // lise pas à son tour. Fermer les réglages annulait aussi la
-            // modification en cours, et effaçait son texte.
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                let mut prise = true;
-                if self.atelier.est_ouvert() {
-                    self.atelier.fermer();
-                } else if self.visionneuse.est_ouverte() {
-                    self.visionneuse.fermer();
-                } else if self.clips.partage.as_ref().is_some_and(|p| p.envoi.is_none()) {
-                    self.clips.partage = None;
-                } else if self.show_settings {
-                    self.close_settings();
-                } else if self.admin.ouverte {
-                    self.close_admin();
-                } else if self.show_account {
-                    self.close_account();
-                } else if self.soundboard.ouvert {
-                    self.soundboard.ouvert = false;
-                } else if self.portes.ouvert {
-                    self.portes.ouvert = false;
-                } else if self.fiche.is_some() {
-                    self.fiche = None;
-                    self.comparee = None;
-                    self.valo.fermer_fiche();
-                } else if self.valo.ouvert {
-                    self.valo.ouvert = false;
-                } else if self.clips.ouverte {
-                    self.clips.ouverte = false;
-                } else {
-                    prise = false;
-                }
-                if prise {
-                    prendre_echap(ctx);
-                }
+        }
+        // Échap ferme ce qui est au-dessus — et rien d'autre : la touche est
+        // prise, pour que la zone de saisie derrière ne la lise pas à son
+        // tour (fermer les réglages annulait aussi la modification en cours,
+        // et effaçait son texte). Dans l'ordre de ce qui recouvre : ce qui
+        // prend tout l'écran, puis la modale ou la fenêtre du dessus — ki-ui
+        // sait laquelle, toutes les fenêtres y sont, plus besoin de les
+        // nommer ici —, puis la page qui a pris la place du chat.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.welcomed && self.atelier.est_ouvert() {
+                self.atelier.fermer();
+                prendre_echap(ctx);
+            } else if self.welcomed && self.visionneuse.est_ouverte() {
+                self.visionneuse.fermer();
+                prendre_echap(ctx);
+            } else if ki_ui::fenetre::echap(ctx) {
+                // La modale ou la fenêtre se fermera en se dessinant.
+            } else if self.welcomed && self.fiche.is_some() {
+                self.fiche = None;
+                self.comparee = None;
+                self.valo.fermer_fiche();
+                prendre_echap(ctx);
+            } else if self.welcomed && self.valo.ouvert {
+                self.valo.ouvert = false;
+                prendre_echap(ctx);
             }
+        }
+        if self.welcomed {
             self.main_screen(ui, &voice);
         } else {
             self.login_screen(ui);

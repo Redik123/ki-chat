@@ -111,14 +111,11 @@ impl KiApp {
         let mut open = true;
         let mut lancer = false;
         let mut saut: Option<(ChannelId, u64)> = None;
-        let roomy = (ctx.content_rect().height() - 160.0).clamp(280.0, 720.0);
-        egui::Window::new("Rechercher")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(440.0)
-            .default_height(roomy)
-            .min_width(320.0)
+        ki_ui::fenetre::Fenetre::new("recherche", "Rechercher")
+            .ouverte(&mut open)
+            .largeur(440.0)
+            .haute()
+            .taille_min(320.0, 0.0)
             .show(ctx, |ui| {
                 let champ = ui.add(ui::champ(&mut self.recherche.requete, "chercher…"));
                 menu_edition(&champ, &mut self.recherche.requete, false);
