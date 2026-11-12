@@ -235,7 +235,7 @@ impl KiApp {
                                 ui,
                                 &me,
                                 30.0,
-                                self.transmitting,
+                                self.vocal.transmitting,
                                 mine.map(|(_, t)| t),
                                 theme::BG_SIDE,
                             )
@@ -248,9 +248,9 @@ impl KiApp {
                             // l'engrenage. Empilés en widgets, l'interligne
                             // d'egui les écartait : le pseudo dépassait
                             // au-dessus de l'avatar, seul en haut.
-                            let (dot, text) = if self.muted {
+                            let (dot, text) = if self.vocal.muted {
                                 (DANGER, "micro coupé")
-                            } else if self.transmitting {
+                            } else if self.vocal.transmitting {
                                 (SPEAK, "en émission")
                             } else {
                                 (theme::BORDER, "connecté")
@@ -462,12 +462,12 @@ impl KiApp {
             // drapeau du serveur **ou** le niveau reçu : le second sert de
             // filet si un `VoiceState` se perd, et retombe de lui-même.
             let speaking =
-                if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
+                if is_me { self.vocal.transmitting } else { m.speaking || level > SPEAK_LEVEL };
             let photo = self.avatar_of(m.user_id);
             // Cette liste ne contient que des occupants du vocal : l'icône
             // « muet » s'y montre sans autre condition. Pour soi, l'état
             // local fait foi — l'écho serveur peut être en retard d'un aller.
-            let muted = if is_me { self.muted } else { m.muted };
+            let muted = if is_me { self.vocal.muted } else { m.muted };
             // S'attrape : soi-même (le déposer ailleurs, c'est y aller), et
             // qui l'on a le pouvoir de déplacer.
             let glissable = is_me || self.peut_deplacer(m);

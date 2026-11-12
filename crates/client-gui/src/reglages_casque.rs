@@ -131,7 +131,7 @@ impl KiApp {
     /// de ki-chat est lui-même l'entrée d'un câble — la voix bouclerait sur
     /// elle-même.
     pub(crate) fn micro_jeux_resolu(&self) -> Option<String> {
-        if !self.micro_jeux || self.micro_est_un_cable() {
+        if !self.audio.micro_jeux || self.micro_est_un_cable() {
             return None;
         }
         // La liste des sorties n'est relevée qu'à l'ouverture des réglages :
@@ -145,7 +145,7 @@ impl KiApp {
         } else {
             &self.output_devices
         };
-        self.micro_jeux_sortie
+        self.audio.micro_jeux_sortie
             .clone()
             .filter(|s| sorties.contains(s))
             .or_else(|| cable_virtuel(sorties))
@@ -155,7 +155,7 @@ impl KiApp {
     /// choisi, ou le défaut de Windows quand on le suit : la voix traitée
     /// reviendrait par là et tournerait en rond.
     fn micro_est_un_cable(&self) -> bool {
-        match self.pref_input.as_deref() {
+        match self.audio.pref_input.as_deref() {
             Some(nom) => est_entree_de_cable(nom),
             None => ki_voice::micro_par_defaut().is_some_and(|n| est_entree_de_cable(&n)),
         }
@@ -171,19 +171,19 @@ impl KiApp {
             return;
         }
         let total = niveau.db + etat.amplis.iter().map(|g| g.db).sum::<f32>();
-        match &self.gain_carte_vu {
+        match &self.vocal.gain_carte_vu {
             Some((vu, avant)) if vu == nom => {
                 let delta = total - avant;
                 if delta.abs() >= 0.1 {
-                    let cle = crate::voisine_ui::cle_micro(self.pref_input.as_deref());
-                    if let Some(a) = self.proximite_ancres.get_mut(&cle) {
+                    let cle = crate::voisine_ui::cle_micro(self.audio.pref_input.as_deref());
+                    if let Some(a) = self.audio.proximite_ancres.get_mut(&cle) {
                         *a = (*a + delta).clamp(-80.0, 0.0);
                         self.apply_audio_settings();
                     }
-                    self.gain_carte_vu = Some((nom.clone(), total));
+                    self.vocal.gain_carte_vu = Some((nom.clone(), total));
                 }
             }
-            _ => self.gain_carte_vu = Some((nom.clone(), total)),
+            _ => self.vocal.gain_carte_vu = Some((nom.clone(), total)),
         }
     }
 
@@ -198,10 +198,10 @@ impl KiApp {
         restart: &mut bool,
     ) {
         let materiel = Materiel::global();
-        let suivi = (self.pref_input.clone(), self.pref_output.clone());
-        if self.materiel_suivi.as_ref() != Some(&suivi) {
+        let suivi = (self.audio.pref_input.clone(), self.audio.pref_output.clone());
+        if self.vocal.materiel_suivi.as_ref() != Some(&suivi) {
             materiel.ordonner(Ordre::Suivre { entree: suivi.0.clone(), sortie: suivi.1.clone() });
-            self.materiel_suivi = Some(suivi);
+            self.vocal.materiel_suivi = Some(suivi);
         }
         materiel.tenir_eveille();
         let etat = materiel.etat();
@@ -216,9 +216,9 @@ impl KiApp {
         // règlent les mêmes choses — ce qu'on fait en studio reste actif en
         // simple, seulement plus affiché.
         ui.horizontal_wrapped(|ui| {
-            ui::segmente(ui, &mut self.mode_studio, &[(false, "Simple"), (true, "Studio")]);
+            ui::segmente(ui, &mut self.audio.mode_studio, &[(false, "Simple"), (true, "Studio")]);
             ui.label(
-                RichText::new(if self.mode_studio {
+                RichText::new(if self.audio.mode_studio {
                     "toute la chaîne de ta voix, réglage par réglage"
                 } else {
                     "l'essentiel, en préréglages"
@@ -246,10 +246,10 @@ impl KiApp {
                     // les 20 ms : sans retenue, un cri court échappait à la
                     // jauge une fois sur deux.
                     let maintenant = Instant::now();
-                    let crete = match self.marge_crete {
+                    let crete = match self.vocal.marge_crete {
                         Some((c, quand)) if c >= voice.stats.crete_brute && maintenant - quand < RETENUE_MARGE => c,
                         _ => {
-                            self.marge_crete = Some((voice.stats.crete_brute, maintenant));
+                            self.vocal.marge_crete = Some((voice.stats.crete_brute, maintenant));
                             voice.stats.crete_brute
                         }
                     };
@@ -397,11 +397,11 @@ impl KiApp {
                 // Le pré-ampli de ki-chat s'ajoute au gain de la carte avant la
                 // porte et les seuils ; caché quand le gain automatique est
                 // allumé, il n'en agissait pas moins.
-                if self.agc && (self.input_gain - 1.0).abs() > 0.01 {
+                if self.audio.agc && (self.audio.input_gain - 1.0).abs() > 0.01 {
                     ui::ligne(ui, "Pré-ampli", |ui| {
-                        let mut pct = self.input_gain * 100.0;
+                        let mut pct = self.audio.input_gain * 100.0;
                         if curseur(ui, &mut pct, 0.0..=200.0, " %", Some(1.0)) {
-                            self.input_gain = pct / 100.0;
+                            self.audio.input_gain = pct / 100.0;
                             *apply = true;
                         }
                         ui::precision(
@@ -409,17 +409,17 @@ impl KiApp {
                             &format!(
                                 "{:+.1} dB dans ki-chat, avant la porte et la « voix d'à côté ». Avec le \
                                  gain automatique il ne te rend pas plus fort : 100 % est la bonne valeur.",
-                                20.0 * self.input_gain.max(1e-3).log10()
+                                20.0 * self.audio.input_gain.max(1e-3).log10()
                             ),
                         );
                     });
                 }
                 // Le vrai bouton du volume chez les autres.
                 ui::ligne(ui, "Ton volume", |ui| {
-                    if self.agc {
-                        let mut pct = self.agc_target * 100.0;
+                    if self.audio.agc {
+                        let mut pct = self.audio.agc_target * 100.0;
                         if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
-                            self.agc_target = pct / 100.0;
+                            self.audio.agc_target = pct / 100.0;
                             *apply = true;
                         }
                         ui::precision(
@@ -429,9 +429,9 @@ impl KiApp {
                              les monter ne fait que remonter le fond et la voix d'à côté.",
                         );
                     } else {
-                        let mut pct = self.input_gain * 100.0;
+                        let mut pct = self.audio.input_gain * 100.0;
                         if curseur(ui, &mut pct, 0.0..=200.0, " %", Some(1.0)) {
-                            self.input_gain = pct / 100.0;
+                            self.audio.input_gain = pct / 100.0;
                             *apply = true;
                         }
                         ui::precision(
@@ -480,12 +480,12 @@ impl KiApp {
                     });
                     return;
                 }
-                let boucle = self.pref_input.as_deref().is_some_and(est_entree_de_cable);
+                let boucle = self.audio.pref_input.as_deref().is_some_and(est_entree_de_cable);
                 ui::ligne(ui, "Envoi", |ui| {
-                    if ui::interrupteur(ui, &mut self.micro_jeux, "Envoyer ma voix aux jeux").changed() {
+                    if ui::interrupteur(ui, &mut self.audio.micro_jeux, "Envoyer ma voix aux jeux").changed() {
                         *restart = true;
                     }
-                    if self.micro_jeux {
+                    if self.audio.micro_jeux {
                         let (couleur, texte) = if boucle {
                             (DANGER, "coupé : le micro de ki-chat est le câble lui-même")
                         } else if !engine_up {
@@ -504,12 +504,12 @@ impl KiApp {
                          tâches, ça suffit. Environ 100 ms de retard, comme un vocal en ligne.",
                     );
                 });
-                if !self.micro_jeux {
+                if !self.audio.micro_jeux {
                     return;
                 }
                 ui::ligne(ui, "Câble", |ui| {
                     let auto = cable_virtuel(&self.output_devices).unwrap_or_default();
-                    let actuel = self
+                    let actuel = self.audio
                         .micro_jeux_sortie
                         .clone()
                         .unwrap_or_else(|| format!("Automatique ({auto})"));
@@ -519,17 +519,17 @@ impl KiApp {
                         .selected_text(RichText::new(actuel).color(TEXT))
                         .show_ui(ui, |ui| {
                             if ui
-                                .selectable_label(self.micro_jeux_sortie.is_none(), format!("Automatique ({auto})"))
+                                .selectable_label(self.audio.micro_jeux_sortie.is_none(), format!("Automatique ({auto})"))
                                 .clicked()
-                                && self.micro_jeux_sortie.is_some()
+                                && self.audio.micro_jeux_sortie.is_some()
                             {
-                                self.micro_jeux_sortie = None;
+                                self.audio.micro_jeux_sortie = None;
                                 *restart = true;
                             }
                             for c in &cables {
-                                let choisi = self.micro_jeux_sortie.as_deref() == Some(c.as_str());
+                                let choisi = self.audio.micro_jeux_sortie.as_deref() == Some(c.as_str());
                                 if ui.selectable_label(choisi, c).clicked() && !choisi {
-                                    self.micro_jeux_sortie = Some(c.clone());
+                                    self.audio.micro_jeux_sortie = Some(c.clone());
                                     *restart = true;
                                 }
                             }
@@ -611,14 +611,14 @@ impl KiApp {
                     None => {}
                 }
                 ui::ligne(ui, "Ta voix", |ui| {
-                    if ui::interrupteur(ui, &mut self.retour_voix, "T'entendre dans le casque").changed() {
+                    if ui::interrupteur(ui, &mut self.audio.retour_voix, "T'entendre dans le casque").changed() {
                         *apply = true;
                     }
-                    if self.retour_voix {
+                    if self.audio.retour_voix {
                         ui.add_space(espace::S);
-                        let mut pct = self.retour_voix_volume * 100.0;
+                        let mut pct = self.audio.retour_voix_volume * 100.0;
                         if curseur(ui, &mut pct, 0.0..=150.0, " %", Some(1.0)) {
-                            self.retour_voix_volume = pct / 100.0;
+                            self.audio.retour_voix_volume = pct / 100.0;
                             *apply = true;
                         }
                         if !engine_up {
@@ -652,23 +652,23 @@ impl KiApp {
                 ui::ligne(ui, "Pour", |ui| {
                     if ui::segmente(
                         ui,
-                        &mut self.egaliseur_vue,
+                        &mut self.vocal.egaliseur_vue,
                         &[(VUE_TA_VOIX, "Ta voix"), (VUE_LES_AUTRES, "Ce que tu entends")],
                     ) {
-                        self.eq_editeur.selection = None;
-                        if self.eq_editeur.comparer {
-                            self.eq_editeur.comparer = false;
+                        self.vocal.eq_editeur.selection = None;
+                        if self.vocal.eq_editeur.comparer {
+                            self.vocal.eq_editeur.comparer = false;
                             *apply = true;
                         }
                     }
                     ui::precision(
                         ui,
-                        if self.egaliseur_vue == VUE_TA_VOIX && !self.mode_studio {
+                        if self.vocal.egaliseur_vue == VUE_TA_VOIX && !self.audio.mode_studio {
                             "Ce que les autres entendent de toi, dans ki-chat comme dans les \
                              jeux. « Micro-casque » coupe sous la voix — le grondement, l'effet \
                              de proximité — sans toucher à son corps : la « cave » sans le « nez \
                              bouché ». Enregistre-toi juste en dessous pour l'entendre."
-                        } else if self.egaliseur_vue == VUE_TA_VOIX {
+                        } else if self.vocal.egaliseur_vue == VUE_TA_VOIX {
                             "Ce que les autres entendent de toi, dans ki-chat comme dans les \
                              jeux. Derrière la courbe, ta voix en direct : parle, et regarde où \
                              elle gonfle. « Micro-casque » coupe sous la voix — le grondement, \
@@ -681,16 +681,16 @@ impl KiApp {
                         },
                     );
                 });
-                let ta_voix = self.egaliseur_vue == VUE_TA_VOIX;
+                let ta_voix = self.vocal.egaliseur_vue == VUE_TA_VOIX;
                 if ta_voix {
                     ui::ligne(ui, "T'écouter", |ui| self.essai_voix_ui(ui, voice.engine_up));
                 }
                 let (bandes, prereglages): (&mut Vec<Bande>, &[Prereglage]) = if ta_voix {
-                    (&mut self.egaliseur_micro, &PREREGLAGES_VOIX)
+                    (&mut self.audio.egaliseur_micro, &PREREGLAGES_VOIX)
                 } else {
-                    (&mut self.egaliseur, &PREREGLAGES_ECOUTE)
+                    (&mut self.audio.egaliseur, &PREREGLAGES_ECOUTE)
                 };
-                if !self.mode_studio {
+                if !self.audio.mode_studio {
                     // Le mode simple : les préréglages, en pastilles.
                     ui::ligne(ui, "Préréglage", |ui| {
                         let mut choix = prereglages
@@ -712,7 +712,7 @@ impl KiApp {
                     return;
                 }
                 // Le spectre : sa voix telle qu'elle part, ou les voix reçues.
-                self.analyse_voulue = if ta_voix { ki_voice::ANALYSE_MICRO } else { ki_voice::ANALYSE_VOIX };
+                self.vocal.analyse_voulue = if ta_voix { ki_voice::ANALYSE_MICRO } else { ki_voice::ANALYSE_VOIX };
                 let echantillons = self
                     .link
                     .engine
@@ -722,15 +722,15 @@ impl KiApp {
                     .map(|e| e.analyse(egaliseur_ui::FENETRE))
                     .unwrap_or_default();
                 let dt = ui.input(|i| i.stable_dt);
-                self.eq_editeur.analyseur.nourrir(&echantillons, dt);
-                if egaliseur_ui::editeur(ui, bandes, &mut self.eq_editeur, prereglages) {
+                self.vocal.eq_editeur.analyseur.nourrir(&echantillons, dt);
+                if egaliseur_ui::editeur(ui, bandes, &mut self.vocal.eq_editeur, prereglages) {
                     *apply = true;
                 }
             },
         );
 
         // --- La chaîne studio ------------------------------------------
-        if self.mode_studio {
+        if self.audio.mode_studio {
             self.chaine_studio_ui(ui, voice, apply);
         }
     }
@@ -738,9 +738,9 @@ impl KiApp {
     /// Les égaliseurs tels que le moteur doit les jouer : (écoute, sa voix).
     /// « Comparer » coupe celui que la page montre, le temps de l'écoute.
     pub(crate) fn egaliseurs_effectifs(&self) -> (Vec<Bande>, Vec<Bande>) {
-        let compare = self.eq_editeur.comparer;
-        let ecoute = if compare && self.egaliseur_vue == VUE_LES_AUTRES { Vec::new() } else { self.egaliseur.clone() };
-        let voix = if compare && self.egaliseur_vue == VUE_TA_VOIX { Vec::new() } else { self.egaliseur_micro.clone() };
+        let compare = self.vocal.eq_editeur.comparer;
+        let ecoute = if compare && self.vocal.egaliseur_vue == VUE_LES_AUTRES { Vec::new() } else { self.audio.egaliseur.clone() };
+        let voix = if compare && self.vocal.egaliseur_vue == VUE_TA_VOIX { Vec::new() } else { self.audio.egaliseur_micro.clone() };
         (ecoute, voix)
     }
 
@@ -749,7 +749,7 @@ impl KiApp {
         let voix = (voice.levels.values().fold(0f32, |m, &l| m.max(l)) * 3.0).min(1.0);
         let micro = (voice.stats.mic_peak * 3.0).min(1.0);
         let sature = voice.stats.micro_sature;
-        let coupe = self.muted || self.sourd;
+        let coupe = self.vocal.muted || self.vocal.sourd;
         ui::card(ui, |ui| {
             ui.horizontal(|ui| {
                 dessiner_casque(ui, Vec2::new(190.0, 150.0), voix, micro, sature, coupe);
@@ -763,7 +763,7 @@ impl KiApp {
                         .unwrap_or("Mon casque")
                         .to_string();
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.casque_nom)
+                        egui::TextEdit::singleline(&mut self.audio.casque_nom)
                             .hint_text(RichText::new(defaut).color(TEXT_DIM))
                             .font(egui::FontId::proportional(texte::GRAND))
                             .text_color(TEXT)
@@ -805,7 +805,7 @@ impl KiApp {
 
     /// Le calibrage des gains : le bouton, sa progression, son verdict.
     fn calibrage_ui(&mut self, ui: &mut egui::Ui, voice: &VoiceSnapshot, total_db: f32, topologie_lue: bool) {
-        match &self.calibrage_micro {
+        match &self.vocal.calibrage_micro {
             None => {
                 // Sans les amplifications de la carte (lues quelques secondes
                 // après les volumes sur certaines cartes USB), le calibrage
@@ -820,12 +820,12 @@ impl KiApp {
                             // Remise à zéro de la crête relevée.
                             let _ = engine.crete_brute_max();
                         }
-                        self.calibrage_micro = Some(Calibrage {
+                        self.vocal.calibrage_micro = Some(Calibrage {
                             debut: Instant::now(),
                             crete: 0.0,
                             saturations: voice.stats.saturations,
                         });
-                        self.calibrage_verdict = None;
+                        self.vocal.calibrage_verdict = None;
                     }
                 });
                 ui::precision(
@@ -836,8 +836,8 @@ impl KiApp {
                              règle les gains pour que ton cri le plus fort reste 6 dB sous la \
                              saturation ; le gain automatique remonte ta voix normale. Gain \
                              actuel : {total_db:+.0} dB sur la carte{}.",
-                            if (self.input_gain - 1.0).abs() > 0.01 {
-                                format!(", {:+.1} dB de pré-ampli dans ki-chat", 20.0 * self.input_gain.max(1e-3).log10())
+                            if (self.audio.input_gain - 1.0).abs() > 0.01 {
+                                format!(", {:+.1} dB de pré-ampli dans ki-chat", 20.0 * self.audio.input_gain.max(1e-3).log10())
                             } else {
                                 String::new()
                             }
@@ -861,12 +861,12 @@ impl KiApp {
                     };
                     ui.label(RichText::new(texte).color(TEXT_DIM).size(texte::COURANT));
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
-                        self.calibrage_micro = None;
+                        self.vocal.calibrage_micro = None;
                     }
                 });
             }
         }
-        if let Some((quand, texte)) = &self.calibrage_verdict {
+        if let Some((quand, texte)) = &self.vocal.calibrage_verdict {
             if quand.elapsed() < VERDICT {
                 ui.add_space(espace::S);
                 ui::banner(ui, Tone::Info, texte, false);
@@ -877,14 +877,14 @@ impl KiApp {
     /// Relève la crête du calibrage en cours et, les 5 secondes passées,
     /// règle les gains et rend son verdict.
     fn avancer_calibrage(&mut self, voice: &VoiceSnapshot, etat: &EtatMateriel) {
-        let Some(cal) = self.calibrage_micro.as_mut() else { return };
+        let Some(cal) = self.vocal.calibrage_micro.as_mut() else { return };
         if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
             cal.crete = cal.crete.max(engine.crete_brute_max());
         }
         if cal.debut.elapsed() < CALIBRAGE {
             return;
         }
-        let Some(cal) = self.calibrage_micro.take() else { return };
+        let Some(cal) = self.vocal.calibrage_micro.take() else { return };
         // Une saturation soutenue (100 ms de trames écrêtées) : la vraie
         // crête est inconnue, on recule franchement. Un choc isolé sur la
         // perche ou une plosive (une trame, trois échantillons) se règle par
@@ -892,7 +892,7 @@ impl KiApp {
         let ecretees = voice.stats.saturations.saturating_sub(cal.saturations);
         let sature = ecretees >= SATURATION_SOUTENUE;
         let texte = self.conclure_calibrage(cal.crete, sature, ecretees, etat);
-        self.calibrage_verdict = Some((Instant::now(), texte));
+        self.vocal.calibrage_verdict = Some((Instant::now(), texte));
     }
 
     fn conclure_calibrage(&self, crete: f32, sature: bool, ecretees: u64, etat: &EtatMateriel) -> String {

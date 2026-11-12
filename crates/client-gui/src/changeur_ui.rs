@@ -112,24 +112,24 @@ impl KiApp {
             ),
             |ui| {
                 ui::ligne(ui, "Changeur", |ui| {
-                    if ui::interrupteur(ui, &mut self.changeur_actif, "Changer ma voix").changed() {
+                    if ui::interrupteur(ui, &mut self.audio.changeur_actif, "Changer ma voix").changed() {
                         *apply = true;
                     }
-                    if self.changeur_actif {
-                        let nom = personnage_de(&self.changeur).map(|i| PERSONNAGES[i].0).unwrap_or("réglage perso");
+                    if self.audio.changeur_actif {
+                        let nom = personnage_de(&self.audio.changeur).map(|i| PERSONNAGES[i].0).unwrap_or("réglage perso");
                         ui.add_space(espace::XS);
                         ui.horizontal(|ui| ui::status_dot(ui, SPEAK, &format!("allumé : {nom}"), 10.0));
                     }
                 });
                 ui::ligne(ui, "Personnage", |ui| {
-                    let mut choix = personnage_de(&self.changeur).unwrap_or(usize::MAX);
+                    let mut choix = personnage_de(&self.audio.changeur).unwrap_or(usize::MAX);
                     let options: Vec<(usize, &str)> =
                         PERSONNAGES.iter().enumerate().map(|(i, (nom, _, _))| (i, *nom)).collect();
                     if ui::pastilles(ui, &mut choix, &options) {
                         if let Some((_, _, fabrique)) = PERSONNAGES.get(choix) {
-                            self.changeur = fabrique();
+                            self.audio.changeur = fabrique();
                             // Choisir un personnage, c'est vouloir l'entendre.
-                            self.changeur_actif = true;
+                            self.audio.changeur_actif = true;
                             *apply = true;
                         }
                     }
@@ -143,7 +143,7 @@ impl KiApp {
                 ui::ligne(ui, "Où", |ui| {
                     if ui::segmente(
                         ui,
-                        &mut self.changeur_vers,
+                        &mut self.audio.changeur_vers,
                         &[(VERS_TOUT, "ki-chat et jeux"), (VERS_JEUX, "Jeux seulement"), (VERS_KICHAT, "ki-chat seulement")],
                     ) {
                         *apply = true;
@@ -155,25 +155,25 @@ impl KiApp {
                     );
                 });
                 ui::ligne(ui, "Raccourci", |ui| {
-                    let actuel = self.hotkey_changeur.map(|k| k.label()).unwrap_or("aucun");
+                    let actuel = self.audio.hotkey_changeur.map(|k| k.label()).unwrap_or("aucun");
                     egui::ComboBox::from_id_salt("hotkey_changeur")
                         .width(120.0)
                         .selected_text(RichText::new(actuel).color(TEXT))
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.hotkey_changeur, None, "aucun");
+                            ui.selectable_value(&mut self.audio.hotkey_changeur, None, "aucun");
                             for key in PttKey::ALL {
-                                ui.selectable_value(&mut self.hotkey_changeur, Some(key), key.label());
+                                ui.selectable_value(&mut self.audio.hotkey_changeur, Some(key), key.label());
                             }
                         });
-                    let prise = [self.hotkey_micro, self.hotkey_sourd].contains(&self.hotkey_changeur)
-                        || (self.hotkey_changeur.is_some() && self.hotkey_changeur == Some(self.ptt_key));
-                    if self.hotkey_changeur.is_some() && prise {
+                    let prise = [self.audio.hotkey_micro, self.audio.hotkey_sourd].contains(&self.audio.hotkey_changeur)
+                        || (self.audio.hotkey_changeur.is_some() && self.audio.hotkey_changeur == Some(self.audio.ptt_key));
+                    if self.audio.hotkey_changeur.is_some() && prise {
                         ui.label(RichText::new("cette touche sert déjà ailleurs").color(WARN).size(texte::PETIT));
                     }
                     ui::precision(ui, "Une pression allume ou coupe le changeur, même en jeu.");
                 });
 
-                if !self.mode_studio {
+                if !self.audio.mode_studio {
                     return;
                 }
                 // --- Le détail, en mode studio ---
@@ -183,9 +183,9 @@ impl KiApp {
                     RichText::new("Toucher un réglage fait ton propre personnage.").color(TEXT_FAINT).size(texte::PETIT),
                 );
                 ui.add_space(espace::XS);
-                let montrer = self.explications;
-                let avant = self.changeur;
-                let r = &mut self.changeur;
+                let montrer = self.audio.explications;
+                let avant = self.audio.changeur;
+                let r = &mut self.audio.changeur;
                 let aide = |ui: &mut egui::Ui, texte: &str| {
                     if montrer {
                         ui::precision(ui, texte);
@@ -316,7 +316,7 @@ impl KiApp {
                     *r = r.bornes();
                     *apply = true;
                 }
-                if !self.changeur_actif {
+                if !self.audio.changeur_actif {
                     ui.label(
                         RichText::new("Le changeur est coupé : allume-le pour entendre ces réglages.")
                             .color(TEXT_DIM)
@@ -334,35 +334,35 @@ impl KiApp {
     fn imitation_ui(&mut self, ui: &mut egui::Ui, apply: &mut bool) {
         // L'analyse d'un extrait se fait sur un fil : un long MP3 à décoder
         // et à mesurer figerait la fenêtre.
-        if let Some(rx) = &self.imitation_calcul {
+        if let Some(rx) = &self.vocal.imitation_calcul {
             match rx.try_recv() {
                 Ok(Ok(cible)) => {
-                    self.imitation_cible = Some(cible);
-                    self.imitation_erreur = None;
-                    self.imitation_calcul = None;
+                    self.vocal.imitation_cible = Some(cible);
+                    self.vocal.imitation_erreur = None;
+                    self.vocal.imitation_calcul = None;
                 }
                 Ok(Err(erreur)) => {
-                    self.imitation_erreur = Some(erreur);
-                    self.imitation_calcul = None;
+                    self.vocal.imitation_erreur = Some(erreur);
+                    self.vocal.imitation_calcul = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(Duration::from_millis(100)),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.imitation_calcul = None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.vocal.imitation_calcul = None,
             }
         }
         ui::ligne(ui, "Imiter", |ui| {
             // 1. La voix visée.
-            if self.imitation_calcul.is_some() {
+            if self.vocal.imitation_calcul.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(RichText::new("analyse de l'extrait…").color(TEXT_DIM).size(texte::COURANT));
                 });
             } else {
                 let libelle =
-                    if self.imitation_cible.is_some() { "Choisir un autre extrait…" } else { "Choisir l'extrait d'une voix…" };
+                    if self.vocal.imitation_cible.is_some() { "Choisir un autre extrait…" } else { "Choisir l'extrait d'une voix…" };
                 if ui::button(ui, Icon::Paperclip, libelle).clicked() {
                     if let Some(chemin) = rfd::FileDialog::new().add_filter("Son", &EXTENSIONS_SON).pick_file() {
                         let (tx, rx) = std::sync::mpsc::channel();
-                        self.imitation_calcul = Some(rx);
+                        self.vocal.imitation_calcul = Some(rx);
                         std::thread::spawn(move || {
                             let nom = chemin.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                             let resultat = crate::soundboard::decoder(&chemin)
@@ -379,10 +379,10 @@ impl KiApp {
                     }
                 }
             }
-            if let Some(erreur) = &self.imitation_erreur {
+            if let Some(erreur) = &self.vocal.imitation_erreur {
                 ui.label(RichText::new(erreur).color(WARN).size(texte::PETIT));
             }
-            let Some((nom, cible)) = self.imitation_cible.clone() else {
+            let Some((nom, cible)) = self.vocal.imitation_cible.clone() else {
                 ui::precision(
                     ui,
                     "Donne un extrait de la voix à imiter (quelques secondes où elle parle seule) : \
@@ -453,10 +453,10 @@ impl KiApp {
             }
             ui.horizontal_wrapped(|ui| {
                 if ui::button(ui, Icon::Check, "Appliquer au changeur").clicked() {
-                    self.changeur.hauteur = r.hauteur;
-                    self.changeur.formants = r.formants;
-                    self.changeur = self.changeur.bornes();
-                    self.changeur_actif = true;
+                    self.audio.changeur.hauteur = r.hauteur;
+                    self.audio.changeur.formants = r.formants;
+                    self.audio.changeur = self.audio.changeur.bornes();
+                    self.audio.changeur_actif = true;
                     *apply = true;
                 }
                 if ui::icon_button(ui, Icon::Mic, "Réenregistrer ma voix").clicked() {
@@ -478,18 +478,18 @@ impl KiApp {
     /// Le micro brut passé par l'égaliseur de sa voix : ce que le changeur
     /// reçoit, sans le changeur.
     fn empreinte_de_l_essai(&mut self, numero: u64) -> Option<ki_voice::imitation::EmpreinteVoix> {
-        if let Some((n, e)) = &self.imitation_moi {
+        if let Some((n, e)) = &self.vocal.imitation_moi {
             if *n == numero {
                 return e.clone();
             }
         }
         let (mut brute, _) = self.link.engine.lock().unwrap().as_ref()?.essai_pcm()?;
-        let mut eq = ki_voice::egaliseur::Egaliseur::new(&self.egaliseur_micro);
+        let mut eq = ki_voice::egaliseur::Egaliseur::new(&self.audio.egaliseur_micro);
         for bloc in brute.chunks_mut(960) {
             eq.traiter_trame(bloc);
         }
         let e = empreinte(&brute);
-        self.imitation_moi = Some((numero, e.clone()));
+        self.vocal.imitation_moi = Some((numero, e.clone()));
         e
     }
 }

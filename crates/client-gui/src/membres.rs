@@ -792,7 +792,7 @@ impl KiApp {
                             voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
                         };
                         let speaking =
-                            if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
+                            if is_me { self.vocal.transmitting } else { m.speaking || level > SPEAK_LEVEL };
                         if let Some(tier) = palier_de(m) {
                             self.rangs.preparer(ui.ctx(), tier);
                         }
@@ -801,7 +801,7 @@ impl KiApp {
                         // « Muet » n'a de sens qu'en vocal : hors salon, un
                         // micro coupé résiduel n'apprend rien à personne.
                         let muted =
-                            m.voice.is_some() && if is_me { self.muted } else { m.muted };
+                            m.voice.is_some() && if is_me { self.vocal.muted } else { m.muted };
                         let (response, regarder) = member_row(
                             ui,
                             MemberRow {

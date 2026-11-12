@@ -540,7 +540,7 @@ impl KiApp {
                 "modifie_le_message": self.edition.map(|m| json!({ "auteur": m.user_id, "ts": m.ts })),
                 "repond_a": self.reponse_a.as_ref().map(|r| json!({ "de": r.username, "extrait": r.excerpt })),
             },
-            "vocal": { "salon": self.voice_channel, "micro_coupe": self.muted },
+            "vocal": { "salon": self.voice_channel, "micro_coupe": self.vocal.muted },
             "fenetres_ouvertes": ouvertes,
             "bandeau_erreur": self.error,
             "bandeau_info": self.info,

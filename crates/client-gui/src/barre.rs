@@ -127,16 +127,16 @@ impl KiApp {
                     let in_voice = self.voice_channel.is_some();
                     let (icon, tint, state, state_color) = if !in_voice {
                         (Icon::MicOff, None, "Hors vocal", TEXT_FAINT)
-                    } else if self.muted {
+                    } else if self.vocal.muted {
                         (Icon::MicOff, Some(DANGER), "Micro coupé", DANGER)
-                    } else if self.transmitting {
+                    } else if self.vocal.transmitting {
                         (Icon::Mic, Some(SPEAK), "En émission", SPEAK)
                     } else {
                         (Icon::Mic, None, "Micro prêt", TEXT_DIM)
                     };
                     let tip = if !in_voice {
                         "Rejoins un salon vocal pour parler"
-                    } else if self.muted {
+                    } else if self.vocal.muted {
                         "Réactiver le micro"
                     } else {
                         "Couper le micro"
@@ -147,7 +147,7 @@ impl KiApp {
                     }
                     // --- Sourd : plus rien n'entre, et le micro est coupé ---
                     if in_voice {
-                        let (icon, tint, tip) = if self.sourd {
+                        let (icon, tint, tip) = if self.vocal.sourd {
                             (Icon::HeadphonesOff, Some(DANGER), "Retrouver l'écoute")
                         } else {
                             (Icon::Headphones, None, "Se rendre sourd (coupe aussi le micro)")
@@ -183,10 +183,10 @@ impl KiApp {
                         ui.add_space(1.0);
                         ui.label(RichText::new(state).color(state_color).size(texte::CORPS).strong());
                         // Sous-titre : le salon vocal occupé, ou la touche.
-                        let detail = match (self.voice_channel_name(), self.mode) {
+                        let detail = match (self.voice_channel_name(), self.audio.mode) {
                             (None, _) => "aucun salon vocal".to_string(),
                             (Some(name), MicMode::Ptt) => {
-                                format!("{name} · touche {}", self.ptt_key.label())
+                                format!("{name} · touche {}", self.audio.ptt_key.label())
                             }
                             (Some(name), _) => name.to_string(),
                         };
@@ -210,25 +210,25 @@ impl KiApp {
                     ui.add_space(espace::XL);
 
                     // --- Mode d'émission ---
-                    let mode_before = self.mode;
+                    let mode_before = self.audio.mode;
                     egui::ComboBox::from_id_salt("mic_mode")
                         .width(150.0)
-                        .selected_text(RichText::new(self.mode.label()).color(TEXT))
+                        .selected_text(RichText::new(self.audio.mode.label()).color(TEXT))
                         .show_ui(ui, |ui| {
                             for mode in [MicMode::Open, MicMode::Ptt, MicMode::Vad] {
-                                ui.selectable_value(&mut self.mode, mode, mode.label());
+                                ui.selectable_value(&mut self.audio.mode, mode, mode.label());
                             }
                         });
-                    if self.mode != mode_before {
+                    if self.audio.mode != mode_before {
                         self.apply_audio_settings();
                     }
-                    if self.mode == MicMode::Ptt {
+                    if self.audio.mode == MicMode::Ptt {
                         egui::ComboBox::from_id_salt("ptt_key")
                             .width(110.0)
-                            .selected_text(RichText::new(self.ptt_key.label()).color(TEXT))
+                            .selected_text(RichText::new(self.audio.ptt_key.label()).color(TEXT))
                             .show_ui(ui, |ui| {
                                 for key in PttKey::ALL {
-                                    ui.selectable_value(&mut self.ptt_key, key, key.label());
+                                    ui.selectable_value(&mut self.audio.ptt_key, key, key.label());
                                 }
                             });
                     }
@@ -382,7 +382,7 @@ impl KiApp {
                         // les compteurs de paquets se lisent dans les réglages.
                         if niveau != Barre::TresEtroite {
                             let level = (s.mic_peak * 3.0).min(1.0);
-                            let color = if self.transmitting {
+                            let color = if self.vocal.transmitting {
                                 SPEAK
                             } else {
                                 theme::BG_ACTIVE

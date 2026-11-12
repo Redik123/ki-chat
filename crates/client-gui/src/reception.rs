@@ -781,8 +781,8 @@ impl KiApp {
                 if self.voice_channel.is_some_and(|c| !self.channels.iter().any(|ch| ch.id == c))
                 {
                     self.voice_channel = None;
-                    self.armed = false;
-                    self.transmitting = false;
+                    self.vocal.armed = false;
+                    self.vocal.transmitting = false;
                     self.info = Some("le salon vocal a été fermé".into());
                 }
             }

@@ -7,7 +7,8 @@
 //! `diffusion_ui`, `musique`, `recherche_ui` — et ce qui arrive du serveur
 //! dans `reception`. Les zones qui ont leur propre état le rangent dans un
 //! champ de `KiApp` (`admin`, `clips`, `diffusion`, `regard`, `musique`,
-//! `recherche`, `diag`).
+//! `recherche`, `diag`). L'audio a les siens dans le module `audio` : `audio`
+//! pour les réglages qui se sauvent, `vocal` pour l'état du moment.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -66,6 +67,7 @@ mod valo_page;
 mod veille;
 mod visionneuse;
 mod zone;
+mod audio;
 mod admin_ui;
 mod barre;
 mod clips_ui;
@@ -93,6 +95,7 @@ mod televersement;
 static COMPTEUR: perf::alloc::Compteur = perf::alloc::Compteur;
 
 use std::collections::HashMap;
+use audio::{MicMode, BITRATES};
 
 use eframe::egui::{self, RichText};
 use ki_core::markup;
@@ -107,41 +110,11 @@ use fil::{lecture_effective, split_links, MenuMessage};
 use icons::Icon;
 use lanceur::ServerDraft;
 use membres::{couleur_de_membre, empreinte_compte, est_bot, palier_de, MemberRow};
-use ptt::PttKey;
 use reglages_ui::{DemandeReglages, Onglet};
 use salons::VoicePrompt;
 use televersement::LienPret;
 use theme::{ACCENT, TEXT, TEXT_DIM};
 use ui::Tone;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MicMode {
-    Open,
-    Ptt,
-    /// Activation vocale : émet quand le niveau dépasse le seuil réglé.
-    Vad,
-}
-
-impl MicMode {
-    fn label(self) -> &'static str {
-        match self {
-            MicMode::Open => "Micro ouvert",
-            MicMode::Ptt => "Push-to-talk",
-            MicMode::Vad => "Activation vocale",
-        }
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            MicMode::Open => "open",
-            MicMode::Ptt => "ptt",
-            MicMode::Vad => "vad",
-        }
-    }
-}
-
-/// Débits Opus proposés (bits/s).
-const BITRATES: [i32; 6] = [24_000, 32_000, 48_000, 64_000, 96_000, 128_000];
 
 /// Les colonnes des salons (à gauche) et des membres (à droite) : leur
 /// largeur d'origine, et ce qu'on peut leur retirer ou leur ajouter en
@@ -852,149 +825,12 @@ struct KiApp {
     old_password: String,
     new_password: String,
 
-    // Volumes par utilisateur, par compte local : mon pseudo -> (user_id -> gain).
-    // Chacun a ses propres réglages, persistés entre les sessions.
-    all_volumes: HashMap<String, HashMap<u64, f32>>,
-
-    // Vocal
-    mode: MicMode,
-    ptt_key: PttKey,
-    muted: bool,
-    /// Sourd : plus rien ne sort de la carte son — les voix, le son du jeu
-    /// d'un stream, les notifications — et le micro est coupé avec. Le
-    /// volume de sortie réglé reste en mémoire pour le retour.
-    sourd: bool,
-    /// Raccourcis globaux à bascule (en plus du push-to-talk).
-    hotkey_micro: Option<PttKey>,
-    hotkey_sourd: Option<PttKey>,
-    /// Pressions déjà traitées de chaque raccourci.
-    hotkey_vues: (u32, u32),
-    /// Micro armé (mute/PTT/mode) — commande envoyée au moteur.
-    armed: bool,
-    /// Émission réellement en cours (lue depuis le moteur, après VAD).
-    transmitting: bool,
-    pref_input: Option<String>,
-    pref_output: Option<String>,
-    /// Moteur audio Windows natif (WASAPI direct) — cpal si décoché.
-    native_audio: bool,
-    /// Mode brut du micro : demande à Windows d'ignorer les effets tiers
-    /// (Sonar, Nahimic…). Moteur natif seulement.
-    raw_mic: bool,
-    /// Micro en catégorie « communications » dès l'ouverture (sinon le moteur
-    /// ne le propose que s'il détecte un micro affamé).
-    comms_mic: bool,
-    /// Sortie robuste : tampon de lecture profond (+70 ms de latence) pour
-    /// les machines saturées et les cartes son USB fragiles.
-    robust_output: bool,
-    noise_mode: u8,
-    input_gain: f32,
-    output_gain: f32,
-    vad_threshold: f32,
-    /// Activation vocale par le réseau de neurones (Silero) plutôt que par
-    /// le seuil d'amplitude, et la probabilité qui ouvre le micro.
-    vad_neural: bool,
-    vad_sens: f32,
-    vad_hangover_ms: u32,
-    /// Débit choisi (0 = Auto : piloté par les rapports qualité du serveur).
-    bitrate: i32,
-    /// Débit courant en mode Auto.
-    auto_bitrate: i32,
-    /// Rapports "propres" consécutifs (pour remonter le débit).
-    good_reports: u8,
-    /// Dernières pertes montantes signalées par le serveur (%).
-    upstream_loss: Option<f32>,
-    /// Protection contre les pertes DRED : 0 = off, 1 = auto, 2 = toujours.
-    dred_mode: u8,
-    /// DRED actuellement engagé (mode auto).
-    dred_active: bool,
-    agc: bool,
-    /// Annulation d'écho (les haut-parleurs qui reviennent dans le micro).
-    aec_on: bool,
-    agc_target: f32,
-    gate_threshold: f32,
-    /// Compression de sa voix à l'émission (`ki_voice::dynamique::COMPRESSION_*`).
-    compression: u8,
-    /// Dernière saturation du micro vue par l'onglet Audio : l'alerte reste
-    /// affichée un moment après, au lieu de clignoter entre deux phrases.
-    alerte_saturation: Option<std::time::Instant>,
-    /// Un compresseur par personne entendue : celui qui hurle redescend.
-    adoucir_cris: bool,
-    /// Le nom du casque, tapé sur la page Casque (vide : celui de Windows).
-    casque_nom: String,
-    /// Le retour de sa voix dans le casque (sidetone), et son volume.
-    retour_voix: bool,
-    retour_voix_volume: f32,
-    /// L'égaliseur des voix reçues : ses bandes.
-    egaliseur: Vec<ki_voice::egaliseur::Bande>,
-    /// L'égaliseur de sa propre voix, sur ce qui part.
-    egaliseur_micro: Vec<ki_voice::egaliseur::Bande>,
-    /// Lequel des deux la page Casque montre (`reglages_casque::VUE_*`).
-    egaliseur_vue: u8,
-    /// L'éditeur d'égaliseur (bande choisie, comparaison, spectre).
-    eq_editeur: egaliseur_ui::EditeurEq,
-    /// Le spectre que la page veut voir cette image, et celui que le moteur
-    /// dépose (`ki_voice::ANALYSE_*`).
-    analyse_voulue: u8,
-    analyse_actuelle: u8,
-    /// La page Casque en mode studio (toute la chaîne) plutôt que simple.
-    mode_studio: bool,
-    /// Le mode studio explique chaque réglage (masquable une fois connu).
-    explications: bool,
-    /// La chaîne studio de sa voix (porte, de-esser, compresseur perso,
-    /// chaleur, plafond).
-    studio: ki_voice::dynamique::ReglagesStudio,
-    /// Ses profils de voix, et le nom tapé pour le prochain.
-    profils_voix: Vec<studio_ui::ProfilVoix>,
-    profil_nom: String,
-    /// Le changeur de voix : allumé ou non, ses réglages, où part la voix
-    /// changée (`ki_voice::changeur::VERS_*`), son raccourci et les
-    /// pressions déjà traitées.
-    changeur_actif: bool,
-    changeur: ki_voice::changeur::ReglagesChangeur,
-    changeur_vers: u8,
-    hotkey_changeur: Option<PttKey>,
-    hotkey_changeur_vues: u32,
-    /// Le calibrage des gains du micro en cours (page Casque), et son
-    /// dernier verdict, affiché un moment.
-    calibrage_micro: Option<reglages_casque::Calibrage>,
-    calibrage_verdict: Option<(std::time::Instant, String)>,
-    /// Les périphériques que suit le fil du matériel (dernier ordre donné).
-    materiel_suivi: Option<(Option<String>, Option<String>)>,
-    /// Le micro pour les jeux : la voix traitée envoyée dans un câble
-    /// virtuel, et le câble choisi (`None` : détecté d'office).
-    micro_jeux: bool,
-    micro_jeux_sortie: Option<String>,
-    jitter_frames: usize,
-    ptt_release_ms: u32,
-    loopback: bool,
-    /// Le dernier essai « enregistrer et réécouter » gardé en WAV (son
-    /// numéro), et le dossier où il l'a été.
-    essai_garde: u64,
-    essai_dossier: Option<std::path::PathBuf>,
-    /// L'imitation assistée du changeur : la voix visée (le nom de
-    /// l'extrait, son empreinte), son analyse en cours sur un fil, l'erreur à
-    /// dire, et l'empreinte de sa propre voix (mesurée sur l'essai de ce
-    /// numéro).
-    imitation_cible: Option<(String, ki_voice::imitation::EmpreinteVoix)>,
-    imitation_calcul: Option<std::sync::mpsc::Receiver<Result<(String, ki_voice::imitation::EmpreinteVoix), String>>>,
-    imitation_erreur: Option<String>,
-    imitation_moi: Option<(u64, Option<ki_voice::imitation::EmpreinteVoix>)>,
-    /// Calibration des seuils en cours : (départ, crête ambiante mesurée).
-    calibrating: Option<(std::time::Instant, f32)>,
-    /// La voix d'à côté : la force de l'isolation (`ki_voice::proximite::
-    /// PROXIMITE_*`), l'ancre apprise ou mesurée de sa voix par micro (nom
-    /// du périphérique → dBFS), la mesure de cinq secondes en cours et son
-    /// dernier verdict.
-    proximite_force: u8,
-    proximite_ancres: std::collections::HashMap<String, f32>,
-    mesure_prox: Option<voisine_ui::MesureProx>,
-    mesure_prox_verdict: Option<String>,
-    /// Page Casque : la crête brute retenue 300 ms pour la jauge « Marge »
-    /// (sinon un cri de 150 ms y passait une fois sur deux), et le dernier
-    /// gain total de la carte vu pour ce micro — quand il bouge, l'ancre de
-    /// la voix d'à côté bouge d'autant.
-    marge_crete: Option<(f32, std::time::Instant)>,
-    gain_carte_vu: Option<(String, f32)>,
+    /// Les réglages audio, tels qu'ils se sauvent : micro, casque, traitements,
+    /// raccourcis, volumes par personne.
+    audio: audio::ReglagesAudio,
+    /// L'état du vocal, qui ne se sauve pas : micro coupé, émission en cours, débit
+    /// choisi par le réseau, mesures et essais en cours.
+    vocal: audio::Vocal,
     // Labo vidéo (S1a du partage d'écran) : boucle locale de test.
     labo: Option<ki_video::LocalLoop>,
     labo_frame: std::sync::Arc<std::sync::Mutex<Option<ki_video::RgbaFrame>>>,
@@ -1096,17 +932,6 @@ impl KiApp {
                 .and_then(|s| s.get_string(key))
                 .unwrap_or_else(|| default.to_string())
         };
-        // Une porte de bruit réglée à 0 dB de profondeur ne faisait rien :
-        // son seuil a pu être poussé n'importe où sans que ça s'entende. La
-        // rallumer telle quelle couperait des bouts de voix — on la coupe,
-        // elle se réactive d'un geste dans l'onglet Audio.
-        let porte_inerte = studio_ui::porte_inerte(&get("studio", ""));
-        if porte_inerte {
-            ki_voice::journal(
-                "ta porte de bruit avait une profondeur de 0 dB (elle ne coupait rien) :                  elle est désactivée — remets un seuil dans l'onglet Audio si tu la veux"
-                    .into(),
-            );
-        }
         // Le carnet reprend l'unique adresse des versions précédentes ; on
         // rouvre sur le serveur utilisé en dernier.
         let book = servers::load(cc.storage);
@@ -1394,98 +1219,8 @@ impl KiApp {
             show_account: false,
             old_password: String::new(),
             new_password: String::new(),
-            all_volumes: cc
-                .storage
-                .and_then(|s| s.get_string("user_volumes"))
-                .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_default(),
-            mode: match get("mic_mode", "ptt").as_str() {
-                "open" => MicMode::Open,
-                "vad" => MicMode::Vad,
-                _ => MicMode::Ptt,
-            },
-            ptt_key: PttKey::from_id(&get("ptt_key", "lalt")).unwrap_or(PttKey::LAlt),
-            sourd: false,
-            hotkey_micro: PttKey::from_id(&get("hotkey_micro", "")),
-            hotkey_sourd: PttKey::from_id(&get("hotkey_sourd", "")),
-            hotkey_vues: (0, 0),
-            muted: false,
-            armed: false,
-            transmitting: false,
-            pref_input: Some(get("input_device", "")).filter(|s| !s.is_empty()),
-            pref_output: Some(get("output_device", "")).filter(|s| !s.is_empty()),
-            native_audio: get("native_audio", "on") != "off",
-            raw_mic: get("raw_mic", "off") == "on",
-            robust_output: get("robust_output", "off") == "on",
-            comms_mic: get("comms_mic", "off") == "on",
-            noise_mode: get("noise_mode", "1")
-                .parse()
-                .unwrap_or(ki_voice::NOISE_RNNOISE),
-            input_gain: get("input_gain", "1.0").parse().unwrap_or(1.0),
-            output_gain: get("output_gain", "1.0").parse().unwrap_or(1.0),
-            vad_threshold: get("vad_threshold", "0.02").parse().unwrap_or(0.02),
-            vad_neural: get("vad_neural", "on") != "off",
-            vad_sens: get("vad_sens", "0.5").parse().unwrap_or(0.5),
-            vad_hangover_ms: get("vad_hangover_ms", "400").parse().unwrap_or(400),
-            bitrate: get("bitrate", "0").parse().unwrap_or(0),
-            auto_bitrate: 64_000,
-            good_reports: 0,
-            upstream_loss: None,
-            dred_mode: get("dred_mode", "1").parse().unwrap_or(1),
-            dred_active: false,
-            agc: get("agc", "on") != "off",
-            aec_on: get("aec", "on") != "off",
-            agc_target: get("agc_target", "0.30").parse().unwrap_or(0.30),
-            gate_threshold: if porte_inerte { 0.0 } else { get("gate_threshold", "0").parse().unwrap_or(0.0) },
-            compression: get("compression", "1")
-                .parse()
-                .unwrap_or(ki_voice::dynamique::COMPRESSION_DOUCE)
-                .min(ki_voice::dynamique::COMPRESSION_PERSO),
-            adoucir_cris: get("adoucir_cris", "on") != "off",
-            casque_nom: get("casque_nom", ""),
-            retour_voix: get("retour_voix", "off") == "on",
-            retour_voix_volume: get("retour_voix_volume", "0.5").parse().unwrap_or(0.5),
-            egaliseur: ki_voice::egaliseur::lire(&get("egaliseur", "")),
-            egaliseur_micro: ki_voice::egaliseur::lire(&get("egaliseur_micro", "")),
-            egaliseur_vue: reglages_casque::VUE_TA_VOIX,
-            eq_editeur: egaliseur_ui::EditeurEq::new(),
-            analyse_voulue: ki_voice::ANALYSE_AUCUNE,
-            analyse_actuelle: ki_voice::ANALYSE_AUCUNE,
-            mode_studio: get("mode_studio", "off") == "on",
-            explications: get("explications", "on") != "off",
-            studio: studio_ui::lire_studio(&get("studio", "")),
-            profils_voix: studio_ui::lire_profils(&get("profils_voix", "[]")),
-            profil_nom: String::new(),
-            changeur_actif: get("changeur_actif", "off") == "on",
-            changeur: changeur_ui::lire_changeur(&get("changeur", "")),
-            changeur_vers: get("changeur_vers", "0").parse::<u8>().unwrap_or(0).min(ki_voice::changeur::VERS_KICHAT),
-            hotkey_changeur: PttKey::from_id(&get("hotkey_changeur", "")),
-            hotkey_changeur_vues: 0,
-            calibrage_micro: None,
-            calibrage_verdict: None,
-            materiel_suivi: None,
-            micro_jeux: get("micro_jeux", "off") == "on",
-            micro_jeux_sortie: Some(get("micro_jeux_sortie", "")).filter(|s| !s.is_empty()),
-            alerte_saturation: None,
-            jitter_frames: get("jitter_frames", "0").parse().unwrap_or(0),
-            ptt_release_ms: get("ptt_release_ms", "100").parse().unwrap_or(100),
-            loopback: false,
-            essai_garde: 0,
-            essai_dossier: None,
-            imitation_cible: None,
-            imitation_calcul: None,
-            imitation_erreur: None,
-            imitation_moi: None,
-            calibrating: None,
-            proximite_force: get("proximite_force", "0")
-                .parse::<u8>()
-                .unwrap_or(ki_voice::proximite::PROXIMITE_OFF)
-                .min(ki_voice::proximite::PROXIMITE_FORTE),
-            proximite_ancres: voisine_ui::lire_ancres(&get("proximite_ancres", "{}")),
-            mesure_prox: None,
-            mesure_prox_verdict: None,
-            marge_crete: None,
-            gain_carte_vu: None,
+            audio: audio::ReglagesAudio::load(get),
+            vocal: audio::Vocal::new(),
             labo: None,
             labo_frame: Default::default(),
             labo_stats: Default::default(),
@@ -1633,163 +1368,6 @@ impl KiApp {
         }
     }
 
-    /// Seuil VAD effectif : actif seulement en mode activation vocale.
-    fn effective_vad(&self) -> f32 {
-        if self.mode == MicMode::Vad {
-            self.vad_threshold
-        } else {
-            0.0
-        }
-    }
-
-    /// Débit effectif : le choix manuel, ou le débit auto-piloté.
-    fn effective_bitrate(&self) -> i32 {
-        if self.bitrate == 0 {
-            self.auto_bitrate
-        } else {
-            self.bitrate
-        }
-    }
-
-    /// Débit adaptatif : réagit aux rapports de pertes montantes du serveur.
-    /// Baisse d'un cran dès 5 % de pertes, remonte d'un cran après trois
-    /// fenêtres propres consécutives (15 s), plafonné à 64 kbps.
-    fn on_net_quality(&mut self, loss_pct: f32) {
-        self.upstream_loss = Some(loss_pct);
-        // Protection DRED automatique : engagée dès 2 % de pertes, relâchée
-        // après trois fenêtres propres (le débit adaptatif gère le reste).
-        if self.dred_mode == 1 {
-            let was = self.dred_active;
-            if loss_pct > 2.0 {
-                self.dred_active = true;
-            } else if loss_pct < 0.5 && self.good_reports >= 2 {
-                self.dred_active = false;
-            }
-            if was != self.dred_active {
-                self.apply_audio_settings();
-            }
-        }
-        if self.bitrate != 0 {
-            return; // débit manuel : on affiche l'info, on ne pilote pas
-        }
-        let idx = BITRATES
-            .iter()
-            .position(|&b| b == self.auto_bitrate)
-            .unwrap_or(3);
-        if loss_pct > 5.0 {
-            if idx > 0 {
-                self.auto_bitrate = BITRATES[idx - 1];
-                self.good_reports = 0;
-                self.apply_audio_settings();
-            }
-        } else if loss_pct < 1.0 {
-            self.good_reports = self.good_reports.saturating_add(1);
-            if self.good_reports >= 3 && self.auto_bitrate < 64_000 {
-                self.auto_bitrate = BITRATES[idx + 1].min(64_000);
-                self.good_reports = 0;
-                self.apply_audio_settings();
-            }
-        } else {
-            self.good_reports = 0;
-        }
-    }
-
-    /// Pousse tous les réglages audio actuels vers le moteur, à chaud.
-    fn apply_audio_settings(&self) {
-        if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-            engine.set_noise_mode(self.noise_mode);
-            engine.set_input_gain(self.input_gain);
-            // Sourd : la sortie à zéro, le réglage de volume gardé pour le
-            // retour.
-            engine.set_output_gain(if self.sourd { 0.0 } else { self.output_gain });
-            engine.set_vad_threshold(self.effective_vad());
-            engine.set_vad_hangover_ms(self.vad_hangover_ms);
-            engine.set_vad_neural(self.vad_neural);
-            engine.set_vad_sensitivity(self.vad_sens);
-            engine.set_bitrate(self.effective_bitrate());
-            // Pendant la calibration sur le bruit de la pièce, la porte et le
-            // gain automatique restent suspendus, quel que soit le réglage
-            // qui repasse par ici entre-temps (débit auto, DRED, un curseur).
-            let calibration = self.calibrating.is_some();
-            engine.set_agc(self.agc && !calibration);
-            engine.set_aec(self.aec_on);
-            engine.set_agc_target(self.agc_target);
-            engine.set_gate_threshold(if calibration { 0.0 } else { self.gate_threshold });
-            engine.set_proximite(self.proximite_reglages());
-            engine.set_compression(self.compression);
-            engine.set_adoucir_cris(self.adoucir_cris);
-            engine.set_retour_voix(self.retour_voix, self.retour_voix_volume);
-            let (ecoute, voix) = self.egaliseurs_effectifs();
-            engine.set_egaliseur(&ecoute);
-            engine.set_egaliseur_micro(&voix);
-            engine.set_studio(self.studio);
-            engine.set_changeur(self.changeur_actif.then_some(self.changeur), self.changeur_vers);
-            engine.set_jitter_frames(self.jitter_frames);
-            engine.set_dred(match self.dred_mode {
-                0 => 0,
-                2 => ki_voice::DRED_DEFAULT,
-                _ => {
-                    if self.dred_active {
-                        ki_voice::DRED_DEFAULT
-                    } else {
-                        0
-                    }
-                }
-            });
-            engine.set_loopback(self.loopback);
-        }
-    }
-
-    fn voice_prefs(&self) -> net::VoicePrefs {
-        net::VoicePrefs {
-            input_device: self.pref_input.clone(),
-            output_device: self.pref_output.clone(),
-            native_audio: self.native_audio,
-            medias: self.visionneuse.file.clone(),
-            raw_mic: self.raw_mic,
-            robust_output: self.robust_output,
-            comms_mic: self.comms_mic,
-            noise_mode: self.noise_mode,
-            volumes: self
-                .all_volumes
-                .get(self.username.trim())
-                .cloned()
-                .unwrap_or_default(),
-            input_gain: self.input_gain,
-            output_gain: self.output_gain,
-            vad_threshold: self.effective_vad(),
-            vad_hangover_ms: self.vad_hangover_ms,
-            vad_neural: self.vad_neural,
-            vad_sensitivity: self.vad_sens,
-            // Le PC garde Silero seul juge, comme jusqu'ici.
-            vad_garde: false,
-            bitrate: self.effective_bitrate(),
-            agc: self.agc,
-            aec: self.aec_on,
-            agc_target: self.agc_target,
-            gate_threshold: self.gate_threshold,
-            proximite: self.proximite_reglages(),
-            compression: self.compression,
-            adoucir_cris: self.adoucir_cris,
-            retour_voix: self.retour_voix,
-            retour_voix_gain: self.retour_voix_volume,
-            egaliseur: self.egaliseur.clone(),
-            egaliseur_micro: self.egaliseur_micro.clone(),
-            studio: self.studio,
-            changeur: self.changeur_actif.then_some(self.changeur),
-            changeur_vers: self.changeur_vers,
-            micro_jeux: self.micro_jeux_resolu(),
-            jitter_frames: self.jitter_frames,
-            dred: match self.dred_mode {
-                0 => 0,
-                2 => ki_voice::DRED_DEFAULT,
-                _ if self.dred_active => ki_voice::DRED_DEFAULT,
-                _ => 0,
-            },
-            moteur_a_la_demande: false,
-        }
-    }
-
     /// Photo de l'état du moteur audio pour la frame en cours.
     fn voice_snapshot(&self) -> VoiceSnapshot {
         // Le ping n'existe que connecté ; le moteur, lui, tourne même
@@ -1832,7 +1410,7 @@ impl KiApp {
 
     /// Volume mémorisé pour un utilisateur (1.0 = 100 %).
     fn volume_of(&self, user_id: UserId) -> f32 {
-        self.all_volumes
+        self.audio.all_volumes
             .get(self.username.trim())
             .and_then(|v| v.get(&user_id))
             .copied()
@@ -1842,7 +1420,7 @@ impl KiApp {
     /// Mémorise et applique à chaud le volume d'un utilisateur.
     fn set_volume(&mut self, user_id: UserId, gain: f32) {
         let my = self.username.trim().to_string();
-        let volumes = self.all_volumes.entry(my).or_default();
+        let volumes = self.audio.all_volumes.entry(my).or_default();
         if (gain - 1.0).abs() < 0.001 {
             volumes.remove(&user_id);
         } else {
@@ -2258,9 +1836,9 @@ impl KiApp {
             if self.sortie_medias.is_none() {
                 self.sortie_medias = Some(ki_voice::medias::SortieSeule::demarrer(
                     self.visionneuse.file.clone(),
-                    self.pref_output.clone(),
-                    self.native_audio,
-                    self.robust_output,
+                    self.audio.pref_output.clone(),
+                    self.audio.native_audio,
+                    self.audio.robust_output,
                 ));
             }
         } else if self.sortie_medias.is_some() {
@@ -2747,8 +2325,8 @@ impl KiApp {
         if self.voice_channel.take().is_none() {
             return;
         }
-        self.armed = false;
-        self.transmitting = false;
+        self.vocal.armed = false;
+        self.vocal.transmitting = false;
         self.play_sfx(sfx::SELF_LEAVE);
         self.prev_voice_peers.clear();
         self.send(ClientMsg::LeaveVoice);
@@ -3008,9 +2586,9 @@ impl KiApp {
         *self.admin.diag.lock().unwrap() = None;
         self.admin.diag_versions.lock().unwrap().clear();
 
-        self.armed = false;
-        self.transmitting = false;
-        self.loopback = false;
+        self.vocal.armed = false;
+        self.vocal.transmitting = false;
+        self.vocal.loopback = false;
         self.show_settings = false;
         // Les deux fermetures complètes, pas seulement les drapeaux : les
         // mots de passe tapés pour ce serveur restaient pré-remplis sur le
@@ -3576,19 +3154,19 @@ impl KiApp {
                 engine.set_agc(false);
             }
         }
-        self.calibrating = Some((std::time::Instant::now(), 0.0));
+        self.vocal.calibrating = Some((std::time::Instant::now(), 0.0));
     }
 
     /// Fait avancer la calibration ; à la fin, règle les seuils juste
     /// au-dessus du niveau ambiant mesuré et restaure la chaîne.
     fn tick_calibration(&mut self, niveau: f32) {
         const CALIB_SECS: f32 = 5.0;
-        let Some((start, peak)) = &mut self.calibrating else { return };
+        let Some((start, peak)) = &mut self.vocal.calibrating else { return };
         // Les réglages refermés puis rouverts des heures plus tard : la
         // mesure n'a rien vu entre-temps, elle ne vaut rien — on l'abandonne
         // au lieu de poser des seuils sur la trame du moment.
         if start.elapsed().as_secs_f32() > CALIB_SECS + 1.0 {
-            self.calibrating = None;
+            self.vocal.calibrating = None;
             self.apply_audio_settings();
             return;
         }
@@ -3597,21 +3175,21 @@ impl KiApp {
             return;
         }
         let ambient = *peak;
-        let avant = self.gate_threshold;
-        self.calibrating = None;
-        self.gate_threshold = (ambient * 1.4).clamp(0.004, 0.10);
-        if self.mode == MicMode::Vad {
-            self.vad_threshold = (ambient * 1.8).clamp(0.01, 0.25);
+        let avant = self.audio.gate_threshold;
+        self.vocal.calibrating = None;
+        self.audio.gate_threshold = (ambient * 1.4).clamp(0.004, 0.10);
+        if self.audio.mode == MicMode::Vad {
+            self.audio.vad_threshold = (ambient * 1.8).clamp(0.01, 0.25);
         }
         self.apply_audio_settings();
         // En détection neuronale, le seuil d'amplitude ne décide de rien :
         // on ne l'annonce pas.
-        let seuil = if self.mode == MicMode::Vad && !self.vad_neural {
-            format!(", seuil d'activation {:.1} %", self.vad_threshold * 100.0)
+        let seuil = if self.audio.mode == MicMode::Vad && !self.audio.vad_neural {
+            format!(", seuil d'activation {:.1} %", self.audio.vad_threshold * 100.0)
         } else {
             String::new()
         };
-        let baisse = if avant > 0.0 && self.gate_threshold < avant * 0.5 {
+        let baisse = if avant > 0.0 && self.audio.gate_threshold < avant * 0.5 {
             format!(" (elle était à {:.1} %)", avant * 100.0)
         } else {
             String::new()
@@ -3619,7 +3197,7 @@ impl KiApp {
         self.info = Some(format!(
             "calibré : ambiance {:.1} % → porte de bruit {:.1} %{baisse}{seuil}",
             ambient * 100.0,
-            self.gate_threshold * 100.0,
+            self.audio.gate_threshold * 100.0,
         ));
     }
 
@@ -3640,30 +3218,30 @@ impl KiApp {
         // l'interface, qu'eframe espace quand la fenêtre est réduite. D'ici,
         // on ne lui dit que le reste — en vocal, pas coupé, et si le mode
         // exige la touche ; `ptt_active` ne sert plus qu'à l'affichage.
-        self.touche_ptt.regler(self.mode == MicMode::Ptt, self.ptt_release_ms);
+        self.touche_ptt.regler(self.audio.mode == MicMode::Ptt, self.audio.ptt_release_ms);
         if !engine.ptt_branche() {
             engine.brancher_ptt(Some(self.touche_ptt.source()));
         }
-        let ptt_active = self.mode == MicMode::Ptt && self.touche_ptt.tenue();
+        let ptt_active = self.audio.mode == MicMode::Ptt && self.touche_ptt.tenue();
         // Hors d'un salon vocal, le micro reste fermé quoi qu'il arrive.
-        let autorise = !self.muted && self.voice_channel.is_some();
-        let armed = autorise && (matches!(self.mode, MicMode::Open | MicMode::Vad) || ptt_active);
+        let autorise = !self.vocal.muted && self.voice_channel.is_some();
+        let armed = autorise && (matches!(self.audio.mode, MicMode::Open | MicMode::Vad) || ptt_active);
         // Le moteur est réglé **à chaque image**, et non sur la seule
-        // transition. `self.armed` était écrit hors d'ici — en quittant le
+        // transition. `self.vocal.armed` était écrit hors d'ici — en quittant le
         // vocal, sur une erreur, à la disparition d'un salon — si bien que
         // l'état local et celui du moteur pouvaient diverger sans jamais se
         // retrouver : le micro restait ouvert alors que l'interface le
         // montrait fermé, et l'on continuait d'être entendu. L'écriture est
         // un simple stockage atomique, la refaire à chaque image ne coûte rien.
-        self.armed = armed;
+        self.vocal.armed = armed;
         engine.set_transmit(autorise);
 
         // Émission réelle (après VAD) : indicateur TX + diffusion aux autres.
         let sending = engine.is_sending();
         drop(engine_guard);
-        if sending != self.transmitting {
-            self.transmitting = sending;
-            self.send(ClientMsg::VoiceState { speaking: sending, muted: self.muted });
+        if sending != self.vocal.transmitting {
+            self.vocal.transmitting = sending;
+            self.send(ClientMsg::VoiceState { speaking: sending, muted: self.vocal.muted });
         }
     }
 
@@ -3707,15 +3285,15 @@ impl KiApp {
 
         // Le spectre de l'égaliseur : la page le demande à chaque image où
         // elle se montre ; le moteur n'en dépose que tant qu'on le regarde.
-        self.analyse_voulue = ki_voice::ANALYSE_AUCUNE;
+        self.vocal.analyse_voulue = ki_voice::ANALYSE_AUCUNE;
         if self.show_settings {
             self.settings_window(ctx, voice);
         }
-        if self.analyse_voulue != self.analyse_actuelle {
+        if self.vocal.analyse_voulue != self.vocal.analyse_actuelle {
             if let Some(engine) = self.link.engine.lock().unwrap().as_ref() {
-                engine.set_analyse(self.analyse_voulue);
+                engine.set_analyse(self.vocal.analyse_voulue);
             }
-            self.analyse_actuelle = self.analyse_voulue;
+            self.vocal.analyse_actuelle = self.vocal.analyse_voulue;
         }
         self.menu_message_ui(ctx);
         if self.admin.ouverte {
@@ -3747,10 +3325,10 @@ impl KiApp {
     /// Allumer ou couper le changeur de voix — par le raccourci global ou le
     /// Loupedeck —, et dire lequel.
     fn basculer_changeur(&mut self) {
-        self.changeur_actif = !self.changeur_actif;
+        self.audio.changeur_actif = !self.audio.changeur_actif;
         self.apply_audio_settings();
-        self.info = Some(if self.changeur_actif {
-            let nom = changeur_ui::personnage_de(&self.changeur)
+        self.info = Some(if self.audio.changeur_actif {
+            let nom = changeur_ui::personnage_de(&self.audio.changeur)
                 .map(|i| ki_voice::changeur::PERSONNAGES[i].0)
                 .unwrap_or("réglage perso");
             format!("changeur de voix allumé : {nom}")
@@ -3761,26 +3339,26 @@ impl KiApp {
 
     /// Couper ou rétablir son micro — par le bouton ou le raccourci global.
     fn basculer_micro(&mut self) {
-        self.muted = !self.muted;
-        self.play_sfx(if self.muted { sfx::MUTE } else { sfx::UNMUTE });
+        self.vocal.muted = !self.vocal.muted;
+        self.play_sfx(if self.vocal.muted { sfx::MUTE } else { sfx::UNMUTE });
         // Annoncer la bascule tout de suite : les autres voient l'icône
         // « muet » au lieu de se demander si l'on est parti. Sans ça, seule
         // la prochaine transition de parole aurait porté l'information.
-        self.send(ClientMsg::VoiceState { speaking: self.transmitting, muted: self.muted });
+        self.send(ClientMsg::VoiceState { speaking: self.vocal.transmitting, muted: self.vocal.muted });
     }
 
     /// Se rendre sourd, ou retrouver l'écoute. Sourd coupe aussi le micro,
     /// comme partout ailleurs ; le retour le rend, sans se souvenir d'un
     /// micro coupé avant — on redevient présent d'un coup.
     fn basculer_sourd(&mut self) {
-        self.sourd = !self.sourd;
-        if self.muted != self.sourd {
-            self.muted = self.sourd;
-            self.send(ClientMsg::VoiceState { speaking: self.transmitting, muted: self.muted });
+        self.vocal.sourd = !self.vocal.sourd;
+        if self.vocal.muted != self.vocal.sourd {
+            self.vocal.muted = self.vocal.sourd;
+            self.send(ClientMsg::VoiceState { speaking: self.vocal.transmitting, muted: self.vocal.muted });
         }
         // L'effet sonore part avant que la sortie ne se taise ; au retour,
         // après qu'elle est revenue.
-        if self.sourd {
+        if self.vocal.sourd {
             self.play_sfx(sfx::MUTE);
             self.apply_audio_settings();
         } else {
@@ -3858,7 +3436,7 @@ impl KiApp {
                     voice.levels.get(&m.user_id).copied().unwrap_or(0.0)
                 };
                 let parle =
-                    if is_me { self.transmitting } else { m.speaking || level > SPEAK_LEVEL };
+                    if is_me { self.vocal.transmitting } else { m.speaking || level > SPEAK_LEVEL };
                 overlay::Ligne {
                     nom: m.username.clone(),
                     parle,
@@ -4287,34 +3865,34 @@ impl KiApp {
         // Deux écritures atomiques, à chaque image : le fil suit les réglages
         // à chaud sans qu'on ait à le redémarrer. Hors push-to-talk il ne lit
         // même pas le clavier.
-        ptt.watch((self.mode == MicMode::Ptt).then_some(self.ptt_key));
-        ptt.set_release_ms(self.ptt_release_ms);
+        ptt.watch((self.audio.mode == MicMode::Ptt).then_some(self.audio.ptt_key));
+        ptt.set_release_ms(self.audio.ptt_release_ms);
         // Les raccourcis à bascule : autant de pressions vues, autant de
         // bascules — mais seulement en vocal, hors vocal elles n'ont pas de
         // sens et sont simplement consommées.
-        ptt.watch_bascule(ptt::Bascule::Micro, self.hotkey_micro);
-        ptt.watch_bascule(ptt::Bascule::Sourd, self.hotkey_sourd);
+        ptt.watch_bascule(ptt::Bascule::Micro, self.audio.hotkey_micro);
+        ptt.watch_bascule(ptt::Bascule::Sourd, self.audio.hotkey_sourd);
         // Le changeur de voix, lui, bascule partout — il sert aussi en jeu,
         // hors vocal, par le micro pour les jeux.
-        ptt.watch_bascule(ptt::Bascule::Changeur, self.hotkey_changeur);
+        ptt.watch_bascule(ptt::Bascule::Changeur, self.audio.hotkey_changeur);
         // Le raccourci de l'enregistreur de clips, tenu tant qu'il tourne.
         // L'appui, lui, agit sans passer par ici : voir `brancher_declencheur`.
         ptt.watch_raccourci(self.clips.enregistreur.as_ref().map(|_| self.clips.reglages.raccourci));
         let pressions = (ptt.pressions(ptt::Bascule::Micro), ptt.pressions(ptt::Bascule::Sourd));
         let pressions_changeur = ptt.pressions(ptt::Bascule::Changeur);
-        if pressions_changeur != self.hotkey_changeur_vues {
-            let bascule = pressions_changeur.wrapping_sub(self.hotkey_changeur_vues) % 2 == 1;
-            self.hotkey_changeur_vues = pressions_changeur;
+        if pressions_changeur != self.vocal.hotkey_changeur_vues {
+            let bascule = pressions_changeur.wrapping_sub(self.vocal.hotkey_changeur_vues) % 2 == 1;
+            self.vocal.hotkey_changeur_vues = pressions_changeur;
             if bascule {
                 self.basculer_changeur();
             }
         }
-        if pressions != self.hotkey_vues {
+        if pressions != self.vocal.hotkey_vues {
             let (micro, sourd) = (
-                pressions.0.wrapping_sub(self.hotkey_vues.0) % 2 == 1,
-                pressions.1.wrapping_sub(self.hotkey_vues.1) % 2 == 1,
+                pressions.0.wrapping_sub(self.vocal.hotkey_vues.0) % 2 == 1,
+                pressions.1.wrapping_sub(self.vocal.hotkey_vues.1) % 2 == 1,
             );
-            self.hotkey_vues = pressions;
+            self.vocal.hotkey_vues = pressions;
             if self.voice_channel.is_some() {
                 if sourd {
                     self.basculer_sourd();
@@ -4327,8 +3905,8 @@ impl KiApp {
         self.tick_clips(ctx);
         // Sortir du vocal rend l'écoute : sourd hors vocal, ce serait des
         // notifications muettes sans qu'on sache pourquoi.
-        if self.sourd && self.voice_channel.is_none() {
-            self.sourd = false;
+        if self.vocal.sourd && self.voice_channel.is_none() {
+            self.vocal.sourd = false;
             self.apply_audio_settings();
         }
 
@@ -4530,6 +4108,7 @@ impl KiApp {
         storage.set_string("sfx_on", if self.sfx_on { "on" } else { "off" }.into());
         storage.set_string("sfx_volume", format!("{}", self.sfx_volume));
         storage.set_string("visionneuse_volume", format!("{}", self.visionneuse.volume));
+        self.audio.save(storage);
         self.clips.reglages.save(storage);
         storage.set_string(
             "sfx_muted",
@@ -4542,16 +4121,6 @@ impl KiApp {
         storage.set_string("update_skipped", self.updater.skipped().to_string());
         storage.set_string("url", self.url.clone());
         storage.set_string("username", self.username.clone());
-        storage.set_string("mic_mode", self.mode.id().into());
-        storage.set_string("input_gain", format!("{}", self.input_gain));
-        storage.set_string("output_gain", format!("{}", self.output_gain));
-        storage.set_string("vad_threshold", format!("{}", self.vad_threshold));
-        storage.set_string("vad_neural", if self.vad_neural { "on" } else { "off" }.into());
-        storage.set_string("vad_sens", format!("{}", self.vad_sens));
-        storage.set_string("vad_hangover_ms", format!("{}", self.vad_hangover_ms));
-        storage.set_string("bitrate", format!("{}", self.bitrate));
-        storage.set_string("agc", if self.agc { "on" } else { "off" }.into());
-        storage.set_string("aec", if self.aec_on { "on" } else { "off" }.into());
         storage.set_string("reglages_onglet", self.reglages_onglet.cle().into());
         storage.set_string("valorant_presence", if self.valorant_presence { "on" } else { "off" }.into());
         storage.set_string("valorant_medailles", if self.valorant_medailles { "on" } else { "off" }.into());
@@ -4561,59 +4130,13 @@ impl KiApp {
         storage.set_string("presence_jeux", if self.presence_jeux { "on" } else { "off" }.into());
         self.soundboard.save(storage);
         self.valo.save(storage);
-        storage.set_string("agc_target", format!("{}", self.agc_target));
-        storage.set_string("gate_threshold", format!("{}", self.gate_threshold));
-        storage.set_string("compression", format!("{}", self.compression));
-        storage.set_string(
-            "adoucir_cris",
-            if self.adoucir_cris { "on" } else { "off" }.into(),
-        );
-        storage.set_string("casque_nom", self.casque_nom.clone());
-        storage.set_string("retour_voix", if self.retour_voix { "on" } else { "off" }.into());
-        storage.set_string("retour_voix_volume", format!("{}", self.retour_voix_volume));
-        storage.set_string("egaliseur", ki_voice::egaliseur::ecrire(&self.egaliseur));
-        storage.set_string("egaliseur_micro", ki_voice::egaliseur::ecrire(&self.egaliseur_micro));
-        storage.set_string("mode_studio", if self.mode_studio { "on" } else { "off" }.into());
-        storage.set_string("explications", if self.explications { "on" } else { "off" }.into());
-        storage.set_string("studio", studio_ui::ecrire_studio(&self.studio));
-        storage.set_string("profils_voix", studio_ui::ecrire_profils(&self.profils_voix));
-        storage.set_string("changeur_actif", if self.changeur_actif { "on" } else { "off" }.into());
-        storage.set_string("changeur", changeur_ui::ecrire_changeur(&self.changeur));
-        storage.set_string("changeur_vers", format!("{}", self.changeur_vers));
-        storage.set_string("hotkey_changeur", self.hotkey_changeur.map(|k| k.id()).unwrap_or("").into());
-        storage.set_string("micro_jeux", if self.micro_jeux { "on" } else { "off" }.into());
-        storage.set_string("micro_jeux_sortie", self.micro_jeux_sortie.clone().unwrap_or_default());
-        storage.set_string("jitter_frames", format!("{}", self.jitter_frames));
-        storage.set_string("ptt_release_ms", format!("{}", self.ptt_release_ms));
-        storage.set_string("noise_mode", format!("{}", self.noise_mode));
-        storage.set_string("proximite_force", format!("{}", self.proximite_force));
-        storage.set_string("proximite_ancres", voisine_ui::ecrire_ancres(&self.proximite_ancres));
-        storage.set_string("dred_mode", format!("{}", self.dred_mode));
-        storage.set_string("ptt_key", self.ptt_key.id().into());
-        storage.set_string("hotkey_micro", self.hotkey_micro.map(|k| k.id()).unwrap_or("").into());
-        storage.set_string("hotkey_sourd", self.hotkey_sourd.map(|k| k.id()).unwrap_or("").into());
         storage.set_string("loupedeck", if self.loupedeck_etat.actif { "on" } else { "off" }.into());
         storage.set_string("loupedeck_config", self.loupedeck_etat.config.ecrire());
         storage.set_string("soundboard_visible", if self.soundboard_visible { "on" } else { "off" }.into());
-        storage.set_string("input_device", self.pref_input.clone().unwrap_or_default());
-        storage.set_string(
-            "output_device",
-            self.pref_output.clone().unwrap_or_default(),
-        );
-        storage.set_string("native_audio", if self.native_audio { "on" } else { "off" }.into());
-        storage.set_string("raw_mic", if self.raw_mic { "on" } else { "off" }.into());
-        storage.set_string(
-            "robust_output",
-            if self.robust_output { "on" } else { "off" }.into(),
-        );
-        storage.set_string("comms_mic", if self.comms_mic { "on" } else { "off" }.into());
         storage.set_string("diag_share", if self.diag.partage { "on" } else { "off" }.into());
         storage.set_string("diag_crash_envoye", self.diag.crash_envoye.clone());
         self.diffusion.reglages.save(storage);
         self.overlay.save(storage);
-        if let Ok(json) = serde_json::to_string(&self.all_volumes) {
-            storage.set_string("user_volumes", json);
-        }
     }
 
     fn quitter_proprement(&mut self) {

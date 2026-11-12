@@ -550,28 +550,28 @@ impl KiApp {
                             ui::group_title(ui, Icon::Info, "Réseau & qualité");
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("débit voix").color(TEXT_DIM).size(texte::COURANT));
-                                let selected = if self.bitrate == 0 {
-                                    format!("Auto ({} kbps)", self.auto_bitrate / 1000)
+                                let selected = if self.audio.bitrate == 0 {
+                                    format!("Auto ({} kbps)", self.vocal.auto_bitrate / 1000)
                                 } else {
-                                    format!("{} kbps", self.bitrate / 1000)
+                                    format!("{} kbps", self.audio.bitrate / 1000)
                                 };
                                 egui::ComboBox::from_id_salt("bitrate")
                                     .width(150.0)
                                     .selected_text(RichText::new(selected).color(TEXT))
                                     .show_ui(ui, |ui| {
-                                        if ui.selectable_label(self.bitrate == 0, "Auto").clicked() {
-                                            self.bitrate = 0;
+                                        if ui.selectable_label(self.audio.bitrate == 0, "Auto").clicked() {
+                                            self.audio.bitrate = 0;
                                             apply = true;
                                         }
                                         for br in BITRATES {
                                             if ui
                                                 .selectable_label(
-                                                    self.bitrate == br,
+                                                    self.audio.bitrate == br,
                                                     format!("{} kbps", br / 1000),
                                                 )
                                                 .clicked()
                                             {
-                                                self.bitrate = br;
+                                                self.audio.bitrate = br;
                                                 apply = true;
                                             }
                                         }
@@ -593,18 +593,18 @@ impl KiApp {
                                 egui::ComboBox::from_id_salt("dred_mode")
                                     .width(150.0)
                                     .selected_text(
-                                        RichText::new(dred_label(self.dred_mode)).color(TEXT),
+                                        RichText::new(dred_label(self.audio.dred_mode)).color(TEXT),
                                     )
                                     .show_ui(ui, |ui| {
                                         for mode in [1u8, 0, 2] {
                                             if ui
                                                 .selectable_label(
-                                                    self.dred_mode == mode,
+                                                    self.audio.dred_mode == mode,
                                                     dred_label(mode),
                                                 )
                                                 .clicked()
                                             {
-                                                self.dred_mode = mode;
+                                                self.audio.dred_mode = mode;
                                                 apply = true;
                                             }
                                         }
@@ -612,10 +612,10 @@ impl KiApp {
                             });
                             ui::hint(
                                 ui,
-                                match self.dred_mode {
+                                match self.audio.dred_mode {
                                     0 => "redondance neuronale coupée",
                                     2 => "≈1 s de voix re-transmise en continu dans chaque paquet",
-                                    _ if self.dred_active => {
+                                    _ if self.vocal.dred_active => {
                                         "ENGAGÉE — pertes détectées, la voix est protégée"
                                     }
                                     _ => "en veille : s'engage automatiquement dès 2 % de pertes",
@@ -631,18 +631,18 @@ impl KiApp {
                                 egui::ComboBox::from_id_salt("jitter")
                                     .width(150.0)
                                     .selected_text(
-                                        RichText::new(jitter_label(self.jitter_frames)).color(TEXT),
+                                        RichText::new(jitter_label(self.audio.jitter_frames)).color(TEXT),
                                     )
                                     .show_ui(ui, |ui| {
                                         for frames in [0usize, 2, 3, 4, 6, 8] {
                                             if ui
                                                 .selectable_label(
-                                                    self.jitter_frames == frames,
+                                                    self.audio.jitter_frames == frames,
                                                     jitter_label(frames),
                                                 )
                                                 .clicked()
                                             {
-                                                self.jitter_frames = frames;
+                                                self.audio.jitter_frames = frames;
                                                 apply = true;
                                             }
                                         }
@@ -656,7 +656,7 @@ impl KiApp {
                                     Some(p) => format!("{p} ms"),
                                     None => "—".into(),
                                 };
-                                let upstream = match self.upstream_loss {
+                                let upstream = match self.vocal.upstream_loss {
                                     Some(l) => format!(" · pertes montantes {l:.1} %"),
                                     None => String::new(),
                                 };
@@ -901,19 +901,19 @@ impl KiApp {
     pub(crate) fn close_settings(&mut self) {
         self.show_settings = false;
         self.info = None;
-        self.calibrage_micro = None;
-        self.mesure_prox = None;
+        self.vocal.calibrage_micro = None;
+        self.vocal.mesure_prox = None;
         if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
             e.set_decision_demandee(false);
         }
-        if self.eq_editeur.comparer {
+        if self.vocal.eq_editeur.comparer {
             // Fermer la fenêtre en pleine comparaison ne doit pas laisser
             // l'égaliseur coupé.
-            self.eq_editeur.comparer = false;
+            self.vocal.eq_editeur.comparer = false;
             self.apply_audio_settings();
         }
-        if self.calibrating.take().is_some() || self.loopback {
-            self.loopback = false;
+        if self.vocal.calibrating.take().is_some() || self.vocal.loopback {
+            self.vocal.loopback = false;
             self.apply_audio_settings();
         }
         // Un enregistrement d'essai laissé en route rendrait le micro muet

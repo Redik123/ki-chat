@@ -155,8 +155,8 @@ impl KiApp {
     /// Les réglages de proximité à pousser au moteur : la force choisie et
     /// l'ancre de ce micro, s'il en a une.
     pub(crate) fn proximite_reglages(&self) -> ReglagesProximite {
-        let ancre = self.proximite_ancres.get(&cle_micro(self.pref_input.as_deref())).copied();
-        ReglagesProximite::de_force(self.proximite_force, ancre)
+        let ancre = self.audio.proximite_ancres.get(&cle_micro(self.audio.pref_input.as_deref())).copied();
+        ReglagesProximite::de_force(self.audio.proximite_force, ancre)
     }
 
     /// Le moteur a posé une ancre tout seul (une minute de parole sûre) : on
@@ -164,11 +164,11 @@ impl KiApp {
     /// publier. Appelé à chaque image, réglages ouverts ou non.
     pub(crate) fn ranger_ancre_apprise(&mut self, stats: &ki_voice::VoiceStats) {
         let Some(a) = stats.prox_ancre_apprise else { return };
-        let cle = cle_micro(self.pref_input.as_deref());
-        if self.proximite_ancres.get(&cle).is_some_and(|v| (v - a).abs() < 0.01) {
+        let cle = cle_micro(self.audio.pref_input.as_deref());
+        if self.audio.proximite_ancres.get(&cle).is_some_and(|v| (v - a).abs() < 0.01) {
             return;
         }
-        self.proximite_ancres.insert(cle, a);
+        self.audio.proximite_ancres.insert(cle, a);
         if let Some(e) = self.link.engine.lock().unwrap().as_ref() {
             e.set_proximite(self.proximite_reglages());
         }
@@ -182,7 +182,7 @@ impl KiApp {
 
         if ui::segmente(
             ui,
-            &mut self.proximite_force,
+            &mut self.audio.proximite_force,
             &[
                 (PROXIMITE_OFF, "Désactivée"),
                 (PROXIMITE_DOUCE, "Douce"),
@@ -194,7 +194,7 @@ impl KiApp {
         }
         ui::precision(
             ui,
-            match self.proximite_force {
+            match self.audio.proximite_force {
                 PROXIMITE_OFF => {
                     "Toute voix assez nette ouvre le micro, la tienne comme celle de la personne \
                      à côté de toi — et le gain automatique la remonte au même niveau."
@@ -217,14 +217,14 @@ impl KiApp {
                 }
             },
         );
-        if self.proximite_force == PROXIMITE_OFF {
+        if self.audio.proximite_force == PROXIMITE_OFF {
             return;
         }
         ui.add_space(espace::S);
 
         // Ce que le moteur sait de sa voix.
-        let cle = cle_micro(self.pref_input.as_deref());
-        let ancre = self.proximite_ancres.get(&cle).copied();
+        let cle = cle_micro(self.audio.pref_input.as_deref());
+        let ancre = self.audio.proximite_ancres.get(&cle).copied();
         let (etat_couleur, etat_texte) = match (engine_up, stats.prox_etat, stats.prox_reference_db) {
             (false, _, _) => (TEXT_FAINT, "vocal inactif".to_owned()),
             (true, 0, _) => (WARN, "parle : ki-chat apprend le niveau de ta voix…".to_owned()),
@@ -270,7 +270,7 @@ impl KiApp {
 
         // Les deux mesures.
         ui.add_space(espace::S);
-        match self.mesure_prox.as_ref().map(|m| (m.quoi, m.debut)) {
+        match self.vocal.mesure_prox.as_ref().map(|m| (m.quoi, m.debut)) {
             Some((quoi, debut)) => {
                 let progression = (debut.elapsed().as_secs_f32() / DUREE.as_secs_f32()).min(1.0);
                 ui.ctx().request_repaint_after(Duration::from_millis(50));
@@ -285,7 +285,7 @@ impl KiApp {
                         .size(texte::COURANT),
                     );
                     if ui::icon_button(ui, Icon::Close, "Annuler").clicked() {
-                        self.mesure_prox = None;
+                        self.vocal.mesure_prox = None;
                     }
                 });
             }
@@ -296,8 +296,8 @@ impl KiApp {
                             .on_hover_text("parle normalement pendant cinq secondes : c'est le niveau de référence de ce micro")
                             .clicked()
                     {
-                        self.mesure_prox = Some(MesureProx { quoi: Quoi::Moi, debut: Instant::now() });
-                        self.mesure_prox_verdict = None;
+                        self.vocal.mesure_prox = Some(MesureProx { quoi: Quoi::Moi, debut: Instant::now() });
+                        self.vocal.mesure_prox_verdict = None;
                     }
                     if engine_up
                         && ancre.is_some()
@@ -305,18 +305,18 @@ impl KiApp {
                             .on_hover_text("tais-toi et fais parler la personne à côté, un peu fort : ki-chat mesure l'écart et choisit la force")
                             .clicked()
                     {
-                        self.mesure_prox = Some(MesureProx { quoi: Quoi::Elle, debut: Instant::now() });
-                        self.mesure_prox_verdict = None;
+                        self.vocal.mesure_prox = Some(MesureProx { quoi: Quoi::Elle, debut: Instant::now() });
+                        self.vocal.mesure_prox_verdict = None;
                     }
                     if ancre.is_some() && ui::icon_button(ui, Icon::Trash, "Oublier ce que ki-chat sait de ma voix sur ce micro").clicked() {
-                        self.proximite_ancres.remove(&cle);
-                        self.mesure_prox_verdict = None;
+                        self.audio.proximite_ancres.remove(&cle);
+                        self.vocal.mesure_prox_verdict = None;
                         *apply = true;
                     }
                 });
             }
         }
-        if let Some(v) = &self.mesure_prox_verdict {
+        if let Some(v) = &self.vocal.mesure_prox_verdict {
             ui.add_space(espace::XS);
             ui.label(RichText::new(v).color(TEXT_DIM).size(texte::COURANT));
         }
@@ -331,46 +331,46 @@ impl KiApp {
 
     /// Fait avancer la mesure en cours ; finie, conclut et applique.
     fn avancer_mesure_prox(&mut self) {
-        let Some(m) = &self.mesure_prox else { return };
+        let Some(m) = &self.vocal.mesure_prox else { return };
         if m.debut.elapsed() < DUREE {
             return;
         }
         let quoi = m.quoi;
-        self.mesure_prox = None;
+        self.vocal.mesure_prox = None;
         let recents = self.link.engine.lock().unwrap().as_ref().map(|e| e.proximite_recents()).unwrap_or_default();
-        let cle = cle_micro(self.pref_input.as_deref());
+        let cle = cle_micro(self.audio.pref_input.as_deref());
         match quoi {
             Quoi::Moi => match niveau_de_ma_voix(&recents) {
                 Some(n) => {
-                    self.proximite_ancres.insert(cle, n);
-                    self.mesure_prox_verdict = Some(format!(
+                    self.audio.proximite_ancres.insert(cle, n);
+                    self.vocal.mesure_prox_verdict = Some(format!(
                         "Ta voix arrive à {n:.0} dBFS sur ce micro : c'est la référence. Fais parler la \
                          personne à côté pour vérifier l'écart."
                     ));
                     self.apply_audio_settings();
                 }
                 None => {
-                    self.mesure_prox_verdict =
+                    self.vocal.mesure_prox_verdict =
                         Some("Je ne t'ai pas entendu : parle pendant les cinq secondes, micro branché.".into());
                 }
             },
             Quoi::Elle => {
-                let Some(ancre) = self.proximite_ancres.get(&cle).copied() else { return };
+                let Some(ancre) = self.audio.proximite_ancres.get(&cle).copied() else { return };
                 match niveau_de_la_voisine(&recents) {
                     Some(elle) => {
                         let ecart = ancre - elle;
                         match force_pour(ecart) {
                             Some(force) => {
-                                self.proximite_force = force;
-                                self.mesure_prox_verdict = Some(format!(
+                                self.audio.proximite_force = force;
+                                self.vocal.mesure_prox_verdict = Some(format!(
                                     "Elle arrive {ecart:.0} dB sous toi ({elle:.0} dBFS) : isolation réglée sur \
                                      « {} ».",
                                     nom_force(force)
                                 ));
                             }
                             None => {
-                                self.proximite_force = PROXIMITE_FORTE;
-                                self.mesure_prox_verdict = Some(format!(
+                                self.audio.proximite_force = PROXIMITE_FORTE;
+                                self.vocal.mesure_prox_verdict = Some(format!(
                                     "Elle arrive seulement {ecart:.0} dB sous toi ({elle:.0} dBFS) : trop près pour \
                                      être sûr. Isolation sur « Forte » ; rapproche la perche de ta bouche, ou \
                                      passe en push-to-talk."
@@ -380,7 +380,7 @@ impl KiApp {
                         self.apply_audio_settings();
                     }
                     None => {
-                        self.mesure_prox_verdict = Some(
+                        self.vocal.mesure_prox_verdict = Some(
                             "Je ne l'ai pas entendue : qu'elle parle pendant les cinq secondes, toi sans rien dire."
                                 .into(),
                         );

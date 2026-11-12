@@ -172,22 +172,22 @@ impl KiApp {
     fn profil_actuel(&self, nom: &str) -> ProfilVoix {
         ProfilVoix {
             nom: nom.to_string(),
-            egaliseur: ki_voice::egaliseur::ecrire(&self.egaliseur_micro),
-            studio: ecrire_studio(&self.studio),
-            compression: self.compression,
-            porte: self.gate_threshold,
-            agc: self.agc,
-            agc_cible: self.agc_target,
+            egaliseur: ki_voice::egaliseur::ecrire(&self.audio.egaliseur_micro),
+            studio: ecrire_studio(&self.audio.studio),
+            compression: self.audio.compression,
+            porte: self.audio.gate_threshold,
+            agc: self.audio.agc,
+            agc_cible: self.audio.agc_target,
         }
     }
 
     fn appliquer_profil(&mut self, p: &ProfilVoix) {
-        self.egaliseur_micro = ki_voice::egaliseur::lire(&p.egaliseur);
-        self.studio = lire_studio(&p.studio);
-        self.compression = p.compression.min(COMPRESSION_PERSO);
-        self.gate_threshold = p.porte.clamp(0.0, 0.5);
-        self.agc = p.agc;
-        self.agc_target = p.agc_cible.clamp(0.15, 0.5);
+        self.audio.egaliseur_micro = ki_voice::egaliseur::lire(&p.egaliseur);
+        self.audio.studio = lire_studio(&p.studio);
+        self.audio.compression = p.compression.min(COMPRESSION_PERSO);
+        self.audio.gate_threshold = p.porte.clamp(0.0, 0.5);
+        self.audio.agc = p.agc;
+        self.audio.agc_target = p.agc_cible.clamp(0.15, 0.5);
     }
 
     /// La section « Chaîne de ta voix » du mode studio.
@@ -204,16 +204,16 @@ impl KiApp {
             ),
             |ui| {
                 ui::ligne(ui, "Aide", |ui| {
-                    ui::interrupteur(ui, &mut self.explications, "Expliquer chaque réglage");
+                    ui::interrupteur(ui, &mut self.audio.explications, "Expliquer chaque réglage");
                     ui::precision(ui, "Masque les explications une fois connues : le survol d'un nom les rappelle.");
                 });
-                let montrer = self.explications;
+                let montrer = self.audio.explications;
 
                 // --- Profils ---
                 ui::ligne(ui, "Profil", |ui| {
                     ui.horizontal_wrapped(|ui| {
                         let actuel = self.profil_actuel("");
-                        let nom_actuel = self
+                        let nom_actuel = self.audio
                             .profils_voix
                             .iter()
                             .find(|p| ProfilVoix { nom: String::new(), ..(*p).clone() } == actuel)
@@ -226,43 +226,43 @@ impl KiApp {
                             )
                             .show_ui(ui, |ui| {
                                 let mut choisi = None;
-                                for (i, p) in self.profils_voix.iter().enumerate() {
+                                for (i, p) in self.audio.profils_voix.iter().enumerate() {
                                     if ui.selectable_label(nom_actuel.as_deref() == Some(p.nom.as_str()), &p.nom).clicked() {
                                         choisi = Some(i);
                                     }
                                 }
                                 if let Some(i) = choisi {
-                                    let p = self.profils_voix[i].clone();
+                                    let p = self.audio.profils_voix[i].clone();
                                     self.appliquer_profil(&p);
                                     *apply = true;
                                 }
                             });
                         if let Some(nom) = &nom_actuel {
                             if ui::icon_button(ui, Icon::Trash, "Supprimer ce profil").clicked() {
-                                self.profils_voix.retain(|p| &p.nom != nom);
+                                self.audio.profils_voix.retain(|p| &p.nom != nom);
                             }
                         }
                     });
                     ui.add_space(espace::XS);
                     ui.horizontal(|ui| {
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.profil_nom)
+                            egui::TextEdit::singleline(&mut self.vocal.profil_nom)
                                 .margin(egui::Margin::symmetric(4, 5))
                                 .hint_text("nom du profil")
                                 .desired_width(160.0),
                         );
-                        let nom = self.profil_nom.trim().to_string();
+                        let nom = self.vocal.profil_nom.trim().to_string();
                         if ui
                             .add_enabled(!nom.is_empty(), egui::Button::new("Enregistrer"))
                             .on_hover_text("un profil du même nom est remplacé")
                             .clicked()
                         {
                             let profil = self.profil_actuel(&nom);
-                            match self.profils_voix.iter_mut().find(|p| p.nom == nom) {
+                            match self.audio.profils_voix.iter_mut().find(|p| p.nom == nom) {
                                 Some(p) => *p = profil,
-                                None => self.profils_voix.push(profil),
+                                None => self.audio.profils_voix.push(profil),
                             }
-                            self.profil_nom.clear();
+                            self.vocal.profil_nom.clear();
                         }
                     });
                     if montrer {
@@ -283,15 +283,15 @@ impl KiApp {
                      ta respiration entre deux phrases ne partent plus.",
                     montrer,
                 );
-                let mut porte_on = self.gate_threshold > 0.0;
+                let mut porte_on = self.audio.gate_threshold > 0.0;
                 parametre(ui, "Active", "Allume ou coupe la porte.", false, |ui| {
                     if ui::interrupteur(ui, &mut porte_on, "coupe le fond entre tes phrases").changed() {
-                        self.gate_threshold = if porte_on { 0.01 } else { 0.0 };
+                        self.audio.gate_threshold = if porte_on { 0.01 } else { 0.0 };
                         *apply = true;
                     }
                 });
                 if porte_on {
-                    let mut seuil = 20.0 * self.gate_threshold.max(1e-4).log10();
+                    let mut seuil = 20.0 * self.audio.gate_threshold.max(1e-4).log10();
                     parametre(
                         ui,
                         "Seuil",
@@ -301,12 +301,12 @@ impl KiApp {
                         montrer,
                         |ui| {
                             if curseur(ui, &mut seuil, -80.0..=-20.0, " dBFS", Some(1.0)) {
-                                self.gate_threshold = 10f32.powf(seuil / 20.0);
+                                self.audio.gate_threshold = 10f32.powf(seuil / 20.0);
                                 *apply = true;
                             }
                         },
                     );
-                    let p = &mut self.studio.porte;
+                    let p = &mut self.audio.studio.porte;
                     parametre(
                         ui,
                         "Profondeur",
@@ -393,11 +393,11 @@ impl KiApp {
                     montrer,
                     |ui| {
                         *apply |=
-                            ui::interrupteur(ui, &mut self.agc, "ramène ta voix à un niveau constant").changed();
+                            ui::interrupteur(ui, &mut self.audio.agc, "ramène ta voix à un niveau constant").changed();
                     },
                 );
-                if self.agc {
-                    let mut pct = self.agc_target * 100.0;
+                if self.audio.agc {
+                    let mut pct = self.audio.agc_target * 100.0;
                     parametre(
                         ui,
                         "Niveau visé",
@@ -405,7 +405,7 @@ impl KiApp {
                         montrer,
                         |ui| {
                             if curseur(ui, &mut pct, 15.0..=50.0, " %", Some(1.0)) {
-                                self.agc_target = pct / 100.0;
+                                self.audio.agc_target = pct / 100.0;
                                 *apply = true;
                             }
                         },
@@ -421,14 +421,14 @@ impl KiApp {
                      sans ternir le reste de ta voix.",
                     montrer,
                 );
-                let mut deesser_on = self.studio.deesser.is_some();
+                let mut deesser_on = self.audio.studio.deesser.is_some();
                 parametre(ui, "Actif", "Allume ou coupe le de-esser.", false, |ui| {
                     if ui::interrupteur(ui, &mut deesser_on, "calme les « s » et « ch » qui sifflent").changed() {
-                        self.studio.deesser = deesser_on.then(ReglagesDeesser::default);
+                        self.audio.studio.deesser = deesser_on.then(ReglagesDeesser::default);
                         *apply = true;
                     }
                 });
-                if let Some(d) = self.studio.deesser.as_mut() {
+                if let Some(d) = self.audio.studio.deesser.as_mut() {
                     let mut khz = d.frequence / 1000.0;
                     parametre(
                         ui,
@@ -484,7 +484,7 @@ impl KiApp {
                     |ui| {
                         *apply |= ui::segmente(
                             ui,
-                            &mut self.compression,
+                            &mut self.audio.compression,
                             &[
                                 (COMPRESSION_AUCUNE, "Aucun"),
                                 (COMPRESSION_DOUCE, "Doux"),
@@ -494,10 +494,10 @@ impl KiApp {
                         );
                     },
                 );
-                if self.compression != COMPRESSION_AUCUNE {
+                if self.audio.compression != COMPRESSION_AUCUNE {
                     // Doux et Fort se montrent tels qu'ils sont ; toucher à un
                     // réglage passe en « Perso », à partir de ces valeurs.
-                    let mut r = ReglagesCompresseur::du_niveau(self.compression).unwrap_or(self.studio.compresseur);
+                    let mut r = ReglagesCompresseur::du_niveau(self.audio.compression).unwrap_or(self.audio.studio.compresseur);
                     let avant = r;
                     parametre(
                         ui,
@@ -565,8 +565,8 @@ impl KiApp {
                         },
                     );
                     if r != avant {
-                        self.studio.compresseur = r.bornes();
-                        self.compression = COMPRESSION_PERSO;
+                        self.audio.studio.compresseur = r.bornes();
+                        self.audio.compression = COMPRESSION_PERSO;
                         *apply = true;
                     }
                     let red = -stats.reduction_compresseur_db.min(0.0);
@@ -582,7 +582,7 @@ impl KiApp {
                     "Une saturation douce, façon lampe : la voix paraît plus pleine, plus « radio ».",
                     montrer,
                 );
-                let mut chaleur = self.studio.chaleur * 100.0;
+                let mut chaleur = self.audio.studio.chaleur * 100.0;
                 parametre(
                     ui,
                     "Saturation",
@@ -590,7 +590,7 @@ impl KiApp {
                     montrer,
                     |ui| {
                         if curseur(ui, &mut chaleur, 0.0..=100.0, " %", Some(1.0)) {
-                            self.studio.chaleur = chaleur / 100.0;
+                            self.audio.studio.chaleur = chaleur / 100.0;
                             *apply = true;
                         }
                     },
@@ -612,7 +612,7 @@ impl KiApp {
                      respirer le codec.",
                     montrer,
                     |ui| {
-                        *apply |= curseur(ui, &mut self.studio.plafond_db, -12.0..=0.0, " dBFS", Some(0.5));
+                        *apply |= curseur(ui, &mut self.audio.studio.plafond_db, -12.0..=0.0, " dBFS", Some(0.5));
                     },
                 );
             },

@@ -410,7 +410,7 @@ impl KiApp {
         // Pour moi, l'état local fait foi, comme dans la liste des membres :
         // l'écho du serveur peut avoir un aller de retard.
         let (parle, muet) = if Some(m.user_id) == self.my_id {
-            (self.transmitting, self.muted || m.force_muted)
+            (self.vocal.transmitting, self.vocal.muted || m.force_muted)
         } else {
             let niveau = voice.levels.get(&m.user_id).copied().unwrap_or(0.0);
             (m.speaking || niveau > SPEAK_LEVEL, m.muted || m.force_muted)
@@ -786,18 +786,18 @@ impl KiApp {
         match action {
             Action::Rien => Eteinte,
             Action::Micro if !en_vocal => Eteinte,
-            Action::Micro if self.muted => Alerte,
-            Action::Micro => selon(self.transmitting),
+            Action::Micro if self.vocal.muted => Alerte,
+            Action::Micro => selon(self.vocal.transmitting),
             Action::Sourd if !en_vocal => Eteinte,
-            Action::Sourd => if self.sourd { Alerte } else { Veille },
-            Action::Ptt if !en_vocal || self.mode != MicMode::Ptt => Eteinte,
-            Action::Ptt => selon(self.armed),
+            Action::Sourd => if self.vocal.sourd { Alerte } else { Veille },
+            Action::Ptt if !en_vocal || self.audio.mode != MicMode::Ptt => Eteinte,
+            Action::Ptt => selon(self.vocal.armed),
             // Les clips marchent aussi hors vocal.
             Action::Clip => if self.clips.enregistreur.is_some() { Veille } else { Eteinte },
             Action::Partage if !en_vocal => Eteinte,
             Action::Partage if self.diffusion.live.is_some() => Alerte,
             Action::Partage => selon(self.diffusion.attente.is_some()),
-            Action::Changeur => selon(self.changeur_actif),
+            Action::Changeur => selon(self.audio.changeur_actif),
             Action::Enregistreur => selon(self.clips.enregistreur.is_some()),
             Action::QuitterVocal => if en_vocal { Veille } else { Eteinte },
             Action::Page(n) => selon(self.loupedeck_etat.ecran == *n),
@@ -836,11 +836,11 @@ impl KiApp {
         let detail = match action {
             Action::Rien | Action::Ptt => String::new(),
             Action::Micro if !en_vocal => hors_vocal(),
-            Action::Micro if self.muted => "coupé".into(),
-            Action::Micro if self.transmitting => "tu parles".into(),
+            Action::Micro if self.vocal.muted => "coupé".into(),
+            Action::Micro if self.vocal.transmitting => "tu parles".into(),
             Action::Micro => "ouvert".into(),
             Action::Sourd if !en_vocal => hors_vocal(),
-            Action::Sourd if self.sourd => "tu n'entends rien".into(),
+            Action::Sourd if self.vocal.sourd => "tu n'entends rien".into(),
             Action::Sourd => "tu entends".into(),
             Action::Clip if self.clips.enregistreur.is_some() => format!("les {duree} dernières s"),
             Action::Clip => "enregistreur arrêté".into(),
@@ -848,7 +848,7 @@ impl KiApp {
             Action::Partage if self.diffusion.live.is_some() => "en direct".into(),
             Action::Partage if self.diffusion.attente.is_some() => "démarrage…".into(),
             Action::Partage => "toucher : diffuser".into(),
-            Action::Changeur => if self.changeur_actif { "allumé" } else { "coupé" }.into(),
+            Action::Changeur => if self.audio.changeur_actif { "allumé" } else { "coupé" }.into(),
             Action::Enregistreur if self.clips.enregistreur.is_some() => "en marche".into(),
             Action::Enregistreur => "arrêté".into(),
             Action::QuitterVocal => self.voice_channel_name().map(str::to_string).unwrap_or_else(hors_vocal),
@@ -935,7 +935,7 @@ impl KiApp {
             Commande::Glisse(dy) => {
                 // Toute la hauteur de la bande : 100 %. Pas d'arrondi au
                 // cran, un glissé lent avance de moins de 5 % à la fois.
-                self.output_gain = (self.output_gain + dy / ki_loupedeck::HAUTEUR as f32).clamp(0.0, 2.0);
+                self.audio.output_gain = (self.audio.output_gain + dy / ki_loupedeck::HAUTEUR as f32).clamp(0.0, 2.0);
                 self.apply_audio_settings();
             }
         }
@@ -945,11 +945,11 @@ impl KiApp {
         match action {
             ActionMolette::Rien => {}
             ActionMolette::Volume => {
-                self.output_gain = cran(self.output_gain, crans);
+                self.audio.output_gain = cran(self.audio.output_gain, crans);
                 self.apply_audio_settings();
             }
             ActionMolette::Micro => {
-                self.input_gain = cran(self.input_gain, crans);
+                self.audio.input_gain = cran(self.audio.input_gain, crans);
                 self.apply_audio_settings();
             }
             ActionMolette::Choix => {
@@ -982,11 +982,11 @@ impl KiApp {
         match action {
             ActionMolette::Rien => {}
             ActionMolette::Volume => {
-                self.output_gain = 1.0;
+                self.audio.output_gain = 1.0;
                 self.apply_audio_settings();
             }
             ActionMolette::Micro => {
-                self.input_gain = 1.0;
+                self.audio.input_gain = 1.0;
                 self.apply_audio_settings();
             }
             ActionMolette::Choix => self.loupedeck_etat.choix = None,
@@ -1011,14 +1011,14 @@ impl KiApp {
         };
         match action {
             ActionMolette::Rien => Jauge::default(),
-            ActionMolette::Volume if self.sourd => Jauge {
+            ActionMolette::Volume if self.vocal.sourd => Jauge {
                 titre: "VOLUME".into(),
                 valeur: "sourd".into(),
-                fraction: Some(self.output_gain / 2.0),
+                fraction: Some(self.audio.output_gain / 2.0),
                 actif: false,
             },
-            ActionMolette::Volume => volume("VOLUME", self.output_gain, 2.0, true),
-            ActionMolette::Micro => volume("MICRO", self.input_gain, 2.0, !(en_vocal && self.muted)),
+            ActionMolette::Volume => volume("VOLUME", self.audio.output_gain, 2.0, true),
+            ActionMolette::Micro => volume("MICRO", self.audio.input_gain, 2.0, !(en_vocal && self.vocal.muted)),
             ActionMolette::Choix => {
                 let membres = self.loupedeck_membres();
                 let choisi = self.loupedeck_choisi();
