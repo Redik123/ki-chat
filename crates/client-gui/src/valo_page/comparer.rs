@@ -506,6 +506,7 @@ mod tests {
         let cx = Contexte {
             stats: &[],
             recu: true,
+            chargement: crate::valo_donnees::Chargement::Repos,
             esports: &[],
             activite: &[],
             moi: None,

@@ -160,7 +160,7 @@ impl PageValo {
             });
         }
         if !cx.recu {
-            ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
+            super::attente_des_fiches(ui, cx, demandes);
             return;
         }
         if lignes.is_empty() {

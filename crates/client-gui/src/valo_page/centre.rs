@@ -75,7 +75,10 @@ impl PageValo {
                 if ui::Bouton::new("Fermer").icone(Icon::Close).show(ui).on_hover_text("retour au chat (Échap)").clicked() {
                     ouvert = false;
                 }
-                if ui::Bouton::new("Actualiser").icone(Icon::Refresh).show(ui).clicked() {
+                // Pendant que la réponse arrive, le bouton tourne et ne
+                // redemande pas ; les chiffres d'avant restent à l'écran.
+                let en_vol = cx.chargement == crate::valo_donnees::Chargement::EnCours;
+                if ui::Bouton::new("Actualiser").icone(Icon::Refresh).en_charge(en_vol).show(ui).clicked() && !en_vol {
                     demandes.push(Demande::Actualiser);
                 }
             });
@@ -122,7 +125,7 @@ impl PageValo {
                     match onglet {
                         OngletCentre::Accueil => self.accueil(ui, cx, &lignes, &noms, &mut demandes),
                         OngletCentre::Classement | OngletCentre::Matchs if !cx.recu => {
-                            ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
+                            super::attente_des_fiches(ui, cx, &mut demandes);
                         }
                         OngletCentre::Classement => self.onglet_classement(ui, cx, &lignes, &noms, &mut demandes),
                         OngletCentre::Matchs => self.matchs_du_groupe(ui, &lignes, &noms, cx, maintenant, &mut demandes),

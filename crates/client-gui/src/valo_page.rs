@@ -191,6 +191,23 @@ impl PeriodeFiche {
     }
 }
 
+/// En attendant les fiches du groupe : la roue tant que la réponse peut
+/// venir, et, passé le délai, ce qui s'est passé avec de quoi réessayer.
+pub(crate) fn attente_des_fiches(ui: &mut Ui, cx: &Contexte<'_>, demandes: &mut Vec<Demande>) {
+    if cx.chargement == crate::valo_donnees::Chargement::EnRetard {
+        ui::bandeau(ui, ui::Ton::Alerte, "le serveur n'a pas rendu les fiches du groupe");
+        ui.add_space(espace::S);
+        if ui::Bouton::new("Réessayer").icone(crate::icons::Icon::Refresh).principal().show(ui).clicked() {
+            demandes.push(Demande::Actualiser);
+        }
+    } else {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
+        });
+    }
+}
+
 /// Ce que la page demande à l'application, qui tient la connexion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Demande {
@@ -985,6 +1002,8 @@ pub struct Contexte<'a> {
     pub stats: &'a [FicheMembre],
     /// Elles sont arrivées, même vides.
     pub recu: bool,
+    /// Où en est leur demande : en vol, sans réponse, ou rien.
+    pub chargement: crate::valo_donnees::Chargement,
     pub esports: &'a [MatchEsport],
     /// Les parties du groupe par heure de la semaine, en UTC.
     pub activite: &'a [u16],
@@ -1868,12 +1887,12 @@ mod tests {
         let rangs = rangs::Rangs::new();
         let catalogue = Catalogue::new();
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, false, &Contexte { stats: &[], recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         assert_eq!(vue.e.len(), 5);
         assert_eq!(vue.b.matchs, 5, "un Spike Rush a des manches, il compte");
         assert_eq!(vue.e[0].id, "a", "du plus récent au plus ancien");
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::SeptJours, true, &Contexte { stats: &[], recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         assert_eq!(vue.e.len(), 2);
         assert_eq!(vue.b.rr, 20);
         assert!(vue.point_de("a").is_some());
@@ -2108,7 +2127,7 @@ mod tests {
                 for periode in Periode::TOUTES {
                     page.periode = periode;
                     for (soiree, servie) in [(&soiree[..], true), (&[][..], false)] {
-                        let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree, soiree_servie: servie, ma_fiche: stats.first().map(|f| &f.fiche), photos: &photos, comparee: None, journal: Journal::default() };
+                        let cx = Contexte { stats: &stats, recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree, soiree_servie: servie, ma_fiche: stats.first().map(|f| &f.fiche), photos: &photos, comparee: None, journal: Journal::default() };
                         for souris in [None, Some(Pos2::new(300.0, 300.0)), Some(Pos2::new(600.0, 800.0))] {
                             dessiner(&ctx, souris, |ui| {
                                 let (ouvert, demandes) = page.centre(ui, &cx, None, &mut boutique);
@@ -2118,7 +2137,7 @@ mod tests {
                     }
                 }
             }
-            let cx = Contexte { stats: &stats, recu: true, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &soiree, soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
+            let cx = Contexte { stats: &stats, recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &activite, moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &soiree, soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
             // Les filtres des matchs : un membre, et un mode qui n'est plus
             // dans la période, oublié.
             page.onglet_centre = centre::OngletCentre::Matchs;
@@ -2137,7 +2156,7 @@ mod tests {
             });
             // Avant la réponse du serveur, et sans personne de lié.
             for (stats, recu) in [(&stats[..], false), (&[][..], true)] {
-                let cx = Contexte { stats, recu, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
+                let cx = Contexte { stats, recu, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: None, membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
                 for onglet in [centre::OngletCentre::Accueil, centre::OngletCentre::Classement, centre::OngletCentre::Matchs] {
                     page.onglet_centre = onglet;
                     dessiner(&ctx, None, |ui| {
@@ -2168,11 +2187,11 @@ mod tests {
         let catalogue = Catalogue::new();
         let deux = [membre(1, 10), membre(2, 20)];
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &deux, recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         assert!(vue.repere(Bilan::kd, 1.0).is_none());
         let trois = [membre(1, 10), membre(2, 20), membre(3, 30)];
         let photos = HashMap::new();
-        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
+        let vue = Vue::new("moi", &fiche, PeriodeFiche::Tout, true, &Contexte { stats: &trois, recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: None, membres: &[], rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() }, maintenant);
         let (mediane, max) = vue.repere(Bilan::kd, 5.0).expect("trois membres assez classés");
         assert_eq!(mediane, 2.0);
         assert_eq!(max, 5.0, "le plafond prend en compte la valeur du membre");
@@ -2243,7 +2262,7 @@ mod tests {
         for recu in [false, true] {
             for souris in [None, Some(Pos2::new(200.0, 160.0))] {
                 dessiner(&ctx, souris, |ui| {
-                    page.centre(ui, &Contexte { stats: &stats, recu, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, None, &mut boutique);
+                    page.centre(ui, &Contexte { stats: &stats, recu, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: Some(1), membres: &membres, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &HashMap::new(), comparee: None, journal: Journal::default() }, None, &mut boutique);
                 });
             }
         }

@@ -5,11 +5,39 @@
 //! À part de la page (`valo_page`, ce qu'on regarde) et du veilleur
 //! (`valorant`, ce que lit le client Riot de cette machine).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ki_protocol::{FicheMembre, FicheValorant, JeuEtat, JourDeJeu, MatchEsport, MonCompte, PartieSoiree};
 
 use crate::FicheOuverte;
+
+/// Le temps laissé au serveur pour rendre les fiches du groupe. Il les sert
+/// de son cache, en quelques millisecondes : dix secondes sans rien, c'est
+/// une demande perdue.
+pub(crate) const REPONSE_MAX: Duration = Duration::from_secs(10);
+
+/// Où en est la demande des fiches du groupe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chargement {
+    /// Rien en vol.
+    Repos,
+    /// Une demande est partie, la réponse peut encore arriver.
+    EnCours,
+    /// Une demande est partie depuis trop longtemps : le serveur ne répond
+    /// pas.
+    EnRetard,
+}
+
+impl Chargement {
+    /// D'après le temps écoulé depuis la demande, s'il y en a une en vol.
+    pub(crate) fn depuis(demandee: Option<Duration>) -> Self {
+        match demandee {
+            None => Chargement::Repos,
+            Some(t) if t < REPONSE_MAX => Chargement::EnCours,
+            Some(_) => Chargement::EnRetard,
+        }
+    }
+}
 
 /// Ce que l'on sait de VALORANT : les fiches du groupe, la soirée, sa propre
 /// fiche et son journal, ses comptes Riot, et ce que ce serveur sait faire.
@@ -19,6 +47,9 @@ pub(crate) struct DonneesValo {
     /// (`StatsValorant`), et si elles sont arrivées depuis la demande.
     pub(crate) stats: Vec<FicheMembre>,
     pub(crate) stats_recu: bool,
+    /// La demande en vol : quand elle est partie. Rendue à `None` par la
+    /// réponse — ou par l'abandon, passé [`REPONSE_MAX`].
+    pub(crate) stats_demandees: Option<Instant>,
     /// Les matchs d'e-sport à venir, pour l'accueil de la page.
     pub(crate) esports: Vec<MatchEsport>,
     /// Les 168 cases jour × heure (UTC) des parties du groupe sur 30 jours.
@@ -74,4 +105,18 @@ pub(crate) struct DonneesValo {
     pub(crate) valorant_avant: Option<JeuEtat>,
     /// Le dernier ennui des médailles consigné : on ne le répète pas.
     pub(crate) medailles_ennui: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn une_demande_sans_reponse_finit_en_retard() {
+        assert_eq!(Chargement::depuis(None), Chargement::Repos);
+        assert_eq!(Chargement::depuis(Some(Duration::from_millis(200))), Chargement::EnCours);
+        assert_eq!(Chargement::depuis(Some(REPONSE_MAX - Duration::from_millis(1))), Chargement::EnCours);
+        assert_eq!(Chargement::depuis(Some(REPONSE_MAX)), Chargement::EnRetard);
+        assert_eq!(Chargement::depuis(Some(Duration::from_secs(120))), Chargement::EnRetard);
+    }
 }

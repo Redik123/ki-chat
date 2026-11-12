@@ -206,6 +206,7 @@ impl eframe::App for Banc {
         let cx = Contexte {
             stats: &self.stats,
             recu: true,
+            chargement: crate::valo_donnees::Chargement::Repos,
             esports: &[],
             activite: &self.activite,
             moi: Some(1),

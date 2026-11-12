@@ -1346,11 +1346,13 @@ impl KiApp {
                 self.send(ClientMsg::FicheValorant { user_id: moi });
             }
         }
+        let chargement = self.tenir_les_stats(&ctx);
         let mut boutique = std::mem::take(&mut self.boutique);
         let (ouvert, demandes) = {
             let cx = valo_page::Contexte {
                 stats: &self.donnees_valo.stats,
                 recu: self.donnees_valo.stats_recu,
+                chargement,
                 esports: &self.donnees_valo.esports,
                 activite: &self.donnees_valo.activite,
                 moi: self.session.my_id,
@@ -1412,7 +1414,7 @@ impl KiApp {
         for demande in demandes {
             match demande {
                 valo_page::Demande::Actualiser => {
-                    self.ouvrir_stats();
+                    self.demander_stats();
                     self.donnees_valo.soiree_demandee = None;
                     self.donnees_valo.mon_journal = None;
                     self.donnees_valo.mon_journal_demande = None;
@@ -1798,8 +1800,43 @@ impl KiApp {
     fn ouvrir_stats(&mut self) {
         self.claude.ouvert = false;
         self.valo.ouvert = true;
-        self.donnees_valo.stats_recu = false;
+        self.demander_stats();
+    }
+
+    /// Demande les fiches du groupe. Celles qu'on a déjà restent à l'écran
+    /// en attendant : « Actualiser » ne vide plus la page.
+    fn demander_stats(&mut self) {
+        self.donnees_valo.stats_demandees = Some(std::time::Instant::now());
         self.send(ClientMsg::StatsValorant);
+    }
+
+    /// Les fiches du groupe, tenues à jour tant que la page se montre :
+    /// redemandées quand on n'en a pas — une reconnexion les a effacées, et
+    /// la page restait sur « demande au serveur… » jusqu'à « Actualiser » —,
+    /// et la demande abandonnée quand le serveur ne répond pas. Rend où en
+    /// est le chargement, pour l'affichage.
+    fn tenir_les_stats(&mut self, ctx: &egui::Context) -> valo_donnees::Chargement {
+        let d = &mut self.donnees_valo;
+        let chargement = valo_donnees::Chargement::depuis(d.stats_demandees.map(|t| t.elapsed()));
+        match chargement {
+            valo_donnees::Chargement::Repos if !d.stats_recu => {
+                self.demander_stats();
+                return valo_donnees::Chargement::EnCours;
+            }
+            valo_donnees::Chargement::Repos => {}
+            // De quoi voir le délai passer, même si rien d'autre ne repeint.
+            valo_donnees::Chargement::EnCours => ctx.request_repaint_after(std::time::Duration::from_millis(500)),
+            // Sans réponse, mais avec des fiches à l'écran : on garde
+            // celles d'avant, et on le dit une fois. Sans fiches, la page le
+            // dit elle-même, avec de quoi réessayer.
+            valo_donnees::Chargement::EnRetard if d.stats_recu => {
+                d.stats_demandees = None;
+                self.info = Some("VALORANT : le serveur n'a pas répondu — les chiffres affichés sont ceux d'avant".into());
+                return valo_donnees::Chargement::Repos;
+            }
+            valo_donnees::Chargement::EnRetard => {}
+        }
+        chargement
     }
 
     /// Les icônes de rang de la page du groupe — les fiches, et le rang de
@@ -2407,6 +2444,7 @@ impl KiApp {
         self.donnees_valo.fiche = None;
         self.donnees_valo.stats.clear();
         self.donnees_valo.stats_recu = false;
+        self.donnees_valo.stats_demandees = None;
         self.musique.etat = ki_protocol::EtatMusique::default();
         // La table de cartes : celle d'un salon de ce serveur.
         self.cartes.effacer();

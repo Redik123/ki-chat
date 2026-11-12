@@ -807,6 +807,7 @@ impl KiApp {
                 self.donnees_valo.esports = esports;
                 self.donnees_valo.activite = activite;
                 self.donnees_valo.stats_recu = true;
+                self.donnees_valo.stats_demandees = None;
             }
             // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
             autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),
