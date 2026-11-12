@@ -292,6 +292,12 @@ pub struct ConnectedUser {
     pub admin: bool,
     /// Anti-spam du chat.
     pub chat_budget: TokenBucket,
+    /// Les choix que le client redit à chaque connexion (médailles, journal
+    /// des parties). Ils puisaient dans le budget du chat : deux jetons
+    /// partis dès l'arrivée, et le premier message écrit dans la seconde
+    /// était refusé — « tu écris trop vite » à quelqu'un qui n'avait encore
+    /// rien écrit.
+    pub choix_budget: TokenBucket,
     /// Anti-spam des entrées et sorties de salon vocal.
     ///
     /// Chaque bascule reconstruit la table de routage de la voix et rediffuse
@@ -427,6 +433,15 @@ impl TokenBucket {
         }
         self.tokens -= 1.0;
         true
+    }
+}
+
+impl TokenBucket {
+    /// Le budget des choix redits à la connexion : quatre d'un coup, puis un
+    /// toutes les deux secondes — de quoi les annoncer tous, pas de quoi
+    /// faire réécrire le disque en rafale.
+    pub fn des_choix() -> Self {
+        Self::new(0.5, 4.0)
     }
 }
 
@@ -1749,6 +1764,22 @@ mod tests {
         drop(jetons);
         assert_eq!(sas.en_attente(ip), 0, "la table ne doit rien retenir");
         assert!(sas.entrer(ip).is_some(), "la place est rendue");
+    }
+
+    /// Médailles et journal des parties, redits à chaque connexion, vidaient
+    /// le budget du chat : le premier message écrit dans la seconde était
+    /// refusé. Ils ont leur budget, et le chat garde le sien entier.
+    #[test]
+    fn les_choix_de_connexion_ne_prennent_rien_au_chat() {
+        let mut chat = TokenBucket::default();
+        let mut choix = TokenBucket::des_choix();
+        // Les deux annonces de l'arrivée.
+        assert!(choix.take() && choix.take());
+        // Le premier message passe, et celui d'après aussi.
+        assert!(chat.take() && chat.take());
+        // Un client qui redirait ses choix en rafale, lui, est arrêté.
+        assert!(choix.take() && choix.take());
+        assert!(!choix.take());
     }
 
     /// Le flux de contrôle entier est désormais borné en débit, et pas

@@ -397,6 +397,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
                 color,
                 admin: is_admin,
                 chat_budget: Default::default(),
+                choix_budget: crate::state::TokenBucket::des_choix(),
                 voice_budget: crate::state::TokenBucket::new(3.0, 8.0),
                 pokes_ok: None,
                 mdp_budget: crate::state::TokenBucket::new(1.0 / 5.0, 2.0),
@@ -1815,16 +1816,16 @@ fn handle_msg(
         ClientMsg::ChoixMedailles { oui } => {
             // Son choix pour ses médailles : non, celles de sa fiche
             // s'effacent et le serveur ne les lit plus chez HenrikDev. Le
-            // même choix revient à chaque connexion et ne coûte rien ; un
-            // changement écrit sur le disque, à côté du fil réseau — au
-            // budget d'un message, qu'un client modifié ne le fasse pas
-            // réécrire en rafale.
+            // même choix revient à chaque connexion ; un changement écrit
+            // sur le disque, à côté du fil réseau — sur un budget à lui,
+            // qu'un client modifié ne le fasse pas réécrire en rafale, et
+            // sans rien prendre à celui des messages.
             let permis = state
                 .users
                 .lock()
                 .unwrap()
                 .get_mut(&user_id)
-                .is_some_and(|u| u.chat_budget.take());
+                .is_some_and(|u| u.choix_budget.take());
             if !permis {
                 return;
             }
@@ -1846,7 +1847,7 @@ fn handle_msg(
                     return;
                 };
                 u.journal_oui = oui;
-                oui || u.chat_budget.take()
+                oui || u.choix_budget.take()
             };
             if !oui && permis {
                 let state = state.clone();
