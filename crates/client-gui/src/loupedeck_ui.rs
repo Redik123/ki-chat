@@ -299,7 +299,7 @@ impl KiApp {
                 self.send(ClientMsg::StatsValorant);
             }
             self.catalogue.demarrer();
-            let agents: Vec<String> = self
+            let agents: Vec<String> = self.donnees_valo
                 .stats
                 .iter()
                 .find(|f| Some(f.user_id) == self.session.my_id)
@@ -447,7 +447,7 @@ impl KiApp {
 
     fn valo(&self) -> Valo<'_> {
         let moi = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id);
-        let membre = self.stats.iter().find(|f| Some(f.user_id) == self.session.my_id);
+        let membre = self.donnees_valo.stats.iter().find(|f| Some(f.user_id) == self.session.my_id);
         let fiche = membre.map(|f| &f.fiche);
         let mut matchs: Vec<&MatchResume> = fiche.map(|f| f.matchs.iter().collect()).unwrap_or_default();
         matchs.sort_by_key(|m| std::cmp::Reverse(m.date));

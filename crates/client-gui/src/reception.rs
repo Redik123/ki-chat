@@ -49,7 +49,7 @@ impl KiApp {
                     ki_voice::journal(format!("session close par le serveur : {message}"));
                     self.disconnect(Some(message));
                     // La reprise au lancement suivant non plus.
-                    self.session_auto = None;
+                    self.lanceur.session_auto = None;
                 }
                 net::Event::Msg(msg) => self.handle_server_msg(msg),
                 net::Event::Fingerprint(fp) => {
@@ -60,7 +60,7 @@ impl KiApp {
                     // échoué avant si elle avait différé.
                     let address = self.url.trim().to_string();
                     self.server_fingerprint = fp.clone();
-                    if let Some(s) = self.book.iter_mut().find(|s| s.address == address) {
+                    if let Some(s) = self.lanceur.book.iter_mut().find(|s| s.address == address) {
                         if s.cert_fingerprint.is_empty() {
                             tracing::info!("empreinte de {address} retenue : {fp}");
                             s.cert_fingerprint = fp;
@@ -191,11 +191,11 @@ impl KiApp {
                 // reste caché — rien de nouveau ne lui part.
                 self.portes.disponible = portes;
                 // Même preuve pour les médailles VALORANT.
-                self.serveur_medailles = medailles;
+                self.donnees_valo.serveur_medailles = medailles;
                 // Et pour le choix de les montrer, que le serveur apprend
                 // une fois par connexion, puis à chaque changement.
-                self.serveur_choix_medailles = choix_medailles;
-                self.choix_medailles_dit = None;
+                self.donnees_valo.serveur_choix_medailles = choix_medailles;
+                self.donnees_valo.choix_medailles_dit = None;
                 // Et pour les tables de cartes — et leurs règles en plus,
                 // qu'un serveur au protocole 1 prendrait pour un geste
                 // invalide.
@@ -204,28 +204,28 @@ impl KiApp {
                 // Et pour la carte tactique du salon.
                 self.serveur_tactique = tactique;
                 // Et pour le fil de la soirée.
-                self.serveur_soiree = soiree;
+                self.donnees_valo.serveur_soiree = soiree;
                 // Et pour la relecture de mon journal des parties.
-                self.serveur_journal_lecture = journal_lecture;
+                self.donnees_valo.serveur_journal_lecture = journal_lecture;
                 // Et pour Claude : sans clé d'API chez lui, pas de salon.
                 // Resté ouvert d'avant une coupure, il se recharge.
                 if self.claude.sur_bienvenue(claude) {
                     self.send(ClientMsg::ClaudeHistorique { de: None });
                 }
                 // Et pour nos comptes Riot, qu'il envoie juste après.
-                self.serveur_comptes_joues = comptes_joues;
-                self.mes_comptes.clear();
+                self.donnees_valo.serveur_comptes_joues = comptes_joues;
+                self.donnees_valo.mes_comptes.clear();
                 // Et pour le journal de nos parties, dont il apprendra notre
                 // choix au prochain tour.
-                self.serveur_journal = journal_parties;
-                self.choix_journal_dit = None;
+                self.donnees_valo.serveur_journal = journal_parties;
+                self.donnees_valo.choix_journal_dit = None;
                 self.session.connecting = false;
                 self.session.connect_started = None;
                 self.error = None;
                 self.remember_connection();
                 // Connecté : on y reviendra tout seul au prochain lancement,
                 // si le mot de passe est mémorisé — sans lui, impossible.
-                self.session_auto = self.selected.filter(|_| self.remember_password);
+                self.lanceur.session_auto = self.lanceur.selected.filter(|_| self.lanceur.remember_password);
                 // Une nouvelle connexion ne connaît pas notre statut de jeu,
                 // ni si l'on accepte les pokes : ils repartiront au prochain
                 // tour.
@@ -286,7 +286,7 @@ impl KiApp {
                 // Relancé après un plantage : même raisonnement, c'était
                 // décidé — c'est ki-chat qui en a décidé autrement. Une
                 // fois, et seulement chez le serveur d'avant.
-                if let Some(r) = self.retour.take().filter(|r| self.selected == Some(r.serveur)) {
+                if let Some(r) = self.retour.take().filter(|r| self.lanceur.selected == Some(r.serveur)) {
                     let salon = r.salon.filter(|c| self.session.channels.iter().any(|k| k.id == *c));
                     let vocal = r.vocal.filter(|c| self.session.channels.iter().any(|k| k.id == *c));
                     if let Some(c) = salon {
@@ -741,21 +741,21 @@ impl KiApp {
     fn recu_jeux(&mut self, msg: ServerMsg) {
         match msg {
             ServerMsg::LiaisonRiot { ok, message, .. } => {
-                self.riot_message = Some((ok, message));
+                self.donnees_valo.riot_message = Some((ok, message));
             }
             ServerMsg::MesComptes { mut comptes } => {
                 comptes.truncate(MES_COMPTES_MAX);
-                self.mes_comptes = comptes;
+                self.donnees_valo.mes_comptes = comptes;
             }
             ServerMsg::FicheValorant { user_id, fiche } => {
                 if Some(user_id) == self.session.my_id {
-                    self.ma_fiche = fiche.clone();
+                    self.donnees_valo.ma_fiche = fiche.clone();
                 }
-                if let Some(c) = self.comparee.as_mut().filter(|c| c.user_id == user_id) {
+                if let Some(c) = self.donnees_valo.comparee.as_mut().filter(|c| c.user_id == user_id) {
                     c.recue = true;
                     c.fiche = fiche.clone();
                 }
-                if let Some(f) = &mut self.fiche {
+                if let Some(f) = &mut self.donnees_valo.fiche {
                     if f.user_id == user_id {
                         f.recue = true;
                         f.fiche = fiche;
@@ -794,19 +794,19 @@ impl KiApp {
                 self.tactique.refuser(ki_protocol::safe_display(&message, 200));
             }
             ServerMsg::MonJournal { jours } => {
-                self.mon_journal = Some(jours);
+                self.donnees_valo.mon_journal = Some(jours);
             }
             ServerMsg::Soiree { depuis, parties } => {
                 // Une réponse d'avant 6 h du matin ne remplace pas la soirée.
-                if depuis == self.soiree_depuis {
-                    self.soiree = parties;
+                if depuis == self.donnees_valo.soiree_depuis {
+                    self.donnees_valo.soiree = parties;
                 }
             }
             ServerMsg::StatsValorant { fiches, esports, activite } => {
-                self.stats = fiches;
-                self.esports = esports;
-                self.activite = activite;
-                self.stats_recu = true;
+                self.donnees_valo.stats = fiches;
+                self.donnees_valo.esports = esports;
+                self.donnees_valo.activite = activite;
+                self.donnees_valo.stats_recu = true;
             }
             // L'aiguillage de `handle_server_msg` n'envoie ici que ce qui précède.
             autre => debug_assert!(false, "message mal aiguillé : {autre:?}"),

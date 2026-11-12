@@ -785,7 +785,7 @@ impl KiApp {
                 }
 
                 // --- Le journal des parties, proposé une fois ---
-                if self.serveur_journal
+                if self.donnees_valo.serveur_journal
                     && !self.reglages.journal_propose
                     && !self.reglages.journal_parties
                     && self.jeu_envoye.as_ref().is_some_and(|j| j.est_valorant())
@@ -826,7 +826,7 @@ impl KiApp {
                 // connaît pas. Sans compte lié, on propose de le lier ;
                 // sinon on le dit, une fois par compte si l'on veut.
                 if let Some(session) = self.compte_non_lie() {
-                    let rien_de_lie = self.mes_comptes.is_empty();
+                    let rien_de_lie = self.donnees_valo.mes_comptes.is_empty();
                     egui::Panel::top("chat_compte_riot")
                         .frame(
                             egui::Frame::NONE

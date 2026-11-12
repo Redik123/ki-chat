@@ -226,7 +226,7 @@ impl KiApp {
                         if deconnecter {
                             // Voulu : on ne reviendra pas tout seul au
                             // prochain lancement.
-                            self.session_auto = None;
+                            self.lanceur.session_auto = None;
                             self.disconnect(None);
                         }
                     });

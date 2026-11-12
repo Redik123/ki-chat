@@ -735,7 +735,7 @@ impl KiApp {
                                 Some("décoché, le serveur n'en garde rien — et efface ce qu'il avait")
                             } else if !self.reglages.valorant_presence {
                                 Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui montre les parties")
-                            } else if self.session.welcomed && !self.serveur_journal {
+                            } else if self.session.welcomed && !self.donnees_valo.serveur_journal {
                                 Some("le serveur ne le tient pas encore : il doit être mis à jour")
                             } else {
                                 None
@@ -772,7 +772,7 @@ impl KiApp {
                                         }
                                         if ui::Bouton::new("Délier").icone(Icon::Close).show(ui).clicked() {
                                             self.send(ClientMsg::DelierRiot { user_id: None });
-                                            self.riot_message = None;
+                                            self.donnees_valo.riot_message = None;
                                         }
                                     });
                                     ui.add_space(espace::XS);
@@ -783,13 +783,13 @@ impl KiApp {
                                          celles des autres joueurs du match ne partent jamais. Décoche, et \
                                          elles s'effacent de ta fiche.",
                                     );
-                                    let pourquoi_pas = if !self.reglages.valorant_medailles || self.serveur_choix_medailles {
+                                    let pourquoi_pas = if !self.reglages.valorant_medailles || self.donnees_valo.serveur_choix_medailles {
                                         // Un serveur qui les lit chez HenrikDev n'a
                                         // besoin de rien : la présence les avance.
                                         None
                                     } else if !self.reglages.valorant_presence {
                                         Some("il faut aussi « Partager mon activité Valorant » : c'est elle qui dit quand une partie finit")
-                                    } else if !self.serveur_medailles {
+                                    } else if !self.donnees_valo.serveur_medailles {
                                         Some("le serveur ne les garde pas encore : il doit être mis à jour")
                                     } else {
                                         None
@@ -805,29 +805,29 @@ impl KiApp {
                                     );
                                     ui.horizontal(|ui| {
                                         let champ = ui.add(
-                                            egui::TextEdit::singleline(&mut self.riot_saisie)
+                                            egui::TextEdit::singleline(&mut self.donnees_valo.riot_saisie)
                                                 .margin(egui::Margin::symmetric(4, 5))
                                                 .hint_text("Pseudo#TAG")
                                                 .desired_width(200.0),
                                         );
-                                        menu_edition(&champ, &mut self.riot_saisie, false);
+                                        menu_edition(&champ, &mut self.donnees_valo.riot_saisie, false);
                                         let entree = champ.lost_focus()
                                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                        let valide = ki_protocol::parser_riot_id(&self.riot_saisie).is_some();
+                                        let valide = ki_protocol::parser_riot_id(&self.donnees_valo.riot_saisie).is_some();
                                         let clic = ui
                                             .add_enabled_ui(valide, |ui| ui::Bouton::new("Lier").icone(Icon::Check).show(ui))
                                             .inner
                                             .clicked();
                                         if (clic || entree) && valide {
                                             self.send(ClientMsg::LierRiot {
-                                                riot_id: self.riot_saisie.trim().to_string(),
+                                                riot_id: self.donnees_valo.riot_saisie.trim().to_string(),
                                             });
-                                            self.riot_message = Some((true, "recherche du compte…".into()));
+                                            self.donnees_valo.riot_message = Some((true, "recherche du compte…".into()));
                                         }
                                     });
                                 }
                             }
-                            if let Some((ok, message)) = &self.riot_message {
+                            if let Some((ok, message)) = &self.donnees_valo.riot_message {
                                 let teinte = if *ok { TEXT_DIM } else { DANGER };
                                 ui.label(RichText::new(message).color(teinte).size(texte::PETIT));
                             }
@@ -953,7 +953,7 @@ impl KiApp {
                 );
                 if let Some((table, nom)) = &self.import_propose {
                     ui.add_space(espace::S);
-                    let serveurs = if self.book.is_empty() {
+                    let serveurs = if self.lanceur.book.is_empty() {
                         "Tes serveurs seront repris aussi, sans leurs mots de passe."
                     } else {
                         "Tes serveurs enregistrés ici ne changent pas."
@@ -1016,7 +1016,7 @@ impl KiApp {
                 }
             }
             DemandeReglages::Importer(importes) => {
-                for (cle, valeur) in prefs::a_poser(importes, self.book.is_empty()) {
+                for (cle, valeur) in prefs::a_poser(importes, self.lanceur.book.is_empty()) {
                     stockage.set_string(&cle, valeur);
                 }
                 // Tout est relu au démarrage : on redémarre, sans rien

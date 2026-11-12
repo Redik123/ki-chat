@@ -67,6 +67,7 @@ mod valo_page;
 mod veille;
 mod visionneuse;
 mod zone;
+mod valo_donnees;
 mod session;
 mod reglages;
 mod audio;
@@ -420,21 +421,9 @@ struct KiApp {
     /// l'utilisateur l'accepte.
     updater: update::Updater,
     // Carnet de serveurs
-    book: Vec<servers::Server>,
-    /// Serveur sélectionné dans le lanceur.
-    selected: Option<u64>,
-    /// Le serveur où l'on était quand l'application a été quittée : au
-    /// lancement suivant, on s'y reconnecte sans rien cliquer. Effacé par
-    /// une déconnexion voulue depuis l'application — et par elle seule.
-    session_auto: Option<u64>,
-    /// La reprise de session n'est tentée qu'une fois par lancement.
-    auto_tente: bool,
-    probes: servers::Probes,
-    /// Formulaire ouvert par le bouton « + » ou le crayon.
-    draft: Option<ServerDraft>,
-    /// Textures des logos, montées à la demande. `None` = pas de logo (ou
-    /// vignette illisible) : on retient l'échec pour ne pas réessayer.
-    icon_textures: HashMap<u64, Option<egui::TextureHandle>>,
+    /// L'écran de connexion : le carnet des serveurs, celui qu'on a choisi, et ce
+    /// que le formulaire retient (mot de passe, code d'invitation).
+    lanceur: lanceur::Lanceur,
     /// Logo de serveur rapporté par le sélecteur de fichier, sur son thread.
     picked_icon: PickedImage,
     /// Photo de profil rapportée par le sélecteur. Case distincte du logo :
@@ -468,11 +457,6 @@ struct KiApp {
     /// (base HTTP des fichiers, code d'invitation à recopier).
     url: String,
     username: String,
-    password: String,
-    remember_password: bool,
-    invite: String,
-    /// Le champ « code d'invitation » n'est affiché qu'à la demande.
-    show_invite: bool,
     /// La session en cours : la connexion, qui l'on est chez ce serveur, ce qu'il
     /// nous a donné à voir — salons, rôles, membres, messages.
     session: session::Session,
@@ -609,45 +593,17 @@ struct KiApp {
     overlay: overlay::Overlay,
     /// Les lectures de médailles prévues, et la dernière.
     medailles: medailles::Lecteur,
-    /// Le serveur garde les médailles (`Welcome.medailles`) : sans cette
-    /// preuve, rien ne lui part.
-    serveur_medailles: bool,
-    /// Le serveur lit lui-même les médailles chez HenrikDev, et veut
-    /// savoir si on les accepte (`Welcome.choix_medailles`).
-    serveur_choix_medailles: bool,
     /// Le serveur tient les tables de cartes (`Welcome.cartes`) : sans
     /// cette preuve, ni bouton ni geste.
     serveur_cartes: bool,
     /// Le serveur partage la carte tactique des salons vocaux
     /// (`Welcome.tactique`) : sans lui, chacun dessine sur la sienne.
     serveur_tactique: bool,
-    /// Le serveur nous dit nos comptes Riot et lit lequel est ouvert
-    /// (`Welcome.comptes_joues`) : sans lui, rien à classer.
-    serveur_comptes_joues: bool,
-    /// Nos comptes Riot liés, d'après le serveur (`MesComptes`) : de quoi
-    /// reconnaître, ici, celui qui est ouvert dans le client Riot.
-    mes_comptes: Vec<ki_protocol::MonCompte>,
-    /// Le serveur tient ce journal (`Welcome.journal_parties`).
-    serveur_journal: bool,
-    /// Le choix déjà dit à ce serveur depuis la connexion.
-    choix_journal_dit: Option<bool>,
     /// La table de cartes de mon salon vocal, et sa fenêtre.
     cartes: cartes::Cartes,
     /// La carte tactique : un plan de VALORANT où dessiner la manche
     /// suivante (V10.1 : chacun la sienne, rien ne part au serveur).
     tactique: tactique::Tactique,
-    /// Le choix déjà dit à ce serveur depuis la connexion.
-    choix_medailles_dit: Option<bool>,
-    /// L'état VALORANT du tour d'avant, pour voir une partie finir.
-    valorant_avant: Option<ki_protocol::JeuEtat>,
-    /// Le dernier ennui des médailles consigné : on ne le répète pas.
-    medailles_ennui: String,
-    /// Le Riot ID en cours de saisie dans ⚙ → Jeu, et la dernière réponse
-    /// du serveur à une liaison (réussie ou non, et pourquoi).
-    riot_saisie: String,
-    riot_message: Option<(bool, String)>,
-    /// La fiche VALORANT ouverte au clic droit sur un membre.
-    fiche: Option<FicheOuverte>,
     /// Le dernier message envoyé : un toutes les 1,5 s, pas plus.
     dernier_envoi: Option<std::time::Instant>,
     /// Les icônes de rang VALORANT, téléchargées une fois.
@@ -676,11 +632,9 @@ struct KiApp {
     /// La page VALORANT du groupe (son état, ses deux fenêtres) et ce que
     /// le serveur en a envoyé : les fiches, les esports, l'activité.
     valo: valo_page::PageValo,
-    stats: Vec<ki_protocol::FicheMembre>,
-    stats_recu: bool,
-    esports: Vec<ki_protocol::MatchEsport>,
-    /// Les 168 cases jour × heure (UTC) des parties du groupe sur 30 jours.
-    activite: Vec<u16>,
+    /// Ce que l'on sait de VALORANT : les fiches du groupe, la soirée, sa propre
+    /// fiche et son journal, ses comptes Riot, et ce que ce serveur sait faire.
+    donnees_valo: valo_donnees::DonneesValo,
     /// Le contrôle de démarrage (diffusion précédente interrompue ?) est
     /// fait une fois, à la première image.
     demarrage_verifie: bool,
@@ -800,27 +754,6 @@ struct KiApp {
     barre_largeur_libelles: Option<f32>,
     barre_largeur_icones: Option<f32>,
     barre_largeur_droite: f32,
-    /// Le serveur raconte la soirée (`Welcome.soiree`).
-    serveur_soiree: bool,
-    /// Le fil de la soirée (`ServerMsg::Soiree`), sa borne, et la dernière
-    /// demande : il se relit toutes les deux minutes tant que l'accueil se
-    /// montre.
-    soiree: Vec<ki_protocol::PartieSoiree>,
-    soiree_depuis: u64,
-    soiree_demandee: Option<std::time::Instant>,
-    /// Ma propre fiche, entière : « Moi » sur la carte de chaleur de
-    /// l'accueil. Demandée une fois par connexion.
-    ma_fiche: Option<ki_protocol::FicheValorant>,
-    ma_fiche_demandee: bool,
-    /// La fiche comparée à celle qui est ouverte (la vue Comparer du
-    /// profil), demandée ou reçue.
-    comparee: Option<FicheOuverte>,
-    /// Le serveur relit le journal des parties (`Welcome.journal_lecture`),
-    /// et mon journal tel qu'il l'a rendu, avec la dernière demande : il
-    /// se redemande au plus toutes les cinq minutes.
-    serveur_journal_lecture: bool,
-    mon_journal: Option<Vec<ki_protocol::JourDeJeu>>,
-    mon_journal_demande: Option<std::time::Instant>,
     /// Interdiction de veille système pendant le vocal.
     veille: veille::Garde,
 }
@@ -888,15 +821,20 @@ impl KiApp {
             username: active
                 .map(|s| s.username.clone())
                 .unwrap_or_else(|| get("username", "")),
-            password: active.and_then(|s| s.password()).unwrap_or_default(),
-            remember_password: active.is_some_and(|s| s.secret.is_some()),
-            book,
-            selected,
-            session_auto: get("session_auto", "").parse().ok(),
-            auto_tente: false,
-            probes: servers::Probes::default(),
-            draft: None,
-            icon_textures: HashMap::new(),
+            lanceur: lanceur::Lanceur {
+                selected,
+                session_auto: get("session_auto", "").parse().ok(),
+                auto_tente: false,
+                probes: servers::Probes::default(),
+                draft: None,
+                icon_textures: HashMap::new(),
+                password: active.and_then(|s| s.password()).unwrap_or_default(),
+                remember_password: active.is_some_and(|s| s.secret.is_some()),
+                invite: String::new(),
+                show_invite: false,
+                // En dernier : ce qui précède se lit encore dans le carnet.
+                book,
+            },
             picked_icon: Default::default(),
             picked_avatar: Default::default(),
             preview_icons: HashMap::new(),
@@ -939,8 +877,6 @@ impl KiApp {
                 reseau_demande: None,
                 reseau_en_vol: Default::default(),
             },
-            invite: String::new(),
-            show_invite: false,
             session: session::Session::nouvelle(),
             error: None,
             jeton_http: Default::default(),
@@ -1015,22 +951,11 @@ impl KiApp {
                 fenetre: None,
             },
             medailles: medailles::Lecteur::new(),
-            serveur_medailles: false,
-            serveur_choix_medailles: false,
+            donnees_valo: valo_donnees::DonneesValo::default(),
             serveur_cartes: false,
             serveur_tactique: false,
-            serveur_comptes_joues: false,
-            mes_comptes: Vec::new(),
-            serveur_journal: false,
-            choix_journal_dit: None,
             cartes: cartes::Cartes::default(),
             tactique: tactique::Tactique::default(),
-            choix_medailles_dit: None,
-            valorant_avant: None,
-            medailles_ennui: String::new(),
-            riot_saisie: String::new(),
-            riot_message: None,
-            fiche: None,
             dernier_envoi: None,
             rangs: rangs::Rangs::new(),
             catalogue: valo_catalogue::Catalogue::new(),
@@ -1070,10 +995,6 @@ impl KiApp {
                 dossier_choisi: Default::default(),
             },
             valo: valo_page::PageValo::load(get),
-            stats: Vec::new(),
-            stats_recu: false,
-            esports: Vec::new(),
-            activite: Vec::new(),
             demarrage_verifie: false,
             barre_sombre: false,
             veilleur_valorant: None,
@@ -1140,16 +1061,6 @@ impl KiApp {
                 "off" => false,
                 _ => soundboard::Soundboard::a_des_sons(),
             },
-            serveur_soiree: false,
-            soiree: Vec::new(),
-            soiree_depuis: 0,
-            soiree_demandee: None,
-            ma_fiche: None,
-            ma_fiche_demandee: false,
-            comparee: None,
-            serveur_journal_lecture: false,
-            mon_journal: None,
-            mon_journal_demande: None,
             veille: veille::Garde::default(),
         };
         // Instance relancée par le dispositif de secours : le dire. Sans ce
@@ -1392,31 +1303,31 @@ impl KiApp {
             self.demander_soiree();
         }
         // Ma fiche, une fois : « Moi » sur la carte de chaleur.
-        if !self.ma_fiche_demandee {
-            if let Some(moi) = self.session.my_id.filter(|_| !self.mes_comptes.is_empty()) {
-                self.ma_fiche_demandee = true;
+        if !self.donnees_valo.ma_fiche_demandee {
+            if let Some(moi) = self.session.my_id.filter(|_| !self.donnees_valo.mes_comptes.is_empty()) {
+                self.donnees_valo.ma_fiche_demandee = true;
                 self.send(ClientMsg::FicheValorant { user_id: moi });
             }
         }
         let mut boutique = std::mem::take(&mut self.boutique);
         let (ouvert, demandes) = {
             let cx = valo_page::Contexte {
-                stats: &self.stats,
-                recu: self.stats_recu,
-                esports: &self.esports,
-                activite: &self.activite,
+                stats: &self.donnees_valo.stats,
+                recu: self.donnees_valo.stats_recu,
+                esports: &self.donnees_valo.esports,
+                activite: &self.donnees_valo.activite,
                 moi: self.session.my_id,
                 membres: &self.session.members,
                 rangs: &self.rangs,
                 catalogue: &self.catalogue,
-                soiree: &self.soiree,
-                soiree_servie: self.serveur_soiree,
-                ma_fiche: self.ma_fiche.as_ref(),
+                soiree: &self.donnees_valo.soiree,
+                soiree_servie: self.donnees_valo.serveur_soiree,
+                ma_fiche: self.donnees_valo.ma_fiche.as_ref(),
                 photos: &self.avatars,
-                comparee: self.comparee.as_ref(),
-                journal: valo_page::Journal { servi: self.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.mon_journal.as_deref() },
+                comparee: self.donnees_valo.comparee.as_ref(),
+                journal: valo_page::Journal { servi: self.donnees_valo.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.donnees_valo.mon_journal.as_deref() },
             };
-            let fiche = self.fiche.as_ref();
+            let fiche = self.donnees_valo.fiche.as_ref();
             let valo = &mut self.valo;
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(theme::BG_BASE).inner_margin(marge::egale(espace::XL)))
@@ -1435,10 +1346,10 @@ impl KiApp {
     /// de Claude, qui tient la même place, aussi.
     fn retour_au_chat(&mut self) {
         self.claude.ouvert = false;
-        if self.valo.ouvert || self.fiche.is_some() {
+        if self.valo.ouvert || self.donnees_valo.fiche.is_some() {
             self.valo.ouvert = false;
-            self.fiche = None;
-            self.comparee = None;
+            self.donnees_valo.fiche = None;
+            self.donnees_valo.comparee = None;
             self.valo.fermer_fiche();
         }
     }
@@ -1446,14 +1357,14 @@ impl KiApp {
     /// Le fil de la soirée : demandé à l'ouverture de l'accueil, puis toutes
     /// les deux minutes, et dès que la soirée change (6 h du matin).
     fn demander_soiree(&mut self) {
-        if !self.serveur_soiree {
+        if !self.donnees_valo.serveur_soiree {
             return;
         }
         let depuis = valo_page::debut_de_soiree(chrono::Local::now());
-        let vieille = self.soiree_demandee.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(120));
-        if vieille || depuis != self.soiree_depuis {
-            self.soiree_depuis = depuis;
-            self.soiree_demandee = Some(std::time::Instant::now());
+        let vieille = self.donnees_valo.soiree_demandee.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(120));
+        if vieille || depuis != self.donnees_valo.soiree_depuis {
+            self.donnees_valo.soiree_depuis = depuis;
+            self.donnees_valo.soiree_demandee = Some(std::time::Instant::now());
             self.send(ClientMsg::SoireeValorant { depuis });
         }
     }
@@ -1465,9 +1376,9 @@ impl KiApp {
             match demande {
                 valo_page::Demande::Actualiser => {
                     self.ouvrir_stats();
-                    self.soiree_demandee = None;
-                    self.mon_journal = None;
-                    self.mon_journal_demande = None;
+                    self.donnees_valo.soiree_demandee = None;
+                    self.donnees_valo.mon_journal = None;
+                    self.donnees_valo.mon_journal_demande = None;
                 }
                 valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
                 valo_page::Demande::OuvrirTactique => {
@@ -1475,16 +1386,16 @@ impl KiApp {
                     self.catalogue.demarrer();
                 }
                 valo_page::Demande::Comparer(user_id, username) => {
-                    if self.comparee.as_ref().is_none_or(|c| c.user_id != user_id) {
-                        self.comparee = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
+                    if self.donnees_valo.comparee.as_ref().is_none_or(|c| c.user_id != user_id) {
+                        self.donnees_valo.comparee = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
                         self.send(ClientMsg::FicheValorant { user_id });
                     }
                     self.valo.vers_comparer();
                 }
                 valo_page::Demande::MonJournal => {
-                    let vieille = self.mon_journal_demande.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(300));
-                    if self.serveur_journal_lecture && vieille {
-                        self.mon_journal_demande = Some(std::time::Instant::now());
+                    let vieille = self.donnees_valo.mon_journal_demande.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(300));
+                    if self.donnees_valo.serveur_journal_lecture && vieille {
+                        self.donnees_valo.mon_journal_demande = Some(std::time::Instant::now());
                         self.send(ClientMsg::MonJournal { decalage_min: valo_page::decalage_journal() });
                     }
                 }
@@ -1495,7 +1406,7 @@ impl KiApp {
     /// Les icônes de rang que la fiche ouverte montrera (le rang, le pic,
     /// le palier suivant, le rang de chaque match), et le catalogue.
     fn preparer_fiche(&mut self, ctx: &egui::Context) {
-        let Some(f) = &self.fiche else { return };
+        let Some(f) = &self.donnees_valo.fiche else { return };
         if let Some(fiche) = &f.fiche {
             let mut tiers: Vec<u8> = vec![fiche.rang.tier, fiche.rang.tier.saturating_add(1)];
             tiers.extend(fiche.pic.iter().map(|p| p.tier));
@@ -1850,14 +1761,14 @@ impl KiApp {
     fn ouvrir_stats(&mut self) {
         self.claude.ouvert = false;
         self.valo.ouvert = true;
-        self.stats_recu = false;
+        self.donnees_valo.stats_recu = false;
         self.send(ClientMsg::StatsValorant);
     }
 
     /// Les icônes de rang de la page du groupe — les fiches, et le rang de
     /// ceux qui jouent, fiche ou pas — et le catalogue.
     fn preparer_valo(&mut self, ctx: &egui::Context) {
-        for f in &self.stats {
+        for f in &self.donnees_valo.stats {
             self.rangs.preparer(ctx, f.fiche.rang.tier);
             if let Some(pic) = &f.fiche.pic {
                 self.rangs.preparer(ctx, pic.tier);
@@ -1880,10 +1791,10 @@ impl KiApp {
         self.valo.fermer_fiche();
         self.valo.vers_profil();
         // On ne se compare pas à soi-même.
-        if self.comparee.as_ref().is_some_and(|c| c.user_id == user_id) {
-            self.comparee = None;
+        if self.donnees_valo.comparee.as_ref().is_some_and(|c| c.user_id == user_id) {
+            self.donnees_valo.comparee = None;
         }
-        self.fiche = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
+        self.donnees_valo.fiche = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
         self.send(ClientMsg::FicheValorant { user_id });
     }
 
@@ -2456,9 +2367,9 @@ impl KiApp {
         self.reponse_a = None;
         // La fiche VALORANT ouverte, les fiches et l'état du bot : ceux d'un
         // serveur. Le suivant renvoie les siens.
-        self.fiche = None;
-        self.stats.clear();
-        self.stats_recu = false;
+        self.donnees_valo.fiche = None;
+        self.donnees_valo.stats.clear();
+        self.donnees_valo.stats_recu = false;
         self.musique.etat = ki_protocol::EtatMusique::default();
         // La table de cartes : celle d'un salon de ce serveur.
         self.cartes.effacer();
@@ -2469,20 +2380,20 @@ impl KiApp {
         // Claude : sa conversation et ses chiffres sont ceux de ce serveur.
         self.claude.oublier();
         // La soirée et ma fiche : celles de ce serveur.
-        self.serveur_soiree = false;
-        self.soiree.clear();
-        self.soiree_demandee = None;
-        self.ma_fiche = None;
-        self.ma_fiche_demandee = false;
-        self.comparee = None;
+        self.donnees_valo.serveur_soiree = false;
+        self.donnees_valo.soiree.clear();
+        self.donnees_valo.soiree_demandee = None;
+        self.donnees_valo.ma_fiche = None;
+        self.donnees_valo.ma_fiche_demandee = false;
+        self.donnees_valo.comparee = None;
         // Mon journal relu : celui de ce serveur.
-        self.serveur_journal_lecture = false;
-        self.mon_journal = None;
-        self.mon_journal_demande = None;
+        self.donnees_valo.serveur_journal_lecture = false;
+        self.donnees_valo.mon_journal = None;
+        self.donnees_valo.mon_journal_demande = None;
         // Nos comptes Riot : ceux de ce serveur.
-        self.serveur_comptes_joues = false;
-        self.mes_comptes.clear();
-        self.serveur_journal = false;
+        self.donnees_valo.serveur_comptes_joues = false;
+        self.donnees_valo.mes_comptes.clear();
+        self.donnees_valo.serveur_journal = false;
         // Le partage d'un clip visait un salon de ce serveur : sur le
         // suivant, ce numéro désignerait un autre salon.
         self.clips.partage = None;
@@ -2531,10 +2442,10 @@ impl KiApp {
                 return Some(Duration::from_millis(250));
             }
             // Une sonde en cours fait tourner son indicateur.
-            if self
+            if self.lanceur
                 .book
                 .iter()
-                .any(|s| matches!(self.probes.reach(s.id), servers::Reach::Probing))
+                .any(|s| matches!(self.lanceur.probes.reach(s.id), servers::Reach::Probing))
             {
                 return Some(ANIME);
             }
@@ -2637,16 +2548,16 @@ impl KiApp {
         self.error = None;
         self.session.connecting = true;
         self.session.connect_started = Some(std::time::Instant::now());
-        let invite = self.invite.trim();
+        let invite = self.lanceur.invite.trim();
         self.session.conn = Some(net::connect(
             self.url.trim().to_string(),
             net::Credentials {
                 username: self.username.trim().to_string(),
-                password: self.password.clone(),
+                password: self.lanceur.password.clone(),
                 invite: (!invite.is_empty()).then(|| invite.to_string()),
                 // L'empreinte retenue pour ce serveur, s'il est au carnet :
                 // c'est elle qui fera refuser un imposteur.
-                fingerprint: self
+                fingerprint: self.lanceur
                     .book
                     .iter()
                     .find(|s| s.address == self.url.trim())
@@ -2668,8 +2579,8 @@ impl KiApp {
     // -----------------------------------------------------------------
 
     fn active_server(&self) -> Option<&servers::Server> {
-        let id = self.selected?;
-        self.book.iter().find(|s| s.id == id)
+        let id = self.lanceur.selected?;
+        self.lanceur.book.iter().find(|s| s.id == id)
     }
 
     /// Nom du serveur courant, pour l'en-tête de la colonne de gauche.
@@ -2708,10 +2619,10 @@ impl KiApp {
         let mut valorant = self.veilleur_valorant.as_ref().and_then(|v| v.releve().1);
         // Et sur quel compte : classé ici parmi nos comptes liés — un compte
         // qu'on n'a pas lié ne part jamais, ni son nom ni son puuid.
-        if self.serveur_comptes_joues {
+        if self.donnees_valo.serveur_comptes_joues {
             if let Some(j) = valorant.as_mut() {
                 let session = self.veilleur_valorant.as_ref().and_then(|v| v.session());
-                j.compte = valorant::classer_compte(session.as_ref(), &self.mes_comptes);
+                j.compte = valorant::classer_compte(session.as_ref(), &self.donnees_valo.mes_comptes);
             }
         }
         self.tick_medailles(valorant.as_ref().map(|j| j.etat));
@@ -2740,11 +2651,11 @@ impl KiApp {
     /// VALORANT partagée, un compte qu'on n'a pas demandé à taire. Rien
     /// de tout ça ne part au serveur : c'est pour nos yeux seuls.
     fn compte_non_lie(&self) -> Option<valorant::SessionLocale> {
-        if !self.serveur_comptes_joues || !self.jeu_envoye.as_ref().is_some_and(|j| j.est_valorant()) {
+        if !self.donnees_valo.serveur_comptes_joues || !self.jeu_envoye.as_ref().is_some_and(|j| j.est_valorant()) {
             return None;
         }
         let session = self.veilleur_valorant.as_ref()?.session()?;
-        let autre = valorant::classer_compte(Some(&session), &self.mes_comptes) == ki_protocol::CompteLocal::Autre;
+        let autre = valorant::classer_compte(Some(&session), &self.donnees_valo.mes_comptes) == ki_protocol::CompteLocal::Autre;
         (autre && !self.reglages.comptes_tus.contains(&empreinte_compte(&session.puuid))).then_some(session)
     }
 
@@ -2764,26 +2675,26 @@ impl KiApp {
         // Le choix d'abord, compte lié ou pas encore : il vaut aussi pour
         // la liaison à venir, et pour les médailles que le serveur lit
         // lui-même chez HenrikDev.
-        if self.serveur_choix_medailles && self.choix_medailles_dit != Some(self.reglages.valorant_medailles) {
+        if self.donnees_valo.serveur_choix_medailles && self.donnees_valo.choix_medailles_dit != Some(self.reglages.valorant_medailles) {
             self.send(ClientMsg::ChoixMedailles { oui: self.reglages.valorant_medailles });
-            self.choix_medailles_dit = Some(self.reglages.valorant_medailles);
+            self.donnees_valo.choix_medailles_dit = Some(self.reglages.valorant_medailles);
         }
         // Le journal de nos parties, sur le même modèle.
-        if self.serveur_journal && self.choix_journal_dit != Some(self.reglages.journal_parties) {
+        if self.donnees_valo.serveur_journal && self.donnees_valo.choix_journal_dit != Some(self.reglages.journal_parties) {
             self.send(ClientMsg::ChoixJournal { oui: self.reglages.journal_parties });
-            self.choix_journal_dit = Some(self.reglages.journal_parties);
+            self.donnees_valo.choix_journal_dit = Some(self.reglages.journal_parties);
             // Effacé ou repris : la Progression le relira.
-            self.mon_journal = None;
-            self.mon_journal_demande = None;
+            self.donnees_valo.mon_journal = None;
+            self.donnees_valo.mon_journal_demande = None;
         }
         // À chaque image : rien n'est copié tant qu'aucune lecture n'arrive.
         let lie_existe = self.session
             .my_id
             .and_then(|id| self.session.members.iter().find(|m| m.user_id == id))
             .is_some_and(|m| m.riot_id.is_some());
-        let voulu = self.reglages.valorant_medailles && self.serveur_medailles && lie_existe;
+        let voulu = self.reglages.valorant_medailles && self.donnees_valo.serveur_medailles && lie_existe;
         if voulu {
-            match (self.valorant_avant, etat) {
+            match (self.donnees_valo.valorant_avant, etat) {
                 (None, Some(_)) => self.medailles.au_lancement(),
                 (Some(JeuEtat::EnJeu), apres) if apres != Some(JeuEtat::EnJeu) => self.medailles.apres_partie(),
                 _ => {}
@@ -2791,12 +2702,12 @@ impl KiApp {
         } else {
             self.medailles.oublier();
         }
-        self.valorant_avant = etat;
+        self.donnees_valo.valorant_avant = etat;
         let Some(resultat) = self.medailles.tick(&self.app_ctx) else { return };
         let lie = self.mon_riot_id();
         // Le compte principal, au puuid quand le serveur nous l'a dit : un
         // Riot ID se renomme, un puuid jamais.
-        let principal = self.mes_comptes.iter().find(|c| c.principal).map(|c| c.puuid.clone());
+        let principal = self.donnees_valo.mes_comptes.iter().find(|c| c.principal).map(|c| c.puuid.clone());
         let meme_compte = |lecture: &medailles::Lecture, lie: &str| match &principal {
             Some(p) => p.eq_ignore_ascii_case(&lecture.puuid),
             None => medailles::meme_riot_id(lie, &lecture.riot_id),
@@ -2807,7 +2718,7 @@ impl KiApp {
                 let n = lecture.medailles.matchs.len();
                 self.send(ClientMsg::Medailles { medailles: lecture.medailles });
                 ki_voice::journal(format!("médailles VALORANT envoyées ({n} matchs médaillés)"));
-                self.medailles_ennui.clear();
+                self.donnees_valo.medailles_ennui.clear();
                 return;
             }
             (Ok(_), Some(_)) if voulu => {
@@ -2817,9 +2728,9 @@ impl KiApp {
             // L'option coupée pendant la lecture : rien à dire.
             (Ok(_), _) => return,
         };
-        if ennui != self.medailles_ennui {
+        if ennui != self.donnees_valo.medailles_ennui {
             ki_voice::journal(ennui.clone());
-            self.medailles_ennui = ennui;
+            self.donnees_valo.medailles_ennui = ennui;
         }
     }
 
@@ -2829,23 +2740,23 @@ impl KiApp {
     /// passe soit mémorisé. Une seule tentative ; si elle échoue, le
     /// lanceur dit pourquoi, comme d'habitude.
     fn auto_connexion(&mut self, ctx: &egui::Context) {
-        if self.auto_tente {
+        if self.lanceur.auto_tente {
             return;
         }
-        self.auto_tente = true;
+        self.lanceur.auto_tente = true;
         // Sans reconnexion automatique vers le serveur d'avant le plantage,
         // il n'y a nulle part où revenir : un salon d'un autre serveur
         // porterait le même numéro.
-        if self.retour.is_some_and(|r| self.session_auto != Some(r.serveur)) {
+        if self.retour.is_some_and(|r| self.lanceur.session_auto != Some(r.serveur)) {
             self.retour = None;
         }
-        let Some(id) = self.session_auto else { return };
+        let Some(id) = self.lanceur.session_auto else { return };
         if self.session.conn.is_some() || self.session.connecting {
             return;
         }
-        let memorise = self.book.iter().any(|s| s.id == id && s.secret.is_some());
+        let memorise = self.lanceur.book.iter().any(|s| s.id == id && s.secret.is_some());
         if !memorise {
-            self.session_auto = None;
+            self.lanceur.session_auto = None;
             self.retour = None;
             return;
         }
@@ -2861,17 +2772,17 @@ impl KiApp {
         if self.session.connecting {
             return;
         }
-        let Some(server) = self.book.iter().find(|s| s.id == id) else { return };
+        let Some(server) = self.lanceur.book.iter().find(|s| s.id == id) else { return };
         // Un autre serveur que celui qu'on essayait de retrouver : la reprise
         // ne le concerne pas.
         if self.reprise.as_ref().is_some_and(|r| r.adresse != server.address) {
             self.reprise = None;
         }
-        self.selected = Some(id);
+        self.lanceur.selected = Some(id);
         self.url = server.address.clone();
         self.username = server.username.clone();
-        self.password = server.password().unwrap_or_default();
-        self.remember_password = server.secret.is_some();
+        self.lanceur.password = server.password().unwrap_or_default();
+        self.lanceur.remember_password = server.secret.is_some();
         self.error = None;
     }
 
@@ -2926,7 +2837,7 @@ impl KiApp {
         ctx: &egui::Context,
         server: &servers::Server,
     ) -> Option<egui::TextureHandle> {
-        if let Some(cached) = self.icon_textures.get(&server.id) {
+        if let Some(cached) = self.lanceur.icon_textures.get(&server.id) {
             return cached.clone();
         }
         let texture = server.icon.as_deref().and_then(servers::decode_icon).map(|image| {
@@ -2936,7 +2847,7 @@ impl KiApp {
                 egui::TextureOptions::LINEAR,
             )
         });
-        self.icon_textures.insert(server.id, texture.clone());
+        self.lanceur.icon_textures.insert(server.id, texture.clone());
         texture
     }
 
@@ -2963,19 +2874,19 @@ impl KiApp {
     }
 
     fn delete_server(&mut self, id: u64) {
-        self.book.retain(|s| s.id != id);
-        self.probes.forget(id);
-        self.icon_textures.remove(&id);
-        if self.selected != Some(id) {
+        self.lanceur.book.retain(|s| s.id != id);
+        self.lanceur.probes.forget(id);
+        self.lanceur.icon_textures.remove(&id);
+        if self.lanceur.selected != Some(id) {
             return;
         }
-        self.selected = None;
-        match self.book.first().map(|s| s.id) {
+        self.lanceur.selected = None;
+        match self.lanceur.book.first().map(|s| s.id) {
             Some(next) => self.select_server(next),
             None => {
                 self.url.clear();
                 self.username.clear();
-                self.password.clear();
+                self.lanceur.password.clear();
             }
         }
     }
@@ -2987,15 +2898,15 @@ impl KiApp {
         let address = draft.address.trim().to_string();
         let id = match draft.id {
             Some(id) => {
-                if let Some(server) = self.book.iter_mut().find(|s| s.id == id) {
+                if let Some(server) = self.lanceur.book.iter_mut().find(|s| s.id == id) {
                     server.name = name;
                     server.address = address;
                 }
                 id
             }
             None => {
-                let id = servers::next_id(&self.book);
-                self.book.push(servers::Server {
+                let id = servers::next_id(&self.lanceur.book);
+                self.lanceur.book.push(servers::Server {
                     id,
                     name,
                     address,
@@ -3011,8 +2922,8 @@ impl KiApp {
             }
         };
         self.select_server(id);
-        if let Some(server) = self.book.iter().find(|s| s.id == id) {
-            self.probes.probe(server, ctx);
+        if let Some(server) = self.lanceur.book.iter().find(|s| s.id == id) {
+            self.lanceur.probes.probe(server, ctx);
         }
         id
     }
@@ -3021,9 +2932,9 @@ impl KiApp {
     /// le lanceur puisse l'afficher même hors ligne. Le client ne fait que
     /// mémoriser : ces deux champs ne se règlent que côté serveur.
     fn cache_server_identity(&mut self) {
-        let Some(id) = self.selected else { return };
+        let Some(id) = self.lanceur.selected else { return };
         let (name, icon) = (self.server_info.name.clone(), self.server_info.icon.clone());
-        let changed = match self.book.iter_mut().find(|s| s.id == id) {
+        let changed = match self.lanceur.book.iter_mut().find(|s| s.id == id) {
             Some(server) => {
                 let changed = server.icon != icon;
                 server.server_name = name;
@@ -3033,21 +2944,21 @@ impl KiApp {
             None => false,
         };
         if changed {
-            self.icon_textures.remove(&id);
+            self.lanceur.icon_textures.remove(&id);
         }
     }
 
     /// Après une connexion réussie : mémorise pseudo, mot de passe (si
     /// demandé) et date, pour que le lanceur rouvre au bon endroit.
     fn remember_connection(&mut self) {
-        let Some(id) = self.selected else { return };
+        let Some(id) = self.lanceur.selected else { return };
         let username = self.username.trim().to_string();
-        let password = self.remember_password.then(|| self.password.clone());
+        let password = self.lanceur.remember_password.then(|| self.lanceur.password.clone());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        if let Some(server) = self.book.iter_mut().find(|s| s.id == id) {
+        if let Some(server) = self.lanceur.book.iter_mut().find(|s| s.id == id) {
             server.username = username;
             server.set_password(password.as_deref());
             server.last_used = now;
@@ -3176,7 +3087,7 @@ impl KiApp {
         self.voice_bar(ui, voice);
         self.sidebar(ui, voice);
         self.roster_panel(ui, voice);
-        if self.valo.ouvert || self.fiche.is_some() {
+        if self.valo.ouvert || self.donnees_valo.fiche.is_some() {
             self.valo_panel(ui);
         } else if self.claude.ouvert && self.claude.servi {
             self.claude_panel(ui);
@@ -3903,7 +3814,7 @@ impl KiApp {
     fn interface(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         // Où l'on est, pour le successeur si cette instance plante.
-        secours::situer(self.selected.filter(|_| self.session.welcomed), self.session.current, self.session.voice_channel);
+        secours::situer(self.lanceur.selected.filter(|_| self.session.welcomed), self.session.current, self.session.voice_channel);
         if !self.premiere_image {
             self.premiere_image = true;
             tracing::info!("interface prête : première image");
@@ -3933,9 +3844,9 @@ impl KiApp {
                 prendre_echap(ctx);
             } else if ki_ui::fenetre::echap(ctx) {
                 // La modale ou la fenêtre se fermera en se dessinant.
-            } else if self.session.welcomed && self.fiche.is_some() {
-                self.fiche = None;
-                self.comparee = None;
+            } else if self.session.welcomed && self.donnees_valo.fiche.is_some() {
+                self.donnees_valo.fiche = None;
+                self.donnees_valo.comparee = None;
                 self.valo.fermer_fiche();
                 prendre_echap(ctx);
             } else if self.session.welcomed && self.valo.ouvert {
@@ -4001,10 +3912,10 @@ impl KiApp {
         // et « Ce salon / Partout » de la recherche repartaient de zéro.
         storage.set_string("regard_volume", format!("{}", self.regard.volume));
         storage.set_string("search_ici", if self.recherche.ici { "on" } else { "off" }.into());
-        servers::save(storage, &self.book);
+        servers::save(storage, &self.lanceur.book);
         storage.set_string(
             "session_auto",
-            self.session_auto.map(|id| id.to_string()).unwrap_or_default(),
+            self.lanceur.session_auto.map(|id| id.to_string()).unwrap_or_default(),
         );
         storage.set_string(
             "window_maximized",

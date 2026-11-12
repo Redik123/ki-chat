@@ -1,6 +1,8 @@
 //! L'écran d'avant la connexion : le carnet de serveurs, l'éditeur d'un serveur,
 //! les identifiants.
 
+use std::collections::HashMap;
+
 use ki_ui::typo::Texte;
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use ki_ui::jetons::{espace, rayon, texte};
@@ -18,6 +20,37 @@ pub(crate) struct ServerDraft {
     /// Alias local, pas le nom officiel du serveur.
     pub(crate) name: String,
     pub(crate) address: String,
+}
+
+/// L'écran de connexion : le carnet des serveurs, celui qu'on a choisi, et ce
+/// que le formulaire retient (mot de passe, code d'invitation).
+pub(crate) struct Lanceur {
+    /// Le carnet : les serveurs enregistrés, avec ce qu'on en retient.
+    pub(crate) book: Vec<servers::Server>,
+    /// Serveur sélectionné dans le lanceur.
+    pub(crate) selected: Option<u64>,
+    /// Le serveur où l'on était quand l'application a été quittée : au
+    /// lancement suivant, on s'y reconnecte sans rien cliquer. Effacé par
+    /// une déconnexion voulue depuis l'application — et par elle seule.
+    pub(crate) session_auto: Option<u64>,
+    /// La reprise de session n'est tentée qu'une fois par lancement.
+    pub(crate) auto_tente: bool,
+    /// L'état et le ping de chaque serveur du carnet, sondés en tâche de fond.
+    pub(crate) probes: servers::Probes,
+    /// Formulaire ouvert par le bouton « + » ou le crayon.
+    pub(crate) draft: Option<ServerDraft>,
+    /// Textures des logos, montées à la demande. `None` = pas de logo (ou
+    /// vignette illisible) : on retient l'échec pour ne pas réessayer.
+    pub(crate) icon_textures: HashMap<u64, Option<egui::TextureHandle>>,
+    /// Le mot de passe saisi, ou relu du coffre de Windows.
+    pub(crate) password: String,
+    /// « Retenir le mot de passe » : il va au coffre, et la session reprend
+    /// seule au lancement suivant.
+    pub(crate) remember_password: bool,
+    /// Le code d'invitation saisi, pour créer un compte.
+    pub(crate) invite: String,
+    /// Le champ « code d'invitation » n'est affiché qu'à la demande.
+    pub(crate) show_invite: bool,
 }
 
 impl ServerDraft {
@@ -263,12 +296,12 @@ impl KiApp {
         let ctx = &ui.ctx().clone();
         // Teste les serveurs en tâche de fond, au plus une fois toutes les
         // 20 s : l'état et le ping sont connus avant même de se connecter.
-        self.probes.sweep(&self.book, ctx, false);
+        self.lanceur.probes.sweep(&self.lanceur.book, ctx, false);
 
-        let editing = self.draft.is_some();
-        let ready = self.selected.is_some()
+        let editing = self.lanceur.draft.is_some();
+        let ready = self.lanceur.selected.is_some()
             && !self.username.trim().is_empty()
-            && !self.password.is_empty()
+            && !self.lanceur.password.is_empty()
             && !self.session.connecting;
         let enter = !editing && ctx.input(|i| i.key_pressed(egui::Key::Enter));
         let mut go = false;
@@ -362,7 +395,7 @@ impl KiApp {
                                 if ui::Bouton::new("Accepter la nouvelle identité du serveur").icone(Icon::Key).show(ui)
                                 .clicked()
                                 {
-                                    if let Some(s) = self
+                                    if let Some(s) = self.lanceur
                                         .book
                                         .iter_mut()
                                         .find(|s| s.address == address)
@@ -394,28 +427,28 @@ impl KiApp {
     pub(crate) fn server_picker(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui::section_label(ui, "Serveurs");
-            if !self.book.is_empty() {
+            if !self.lanceur.book.is_empty() {
                 ui.label(
-                    Texte::Aide.gras(ui, self.book.len().to_string()).color(theme::BORDER_STRONG),
+                    Texte::Aide.gras(ui, self.lanceur.book.len().to_string()).color(theme::BORDER_STRONG),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui::Bouton::icone_seule(Icon::Plus).cote(26.0).couleur(ACCENT).bulle("Ajouter un serveur").show(ui)
                     .clicked()
                 {
-                    self.draft = Some(ServerDraft::new());
+                    self.lanceur.draft = Some(ServerDraft::new());
                 }
-                if !self.book.is_empty()
+                if !self.lanceur.book.is_empty()
                     && ui::Bouton::icone_seule(Icon::Refresh).cote(26.0).bulle("Retester les serveurs").show(ui)
                         .clicked()
                 {
-                    self.probes.sweep(&self.book, ctx, true);
+                    self.lanceur.probes.sweep(&self.lanceur.book, ctx, true);
                 }
             });
         });
         ui.add_space(espace::XXS);
 
-        if self.book.is_empty() {
+        if self.lanceur.book.is_empty() {
             let mut add = false;
             ui.add_space(espace::M);
             ui.vertical_centered(|ui| {
@@ -431,20 +464,20 @@ impl KiApp {
                     .clicked();
             });
             if add {
-                self.draft = Some(ServerDraft::new());
+                self.lanceur.draft = Some(ServerDraft::new());
             }
             ui.add_space(espace::S);
             return;
         }
 
-        let book = self.book.clone();
+        let book = self.lanceur.book.clone();
         for server in &book {
-            let selected = self.selected == Some(server.id);
-            let reach = self.probes.reach(server.id);
+            let selected = self.lanceur.selected == Some(server.id);
+            let reach = self.lanceur.probes.reach(server.id);
             let icon = self.server_icon(ctx, server);
             match server_row(ui, server, selected, reach, icon.as_ref()) {
                 RowAction::Select => self.select_server(server.id),
-                RowAction::Edit => self.draft = Some(ServerDraft::edit(server)),
+                RowAction::Edit => self.lanceur.draft = Some(ServerDraft::edit(server)),
                 RowAction::None => {}
             }
             // Pas d'espace ajouté ici : la mise en page verticale intercale
@@ -454,7 +487,7 @@ impl KiApp {
 
     /// Formulaire d'ajout / modification d'un serveur.
     pub(crate) fn server_editor(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let Some(mut draft) = self.draft.take() else { return };
+        let Some(mut draft) = self.lanceur.draft.take() else { return };
         let creating = draft.id.is_none();
 
         ui::group_title(
@@ -512,7 +545,7 @@ impl KiApp {
         });
 
         if !close {
-            self.draft = Some(draft);
+            self.lanceur.draft = Some(draft);
         }
     }
 
@@ -545,19 +578,19 @@ impl KiApp {
         ui.add_space(espace::L);
 
         ui::field_label(ui, "Mot de passe");
-        ui.add(ui::champ_secret(&mut self.password, "ton mot de passe"));
+        ui.add(ui::champ_secret(&mut self.lanceur.password, "ton mot de passe"));
         ui.add_space(espace::L);
 
         // Sans coffre natif, on ne propose pas de mémoriser : pas de repli
         // en clair, la case est simplement inerte.
         let vault = secret::available();
         if !vault {
-            self.remember_password = false;
+            self.lanceur.remember_password = false;
         }
         let mut open_invite = false;
         ui.horizontal(|ui| {
             ui.add_enabled_ui(vault, |ui| {
-                ui.checkbox(&mut self.remember_password, "Retenir le mot de passe")
+                ui.checkbox(&mut self.lanceur.remember_password, "Retenir le mot de passe")
                     .on_hover_text(if vault {
                         "Chiffré par Windows avec une clé dérivée de ta session : \
                          illisible sur une autre machine ou sous un autre compte, \
@@ -568,7 +601,7 @@ impl KiApp {
             });
             // Le code d'invitation ne sert qu'une fois dans la vie d'un
             // compte : il tient sur la même ligne, en retrait.
-            if !self.show_invite {
+            if !self.lanceur.show_invite {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     open_invite = ui
                         .add(
@@ -584,12 +617,12 @@ impl KiApp {
             }
         });
         if open_invite {
-            self.show_invite = true;
+            self.lanceur.show_invite = true;
         }
-        if self.show_invite {
+        if self.lanceur.show_invite {
             ui.add_space(espace::L);
             ui::field_label(ui, "Code d'invitation");
-            ui.add(ui::champ(&mut self.invite, "fourni par un admin"));
+            ui.add(ui::champ(&mut self.lanceur.invite, "fourni par un admin"));
             ui::hint(ui, "Nécessaire uniquement à la première connexion.");
         }
 
@@ -618,7 +651,7 @@ impl KiApp {
                 .on_hover_text("Annuler la connexion")
                 .clicked();
             if annule {
-                self.session_auto = None;
+                self.lanceur.session_auto = None;
                 self.disconnect(None);
             }
             // Jamais « se connecter » : la tentative est déjà en cours.
