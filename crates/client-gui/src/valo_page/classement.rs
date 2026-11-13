@@ -6,14 +6,14 @@
 
 use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::police;
-use ki_ui::tableau::{Colonne, Tableau};
+use ki_ui::tableau::{Colonne, Tableau, Tri};
 
 use super::*;
 use crate::icons::Icon;
 
 /// Ce que montre une colonne du classement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Col {
+pub(super) enum Col {
     Place,
     Membre,
     Rang,
@@ -104,18 +104,60 @@ impl Col {
     fn cle_possible(self) -> bool {
         !matches!(self, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan | Col::Comparer)
     }
+
+    /// Le nom sous lequel le tri par cette colonne se range.
+    fn nom(self) -> &'static str {
+        match self {
+            Col::Place => "place",
+            Col::Membre => "membre",
+            Col::Rang => "rang",
+            Col::Tendance => "tendance",
+            Col::Sept => "sept",
+            Col::Trente => "trente",
+            Col::Forme => "forme",
+            Col::Bilan => "bilan",
+            Col::Kd => "kd",
+            Col::Acs => "acs",
+            Col::Adr => "adr",
+            Col::Kast => "kast",
+            Col::Tete => "tete",
+            Col::Matchs => "matchs",
+            Col::Comparer => "comparer",
+        }
+    }
 }
 
-/// Le tableau du classement. Trié par les 7 jours tant qu'on n'a cliqué
-/// sur aucun en-tête.
-fn tableau() -> Tableau<'static, Col> {
+/// Le tri qu'on a choisi en cliquant un en-tête, gardé d'un lancement à
+/// l'autre ; rien tant qu'on n'a pas cliqué.
+pub(super) type TriChoisi = Option<Tri<Col>>;
+
+/// Le tri rangé : « kd:desc », « rang:asc ». Rien pour un texte qu'on ne
+/// reconnaît pas, ou pour une colonne qui ne trie pas.
+pub(super) fn lire_tri(texte: &str) -> TriChoisi {
+    let (nom, sens) = texte.split_once(':')?;
+    let colonne = COLONNES.iter().map(|c| c.0).find(|c| c.nom() == nom && c.cle_possible())?;
+    match sens {
+        "asc" => Some(Tri { colonne, croissant: true }),
+        "desc" => Some(Tri { colonne, croissant: false }),
+        _ => None,
+    }
+}
+
+pub(super) fn ecrire_tri(tri: TriChoisi) -> String {
+    tri.map_or_else(String::new, |t| format!("{}:{}", t.colonne.nom(), if t.croissant { "asc" } else { "desc" }))
+}
+
+/// Le tableau du classement. Trié comme on l'a laissé ; par les 7 jours
+/// tant qu'on n'a jamais cliqué d'en-tête.
+fn tableau(choisi: TriChoisi) -> Tableau<'static, Col> {
+    let tri = choisi.unwrap_or(Tri { colonne: Col::Sept, croissant: false });
     COLONNES
         .iter()
         .fold(Tableau::new("valo_classement"), |t, &(col, titre, largeur, priorite)| {
             t.colonne(col, col.colonne(titre, largeur, priorite))
         })
         .hauteur_ligne(HAUTEUR_LIGNE)
-        .tri_par_defaut(Col::Sept, false)
+        .tri_par_defaut(tri.colonne, tri.croissant)
 }
 
 impl PageValo {
@@ -135,8 +177,13 @@ impl PageValo {
         let periode = self.periode;
         let maintenant = maintenant_ms();
         let (sept, trente) = (maintenant.saturating_sub(7 * JOUR_MS), maintenant.saturating_sub(30 * JOUR_MS));
-        let tableau = tableau();
-        let ordre = ordonner(lignes, tableau.tri(ui), periode);
+        // Le tri du moment : celui d'un en-tête cliqué depuis le lancement,
+        // sinon celui qu'on avait laissé. Il se retient pour la prochaine
+        // fois.
+        let tableau = tableau(self.tri_classement);
+        let tri = tableau.tri(ui);
+        self.tri_classement = tri;
+        let ordre = ordonner(lignes, tri, periode);
 
         // Les deux cochés : de quoi les comparer.
         self.a_comparer.retain(|id| lignes.iter().any(|l| l.f.user_id == *id));
@@ -285,7 +332,7 @@ fn cocher(liste: &mut Vec<UserId>, id: UserId, oui: bool) {
 /// Les lignes dans l'ordre du tri choisi : ceux qui ont joué sur la
 /// période d'abord, puis par la colonne, les sans-valeur derrière ; à
 /// égalité, et pour une colonne qui ne trie pas, l'ordre reçu.
-fn ordonner<'l, 'a>(lignes: &'l [Ligne<'a>], tri: Option<ki_ui::tableau::Tri<Col>>, periode: Periode) -> Vec<&'l Ligne<'a>> {
+fn ordonner<'l, 'a>(lignes: &'l [Ligne<'a>], tri: Option<Tri<Col>>, periode: Periode) -> Vec<&'l Ligne<'a>> {
     let mut ordre: Vec<&Ligne> = lignes.iter().collect();
     let tri = tri.map(|t| (t.colonne, !t.croissant));
     match tri.filter(|(col, _)| col.cle_possible()) {
@@ -383,7 +430,7 @@ mod tests {
     /// Le 7 jours trie par défaut ; les colonnes de dessin ne trient pas.
     #[test]
     fn seules_les_colonnes_de_chiffres_trient() {
-        let origine = tableau().tri_d_origine().expect("le classement a un tri d'origine");
+        let origine = tableau(None).tri_d_origine().expect("le classement a un tri d'origine");
         assert!(origine.colonne == Col::Sept && !origine.croissant);
         for (col, ..) in COLONNES {
             let attendu = !matches!(col, Col::Place | Col::Membre | Col::Tendance | Col::Forme | Col::Bilan | Col::Comparer);
@@ -403,5 +450,27 @@ mod tests {
         assert_eq!(liste, [2, 3]);
         cocher(&mut liste, 2, false);
         assert_eq!(liste, [3]);
+    }
+
+    /// Le tri se range et se relit tel quel, pour chaque colonne qui trie,
+    /// dans les deux sens ; ce qu'on ne reconnaît pas ne trie rien, et le
+    /// classement repart alors de son tri d'origine.
+    #[test]
+    fn le_tri_se_range_et_se_relit() {
+        for &(colonne, ..) in COLONNES.iter().filter(|c| c.0.cle_possible()) {
+            for croissant in [true, false] {
+                let tri = Some(Tri { colonne, croissant });
+                assert_eq!(lire_tri(&ecrire_tri(tri)), tri, "{colonne:?}");
+            }
+        }
+        assert_eq!(ecrire_tri(Some(Tri { colonne: Col::Kd, croissant: false })), "kd:desc");
+        assert_eq!(ecrire_tri(None), "");
+        for abime in ["", "kd", "kd:", "kd:haut", "membre:asc", "forme:desc", "rien:asc"] {
+            assert_eq!(lire_tri(abime), None, "{abime:?}");
+        }
+        let origine = tableau(None).tri_d_origine();
+        assert_eq!(origine, Some(Tri { colonne: Col::Sept, croissant: false }));
+        let laisse = Some(Tri { colonne: Col::Acs, croissant: true });
+        assert_eq!(tableau(laisse).tri_d_origine(), laisse);
     }
 }

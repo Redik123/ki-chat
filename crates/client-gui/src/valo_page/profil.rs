@@ -85,6 +85,7 @@ impl PageValo {
     /// Le profil sans sa barre : dans l'onglet Profil de la page au
     /// centre, comme seul au centre.
     pub(super) fn profil_contenu(&mut self, ui: &mut Ui, ouverte: &FicheOuverte, cx: &Contexte<'_>, demandes: &mut Vec<Demande>) {
+        choix_du_membre(ui, Some((ouverte.user_id, &ouverte.username)), cx, demandes);
         match (ouverte.recue, &ouverte.fiche) {
             (false, _) => {
                 ui.label(RichText::new("demande au serveur…").color(TEXT_DIM));
@@ -259,6 +260,97 @@ impl PageValo {
         }
         tout_voir
     }
+}
+
+// ---------------------------------------------------------------------
+// Le choix du membre
+// ---------------------------------------------------------------------
+
+/// La largeur de la liste des membres, et la taille de ce qu'une ligne
+/// montre.
+const LISTE_MEMBRES: f32 = 240.0;
+const AVATAR_LISTE: f32 = 20.0;
+const RANG_LISTE: f32 = 18.0;
+
+/// Les membres liés, dans l'ordre des pseudos sans regarder la casse :
+/// l'ordre de la liste et des deux flèches.
+fn membres_lies(stats: &[FicheMembre]) -> Vec<&FicheMembre> {
+    let mut lies: Vec<&FicheMembre> = stats.iter().collect();
+    lies.sort_by_cached_key(|f| f.username.to_lowercase());
+    lies
+}
+
+/// Le voisin de `rang` parmi `n`, d'un pas en avant ou en arrière, en
+/// bouclant.
+fn voisin(rang: usize, n: usize, en_avant: bool) -> usize {
+    if en_avant {
+        (rang + 1) % n
+    } else {
+        (rang + n - 1) % n
+    }
+}
+
+/// De qui on lit le profil, et de quoi en changer sans repasser par le
+/// classement : la liste des membres liés, et deux flèches vers le
+/// précédent et le suivant. Rien quand il n'y a personne d'autre à
+/// choisir.
+pub(super) fn choix_du_membre(ui: &mut Ui, ouvert: Option<(UserId, &str)>, cx: &Contexte<'_>, demandes: &mut Vec<Demande>) {
+    let lies = membres_lies(cx.stats);
+    let devant = |f: &FicheMembre| ouvert.is_some_and(|(id, _)| id == f.user_id);
+    if lies.is_empty() || (lies.len() == 1 && devant(lies[0])) {
+        return;
+    }
+    let rang = lies.iter().position(|f| devant(f));
+    let mut choisi: Option<&FicheMembre> = None;
+    ui.horizontal(|ui| {
+        ui.label(Texte::Aide.riche_ton(ui, Ton::Discret, "Profil de"));
+        let titre = ouvert.map_or("choisir un membre", |(_, nom)| nom);
+        egui::ComboBox::from_id_salt("profil_membre").selected_text(titre).width(LISTE_MEMBRES).height(360.0).show_ui(ui, |ui| {
+            for f in &lies {
+                if ligne_de_membre(ui, f, cx, devant(f)).clicked() && !devant(f) {
+                    choisi = Some(f);
+                }
+            }
+        });
+        if let Some(rang) = rang.filter(|_| lies.len() > 1) {
+            if ui::Bouton::icone_seule(Icon::ChevronLeft).taille(ui::Taille::S).bulle("le membre d'avant").show(ui).clicked() {
+                choisi = Some(lies[voisin(rang, lies.len(), false)]);
+            }
+            if ui::Bouton::icone_seule(Icon::ChevronRight).taille(ui::Taille::S).bulle("le membre d'après").show(ui).clicked() {
+                choisi = Some(lies[voisin(rang, lies.len(), true)]);
+            }
+            ui::hint(ui, format!("{} sur {}", rang + 1, lies.len()));
+        }
+    });
+    if let Some(f) = choisi {
+        demandes.push(Demande::AutreFiche(f.user_id, f.username.clone()));
+    }
+    ui.add_space(espace::S);
+}
+
+/// Une ligne de la liste : l'avatar, le pseudo, et le rang à droite.
+fn ligne_de_membre(ui: &mut Ui, f: &FicheMembre, cx: &Contexte<'_>, devant: bool) -> Response {
+    let largeur = ui.available_width().max(LISTE_MEMBRES);
+    let (rect, reponse) = ui.allocate_exact_size(Vec2::new(largeur, AVATAR_LISTE + 2.0 * espace::XS), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return reponse;
+    }
+    if devant || reponse.hovered() {
+        let fond = if devant { theme::alpha(ACCENT, 36) } else { theme::BG_HOVER };
+        ui.painter().rect_filled(rect, rayon::S, fond);
+    }
+    let mut dedans = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(espace::S, espace::XS))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    classement::avatar(&mut dedans, &f.username, cx.photos.get(&f.user_id).map(|(_, t)| t), AVATAR_LISTE);
+    dedans.add(egui::Label::new(RichText::new(&f.username).color(if devant { TEXT } else { TEXT_DIM })).selectable(false).truncate());
+    let tier = f.fiche.rang.tier;
+    if tier >= 3 {
+        dedans.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(icone) = cx.rangs.texture(tier) {
+                ui.add(egui::Image::new(icone).fit_to_exact_size(Vec2::splat(RANG_LISTE)));
+            }
+        });
+    }
+    reponse.on_hover_text(if tier >= 3 { format!("{} · {} RR", nom_de_rang(tier), f.fiche.rang.rr) } else { "non classé".to_string() })
 }
 
 // ---------------------------------------------------------------------
@@ -1009,5 +1101,30 @@ fn cellule_de_match(ui: &mut Ui, m: &MatchResume, colonne: ColonneMatch, vue: &V
                 cellule(ui, TIRET, TEXT_FAINT);
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Les flèches du choix du membre bouclent, dans les deux sens.
+    #[test]
+    fn les_fleches_du_profil_bouclent() {
+        assert_eq!(voisin(0, 3, true), 1);
+        assert_eq!(voisin(2, 3, true), 0);
+        assert_eq!(voisin(0, 3, false), 2);
+        assert_eq!(voisin(1, 3, false), 0);
+        assert_eq!(voisin(0, 1, true), 0);
+        assert_eq!(voisin(0, 1, false), 0);
+    }
+
+    /// La liste suit les pseudos sans regarder la casse.
+    #[test]
+    fn les_membres_se_rangent_par_pseudo() {
+        let membre = |user_id, nom: &str| FicheMembre { user_id, username: nom.to_string(), ..Default::default() };
+        let stats = [membre(1, "zed"), membre(2, "Amnesyak"), membre(3, "mg4230"), membre(4, "BS")];
+        let noms: Vec<&str> = membres_lies(&stats).iter().map(|f| f.username.as_str()).collect();
+        assert_eq!(noms, ["Amnesyak", "BS", "mg4230", "zed"]);
     }
 }

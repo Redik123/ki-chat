@@ -1402,7 +1402,7 @@ impl KiApp {
             self.valo.ouvert = false;
             self.donnees_valo.fiche = None;
             self.donnees_valo.comparee = None;
-            self.valo.fermer_fiche();
+            self.valo.quitter_la_fiche();
         }
     }
 
@@ -1433,6 +1433,10 @@ impl KiApp {
                     self.donnees_valo.mon_journal_demande = None;
                 }
                 valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
+                valo_page::Demande::AutreFiche(user_id, username) => {
+                    self.valo.replier_fiche();
+                    self.montrer_fiche(user_id, username);
+                }
                 valo_page::Demande::OuvrirTactique => self.ouvrir_le_tableau(),
                 valo_page::Demande::Comparer(user_id, username) => {
                     if self.donnees_valo.comparee.as_ref().is_none_or(|c| c.user_id != user_id) {
@@ -1873,6 +1877,12 @@ impl KiApp {
     /// il s'ouvrirait déjà déplié chez le second.
     fn ouvrir_fiche(&mut self, user_id: UserId, username: String) {
         self.valo.fermer_fiche();
+        self.montrer_fiche(user_id, username);
+    }
+
+    /// La fiche de ce membre devant, demandée au serveur ; la vue du profil
+    /// est celle que l'appelant a laissée.
+    fn montrer_fiche(&mut self, user_id: UserId, username: String) {
         self.valo.vers_profil();
         // On ne se compare pas à soi-même.
         if self.donnees_valo.comparee.as_ref().is_some_and(|c| c.user_id == user_id) {
@@ -4029,13 +4039,16 @@ impl KiApp {
                 prendre_echap(ctx);
             } else if ki_ui::fenetre::echap(ctx) {
                 // La modale ou la fenêtre se fermera en se dessinant.
-            } else if self.session.welcomed && self.donnees_valo.fiche.is_some() {
-                self.donnees_valo.fiche = None;
-                self.donnees_valo.comparee = None;
-                self.valo.fermer_fiche();
-                prendre_echap(ctx);
-            } else if self.session.welcomed && self.valo.ouvert {
-                self.valo.ouvert = false;
+            } else if self.session.welcomed && (self.valo.ouvert || self.donnees_valo.fiche.is_some()) {
+                // Une fiche ouverte depuis le classement ou les matchs : on
+                // y retourne. Sinon c'est la page qui se ferme — sur l'onglet
+                // Profil, fermer la fiche seule rouvrait la sienne aussitôt.
+                if self.valo.echap() {
+                    self.donnees_valo.fiche = None;
+                    self.donnees_valo.comparee = None;
+                } else {
+                    self.retour_au_chat();
+                }
                 prendre_echap(ctx);
             } else if self.session.welcomed && self.claude.ouvert {
                 self.claude.ouvert = false;

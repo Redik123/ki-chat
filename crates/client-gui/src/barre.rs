@@ -227,8 +227,13 @@ impl KiApp {
                         self.loupedeck_etat.page_ouverte = !self.loupedeck_etat.page_ouverte;
                     }
                     if bouton_de_barre(ui, etroite, Icon::Target, "Valorant").clicked() {
+                        // La page s'ouvre sur l'onglet où on l'a laissée ;
+                        // déjà ouverte, le bouton ramène à l'accueil.
+                        let deja = self.valo.ouvert || self.donnees_valo.fiche.is_some();
                         self.ouvrir_stats();
-                        self.valo.vers_accueil();
+                        if deja {
+                            self.valo.vers_accueil();
+                        }
                     }
                     if bouton_de_barre(ui, etroite, Icon::Film, "Clips").clicked() {
                         self.ouvrir_clips();

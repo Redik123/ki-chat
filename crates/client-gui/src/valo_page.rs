@@ -215,6 +215,9 @@ pub enum Demande {
     OuvrirFiche(UserId, String),
     /// La carte tactique, depuis son onglet de la page au centre.
     OuvrirTactique,
+    /// Le profil d'un autre membre à la place de celui qu'on regarde, sur
+    /// la même vue : ses agents après ceux du premier.
+    AutreFiche(UserId, String),
     /// Comparer la fiche ouverte à celle de ce membre (la vue Comparer du
     /// profil) : la demander au serveur.
     Comparer(UserId, String),
@@ -250,6 +253,10 @@ pub struct PageValo {
     vue_profil: profil::VueProfil,
     /// L'onglet de la page au centre.
     onglet_centre: centre::OngletCentre,
+    /// L'onglet d'où une fiche a été ouverte : Échap y ramène.
+    retour: Option<centre::OngletCentre>,
+    /// Le tri du classement, tel qu'on l'a laissé.
+    tri_classement: classement::TriChoisi,
     /// La carte de chaleur de l'accueil : le groupe, moi, ou les deux.
     heures: accueil::Heures,
     /// Les cartes de l'onglet Matchs montrées : « voir plus » en ajoute.
@@ -260,7 +267,8 @@ pub struct PageValo {
 }
 
 impl PageValo {
-    /// Clés mémorisées : `valo_periode`, `fiche_periode`, `fiche_classe`.
+    /// Clés mémorisées : `valo_periode`, `fiche_periode`, `fiche_classe`,
+    /// `valo_onglet`, `valo_tri`.
     pub fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
             ouvert: false,
@@ -273,7 +281,9 @@ impl PageValo {
             survol: None,
             fiche_plus: false,
             vue_profil: profil::VueProfil::Ensemble,
-            onglet_centre: centre::OngletCentre::Accueil,
+            onglet_centre: centre::OngletCentre::depuis(&get("valo_onglet", "accueil")),
+            retour: None,
+            tri_classement: classement::lire_tri(&get("valo_tri", "")),
             heures: accueil::Heures::Groupe,
             cartes_matchs: matchs::CARTES_PAR_PAGE,
             a_comparer: Vec::new(),
@@ -284,6 +294,8 @@ impl PageValo {
         storage.set_string("valo_periode", self.periode.cle().into());
         storage.set_string("fiche_periode", self.fiche_periode.cle().into());
         storage.set_string("fiche_classe", if self.fiche_classe { "on" } else { "off" }.into());
+        storage.set_string("valo_onglet", self.onglet_a_garder().cle().into());
+        storage.set_string("valo_tri", classement::ecrire_tri(self.tri_classement));
     }
 
     /// La vue Comparer du profil, l'onglet Profil devant.
@@ -294,10 +306,17 @@ impl PageValo {
 
     /// La fiche se ferme : rien de déplié, rien de survolé, table repliée.
     pub fn fermer_fiche(&mut self) {
+        self.replier_fiche();
+        self.vue_profil = profil::VueProfil::Ensemble;
+    }
+
+    /// Un autre membre sur la même vue : ce qui était déplié ou déroulé
+    /// s'oublie — un match joué ensemble porte le même id chez les deux —,
+    /// la vue reste.
+    pub fn replier_fiche(&mut self) {
         self.deplie = None;
         self.survol = None;
         self.fiche_plus = false;
-        self.vue_profil = profil::VueProfil::Ensemble;
     }
 }
 
@@ -1730,6 +1749,72 @@ mod tests {
         });
         assert!(!page.fiche_classe);
         assert_eq!(page.fiche_periode, PeriodeFiche::TrenteJours);
+    }
+
+    /// L'onglet et le tri du classement se retrouvent au lancement suivant ;
+    /// la carte tactique, qui est une fenêtre, et une clé inconnue rendent
+    /// l'accueil.
+    #[test]
+    fn l_onglet_et_le_tri_se_retrouvent() {
+        use centre::OngletCentre;
+        for (onglet, _) in OngletCentre::TOUS {
+            let attendu = if onglet == OngletCentre::Tactique { OngletCentre::Accueil } else { onglet };
+            assert_eq!(OngletCentre::depuis(onglet.cle()), attendu);
+        }
+        assert_eq!(OngletCentre::depuis("?"), OngletCentre::Accueil);
+        let page = PageValo::load(|cle, defaut| {
+            match cle {
+                "valo_onglet" => "classement",
+                "valo_tri" => "kd:desc",
+                _ => defaut,
+            }
+            .to_string()
+        });
+        assert_eq!(page.onglet_centre, OngletCentre::Classement);
+        assert_eq!(classement::ecrire_tri(page.tri_classement), "kd:desc");
+    }
+
+    /// Échap sur la page. Une fiche ouverte depuis le classement : on y
+    /// retourne, la page reste. Sur l'onglet Profil choisi à la main, ou
+    /// sans la page (la fiche ouverte d'un clic droit) : tout se ferme, et
+    /// l'onglet d'avant attend la prochaine ouverture.
+    #[test]
+    fn echap_ramene_a_l_onglet_d_ou_la_fiche_vient() {
+        use centre::OngletCentre;
+        let mut page = PageValo::load(|_, d| d.to_string());
+        page.ouvert = true;
+        page.onglet_centre = OngletCentre::Classement;
+        page.vers_profil();
+        page.vue_profil = profil::VueProfil::Agents;
+        // Une seconde fiche par-dessus la première : l'origine ne bouge pas.
+        page.vers_profil();
+        assert_eq!(page.onglet_a_garder(), OngletCentre::Classement, "le profil ouvert en passant ne se retient pas");
+        assert!(page.echap(), "la page reste");
+        assert_eq!(page.onglet_centre, OngletCentre::Classement);
+        assert_eq!(page.vue_profil, profil::VueProfil::Ensemble);
+        assert!(!page.echap(), "plus de fiche : Échap ferme la page");
+
+        // L'onglet Profil cliqué : aucun onglet où revenir.
+        page.onglet_centre = OngletCentre::Profil;
+        page.retour = None;
+        assert!(!page.echap());
+        assert_eq!(page.onglet_a_garder(), OngletCentre::Profil);
+
+        // La fiche seule, page fermée : Échap ferme, et l'onglet d'avant
+        // revient pour la prochaine ouverture.
+        let mut page = PageValo::load(|_, d| d.to_string());
+        page.onglet_centre = OngletCentre::Matchs;
+        page.vers_profil();
+        assert!(!page.echap());
+        page.quitter_la_fiche();
+        assert_eq!(page.onglet_centre, OngletCentre::Matchs);
+
+        // Le bouton de la barre, la page déjà ouverte : l'accueil, sans
+        // retour en attente.
+        page.vers_profil();
+        page.vers_accueil();
+        assert_eq!(page.onglet_centre, OngletCentre::Accueil);
+        assert!(page.retour.is_none());
     }
 
     #[test]

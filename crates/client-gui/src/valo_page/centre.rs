@@ -25,7 +25,7 @@ pub enum OngletCentre {
 }
 
 impl OngletCentre {
-    const TOUS: [(OngletCentre, &'static str); 7] = [
+    pub(super) const TOUS: [(OngletCentre, &'static str); 7] = [
         (OngletCentre::Accueil, "Accueil"),
         (OngletCentre::Classement, "Classement"),
         (OngletCentre::Matchs, "Matchs"),
@@ -34,17 +34,72 @@ impl OngletCentre {
         (OngletCentre::Esport, "Esport"),
         (OngletCentre::Boutique, "Boutique"),
     ];
+
+    /// Le nom sous lequel l'onglet se range d'un lancement à l'autre.
+    pub(super) fn cle(self) -> &'static str {
+        match self {
+            OngletCentre::Accueil => "accueil",
+            OngletCentre::Classement => "classement",
+            OngletCentre::Matchs => "matchs",
+            OngletCentre::Profil => "profil",
+            OngletCentre::Tactique => "tactique",
+            OngletCentre::Esport => "esport",
+            OngletCentre::Boutique => "boutique",
+        }
+    }
+
+    /// L'onglet rangé sous `cle` ; l'accueil pour une clé inconnue, et pour
+    /// la carte tactique, qui n'est pas une page mais une fenêtre.
+    pub(super) fn depuis(cle: &str) -> Self {
+        Self::TOUS
+            .into_iter()
+            .map(|(o, _)| o)
+            .find(|o| o.cle() == cle && *o != OngletCentre::Tactique)
+            .unwrap_or(OngletCentre::Accueil)
+    }
 }
 
 impl PageValo {
-    /// L'accueil, en ouvrant la page.
+    /// L'accueil : le bouton VALORANT de la barre, la page déjà ouverte.
     pub fn vers_accueil(&mut self) {
         self.onglet_centre = OngletCentre::Accueil;
+        self.retour = None;
     }
 
-    /// Le profil, en ouvrant une fiche.
+    /// Le profil, en ouvrant une fiche. L'onglet d'où l'on vient se
+    /// retient : Échap y ramène.
     pub fn vers_profil(&mut self) {
+        if self.onglet_centre != OngletCentre::Profil {
+            self.retour = Some(self.onglet_centre);
+        }
         self.onglet_centre = OngletCentre::Profil;
+    }
+
+    /// La fiche se quitte : l'onglet d'où elle avait été ouverte revient
+    /// devant — tout de suite si la page reste, à sa prochaine ouverture
+    /// sinon.
+    pub fn quitter_la_fiche(&mut self) {
+        if let Some(onglet) = self.retour.take() {
+            self.onglet_centre = onglet;
+        }
+        self.fermer_fiche();
+    }
+
+    /// Échap sur la page. Une fiche ouverte depuis un autre onglet se
+    /// referme et rend la place à cet onglet : vrai, la page reste. Sinon
+    /// faux : c'est la page qui se ferme.
+    pub fn echap(&mut self) -> bool {
+        let revient = self.ouvert && self.onglet_centre == OngletCentre::Profil && self.retour.is_some();
+        if revient {
+            self.quitter_la_fiche();
+        }
+        revient
+    }
+
+    /// L'onglet à retrouver au prochain lancement : celui qu'on a choisi,
+    /// pas le profil qu'une fiche ouverte en passant a mis devant.
+    pub(super) fn onglet_a_garder(&self) -> OngletCentre {
+        self.retour.unwrap_or(self.onglet_centre)
     }
 
     /// L'accueil se montre : le fil de la soirée doit être frais.
@@ -91,7 +146,10 @@ impl PageValo {
                         // La carte vit dans sa propre fenêtre, partagée avec
                         // le salon vocal : l'onglet l'ouvre.
                         OngletCentre::Tactique => demandes.push(Demande::OuvrirTactique),
-                        o => self.onglet_centre = o,
+                        o => {
+                            self.onglet_centre = o;
+                            self.retour = None;
+                        }
                     }
                 }
             }
@@ -111,7 +169,10 @@ impl PageValo {
                     // Sans fiche ouverte, la sienne.
                     match cx.moi.and_then(|moi| cx.stats.iter().find(|f| f.user_id == moi)) {
                         Some(f) => demandes.push(Demande::OuvrirFiche(f.user_id, f.username.clone())),
-                        None => ui::hint(ui, "Lie ton compte Riot dans ⚙ → Jeu pour avoir ta fiche ; clic droit sur un membre pour la sienne."),
+                        None => {
+                            profil::choix_du_membre(ui, None, cx, &mut demandes);
+                            ui::hint(ui, "Lie ton compte Riot dans ⚙ → Jeu pour avoir ta fiche.");
+                        }
                     }
                 }
             },
