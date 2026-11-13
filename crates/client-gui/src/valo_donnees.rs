@@ -2,7 +2,7 @@
 //! fiches du groupe, la soirée, sa propre fiche, son journal, ses comptes
 //! Riot), ce qu'on lui a déjà demandé ou dit, et ce qu'il sait faire.
 //!
-//! À part de la page (`valo_page`, ce qu'on regarde) et du veilleur
+//! À part de la page (`valo`, ce qu'on regarde) et du veilleur
 //! (`valorant`, ce que lit le client Riot de cette machine).
 
 use std::time::{Duration, Instant};

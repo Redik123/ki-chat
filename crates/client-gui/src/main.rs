@@ -64,7 +64,7 @@ mod ui;
 mod update;
 mod valorant;
 mod valo_catalogue;
-mod valo_page;
+mod valo;
 mod veille;
 mod visionneuse;
 mod zone;
@@ -159,10 +159,10 @@ const SPEAK_LEVEL: f32 = 0.02;
 
 fn main() -> eframe::Result {
     // Le banc des pages VALORANT, en version de debug : une fenêtre sur un
-    // groupe inventé, photographiée scène par scène (valo_page/banc.rs).
+    // groupe inventé, photographiée scène par scène (valo/banc.rs).
     #[cfg(debug_assertions)]
-    if let Some(dossier) = valo_page::banc::demande() {
-        return valo_page::banc::lancer(dossier);
+    if let Some(dossier) = valo::banc::demande() {
+        return valo::banc::lancer(dossier);
     }
     // Traces sur stderr ET dans un fichier, plus un panic hook : compilée
     // `panic = "abort"` sans console, l'application mourait sans témoin.
@@ -647,7 +647,7 @@ struct KiApp {
     clips: clips_ui::Clips,
     /// La page VALORANT du groupe (son état, ses deux fenêtres) et ce que
     /// le serveur en a envoyé : les fiches, les esports, l'activité.
-    valo: valo_page::PageValo,
+    valo: valo::PageValo,
     /// Ce que l'on sait de VALORANT : les fiches du groupe, la soirée, sa propre
     /// fiche et son journal, ses comptes Riot, et ce que ce serveur sait faire.
     donnees_valo: valo_donnees::DonneesValo,
@@ -1028,7 +1028,7 @@ impl KiApp {
                 retrait_resultat: None,
                 dossier_choisi: Default::default(),
             },
-            valo: valo_page::PageValo::load(get),
+            valo: valo::PageValo::load(get),
             demarrage_verifie: false,
             barre_sombre: false,
             veilleur_valorant: None,
@@ -1362,7 +1362,7 @@ impl KiApp {
         let chargement = self.tenir_les_stats(&ctx);
         let mut boutique = std::mem::take(&mut self.boutique);
         let (ouvert, demandes) = {
-            let cx = valo_page::Contexte {
+            let cx = valo::Contexte {
                 stats: &self.donnees_valo.stats,
                 recu: self.donnees_valo.stats_recu,
                 chargement,
@@ -1377,7 +1377,7 @@ impl KiApp {
                 ma_fiche: self.donnees_valo.ma_fiche.as_ref(),
                 photos: &self.avatars,
                 comparee: self.donnees_valo.comparee.as_ref(),
-                journal: valo_page::Journal { servi: self.donnees_valo.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.donnees_valo.mon_journal.as_deref() },
+                journal: valo::Journal { servi: self.donnees_valo.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.donnees_valo.mon_journal.as_deref() },
             };
             let fiche = self.donnees_valo.fiche.as_ref();
             let valo = &mut self.valo;
@@ -1412,7 +1412,7 @@ impl KiApp {
         if !self.donnees_valo.serveur_soiree {
             return;
         }
-        let depuis = valo_page::debut_de_soiree(chrono::Local::now());
+        let depuis = valo::debut_de_soiree(chrono::Local::now());
         let vieille = self.donnees_valo.soiree_demandee.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(120));
         if vieille || depuis != self.donnees_valo.soiree_depuis {
             self.donnees_valo.soiree_depuis = depuis;
@@ -1423,33 +1423,33 @@ impl KiApp {
 
     /// Ce que la page VALORANT demande : actualiser, ouvrir une fiche ou la
     /// carte tactique.
-    fn executer_demandes_valo(&mut self, demandes: Vec<valo_page::Demande>) {
+    fn executer_demandes_valo(&mut self, demandes: Vec<valo::Demande>) {
         for demande in demandes {
             match demande {
-                valo_page::Demande::Actualiser => {
+                valo::Demande::Actualiser => {
                     self.demander_stats();
                     self.donnees_valo.soiree_demandee = None;
                     self.donnees_valo.mon_journal = None;
                     self.donnees_valo.mon_journal_demande = None;
                 }
-                valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
-                valo_page::Demande::AutreFiche(user_id, username) => {
+                valo::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
+                valo::Demande::AutreFiche(user_id, username) => {
                     self.valo.replier_fiche();
                     self.montrer_fiche(user_id, username);
                 }
-                valo_page::Demande::OuvrirTactique => self.ouvrir_le_tableau(),
-                valo_page::Demande::Comparer(user_id, username) => {
+                valo::Demande::OuvrirTactique => self.ouvrir_le_tableau(),
+                valo::Demande::Comparer(user_id, username) => {
                     if self.donnees_valo.comparee.as_ref().is_none_or(|c| c.user_id != user_id) {
                         self.donnees_valo.comparee = Some(FicheOuverte { user_id, username, recue: false, fiche: None });
                         self.send(ClientMsg::FicheValorant { user_id });
                     }
                     self.valo.vers_comparer();
                 }
-                valo_page::Demande::MonJournal => {
+                valo::Demande::MonJournal => {
                     let vieille = self.donnees_valo.mon_journal_demande.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(300));
                     if self.donnees_valo.serveur_journal_lecture && vieille {
                         self.donnees_valo.mon_journal_demande = Some(std::time::Instant::now());
-                        self.send(ClientMsg::MonJournal { decalage_min: valo_page::decalage_journal() });
+                        self.send(ClientMsg::MonJournal { decalage_min: valo::decalage_journal() });
                     }
                 }
             }

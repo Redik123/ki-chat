@@ -505,7 +505,7 @@ mod tests {
             include_str!("reglages.rs"),
             include_str!("clips.rs"),
             include_str!("soundboard.rs"),
-            include_str!("valo_page.rs"),
+            include_str!("valo.rs"),
             include_str!("partage.rs"),
             include_str!("overlay.rs"),
             include_str!("servers.rs"),

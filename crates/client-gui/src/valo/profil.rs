@@ -5,7 +5,7 @@
 //!
 //! Les nombres sont ceux de la fiche d'aujourd'hui (la [`Vue`] et ses
 //! bilans) : seule la mise en page change. Module enfant de
-//! `valo_page`, il en reprend les calculs et les petits dessins tels
+//! `valo`, il en reprend les calculs et les petits dessins tels
 //! quels.
 
 use ki_ui::typo::{Texte, Ton};
