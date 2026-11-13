@@ -7,6 +7,8 @@
 //! - Un clic sur l'en-tête d'une colonne triable la trie, un second
 //!   renverse le tri. Le tableau ne trie rien lui-même : il dit le tri
 //!   choisi ([`Tableau::tri`]), et l'appelant range ses lignes.
+//! - Un titre abrégé pour tenir dans sa colonne se dit en entier au survol
+//!   ([`Colonne::info`]).
 //! - Les lignes sont rayées, s'éclairent au survol, et se cliquent.
 //! - Chaque colonne porte un identifiant, que le tri et le dessin des
 //!   cases rendent tel quel : le plus souvent une variante d'enum. Elles
@@ -45,11 +47,12 @@ pub struct Colonne<'a> {
     droite: bool,
     chiffre: bool,
     triable: bool,
+    info: Option<&'a str>,
 }
 
 impl<'a> Colonne<'a> {
     pub fn new(titre: &'a str, largeur: f32) -> Self {
-        Self { titre, largeur, grandit: false, priorite: 0, droite: false, chiffre: false, triable: false }
+        Self { titre, largeur, grandit: false, priorite: 0, droite: false, chiffre: false, triable: false, info: None }
     }
 
     /// Elle prend la place qui reste (le nom d'un membre).
@@ -82,6 +85,13 @@ impl<'a> Colonne<'a> {
     /// Son en-tête se clique pour trier.
     pub fn triable(mut self) -> Self {
         self.triable = true;
+        self
+    }
+
+    /// Ce que dit le survol de son en-tête : le titre en entier quand il
+    /// est abrégé, ou ce que la colonne compte.
+    pub fn info(mut self, info: &'a str) -> Self {
+        self.info = Some(info);
         self
     }
 }
@@ -221,11 +231,18 @@ impl<'a, C: Copy + PartialEq + Send + Sync + 'static> Tableau<'a, C> {
         for &(i, x, w) in &cases {
             let c = &self.colonnes[i];
             let case = Rect::from_min_size(egui::pos2(gauche + x, tete.top()), Vec2::new(w, Self::HAUTEUR_TETE));
-            let clic = c.triable
-                && ui
-                    .interact(case, self.id.with(("tete", i)), Sense::click())
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked();
+            let mut clic = false;
+            if c.triable || c.info.is_some() {
+                let sens = if c.triable { Sense::click() } else { Sense::hover() };
+                let mut reponse = ui.interact(case, self.id.with(("tete", i)), sens);
+                if c.triable {
+                    reponse = reponse.on_hover_cursor(egui::CursorIcon::PointingHand);
+                }
+                if let Some(info) = c.info {
+                    reponse = reponse.on_hover_text(info);
+                }
+                clic = c.triable && reponse.clicked();
+            }
             if clic {
                 let nouveau = basculer(tri, self.identifiants[i], c.chiffre);
                 ui.data_mut(|d| d.insert_temp(self.id, nouveau));
@@ -350,6 +367,59 @@ mod tests {
         let rang = Colonne::new("Rang", 90.0).chiffre();
         assert!(rang.chiffre && !rang.droite);
         assert!(Colonne::new("7 j", 50.0).droite().chiffre);
+    }
+
+    /// La bulle d'un en-tête ne le rend pas cliquable : un clic dessus ne
+    /// trie rien. Une colonne qui trie et porte une bulle trie toujours.
+    #[test]
+    fn la_bulle_d_un_en_tete_ne_trie_pas() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Col {
+            Membre,
+            Sept,
+        }
+        let tableau = || {
+            Tableau::new("bulle")
+                .colonne(Col::Membre, Colonne::new("Membre", 160.0).grandit().info("le pseudo"))
+                .colonne(Col::Sept, Colonne::new("7 j", 50.0).droite().triable().info("les RR gagnés sur 7 jours"))
+                .tri_par_defaut(Col::Sept, false)
+        };
+        let ctx = egui::Context::default();
+        // Une image : le coin et la largeur du tableau, et le tri du moment.
+        let image = |evenements: Vec<egui::Event>| {
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(600.0, 300.0))),
+                events: evenements,
+                ..Default::default()
+            };
+            let mut vu = None;
+            ctx.run_ui(entree, |ui| {
+                vu = Some((ui.cursor().min, ui.available_width(), tableau().tri(ui)));
+                tableau().show(ui, 1, |_, _, _| {});
+            })
+            .drop_without_applying_deltas();
+            vu.expect("l'image a été dessinée")
+        };
+        let cliquer = |pos: egui::Pos2| {
+            let bouton = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            image(vec![egui::Event::PointerMoved(pos)]);
+            image(vec![bouton(true)]);
+            image(vec![bouton(false)]);
+            image(Vec::new()).2
+        };
+        let (coin, largeur, tri) = image(Vec::new());
+        let origine = Some(Tri { colonne: Col::Sept, croissant: false });
+        assert_eq!(tri, origine);
+        let milieu = Tableau::<Col>::HAUTEUR_TETE / 2.0;
+        let sur_membre = coin + Vec2::new(espace::M + 20.0, milieu);
+        let sur_sept = coin + Vec2::new(largeur - espace::M - 10.0, milieu);
+        assert_eq!(cliquer(sur_membre), origine, "une bulle seule ne trie pas");
+        assert_eq!(cliquer(sur_sept), Some(Tri { colonne: Col::Sept, croissant: true }), "la colonne qui trie, bulle ou pas");
     }
 
     /// Le tableau rend à chaque case l'identifiant de sa colonne, et au tri

@@ -502,7 +502,7 @@ impl Vitrine {
                     .colonne(Col::Membre, Colonne::new("Membre", 140.0).grandit().triable())
                     .colonne(Col::Rang, Colonne::new("Rang", 100.0).priorite(1))
                     .colonne(Col::Forme, Colonne::new("Forme", 90.0).priorite(2))
-                    .colonne(Col::SeptJours, Colonne::new("7 jours", 64.0).droite().triable())
+                    .colonne(Col::SeptJours, Colonne::new("7 j", 64.0).droite().triable().info("les RR gagnés sur 7 jours"))
                     .tri_par_defaut(Col::SeptJours, false);
                 if let Some(tri) = tableau.tri(ui) {
                     match tri.colonne {
