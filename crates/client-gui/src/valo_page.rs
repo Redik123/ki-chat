@@ -48,7 +48,9 @@ pub(crate) mod banc;
 mod centre;
 mod classement;
 mod comparer;
+mod esport;
 mod matchs;
+mod medailles;
 mod profil;
 mod progression;
 
@@ -682,11 +684,6 @@ fn cellule(ui: &mut Ui, texte: impl Into<String>, couleur: Color32) -> Response 
     ui.label(RichText::new(texte.into()).color(couleur).size(texte::PETIT))
 }
 
-/// L'en-tête d'une colonne, en petit et pâle.
-fn en_tete(ui: &mut Ui, titre: &str) {
-    ui::hint(ui, titre);
-}
-
 /// Ce que dit le survol d'un point de RR : la carte, le delta, le rang,
 /// quand, et ce qui l'explique (bonus, placement, descente protégée).
 fn info_de_point(x: &PointRR) -> String {
@@ -1048,10 +1045,6 @@ pub struct Contexte<'a> {
     pub journal: Journal<'a>,
 }
 
-impl PageValo {
-
-}
-
 /// Trie stable : ceux qui ont joué d'abord, puis par la clé dans le sens
 /// demandé, les sans-clé derrière ; à égalité, l'ordre reçu.
 fn trier<T>(ordre: &mut [T], en_bas: impl Fn(&T) -> bool, cle: impl Fn(&T) -> Option<f64>, desc: bool) {
@@ -1164,94 +1157,6 @@ fn records(ui: &mut Ui, lignes: &[Ligne], periode: Periode, rangs: &rangs::Rangs
     grille.montrer(ui);
 }
 
-/// L'acte dont parlent la plupart des membres (« V26 · ACTE V ») : celui
-/// d'une lecture d'avant un changement d'acte ne compte plus.
-fn acte_du_groupe<'a>(medailles: impl Iterator<Item = &'a Medailles>) -> String {
-    let mut comptes: BTreeMap<&str, usize> = BTreeMap::new();
-    for m in medailles.filter(|m| !m.acte.is_empty()) {
-        *comptes.entry(m.acte.as_str()).or_default() += 1;
-    }
-    comptes.into_iter().max_by_key(|(acte, n)| (*n, *acte)).map(|(acte, _)| acte.to_string()).unwrap_or_default()
-}
-
-/// Les médailles de l'acte, membre par membre, le MVP d'abord — lues chez
-/// HenrikDev par le serveur, ou par le client de chacun. Une ligne d'aide
-/// tant qu'on n'en connaît aucune.
-fn medailles_du_groupe(
-    ui: &mut Ui,
-    lignes: &[Ligne],
-    noms: &Annuaire,
-    my_id: Option<UserId>,
-    demandes: &mut Vec<Demande>,
-    colonnes: &[Medaille],
-) {
-    let avec: Vec<(&Ligne, &Medailles)> = lignes
-        .iter()
-        .filter_map(|l| l.f.fiche.medailles.as_ref().map(|m| (l, m)))
-        .filter(|(_, m)| !m.cet_acte.is_empty() || !m.carriere.is_empty())
-        .collect();
-    let acte = acte_du_groupe(avec.iter().map(|(_, m)| *m));
-    ui.add_space(espace::XL);
-    let titre = if acte.is_empty() { "Médailles de l'acte".to_string() } else { format!("Médailles — {acte}") };
-    ui.label(Texte::Corps.gras(ui, titre));
-    if avec.is_empty() {
-        ui::hint(
-            ui,
-            "aucune médaille connue pour l'instant : le serveur les lit chez HenrikDev à chaque \
-             rafraîchissement des fiches, pour qui garde « Ajouter mes médailles à ma fiche » (⚙ → Jeu)",
-        );
-        return;
-    }
-    // Les sommes de l'acte du groupe ; une lecture d'un autre acte ne dit
-    // rien de celui-ci.
-    let a_jour = |m: &Medailles| acte.is_empty() || m.acte.is_empty() || m.acte == acte;
-    let fois = |m: &Medailles, medaille| if a_jour(m) { m.fois(medaille, false) } else { 0 };
-    let total = |m: &Medailles| if a_jour(m) { m.cet_acte.iter().map(|c| c.fois).sum::<u32>() } else { 0 };
-    let mut ordre = avec.clone();
-    ordre.sort_by_key(|(l, m)| {
-        (std::cmp::Reverse(fois(m, Medaille::Mvp)), std::cmp::Reverse(total(m)), l.f.username.to_lowercase())
-    });
-    ui.add_space(espace::XS);
-    egui::ScrollArea::horizontal().id_salt("valo_medailles").show(ui, |ui| {
-        egui::Grid::new("stats_medailles").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
-            en_tete(ui, "Joueur");
-            for &m in colonnes {
-                en_tete(ui, m.nom());
-            }
-            en_tete(ui, "Toutes");
-            en_tete(ui, "Lues");
-            ui.end_row();
-            for (l, md) in ordre {
-                // Sa propre ligne se repère : son pseudo pèse.
-                let couleur = noms.couleur(l.f.user_id);
-                let pseudo = if my_id == Some(l.f.user_id) {
-                    Texte::Corps.gras(ui, &l.f.username).color(couleur)
-                } else {
-                    RichText::new(&l.f.username).color(couleur)
-                };
-                if ui.add(egui::Label::new(pseudo).sense(Sense::click())).on_hover_text("ouvrir sa fiche").clicked() {
-                    demandes.push(Demande::OuvrirFiche(l.f.user_id, l.f.username.clone()));
-                }
-                for &m in colonnes {
-                    let n = fois(md, m);
-                    if n == 0 {
-                        cellule(ui, TIRET, TEXT_FAINT);
-                        continue;
-                    }
-                    let couleur = if matches!(m, Medaille::Mvp | Medaille::Distinction) { theme::WARN } else { TEXT };
-                    let reponse = ui.label(Texte::Aide.gras(ui, n.to_string()).color(couleur));
-                    if let Some(c) = md.cet_acte.iter().find(|c| c.medaille == m) {
-                        reponse.on_hover_text(format!("record de l'acte : {}", m.valeur(c.meilleur)));
-                    }
-                }
-                cellule(ui, total(md).to_string(), TEXT_DIM);
-                cellule(ui, crate::formats::il_y_a(md.maj), TEXT_FAINT);
-                ui.end_row();
-            }
-        });
-    });
-}
-
 fn paires_de_duos<'a>(duos: impl Iterator<Item = (UserId, &'a [(UserId, u16, u16)])>) -> Vec<(UserId, UserId, u16, u16)> {
     let mut paires: BTreeMap<(UserId, UserId), (u16, u16)> = BTreeMap::new();
     for (moi, liste) in duos {
@@ -1314,37 +1219,6 @@ fn regrouper(ids: &[&str]) -> Vec<Vec<usize>> {
         }
     }
     blocs
-}
-
-/// Les prochains matchs d'esport, tels que le serveur les a lus chez
-/// HenrikDev — un mot si le serveur n'en a pas.
-fn esports_ui(ui: &mut Ui, matchs: &[MatchEsport]) {
-    ui.label(Texte::Corps.gras(ui, "Esports — prochains matchs"));
-    ui.add_space(espace::XS);
-    if matchs.is_empty() {
-        ui.label(RichText::new("rien de prévu chez HenrikDev pour l'instant").color(TEXT_DIM));
-        return;
-    }
-    egui::Grid::new("stats_esports").striped(true).spacing([16.0, 5.0]).show(ui, |ui| {
-        for titre in ["Quand", "Affiche", "Ligue", "Tournoi", "Format"] {
-            en_tete(ui, titre);
-        }
-        ui.end_row();
-        for m in matchs {
-            let quand = if m.etat == "inProgress" {
-                Texte::Aide.gras(ui, "en cours").color(SPEAK)
-            } else {
-                Texte::Aide.riche_ton(ui, Ton::Discret, format!("{} · {}", crate::formats::day_label(m.date), crate::formats::format_time(m.date)))
-            };
-            ui.label(quand);
-            ui.label(Texte::Corps.gras(ui, m.equipes.join("  vs  ")));
-            let ligue = if m.region.is_empty() { m.ligue.clone() } else { format!("{} · {}", m.ligue, m.region) };
-            ui.label(RichText::new(ligue).color(TEXT_DIM));
-            ui::hint(ui, &m.tournoi);
-            ui::hint(ui, &m.format);
-            ui.end_row();
-        }
-    });
 }
 
 // ---------------------------------------------------------------------

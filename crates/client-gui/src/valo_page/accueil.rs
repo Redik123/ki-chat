@@ -199,7 +199,7 @@ impl PageValo {
                 self.choix_de_periode(ui);
                 ui.add_space(espace::S);
                 self.classement_tableau(ui, lignes, noms, cx, demandes);
-                medailles_du_groupe(ui, lignes, noms, cx.moi, demandes, &Medaille::TOUTES);
+                medailles::du_groupe(ui, lignes, noms, cx, demandes);
             },
         );
     }

@@ -61,7 +61,7 @@ struct Scene {
     quoi: Quoi,
 }
 
-const SCENES: [Scene; 19] = [
+const SCENES: [Scene; 21] = [
     Scene { nom: "accueil", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-serveur-d-avant", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: false } },
@@ -81,6 +81,8 @@ const SCENES: [Scene; 19] = [
     Scene { nom: "profil-comparer-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Profil(profil::VueProfil::Comparer) },
     Scene { nom: "profil-pauvre", fiche: 1, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
     Scene { nom: "profil-vide", fiche: 2, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
+    Scene { nom: "esport", fiche: 0, largeur: 980.0, quoi: Quoi::Onglet(centre::OngletCentre::Esport) },
+    Scene { nom: "esport-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Onglet(centre::OngletCentre::Esport) },
 ];
 
 struct Banc {
@@ -97,6 +99,7 @@ struct Banc {
     /// Jerem, à qui drion se compare ; le journal de drion.
     comparee: FicheOuverte,
     journal: Vec<JourDeJeu>,
+    esports: Vec<MatchEsport>,
     photos: HashMap<UserId, (String, egui::TextureHandle)>,
     rangs: rangs::Rangs,
     catalogue: Catalogue,
@@ -182,6 +185,7 @@ impl Banc {
             soiree: soiree_inventee(maintenant),
             comparee,
             journal: journal_invente(maintenant),
+            esports: esports_inventes(maintenant),
             photos: HashMap::new(),
             rangs: rangs::Rangs::new(),
             catalogue: Catalogue::new(),
@@ -207,7 +211,7 @@ impl eframe::App for Banc {
             stats: &self.stats,
             recu: true,
             chargement: crate::valo_donnees::Chargement::Repos,
-            esports: &[],
+            esports: &self.esports,
             activite: &self.activite,
             moi: Some(1),
             membres: &self.membres,
@@ -445,7 +449,8 @@ fn fiche_inventee(nom: &str, niveau: f32, rang: (u8, u16), n: usize, graine: u64
     for m in matchs.iter_mut() {
         m.tier = points.iter().find(|p| p.match_id == m.id).map_or(rang.0, |p| p.tier);
     }
-    let medailles = (nom == "drion").then(|| medailles_inventees(&matchs, maintenant));
+    // Kevin n'en a pas : sa ligne manque au tableau des médailles.
+    let medailles = (nom != "Kevin").then(|| medailles_inventees(nom, &matchs, maintenant));
     FicheValorant {
         riot_id: format!("{nom}#EUW"),
         region: "eu".into(),
@@ -504,12 +509,36 @@ fn jouer_avec_drion(fiches: &mut [FicheValorant], qui: usize, k: usize, meme_cam
     f.historique_rr.sort_by_key(|p| std::cmp::Reverse(p.date));
 }
 
-fn medailles_inventees(matchs: &[MatchResume], maintenant: u64) -> ki_protocol::Medailles {
+/// Les médailles de l'acte : celles de drion, détaillées ; pour les autres,
+/// des comptes qui ne se ressemblent pas — chacun a ses colonnes vides —,
+/// et Lina lue il y a trois jours.
+fn medailles_inventees(nom: &str, matchs: &[MatchResume], maintenant: u64) -> ki_protocol::Medailles {
     let compte = |medaille, fois, meilleur| CompteMedaille { medaille, fois, meilleur };
-    ki_protocol::Medailles {
-        maj: maintenant - 3_600_000,
-        acte: "V26 · ACTE V".into(),
-        cet_acte: vec![
+    let cet_acte = match nom {
+        "Jerem" => vec![
+            compte(Medaille::Mvp, 7, 481.0),
+            compte(Medaille::TopFrag, 12, 31.0),
+            compte(Medaille::Degats, 10, 212.0),
+            compte(Medaille::Kills, 9, 31.0),
+            compte(Medaille::Poses, 2, 5.0),
+            compte(Medaille::Aces, 2, 1.0),
+            compte(Medaille::Clutchs, 3, 2.0),
+            compte(Medaille::Echanges, 5, 6.0),
+        ],
+        "Pandora" => vec![
+            compte(Medaille::Distinction, 2, 431.0),
+            compte(Medaille::Assists, 8, 14.0),
+            compte(Medaille::Poses, 6, 7.0),
+            compte(Medaille::Clutchs, 1, 2.0),
+            compte(Medaille::Echanges, 7, 8.0),
+        ],
+        "Lina" => vec![
+            compte(Medaille::Mvp, 1, 441.0),
+            compte(Medaille::TopFrag, 2, 24.0),
+            compte(Medaille::Tetes, 6, 38.0),
+            compte(Medaille::PremiersSangs, 4, 5.0),
+        ],
+        _ => vec![
             compte(Medaille::Mvp, 4, 468.0),
             compte(Medaille::Distinction, 5, 452.0),
             compte(Medaille::TopFrag, 9, 27.0),
@@ -519,6 +548,11 @@ fn medailles_inventees(matchs: &[MatchResume], maintenant: u64) -> ki_protocol::
             compte(Medaille::Kills, 6, 27.0),
             compte(Medaille::Aces, 1, 1.0),
         ],
+    };
+    ki_protocol::Medailles {
+        maj: maintenant - if nom == "Lina" { 3 * 24 * 3_600_000 } else { 3_600_000 },
+        acte: "V26 · ACTE V".into(),
+        cet_acte,
         carriere: vec![compte(Medaille::Mvp, 31, 482.0), compte(Medaille::PremiersSangs, 118, 7.0), compte(Medaille::Aces, 4, 1.0)],
         matchs: matchs
             .iter()
@@ -532,6 +566,29 @@ fn medailles_inventees(matchs: &[MatchResume], maintenant: u64) -> ki_protocol::
             })
             .collect(),
     }
+}
+
+/// Six affiches d'esport : une en cours, puis les suivantes sur trois jours ;
+/// une ligue sans région, un format inconnu, un nom de tournoi qui déborde.
+fn esports_inventes(maintenant: u64) -> Vec<MatchEsport> {
+    let heure = 3_600_000u64;
+    let affiche = |dans_h: u64, a: &str, b: &str, ligue: &str, region: &str, tournoi: &str, format: &str| MatchEsport {
+        date: maintenant + dans_h * heure,
+        ligue: ligue.into(),
+        region: region.into(),
+        tournoi: tournoi.into(),
+        equipes: vec![a.into(), b.into()],
+        etat: if dans_h == 0 { "inProgress".into() } else { "unstarted".into() },
+        format: format.into(),
+    };
+    vec![
+        affiche(0, "FNC", "TH", "VCT EMEA", "EMEA", "Stage 2 — Playoffs", "BO3"),
+        affiche(3, "KC", "VIT", "VCT EMEA", "EMEA", "Stage 2 — Playoffs", "BO3"),
+        affiche(22, "SEN", "G2", "VCT Americas", "AMER", "Stage 2 — Playoffs", "BO5"),
+        affiche(27, "MDH", "JL", "Challengers France", "", "Revolution — Split 3, saison régulière, semaine 7", "BO3"),
+        affiche(49, "PRX", "DRX", "VCT Pacific", "APAC", "Stage 2 — Finale", "BO5"),
+        affiche(70, "GX", "NAVI", "VCT EMEA", "EMEA", "Stage 2 — Petite finale", ""),
+    ]
 }
 
 /// Une soirée de cinq parties, la plus récente il y a vingt minutes : trois

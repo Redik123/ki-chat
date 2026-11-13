@@ -190,7 +190,7 @@ impl PageValo {
                         }
                         OngletCentre::Classement => self.onglet_classement(ui, cx, &lignes, &noms, &mut demandes),
                         OngletCentre::Matchs => self.matchs_du_groupe(ui, &lignes, &noms, cx, maintenant, &mut demandes),
-                        OngletCentre::Esport => esports_ui(ui, cx.esports),
+                        OngletCentre::Esport => esport::esports_ui(ui, cx.esports),
                         OngletCentre::Boutique => {
                             ui.label(Texte::Corps.gras(ui, "Ma boutique du jour"));
                             ui::hint(
@@ -220,7 +220,7 @@ impl PageValo {
             self.choix_de_periode(ui);
             ui.add_space(espace::S);
             self.classement_tableau(ui, lignes, noms, cx, demandes);
-            medailles_du_groupe(ui, lignes, noms, cx.moi, demandes, &Medaille::TOUTES);
+            medailles::du_groupe(ui, lignes, noms, cx, demandes);
         });
         let aide = format!("sur {}, {ASSEZ} classés au moins", self.periode.titre());
         ui::section(ui, Icon::Star, "Les records", Some(&aide), |ui| records(ui, lignes, self.periode, cx.rangs));
