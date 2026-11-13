@@ -69,8 +69,12 @@ fn avec_la_pile<R>(ctx: &Context, f: impl FnOnce(&mut Pile) -> R) -> R {
         let pile = d.get_temp_mut_or_default::<Pile>(Id::unique("ki-ui-pile-des-fenetres"));
         if pile.image != image {
             // Une image de passée : ce qui s'y est dessiné devient le bilan.
-            pile.dessus = pile.vues.iter().max_by_key(|(_, rang)| *rang).map(|(id, _)| *id);
-            pile.modale_avant = pile.modale;
+            // Plusieurs images sans que personne ne passe ici, et c'est que
+            // plus rien n'est ouvert : ce qu'on avait noté date, et Échap
+            // n'a pas à aller à une fenêtre fermée depuis.
+            let juste_avant = pile.image + 1 == image;
+            pile.dessus = pile.vues.iter().max_by_key(|(_, rang)| *rang).map(|(id, _)| *id).filter(|_| juste_avant);
+            pile.modale_avant = pile.modale.filter(|_| juste_avant);
             pile.vues.clear();
             pile.modale = None;
             pile.a_fermer = None;
@@ -402,6 +406,36 @@ mod tests {
         assert!(!a && !b);
         image(&ctx, Vec::new(), |ctx| dessiner(ctx, &mut a, &mut b));
         assert!(!image(&ctx, touche_echap(), |ctx| dessiner(ctx, &mut a, &mut b)), "plus rien à fermer : la touche reste libre");
+        assert!(!une_est_ouverte(&ctx));
+    }
+
+    /// Une fenêtre fermée autrement que par Échap — sa croix, un choix fait
+    /// dedans — ne garde pas la touche. Personne n'interroge la pile pendant
+    /// les images qui suivent (une page a pris la place du fil) : le
+    /// prochain Échap va quand même à ce qui est derrière.
+    #[test]
+    fn une_fenetre_fermee_ne_garde_pas_echap() {
+        let ctx = Context::default();
+        // Une image sans Échap ni question à la pile : seulement le dessin.
+        let passer = |ctx: &Context, ouverte: &mut bool| {
+            let entree = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                ..Default::default()
+            };
+            ctx.run_ui(entree, |ui| {
+                Fenetre::new("a", "A").ouverte(ouverte).show(ui.ctx(), |ui| ui.label("a"));
+            })
+            .drop_without_applying_deltas();
+        };
+        let mut ouverte = true;
+        for _ in 0..2 {
+            passer(&ctx, &mut ouverte);
+        }
+        ouverte = false;
+        for _ in 0..3 {
+            passer(&ctx, &mut ouverte);
+        }
+        assert!(!image(&ctx, touche_echap(), |_| {}), "la fenêtre est fermée depuis trois images : la touche reste libre");
         assert!(!une_est_ouverte(&ctx));
     }
 
