@@ -10,12 +10,15 @@
 //! - Dans le fil : PageHaut / PageBas remontent ou redescendent d'un écran,
 //!   Échap revient tout en bas — et marque lu, puisqu'on y est.
 //!
-//! Ce module ne tient que le calcul, qui se teste sans fenêtre ; les touches
-//! elles-mêmes se lisent dans `saisie` et dans `main`.
+//! Ce module tient le calcul, qui se teste sans fenêtre, et ce que chaque
+//! action fait ; quelle touche la demande, c'est `registre` qui le sait —
+//! les combinaisons ci-dessus sont celles d'origine, et se changent dans la
+//! fenêtre « Raccourcis clavier ».
 
 use eframe::egui;
 use ki_protocol::{ChannelId, ChannelKind};
 
+use crate::registre::Action;
 use crate::saisie::id_saisie;
 use crate::KiApp;
 
@@ -151,11 +154,10 @@ impl KiApp {
         if !ctx.memory(|m| m.has_focus(id_saisie())) {
             return;
         }
-        let commande = egui::Modifiers::COMMAND;
         let marque = ctx.input_mut(|i| {
-            [(egui::Key::B, Marque::Gras), (egui::Key::I, Marque::Italique), (egui::Key::E, Marque::Code)]
+            [(Action::Gras, Marque::Gras), (Action::Italique, Marque::Italique), (Action::Code, Marque::Code)]
                 .into_iter()
-                .find(|(touche, _)| i.consume_key(commande, *touche))
+                .find(|(action, _)| self.registre.faite(i, *action))
                 .map(|(_, marque)| marque)
         });
         let Some(marque) = marque else { return };
@@ -175,13 +177,25 @@ impl KiApp {
         etat.store(ctx, id_saisie());
     }
 
-    /// Les raccourcis de navigation, à lire en tête d'image : Alt+↑ / ↓ d'un
-    /// salon textuel à l'autre, Alt+Maj+↑ / ↓ vers le prochain non-lu,
-    /// Ctrl+F pour chercher.
+    /// Les raccourcis de navigation, à lire en tête d'image : d'un salon
+    /// textuel à l'autre, vers le prochain non-lu, « aller à », la
+    /// recherche, les réglages, la liste des raccourcis.
     pub(crate) fn navigation_au_clavier(&mut self, ctx: &egui::Context) {
-        // Ctrl+K ouvre « aller à », et le referme. Ouverte, elle lit ses
-        // touches ici, avant tout le monde, et le reste attend.
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
+        // On choisit une combinaison : le clavier est à la fenêtre des
+        // raccourcis, en entier.
+        if self.raccourcis.lire_la_capture(ctx, &mut self.registre) {
+            return;
+        }
+        let faite = |app: &Self, action| ctx.input_mut(|i| app.registre.faite(i, action));
+        if faite(self, Action::Raccourcis) {
+            self.raccourcis.basculer();
+        }
+        if faite(self, Action::Reglages) {
+            self.basculer_les_reglages();
+        }
+        // « Aller à » s'ouvre, et se referme. Ouverte, elle lit ses touches
+        // ici, avant tout le monde, et le reste attend.
+        if faite(self, Action::AllerA) {
             if self.aller_a.ouvert {
                 self.aller_a.fermer();
             } else {
@@ -192,21 +206,17 @@ impl KiApp {
             self.aller_a.lire_les_touches(ctx);
             return;
         }
-        let alt = egui::Modifiers::ALT;
-        let alt_maj = egui::Modifiers::ALT | egui::Modifiers::SHIFT;
-        // Avec Maj d'abord : sans Maj, le motif accepterait aussi Alt+Maj.
+        let registre = &self.registre;
         let geste = ctx.input_mut(|i| {
-            if i.consume_key(alt_maj, egui::Key::ArrowDown) {
-                Some((true, true))
-            } else if i.consume_key(alt_maj, egui::Key::ArrowUp) {
-                Some((false, true))
-            } else if i.consume_key(alt, egui::Key::ArrowDown) {
-                Some((true, false))
-            } else if i.consume_key(alt, egui::Key::ArrowUp) {
-                Some((false, false))
-            } else {
-                None
-            }
+            [
+                (Action::SalonSuivant, (true, false)),
+                (Action::SalonPrecedent, (false, false)),
+                (Action::NonLuSuivant, (true, true)),
+                (Action::NonLuPrecedent, (false, true)),
+            ]
+            .into_iter()
+            .find(|(action, _)| registre.faite(i, *action))
+            .map(|(_, geste)| geste)
         });
         if let Some((vers_le_bas, non_lus)) = geste {
             // Dans l'ordre de la colonne : les salons textuels, puis ceux
@@ -228,7 +238,7 @@ impl KiApp {
                 None => {}
             }
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+        if faite(self, Action::Chercher) {
             self.retour_au_chat();
             self.recherche.ouverte = true;
             self.recherche.focus = true;

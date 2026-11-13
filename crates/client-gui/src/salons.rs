@@ -300,14 +300,7 @@ impl KiApp {
                                         // Fermer par l'engrenage range tout comme
                                         // la croix : calibration, « M'écouter »,
                                         // essai — rien ne reste en plan.
-                                        if self.show_settings {
-                                            self.close_settings();
-                                        } else {
-                                            self.show_settings = true;
-                                            let (i, o) = ki_voice::list_devices();
-                                            self.input_devices = i;
-                                            self.output_devices = o;
-                                        }
+                                        self.basculer_les_reglages();
                                     }
                                 },
                             );

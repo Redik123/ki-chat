@@ -87,7 +87,9 @@ mod lanceur;
 mod membres;
 mod musique;
 mod reception;
+mod raccourcis_ui;
 mod recherche_ui;
+mod registre;
 mod reglages_ui;
 mod saisie;
 mod salons;
@@ -719,6 +721,10 @@ struct KiApp {
     recherche: recherche_ui::Recherche,
     /// Ctrl+K : aller à un salon ou à un membre.
     aller_a: aller_a::AllerA,
+    /// Les raccourcis de la fenêtre : chaque action et sa combinaison.
+    registre: registre::Registre,
+    /// La fenêtre qui les montre et les change.
+    raccourcis: raccourcis_ui::Raccourcis,
     /// Le salon privé de Claude, et l'onglet du propriétaire.
     claude: claude_ui::Claude,
     /// Ce que le registre dit du démarrage avec Windows, relu à l'ouverture
@@ -1061,6 +1067,8 @@ impl KiApp {
             fenetre_a_verifier: 0,
             retour: secours::retour_demande(),
             aller_a: aller_a::AllerA::default(),
+            registre: registre::Registre::load(get),
+            raccourcis: raccourcis_ui::Raccourcis::default(),
             recherche: recherche_ui::Recherche {
                 ouverte: false,
                 requete: String::new(),
@@ -4002,7 +4010,8 @@ impl KiApp {
         let voice = self.instantane_voix.take().unwrap_or_else(|| self.voice_snapshot());
 
         if self.session.welcomed {
-            // D'un salon à l'autre et vers la recherche, au clavier.
+            // D'un salon à l'autre, vers la recherche, les réglages : au
+            // clavier.
             self.navigation_au_clavier(ctx);
             // Avant tout le reste : ouvert, le panneau des suggestions garde Échap.
             self.suggestions.echap(ctx);
@@ -4043,6 +4052,7 @@ impl KiApp {
         }
         if self.session.welcomed {
             self.aller_a_window(ctx);
+            self.raccourcis_window(ctx);
         }
         self.update_window(ctx);
         self.zone_dialogue_window(ctx);
@@ -4112,6 +4122,7 @@ impl KiApp {
         // carnet de serveurs vit dans le même fichier.
         storage.set_string("window", String::new());
         self.reglages.save(storage);
+        self.registre.save(storage);
         storage.set_string("visionneuse_volume", format!("{}", self.visionneuse.volume));
         self.audio.save(storage);
         self.clips.reglages.save(storage);

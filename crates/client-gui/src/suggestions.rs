@@ -50,6 +50,8 @@ pub const MUET: Commande = Commande { nom: "muet", argument: "", aide: "couper o
 pub const SOURD: Commande = Commande { nom: "sourd", argument: "", aide: "ne plus entendre, ou entendre à nouveau", insertion: "/sourd" };
 pub const TABLEAU: Commande =
     Commande { nom: "tableau", argument: "", aide: "ouvrir le tableau tactique", insertion: "/tableau" };
+pub const RACCOURCIS: Commande =
+    Commande { nom: "raccourcis", argument: "", aide: "voir et changer les raccourcis clavier", insertion: "/raccourcis" };
 
 /// Une commande reconnue dans un message prêt à partir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +67,7 @@ pub enum Ordre<'a> {
     Muet,
     Sourd,
     Tableau,
+    Raccourcis,
 }
 
 /// La commande que ce message demande. `None` : c'est un message comme un
@@ -87,6 +90,7 @@ pub fn lire_commande(texte: &str) -> Option<Ordre<'_>> {
         "muet" => seule(Ordre::Muet),
         "sourd" => seule(Ordre::Sourd),
         "tableau" => seule(Ordre::Tableau),
+        "raccourcis" => seule(Ordre::Raccourcis),
         _ => None,
     }
 }
@@ -622,6 +626,7 @@ mod tests {
         assert_eq!(lire_commande("/muet"), Some(Ordre::Muet));
         assert_eq!(lire_commande("/Sourd"), Some(Ordre::Sourd));
         assert_eq!(lire_commande("/tableau"), Some(Ordre::Tableau));
+        assert_eq!(lire_commande("/raccourcis"), Some(Ordre::Raccourcis));
         for message in ["bonjour", "/s", "/inconnue test", "/pause café ?", "/home/moi", " /pause", "pause", "/muet stp", "/tableau des scores"] {
             assert_eq!(lire_commande(message), None, "« {message} »");
         }

@@ -10,6 +10,7 @@ use ki_ui::jetons::{espace, marge, rayon};
 use crate::{brouillons, prendre_echap, suggestions, theme, ui, KiApp};
 use crate::icons::Icon;
 use crate::membres::{couleur_de_membre, est_bot};
+use crate::registre::{Action, Registre};
 use crate::theme::{ACCENT, WARN};
 
 /// Ligne de membre : avatar, pseudo, badges, vumètre pendant qu'il parle.
@@ -23,9 +24,19 @@ pub(crate) const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_m
 /// bot musique. Jamais un compte, jamais un membre.
 /// La zone de saisie du salon : son curseur et son focus se manipulent par cet id.
 /// Ce que dit le bouton d'envoi au survol : comment envoyer, et les
-/// raccourcis de mise en forme, qu'on ne devine pas.
-const AIDE_ENVOI: &str = "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne
-Ctrl+B gras · Ctrl+I italique · Ctrl+E code";
+/// raccourcis de mise en forme, qu'on ne devine pas — ceux du moment, s'ils
+/// ont été changés.
+fn aide_envoi(registre: &Registre) -> String {
+    let mise_en_forme: Vec<String> = [(Action::Gras, "gras"), (Action::Italique, "italique"), (Action::Code, "code")]
+        .into_iter()
+        .filter_map(|(action, nom)| Some(format!("{} {nom}", registre.libelle(action)?)))
+        .collect();
+    let mut aide = "Envoyer (Entrée) — Maj+Entrée pour aller à la ligne".to_string();
+    if !mise_en_forme.is_empty() {
+        aide = format!("{aide}\n{}", mise_en_forme.join(" · "));
+    }
+    aide
+}
 
 pub(crate) fn id_saisie() -> egui::Id {
     egui::Id::unique("saisie_du_chat")
@@ -253,13 +264,14 @@ impl KiApp {
                             .dernier_envoi
                             .map(|t| CADENCE_CHAT.saturating_sub(t.elapsed()))
                             .filter(|r| !r.is_zero());
+                        let aide_envoi = aide_envoi(&self.registre);
                         let (tint, aide) = match reste {
                             Some(r) => {
                                 ui.ctx().request_repaint_after(r);
                                 (Some(WARN), "un message toutes les 1,5 s — encore un instant")
                             }
-                            None if filled => (Some(ACCENT), AIDE_ENVOI),
-                            None => (None, AIDE_ENVOI),
+                            None if filled => (Some(ACCENT), aide_envoi.as_str()),
+                            None => (None, aide_envoi.as_str()),
                         };
                         if ui::Bouton::icone_seule(Icon::Send).couleur_si(tint).bulle(aide).show(ui).clicked() {
                             submit = true;
@@ -418,7 +430,14 @@ impl KiApp {
             commandes.push(suggestions::CARTES);
         }
         // Celles-ci ne demandent rien au serveur qu'il ne fasse déjà.
-        commandes.extend([suggestions::CHERCHER, suggestions::MOI, suggestions::MUET, suggestions::SOURD, suggestions::TABLEAU]);
+        commandes.extend([
+            suggestions::CHERCHER,
+            suggestions::MOI,
+            suggestions::MUET,
+            suggestions::SOURD,
+            suggestions::TABLEAU,
+            suggestions::RACCOURCIS,
+        ]);
         commandes
     }
 
@@ -440,6 +459,7 @@ impl KiApp {
             Ordre::Muet => (suggestions::MUET, "pas ici"),
             Ordre::Sourd => (suggestions::SOURD, "pas ici"),
             Ordre::Tableau => (suggestions::TABLEAU, "pas ici"),
+            Ordre::Raccourcis => (suggestions::RACCOURCIS, "pas ici"),
         };
         if !self.commandes_disponibles().contains(&commande) {
             return Err(format!("/{} : {refus}", commande.nom));
@@ -513,6 +533,7 @@ impl KiApp {
                 self.tactique.ouvert = true;
                 self.catalogue.demarrer();
             }
+            Ordre::Raccourcis => self.raccourcis.ouverte = true,
         }
         Ok(None)
     }
