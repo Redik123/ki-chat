@@ -284,10 +284,19 @@ impl KiApp {
         if submit && self.edition.is_none() {
             let text = self.input.trim().to_string();
             if let Some(ordre) = suggestions::lire_commande(&text) {
-                submit = false;
                 match self.executer_commande(ordre) {
-                    Ok(()) => self.input.clear(),
-                    Err(message) => self.error = Some(message),
+                    // Faite : rien ne part dans le salon.
+                    Ok(None) => {
+                        submit = false;
+                        self.input.clear();
+                    }
+                    // Elle a réécrit le message : c'est lui qui part, par le
+                    // chemin de tous les messages.
+                    Ok(Some(message)) => self.input = message,
+                    Err(message) => {
+                        submit = false;
+                        self.error = Some(message);
+                    }
                 }
             }
         }
@@ -408,11 +417,15 @@ impl KiApp {
         if self.serveur_cartes {
             commandes.push(suggestions::CARTES);
         }
+        // Celles-ci ne demandent rien au serveur qu'il ne fasse déjà.
+        commandes.extend([suggestions::CHERCHER, suggestions::MOI, suggestions::MUET, suggestions::SOURD, suggestions::TABLEAU]);
         commandes
     }
 
     /// Lance une commande de la saisie. `Err` : pourquoi elle ne part pas.
-    pub(crate) fn executer_commande(&mut self, ordre: suggestions::Ordre<'_>) -> Result<(), String> {
+    /// `Ok(Some(message))` : elle se résume à un message, à envoyer à sa
+    /// place.
+    pub(crate) fn executer_commande(&mut self, ordre: suggestions::Ordre<'_>) -> Result<Option<String>, String> {
         use ki_protocol::CommandeMusique as C;
         use suggestions::Ordre;
         let (commande, refus) = match ordre {
@@ -422,6 +435,11 @@ impl KiApp {
             Ordre::Reprendre => (suggestions::REPRENDRE, "rien à reprendre, ou tu n'as pas le droit"),
             Ordre::Suivant => (suggestions::SUIVANT, "aucun morceau en cours, ou tu n'as pas le droit"),
             Ordre::Cartes => (suggestions::CARTES, "ce serveur ne gère pas les cartes"),
+            Ordre::Chercher(_) => (suggestions::CHERCHER, "pas ici"),
+            Ordre::Moi(_) => (suggestions::MOI, "pas ici"),
+            Ordre::Muet => (suggestions::MUET, "pas ici"),
+            Ordre::Sourd => (suggestions::SOURD, "pas ici"),
+            Ordre::Tableau => (suggestions::TABLEAU, "pas ici"),
         };
         if !self.commandes_disponibles().contains(&commande) {
             return Err(format!("/{} : {refus}", commande.nom));
@@ -465,8 +483,38 @@ impl KiApp {
             Ordre::Reprendre => self.commander_musique(C::Lecture),
             Ordre::Suivant => self.commander_musique(C::Suivant),
             Ordre::Cartes => self.cartes.ouvert = true,
+            Ordre::Chercher(mots) => {
+                // Comme Entrée dans le champ du haut : la fenêtre des
+                // résultats s'ouvre, la requête part. Sans mots, elle
+                // s'ouvre sur son champ.
+                self.recherche.ouverte = true;
+                if mots.is_empty() {
+                    self.recherche.focus = true;
+                } else {
+                    self.recherche.requete = mots.to_string();
+                    self.lancer_recherche();
+                }
+            }
+            Ordre::Moi(action) => {
+                if action.is_empty() {
+                    return Err("/moi : quoi ? Écris ce que tu fais".into());
+                }
+                return Ok(Some(format!("*{action}*")));
+            }
+            Ordre::Muet => {
+                self.basculer_micro();
+                self.info = Some(if self.vocal.muted { "micro coupé" } else { "micro rouvert" }.into());
+            }
+            Ordre::Sourd => {
+                self.basculer_sourd();
+                self.info = Some(if self.vocal.sourd { "tu n'entends plus rien, micro coupé" } else { "tu entends à nouveau" }.into());
+            }
+            Ordre::Tableau => {
+                self.tactique.ouvert = true;
+                self.catalogue.demarrer();
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Le serveur a renvoyé ce qu'on venait d'envoyer : c'est passé. Si une

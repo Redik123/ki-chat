@@ -43,6 +43,13 @@ pub const REPRENDRE: Commande =
     Commande { nom: "reprendre", argument: "", aide: "relancer la musique", insertion: "/reprendre" };
 pub const SUIVANT: Commande = Commande { nom: "suivant", argument: "", aide: "passer au morceau suivant", insertion: "/suivant" };
 pub const CARTES: Commande = Commande { nom: "cartes", argument: "", aide: "ouvrir la table de cartes", insertion: "/cartes" };
+pub const CHERCHER: Commande =
+    Commande { nom: "chercher", argument: "mots", aide: "chercher dans les messages", insertion: "/chercher " };
+pub const MOI: Commande = Commande { nom: "moi", argument: "ce que tu fais", aide: "le dire en italique", insertion: "/moi " };
+pub const MUET: Commande = Commande { nom: "muet", argument: "", aide: "couper ou rouvrir ton micro", insertion: "/muet" };
+pub const SOURD: Commande = Commande { nom: "sourd", argument: "", aide: "ne plus entendre, ou entendre à nouveau", insertion: "/sourd" };
+pub const TABLEAU: Commande =
+    Commande { nom: "tableau", argument: "", aide: "ouvrir le tableau tactique", insertion: "/tableau" };
 
 /// Une commande reconnue dans un message prêt à partir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +60,11 @@ pub enum Ordre<'a> {
     Reprendre,
     Suivant,
     Cartes,
+    Chercher(&'a str),
+    Moi(&'a str),
+    Muet,
+    Sourd,
+    Tableau,
 }
 
 /// La commande que ce message demande. `None` : c'est un message comme un
@@ -70,6 +82,11 @@ pub fn lire_commande(texte: &str) -> Option<Ordre<'_>> {
         "reprendre" => seule(Ordre::Reprendre),
         "suivant" => seule(Ordre::Suivant),
         "cartes" => seule(Ordre::Cartes),
+        "chercher" => Some(Ordre::Chercher(argument)),
+        "moi" => Some(Ordre::Moi(argument)),
+        "muet" => seule(Ordre::Muet),
+        "sourd" => seule(Ordre::Sourd),
+        "tableau" => seule(Ordre::Tableau),
         _ => None,
     }
 }
@@ -599,7 +616,13 @@ mod tests {
         assert_eq!(lire_commande("/reprendre"), Some(Ordre::Reprendre));
         assert_eq!(lire_commande("/suivant"), Some(Ordre::Suivant));
         assert_eq!(lire_commande("/cartes"), Some(Ordre::Cartes));
-        for message in ["bonjour", "/s", "/inconnue test", "/pause café ?", "/home/moi", " /pause", "pause"] {
+        assert_eq!(lire_commande("/chercher  rendez-vous 21h "), Some(Ordre::Chercher("rendez-vous 21h")));
+        assert_eq!(lire_commande("/chercher"), Some(Ordre::Chercher("")));
+        assert_eq!(lire_commande("/moi part manger"), Some(Ordre::Moi("part manger")));
+        assert_eq!(lire_commande("/muet"), Some(Ordre::Muet));
+        assert_eq!(lire_commande("/Sourd"), Some(Ordre::Sourd));
+        assert_eq!(lire_commande("/tableau"), Some(Ordre::Tableau));
+        for message in ["bonjour", "/s", "/inconnue test", "/pause café ?", "/home/moi", " /pause", "pause", "/muet stp", "/tableau des scores"] {
             assert_eq!(lire_commande(message), None, "« {message} »");
         }
     }
