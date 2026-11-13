@@ -361,6 +361,7 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         tx: tx.clone(),
         conn: conn.clone(),
         channel: None,
+        suit_valorant: false,
     };
     // `Some` : le compte était déjà en ligne sur un autre appareil — il ne
     // « rejoint » pas le serveur, il y ajoute une connexion.
@@ -475,6 +476,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         soiree: true,
         // Et la relecture de son journal des parties.
         journal_lecture: true,
+        // Et l'avis quand des fiches VALORANT changent, à qui le demande.
+        suivi_valorant: true,
         // Et Claude, s'il a sa clé.
         claude: state.claude.actif(),
         // Sa version du protocole : un client en retard le dira.
@@ -1786,6 +1789,10 @@ fn handle_msg(
             }
             let ancien = state.valorant.riot_id(cible);
             let ok = state.valorant.delier(cible);
+            if ok {
+                // Une fiche de moins sur la page du groupe.
+                state.valorant_a_change();
+            }
             if ok && cible != user_id {
                 state.audit.record(
                     "valorant.unlink",
@@ -1824,6 +1831,7 @@ fn handle_msg(
             tokio::task::spawn_blocking(move || {
                 if state.valorant.medailles(user_id, &medailles) {
                     tracing::debug!("VALORANT : médailles de {user_id} rangées ({} matchs)", medailles.matchs.len());
+                    state.valorant_a_change();
                 }
             });
         }
@@ -1847,6 +1855,7 @@ fn handle_msg(
             tokio::task::spawn_blocking(move || {
                 if state.valorant.choix_medailles(user_id, oui) {
                     tracing::debug!("VALORANT : médailles de {user_id} {}", if oui { "voulues" } else { "refusées" });
+                    state.valorant_a_change();
                 }
             });
         }
@@ -2349,6 +2358,11 @@ fn handle_msg(
                     .commander(crate::musique::Commande::Volume(pour_cent)),
                 C::Arreter => state.musique.commander(crate::musique::Commande::Arreter),
             }
+        }
+        ClientMsg::SuivreValorant { oui } => {
+            // Cette connexion montre la page VALORANT, ou ne la montre
+            // plus : rien à répondre, l'avis viendra quand une fiche change.
+            state.suivre_valorant(user_id, jeton, oui);
         }
         ClientMsg::SoireeValorant { depuis } => {
             // Tirée des fiches du cache, comme la page du groupe : rien ne

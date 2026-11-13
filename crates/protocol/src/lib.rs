@@ -305,6 +305,12 @@ pub enum ClientMsg {
     /// moins six heures, pour que ses jours commencent à 6 h du matin
     /// comme ses soirées. Le serveur ne relit jamais le journal d'un autre.
     MonJournal { decalage_min: i32 },
+    /// La page VALORANT se montre sur cette connexion (`oui`), ou ne s'y
+    /// montre plus : tant que oui, le serveur lui dit quand des fiches ont
+    /// changé ([`ServerMsg::ValorantChange`]), et la page se redemande ce
+    /// qu'elle montre. Seulement vers un serveur qui l'a dit
+    /// (`Welcome.suivi_valorant`).
+    SuivreValorant { oui: bool },
     /// Une commande au bot musique (permission « Contrôler la musique »).
     Musique { commande: CommandeMusique },
     /// Un geste à la table de cartes de son salon vocal — seulement vers un
@@ -762,6 +768,12 @@ pub enum ServerMsg {
         /// prendrait pour un message invalide.
         #[serde(default)]
         journal_lecture: bool,
+        /// Ce serveur prévient quand des fiches VALORANT changent et
+        /// comprend `ClientMsg::SuivreValorant` ; un serveur antérieur le
+        /// prendrait pour un message invalide, et la page ne se met à jour
+        /// qu'à la main.
+        #[serde(default)]
+        suivi_valorant: bool,
         /// Ce serveur a un Claude à qui parler (une clé d'API lui a été
         /// donnée) et comprend les `ClientMsg::Claude*` ; un serveur
         /// antérieur, ou sans clé, ne pose pas le champ et rien ne lui part.
@@ -920,6 +932,12 @@ pub enum ServerMsg {
         #[serde(default)]
         jours: Vec<JourDeJeu>,
     },
+    /// Des fiches VALORANT ont changé depuis le dernier avis : une fiche
+    /// relue chez HenrikDev, un compte lié ou délié, des médailles reçues.
+    /// Rien dedans — qui montre la page redemande ce qu'il montre. Envoyé
+    /// aux seules connexions qui suivent (`ClientMsg::SuivreValorant`) : un
+    /// client d'avant, qui ne le lirait pas, ne le reçoit jamais.
+    ValorantChange,
     /// Historique demandé.
     History { messages: Vec<ChatRecord> },
     /// Résultats d'une recherche, du plus ancien au plus récent.
@@ -5827,6 +5845,21 @@ mod tests {
         assert_eq!(demande, r#"{"type":"mon_journal","decalage_min":-240}"#);
         let ServerMsg::MonJournal { jours } = serde_json::from_str(r#"{"type":"mon_journal"}"#).unwrap() else { panic!() };
         assert!(jours.is_empty());
+    }
+
+    /// Le suivi des fiches : ce qui voyage, et ce qu'un serveur d'avant ne
+    /// promet pas — sans cette promesse, rien ne lui part.
+    #[test]
+    fn le_suivi_des_fiches_valorant() {
+        let demande = serde_json::to_string(&ClientMsg::SuivreValorant { oui: true }).unwrap();
+        assert_eq!(demande, r#"{"type":"suivre_valorant","oui":true}"#);
+        assert!(matches!(serde_json::from_str(&demande).unwrap(), ClientMsg::SuivreValorant { oui: true }));
+        let avis = serde_json::to_string(&ServerMsg::ValorantChange).unwrap();
+        assert_eq!(avis, r#"{"type":"valorant_change"}"#);
+        assert!(matches!(serde_json::from_str(&avis).unwrap(), ServerMsg::ValorantChange));
+        let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
+        let ServerMsg::Welcome { suivi_valorant, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        assert!(!suivi_valorant, "un serveur d'avant ne prévient pas");
     }
 
     #[test]

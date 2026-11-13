@@ -318,6 +318,10 @@ async fn main() -> anyhow::Result<()> {
                                 &ki_protocol::ServerMsg::MesComptes { comptes: state.valorant.mes_comptes(user_id) },
                             );
                             state.broadcast_member(user_id);
+                            if ok {
+                                // Une fiche de plus sur la page du groupe.
+                                state.valorant_a_change();
+                            }
                         }
                         valorant::Resultat::Fiche { user_id } => {
                             // Un renommage chez Riot passe aussi par ici : son
@@ -327,8 +331,15 @@ async fn main() -> anyhow::Result<()> {
                                 &ki_protocol::ServerMsg::MesComptes { comptes: state.valorant.mes_comptes(user_id) },
                             );
                             state.broadcast_member(user_id);
+                            state.valorant_a_change();
                         }
                     }
+                }
+                // Ce qui a changé dans les fiches se dit à ceux qui montrent
+                // la page VALORANT, regroupé : ils la redemandent.
+                let prevenues = state.dire_valorant();
+                if prevenues > 0 {
+                    tracing::debug!("VALORANT : fiches changées, {prevenues} connexion(s) prévenue(s)");
                 }
                 // Le fil de jeu : relances après une fin de partie, les
                 // annonces prêtes, et le dimanche soir le récap de la semaine

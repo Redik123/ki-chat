@@ -235,6 +235,53 @@ pub struct Lien {
     pub conn: quinn::Connection,
     /// Salon textuel ouvert sur cet appareil : ce qu'on y lit en ce moment.
     pub channel: Option<ChannelId>,
+    /// La page VALORANT se montre sur cet appareil
+    /// (`ClientMsg::SuivreValorant`) : il veut savoir quand des fiches
+    /// changent. Un client d'avant ne le demande jamais, et ne reçoit rien.
+    pub suit_valorant: bool,
+}
+
+/// Les avis « des fiches VALORANT ont changé », regroupés : une partie à
+/// cinq fait relire cinq fiches en une minute, et chaque avis fait
+/// redemander la page du groupe à ceux qui la montrent. Un changement se
+/// note ; l'avis part au plus une fois par [`AvisValorant::ECART`], et
+/// porte tout ce qui s'est noté entre-temps.
+pub struct AvisValorant {
+    a_dire: bool,
+    dernier: Option<Instant>,
+}
+
+impl AvisValorant {
+    /// Le temps entre deux avis.
+    pub const ECART: std::time::Duration = std::time::Duration::from_secs(10);
+
+    pub const fn new() -> Self {
+        Self { a_dire: false, dernier: None }
+    }
+
+    /// Une fiche a changé : à dire au prochain avis.
+    pub fn noter(&mut self) {
+        self.a_dire = true;
+    }
+
+    /// Vrai s'il y a quelque chose à dire et que le dernier avis est assez
+    /// loin : l'avis part, et le compte repart de zéro.
+    pub fn a_dire(&mut self, maintenant: Instant) -> bool {
+        let assez_loin = self.dernier.is_none_or(|d| maintenant.duration_since(d) >= Self::ECART);
+        if self.a_dire && assez_loin {
+            self.a_dire = false;
+            self.dernier = Some(maintenant);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for AvisValorant {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Lien {
@@ -644,6 +691,9 @@ pub struct AppState {
     pub audit: crate::audit::Audit,
     /// Comptes Riot liés et fiches VALORANT (HenrikDev).
     pub valorant: crate::valorant::Valorant,
+    /// Ce qui a changé dans les fiches et reste à dire à ceux qui suivent
+    /// la page VALORANT.
+    pub avis_valorant: Mutex<AvisValorant>,
     /// Claude : la clé d'API, les conversations, ce que chacun a consommé.
     pub claude: crate::claude::Claude,
     /// Le bot musique.
@@ -718,6 +768,7 @@ impl AppState {
             history,
             audit,
             valorant: crate::valorant::Valorant::open(data_dir),
+            avis_valorant: Mutex::new(AvisValorant::new()),
             claude: crate::claude::Claude::open(data_dir),
             musique: crate::musique::Musique::new(data_dir),
             medias: crate::medias::Fabrique::new(fichier_max_mb),
@@ -1245,6 +1296,37 @@ impl AppState {
         }
     }
 
+    /// La page VALORANT se montre, ou ne se montre plus, sur la connexion
+    /// `jeton` de ce compte.
+    pub fn suivre_valorant(&self, user_id: UserId, jeton: u64, oui: bool) {
+        if let Some(l) = self.users.lock().unwrap().get_mut(&user_id).and_then(|u| u.lien_mut(jeton)) {
+            l.suit_valorant = oui;
+        }
+    }
+
+    /// Des fiches VALORANT ont changé : à dire à ceux qui suivent, au
+    /// prochain passage de [`AppState::dire_valorant`].
+    pub fn valorant_a_change(&self) {
+        self.avis_valorant.lock().unwrap().noter();
+    }
+
+    /// À appeler régulièrement : s'il y a du neuf et que le dernier avis
+    /// est assez loin, prévient les connexions qui suivent la page
+    /// VALORANT — elles seules. Rend le nombre de connexions prévenues.
+    pub fn dire_valorant(&self) -> usize {
+        if !self.avis_valorant.lock().unwrap().a_dire(Instant::now()) {
+            return 0;
+        }
+        let Some(line) = encode(&ServerMsg::ValorantChange) else { return 0 };
+        let users = self.users.lock().unwrap();
+        let mut prevenues = 0;
+        for l in users.values().flat_map(|u| &u.liens).filter(|l| l.suit_valorant) {
+            let _ = l.tx.send_line(&line);
+            prevenues += 1;
+        }
+        prevenues
+    }
+
     /// Un message en deux versions : `recent` aux connexions qui parlent le
     /// protocole `depuis` ou plus, `ancien` aux autres.
     pub fn send_to_selon_protocole(&self, user_id: UserId, depuis: u32, recent: &ServerMsg, ancien: &ServerMsg) {
@@ -1648,6 +1730,28 @@ pub fn now_millis() -> u64 {
 mod tests {
     use super::*;
 
+    /// Les avis VALORANT se regroupent : rien à dire, rien ne part ; un
+    /// changement part aussitôt ; ceux qui suivent de près attendent
+    /// l'écart, et partent en un seul avis.
+    #[test]
+    fn les_avis_valorant_se_regroupent() {
+        let t0 = Instant::now();
+        let s = std::time::Duration::from_secs;
+        let mut avis = AvisValorant::new();
+        assert!(!avis.a_dire(t0), "rien n'a changé");
+        avis.noter();
+        assert!(avis.a_dire(t0), "le premier changement part tout de suite");
+        assert!(!avis.a_dire(t0 + s(1)), "déjà dit");
+        // Quatre autres fiches de la même partie, dans les secondes qui
+        // suivent : un seul avis, à l'écart.
+        for k in 1..=4 {
+            avis.noter();
+            assert!(!avis.a_dire(t0 + s(k)), "trop tôt après le premier");
+        }
+        assert!(avis.a_dire(t0 + AvisValorant::ECART), "tout ce qui s'est noté part d'un coup");
+        assert!(!avis.a_dire(t0 + AvisValorant::ECART + s(60)), "et rien ne reste à dire");
+    }
+
     /// Les réactions ont leur budget à elles : une rafale de huit passe,
     /// la neuvième attend, et rien de tout ça ne touche au budget du chat.
     #[test]
@@ -1720,6 +1824,7 @@ mod tests {
             tactique: true,
             soiree: true,
             journal_lecture: true,
+            suivi_valorant: true,
             claude: true,
             protocole: ki_protocol::PROTOCOLE,
         };

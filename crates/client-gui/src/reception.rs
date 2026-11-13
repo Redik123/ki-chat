@@ -112,6 +112,7 @@ impl KiApp {
             | ServerMsg::TactiqueRefus { .. }
             | ServerMsg::MonJournal { .. }
             | ServerMsg::Soiree { .. }
+            | ServerMsg::ValorantChange
             | ServerMsg::StatsValorant { .. } => self.recu_jeux(msg),
             ServerMsg::Poke { .. }
             | ServerMsg::PokeRefuse { .. }
@@ -164,6 +165,7 @@ impl KiApp {
                 tactique,
                 soiree,
                 journal_lecture,
+                suivi_valorant,
                 claude,
                 protocole,
                 ..
@@ -205,6 +207,9 @@ impl KiApp {
                 self.serveur_tactique = tactique;
                 // Et pour le fil de la soirée.
                 self.donnees_valo.serveur_soiree = soiree;
+                // Et pour l'avis « des fiches ont changé » : sans lui, rien
+                // ne lui part, et la page s'actualise à la main.
+                self.donnees_valo.suivi_a_la_connexion(suivi_valorant);
                 // Et pour la relecture de mon journal des parties.
                 self.donnees_valo.serveur_journal_lecture = journal_lecture;
                 // Et pour Claude : sans clé d'API chez lui, pas de salon.
@@ -802,6 +807,7 @@ impl KiApp {
                     self.donnees_valo.soiree = parties;
                 }
             }
+            ServerMsg::ValorantChange => self.fiches_valorant_changees(),
             ServerMsg::StatsValorant { fiches, esports, activite } => {
                 self.donnees_valo.stats = fiches;
                 self.donnees_valo.esports = esports;

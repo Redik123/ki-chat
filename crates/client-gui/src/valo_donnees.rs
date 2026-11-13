@@ -93,6 +93,11 @@ pub(crate) struct DonneesValo {
     pub(crate) serveur_journal: bool,
     /// Le serveur raconte la soirée (`Welcome.soiree`).
     pub(crate) serveur_soiree: bool,
+    /// Le serveur prévient quand des fiches changent
+    /// (`Welcome.suivi_valorant`), et ce qu'on lui a dit sur cette
+    /// connexion : que la page se montre, ou non.
+    pub(crate) serveur_suivi: bool,
+    pub(crate) suivi_dit: bool,
     /// Le serveur relit le journal des parties (`Welcome.journal_lecture`),
     /// et mon journal tel qu'il l'a rendu, avec la dernière demande : il
     /// se redemande au plus toutes les cinq minutes.
@@ -107,9 +112,52 @@ pub(crate) struct DonneesValo {
     pub(crate) medailles_ennui: String,
 }
 
+impl DonneesValo {
+    /// Ce qu'il faut dire au serveur du suivi des fiches, s'il y a du neuf :
+    /// la page vient de se montrer (`Some(true)`), ou de se fermer
+    /// (`Some(false)`). Rien face à un serveur qui ne prévient pas, ni
+    /// quand il le sait déjà.
+    pub(crate) fn suivi_a_dire(&mut self, page_montree: bool) -> Option<bool> {
+        if !self.serveur_suivi || self.suivi_dit == page_montree {
+            return None;
+        }
+        self.suivi_dit = page_montree;
+        Some(page_montree)
+    }
+
+    /// Une connexion neuve : le serveur dit s'il prévient, et ne sait
+    /// encore rien de ce que cette connexion montre.
+    pub(crate) fn suivi_a_la_connexion(&mut self, serveur_suivi: bool) {
+        self.serveur_suivi = serveur_suivi;
+        self.suivi_dit = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le suivi des fiches se dit une fois par changement : à l'ouverture
+    /// de la page, à sa fermeture, et de nouveau après une reconnexion —
+    /// le serveur n'en garde rien d'une connexion à l'autre. Jamais à un
+    /// serveur qui ne l'a pas promis.
+    #[test]
+    fn le_suivi_se_dit_une_fois_par_changement() {
+        let mut d = DonneesValo::default();
+        assert_eq!(d.suivi_a_dire(true), None, "serveur d'avant : rien ne lui part");
+        d.suivi_a_la_connexion(true);
+        assert_eq!(d.suivi_a_dire(false), None, "la page n'était pas montrée");
+        assert_eq!(d.suivi_a_dire(true), Some(true));
+        assert_eq!(d.suivi_a_dire(true), None, "déjà dit");
+        assert_eq!(d.suivi_a_dire(false), Some(false));
+        assert_eq!(d.suivi_a_dire(false), None);
+        // La page ouverte pendant une reconnexion : à redire.
+        assert_eq!(d.suivi_a_dire(true), Some(true));
+        d.suivi_a_la_connexion(true);
+        assert_eq!(d.suivi_a_dire(true), Some(true), "la connexion neuve ne le savait pas");
+        d.suivi_a_la_connexion(false);
+        assert_eq!(d.suivi_a_dire(true), None, "ce serveur-ci ne prévient pas");
+    }
 
     #[test]
     fn une_demande_sans_reponse_finit_en_retard() {

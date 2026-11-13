@@ -1824,6 +1824,30 @@ impl KiApp {
         self.send(ClientMsg::StatsValorant);
     }
 
+    /// La page VALORANT se montre : son contenu, ou une fiche seule.
+    fn page_valo_montree(&self) -> bool {
+        self.valo.ouvert || self.donnees_valo.fiche.is_some()
+    }
+
+    /// Le serveur dit que des fiches ont changé : ce que la page montre se
+    /// redemande — les fiches du groupe, la soirée, la fiche ouverte, celle
+    /// qu'on lui compare, et la mienne. Ce qui est à l'écran y reste en
+    /// attendant la réponse. Page fermée, rien : elle redemande tout en
+    /// s'ouvrant.
+    fn fiches_valorant_changees(&mut self) {
+        if !self.page_valo_montree() {
+            return;
+        }
+        self.demander_stats();
+        self.donnees_valo.soiree_demandee = None;
+        self.donnees_valo.ma_fiche_demandee = false;
+        let ouvertes: Vec<UserId> =
+            [&self.donnees_valo.fiche, &self.donnees_valo.comparee].into_iter().flatten().map(|f| f.user_id).collect();
+        for user_id in ouvertes {
+            self.send(ClientMsg::FicheValorant { user_id });
+        }
+    }
+
     /// Les fiches du groupe, tenues à jour tant que la page se montre :
     /// redemandées quand on n'en a pas — une reconnexion les a effacées, et
     /// la page restait sur « demande au serveur… » jusqu'à « Actualiser » —,
@@ -2476,6 +2500,7 @@ impl KiApp {
         self.claude.oublier();
         // La soirée et ma fiche : celles de ce serveur.
         self.donnees_valo.serveur_soiree = false;
+        self.donnees_valo.suivi_a_la_connexion(false);
         self.donnees_valo.soiree.clear();
         self.donnees_valo.soiree_demandee = None;
         self.donnees_valo.ma_fiche = None;
@@ -3655,6 +3680,14 @@ impl KiApp {
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
         // celui de la partie qu'on a pensé à instrumenter.
         self.perf.debut_image();
+
+        // Le suivi des fiches VALORANT : le serveur apprend que la page se
+        // montre, puis qu'elle ne se montre plus — il ne prévient que ceux
+        // qui la regardent.
+        let page_valo = self.session.welcomed && self.page_valo_montree();
+        if let Some(oui) = self.donnees_valo.suivi_a_dire(page_valo) {
+            self.send(ClientMsg::SuivreValorant { oui });
+        }
 
         // Géométrie : on ne restaure que « maximisée », et on suit l'état
         // courant pour le réenregistrer. Cf. `main` pour le pourquoi.

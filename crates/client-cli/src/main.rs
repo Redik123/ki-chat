@@ -174,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 | ServerMsg::TactiqueRefus { .. }
                 | ServerMsg::Soiree { .. }
                 | ServerMsg::MonJournal { .. }
+                | ServerMsg::ValorantChange
                 // Claude : le client en ligne de commande ne lui parle pas.
                 | ServerMsg::ClaudeConversation { .. }
                 | ServerMsg::ClaudeMessage { .. }
