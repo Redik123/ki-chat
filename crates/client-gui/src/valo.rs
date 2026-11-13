@@ -1954,4 +1954,70 @@ mod tests {
             }
         }
     }
+
+    /// Ce que coûte, par image, ce que la page recalcule au lieu de le
+    /// garder : `cargo test --release -p ki-client-gui mesure_des_vues --
+    /// --ignored --nocapture`. Trente membres liés, au plus gros résumé que
+    /// le serveur envoie (trente matchs chacun), et une fiche ouverte de
+    /// soixante matchs. À relancer avant de décider d'un cache.
+    #[test]
+    #[ignore]
+    fn mesure_des_vues_derivees() {
+        let maintenant = maintenant_ms();
+        let riche = fiche_riche(maintenant);
+        let groupe = |vieux_serveur: bool| -> Vec<FicheMembre> {
+            (1..=30)
+                .map(|id| {
+                    // Des parties à eux, et une sur cinq jouée à plusieurs.
+                    let mut fiche = riche.clone();
+                    for (k, m) in fiche.matchs.iter_mut().enumerate() {
+                        if k % 5 != 0 {
+                            m.id = format!("{}-{id}", m.id);
+                        }
+                    }
+                    FicheMembre {
+                        user_id: id,
+                        username: format!("membre{id}"),
+                        bilan: (!vieux_serveur).then(|| bilan_local(&fiche, maintenant)),
+                        fiche: fiche.resume(30, 30),
+                    }
+                })
+                .collect()
+        };
+        let (stats, vieux) = (groupe(false), groupe(true));
+        let modele = membres().remove(0);
+        let roster: Vec<Member> = (1..=30).map(|id| Member { user_id: id, username: format!("membre{id}"), ..modele.clone() }).collect();
+        let (rangs, catalogue, photos) = (rangs::Rangs::new(), Catalogue::new(), HashMap::new());
+        let cx = Contexte { stats: &stats, recu: true, chargement: crate::valo_donnees::Chargement::Repos, esports: &[], activite: &[], moi: Some(1), membres: &roster, rangs: &rangs, catalogue: &catalogue, soiree: &[], soiree_servie: true, ma_fiche: None, photos: &photos, comparee: None, journal: Journal::default() };
+
+        const TOURS: u32 = 2_000;
+        let mut total = 0.0;
+        let mut mesurer = |quoi: &str, f: &mut dyn FnMut() -> usize| {
+            let debut = std::time::Instant::now();
+            let mut garde = 0usize;
+            for _ in 0..TOURS {
+                garde = garde.wrapping_add(std::hint::black_box(f()));
+            }
+            let micros = debut.elapsed().as_secs_f64() * 1e6 / f64::from(TOURS);
+            total += micros;
+            println!("{quoi:<46} {micros:>9.1} µs   ({garde})");
+            micros
+        };
+        mesurer("lignes_du_groupe, bilans du serveur", &mut || lignes_du_groupe(&stats, maintenant).0.len());
+        let ancien = mesurer("lignes_du_groupe, serveur d'avant (bilans ici)", &mut || lignes_du_groupe(&vieux, maintenant).0.len());
+        mesurer("Annuaire::new", &mut || Annuaire::new(&stats, &roster).membres.len());
+        let (lignes, _) = lignes_du_groupe(&stats, maintenant);
+        mesurer("parties_du_groupe, 30 jours", &mut || matchs::parties_du_groupe(&lignes, maintenant - 30 * JOUR_MS).len());
+        mesurer("Vue::new, fiche de 60 matchs", &mut || Vue::new("membre1", &riche, PeriodeFiche::Tout, false, &cx, maintenant).e.len());
+        let vue = Vue::new("membre1", &riche, PeriodeFiche::Tout, false, &cx, maintenant);
+        mesurer("huit repères du groupe", &mut || {
+            [Bilan::kd, Bilan::acs, Bilan::adr, Bilan::kast_pct, Bilan::tete_pct, Bilan::kd, Bilan::acs, Bilan::adr]
+                .iter()
+                .filter(|f| vue.repere(**f, 1.0).is_some())
+                .count()
+        });
+        // Vingt images par seconde en vocal : la part d'un cœur que ça prend.
+        let courant = total - ancien;
+        println!("par image, serveur d'aujourd'hui : {courant:.0} µs, soit {:.2} % d'un cœur à 20 images/s", courant * 20.0 / 10_000.0);
+    }
 }
