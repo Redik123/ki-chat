@@ -478,6 +478,8 @@ async fn handle_connection(state: Arc<AppState>, incoming: quinn::Incoming) -> a
         journal_lecture: true,
         // Et l'avis quand des fiches VALORANT changent, à qui le demande.
         suivi_valorant: true,
+        // Et les parties du groupe, page par page.
+        matchs_groupe: true,
         // Et Claude, s'il a sa clé.
         claude: state.claude.actif(),
         // Sa version du protocole : un client en retard le dira.
@@ -647,6 +649,7 @@ fn classe_de(msg: &ClientMsg) -> Classe {
         | ClientMsg::HistoryBefore { .. }
         | ClientMsg::StatsValorant
         | ClientMsg::SoireeValorant { .. }
+        | ClientMsg::MatchsValorant { .. }
         | ClientMsg::MonJournal { .. }
         | ClientMsg::FicheValorant { .. }
         | ClientMsg::RequestAvatars { .. }
@@ -2369,6 +2372,21 @@ fn handle_msg(
             // part vers HenrikDev.
             let parties = state.valorant.soiree(depuis);
             let _ = tx.send(crate::valorant::message_soiree(depuis, parties));
+        }
+        ClientMsg::MatchsValorant { depuis, apres } => {
+            // Un curseur vient d'une page qu'on a rendue : un identifiant
+            // plus long qu'un uuid n'en est pas un, et il reviendrait tel
+            // quel dans la réponse.
+            if apres.as_ref().is_some_and(|c| c.id.len() > ki_protocol::CurseurMatchs::ID_MAX) {
+                return;
+            }
+            // Tirées des fiches du cache, hors de la boucle asynchrone :
+            // trente fiches à ranger, et une page à peser.
+            let (state, tx) = (state.clone(), tx.clone());
+            tokio::task::spawn_blocking(move || {
+                let parties = state.valorant.matchs_du_groupe(depuis);
+                let _ = tx.send(crate::valorant::message_matchs(depuis, apres, parties));
+            });
         }
         ClientMsg::MonJournal { decalage_min } => {
             // Son journal à lui, jamais celui d'un autre : relu sur le

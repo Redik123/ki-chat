@@ -435,7 +435,24 @@ impl PageValo {
     ) {
         let periode = self.periode;
         let depuis = maintenant.saturating_sub(periode.jours() * JOUR_MS);
-        let toutes = parties_du_groupe(lignes, depuis);
+        let aide = format!("sur {} · une carte par partie, jouée seul ou ensemble · clique un joueur pour sa fiche", periode.titre());
+        // Les parties que le serveur a rendues, toutes ; à défaut — un
+        // serveur d'avant, ou qui ne répond pas — celles du résumé des
+        // fiches, quelques-unes par membre. Le temps de la première
+        // lecture, rien : des chiffres faux ne se montrent pas pour une
+        // demi-seconde.
+        let toutes: Vec<Partie> = match cx.matchs {
+            MatchsVus::DuServeur(parties) => parties.iter().filter(|p| p.date >= depuis).map(Partie::de_la_soiree).collect(),
+            MatchsVus::DesFiches => parties_du_groupe(lignes, depuis),
+            MatchsVus::EnLecture => {
+                ui::section(ui, Icon::Play, "Les matchs du groupe", Some(&aide), |ui| {
+                    self.choix_de_periode(ui);
+                    ui.add_space(espace::M);
+                    ui::hint(ui, "lecture des parties du groupe…");
+                });
+                return;
+            }
+        };
         let modes: BTreeSet<&str> = toutes.iter().map(|p| p.mode).filter(|m| !m.is_empty()).collect();
         let modes: Vec<&str> = modes.into_iter().collect();
         // Un mode qui n'est plus dans la période ne filtre plus rien.
@@ -448,7 +465,6 @@ impl PageValo {
             .filter(|p| self.filtre_membre.is_none_or(|qui| p.a(qui)))
             .collect();
 
-        let aide = format!("sur {} · une carte par partie, jouée seul ou ensemble · clique un joueur pour sa fiche", periode.titre());
         ui::section(ui, Icon::Play, "Les matchs du groupe", Some(&aide), |ui| {
             self.choix_de_periode(ui);
             if modes.len() > 1 {

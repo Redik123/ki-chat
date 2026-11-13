@@ -49,6 +49,9 @@ pub(crate) fn lancer(dossier: PathBuf) -> eframe::Result {
 enum Quoi {
     Accueil { soiree: bool },
     Onglet(centre::OngletCentre),
+    /// L'onglet Matchs sur les parties que le serveur rend — ici la soirée
+    /// inventée — au lieu du résumé des fiches.
+    MatchsDuServeur,
     Profil(profil::VueProfil),
 }
 
@@ -61,7 +64,7 @@ struct Scene {
     quoi: Quoi,
 }
 
-const SCENES: [Scene; 21] = [
+const SCENES: [Scene; 22] = [
     Scene { nom: "accueil", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Accueil { soiree: true } },
     Scene { nom: "accueil-serveur-d-avant", fiche: 0, largeur: 980.0, quoi: Quoi::Accueil { soiree: false } },
@@ -83,6 +86,7 @@ const SCENES: [Scene; 21] = [
     Scene { nom: "profil-vide", fiche: 2, largeur: 980.0, quoi: Quoi::Profil(profil::VueProfil::Ensemble) },
     Scene { nom: "esport", fiche: 0, largeur: 980.0, quoi: Quoi::Onglet(centre::OngletCentre::Esport) },
     Scene { nom: "esport-etroit", fiche: 0, largeur: 720.0, quoi: Quoi::Onglet(centre::OngletCentre::Esport) },
+    Scene { nom: "matchs-du-serveur", fiche: 0, largeur: 980.0, quoi: Quoi::MatchsDuServeur },
 ];
 
 struct Banc {
@@ -223,6 +227,7 @@ impl eframe::App for Banc {
             photos: &self.photos,
             comparee: Some(&self.comparee),
             journal: Journal { servi: true, coche: true, jours: Some(&self.journal) },
+            matchs: if matches!(scene.quoi, Quoi::MatchsDuServeur) { MatchsVus::DuServeur(&self.soiree) } else { MatchsVus::DesFiches },
         };
         let ouverte = &self.ouvertes[scene.fiche];
         let page = &mut self.page;
@@ -241,6 +246,10 @@ impl eframe::App for Banc {
                     page.onglet_centre = onglet;
                     // drion et Jerem cochés : le bouton « Comparer » se voit.
                     page.a_comparer = vec![1, 2];
+                    let _ = page.centre(&mut dedans, &cx, Some(ouverte), boutique);
+                }
+                Quoi::MatchsDuServeur => {
+                    page.onglet_centre = centre::OngletCentre::Matchs;
                     let _ = page.centre(&mut dedans, &cx, Some(ouverte), boutique);
                 }
                 Quoi::Profil(vue) => {

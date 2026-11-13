@@ -1352,6 +1352,9 @@ impl KiApp {
         if self.valo.sur_l_accueil() {
             self.demander_soiree();
         }
+        if self.valo.sur_les_matchs() {
+            self.tenir_les_matchs(&ctx);
+        }
         // Ma fiche, une fois : « Moi » sur la carte de chaleur.
         if !self.donnees_valo.ma_fiche_demandee {
             if let Some(moi) = self.session.my_id.filter(|_| !self.donnees_valo.mes_comptes.is_empty()) {
@@ -1378,6 +1381,7 @@ impl KiApp {
                 photos: &self.avatars,
                 comparee: self.donnees_valo.comparee.as_ref(),
                 journal: valo::Journal { servi: self.donnees_valo.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.donnees_valo.mon_journal.as_deref() },
+                matchs: self.donnees_valo.matchs.vus(self.donnees_valo.serveur_matchs),
             };
             let fiche = self.donnees_valo.fiche.as_ref();
             let valo = &mut self.valo;
@@ -1421,6 +1425,23 @@ impl KiApp {
         }
     }
 
+    /// Les parties du groupe, pour l'onglet Matchs : demandées au serveur
+    /// qui les rend, la première fois que l'onglet se montre, puis quand
+    /// ce qu'on en a a vieilli. Face à un serveur d'avant, rien ne part.
+    fn tenir_les_matchs(&mut self, ctx: &egui::Context) {
+        if !self.donnees_valo.serveur_matchs {
+            return;
+        }
+        let demande = self.donnees_valo.matchs.a_demander(valo::maintenant_ms(), std::time::Instant::now());
+        if let Some((depuis, apres)) = demande {
+            self.send(ClientMsg::MatchsValorant { depuis, apres });
+        }
+        // De quoi voir une lecture sans réponse s'abandonner.
+        if self.donnees_valo.matchs.en_lecture() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+
     /// Ce que la page VALORANT demande : actualiser, ouvrir une fiche ou la
     /// carte tactique.
     fn executer_demandes_valo(&mut self, demandes: Vec<valo::Demande>) {
@@ -1429,6 +1450,7 @@ impl KiApp {
                 valo::Demande::Actualiser => {
                     self.demander_stats();
                     self.donnees_valo.soiree_demandee = None;
+                    self.donnees_valo.matchs.perimer();
                     self.donnees_valo.mon_journal = None;
                     self.donnees_valo.mon_journal_demande = None;
                 }
@@ -1815,6 +1837,7 @@ impl KiApp {
         self.claude.ouvert = false;
         self.valo.ouvert = true;
         self.demander_stats();
+        self.donnees_valo.matchs.perimer();
     }
 
     /// Demande les fiches du groupe. Celles qu'on a déjà restent à l'écran
@@ -1840,6 +1863,7 @@ impl KiApp {
         }
         self.demander_stats();
         self.donnees_valo.soiree_demandee = None;
+        self.donnees_valo.matchs.perimer();
         self.donnees_valo.ma_fiche_demandee = false;
         let ouvertes: Vec<UserId> =
             [&self.donnees_valo.fiche, &self.donnees_valo.comparee].into_iter().flatten().map(|f| f.user_id).collect();
@@ -2501,6 +2525,8 @@ impl KiApp {
         // La soirée et ma fiche : celles de ce serveur.
         self.donnees_valo.serveur_soiree = false;
         self.donnees_valo.suivi_a_la_connexion(false);
+        self.donnees_valo.serveur_matchs = false;
+        self.donnees_valo.matchs.oublier();
         self.donnees_valo.soiree.clear();
         self.donnees_valo.soiree_demandee = None;
         self.donnees_valo.ma_fiche = None;

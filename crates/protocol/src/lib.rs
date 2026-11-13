@@ -298,6 +298,17 @@ pub enum ClientMsg {
     /// `depuis` est le dernier 6 h du matin à l'heure du client, que le
     /// serveur ne connaît pas.
     SoireeValorant { depuis: u64 },
+    /// Les parties du groupe depuis `depuis` (ms Unix), pour l'onglet
+    /// Matchs : tout ce que le serveur garde, pas le résumé de la page du
+    /// groupe. Elles viennent par pages, des plus récentes aux plus
+    /// anciennes : `apres` est la `suite` de la page d'avant, rien pour la
+    /// première. Seulement vers un serveur qui l'a dit
+    /// (`Welcome.matchs_groupe`).
+    MatchsValorant {
+        depuis: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        apres: Option<CurseurMatchs>,
+    },
     /// Son propre journal des parties (`ChoixJournal`), résumé jour par
     /// jour — seulement vers un serveur qui l'a dit
     /// (`Welcome.journal_lecture`). `decalage_min` : les minutes à ajouter
@@ -774,6 +785,11 @@ pub enum ServerMsg {
         /// qu'à la main.
         #[serde(default)]
         suivi_valorant: bool,
+        /// Ce serveur rend les parties du groupe page par page et comprend
+        /// `ClientMsg::MatchsValorant` ; face à un serveur antérieur,
+        /// l'onglet Matchs se contente du résumé de la page du groupe.
+        #[serde(default)]
+        matchs_groupe: bool,
         /// Ce serveur a un Claude à qui parler (une clé d'API lui a été
         /// donnée) et comprend les `ClientMsg::Claude*` ; un serveur
         /// antérieur, ou sans clé, ne pose pas le champ et rien ne lui part.
@@ -925,6 +941,20 @@ pub enum ServerMsg {
         depuis: u64,
         #[serde(default)]
         parties: Vec<PartieSoiree>,
+    },
+    /// Une page de la réponse à `MatchsValorant` : `depuis` et `apres`
+    /// tels que demandés, les parties de la plus récente à la plus
+    /// ancienne, une seule par match joué ensemble, et où reprendre —
+    /// `suite` vaut l'`apres` de la demande suivante, rien quand c'est la
+    /// dernière page. Chaque page tient sous [`STATS_MAX_BYTES`].
+    MatchsDuGroupe {
+        depuis: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        apres: Option<CurseurMatchs>,
+        #[serde(default)]
+        parties: Vec<PartieSoiree>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suite: Option<CurseurMatchs>,
     },
     /// La réponse à `MonJournal` : son temps de jeu jour par jour, par file
     /// et par compte, du plus ancien au plus récent. Vide sans journal.
@@ -2976,6 +3006,36 @@ pub struct JourDeJeu {
     pub parties: u16,
     #[serde(default)]
     pub secondes: u32,
+}
+
+/// Où reprendre la lecture des parties du groupe
+/// ([`ClientMsg::MatchsValorant`]) : la dernière partie de la page d'avant,
+/// par son début et son identifiant. Les parties sont rangées de la plus
+/// récente à la plus ancienne, l'identifiant départageant deux débuts
+/// égaux ; la page suivante commence juste après.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurseurMatchs {
+    pub date: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+}
+
+impl CurseurMatchs {
+    /// Le plus long identifiant qu'un curseur porte : un uuid et de la
+    /// marge. Le serveur refuse au-delà — il renvoie le curseur tel quel.
+    pub const ID_MAX: usize = 64;
+
+    /// Le curseur d'une partie : là où elle est dans la liste.
+    pub fn de(partie: &PartieSoiree) -> Self {
+        Self { date: partie.date, id: partie.id.clone() }
+    }
+
+    /// Cette partie vient-elle après le curseur, dans l'ordre de la
+    /// liste — plus ancienne, ou du même début avec un identifiant plus
+    /// grand ?
+    pub fn avant(&self, partie: &PartieSoiree) -> bool {
+        partie.date < self.date || (partie.date == self.date && partie.id.as_str() > self.id.as_str())
+    }
 }
 
 /// Une partie de la soirée, telle que le groupe l'a jouée : une ligne par
@@ -5845,6 +5905,38 @@ mod tests {
         assert_eq!(demande, r#"{"type":"mon_journal","decalage_min":-240}"#);
         let ServerMsg::MonJournal { jours } = serde_json::from_str(r#"{"type":"mon_journal"}"#).unwrap() else { panic!() };
         assert!(jours.is_empty());
+    }
+
+    /// Les parties du groupe, page par page : ce qui voyage, l'ordre que
+    /// le curseur suit, et ce qu'un serveur d'avant ne promet pas.
+    #[test]
+    fn les_parties_du_groupe_page_par_page() {
+        let premiere = serde_json::to_string(&ClientMsg::MatchsValorant { depuis: 7, apres: None }).unwrap();
+        assert_eq!(premiere, r#"{"type":"matchs_valorant","depuis":7}"#);
+        let curseur = CurseurMatchs { date: 50, id: "b".into() };
+        let suivante = serde_json::to_string(&ClientMsg::MatchsValorant { depuis: 7, apres: Some(curseur.clone()) }).unwrap();
+        assert_eq!(suivante, r#"{"type":"matchs_valorant","depuis":7,"apres":{"date":50,"id":"b"}}"#);
+        let ClientMsg::MatchsValorant { apres, .. } = serde_json::from_str(&suivante).unwrap() else { panic!() };
+        assert_eq!(apres, Some(curseur.clone()));
+
+        // Après le curseur : plus ancienne, ou du même début et d'un
+        // identifiant plus grand. La partie du curseur elle-même, non.
+        let partie = |date, id: &str| PartieSoiree { id: id.into(), date, ..Default::default() };
+        assert!(curseur.avant(&partie(49, "a")));
+        assert!(curseur.avant(&partie(50, "c")));
+        assert!(!curseur.avant(&partie(50, "b")), "celle du curseur est déjà partie");
+        assert!(!curseur.avant(&partie(50, "a")));
+        assert!(!curseur.avant(&partie(51, "z")));
+        assert_eq!(CurseurMatchs::de(&partie(50, "b")), curseur);
+
+        let page = ServerMsg::MatchsDuGroupe { depuis: 7, apres: None, parties: vec![partie(50, "b")], suite: Some(curseur) };
+        let json = serde_json::to_string(&page).unwrap();
+        assert!(json.starts_with(r#"{"type":"matchs_du_groupe","depuis":7,"parties":["#), "{json}");
+        let ServerMsg::MatchsDuGroupe { parties, suite, apres, .. } = serde_json::from_str(&json).unwrap() else { panic!() };
+        assert_eq!((parties.len(), suite.map(|s| s.date), apres), (1, Some(50), None));
+        let json = r#"{"type":"welcome","user_id":1,"voice_token":2,"udp_port":0,"voice_key":"ab","channels":[]}"#;
+        let ServerMsg::Welcome { matchs_groupe, .. } = serde_json::from_str(json).unwrap() else { panic!() };
+        assert!(!matchs_groupe, "un serveur d'avant ne les rend pas");
     }
 
     /// Le suivi des fiches : ce qui voyage, et ce qu'un serveur d'avant ne

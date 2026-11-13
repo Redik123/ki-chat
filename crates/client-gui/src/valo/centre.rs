@@ -107,6 +107,11 @@ impl PageValo {
         self.onglet_centre == OngletCentre::Accueil
     }
 
+    /// L'onglet Matchs se montre : les parties du groupe doivent être lues.
+    pub fn sur_les_matchs(&self) -> bool {
+        self.ouvert && self.onglet_centre == OngletCentre::Matchs
+    }
+
     /// La page entière, dans toute la place qu'on lui donne. Rend si elle
     /// reste ouverte (« Fermer » ou Échap la referment) et ce qu'elle
     /// demande à l'application.

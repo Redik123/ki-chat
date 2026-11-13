@@ -112,6 +112,7 @@ impl KiApp {
             | ServerMsg::TactiqueRefus { .. }
             | ServerMsg::MonJournal { .. }
             | ServerMsg::Soiree { .. }
+            | ServerMsg::MatchsDuGroupe { .. }
             | ServerMsg::ValorantChange
             | ServerMsg::StatsValorant { .. } => self.recu_jeux(msg),
             ServerMsg::Poke { .. }
@@ -166,6 +167,7 @@ impl KiApp {
                 soiree,
                 journal_lecture,
                 suivi_valorant,
+                matchs_groupe,
                 claude,
                 protocole,
                 ..
@@ -210,6 +212,10 @@ impl KiApp {
                 // Et pour l'avis « des fiches ont changé » : sans lui, rien
                 // ne lui part, et la page s'actualise à la main.
                 self.donnees_valo.suivi_a_la_connexion(suivi_valorant);
+                // Et pour les parties du groupe, page par page : ce qu'on
+                // en gardait est à relire sur cette connexion.
+                self.donnees_valo.serveur_matchs = matchs_groupe;
+                self.donnees_valo.matchs.reconnexion();
                 // Et pour la relecture de mon journal des parties.
                 self.donnees_valo.serveur_journal_lecture = journal_lecture;
                 // Et pour Claude : sans clé d'API chez lui, pas de salon.
@@ -805,6 +811,13 @@ impl KiApp {
                 // Une réponse d'avant 6 h du matin ne remplace pas la soirée.
                 if depuis == self.donnees_valo.soiree_depuis {
                     self.donnees_valo.soiree = parties;
+                }
+            }
+            ServerMsg::MatchsDuGroupe { depuis, apres, parties, suite } => {
+                // Une page : la suivante se demande, jusqu'à la dernière.
+                let suivante = self.donnees_valo.matchs.recevoir(depuis, apres, parties, suite, std::time::Instant::now());
+                if let Some((depuis, apres)) = suivante {
+                    self.send(ClientMsg::MatchsValorant { depuis, apres });
                 }
             }
             ServerMsg::ValorantChange => self.fiches_valorant_changees(),

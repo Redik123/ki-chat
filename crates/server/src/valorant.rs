@@ -806,6 +806,13 @@ impl Valorant {
         soiree_de(&self.etat.fiches.lock().unwrap(), depuis, maintenant_ms())
     }
 
+    /// Toutes les parties du groupe depuis `depuis`, pour l'onglet Matchs :
+    /// ce que les fiches gardent, sans la borne de la soirée. Tirées du
+    /// cache, comme elle.
+    pub fn matchs_du_groupe(&self, depuis: u64) -> Vec<PartieSoiree> {
+        parties_de(&self.etat.fiches.lock().unwrap(), depuis)
+    }
+
     /// Les 168 cases jour × heure (UTC) des parties commencées sur trente
     /// jours, tous membres et modes — vide si personne n'a joué.
     pub fn activite(&self) -> Vec<u16> {
@@ -1792,7 +1799,16 @@ fn activite_de<'a>(fiches: impl Iterator<Item = &'a FicheValorant>, maintenant: 
 /// Chaque ligne porte les RR de la partie et le palier d'avant et
 /// d'après, lus dans l'historique du membre, et ses médailles.
 fn soiree_de(fiches: &BTreeMap<UserId, FicheValorant>, depuis: u64, maintenant: u64) -> Vec<PartieSoiree> {
-    let depuis = depuis.max(maintenant.saturating_sub(SOIREE_MAX_MS));
+    let mut parties = parties_de(fiches, depuis.max(maintenant.saturating_sub(SOIREE_MAX_MS)));
+    parties.truncate(SOIREE_PARTIES_MAX);
+    parties
+}
+
+/// Les parties commencées depuis `depuis`, toutes : de la plus récente à
+/// la plus ancienne, l'identifiant départageant deux débuts égaux — l'ordre
+/// que suit [`ki_protocol::CurseurMatchs`]. Un match joué ensemble n'en
+/// fait qu'une, avec une ligne par membre, la meilleure en tête.
+fn parties_de(fiches: &BTreeMap<UserId, FicheValorant>, depuis: u64) -> Vec<PartieSoiree> {
     let mut parties: Vec<PartieSoiree> = Vec::new();
     let mut par_id: HashMap<&str, usize> = HashMap::new();
     for (&user_id, f) in fiches {
@@ -1850,12 +1866,41 @@ fn soiree_de(fiches: &BTreeMap<UserId, FicheValorant>, depuis: u64, maintenant: 
             }
         }
     }
-    parties.sort_by_key(|p| std::cmp::Reverse(p.date));
-    parties.truncate(SOIREE_PARTIES_MAX);
+    parties.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.id.cmp(&b.id)));
     for p in &mut parties {
         p.joueurs.sort_by_key(|j| std::cmp::Reverse(j.score));
     }
     parties
+}
+
+/// Une page de la réponse à `MatchsValorant` : les parties qui suivent
+/// `apres` dans `parties` (rangées comme [`parties_de`] les rend), autant
+/// que la ligne en porte sous [`STATS_MAX_BYTES`], et où reprendre s'il en
+/// reste. Une page porte toujours au moins une partie quand il y en a : la
+/// lecture avance.
+pub fn message_matchs(depuis: u64, apres: Option<ki_protocol::CurseurMatchs>, parties: Vec<PartieSoiree>) -> ServerMsg {
+    use ki_protocol::CurseurMatchs;
+    // La place de ce qui entoure les parties : le type, les bornes, les
+    // deux curseurs.
+    const ENVELOPPE: usize = 512;
+    let reste: Vec<PartieSoiree> = match &apres {
+        Some(curseur) => parties.into_iter().filter(|p| curseur.avant(p)).collect(),
+        None => parties,
+    };
+    let mut taille = ENVELOPPE;
+    let mut combien = 0;
+    for p in &reste {
+        // La partie et sa virgule.
+        taille += serde_json::to_vec(p).map_or(usize::MAX / 2, |o| o.len()) + 1;
+        if taille > STATS_MAX_BYTES && combien > 0 {
+            break;
+        }
+        combien += 1;
+    }
+    let suite = (combien < reste.len()).then(|| CurseurMatchs::de(&reste[combien - 1]));
+    let mut page = reste;
+    page.truncate(combien);
+    ServerMsg::MatchsDuGroupe { depuis, apres, parties: page, suite }
 }
 
 /// La réponse à `SoireeValorant`, sous le budget d'une ligne : une soirée
@@ -3604,6 +3649,81 @@ mod tests {
         let ordinaire: Vec<PartieSoiree> = (0..8).map(|d| PartieSoiree { joueurs: vec![JoueurSoiree::default(); 4], ..partie(d) }).collect();
         let ServerMsg::Soiree { parties, .. } = message_soiree(1, ordinaire) else { panic!() };
         assert_eq!(parties.len(), 8);
+    }
+
+    /// Les parties du groupe, page par page : toutes y passent une fois,
+    /// dans l'ordre, chaque page sous le budget d'une ligne ; la soirée,
+    /// elle, garde sa borne.
+    #[test]
+    fn les_parties_du_groupe_se_lisent_page_par_page() {
+        let jour = 86_400_000u64;
+        let maintenant = 1_800_000_000_000u64;
+        // Trente membres, soixante matchs chacun sur trente jours : un sur
+        // trois joué à trois (le même id, la même date), les autres seuls —
+        // et deux matchs sans identifiant, au même début.
+        let mut fiches = BTreeMap::new();
+        for user_id in 1..=30u64 {
+            let matchs = (0..60u64)
+                .map(|k| {
+                    let ensemble = k % 3 == 0;
+                    let groupe = (user_id - 1) / 3;
+                    MatchResume {
+                        id: if ensemble { format!("ensemble-{groupe}-{k}") } else { format!("seul-{user_id}-{k}") },
+                        date: maintenant - k * jour / 2 - if ensemble { groupe } else { user_id * 1_000 },
+                        carte: "Lotus".into(),
+                        mode: "Compétitif".into(),
+                        agent: "Jett".into(),
+                        score: 4_000,
+                        manches: (13, 11),
+                        gagne: Some(true),
+                        manches_detail: Some(ki_protocol::DetailManches { deroule: "V".repeat(24), ..Default::default() }),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            fiches.insert(user_id as UserId, FicheValorant { matchs, ..Default::default() });
+        }
+        fiches.get_mut(&1).unwrap().matchs.push(MatchResume { date: maintenant - 5, ..Default::default() });
+        fiches.get_mut(&2).unwrap().matchs.push(MatchResume { date: maintenant - 5, ..Default::default() });
+
+        let toutes = parties_de(&fiches, maintenant - 30 * jour);
+        // 30 × 40 seuls, 10 groupes × 20 ensemble, 2 sans identifiant.
+        assert_eq!(toutes.len(), 30 * 40 + 10 * 20 + 2);
+        assert!(toutes.windows(2).all(|w| w[0].date > w[1].date || (w[0].date == w[1].date && w[0].id <= w[1].id)), "rangées");
+        assert!(toutes.iter().filter(|p| p.id.starts_with("ensemble")).all(|p| p.joueurs.len() == 3));
+        assert!(soiree_de(&fiches, 0, maintenant).len() <= SOIREE_PARTIES_MAX, "la soirée garde sa borne");
+
+        let mut lues: Vec<PartieSoiree> = Vec::new();
+        let mut apres = None;
+        let mut pages = 0;
+        loop {
+            let msg = message_matchs(7, apres.clone(), toutes.clone());
+            assert!(serde_json::to_vec(&msg).unwrap().len() <= STATS_MAX_BYTES, "une page tient dans une ligne");
+            let ServerMsg::MatchsDuGroupe { depuis, apres: rendu, parties, suite } = msg else { panic!() };
+            assert_eq!((depuis, &rendu), (7, &apres), "la demande revient telle quelle");
+            assert!(!parties.is_empty(), "la lecture avance");
+            lues.extend(parties);
+            pages += 1;
+            match suite {
+                Some(s) => apres = Some(s),
+                None => break,
+            }
+            assert!(pages < 50, "la lecture finit");
+        }
+        assert!(pages > 1, "il fallait plus d'une page : {pages}");
+        // Tout, une fois, dans l'ordre — les deux matchs sans identifiant
+        // du même début compris : ils sont en tête de la première page.
+        let attendu: Vec<(u64, &str)> = toutes.iter().map(|p| (p.date, p.id.as_str())).collect();
+        let lu: Vec<(u64, &str)> = lues.iter().map(|p| (p.date, p.id.as_str())).collect();
+        assert_eq!(lu, attendu);
+
+        // Rien à rendre : une page vide, sans suite. Un curseur au-delà de
+        // tout : pareil.
+        let ServerMsg::MatchsDuGroupe { parties, suite, .. } = message_matchs(7, None, Vec::new()) else { panic!() };
+        assert!(parties.is_empty() && suite.is_none());
+        let fin = ki_protocol::CurseurMatchs { date: 0, id: String::new() };
+        let ServerMsg::MatchsDuGroupe { parties, suite, .. } = message_matchs(7, Some(fin), toutes) else { panic!() };
+        assert!(parties.is_empty() && suite.is_none());
     }
 
     #[test]

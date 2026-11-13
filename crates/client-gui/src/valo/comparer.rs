@@ -519,6 +519,7 @@ mod tests {
             photos: &photos,
             comparee: None,
             journal: Journal::default(),
+            matchs: MatchsVus::DesFiches,
         };
         let a = Vue::new("A", &fa, PeriodeFiche::TrenteJours, true, &cx, maintenant);
         let b = Vue::new("B", &fb, PeriodeFiche::TrenteJours, true, &cx, maintenant);

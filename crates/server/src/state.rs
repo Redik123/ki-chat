@@ -1825,6 +1825,7 @@ mod tests {
             soiree: true,
             journal_lecture: true,
             suivi_valorant: true,
+            matchs_groupe: true,
             claude: true,
             protocole: ki_protocol::PROTOCOLE,
         };
