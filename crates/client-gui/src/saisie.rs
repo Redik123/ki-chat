@@ -521,18 +521,9 @@ impl KiApp {
                 }
                 return Ok(Some(format!("*{action}*")));
             }
-            Ordre::Muet => {
-                self.basculer_micro();
-                self.info = Some(if self.vocal.muted { "micro coupé" } else { "micro rouvert" }.into());
-            }
-            Ordre::Sourd => {
-                self.basculer_sourd();
-                self.info = Some(if self.vocal.sourd { "tu n'entends plus rien, micro coupé" } else { "tu entends à nouveau" }.into());
-            }
-            Ordre::Tableau => {
-                self.tactique.ouvert = true;
-                self.catalogue.demarrer();
-            }
+            Ordre::Muet => self.basculer_micro_et_le_dire(),
+            Ordre::Sourd => self.basculer_sourd_et_le_dire(),
+            Ordre::Tableau => self.ouvrir_le_tableau(),
             Ordre::Raccourcis => self.raccourcis.ouverte = true,
         }
         Ok(None)

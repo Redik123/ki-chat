@@ -6,7 +6,8 @@
 //!   milieu. Refaits, ils la déballent.
 //! - Partout : Alt+↑ / Alt+↓ vont au salon textuel d'à côté, Alt+Maj+↑ / ↓
 //!   au prochain qui a du non-lu ; Ctrl+F ouvre la recherche, Ctrl+K la
-//!   fenêtre « aller à » (voir `aller_a`).
+//!   fenêtre « aller à » et Ctrl+Maj+P la même sur ses commandes (voir
+//!   `aller_a`).
 //! - Dans le fil : PageHaut / PageBas remontent ou redescendent d'un écran,
 //!   Échap revient tout en bas — et marque lu, puisqu'on y est.
 //!
@@ -18,7 +19,7 @@
 use eframe::egui;
 use ki_protocol::{ChannelId, ChannelKind};
 
-use crate::registre::Action;
+use crate::registre::{Action, Groupe};
 use crate::saisie::id_saisie;
 use crate::KiApp;
 
@@ -160,7 +161,14 @@ impl KiApp {
                 .find(|(action, _)| self.registre.faite(i, *action))
                 .map(|(_, marque)| marque)
         });
-        let Some(marque) = marque else { return };
+        if let Some(marque) = marque {
+            self.mettre_en_forme(ctx, marque);
+        }
+    }
+
+    /// Pose la marque autour de ce qui est sélectionné dans la saisie, ou
+    /// l'en retire.
+    fn mettre_en_forme(&mut self, ctx: &egui::Context, marque: Marque) {
         let mut etat = egui::TextEdit::load_state(ctx, id_saisie()).unwrap_or_default();
         let total = self.input.chars().count();
         let (debut, fin) = match etat.cursor.char_range() {
@@ -177,72 +185,125 @@ impl KiApp {
         etat.store(ctx, id_saisie());
     }
 
-    /// Les raccourcis de navigation, à lire en tête d'image : d'un salon
-    /// textuel à l'autre, vers le prochain non-lu, « aller à », la
-    /// recherche, les réglages, la liste des raccourcis.
+    /// Les raccourcis de la fenêtre, à lire en tête d'image, avant que la
+    /// saisie ne prenne les touches pour elle. Ceux de la mise en forme
+    /// attendent la saisie : ils n'agissent que quand elle a le clavier.
     pub(crate) fn navigation_au_clavier(&mut self, ctx: &egui::Context) {
         // On choisit une combinaison : le clavier est à la fenêtre des
         // raccourcis, en entier.
         if self.raccourcis.lire_la_capture(ctx, &mut self.registre) {
             return;
         }
-        let faite = |app: &Self, action| ctx.input_mut(|i| app.registre.faite(i, action));
-        if faite(self, Action::Raccourcis) {
-            self.raccourcis.basculer();
-        }
-        if faite(self, Action::Reglages) {
-            self.basculer_les_reglages();
-        }
-        // « Aller à » s'ouvre, et se referme. Ouverte, elle lit ses touches
-        // ici, avant tout le monde, et le reste attend.
-        if faite(self, Action::AllerA) {
-            if self.aller_a.ouvert {
-                self.aller_a.fermer();
-            } else {
-                self.aller_a.ouvrir();
+        // « Aller à » ouverte lit ses touches ici, avant tout le monde, et
+        // le reste attend — sauf ses deux raccourcis, qui la referment ou la
+        // font changer de liste.
+        let ouverte = self.aller_a.ouvert;
+        let demandee = ctx.input_mut(|i| {
+            if i.events.is_empty() {
+                return None;
             }
+            Action::TOUTES
+                .into_iter()
+                .filter(|a| if ouverte { matches!(a, Action::AllerA | Action::Palette) } else { a.groupe() != Groupe::Ecrire })
+                .find(|a| self.registre.faite(i, *a))
+        });
+        if let Some(action) = demandee {
+            self.faire(ctx, action);
         }
         if self.aller_a.ouvert {
             self.aller_a.lire_les_touches(ctx);
-            return;
         }
-        let registre = &self.registre;
-        let geste = ctx.input_mut(|i| {
-            [
-                (Action::SalonSuivant, (true, false)),
-                (Action::SalonPrecedent, (false, false)),
-                (Action::NonLuSuivant, (true, true)),
-                (Action::NonLuPrecedent, (false, true)),
-            ]
-            .into_iter()
-            .find(|(action, _)| registre.faite(i, *action))
-            .map(|(_, geste)| geste)
-        });
-        if let Some((vers_le_bas, non_lus)) = geste {
-            // Dans l'ordre de la colonne : les salons textuels, puis ceux
-            // des portes web.
-            let textuels = self.session.channels.iter().filter(|c| c.kind == ChannelKind::Text);
-            let salons: Vec<(ChannelId, bool)> = textuels
-                .clone()
-                .filter(|c| c.expire_le.is_none())
-                .chain(textuels.filter(|c| c.expire_le.is_some()))
-                .map(|c| (c.id, self.session.non_lus.get(&c.id).is_some_and(|n| n.nb > 0)))
-                .collect();
-            match salon_voisin(&salons, self.session.current, vers_le_bas, non_lus) {
-                Some(id) => {
-                    self.retour_au_chat();
-                    self.join(id);
-                    self.focus_input = true;
+    }
+
+    /// L'action a-t-elle un sens à l'instant ? Sinon la palette ne la
+    /// propose pas.
+    pub(crate) fn possible(&self, action: Action) -> bool {
+        match action {
+            Action::Claude => self.claude.servi,
+            Action::QuitterVocal => self.session.voice_channel.is_some(),
+            _ => true,
+        }
+    }
+
+    /// Fait ce que l'action demande, qu'elle vienne du clavier ou de la
+    /// palette.
+    pub(crate) fn faire(&mut self, ctx: &egui::Context, action: Action) {
+        match action {
+            // Le raccourci de la liste qu'on regarde la referme ; l'autre
+            // la fait changer de liste.
+            Action::AllerA | Action::Palette => {
+                let commandes = action == Action::Palette;
+                if self.aller_a.ouvert && self.aller_a.en_commandes() == commandes {
+                    self.aller_a.fermer();
+                } else if commandes {
+                    self.aller_a.ouvrir_commandes();
+                } else {
+                    self.aller_a.ouvrir();
                 }
-                None if non_lus => self.info = Some("rien de non lu ailleurs".into()),
-                None => {}
             }
+            Action::Chercher => {
+                self.retour_au_chat();
+                self.recherche.ouverte = true;
+                self.recherche.focus = true;
+            }
+            Action::SalonSuivant => self.aller_au_salon_voisin(true, false),
+            Action::SalonPrecedent => self.aller_au_salon_voisin(false, false),
+            Action::NonLuSuivant => self.aller_au_salon_voisin(true, true),
+            Action::NonLuPrecedent => self.aller_au_salon_voisin(false, true),
+            Action::Gras => self.mettre_en_forme(ctx, Marque::Gras),
+            Action::Italique => self.mettre_en_forme(ctx, Marque::Italique),
+            Action::Code => self.mettre_en_forme(ctx, Marque::Code),
+            Action::Reglages => self.basculer_les_reglages(),
+            Action::Raccourcis => self.raccourcis.basculer(),
+            Action::Compte => self.show_account = !self.show_account,
+            Action::Valorant if self.valo.ouvert => self.retour_au_chat(),
+            Action::Valorant => self.ouvrir_stats(),
+            Action::Tableau => self.ouvrir_le_tableau(),
+            Action::Claude if self.claude.servi => self.ouvrir_claude(),
+            Action::Claude => self.info = Some("ce serveur n'a pas de salon de Claude".into()),
+            Action::Micro => self.basculer_micro_et_le_dire(),
+            Action::Sourd => self.basculer_sourd_et_le_dire(),
+            Action::QuitterVocal if self.session.voice_channel.is_some() => self.leave_voice(),
+            Action::QuitterVocal => self.info = Some("tu n'es dans aucun salon vocal".into()),
         }
-        if faite(self, Action::Chercher) {
-            self.retour_au_chat();
-            self.recherche.ouverte = true;
-            self.recherche.focus = true;
+    }
+
+    /// D'un salon textuel à l'autre, dans l'ordre de la colonne : les
+    /// salons, puis ceux des portes web.
+    fn aller_au_salon_voisin(&mut self, vers_le_bas: bool, non_lus: bool) {
+        let textuels = self.session.channels.iter().filter(|c| c.kind == ChannelKind::Text);
+        let salons: Vec<(ChannelId, bool)> = textuels
+            .clone()
+            .filter(|c| c.expire_le.is_none())
+            .chain(textuels.filter(|c| c.expire_le.is_some()))
+            .map(|c| (c.id, self.session.non_lus.get(&c.id).is_some_and(|n| n.nb > 0)))
+            .collect();
+        match salon_voisin(&salons, self.session.current, vers_le_bas, non_lus) {
+            Some(id) => {
+                self.retour_au_chat();
+                self.join(id);
+                self.focus_input = true;
+            }
+            None if non_lus => self.info = Some("rien de non lu ailleurs".into()),
+            None => {}
         }
+    }
+
+    /// Le micro, coupé ou rouvert — et dit, puisque rien d'autre ne le
+    /// montre quand on regarde la saisie.
+    pub(crate) fn basculer_micro_et_le_dire(&mut self) {
+        self.basculer_micro();
+        self.info = Some(if self.vocal.muted { "micro coupé" } else { "micro rouvert" }.into());
+    }
+
+    pub(crate) fn basculer_sourd_et_le_dire(&mut self) {
+        self.basculer_sourd();
+        self.info = Some(if self.vocal.sourd { "tu n'entends plus rien, micro coupé" } else { "tu entends à nouveau" }.into());
+    }
+
+    pub(crate) fn ouvrir_le_tableau(&mut self) {
+        self.tactique.ouvert = true;
+        self.catalogue.demarrer();
     }
 }
 

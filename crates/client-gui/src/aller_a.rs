@@ -6,7 +6,12 @@
 //! sinon une mention posée dans la saisie. `#` ne garde que les salons, `@`
 //! que les membres.
 //!
-//! [`proposer`] fait le tri, sans fenêtre ni réseau : c'est lui qui se teste.
+//! `>` en tête, et c'est la palette : la liste est celle des commandes —
+//! tout ce que `registre` connaît, avec la touche de chacune. Ctrl+Maj+P
+//! l'ouvre directement là.
+//!
+//! [`proposer`] et [`proposer_commandes`] font le tri, sans fenêtre ni
+//! réseau : ce sont eux qui se testent.
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Key, Modifiers, Rect, Sense};
 use ki_protocol::{ChannelId, ChannelKind, UserId};
@@ -15,9 +20,12 @@ use ki_ui::selecteur_emoji::plier;
 
 use crate::icons::{self, Icon};
 use crate::membres::{couleur_de_membre, est_bot};
+use crate::registre::{Action, Groupe};
 use crate::{ui, KiApp};
 
-/// Au-delà, on continue d'écrire pour affiner.
+/// Les lignes montrées à la fois. Pour les salons et les membres, la liste
+/// s'arrête là : on continue d'écrire pour affiner. Celle des commandes
+/// défile.
 const MAX_ENTREES: usize = 8;
 const LIGNE: f32 = 32.0;
 const LARGEUR: f32 = 460.0;
@@ -40,8 +48,18 @@ impl AllerA {
         *self = Self { ouvert: true, focus: true, ..Self::default() };
     }
 
+    /// Ouvre sur les commandes : « > » déjà tapé.
+    pub(crate) fn ouvrir_commandes(&mut self) {
+        *self = Self { ouvert: true, focus: true, requete: ">".into(), ..Self::default() };
+    }
+
     pub(crate) fn fermer(&mut self) {
         *self = Self::default();
+    }
+
+    /// La liste montrée est celle des commandes.
+    pub(crate) fn en_commandes(&self) -> bool {
+        mots_de_commande(&self.requete).is_some()
     }
 
     /// ↑, ↓ et Entrée, à lire en tête d'image tant que la fenêtre est là.
@@ -86,6 +104,7 @@ pub(crate) enum Cible {
     Vocal(ChannelId),
     Fiche(UserId, String),
     Mention(String),
+    Commande(Action),
 }
 
 /// Ce qui se dessine à gauche d'une ligne.
@@ -94,6 +113,7 @@ pub(crate) enum Signe {
     Texte,
     Vocal,
     Membre { couleur: Color32, en_ligne: bool },
+    Commande,
 }
 
 /// Une ligne de la liste.
@@ -188,6 +208,45 @@ pub(crate) fn proposer(requete: &str, salons: &[Salon], membres: &[Membre]) -> V
     trouves.into_iter().take(MAX_ENTREES).map(|(_, e)| e).collect()
 }
 
+/// Ce qui suit le « > » qui demande les commandes — ou rien, si la requête
+/// n'en est pas une.
+fn mots_de_commande(requete: &str) -> Option<&str> {
+    requete.trim_start().strip_prefix('>')
+}
+
+/// Les commandes que `mots` retient, parmi `commandes` (chacune avec sa
+/// touche, si elle en a une) : celles dont le nom commence par eux, puis
+/// celles dont un mot commence par eux, puis celles qui les contiennent ;
+/// à égalité, l'ordre du registre. Toutes : cette liste-là défile.
+pub(crate) fn proposer_commandes(mots: &str, commandes: &[(Action, Option<String>)]) -> Vec<Entree> {
+    let mots = plier(mots.trim());
+    let mut trouvees: Vec<(u8, usize, Entree)> = commandes
+        .iter()
+        .enumerate()
+        .filter_map(|(place, (action, touche))| {
+            let nom = plier(action.libelle());
+            let rang = if nom.starts_with(&mots) {
+                0
+            } else if nom.split(|c: char| !c.is_alphanumeric()).any(|mot| mot.starts_with(&mots)) {
+                1
+            } else if nom.contains(&mots) {
+                2
+            } else {
+                return None;
+            };
+            let entree = Entree {
+                libelle: action.libelle().to_string(),
+                detail: touche.clone().unwrap_or_default(),
+                signe: Signe::Commande,
+                cible: Cible::Commande(*action),
+            };
+            Some((rang, place, entree))
+        })
+        .collect();
+    trouvees.sort_by_key(|(rang, place, _)| (*rang, *place));
+    trouvees.into_iter().map(|(_, _, e)| e).collect()
+}
+
 fn ligne(ui: &egui::Ui, rect: Rect, e: &Entree, choisie: bool) {
     let p = ui.painter();
     if choisie {
@@ -207,6 +266,10 @@ fn ligne(ui: &egui::Ui, rect: Rect, e: &Entree, choisie: bool) {
         Signe::Membre { couleur, en_ligne } => {
             p.circle_filled(signe.center(), 4.0, if en_ligne { c::ACCENT } else { c::TEXT_FAINT });
             couleur
+        }
+        Signe::Commande => {
+            icons::draw(p, signe, Icon::ChevronRight, c::TEXT_FAINT);
+            c::TEXT
         }
     };
     let gauche = signe.right() + espace::S;
@@ -260,13 +323,30 @@ impl KiApp {
         (salons, membres)
     }
 
+    /// Ce que la palette propose : tout ce qui a un sens à l'instant, sauf
+    /// les deux raccourcis de cette fenêtre même, et la mise en forme — la
+    /// saisie perd sa sélection dès qu'on la quitte pour venir ici.
+    fn commandes_de_la_palette(&self) -> Vec<(Action, Option<String>)> {
+        Action::TOUTES
+            .into_iter()
+            .filter(|a| !matches!(a, Action::AllerA | Action::Palette) && a.groupe() != Groupe::Ecrire && self.possible(*a))
+            .map(|a| (a, self.registre.libelle(a)))
+            .collect()
+    }
+
     /// La fenêtre de Ctrl+K, tant qu'elle est ouverte.
     pub(crate) fn aller_a_window(&mut self, ctx: &egui::Context) {
         if !self.aller_a.ouvert {
             return;
         }
-        let (salons, membres) = self.sources_aller_a();
-        let entrees = proposer(&self.aller_a.requete, &salons, &membres);
+        let en_commandes = self.aller_a.en_commandes();
+        let entrees = match mots_de_commande(&self.aller_a.requete) {
+            Some(mots) => proposer_commandes(mots, &self.commandes_de_la_palette()),
+            None => {
+                let (salons, membres) = self.sources_aller_a();
+                proposer(&self.aller_a.requete, &salons, &membres)
+            }
+        };
         let etat = &mut self.aller_a;
         // Le choix fait le tour de la liste, comme dans les suggestions.
         let n = entrees.len() as i32;
@@ -278,6 +358,11 @@ impl KiApp {
             let champ = ui.add(ui::champ(&mut etat.requete, "aller à un salon ou à un membre…"));
             if std::mem::take(&mut etat.focus) {
                 champ.request_focus();
+                // Ouverte sur « > » : la suite s'écrit après, pas avant.
+                let mut edition = egui::TextEdit::load_state(ui.ctx(), champ.id).unwrap_or_default();
+                let fin = egui::text::CCursor::new(etat.requete.chars().count());
+                edition.cursor.set_char_range(Some(egui::text::CCursorRange::one(fin)));
+                edition.store(ui.ctx(), champ.id);
             }
             if champ.changed() {
                 etat.choix = 0;
@@ -288,8 +373,10 @@ impl KiApp {
             // lettre.
             let (zone, _) =
                 ui.allocate_exact_size(vec2(ui.available_width(), MAX_ENTREES as f32 * LIGNE), Sense::hover());
-            for (i, e) in entrees.iter().enumerate() {
-                let rect = Rect::from_min_size(zone.min + vec2(0.0, i as f32 * LIGNE), vec2(zone.width(), LIGNE));
+            // Une liste plus longue que la fenêtre défile avec le choix.
+            let premiere = (etat.choix + 1).saturating_sub(MAX_ENTREES);
+            for (i, e) in entrees.iter().enumerate().skip(premiere).take(MAX_ENTREES) {
+                let rect = Rect::from_min_size(zone.min + vec2(0.0, (i - premiere) as f32 * LIGNE), vec2(zone.width(), LIGNE));
                 let reponse = ui.interact(rect, ui.scope_id().with(("aller-a", i)), Sense::click());
                 if reponse.hovered() && ui.input(|e| e.pointer.is_moving()) {
                     etat.choix = i;
@@ -303,13 +390,20 @@ impl KiApp {
                 ui.painter().text(
                     zone.min + vec2(espace::S, LIGNE / 2.0),
                     Align2::LEFT_CENTER,
-                    "rien de ce nom",
+                    if en_commandes { "aucune commande de ce nom" } else { "rien de ce nom" },
                     FontId::proportional(texte::COURANT),
                     c::TEXT_DIM,
                 );
             }
             ui.add_space(espace::S);
-            ui::hint(ui, "↑↓ choisir · Entrée y aller · Échap fermer · # les salons, @ les membres");
+            ui::hint(
+                ui,
+                if en_commandes {
+                    "↑↓ choisir · Entrée lancer · Échap fermer"
+                } else {
+                    "↑↓ choisir · Entrée y aller · Échap fermer · # salons, @ membres, > commandes"
+                },
+            );
         });
 
         if let Some(e) = choisie.and_then(|i| entrees.into_iter().nth(i)) {
@@ -330,6 +424,11 @@ impl KiApp {
             }
             Cible::Vocal(id) => self.join_voice(id),
             Cible::Fiche(id, pseudo) => self.ouvrir_fiche(id, pseudo),
+            Cible::Commande(action) => {
+                // Le micro coupé, on se remet à écrire.
+                self.focus_input = action.groupe() == Groupe::Voix;
+                self.faire(ctx, action);
+            }
             Cible::Mention(pseudo) => {
                 self.retour_au_chat();
                 self.inserer_dans_la_saisie(ctx, &format!("@{pseudo} "));
@@ -425,6 +524,52 @@ mod tests {
         // Le salon où l'on est se trouve quand on le nomme, et se dit.
         let ici = proposer("géné", &salons, &membres).remove(0);
         assert_eq!((ici.cible, ici.detail.as_str()), (Cible::Salon(1), "tu y es"));
+    }
+
+    #[test]
+    fn la_palette_trie_les_commandes() {
+        let commandes: Vec<(Action, Option<String>)> = [
+            (Action::Chercher, Some("Ctrl+F")),
+            (Action::Reglages, Some("Ctrl+,")),
+            (Action::Raccourcis, None),
+            (Action::Compte, None),
+            (Action::Claude, None),
+            (Action::Micro, None),
+            (Action::QuitterVocal, None),
+        ]
+        .into_iter()
+        .map(|(a, t)| (a, t.map(String::from)))
+        .collect();
+        let noms = |mots: &str| -> Vec<String> { proposer_commandes(mots, &commandes).into_iter().map(|e| e.libelle).collect() };
+        // Rien de tapé : toutes, dans l'ordre du registre — et plus de huit
+        // ne seraient pas coupées.
+        assert_eq!(noms("").len(), commandes.len());
+        assert_eq!(noms(" ")[0], "Chercher dans les messages");
+        // Le début du nom, puis le début d'un mot, puis n'importe où ; les
+        // accents et la casse ne comptent pas.
+        assert_eq!(
+            noms("c"),
+            [
+                "Chercher dans les messages",
+                "Couper ou rouvrir le micro",
+                "Raccourcis clavier",
+                "Mon compte",
+                "Salon de Claude",
+                "Quitter le salon vocal",
+            ]
+        );
+        assert_eq!(noms("REGL"), ["Réglages"]);
+        assert_eq!(noms("micro"), ["Couper ou rouvrir le micro"]);
+        assert_eq!(noms("voc"), ["Quitter le salon vocal"]);
+        assert_eq!(noms("our"), ["Raccourcis clavier"]);
+        assert_eq!(noms("zzz"), Vec::<String>::new());
+        // La touche se lit à droite, et la ligne mène à l'action.
+        let chercher = proposer_commandes("cher", &commandes).remove(0);
+        assert_eq!((chercher.detail.as_str(), chercher.cible), ("Ctrl+F", Cible::Commande(Action::Chercher)));
+        // « > » en tête demande les commandes, et pas autrement.
+        assert_eq!(mots_de_commande(" >regl"), Some("regl"));
+        assert_eq!(mots_de_commande("regl>"), None);
+        assert_eq!(mots_de_commande("#general"), None);
     }
 
     #[test]

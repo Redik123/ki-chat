@@ -1433,10 +1433,7 @@ impl KiApp {
                     self.donnees_valo.mon_journal_demande = None;
                 }
                 valo_page::Demande::OuvrirFiche(user_id, username) => self.ouvrir_fiche(user_id, username),
-                valo_page::Demande::OuvrirTactique => {
-                    self.tactique.ouvert = true;
-                    self.catalogue.demarrer();
-                }
+                valo_page::Demande::OuvrirTactique => self.ouvrir_le_tableau(),
                 valo_page::Demande::Comparer(user_id, username) => {
                     if self.donnees_valo.comparee.as_ref().is_none_or(|c| c.user_id != user_id) {
                         self.donnees_valo.comparee = Some(FicheOuverte { user_id, username, recue: false, fiche: None });

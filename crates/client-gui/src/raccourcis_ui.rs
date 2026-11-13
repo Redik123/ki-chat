@@ -140,11 +140,11 @@ impl KiApp {
                                     etat.refus = None;
                                 }
                                 if registre.changee(action) {
-                                    let origine = format!("Remettre {}", action.origine().libelle());
-                                    if ui::Bouton::icone_seule(Icon::Refresh).cote(24.0).bulle(&origine).show(ui).clicked() {
-                                        etat.refus = registre.remettre(action).err().map(|r| {
-                                            (action, format!("{} : {}", action.origine().libelle(), r.phrase()))
-                                        });
+                                    let origine = action.origine().map_or("aucune".to_string(), Combinaison::libelle);
+                                    let bulle = format!("Comme au départ : {origine}");
+                                    if ui::Bouton::icone_seule(Icon::Refresh).cote(24.0).bulle(&bulle).show(ui).clicked() {
+                                        etat.refus =
+                                            registre.remettre(action).err().map(|r| (action, format!("{origine} : {}", r.phrase())));
                                     }
                                 }
                             });

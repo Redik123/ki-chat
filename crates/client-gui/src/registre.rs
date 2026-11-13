@@ -6,10 +6,13 @@
 //! micro, prendre un clip — vivent dans `ptt` et se règlent avec la voix.
 //!
 //! Tout se lit ici, et rien qu'ici : `clavier` demande « cette action
-//! vient-elle d'être faite ? » sans connaître la touche. Une combinaison se
-//! compare à la lettre — Alt+Maj+↓ n'est pas Alt+↓ —, sauf Maj sur un signe,
-//! qui dépend du clavier : « / » se tape avec Maj sur un clavier français ou
-//! suisse, sans sur un clavier américain.
+//! vient-elle d'être faite ? » sans connaître la touche. Toutes n'ont pas de
+//! touche d'origine : celles-là se lancent par la palette (Ctrl+Maj+P), et
+//! reçoivent une combinaison si on leur en donne une.
+//!
+//! Une combinaison se compare à la lettre — Alt+Maj+↓ n'est pas Alt+↓ —,
+//! sauf Maj sur un signe, qui dépend du clavier : « / » se tape avec Maj sur
+//! un clavier français ou suisse, sans sur un clavier américain.
 
 use std::collections::HashMap;
 
@@ -19,6 +22,7 @@ use eframe::egui::{self, Key, Modifiers};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Action {
     AllerA,
+    Palette,
     Chercher,
     SalonSuivant,
     SalonPrecedent,
@@ -29,6 +33,13 @@ pub(crate) enum Action {
     Code,
     Reglages,
     Raccourcis,
+    Compte,
+    Valorant,
+    Tableau,
+    Claude,
+    Micro,
+    Sourd,
+    QuitterVocal,
 }
 
 /// Les familles, dans l'ordre où la fenêtre les montre.
@@ -37,23 +48,26 @@ pub(crate) enum Groupe {
     Aller,
     Ecrire,
     Fenetres,
+    Voix,
 }
 
 impl Groupe {
-    pub(crate) const TOUS: [Groupe; 3] = [Groupe::Aller, Groupe::Ecrire, Groupe::Fenetres];
+    pub(crate) const TOUS: [Groupe; 4] = [Groupe::Aller, Groupe::Ecrire, Groupe::Fenetres, Groupe::Voix];
 
     pub(crate) fn titre(self) -> &'static str {
         match self {
             Groupe::Aller => "Aller quelque part",
             Groupe::Ecrire => "Écrire",
             Groupe::Fenetres => "Ouvrir",
+            Groupe::Voix => "La voix, ki-chat devant",
         }
     }
 }
 
 impl Action {
-    pub(crate) const TOUTES: [Action; 11] = [
+    pub(crate) const TOUTES: [Action; 19] = [
         Action::AllerA,
+        Action::Palette,
         Action::Chercher,
         Action::SalonSuivant,
         Action::SalonPrecedent,
@@ -64,12 +78,20 @@ impl Action {
         Action::Code,
         Action::Reglages,
         Action::Raccourcis,
+        Action::Compte,
+        Action::Valorant,
+        Action::Tableau,
+        Action::Claude,
+        Action::Micro,
+        Action::Sourd,
+        Action::QuitterVocal,
     ];
 
     /// Le nom sous lequel le choix se range : ne change plus.
     pub(crate) fn cle(self) -> &'static str {
         match self {
             Action::AllerA => "aller-a",
+            Action::Palette => "palette",
             Action::Chercher => "chercher",
             Action::SalonSuivant => "salon-suivant",
             Action::SalonPrecedent => "salon-precedent",
@@ -80,12 +102,22 @@ impl Action {
             Action::Code => "code",
             Action::Reglages => "reglages",
             Action::Raccourcis => "raccourcis",
+            Action::Compte => "compte",
+            Action::Valorant => "valorant",
+            Action::Tableau => "tableau",
+            Action::Claude => "claude",
+            Action::Micro => "micro",
+            Action::Sourd => "sourd",
+            Action::QuitterVocal => "quitter-vocal",
         }
     }
 
+    /// Ce que ça fait, en quelques mots : la ligne de la fenêtre des
+    /// raccourcis, et celle de la palette.
     pub(crate) fn libelle(self) -> &'static str {
         match self {
             Action::AllerA => "Aller à un salon ou à un membre",
+            Action::Palette => "Toutes les commandes",
             Action::Chercher => "Chercher dans les messages",
             Action::SalonSuivant => "Salon suivant",
             Action::SalonPrecedent => "Salon précédent",
@@ -95,27 +127,40 @@ impl Action {
             Action::Italique => "Italique",
             Action::Code => "Code",
             Action::Reglages => "Réglages",
-            Action::Raccourcis => "Cette liste",
+            Action::Raccourcis => "Raccourcis clavier",
+            Action::Compte => "Mon compte",
+            Action::Valorant => "Page VALORANT",
+            Action::Tableau => "Tableau tactique",
+            Action::Claude => "Salon de Claude",
+            Action::Micro => "Couper ou rouvrir le micro",
+            Action::Sourd => "Ne plus entendre, ou entendre",
+            Action::QuitterVocal => "Quitter le salon vocal",
         }
     }
 
     pub(crate) fn groupe(self) -> Groupe {
         match self {
             Action::AllerA
+            | Action::Palette
             | Action::Chercher
             | Action::SalonSuivant
             | Action::SalonPrecedent
             | Action::NonLuSuivant
             | Action::NonLuPrecedent => Groupe::Aller,
             Action::Gras | Action::Italique | Action::Code => Groupe::Ecrire,
-            Action::Reglages | Action::Raccourcis => Groupe::Fenetres,
+            Action::Reglages | Action::Raccourcis | Action::Compte | Action::Valorant | Action::Tableau | Action::Claude => {
+                Groupe::Fenetres
+            }
+            Action::Micro | Action::Sourd | Action::QuitterVocal => Groupe::Voix,
         }
     }
 
-    /// La combinaison d'origine.
-    pub(crate) fn origine(self) -> Combinaison {
-        match self {
+    /// La combinaison d'origine. `None` : l'action n'en a pas — elle se
+    /// lance par la palette, ou par celle qu'on lui donne.
+    pub(crate) fn origine(self) -> Option<Combinaison> {
+        Some(match self {
             Action::AllerA => Combinaison::ctrl(Key::K),
+            Action::Palette => Combinaison::ctrl(Key::P).et_maj(),
             Action::Chercher => Combinaison::ctrl(Key::F),
             Action::SalonSuivant => Combinaison::alt(Key::ArrowDown),
             Action::SalonPrecedent => Combinaison::alt(Key::ArrowUp),
@@ -126,7 +171,14 @@ impl Action {
             Action::Code => Combinaison::ctrl(Key::E),
             Action::Reglages => Combinaison::ctrl(Key::Comma),
             Action::Raccourcis => Combinaison::ctrl(Key::Slash),
-        }
+            Action::Compte
+            | Action::Valorant
+            | Action::Tableau
+            | Action::Claude
+            | Action::Micro
+            | Action::Sourd
+            | Action::QuitterVocal => return None,
+        })
     }
 
     fn depuis_cle(cle: &str) -> Option<Action> {
@@ -345,7 +397,7 @@ pub(crate) fn nom_de_touche(touche: Key) -> String {
 }
 
 /// Le registre : pour chaque action, la combinaison choisie quand ce n'est
-/// pas celle d'origine — ou `None` quand on la lui a retirée.
+/// pas celle d'origine — `None` quand on la lui a retirée.
 #[derive(Default, Debug, PartialEq)]
 pub(crate) struct Registre {
     choisies: HashMap<Action, Option<Combinaison>>,
@@ -381,7 +433,7 @@ impl Registre {
 
     /// La combinaison d'une action, à l'instant. `None` : elle n'en a plus.
     pub(crate) fn de(&self, action: Action) -> Option<Combinaison> {
-        self.choisies.get(&action).copied().unwrap_or(Some(action.origine()))
+        self.choisies.get(&action).copied().unwrap_or(action.origine())
     }
 
     /// Ce qu'on en montre dans une bulle ou un menu : « Ctrl+K », ou rien.
@@ -411,7 +463,7 @@ impl Registre {
                 return Err(Refus::Prise(autre));
             }
         }
-        if c == Some(action.origine()) {
+        if c == action.origine() {
             self.choisies.remove(&action);
         } else {
             self.choisies.insert(action, c);
@@ -420,9 +472,9 @@ impl Registre {
     }
 
     /// Rend sa combinaison d'origine à une action — si personne ne l'a
-    /// prise entre-temps.
+    /// prise entre-temps. Celle qui n'en avait pas n'en a plus.
     pub(crate) fn remettre(&mut self, action: Action) -> Result<(), Refus> {
-        self.donner(action, Some(action.origine()))
+        self.donner(action, action.origine())
     }
 
     /// Tout comme au premier jour.
@@ -503,11 +555,13 @@ mod tests {
     #[test]
     fn les_origines_tiennent_debout() {
         let r = Registre::default();
-        for a in Action::TOUTES {
-            let c = a.origine();
+        for (rang, a) in Action::TOUTES.into_iter().enumerate() {
+            assert_eq!(Action::depuis_cle(a.cle()), Some(a));
+            assert_eq!(Action::TOUTES.iter().position(|b| b.cle() == a.cle()), Some(rang), "{a:?} partage sa clé");
+            assert!(Groupe::TOUS.contains(&a.groupe()));
+            let Some(c) = a.origine() else { continue };
             assert_eq!(c.acceptable(), Ok(()), "{a:?}");
             assert_eq!(r.prise_par(c, a), None, "{a:?} partage sa combinaison");
-            assert_eq!(Action::depuis_cle(a.cle()), Some(a));
             assert_eq!(Combinaison::lire(&c.ecrire()), Some(c), "{a:?} ne se relit pas");
         }
         assert!(r.rien_de_change());
@@ -518,13 +572,14 @@ mod tests {
     /// Windows) n'est pas Ctrl+E.
     #[test]
     fn une_combinaison_se_compare_a_la_lettre() {
-        let suivant = Action::SalonSuivant.origine();
+        let origine = |a: Action| a.origine().unwrap();
+        let suivant = origine(Action::SalonSuivant);
         assert!(suivant.convient(Key::ArrowDown, ALT));
         assert!(!suivant.convient(Key::ArrowDown, avec(&[ALT, Modifiers::SHIFT])));
         assert!(!suivant.convient(Key::ArrowDown, Modifiers::NONE));
         assert!(!suivant.convient(Key::ArrowUp, ALT));
-        assert!(Action::NonLuSuivant.origine().convient(Key::ArrowDown, avec(&[ALT, Modifiers::SHIFT])));
-        let code = Action::Code.origine();
+        assert!(origine(Action::NonLuSuivant).convient(Key::ArrowDown, avec(&[ALT, Modifiers::SHIFT])));
+        let code = origine(Action::Code);
         assert!(code.convient(Key::E, CTRL));
         assert!(!code.convient(Key::E, avec(&[CTRL, ALT])), "AltGr+E écrit €");
         assert!(!code.convient(Key::E, avec(&[CTRL, Modifiers::SHIFT])));
@@ -534,7 +589,7 @@ mod tests {
     /// Maj+: sur un clavier français.
     #[test]
     fn maj_ne_compte_pas_sur_un_signe() {
-        let liste = Action::Raccourcis.origine();
+        let liste = Action::Raccourcis.origine().unwrap();
         assert!(liste.convient(Key::Slash, CTRL));
         assert!(liste.convient(Key::Slash, avec(&[CTRL, Modifiers::SHIFT])));
         assert!(!liste.convient(Key::Slash, Modifiers::NONE));
@@ -546,9 +601,12 @@ mod tests {
 
     #[test]
     fn les_libelles_se_lisent() {
-        assert_eq!(Action::AllerA.origine().libelle(), "Ctrl+K");
-        assert_eq!(Action::NonLuPrecedent.origine().libelle(), "Alt+Maj+↑");
-        assert_eq!(Action::Reglages.origine().libelle(), "Ctrl+,");
+        let r = Registre::default();
+        assert_eq!(r.libelle(Action::AllerA).as_deref(), Some("Ctrl+K"));
+        assert_eq!(r.libelle(Action::Palette).as_deref(), Some("Ctrl+Maj+P"));
+        assert_eq!(r.libelle(Action::NonLuPrecedent).as_deref(), Some("Alt+Maj+↑"));
+        assert_eq!(r.libelle(Action::Reglages).as_deref(), Some("Ctrl+,"));
+        assert_eq!(r.libelle(Action::Micro), None, "pas de touche d'origine");
         assert_eq!(Combinaison::ctrl(Key::Num3).et_maj().libelle(), "Ctrl+Maj+3");
         assert_eq!(Combinaison { ctrl: false, alt: false, maj: false, touche: Key::F2 }.libelle(), "F2");
         assert_eq!(Combinaison::alt(Key::PageDown).libelle(), "Alt+Page bas");
@@ -581,7 +639,7 @@ mod tests {
         // Une combinaison prise ne se donne pas deux fois.
         assert_eq!(r.donner(Action::Gras, Some(Combinaison::ctrl(Key::J))), Err(Refus::Prise(Action::AllerA)));
         assert_eq!(r.donner(Action::Gras, Some(Combinaison::ctrl(Key::F))), Err(Refus::Prise(Action::Chercher)));
-        assert_eq!(r.de(Action::Gras), Some(Action::Gras.origine()));
+        assert_eq!(r.de(Action::Gras), Action::Gras.origine());
         // Ctrl+K est libre maintenant : une autre peut la prendre…
         assert_eq!(r.donner(Action::Chercher, Some(Combinaison::ctrl(Key::K))), Ok(()));
         // … et « aller à » ne la retrouve plus tant qu'elle est prise.
@@ -592,7 +650,26 @@ mod tests {
         assert_eq!(r.remettre(Action::AllerA), Ok(()));
         assert!(!r.changee(Action::AllerA));
         // Redonner celle d'origine, c'est ne plus rien avoir changé.
-        assert_eq!(r.donner(Action::Chercher, Some(Action::Chercher.origine())), Ok(()));
+        assert_eq!(r.donner(Action::Chercher, Action::Chercher.origine()), Ok(()));
+        assert!(r.rien_de_change());
+    }
+
+    /// Une action sans touche d'origine en reçoit une, et la rend.
+    #[test]
+    fn une_action_sans_touche_en_recoit_une() {
+        let mut r = Registre::default();
+        assert_eq!(r.de(Action::Micro), None);
+        assert!(!r.changee(Action::Micro));
+        let m = Combinaison::ctrl(Key::M).et_maj();
+        assert_eq!(r.donner(Action::Micro, Some(m)), Ok(()));
+        assert!(r.changee(Action::Micro));
+        assert_eq!(r.donner(Action::Sourd, Some(m)), Err(Refus::Prise(Action::Micro)));
+        let (copie, texte) = relu(&r);
+        assert_eq!((copie.de(Action::Micro), texte.as_str()), (Some(m), "micro=ctrl+maj+M"));
+        assert_eq!(r.remettre(Action::Micro), Ok(()));
+        assert!(r.rien_de_change() && r.de(Action::Micro).is_none());
+        // La lui retirer alors qu'elle n'en a pas ne change rien non plus.
+        assert_eq!(r.donner(Action::Micro, None), Ok(()));
         assert!(r.rien_de_change());
     }
 
@@ -614,10 +691,10 @@ mod tests {
     #[test]
     fn un_rangement_abime_retombe_sur_l_origine() {
         let r = lu("aller-a=ctrl+Zorglub,inconnue=ctrl+J,gras=K,code=ctrl+F,chercher,,italique=ctrl+maj+I");
-        assert_eq!(r.de(Action::AllerA), Some(Action::AllerA.origine()), "touche inconnue");
-        assert_eq!(r.de(Action::Gras), Some(Action::Gras.origine()), "sans modificateur");
-        assert_eq!(r.de(Action::Code), Some(Action::Code.origine()), "déjà prise par chercher");
-        assert_eq!(r.de(Action::Chercher), Some(Action::Chercher.origine()));
+        assert_eq!(r.de(Action::AllerA), Action::AllerA.origine(), "touche inconnue");
+        assert_eq!(r.de(Action::Gras), Action::Gras.origine(), "sans modificateur");
+        assert_eq!(r.de(Action::Code), Action::Code.origine(), "déjà prise par chercher");
+        assert_eq!(r.de(Action::Chercher), Action::Chercher.origine());
         assert_eq!(r.libelle(Action::Italique).as_deref(), Some("Ctrl+Maj+I"));
     }
 
