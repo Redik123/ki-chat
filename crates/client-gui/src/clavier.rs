@@ -5,7 +5,8 @@
 //!   emballent la sélection — ou posent la paire de marques, le curseur au
 //!   milieu. Refaits, ils la déballent.
 //! - Partout : Alt+↑ / Alt+↓ vont au salon textuel d'à côté, Alt+Maj+↑ / ↓
-//!   au prochain qui a du non-lu ; Ctrl+F ouvre la recherche.
+//!   au prochain qui a du non-lu ; Ctrl+F ouvre la recherche, Ctrl+K la
+//!   fenêtre « aller à » (voir `aller_a`).
 //! - Dans le fil : PageHaut / PageBas remontent ou redescendent d'un écran,
 //!   Échap revient tout en bas — et marque lu, puisqu'on y est.
 //!
@@ -178,6 +179,19 @@ impl KiApp {
     /// salon textuel à l'autre, Alt+Maj+↑ / ↓ vers le prochain non-lu,
     /// Ctrl+F pour chercher.
     pub(crate) fn navigation_au_clavier(&mut self, ctx: &egui::Context) {
+        // Ctrl+K ouvre « aller à », et le referme. Ouverte, elle lit ses
+        // touches ici, avant tout le monde, et le reste attend.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
+            if self.aller_a.ouvert {
+                self.aller_a.fermer();
+            } else {
+                self.aller_a.ouvrir();
+            }
+        }
+        if self.aller_a.ouvert {
+            self.aller_a.lire_les_touches(ctx);
+            return;
+        }
         let alt = egui::Modifiers::ALT;
         let alt_maj = egui::Modifiers::ALT | egui::Modifiers::SHIFT;
         // Avec Maj d'abord : sans Maj, le motif accepterait aussi Alt+Maj.

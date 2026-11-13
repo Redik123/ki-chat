@@ -73,6 +73,7 @@ mod session;
 mod reglages;
 mod audio;
 mod admin_ui;
+mod aller_a;
 mod barre;
 mod claude_ui;
 mod clavier;
@@ -716,6 +717,8 @@ struct KiApp {
     /// La recherche dans l'historique : la requête, ses résultats, le saut dans
     /// le passé.
     recherche: recherche_ui::Recherche,
+    /// Ctrl+K : aller à un salon ou à un membre.
+    aller_a: aller_a::AllerA,
     /// Le salon privé de Claude, et l'onglet du propriétaire.
     claude: claude_ui::Claude,
     /// Ce que le registre dit du démarrage avec Windows, relu à l'ouverture
@@ -1057,6 +1060,7 @@ impl KiApp {
             echelle_posee: 1.0,
             fenetre_a_verifier: 0,
             retour: secours::retour_demande(),
+            aller_a: aller_a::AllerA::default(),
             recherche: recherche_ui::Recherche {
                 ouverte: false,
                 requete: String::new(),
@@ -4036,6 +4040,9 @@ impl KiApp {
             self.main_screen(ui, &voice);
         } else {
             self.login_screen(ui);
+        }
+        if self.session.welcomed {
+            self.aller_a_window(ctx);
         }
         self.update_window(ctx);
         self.zone_dialogue_window(ctx);

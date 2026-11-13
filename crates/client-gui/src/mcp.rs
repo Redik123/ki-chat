@@ -518,6 +518,7 @@ impl KiApp {
             (self.admin.ouverte, "administration"),
             (self.show_account, "mon compte"),
             (self.recherche.ouverte, "recherche"),
+            (self.aller_a.ouvert, "aller-a"),
             (self.clips.ouverte, "clips"),
             (self.diffusion.ouverte, "diffusion"),
             (self.menu_message.is_some(), "menu d'un message"),
