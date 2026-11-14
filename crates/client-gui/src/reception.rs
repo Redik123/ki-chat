@@ -204,7 +204,7 @@ impl KiApp {
                 // qu'un serveur au protocole 1 prendrait pour un geste
                 // invalide.
                 self.serveur_cartes = cartes;
-                self.cartes.regles_disponibles = protocole >= 2;
+                self.cartes.lock().unwrap().regles_disponibles = protocole >= 2;
                 // Et pour la carte tactique du salon.
                 self.serveur_tactique = tactique;
                 // Et pour le fil de la soirée.
@@ -785,7 +785,8 @@ impl KiApp {
                 self.musique.resultats_pour = texte;
             }
             ServerMsg::Cartes { table } => {
-                for son in self.cartes.recevoir(table, self.session.my_id) {
+                let sons = self.cartes.lock().unwrap().recevoir(table, self.session.my_id);
+                for son in sons {
                     self.play_sfx(match son {
                         cartes::Son::MonTour => sfx::CARTES_TOUR,
                         cartes::Son::FinDeManche => sfx::CARTES_FIN,
@@ -796,7 +797,7 @@ impl KiApp {
                 }
             }
             ServerMsg::CartesRefus { message } => {
-                self.cartes.refuser(ki_protocol::safe_display(&message, 200));
+                self.cartes.lock().unwrap().refuser(ki_protocol::safe_display(&message, 200));
             }
             ServerMsg::TactiqueEtat { carte } => self.tactique.lock().unwrap().recevoir_etat(carte),
             ServerMsg::Tactique { evenement } => {

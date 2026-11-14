@@ -106,6 +106,15 @@ pub(crate) fn couleur_de_membre(m: &Member) -> Color32 {
     }
 }
 
+/// Un membre vu de la table de cartes : son pseudo, sa couleur, sa photo.
+pub(crate) fn identite_aux_cartes(m: &Member, photo: Option<&eframe::egui::TextureHandle>) -> crate::cartes::Identite {
+    crate::cartes::Identite {
+        nom: ki_protocol::safe_display(&m.username, 32),
+        couleur: couleur_de_membre(m),
+        photo: photo.cloned(),
+    }
+}
+
 /// La pastille « BOT », à la couleur d'accent, à côté d'un nom.
 pub(crate) fn pastille_bot(ui: &mut egui::Ui) -> egui::Response {
     ui::etiquette(ui, "BOT", ACCENT)

@@ -39,10 +39,19 @@ const REFUS_VISIBLE: Duration = Duration::from_secs(4);
 const POULS: Duration = Duration::from_millis(33);
 
 /// De quoi nommer et reconnaître quelqu'un à la table.
+#[derive(Clone, PartialEq)]
 pub struct Identite {
     pub nom: String,
     pub couleur: Color32,
     pub photo: Option<egui::TextureHandle>,
+}
+
+impl Identite {
+    /// Quelqu'un que l'application ne connaît pas, ou plus : parti du
+    /// serveur, son nom reste au fil des coups.
+    pub fn inconnue() -> Self {
+        Self { nom: "quelqu'un".into(), couleur: c::TEXT_DIM, photo: None }
+    }
 }
 
 /// Ce qui mérite un son : le client choisit lequel.
@@ -77,17 +86,42 @@ pub struct Cartes {
     reperes: Reperes,
     /// Quand la table a été peinte pour la dernière fois.
     peinte_le: Option<Instant>,
+    /// La table est dans sa propre fenêtre système (`cartes_detache`), pas
+    /// dans celle de ki-chat.
+    pub detachee: bool,
+    /// Elle sait se détacher : celle de ki-chat, pas celle du banc d'images.
+    detachable: bool,
+    /// Ce qui est arrivé du serveur, compté.
+    revision: u64,
 }
 
 impl Cartes {
+    /// La table de ki-chat, qui sait se détacher — et l'est déjà si on
+    /// l'avait laissée ainsi.
+    pub fn detachable(detachee: bool) -> Self {
+        Self { detachable: true, detachee, ..Self::default() }
+    }
+
+    /// Ce qui est arrivé du serveur depuis le début, compté : détachée, la
+    /// table se redessine quand le compte bouge.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// La table de mon salon, s'il y en a une.
     pub fn table(&self) -> Option<&TableCartes> {
         self.table.as_ref()
     }
 
-    /// Déconnecté : plus de table, plus de fenêtre.
+    /// Déconnecté : plus de table, plus de fenêtre. Détachée, elle le
+    /// reste pour la prochaine fois.
     pub fn effacer(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            detachable: self.detachable,
+            detachee: self.detachee,
+            revision: self.revision + 1,
+            ..Self::default()
+        };
     }
 
     /// À moi de jouer.
@@ -181,12 +215,14 @@ impl Cartes {
         }
         self.table = table;
         self.recue = Some(Instant::now());
+        self.revision += 1;
         sons
     }
 
     /// Un geste refusé par le serveur.
     pub fn refuser(&mut self, message: String) {
         self.refus = Some((message, Instant::now()));
+        self.revision += 1;
     }
 
     /// Le temps qui reste au joueur du tour, en millisecondes.
@@ -195,7 +231,8 @@ impl Cartes {
         t.reste_ms.saturating_sub(recue.elapsed().as_millis().min(u32::MAX as u128) as u32)
     }
 
-    /// La fenêtre, si elle est ouverte ; renvoie mes gestes.
+    /// La fenêtre dans celle de ki-chat, si elle est ouverte et qu'on ne
+    /// l'a pas détachée ; renvoie mes gestes.
     pub fn fenetre(
         &mut self,
         ctx: &egui::Context,
@@ -204,7 +241,7 @@ impl Cartes {
         qui: &dyn Fn(UserId) -> Identite,
     ) -> Vec<ActionCartes> {
         let mut actions = Vec::new();
-        if !self.ouvert {
+        if !self.ouvert || self.detachee {
             return actions;
         }
         let mut ouvert = true;
@@ -215,9 +252,6 @@ impl Cartes {
             .taille_min(660.0, 560.0)
             .show(ctx, |ui| self.contenu(ui, moi, en_vocal, qui, &mut actions));
         self.ouvert = ouvert;
-        if self.table.as_ref().is_some_and(|t| t.phase == PhaseCartes::EnCours) {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
         actions
     }
 
@@ -236,8 +270,12 @@ impl Cartes {
         // Le tapis : le fond le plus sombre, une pointe de vert.
         p.rect_filled(zone, rayon::XL, c::melanger(c::BG_DEEP, c::ACCENT, 0.05));
         p.rect_stroke(zone, rayon::XL, Stroke::new(1.0, c::BORDER), StrokeKind::Inside);
+        let tapis = zone;
         let zone = zone.shrink(espace::L);
-        let Some(moi) = moi else { return };
+        let Some(moi) = moi else {
+            self.bouton_detacher(ui, tapis);
+            return;
+        };
         match self.table.clone() {
             None => self.sans_table(ui, zone, en_vocal, actions),
             Some(t) if t.phase == PhaseCartes::Attente => self.attente(ui, zone, &t, moi, qui, actions),
@@ -252,6 +290,33 @@ impl Cartes {
             } else {
                 self.refus = None;
             }
+        }
+        self.bouton_detacher(ui, tapis);
+        // Le compte à rebours du tour avance sans qu'on touche à rien.
+        if self.table.as_ref().is_some_and(|t| t.phase == PhaseCartes::EnCours) {
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+    }
+
+    /// Dans un coin du tapis : la table dans sa propre fenêtre, sur un
+    /// second écran — ou de retour dans celle de ki-chat. L'application le
+    /// lit à sa prochaine image : on la réveille. Posé en dernier, le
+    /// bouton passe devant ce que la table a de cliquable dessous.
+    fn bouton_detacher(&mut self, ui: &mut egui::Ui, tapis: Rect) {
+        if !self.detachable {
+            return;
+        }
+        const COTE: f32 = 26.0;
+        let coin = Rect::from_min_size(pos2(tapis.right() - COTE - 6.0, tapis.top() + 6.0), Vec2::splat(COTE));
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(coin));
+        let (icone, bulle) = if self.detachee {
+            (Icon::ChevronLeft, "Rattacher : la table revient dans la fenêtre de ki-chat")
+        } else {
+            (Icon::Screen, "Détacher : la table dans sa propre fenêtre, à poser sur un second écran")
+        };
+        if ui::Bouton::icone_seule(icone).cote(COTE).bulle(bulle).show(&mut ui).clicked() {
+            self.detachee = !self.detachee;
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
         }
     }
 
@@ -2119,6 +2184,21 @@ mod tests {
         };
         assert!(cartes.recevoir(Some(autre), Some(1)).is_empty());
         assert!(cartes.anims.is_empty());
+    }
+
+    #[test]
+    fn se_deconnecter_ne_rattache_pas_la_table() {
+        let mut cartes = Cartes::detachable(true);
+        cartes.ouvert = true;
+        let avant = cartes.revision();
+        cartes.recevoir(Some(table_de_test(&[13], 2)), Some(1));
+        cartes.refuser("pas ton tour".into());
+        assert_eq!(cartes.revision(), avant + 2, "ce qui arrive du serveur se compte");
+        cartes.effacer();
+        assert!(cartes.detachee && cartes.detachable, "détachée, elle le reste");
+        assert!(!cartes.ouvert && cartes.table().is_none(), "plus de table, plus de fenêtre");
+        assert!(cartes.revision() > avant + 2, "la table effacée se redessine aussi");
+        assert!(!Cartes::default().detachee, "d'origine, dans la fenêtre de ki-chat");
     }
 
     #[test]

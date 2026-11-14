@@ -245,7 +245,7 @@ impl KiApp {
                     // La table de cartes du salon : « À toi ! » quand on
                     // attend après moi.
                     if self.serveur_cartes {
-                        let bouton = if self.cartes.mon_tour(self.session.my_id) {
+                        let bouton = if self.cartes.lock().unwrap().mon_tour(self.session.my_id) {
                             ui::Bouton::new("À toi !").icone(Icon::Cartes).teinte(Ton::Accent).show(ui)
                         } else {
                             bouton_de_barre(ui, etroite, Icon::Cartes, "Cartes")
@@ -254,7 +254,8 @@ impl KiApp {
                             .on_hover_text("Dernière carte : un jeu de cartes avec ceux de ton salon vocal")
                             .clicked()
                         {
-                            self.cartes.ouvert = !self.cartes.ouvert;
+                            let mut cartes = self.cartes.lock().unwrap();
+                            cartes.ouvert = !cartes.ouvert;
                         }
                     }
                     if bouton_de_barre(ui, etroite, Icon::Pencil, "Tactique")

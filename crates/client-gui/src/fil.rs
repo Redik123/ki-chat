@@ -733,15 +733,14 @@ impl KiApp {
                 }
 
                 // --- Cartes : une table dans mon salon, fenêtre fermée ---
-                let table_cartes = if self.cartes.ouvert {
-                    None
-                } else {
-                    self.cartes.table().map(|t| (t.phase, t.joueurs.len()))
+                let table_cartes = {
+                    let cartes = self.cartes.lock().unwrap();
+                    let moi = self.session.my_id;
+                    cartes.table().filter(|_| !cartes.ouvert).map(|t| {
+                        (t.phase, t.joueurs.len(), cartes.mon_tour(moi), cartes.place_libre(moi), cartes.ma_place_au_bot(moi))
+                    })
                 };
-                if let Some((phase, assis)) = table_cartes {
-                    let mon_tour = self.cartes.mon_tour(self.session.my_id);
-                    let place_libre = self.cartes.place_libre(self.session.my_id);
-                    let au_bot = self.cartes.ma_place_au_bot(self.session.my_id);
+                if let Some((phase, assis, mon_tour, place_libre, au_bot)) = table_cartes {
                     egui::Panel::top("chat_cartes")
                         .frame(
                             egui::Frame::NONE
@@ -777,7 +776,7 @@ impl KiApp {
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui::Bouton::new("Voir la table").icone(Icon::Cartes).show(ui).clicked() {
-                                        self.cartes.ouvert = true;
+                                        self.cartes.lock().unwrap().ouvert = true;
                                     }
                                 });
                             });

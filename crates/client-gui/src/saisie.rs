@@ -502,7 +502,7 @@ impl KiApp {
             Ordre::Pause => self.commander_musique(C::Pause),
             Ordre::Reprendre => self.commander_musique(C::Lecture),
             Ordre::Suivant => self.commander_musique(C::Suivant),
-            Ordre::Cartes => self.cartes.ouvert = true,
+            Ordre::Cartes => self.cartes.lock().unwrap().ouvert = true,
             Ordre::Chercher(mots) => {
                 // Comme Entrée dans le champ du haut : la fenêtre des
                 // résultats s'ouvre, la requête part. Sans mots, elle

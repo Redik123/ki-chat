@@ -57,7 +57,7 @@ fn outils() -> Value {
             "properties": {
                 "x": { "type": "number", "description": "Abscisse en points, lue sur la capture" },
                 "y": { "type": "number", "description": "Ordonnée en points, lue sur la capture" },
-                "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique"], "description": "Par défaut : principale. « valorant » : la page VALORANT détachée dans sa fenêtre" },
+                "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique", "cartes"], "description": "Par défaut : principale. « valorant » : la page VALORANT détachée dans sa fenêtre" },
             },
             "required": ["x", "y"],
             "description": quoi,
@@ -91,7 +91,7 @@ fn outils() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique"], "description": "Par défaut : principale" },
+                    "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique", "cartes"], "description": "Par défaut : principale" },
                 },
             },
         },
@@ -118,7 +118,7 @@ fn outils() -> Value {
                 "type": "object",
                 "properties": {
                     "texte": { "type": "string" },
-                    "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique"], "description": "Par défaut : principale" },
+                    "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique", "cartes"], "description": "Par défaut : principale" },
                 },
                 "required": ["texte"],
             },
@@ -134,7 +134,7 @@ fn outils() -> Value {
                     "ctrl": { "type": "boolean" },
                     "maj": { "type": "boolean" },
                     "alt": { "type": "boolean" },
-                    "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique"], "description": "Par défaut : principale" },
+                    "fenetre": { "type": "string", "enum": ["principale", "valorant", "tactique", "cartes"], "description": "Par défaut : principale" },
                 },
                 "required": ["touche"],
             },

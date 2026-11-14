@@ -18,6 +18,7 @@ mod atelier;
 mod beta_ui;
 mod brouillons;
 mod cartes;
+mod cartes_detache;
 mod clips;
 mod graphes;
 mod icons;
@@ -121,11 +122,11 @@ use admin_ui::AdminTab;
 use fil::{lecture_effective, split_links, MenuMessage};
 use icons::Icon;
 use lanceur::ServerDraft;
-use membres::{couleur_de_membre, empreinte_compte, est_bot, palier_de, MemberRow};
+use membres::{couleur_de_membre, empreinte_compte, est_bot, identite_aux_cartes, palier_de, MemberRow};
 use reglages_ui::{DemandeReglages, Onglet};
 use salons::VoicePrompt;
 use televersement::LienPret;
-use theme::{ACCENT, TEXT, TEXT_DIM};
+use theme::{ACCENT, TEXT};
 use ui::Ton;
 
 /// Les colonnes des salons (à gauche) et des membres (à droite) : leur
@@ -617,8 +618,15 @@ struct KiApp {
     /// Le serveur partage la carte tactique des salons vocaux
     /// (`Welcome.tactique`) : sans lui, chacun dessine sur la sienne.
     serveur_tactique: bool,
-    /// La table de cartes de mon salon vocal, et sa fenêtre.
-    cartes: cartes::Cartes,
+    /// La table de cartes de mon salon vocal. Tenue à deux avec sa fenêtre
+    /// quand on l'a détachée (`cartes_detache`), comme la carte tactique.
+    cartes: std::sync::Arc<std::sync::Mutex<cartes::Cartes>>,
+    /// La fenêtre de la table détachée, tant qu'elle se montre, la place
+    /// qu'elle avait la dernière fois, et ce qu'on lui a déjà fait
+    /// dessiner de ce qui arrive du serveur.
+    cartes_fenetre: Option<cartes_detache::Fenetre>,
+    cartes_place: Option<place::Place>,
+    cartes_revision: u64,
     /// La carte tactique : un plan de VALORANT où dessiner la manche
     /// suivante (V10.1 : chacun la sienne, rien ne part au serveur).
     /// Tenue à deux avec sa fenêtre quand on l'a détachée
@@ -1002,7 +1010,12 @@ impl KiApp {
             donnees_valo: valo_donnees::DonneesValo::default(),
             serveur_cartes: false,
             serveur_tactique: false,
-            cartes: cartes::Cartes::default(),
+            cartes: std::sync::Arc::new(std::sync::Mutex::new(cartes::Cartes::detachable(
+                get("cartes_detachee", "off") == "on",
+            ))),
+            cartes_fenetre: None,
+            cartes_place: place::Place::lire(&get("fenetre_cartes", "")),
+            cartes_revision: 0,
             tactique: std::sync::Arc::new(std::sync::Mutex::new(
                 tactique::Tactique::default().detachee_si(get("tactique_detachee", "off") == "on"),
             )),
@@ -1562,14 +1575,8 @@ impl KiApp {
                 valo::Demande::Rattacher => {
                     self.valo.detachee = false;
                     self.claude.ouvert = false;
-                    // Réduite — à côté de l'horloge ou dans la barre des
-                    // tâches —, la page disparaîtrait de l'écran : ki-chat
-                    // revient avec elle, et devant.
-                    if self.zone.reduite() {
-                        self.rouvrir_depuis_zone(ctx);
-                    }
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                    // Réduite, la page disparaîtrait de l'écran.
+                    self.revenir_devant(ctx);
                 }
                 valo::Demande::FermerLaFiche => {
                     self.donnees_valo.fiche = None;
@@ -1740,7 +1747,9 @@ impl KiApp {
 
     /// Le soundboard : la fenêtre, et ce qu'elle demande au moteur vocal.
     /// Sans moteur (hors connexion), rien ne joue — la fenêtre le dit.
-    /// La table de cartes de mon salon vocal, et mes gestes vers le serveur.
+    /// La table de cartes de mon salon vocal, dans la fenêtre de ki-chat,
+    /// et mes gestes vers le serveur. Détachée, elle se dessine dans sa
+    /// propre fenêtre (`tenir_les_cartes`).
     fn cartes_window(&mut self, ctx: &egui::Context) {
         if !self.serveur_cartes {
             return;
@@ -1749,17 +1758,72 @@ impl KiApp {
         let membres = &self.session.members;
         let avatars = &self.avatars;
         let qui = |id: UserId| {
-            let m = membres.iter().find(|m| m.user_id == id);
-            cartes::Identite {
-                nom: m.map(|m| ki_protocol::safe_display(&m.username, 32)).unwrap_or_else(|| "quelqu'un".into()),
-                couleur: m.map(couleur_de_membre).unwrap_or(TEXT_DIM),
-                photo: avatars.get(&id).map(|(_, t)| t.clone()),
-            }
+            membres
+                .iter()
+                .find(|m| m.user_id == id)
+                .map(|m| identite_aux_cartes(m, avatars.get(&id).map(|(_, t)| t)))
+                .unwrap_or_else(cartes::Identite::inconnue)
         };
-        let actions = self.cartes.fenetre(ctx, self.session.my_id, en_vocal, &qui);
+        let actions = self.cartes.lock().unwrap().fenetre(ctx, self.session.my_id, en_vocal, &qui);
         for action in actions {
             self.send(ClientMsg::Cartes { action });
         }
+    }
+
+    /// La table de cartes détachée, côté logique — qui tourne aussi fenêtre
+    /// réduite : qui est qui à la table, et mes gestes envoyés au serveur.
+    /// Sa fenêtre naît quand la table s'ouvre détachée, et disparaît — sa
+    /// place retenue — quand elle se ferme ou se rattache.
+    fn tenir_les_cartes(&mut self, ctx: &egui::Context) {
+        let (ouverte, detachee, revision) = {
+            let cartes = self.cartes.lock().unwrap();
+            (cartes.ouvert && self.serveur_cartes, cartes.detachee, cartes.revision())
+        };
+        if !(ouverte && detachee) {
+            if let Some(fenetre) = self.cartes_fenetre.take() {
+                self.cartes_place = fenetre.place().or(self.cartes_place);
+                // « Rattacher » : réduite, ki-chat revient avec la table.
+                if ouverte {
+                    self.revenir_devant(ctx);
+                }
+            }
+            return;
+        }
+        let avatars = &self.avatars;
+        let identites = self
+            .session
+            .members
+            .iter()
+            .map(|m| (m.user_id, identite_aux_cartes(m, avatars.get(&m.user_id).map(|(_, t)| t))))
+            .collect();
+        let (cartes, place) = (&self.cartes, self.cartes_place);
+        let fenetre = self.cartes_fenetre.get_or_insert_with(|| cartes_detache::Fenetre::new(cartes.clone(), place));
+        let retour = fenetre.echanger(identites, self.session.my_id, self.session.voice_channel.is_some());
+        if let Some(place) = fenetre.place() {
+            self.cartes_place = Some(place);
+        }
+        if retour.fermer {
+            self.cartes.lock().unwrap().ouvert = false;
+        }
+        // Ce qui est arrivé du serveur depuis la dernière image se dessine.
+        if retour.nouveau || revision != self.cartes_revision {
+            self.cartes_revision = revision;
+            ctx.request_repaint_of(cartes_detache::id());
+        }
+        for action in retour.actions {
+            self.send(ClientMsg::Cartes { action });
+        }
+    }
+
+    /// Ce qu'on rattache revient dans la fenêtre de ki-chat : réduite — à
+    /// côté de l'horloge ou dans la barre des tâches —, elle revient avec,
+    /// et devant.
+    fn revenir_devant(&mut self, ctx: &egui::Context) {
+        if self.zone.reduite() {
+            self.rouvrir_depuis_zone(ctx);
+        }
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
 
     /// La carte tactique : celle de mon salon vocal face à un serveur qui
@@ -1817,11 +1881,7 @@ impl KiApp {
                 self.tactique_place = fenetre.place().or(self.tactique_place);
                 // « Rattacher » : réduite, ki-chat revient avec la carte.
                 if ouverte {
-                    if self.zone.reduite() {
-                        self.rouvrir_depuis_zone(ctx);
-                    }
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                    self.revenir_devant(ctx);
                 }
             }
             return;
@@ -2706,7 +2766,7 @@ impl KiApp {
         self.donnees_valo.stats_demandees = None;
         self.musique.etat = ki_protocol::EtatMusique::default();
         // La table de cartes : celle d'un salon de ce serveur.
-        self.cartes.effacer();
+        self.cartes.lock().unwrap().effacer();
         self.serveur_cartes = false;
         // La carte tactique : celle d'un salon de ce serveur.
         self.tactique.lock().unwrap().recevoir_etat(None);
@@ -4184,9 +4244,11 @@ impl KiApp {
         }
         self.instantane_voix = Some(voice);
         // La page VALORANT détachée : ce qu'elle lit, tenu à jour ici —
-        // fenêtre réduite comprise. La carte tactique de même.
+        // fenêtre réduite comprise. La carte tactique et la table de
+        // cartes de même.
         self.valo_alimenter(ctx, true);
         self.tenir_la_tactique(ctx);
+        self.tenir_les_cartes(ctx);
     }
 
     /// Ce que l'image dessine. eframe ne l'appelle que si la fenêtre se
@@ -4382,6 +4444,9 @@ impl KiApp {
         if let Some(fenetre) = &self.tactique_fenetre {
             fenetre.montrer(ctx);
         }
+        if let Some(fenetre) = &self.cartes_fenetre {
+            fenetre.montrer(ctx);
+        }
 
         self.perf.fin_image();
     }
@@ -4402,6 +4467,8 @@ impl KiApp {
         storage.set_string("fenetre_valo", self.valo_place.map(|p| p.ecrire()).unwrap_or_default());
         storage.set_string("fenetre_tactique", self.tactique_place.map(|p| p.ecrire()).unwrap_or_default());
         storage.set_string("tactique_detachee", if self.tactique.lock().unwrap().detachee { "on" } else { "off" }.into());
+        storage.set_string("fenetre_cartes", self.cartes_place.map(|p| p.ecrire()).unwrap_or_default());
+        storage.set_string("cartes_detachee", if self.cartes.lock().unwrap().detachee { "on" } else { "off" }.into());
         storage.set_string("search_ici", if self.recherche.ici { "on" } else { "off" }.into());
         servers::save(storage, &self.lanceur.book);
         storage.set_string(
