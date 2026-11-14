@@ -34,6 +34,9 @@ struct Partage {
     lance: bool,
 }
 
+/// Se copie : les copies partagent le travail en cours et les textures
+/// déjà montées — une fenêtre à part lit la sienne.
+#[derive(Clone)]
 pub struct Rangs {
     partage: Arc<Mutex<Partage>>,
     textures: HashMap<u8, egui::TextureHandle>,
@@ -82,6 +85,11 @@ impl Rangs {
     }
 
     /// La texture d'un palier, si elle est prête.
+    /// Combien d'icônes sont montées : de quoi voir qu'il y en a une de plus.
+    pub fn montees(&self) -> usize {
+        self.textures.len()
+    }
+
     pub fn texture(&self, tier: u8) -> Option<&egui::TextureHandle> {
         self.textures.get(&tier)
     }

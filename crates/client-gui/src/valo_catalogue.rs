@@ -430,6 +430,10 @@ struct Partage {
 /// Les images du catalogue, par adresse. Les dessins la lisent en
 /// lecture seule : une image absente s'y demande au passage, et
 /// [`Catalogue::preparer`] la monte en texture à l'image suivante.
+///
+/// Il se copie : les copies partagent les demandes en cours et les textures
+/// déjà montées — une fenêtre à part lit la sienne.
+#[derive(Clone)]
 pub struct Catalogue {
     partage: Arc<Mutex<Partage>>,
     textures: HashMap<String, egui::TextureHandle>,
@@ -461,6 +465,11 @@ impl Catalogue {
     }
 
     /// Le dégradé à poser sur une image sous un texte (voir `voile`).
+    /// Combien d'images sont montées : de quoi voir qu'il y en a une de plus.
+    pub fn montees(&self) -> usize {
+        self.textures.len() + usize::from(self.voile.is_some()) + usize::from(self.index.is_some())
+    }
+
     pub fn voile(&self) -> Option<&egui::TextureHandle> {
         self.voile.as_ref()
     }

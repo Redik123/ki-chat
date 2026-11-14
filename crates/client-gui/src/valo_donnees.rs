@@ -8,6 +8,7 @@
 use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ki_protocol::{CurseurMatchs, FicheMembre, FicheValorant, JeuEtat, JourDeJeu, MatchEsport, MonCompte, PartieSoiree};
 
@@ -39,6 +40,35 @@ pub enum MatchsVus<'a> {
     DesFiches,
 }
 
+/// Ce que l'onglet Matchs a sous la main, possédé : de quoi le passer à une
+/// fenêtre à part. Voir [`MatchsVus`].
+#[derive(Clone, Debug, Default)]
+pub enum Matchs {
+    DuServeur(Arc<Vec<PartieSoiree>>),
+    EnLecture,
+    #[default]
+    DesFiches,
+}
+
+impl Matchs {
+    pub fn vus(&self) -> MatchsVus<'_> {
+        match self {
+            Matchs::DuServeur(parties) => MatchsVus::DuServeur(parties),
+            Matchs::EnLecture => MatchsVus::EnLecture,
+            Matchs::DesFiches => MatchsVus::DesFiches,
+        }
+    }
+
+    /// Les mêmes parties — la même lecture, pas une lecture égale.
+    pub fn memes(&self, autre: &Matchs) -> bool {
+        match (self, autre) {
+            (Matchs::DuServeur(a), Matchs::DuServeur(b)) => Arc::ptr_eq(a, b),
+            (Matchs::EnLecture, Matchs::EnLecture) | (Matchs::DesFiches, Matchs::DesFiches) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Une lecture en route : sa borne, la page attendue, quand sa demande est
 /// partie, et ce qui est déjà arrivé.
 struct Lecture {
@@ -57,7 +87,7 @@ struct Lecture {
 /// finie : la suivante se fait à côté, et la remplace d'un coup.
 #[derive(Default)]
 pub(crate) struct MatchsGroupe {
-    parties: Option<Vec<PartieSoiree>>,
+    parties: Option<Arc<Vec<PartieSoiree>>>,
     lecture: Option<Lecture>,
     /// La dernière lecture n'a pas abouti : on ne redemande pas tout seul.
     echec: bool,
@@ -68,11 +98,11 @@ pub(crate) struct MatchsGroupe {
 impl MatchsGroupe {
     /// Ce que l'onglet peut montrer, face à un serveur qui rend les
     /// parties (`servis`) ou non.
-    pub(crate) fn vus(&self, servis: bool) -> MatchsVus<'_> {
+    pub(crate) fn sous_la_main(&self, servis: bool) -> Matchs {
         match &self.parties {
-            Some(parties) if servis => MatchsVus::DuServeur(parties),
-            None if servis && !self.echec => MatchsVus::EnLecture,
-            _ => MatchsVus::DesFiches,
+            Some(parties) if servis => Matchs::DuServeur(parties.clone()),
+            None if servis && !self.echec => Matchs::EnLecture,
+            _ => Matchs::DesFiches,
         }
     }
 
@@ -127,7 +157,7 @@ impl MatchsGroupe {
             l.partie = instant;
             return Some((depuis, Some(suite)));
         }
-        self.parties = self.lecture.take().map(|l| l.recues);
+        self.parties = self.lecture.take().map(|l| Arc::new(l.recues));
         self.echec = false;
         None
     }
@@ -182,28 +212,28 @@ impl Chargement {
 pub(crate) struct DonneesValo {
     /// Les fiches du groupe, telles que le serveur les a rendues
     /// (`StatsValorant`), et si elles sont arrivées depuis la demande.
-    pub(crate) stats: Vec<FicheMembre>,
+    pub(crate) stats: Arc<Vec<FicheMembre>>,
     pub(crate) stats_recu: bool,
     /// La demande en vol : quand elle est partie. Rendue à `None` par la
     /// réponse — ou par l'abandon, passé [`REPONSE_MAX`].
     pub(crate) stats_demandees: Option<Instant>,
     /// Les matchs d'e-sport à venir, pour l'accueil de la page.
-    pub(crate) esports: Vec<MatchEsport>,
+    pub(crate) esports: Arc<Vec<MatchEsport>>,
     /// Les 168 cases jour × heure (UTC) des parties du groupe sur 30 jours.
-    pub(crate) activite: Vec<u16>,
+    pub(crate) activite: Arc<Vec<u16>>,
     /// Le fil de la soirée (`ServerMsg::Soiree`), sa borne, et la dernière
     /// demande : il se relit toutes les deux minutes tant que l'accueil se
     /// montre.
-    pub(crate) soiree: Vec<PartieSoiree>,
+    pub(crate) soiree: Arc<Vec<PartieSoiree>>,
     pub(crate) soiree_depuis: u64,
     pub(crate) soiree_demandee: Option<Instant>,
     /// Ma propre fiche, entière : « Moi » sur la carte de chaleur de
     /// l'accueil. Demandée une fois par connexion.
-    pub(crate) ma_fiche: Option<FicheValorant>,
+    pub(crate) ma_fiche: Option<Arc<FicheValorant>>,
     pub(crate) ma_fiche_demandee: bool,
     /// Mon journal des parties, tel que le serveur l'a relu, et la
     /// dernière demande.
-    pub(crate) mon_journal: Option<Vec<JourDeJeu>>,
+    pub(crate) mon_journal: Option<Arc<Vec<JourDeJeu>>>,
     pub(crate) mon_journal_demande: Option<Instant>,
     /// Nos comptes Riot liés, d'après le serveur (`MesComptes`) : de quoi
     /// reconnaître, ici, celui qui est ouvert dans le client Riot.
@@ -289,8 +319,8 @@ mod tests {
         let curseur = |date: u64, id: &str| CurseurMatchs { date, id: id.into() };
         let maintenant = 40 * JOUR_MS;
         let mut m = MatchsGroupe::default();
-        assert!(matches!(m.vus(false), MatchsVus::DesFiches), "serveur d'avant : le résumé des fiches");
-        assert!(matches!(m.vus(true), MatchsVus::EnLecture), "rien encore : la lecture va partir");
+        assert!(matches!(m.sous_la_main(false).vus(), MatchsVus::DesFiches), "serveur d'avant : le résumé des fiches");
+        assert!(matches!(m.sous_la_main(true).vus(), MatchsVus::EnLecture), "rien encore : la lecture va partir");
 
         let (depuis, apres) = m.a_demander(maintenant, t0).expect("la première demande");
         assert_eq!((depuis, &apres), (10 * JOUR_MS, &None), "trente jours en arrière, depuis le début");
@@ -299,17 +329,18 @@ mod tests {
 
         // Une page d'une autre lecture : ignorée.
         assert!(m.recevoir(1, None, vec![partie(9, "x")], None, t0).is_none());
-        assert!(m.en_lecture() && matches!(m.vus(true), MatchsVus::EnLecture));
+        assert!(m.en_lecture() && matches!(m.sous_la_main(true).vus(), MatchsVus::EnLecture));
 
         // La première page, puis la seconde, qui redonne la partie « b » :
         // une partie arrivée entre-temps a décalé la liste.
         let suite = m.recevoir(depuis, None, vec![partie(50, "a"), partie(49, "b")], Some(curseur(49, "b")), t0 + s(1));
         assert_eq!(suite, Some((depuis, Some(curseur(49, "b")))), "la page suivante se demande");
-        assert!(matches!(m.vus(true), MatchsVus::EnLecture), "rien ne se montre avant la fin");
+        assert!(matches!(m.sous_la_main(true).vus(), MatchsVus::EnLecture), "rien ne se montre avant la fin");
         assert!(m.recevoir(depuis, None, vec![partie(1, "vieille")], None, t0 + s(1)).is_none(), "la première page ne revient pas");
         let fin = m.recevoir(depuis, Some(curseur(49, "b")), vec![partie(49, "b"), partie(48, "c"), partie(47, ""), partie(47, "")], None, t0 + s(2));
         assert!(fin.is_none() && !m.en_lecture());
-        let MatchsVus::DuServeur(parties) = m.vus(true) else { panic!() };
+        let sous_la_main = m.sous_la_main(true);
+        let MatchsVus::DuServeur(parties) = sous_la_main.vus() else { panic!() };
         let ids: Vec<&str> = parties.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["a", "b", "c", "", ""], "tout, une fois ; deux matchs sans identifiant restent deux");
 
@@ -317,21 +348,21 @@ mod tests {
         assert!(m.a_demander(maintenant, t0 + s(60)).is_none());
         m.perimer();
         let (depuis, _) = m.a_demander(maintenant + 5, t0 + s(61)).expect("la relecture");
-        assert!(matches!(m.vus(true), MatchsVus::DuServeur(p) if p.len() == 5), "l'ancienne lecture reste à l'écran");
+        assert!(matches!(m.sous_la_main(true).vus(), MatchsVus::DuServeur(p) if p.len() == 5), "l'ancienne lecture reste à l'écran");
         // Le serveur ne répond pas : abandon, on garde ce qu'on avait, et
         // rien ne repart tout seul.
         assert!(m.a_demander(maintenant, t0 + s(61) + REPONSE_MAX).is_none());
         assert!(!m.en_lecture());
         assert!(m.a_demander(maintenant, t0 + s(120)).is_none());
         assert!(m.recevoir(depuis, None, Vec::new(), None, t0 + s(121)).is_none(), "une réponse trop tardive est ignorée");
-        assert!(matches!(m.vus(true), MatchsVus::DuServeur(p) if p.len() == 5));
+        assert!(matches!(m.sous_la_main(true).vus(), MatchsVus::DuServeur(p) if p.len() == 5));
 
         // Jamais de réponse à la toute première lecture : le résumé des
         // fiches, jusqu'à ce qu'on redemande.
         let mut m = MatchsGroupe::default();
         m.a_demander(maintenant, t0);
         m.a_demander(maintenant, t0 + REPONSE_MAX);
-        assert!(matches!(m.vus(true), MatchsVus::DesFiches));
+        assert!(matches!(m.sous_la_main(true).vus(), MatchsVus::DesFiches));
         m.perimer();
         assert!(m.a_demander(maintenant, t0 + s(30)).is_some(), "« Actualiser » relance");
         // Une reconnexion pendant la lecture : elle est perdue, et repart.
@@ -348,7 +379,7 @@ mod tests {
             assert!(pages < 1_000);
         }
         assert_eq!(pages + 1, u64::from(MATCHS_PAGES_MAX));
-        assert!(matches!(m.vus(true), MatchsVus::DuServeur(_)));
+        assert!(matches!(m.sous_la_main(true).vus(), MatchsVus::DuServeur(_)));
     }
 
     /// Le suivi des fiches se dit une fois par changement : à l'ouverture

@@ -2254,7 +2254,7 @@ pub fn lowest_free_rank(roles: &[RoleInfo], ceiling: u16) -> Option<u16> {
     (1..=ceiling).find(|r| rank_holder(roles, *r, None).is_none())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Member {
     pub user_id: UserId,
     pub username: String,

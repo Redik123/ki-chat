@@ -44,6 +44,7 @@ mod porte_ui;
 mod boutique;
 mod ptt;
 mod regard_detache;
+mod valo_detache;
 mod reglages_audio;
 mod reglages_casque;
 mod egaliseur_ui;
@@ -648,6 +649,10 @@ struct KiApp {
     /// La page VALORANT du groupe (son état, ses deux fenêtres) et ce que
     /// le serveur en a envoyé : les fiches, les esports, l'activité.
     valo: valo::PageValo,
+    /// La fenêtre de la page VALORANT détachée, tant qu'elle se montre, et
+    /// la place qu'elle avait la dernière fois.
+    valo_fenetre: Option<valo_detache::Fenetre>,
+    valo_place: Option<place::Place>,
     /// Ce que l'on sait de VALORANT : les fiches du groupe, la soirée, sa propre
     /// fiche et son journal, ses comptes Riot, et ce que ce serveur sait faire.
     donnees_valo: valo_donnees::DonneesValo,
@@ -1029,6 +1034,8 @@ impl KiApp {
                 dossier_choisi: Default::default(),
             },
             valo: valo::PageValo::load(get),
+            valo_fenetre: None,
+            valo_place: place::Place::lire(&get("fenetre_valo", "")),
             demarrage_verifie: false,
             barre_sombre: false,
             veilleur_valorant: None,
@@ -1347,13 +1354,36 @@ impl KiApp {
     /// fiche ouverte.
     fn valo_panel(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        self.preparer_valo(&ctx);
-        self.preparer_fiche(&ctx);
+        let chargement = self.tenir_la_page_valo(&ctx);
+        // La page lit un instantané qu'elle possède, le même qu'on passe à
+        // sa fenêtre quand elle est détachée : un seul chemin pour les deux.
+        let instantane = self.instantane_valo(chargement);
+        let (ouvert, demandes) = {
+            let cx = instantane.contexte();
+            let (valo, boutique) = (&mut self.valo, &mut self.boutique);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(theme::BG_BASE).inner_margin(marge::egale(espace::XL)))
+                .show(ui, |ui| valo.centre(ui, &cx, instantane.fiche.as_ref(), boutique))
+                .inner
+        };
+        self.executer_demandes_valo(demandes, &ctx);
+        if !ouvert {
+            self.retour_au_chat();
+        }
+    }
+
+    /// Ce que la page VALORANT attend de l'application tant qu'elle se
+    /// montre, à la place du chat ou dans sa fenêtre : ses images
+    /// préparées, et ce qu'elle lit redemandé au serveur quand il le faut.
+    /// Rend où en est le chargement des fiches.
+    fn tenir_la_page_valo(&mut self, ctx: &egui::Context) -> valo_donnees::Chargement {
+        self.preparer_valo(ctx);
+        self.preparer_fiche(ctx);
         if self.valo.sur_l_accueil() {
             self.demander_soiree();
         }
         if self.valo.sur_les_matchs() {
-            self.tenir_les_matchs(&ctx);
+            self.tenir_les_matchs(ctx);
         }
         // Ma fiche, une fois : « Moi » sur la carte de chaleur.
         if !self.donnees_valo.ma_fiche_demandee {
@@ -1362,38 +1392,102 @@ impl KiApp {
                 self.send(ClientMsg::FicheValorant { user_id: moi });
             }
         }
-        let chargement = self.tenir_les_stats(&ctx);
-        let mut boutique = std::mem::take(&mut self.boutique);
-        let (ouvert, demandes) = {
-            let cx = valo::Contexte {
-                stats: &self.donnees_valo.stats,
-                recu: self.donnees_valo.stats_recu,
-                chargement,
-                esports: &self.donnees_valo.esports,
-                activite: &self.donnees_valo.activite,
-                moi: self.session.my_id,
-                membres: &self.session.members,
-                rangs: &self.rangs,
-                catalogue: &self.catalogue,
-                soiree: &self.donnees_valo.soiree,
-                soiree_servie: self.donnees_valo.serveur_soiree,
-                ma_fiche: self.donnees_valo.ma_fiche.as_ref(),
-                photos: &self.avatars,
-                comparee: self.donnees_valo.comparee.as_ref(),
-                journal: valo::Journal { servi: self.donnees_valo.serveur_journal_lecture, coche: self.reglages.journal_parties, jours: self.donnees_valo.mon_journal.as_deref() },
-                matchs: self.donnees_valo.matchs.vus(self.donnees_valo.serveur_matchs),
-            };
-            let fiche = self.donnees_valo.fiche.as_ref();
-            let valo = &mut self.valo;
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(theme::BG_BASE).inner_margin(marge::egale(espace::XL)))
-                .show(ui, |ui| valo.centre(ui, &cx, fiche, &mut boutique))
-                .inner
+        self.tenir_les_stats(ctx)
+    }
+
+    /// La page VALORANT tient la place du chat : ouverte, et pas dans sa
+    /// propre fenêtre.
+    pub(crate) fn valo_au_centre(&self) -> bool {
+        self.page_valo_montree() && !self.valo.detachee
+    }
+
+    /// Au début d'une image : ce que la fenêtre de la page détachée a fait
+    /// depuis la dernière. Son état de la page est repris avant qu'on y
+    /// touche, ses demandes sont faites, sa fermeture aussi.
+    fn valo_reprendre(&mut self, ctx: &egui::Context) {
+        let Some(fenetre) = &self.valo_fenetre else { return };
+        let retour = fenetre.reprendre();
+        if let Some(page) = retour.page {
+            self.valo = page;
+        }
+        self.executer_demandes_valo(retour.demandes, ctx);
+        if retour.fermer {
+            self.fermer_la_page_valo();
+        }
+    }
+
+    /// À la fin d'une image : la fenêtre de la page détachée reçoit l'état
+    /// de la page et ce qu'elle lit à présent, et se redessine s'il y a du
+    /// nouveau. Elle naît quand la page s'ouvre détachée, et disparaît —
+    /// sa place retenue — quand la page se ferme, se rattache, ou que la
+    /// session tombe. `entretenir` : une fois par image, côté logique —
+    /// qui tourne aussi fenêtre réduite, là où l'interface ne se dessine
+    /// plus.
+    fn valo_alimenter(&mut self, ctx: &egui::Context, entretenir: bool) {
+        let detachee = self.valo.detachee && self.session.welcomed && self.page_valo_montree();
+        if !detachee {
+            if let Some(fenetre) = self.valo_fenetre.take() {
+                self.valo_place = fenetre.place().or(self.valo_place);
+            }
+            return;
+        }
+        let chargement = if entretenir {
+            // Les images arrivées deviennent des textures ici aussi : fenêtre
+            // réduite, `interface` ne le fait plus.
+            self.catalogue.preparer(ctx);
+            self.tenir_la_page_valo(ctx)
+        } else {
+            valo_donnees::Chargement::depuis(self.donnees_valo.stats_demandees.map(|t| t.elapsed()))
         };
-        self.boutique = boutique;
-        self.executer_demandes_valo(demandes);
-        if !ouvert {
-            self.retour_au_chat();
+        let instantane = self.instantane_valo(chargement);
+        let (page, boutique, place) = (&self.valo, &self.boutique, self.valo_place);
+        let fenetre = self.valo_fenetre.get_or_insert_with(|| valo_detache::Fenetre::new(page.clone(), boutique.clone(), place));
+        if fenetre.alimenter(instantane, page) {
+            ctx.request_repaint_of(valo_detache::id());
+        }
+        // Retenue à chaque image : la fenêtre peut disparaître de bien des
+        // façons, jusqu'à la fermeture de ki-chat.
+        if let Some(place) = fenetre.place() {
+            self.valo_place = Some(place);
+        }
+    }
+
+    /// La page VALORANT se ferme, où qu'elle soit, avec sa fiche. Détachée,
+    /// elle le reste : elle se rouvrira dans sa fenêtre.
+    pub(crate) fn fermer_la_page_valo(&mut self) {
+        if self.valo.ouvert || self.donnees_valo.fiche.is_some() {
+            self.valo.ouvert = false;
+            self.donnees_valo.fiche = None;
+            self.donnees_valo.comparee = None;
+            self.valo.quitter_la_fiche();
+        }
+    }
+
+    /// Ce que la page VALORANT lit, à cet instant : des partages de ce que
+    /// le serveur a rendu (rien de lourd n'est copié), et une copie de ce
+    /// qui est petit — les membres, les photos, les images déjà montées.
+    fn instantane_valo(&self, chargement: valo_donnees::Chargement) -> valo::Instantane {
+        let d = &self.donnees_valo;
+        valo::Instantane {
+            stats: d.stats.clone(),
+            recu: d.stats_recu,
+            chargement,
+            esports: d.esports.clone(),
+            activite: d.activite.clone(),
+            moi: self.session.my_id,
+            membres: self.session.members.clone(),
+            rangs: self.rangs.clone(),
+            catalogue: self.catalogue.clone(),
+            soiree: d.soiree.clone(),
+            soiree_servie: d.serveur_soiree,
+            ma_fiche: d.ma_fiche.clone(),
+            photos: self.avatars.clone(),
+            fiche: d.fiche.clone(),
+            comparee: d.comparee.clone(),
+            journal_servi: d.serveur_journal_lecture,
+            journal_coche: self.reglages.journal_parties,
+            journal: d.mon_journal.clone(),
+            matchs: d.matchs.sous_la_main(d.serveur_matchs),
         }
     }
 
@@ -1402,11 +1496,10 @@ impl KiApp {
     /// de Claude, qui tient la même place, aussi.
     fn retour_au_chat(&mut self) {
         self.claude.ouvert = false;
-        if self.valo.ouvert || self.donnees_valo.fiche.is_some() {
-            self.valo.ouvert = false;
-            self.donnees_valo.fiche = None;
-            self.donnees_valo.comparee = None;
-            self.valo.quitter_la_fiche();
+        // Détachée, la page n'a pris la place de rien : le chat est déjà
+        // là, et elle reste où elle est.
+        if !self.valo.detachee {
+            self.fermer_la_page_valo();
         }
     }
 
@@ -1444,9 +1537,30 @@ impl KiApp {
 
     /// Ce que la page VALORANT demande : actualiser, ouvrir une fiche ou la
     /// carte tactique.
-    fn executer_demandes_valo(&mut self, demandes: Vec<valo::Demande>) {
+    fn executer_demandes_valo(&mut self, demandes: Vec<valo::Demande>, ctx: &egui::Context) {
         for demande in demandes {
             match demande {
+                valo::Demande::Detacher => {
+                    // La fenêtre naît à la fin de cette image
+                    // (`valo_alimenter`) ; le chat reprend sa place.
+                    self.valo.detachee = true;
+                }
+                valo::Demande::Rattacher => {
+                    self.valo.detachee = false;
+                    self.claude.ouvert = false;
+                    // Réduite — à côté de l'horloge ou dans la barre des
+                    // tâches —, la page disparaîtrait de l'écran : ki-chat
+                    // revient avec elle, et devant.
+                    if self.zone.reduite() {
+                        self.rouvrir_depuis_zone(ctx);
+                    }
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                }
+                valo::Demande::FermerLaFiche => {
+                    self.donnees_valo.fiche = None;
+                    self.donnees_valo.comparee = None;
+                }
                 valo::Demande::Actualiser => {
                     self.demander_stats();
                     self.donnees_valo.soiree_demandee = None;
@@ -1834,7 +1948,11 @@ impl KiApp {
     /// Ouvre la page de stats du groupe et demande les fiches au serveur —
     /// elles viennent de son cache, HenrikDev n'est pas sollicité.
     fn ouvrir_stats(&mut self) {
-        self.claude.ouvert = false;
+        // Détachée, elle ne prend la place de rien : le salon de Claude
+        // reste où il est.
+        if !self.valo.detachee {
+            self.claude.ouvert = false;
+        }
         self.valo.ouvert = true;
         self.demander_stats();
         self.donnees_valo.matchs.perimer();
@@ -1904,7 +2022,7 @@ impl KiApp {
     /// Les icônes de rang de la page du groupe — les fiches, et le rang de
     /// ceux qui jouent, fiche ou pas — et le catalogue.
     fn preparer_valo(&mut self, ctx: &egui::Context) {
-        for f in &self.donnees_valo.stats {
+        for f in self.donnees_valo.stats.iter() {
             self.rangs.preparer(ctx, f.fiche.rang.tier);
             if let Some(pic) = &f.fiche.pic {
                 self.rangs.preparer(ctx, pic.tier);
@@ -2510,7 +2628,7 @@ impl KiApp {
         // La fiche VALORANT ouverte, les fiches et l'état du bot : ceux d'un
         // serveur. Le suivant renvoie les siens.
         self.donnees_valo.fiche = None;
-        self.donnees_valo.stats.clear();
+        self.donnees_valo.stats = Default::default();
         self.donnees_valo.stats_recu = false;
         self.donnees_valo.stats_demandees = None;
         self.musique.etat = ki_protocol::EtatMusique::default();
@@ -2527,7 +2645,7 @@ impl KiApp {
         self.donnees_valo.suivi_a_la_connexion(false);
         self.donnees_valo.serveur_matchs = false;
         self.donnees_valo.matchs.oublier();
-        self.donnees_valo.soiree.clear();
+        self.donnees_valo.soiree = Default::default();
         self.donnees_valo.soiree_demandee = None;
         self.donnees_valo.ma_fiche = None;
         self.donnees_valo.ma_fiche_demandee = false;
@@ -3233,7 +3351,7 @@ impl KiApp {
         self.voice_bar(ui, voice);
         self.sidebar(ui, voice);
         self.roster_panel(ui, voice);
-        if self.valo.ouvert || self.donnees_valo.fiche.is_some() {
+        if self.valo_au_centre() {
             self.valo_panel(ui);
         } else if self.claude.ouvert && self.claude.servi {
             self.claude_panel(ui);
@@ -3624,11 +3742,27 @@ impl<'a> MemberRow<'a> {
 
 /// La fiche d'un membre, ouverte au clic droit : on l'a demandée au
 /// serveur, et on attend — puis on l'a, ou on sait qu'il n'y en a pas.
+#[derive(Clone)]
 pub(crate) struct FicheOuverte {
     pub(crate) user_id: UserId,
     pub(crate) username: String,
     pub(crate) recue: bool,
-    pub(crate) fiche: Option<ki_protocol::FicheValorant>,
+    pub(crate) fiche: Option<std::sync::Arc<ki_protocol::FicheValorant>>,
+}
+
+impl FicheOuverte {
+    /// La même fiche au même point : le même membre, et la même réponse du
+    /// serveur — pas une réponse égale.
+    pub(crate) fn meme(&self, autre: &FicheOuverte) -> bool {
+        self.user_id == autre.user_id
+            && self.username == autre.username
+            && self.recue == autre.recue
+            && match (&self.fiche, &autre.fiche) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3706,6 +3840,10 @@ impl KiApp {
         // par omission — c'est le coût complet d'une image qu'on cherche, pas
         // celui de la partie qu'on a pensé à instrumenter.
         self.perf.debut_image();
+
+        // La page VALORANT détachée a pu changer d'onglet ou demander
+        // quelque chose depuis la dernière image : repris avant tout.
+        self.valo_reprendre(ctx);
 
         // Le suivi des fiches VALORANT : le serveur apprend que la page se
         // montre, puis qu'elle ne se montre plus — il ne prévient que ceux
@@ -3972,6 +4110,9 @@ impl KiApp {
             ctx.request_repaint_after(delai);
         }
         self.instantane_voix = Some(voice);
+        // La page VALORANT détachée : ce qu'elle lit, tenu à jour ici —
+        // fenêtre réduite comprise.
+        self.valo_alimenter(ctx, true);
     }
 
     /// Ce que l'image dessine. eframe ne l'appelle que si la fenêtre se
@@ -4098,7 +4239,7 @@ impl KiApp {
                 prendre_echap(ctx);
             } else if ki_ui::fenetre::echap(ctx) {
                 // La modale ou la fenêtre se fermera en se dessinant.
-            } else if self.session.welcomed && (self.valo.ouvert || self.donnees_valo.fiche.is_some()) {
+            } else if self.session.welcomed && self.valo_au_centre() {
                 // Une fiche ouverte depuis le classement ou les matchs : on
                 // y retourne. Sinon c'est la page qui se ferme — sur l'onglet
                 // Profil, fermer la fiche seule rouvrait la sienne aussitôt.
@@ -4157,6 +4298,14 @@ impl KiApp {
             ctx.request_repaint_after(delai);
         }
 
+        // La page VALORANT détachée : ce que cette image a changé (un
+        // bouton, une touche) lui arrive, et sa fenêtre se déclare — sans
+        // quoi egui la ferme.
+        self.valo_alimenter(ctx, false);
+        if let Some(fenetre) = &self.valo_fenetre {
+            fenetre.montrer(ctx);
+        }
+
         self.perf.fin_image();
     }
 
@@ -4173,6 +4322,7 @@ impl KiApp {
         // et « Ce salon / Partout » de la recherche repartaient de zéro.
         storage.set_string("regard_volume", format!("{}", self.regard.volume));
         storage.set_string("fenetre_stream", self.regard.place_detachee.map(|p| p.ecrire()).unwrap_or_default());
+        storage.set_string("fenetre_valo", self.valo_place.map(|p| p.ecrire()).unwrap_or_default());
         storage.set_string("search_ici", if self.recherche.ici { "on" } else { "off" }.into());
         servers::save(storage, &self.lanceur.book);
         storage.set_string(

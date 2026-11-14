@@ -256,7 +256,7 @@ impl KiApp {
             Action::Reglages => self.basculer_les_reglages(),
             Action::Raccourcis => self.raccourcis.basculer(),
             Action::Compte => self.show_account = !self.show_account,
-            Action::Valorant if self.valo.ouvert => self.retour_au_chat(),
+            Action::Valorant if self.valo.ouvert => self.fermer_la_page_valo(),
             Action::Valorant => self.ouvrir_stats(),
             Action::Tableau => self.ouvrir_le_tableau(),
             Action::Claude if self.claude.servi => self.ouvrir_claude(),

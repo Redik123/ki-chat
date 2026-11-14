@@ -167,11 +167,11 @@ impl Banc {
         membres[3].online = false;
         // Une soirée pauvre : trois classés ; puis rien du tout.
         let pauvre = FicheValorant { matchs: fiches[3].matchs[..3].to_vec(), historique_rr: fiches[3].historique_rr[..3].to_vec(), saisons: Vec::new(), medailles: None, ..fiches[3].clone() };
-        let comparee = FicheOuverte { user_id: 2, username: "Jerem".into(), recue: true, fiche: Some(fiches[1].clone()) };
+        let comparee = FicheOuverte { user_id: 2, username: "Jerem".into(), recue: true, fiche: Some(Arc::new(fiches[1].clone())) };
         let ouvertes = vec![
-            FicheOuverte { user_id: 1, username: "drion".into(), recue: true, fiche: Some(fiches[0].clone()) },
-            FicheOuverte { user_id: 4, username: "Kevin".into(), recue: true, fiche: Some(pauvre) },
-            FicheOuverte { user_id: 9, username: "Nouveau".into(), recue: true, fiche: Some(FicheValorant { riot_id: "Nouveau#EUW".into(), ..Default::default() }) },
+            FicheOuverte { user_id: 1, username: "drion".into(), recue: true, fiche: Some(Arc::new(fiches[0].clone())) },
+            FicheOuverte { user_id: 4, username: "Kevin".into(), recue: true, fiche: Some(Arc::new(pauvre)) },
+            FicheOuverte { user_id: 9, username: "Nouveau".into(), recue: true, fiche: Some(Arc::new(FicheValorant { riot_id: "Nouveau#EUW".into(), ..Default::default() })) },
         ];
         let mut page = PageValo::load(|_, defaut| defaut.to_string());
         page.fiche_classe = true;
@@ -223,7 +223,7 @@ impl eframe::App for Banc {
             catalogue: &self.catalogue,
             soiree: if soiree_servie { &self.soiree } else { &[] },
             soiree_servie,
-            ma_fiche: self.ouvertes[0].fiche.as_ref(),
+            ma_fiche: self.ouvertes[0].fiche.as_deref(),
             photos: &self.photos,
             comparee: Some(&self.comparee),
             journal: Journal { servi: true, coche: true, jours: Some(&self.journal) },

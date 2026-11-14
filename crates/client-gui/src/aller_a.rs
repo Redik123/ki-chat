@@ -302,7 +302,7 @@ impl KiApp {
                     courant: if vocal {
                         s.voice_channel == Some(ch.id)
                     } else {
-                        s.current == Some(ch.id) && !self.valo.ouvert && !self.claude.ouvert
+                        s.current == Some(ch.id) && !self.valo_au_centre() && !self.claude.ouvert
                     },
                     occupants: if vocal { s.members.iter().filter(|m| m.voice == Some(ch.id)).count() } else { 0 },
                 }

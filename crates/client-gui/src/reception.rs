@@ -759,6 +759,9 @@ impl KiApp {
                 self.donnees_valo.mes_comptes = comptes;
             }
             ServerMsg::FicheValorant { user_id, fiche } => {
+                // Une fiche, lue de plusieurs endroits et d'une fenêtre à
+                // part : partagée, pas copiée.
+                let fiche = fiche.map(std::sync::Arc::new);
                 if Some(user_id) == self.session.my_id {
                     self.donnees_valo.ma_fiche = fiche.clone();
                 }
@@ -805,12 +808,12 @@ impl KiApp {
                 self.tactique.refuser(ki_protocol::safe_display(&message, 200));
             }
             ServerMsg::MonJournal { jours } => {
-                self.donnees_valo.mon_journal = Some(jours);
+                self.donnees_valo.mon_journal = Some(std::sync::Arc::new(jours));
             }
             ServerMsg::Soiree { depuis, parties } => {
                 // Une réponse d'avant 6 h du matin ne remplace pas la soirée.
                 if depuis == self.donnees_valo.soiree_depuis {
-                    self.donnees_valo.soiree = parties;
+                    self.donnees_valo.soiree = std::sync::Arc::new(parties);
                 }
             }
             ServerMsg::MatchsDuGroupe { depuis, apres, parties, suite } => {
@@ -822,9 +825,9 @@ impl KiApp {
             }
             ServerMsg::ValorantChange => self.fiches_valorant_changees(),
             ServerMsg::StatsValorant { fiches, esports, activite } => {
-                self.donnees_valo.stats = fiches;
-                self.donnees_valo.esports = esports;
-                self.donnees_valo.activite = activite;
+                self.donnees_valo.stats = std::sync::Arc::new(fiches);
+                self.donnees_valo.esports = std::sync::Arc::new(esports);
+                self.donnees_valo.activite = std::sync::Arc::new(activite);
                 self.donnees_valo.stats_recu = true;
                 self.donnees_valo.stats_demandees = None;
             }

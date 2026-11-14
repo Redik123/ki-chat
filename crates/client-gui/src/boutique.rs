@@ -55,7 +55,8 @@ enum Etat {
 /// Le temps avant de retenter après un échec, tant que la page est ouverte.
 const NOUVEL_ESSAI: Duration = Duration::from_secs(45);
 
-/// La lecture, et ce qu'elle a donné.
+/// La lecture, et ce qu'elle a donné. Une copie lit la même.
+#[derive(Clone)]
 pub struct Lecteur {
     etat: Arc<Mutex<Etat>>,
 }

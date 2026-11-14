@@ -231,7 +231,11 @@ impl KiApp {
                         // déjà ouverte, le bouton ramène à l'accueil.
                         let deja = self.valo.ouvert || self.donnees_valo.fiche.is_some();
                         self.ouvrir_stats();
-                        if deja {
+                        if deja && self.valo.detachee {
+                            // Dans sa fenêtre, peut-être derrière une
+                            // autre : le bouton la ramène devant.
+                            ui.ctx().send_viewport_cmd_to(crate::valo_detache::id(), egui::ViewportCommand::Focus);
+                        } else if deja {
                             self.valo.vers_accueil();
                         }
                     }

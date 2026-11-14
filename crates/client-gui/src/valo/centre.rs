@@ -107,6 +107,12 @@ impl PageValo {
         self.onglet_centre == OngletCentre::Accueil
     }
 
+    /// L'onglet devant, par sa clé : ce que l'outil de test rapporte.
+    #[cfg(all(debug_assertions, windows))]
+    pub fn onglet_devant(&self) -> &'static str {
+        self.onglet_centre.cle()
+    }
+
     /// L'onglet Matchs se montre : les parties du groupe doivent être lues.
     pub fn sur_les_matchs(&self) -> bool {
         self.ouvert && self.onglet_centre == OngletCentre::Matchs
@@ -132,8 +138,28 @@ impl PageValo {
                 ui::hint(ui, format!("{n} joueur{s} lié{s}"));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::Bouton::new("Fermer").icone(Icon::Close).show(ui).on_hover_text("retour au chat (Échap)").clicked() {
+                let fermer = if self.detachee { "ferme cette fenêtre" } else { "retour au chat (Échap)" };
+                if ui::Bouton::new("Fermer").icone(Icon::Close).show(ui).on_hover_text(fermer).clicked() {
                     ouvert = false;
+                }
+                // Dans sa propre fenêtre, sur un second écran — ou de
+                // retour à la place du chat.
+                if self.detachee {
+                    if ui::Bouton::new("Rattacher")
+                        .icone(Icon::ChevronLeft)
+                        .show(ui)
+                        .on_hover_text("revient dans la fenêtre de ki-chat, à la place du chat")
+                        .clicked()
+                    {
+                        demandes.push(Demande::Rattacher);
+                    }
+                } else if ui::Bouton::new("Détacher")
+                    .icone(Icon::Screen)
+                    .show(ui)
+                    .on_hover_text("dans sa propre fenêtre, à poser sur un second écran")
+                    .clicked()
+                {
+                    demandes.push(Demande::Detacher);
                 }
                 // Pendant que la réponse arrive, le bouton tourne et ne
                 // redemande pas ; les chiffres d'avant restent à l'écran.
@@ -160,7 +186,14 @@ impl PageValo {
             }
         });
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !ui.ctx().egui_wants_keyboard_input() {
-            ouvert = false;
+            if !self.detachee {
+                ouvert = false;
+            } else if self.echap() {
+                // Dans sa fenêtre, Échap ramène d'un profil à l'onglet d'où
+                // il vient, et s'arrête là : une fenêtre posée sur un autre
+                // écran ne se ferme pas d'une touche.
+                demandes.push(Demande::FermerLaFiche);
+            }
         }
         ui.add_space(espace::L);
 

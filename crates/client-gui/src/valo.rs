@@ -26,6 +26,7 @@ use ki_ui::typo::{Texte, Ton};
 use ki_ui::jetons::{espace, rayon, texte};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{Datelike, TimeZone, Timelike};
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, RichText, Sense, Ui, Vec2};
@@ -229,6 +230,13 @@ pub enum Demande {
     /// Mon journal des parties, résumé jour par jour, pour la vue
     /// Progression de mon profil.
     MonJournal,
+    /// La page dans sa propre fenêtre, à poser sur un second écran.
+    Detacher,
+    /// La page de retour dans la fenêtre de ki-chat, à la place du chat.
+    Rattacher,
+    /// La fiche ouverte se referme, la page reste : Échap dans la fenêtre
+    /// détachée, sur un profil ouvert depuis un autre onglet.
+    FermerLaFiche,
 }
 
 // ---------------------------------------------------------------------
@@ -237,9 +245,15 @@ pub enum Demande {
 
 /// L'état de la page : ce qui se mémorise d'une session à l'autre
 /// (périodes, mode) et ce qui ne dure que le temps qu'elle est ouverte
-/// (filtres, ligne dépliée, point survolé).
+/// (filtres, ligne dépliée, point survolé). Il se copie et se compare :
+/// la page détachée dans sa fenêtre a la sienne, que l'application relit.
+#[derive(Clone, PartialEq)]
 pub struct PageValo {
     pub ouvert: bool,
+    /// La page vit dans sa propre fenêtre (`valo_detache`) et non à la
+    /// place du chat. Retenu d'un lancement à l'autre : qui la pose sur
+    /// son second écran la retrouve là.
+    pub detachee: bool,
     periode: Periode,
     /// Le fil des matchs : un mode, un membre — ou tout.
     filtre_mode: Option<String>,
@@ -273,10 +287,11 @@ pub struct PageValo {
 
 impl PageValo {
     /// Clés mémorisées : `valo_periode`, `fiche_periode`, `fiche_classe`,
-    /// `valo_onglet`, `valo_tri`.
+    /// `valo_onglet`, `valo_tri`, `valo_detachee`.
     pub fn load(get: impl Fn(&str, &str) -> String) -> Self {
         Self {
             ouvert: false,
+            detachee: get("valo_detachee", "off") == "on",
             periode: Periode::depuis(&get("valo_periode", "30")),
             filtre_mode: None,
             filtre_membre: None,
@@ -301,6 +316,7 @@ impl PageValo {
         storage.set_string("fiche_classe", if self.fiche_classe { "on" } else { "off" }.into());
         storage.set_string("valo_onglet", self.onglet_a_garder().cle().into());
         storage.set_string("valo_tri", classement::ecrire_tri(self.tri_classement));
+        storage.set_string("valo_detachee", if self.detachee { "on" } else { "off" }.into());
     }
 
     /// La vue Comparer du profil, l'onglet Profil devant.
@@ -775,6 +791,98 @@ pub struct Contexte<'a> {
     /// Les parties du groupe, pour l'onglet Matchs : celles du serveur, ou
     /// à défaut celles du résumé des fiches.
     pub matchs: MatchsVus<'a>,
+}
+
+/// Ce que la page lit, possédé : de quoi la dessiner sans rien emprunter à
+/// l'application — dans la fenêtre principale comme dans la sienne, quand
+/// on l'a détachée. Ce que le serveur a rendu y est partagé, pas copié ;
+/// [`Instantane::contexte`] en fait le [`Contexte`] que la page connaît.
+#[derive(Clone)]
+pub struct Instantane {
+    pub stats: Arc<Vec<FicheMembre>>,
+    pub recu: bool,
+    pub chargement: crate::valo_donnees::Chargement,
+    pub esports: Arc<Vec<MatchEsport>>,
+    pub activite: Arc<Vec<u16>>,
+    pub moi: Option<UserId>,
+    pub membres: Vec<Member>,
+    pub rangs: rangs::Rangs,
+    pub catalogue: Catalogue,
+    pub soiree: Arc<Vec<PartieSoiree>>,
+    pub soiree_servie: bool,
+    pub ma_fiche: Option<Arc<FicheValorant>>,
+    pub photos: HashMap<UserId, (String, egui::TextureHandle)>,
+    /// La fiche ouverte, et celle qu'on lui compare.
+    pub fiche: Option<FicheOuverte>,
+    pub comparee: Option<FicheOuverte>,
+    pub journal_servi: bool,
+    pub journal_coche: bool,
+    pub journal: Option<Arc<Vec<ki_protocol::JourDeJeu>>>,
+    pub matchs: crate::valo_donnees::Matchs,
+}
+
+impl Instantane {
+    pub fn contexte(&self) -> Contexte<'_> {
+        Contexte {
+            stats: &self.stats,
+            recu: self.recu,
+            chargement: self.chargement,
+            esports: &self.esports,
+            activite: &self.activite,
+            moi: self.moi,
+            membres: &self.membres,
+            rangs: &self.rangs,
+            catalogue: &self.catalogue,
+            soiree: &self.soiree,
+            soiree_servie: self.soiree_servie,
+            ma_fiche: self.ma_fiche.as_deref(),
+            photos: &self.photos,
+            comparee: self.comparee.as_ref(),
+            journal: Journal { servi: self.journal_servi, coche: self.journal_coche, jours: self.journal.as_deref().map(Vec::as_slice) },
+            matchs: self.matchs.vus(),
+        }
+    }
+
+    /// Rien de ce que la page montre n'a changé d'un instantané à l'autre :
+    /// les mêmes réponses du serveur (les mêmes, pas des réponses égales),
+    /// les mêmes membres, autant d'images montées. Une fenêtre à part n'a
+    /// alors rien à redessiner.
+    pub fn pareil(&self, autre: &Instantane) -> bool {
+        fn memes<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+            match (a, b) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        fn meme_fiche(a: &Option<FicheOuverte>, b: &Option<FicheOuverte>) -> bool {
+            match (a, b) {
+                (Some(a), Some(b)) => a.meme(b),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        Arc::ptr_eq(&self.stats, &autre.stats)
+            && self.recu == autre.recu
+            && self.chargement == autre.chargement
+            && Arc::ptr_eq(&self.esports, &autre.esports)
+            && Arc::ptr_eq(&self.activite, &autre.activite)
+            && self.moi == autre.moi
+            && self.membres == autre.membres
+            && self.rangs.montees() == autre.rangs.montees()
+            && self.catalogue.montees() == autre.catalogue.montees()
+            && Arc::ptr_eq(&self.soiree, &autre.soiree)
+            && self.soiree_servie == autre.soiree_servie
+            && memes(&self.ma_fiche, &autre.ma_fiche)
+            && self.photos.len() == autre.photos.len()
+            && self.photos.iter().all(|(id, (cle, _))| autre.photos.get(id).is_some_and(|(c, _)| c == cle))
+            && meme_fiche(&self.fiche, &autre.fiche)
+            && meme_fiche(&self.comparee, &autre.comparee)
+            && self.journal_servi == autre.journal_servi
+            && self.journal_coche == autre.journal_coche
+            && memes(&self.journal, &autre.journal)
+            && self.matchs.memes(&autre.matchs)
+    }
 }
 
 /// Trie stable : ceux qui ont joué d'abord, puis par la clé dans le sens
@@ -1378,6 +1486,75 @@ mod tests {
         });
         assert_eq!(page.onglet_centre, OngletCentre::Classement);
         assert_eq!(classement::ecrire_tri(page.tri_classement), "kd:desc");
+        // La page détachée se retrouve détachée ; d'origine, elle tient la
+        // place du chat.
+        assert!(!page.detachee);
+        assert!(PageValo::load(|cle, defaut| if cle == "valo_detachee" { "on" } else { defaut }.to_string()).detachee);
+    }
+
+    /// Un instantané de la page, vide : ce que l'application passerait
+    /// avant d'avoir rien reçu.
+    fn instantane_vide() -> Instantane {
+        Instantane {
+            stats: Arc::default(),
+            recu: false,
+            chargement: crate::valo_donnees::Chargement::Repos,
+            esports: Arc::default(),
+            activite: Arc::default(),
+            moi: Some(1),
+            membres: membres(),
+            rangs: rangs::Rangs::new(),
+            catalogue: Catalogue::new(),
+            soiree: Arc::default(),
+            soiree_servie: true,
+            ma_fiche: None,
+            photos: HashMap::new(),
+            fiche: None,
+            comparee: None,
+            journal_servi: true,
+            journal_coche: false,
+            journal: None,
+            matchs: crate::valo_donnees::Matchs::DesFiches,
+        }
+    }
+
+    /// Deux instantanés pris coup sur coup sont « pareils » : la fenêtre
+    /// détachée n'a rien à redessiner. Une réponse du serveur qui arrive —
+    /// même égale à la précédente —, un membre qui change, une fiche qui
+    /// s'ouvre ou se remplit : ils ne le sont plus.
+    #[test]
+    fn un_instantane_dit_s_il_y_a_du_nouveau() {
+        let base = instantane_vide();
+        let copie = base.clone();
+        assert!(base.pareil(&copie), "la même chose, copiée");
+
+        let mut autre = base.clone();
+        autre.stats = Arc::new(Vec::new());
+        assert!(!base.pareil(&autre), "une réponse neuve, même vide comme la précédente");
+        let mut autre = base.clone();
+        autre.membres[0].online = !autre.membres[0].online;
+        assert!(!base.pareil(&autre), "un membre a changé");
+        let mut autre = base.clone();
+        autre.chargement = crate::valo_donnees::Chargement::EnCours;
+        assert!(!base.pareil(&autre), "une demande est partie");
+        let mut autre = base.clone();
+        autre.matchs = crate::valo_donnees::Matchs::EnLecture;
+        assert!(!base.pareil(&autre));
+
+        // Une fiche s'ouvre, puis reçoit sa réponse.
+        let mut ouverte = base.clone();
+        ouverte.fiche = Some(FicheOuverte { user_id: 2, username: "Nono".into(), recue: false, fiche: None });
+        assert!(!base.pareil(&ouverte));
+        assert!(ouverte.pareil(&ouverte.clone()));
+        let mut remplie = ouverte.clone();
+        remplie.fiche = Some(FicheOuverte { user_id: 2, username: "Nono".into(), recue: true, fiche: Some(Arc::new(FicheValorant::default())) });
+        assert!(!ouverte.pareil(&remplie));
+        assert!(remplie.pareil(&remplie.clone()), "la même réponse, partagée");
+
+        // Et il donne à la page le contexte qu'elle connaît.
+        let cx = remplie.contexte();
+        assert_eq!((cx.moi, cx.membres.len(), cx.soiree_servie), (Some(1), 4, true));
+        assert!(matches!(cx.matchs, MatchsVus::DesFiches));
     }
 
     /// Échap sur la page. Une fiche ouverte depuis le classement : on y
