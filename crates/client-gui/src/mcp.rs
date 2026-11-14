@@ -109,6 +109,10 @@ pub struct Serveur {
     /// La capture demandée à egui, déposée ici par son rappel.
     image: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
     capture_en_attente: Option<(tokio::sync::oneshot::Sender<Reponse>, Instant)>,
+    /// La fenêtre que la demande en cours vise : la principale, ou la page
+    /// VALORANT détachée. Les événements n'entrent que dans celle-là — et
+    /// chaque fenêtre a ses images, donc son entrée.
+    cible: egui::ViewportId,
 }
 
 impl Serveur {
@@ -127,6 +131,7 @@ impl Serveur {
             injection_depuis: None,
             image: Arc::new(Mutex::new(None)),
             capture_en_attente: None,
+            cible: egui::ViewportId::ROOT,
         }
     }
 
@@ -139,14 +144,20 @@ impl Serveur {
         // pas, la flèche haut ne reprenait pas le dernier message. Pour
         // egui, la fenêtre de test a toujours le focus.
         entree.focused = true;
+        // eframe passe ici pour chaque fenêtre, avec l'entrée de celle-ci :
+        // un clic destiné à la page détachée ne tombe pas dans la
+        // principale, ni l'inverse.
+        if entree.viewport_id != self.cible {
+            return;
+        }
         match self.a_injecter.pop_front() {
             Some(lot) => {
                 entree.events.extend(lot);
-                ctx.request_repaint();
+                ctx.request_repaint_of(self.cible);
             }
             None if self.repos > 0 => {
                 self.repos -= 1;
-                ctx.request_repaint();
+                ctx.request_repaint_of(self.cible);
             }
             None => {}
         }
@@ -312,7 +323,13 @@ impl KiApp {
             let image = s.image.lock().ok().and_then(|mut i| i.take());
             if let Some(image) = image {
                 let (reponse, _) = s.capture_en_attente.take().expect("vérifiée juste au-dessus");
-                let points = ctx.content_rect().size();
+                // La fenêtre principale dit sa taille ; une autre se déduit
+                // de son image, à l'échelle de l'interface.
+                let points = if s.cible == egui::ViewportId::ROOT {
+                    ctx.content_rect().size()
+                } else {
+                    egui::vec2(image.size[0] as f32, image.size[1] as f32) / ctx.pixels_per_point()
+                };
                 let r = match en_png(&image, points) {
                     Ok(png) => Reponse {
                         ok: true,
@@ -333,6 +350,7 @@ impl KiApp {
                 ));
             } else {
                 ctx.request_repaint();
+                ctx.request_repaint_of(s.cible);
             }
             return;
         }
@@ -346,12 +364,26 @@ impl KiApp {
                 tracing::warn!("MCP : événements abandonnés, l'interface ne tourne pas");
             } else {
                 ctx.request_repaint();
+                ctx.request_repaint_of(s.cible);
                 return;
             }
         }
         // Une demande par image : chacune voit l'effet de la précédente.
         let Ok(d) = s.demandes.try_recv() else { return };
         ctx.request_repaint();
+        // La fenêtre visée : la principale, sauf demande contraire.
+        s.cible = match d.arguments.get("fenetre").and_then(Value::as_str) {
+            None | Some("principale") => egui::ViewportId::ROOT,
+            Some("valorant") if self.valo_fenetre.is_some() => crate::valo_detache::id(),
+            Some("valorant") => {
+                let _ = d.reponse.send(Reponse::erreur("la page VALORANT n'est pas détachée : pas de seconde fenêtre"));
+                return;
+            }
+            Some(autre) => {
+                let _ = d.reponse.send(Reponse::erreur(format!("fenêtre inconnue « {autre} » : principale ou valorant")));
+                return;
+            }
+        };
         let r = match d.outil.as_str() {
             "capture" => {
                 let depot = s.image.clone();
@@ -359,12 +391,13 @@ impl KiApp {
                 if let Ok(mut i) = depot.lock() {
                     *i = None;
                 }
-                ctx.request_screenshot(move |image| {
+                let rappel = egui::ScreenshotCallback::new(move |image| {
                     if let Ok(mut i) = depot.lock() {
                         *i = Some(image);
                     }
                     reveil.request_repaint();
                 });
+                ctx.send_viewport_cmd_to(s.cible, egui::ViewportCommand::Screenshot(rappel));
                 s.capture_en_attente = Some((d.reponse, Instant::now()));
                 return;
             }
@@ -459,6 +492,15 @@ impl KiApp {
                 }
                 _ => Reponse::erreur("il faut largeur et hauteur, en points"),
             },
+            // La fenêtre principale réduite dans la barre des tâches, ou
+            // rendue : réduite, eframe n'y dessine plus rien et seule la
+            // logique tourne — ce que vit ki-chat derrière un jeu. De quoi
+            // voir ce qui doit continuer sans elle.
+            "reduire" => {
+                let oui = d.arguments.get("oui").and_then(Value::as_bool).unwrap_or(true);
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(oui));
+                Reponse::ok(if oui { "fenêtre principale réduite" } else { "fenêtre principale rendue" })
+            }
             // Les deux boutons de « Mes réglages », sans leur fenêtre de choix
             // de fichier (elle est à Windows, on ne la pilote pas d'ici).
             "exporter_reglages" => match d.arguments.get("chemin").and_then(Value::as_str) {
@@ -543,6 +585,14 @@ impl KiApp {
                 "repond_a": self.reponse_a.as_ref().map(|r| json!({ "de": r.username, "extrait": r.excerpt })),
             },
             "vocal": { "salon": self.session.voice_channel, "micro_coupe": self.vocal.muted },
+            "reduite": ctx.input(|i| i.viewport().minimized == Some(true)),
+            "valorant": {
+                "ouverte": self.valo.ouvert,
+                "onglet": self.valo.onglet_devant(),
+                "detachee": self.valo.detachee,
+                "fenetre": self.valo_fenetre.is_some(),
+                "fiche": self.donnees_valo.fiche.as_ref().map(|f| f.username.clone()),
+            },
             "fenetres_ouvertes": ouvertes,
             "bandeau_erreur": self.error,
             "bandeau_info": self.info,

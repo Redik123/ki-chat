@@ -57,6 +57,7 @@ fn outils() -> Value {
             "properties": {
                 "x": { "type": "number", "description": "Abscisse en points, lue sur la capture" },
                 "y": { "type": "number", "description": "Ordonnée en points, lue sur la capture" },
+                "fenetre": { "type": "string", "enum": ["principale", "valorant"], "description": "Par défaut : principale. « valorant » : la page VALORANT détachée dans sa fenêtre" },
             },
             "required": ["x", "y"],
             "description": quoi,
@@ -85,8 +86,14 @@ fn outils() -> Value {
         {
             "name": "capture",
             "description": "Une image de la fenêtre de ki-chat telle qu'il la dessine, à un pixel par point : les \
-                coordonnées qu'on y lit sont celles de cliquer, survoler et defiler.",
-            "inputSchema": vide,
+                coordonnées qu'on y lit sont celles de cliquer, survoler et defiler. Avec fenetre « valorant » : la \
+                page VALORANT détachée dans sa propre fenêtre (voir etat).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "fenetre": { "type": "string", "enum": ["principale", "valorant"], "description": "Par défaut : principale" },
+                },
+            },
         },
         {
             "name": "cliquer",
@@ -109,7 +116,10 @@ fn outils() -> Value {
                 c'est touche Enter qui valide.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "texte": { "type": "string" } },
+                "properties": {
+                    "texte": { "type": "string" },
+                    "fenetre": { "type": "string", "enum": ["principale", "valorant"], "description": "Par défaut : principale" },
+                },
                 "required": ["texte"],
             },
         },
@@ -124,6 +134,7 @@ fn outils() -> Value {
                     "ctrl": { "type": "boolean" },
                     "maj": { "type": "boolean" },
                     "alt": { "type": "boolean" },
+                    "fenetre": { "type": "string", "enum": ["principale", "valorant"], "description": "Par défaut : principale" },
                 },
                 "required": ["touche"],
             },
@@ -153,6 +164,16 @@ fn outils() -> Value {
                 "type": "object",
                 "properties": { "largeur": { "type": "number" }, "hauteur": { "type": "number" } },
                 "required": ["largeur", "hauteur"],
+            },
+        },
+        {
+            "name": "reduire",
+            "description": "Réduit la fenêtre principale de test dans la barre des tâches (oui, par défaut) ou la \
+                rend (oui: false). Réduite, elle ne se dessine plus : capture échoue, mais etat répond, et la \
+                page VALORANT détachée continue de vivre dans sa fenêtre.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "oui": { "type": "boolean" } },
             },
         },
         {
