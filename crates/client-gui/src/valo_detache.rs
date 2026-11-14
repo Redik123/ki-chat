@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 use ki_ui::jetons::{espace, marge};
 
-use crate::place::{Place, Rendu};
+use crate::place::{Place, PlaceTenue};
 use crate::valo::{Demande, Instantane, PageValo};
 use crate::{boutique, theme};
 
@@ -74,9 +74,7 @@ struct Etat {
     dessinee: bool,
     demandes: Vec<Demande>,
     fermer: bool,
-    // La place de la fenêtre : à rendre à sa naissance, puis relevée.
-    place_a_rendre: Option<Rendu>,
-    place: Option<Place>,
+    place: PlaceTenue,
     barre_sombre: bool,
 }
 
@@ -91,8 +89,7 @@ impl Fenetre {
             dessinee: false,
             demandes: Vec::new(),
             fermer: false,
-            place_a_rendre: place.map(|p| Rendu::depuis(p, p.sur_un_ecran())),
-            place,
+            place: PlaceTenue::new(place),
             barre_sombre: false,
         };
         Self { etat: Arc::new(Mutex::new(etat)), icone: Arc::new(theme::app_icon()) }
@@ -125,7 +122,7 @@ impl Fenetre {
 
     /// La place de la fenêtre, à retenir pour la prochaine fois.
     pub fn place(&self) -> Option<Place> {
-        self.etat.lock().unwrap().place
+        self.etat.lock().unwrap().place.place()
     }
 
     /// À chaque image dessinée de l'application, tant que la page est
@@ -144,42 +141,13 @@ impl Fenetre {
 }
 
 impl Etat {
-    /// La place de cette fenêtre : rendue à sa naissance, image après
-    /// image, puis relevée tant qu'elle est ordinaire — ni minimisée, ni
-    /// maximisée.
-    fn tenir_la_place(&mut self, ctx: &egui::Context) {
-        let (dehors, dedans, minimisee, maximisee) = ctx.input(|i| {
-            let v = i.viewport();
-            (v.outer_rect, v.inner_rect, v.minimized == Some(true), v.maximized == Some(true))
-        });
-        if minimisee {
-            return;
-        }
-        let pixels_par_point = ctx.pixels_per_point();
-        if let Some(rendu) = self.place_a_rendre.take() {
-            let (commande, suite) = rendu.avancer(pixels_par_point);
-            if let Some(commande) = commande {
-                ctx.send_viewport_cmd(commande);
-            }
-            self.place_a_rendre = suite;
-            ctx.request_repaint();
-            return;
-        }
-        if maximisee {
-            return;
-        }
-        if let Some(place) = dehors.zip(dedans).and_then(|(dehors, dedans)| Place::relevee(dehors, dedans, pixels_par_point)) {
-            self.place = Some(place);
-        }
-    }
-
     fn dessiner(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !self.barre_sombre {
             self.barre_sombre = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         }
-        self.tenir_la_place(&ctx);
+        self.place.tenir(&ctx);
         let mut reveiller = false;
         // La croix de la fenêtre ferme la page, comme « Fermer ».
         if ctx.input(|i| i.viewport().close_requested()) {

@@ -44,6 +44,7 @@ mod porte_ui;
 mod boutique;
 mod ptt;
 mod regard_detache;
+mod tactique_detache;
 mod valo_detache;
 mod reglages_audio;
 mod reglages_casque;
@@ -620,7 +621,15 @@ struct KiApp {
     cartes: cartes::Cartes,
     /// La carte tactique : un plan de VALORANT où dessiner la manche
     /// suivante (V10.1 : chacun la sienne, rien ne part au serveur).
-    tactique: tactique::Tactique,
+    /// Tenue à deux avec sa fenêtre quand on l'a détachée
+    /// (`tactique_detache`) : d'où le verrou, jamais disputé.
+    tactique: std::sync::Arc<std::sync::Mutex<tactique::Tactique>>,
+    /// La fenêtre de la carte détachée, tant qu'elle se montre, la place
+    /// qu'elle avait la dernière fois, et ce qu'on lui a déjà fait
+    /// dessiner de ce qui arrive du serveur.
+    tactique_fenetre: Option<tactique_detache::Fenetre>,
+    tactique_place: Option<place::Place>,
+    tactique_revision: u64,
     /// Le dernier message envoyé : un toutes les 1,5 s, pas plus.
     dernier_envoi: Option<std::time::Instant>,
     /// Les icônes de rang VALORANT, téléchargées une fois.
@@ -994,7 +1003,12 @@ impl KiApp {
             serveur_cartes: false,
             serveur_tactique: false,
             cartes: cartes::Cartes::default(),
-            tactique: tactique::Tactique::default(),
+            tactique: std::sync::Arc::new(std::sync::Mutex::new(
+                tactique::Tactique::default().detachee_si(get("tactique_detachee", "off") == "on"),
+            )),
+            tactique_fenetre: None,
+            tactique_place: place::Place::lire(&get("fenetre_tactique", "")),
+            tactique_revision: 0,
             dernier_envoi: None,
             rangs: rangs::Rangs::new(),
             catalogue: valo_catalogue::Catalogue::new(),
@@ -1753,23 +1767,82 @@ impl KiApp {
     /// viennent du catalogue, mes traits ont la couleur de mon pseudo, et
     /// mes gestes partent au serveur.
     fn tactique_window(&mut self, ctx: &egui::Context) {
+        let moi = self.session.my_id.unwrap_or(0);
+        let couleur = self.ma_couleur();
+        let actions = {
+            let mut tactique = self.tactique.lock().unwrap();
+            // Détachée, elle se dessine dans sa propre fenêtre.
+            if tactique.ouvert && !tactique.detachee {
+                let plans = self.catalogue.plans();
+                let minimap = tactique.choisi(plans).and_then(|p| self.catalogue.minimap(p));
+                tactique.fenetre(ctx, plans, minimap, moi, couleur);
+            }
+            // Ce qu'on vient d'y tracer part tout de suite : rien ne dit
+            // qu'une autre image suivra celle-ci.
+            tactique.a_envoyer()
+        };
+        for action in actions {
+            self.send(ClientMsg::Tactique { action });
+        }
+    }
+
+    /// Ma couleur de membre : celle de mes traits sur la carte.
+    fn ma_couleur(&self) -> egui::Color32 {
+        self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id).map_or(ACCENT, couleur_de_membre)
+    }
+
+    /// La carte tactique, côté logique — qui tourne aussi fenêtre réduite :
+    /// avec qui elle se partage, mes gestes envoyés au serveur, et sa
+    /// fenêtre quand on l'a détachée. Celle-ci naît quand la carte s'ouvre
+    /// détachée, et disparaît — sa place retenue — quand elle se ferme ou
+    /// se rattache.
+    fn tenir_la_tactique(&mut self, ctx: &egui::Context) {
         let lien = match (self.serveur_tactique, self.session.voice_channel) {
             (false, _) => tactique::Lien::SansServeur,
             (true, None) => tactique::Lien::HorsVocal,
             (true, Some(_)) => tactique::Lien::Salon,
         };
-        self.tactique.relier(lien);
-        let moi = self.session.my_id.unwrap_or(0);
-        let mien = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id);
-        self.tactique.muet = mien.is_some_and(|m| m.force_muted);
-        if self.tactique.ouvert {
-            let couleur = mien.map_or(ACCENT, couleur_de_membre);
-            let plans = self.catalogue.plans();
-            let minimap = self.tactique.choisi(plans).and_then(|p| self.catalogue.minimap(p));
-            self.tactique.fenetre(ctx, plans, minimap, moi, couleur);
-        }
-        for action in self.tactique.a_envoyer() {
+        let muet = self.session.members.iter().find(|m| Some(m.user_id) == self.session.my_id).is_some_and(|m| m.force_muted);
+        let (actions, ouverte, detachee, revision) = {
+            let mut tactique = self.tactique.lock().unwrap();
+            tactique.relier(lien);
+            tactique.muet = muet;
+            (tactique.a_envoyer(), tactique.ouvert, tactique.detachee, tactique.revision())
+        };
+        for action in actions {
             self.send(ClientMsg::Tactique { action });
+        }
+        if !(ouverte && detachee) {
+            if let Some(fenetre) = self.tactique_fenetre.take() {
+                self.tactique_place = fenetre.place().or(self.tactique_place);
+                // « Rattacher » : réduite, ki-chat revient avec la carte.
+                if ouverte {
+                    if self.zone.reduite() {
+                        self.rouvrir_depuis_zone(ctx);
+                    }
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                }
+            }
+            return;
+        }
+        // Les minimaps arrivées deviennent des textures ici aussi : fenêtre
+        // réduite, `interface` ne le fait plus.
+        self.catalogue.preparer(ctx);
+        let (moi, couleur) = (self.session.my_id.unwrap_or(0), self.ma_couleur());
+        let (tactique, catalogue, place) = (&self.tactique, &self.catalogue, self.tactique_place);
+        let fenetre = self.tactique_fenetre.get_or_insert_with(|| tactique_detache::Fenetre::new(tactique.clone(), catalogue.clone(), place));
+        let (fermer, nouveau) = fenetre.echanger(catalogue, moi, couleur);
+        if let Some(place) = fenetre.place() {
+            self.tactique_place = Some(place);
+        }
+        if fermer {
+            self.tactique.lock().unwrap().ouvert = false;
+        }
+        // Ce qui est arrivé du serveur depuis la dernière image se dessine.
+        if nouveau || revision != self.tactique_revision {
+            self.tactique_revision = revision;
+            ctx.request_repaint_of(tactique_detache::id());
         }
     }
 
@@ -2636,7 +2709,7 @@ impl KiApp {
         self.cartes.effacer();
         self.serveur_cartes = false;
         // La carte tactique : celle d'un salon de ce serveur.
-        self.tactique.recevoir_etat(None);
+        self.tactique.lock().unwrap().recevoir_etat(None);
         self.serveur_tactique = false;
         // Claude : sa conversation et ses chiffres sont ceux de ce serveur.
         self.claude.oublier();
@@ -4111,8 +4184,9 @@ impl KiApp {
         }
         self.instantane_voix = Some(voice);
         // La page VALORANT détachée : ce qu'elle lit, tenu à jour ici —
-        // fenêtre réduite comprise.
+        // fenêtre réduite comprise. La carte tactique de même.
         self.valo_alimenter(ctx, true);
+        self.tenir_la_tactique(ctx);
     }
 
     /// Ce que l'image dessine. eframe ne l'appelle que si la fenêtre se
@@ -4305,6 +4379,9 @@ impl KiApp {
         if let Some(fenetre) = &self.valo_fenetre {
             fenetre.montrer(ctx);
         }
+        if let Some(fenetre) = &self.tactique_fenetre {
+            fenetre.montrer(ctx);
+        }
 
         self.perf.fin_image();
     }
@@ -4323,6 +4400,8 @@ impl KiApp {
         storage.set_string("regard_volume", format!("{}", self.regard.volume));
         storage.set_string("fenetre_stream", self.regard.place_detachee.map(|p| p.ecrire()).unwrap_or_default());
         storage.set_string("fenetre_valo", self.valo_place.map(|p| p.ecrire()).unwrap_or_default());
+        storage.set_string("fenetre_tactique", self.tactique_place.map(|p| p.ecrire()).unwrap_or_default());
+        storage.set_string("tactique_detachee", if self.tactique.lock().unwrap().detachee { "on" } else { "off" }.into());
         storage.set_string("search_ici", if self.recherche.ici { "on" } else { "off" }.into());
         servers::save(storage, &self.lanceur.book);
         storage.set_string(

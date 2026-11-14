@@ -114,6 +114,54 @@ impl Rendu {
     }
 }
 
+/// La place d'une fenêtre à part (la page VALORANT, la carte tactique) :
+/// rendue à sa naissance, image après image, puis relevée tant que la
+/// fenêtre est ordinaire — ni minimisée, ni maximisée.
+pub(crate) struct PlaceTenue {
+    a_rendre: Option<Rendu>,
+    place: Option<Place>,
+}
+
+impl PlaceTenue {
+    /// `place` : celle qu'avait la fenêtre la dernière fois ; rendue si elle
+    /// touche encore un écran, sa taille seule sinon.
+    pub(crate) fn new(place: Option<Place>) -> Self {
+        Self { a_rendre: place.map(|p| Rendu::depuis(p, p.sur_un_ecran())), place }
+    }
+
+    /// La place relevée, à retenir pour la prochaine fois.
+    pub(crate) fn place(&self) -> Option<Place> {
+        self.place
+    }
+
+    /// À chaque image de la fenêtre, avec son contexte.
+    pub(crate) fn tenir(&mut self, ctx: &egui::Context) {
+        let (dehors, dedans, minimisee, maximisee) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.minimized == Some(true), v.maximized == Some(true))
+        });
+        if minimisee {
+            return;
+        }
+        let pixels_par_point = ctx.pixels_per_point();
+        if let Some(rendu) = self.a_rendre.take() {
+            let (commande, suite) = rendu.avancer(pixels_par_point);
+            if let Some(commande) = commande {
+                ctx.send_viewport_cmd(commande);
+            }
+            self.a_rendre = suite;
+            ctx.request_repaint();
+            return;
+        }
+        if maximisee {
+            return;
+        }
+        if let Some(place) = dehors.zip(dedans).and_then(|(dehors, dedans)| Place::relevee(dehors, dedans, pixels_par_point)) {
+            self.place = Some(place);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

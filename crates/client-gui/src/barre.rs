@@ -261,7 +261,16 @@ impl KiApp {
                         .on_hover_text("une carte de VALORANT où dessiner la prochaine manche ; chaque trait s'efface 15 s après")
                         .clicked()
                     {
-                        self.tactique.ouvert = !self.tactique.ouvert;
+                        let ouverte = {
+                            let mut tactique = self.tactique.lock().unwrap();
+                            tactique.ouvert = !tactique.ouvert;
+                            tactique.ouvert
+                        };
+                        // Détachée, peut-être derrière une autre fenêtre :
+                        // l'ouvrir la ramène devant.
+                        if ouverte && self.tactique_fenetre.is_some() {
+                            ui.ctx().send_viewport_cmd_to(crate::tactique_detache::id(), egui::ViewportCommand::Focus);
+                        }
                         self.catalogue.demarrer();
                     }
                     if self.soundboard_visible

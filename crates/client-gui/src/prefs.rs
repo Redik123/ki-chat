@@ -50,6 +50,7 @@ const NON_TRANSPORTES: &[&str] = &[
     "fenetre",
     "fenetre_stream",
     "fenetre_valo",
+    "fenetre_tactique",
     // Les périphériques et les dossiers de ce PC.
     "input_device",
     "output_device",

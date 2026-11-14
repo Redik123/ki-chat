@@ -302,7 +302,7 @@ impl KiApp {
     }
 
     pub(crate) fn ouvrir_le_tableau(&mut self) {
-        self.tactique.ouvert = true;
+        self.tactique.lock().unwrap().ouvert = true;
         self.catalogue.demarrer();
     }
 }

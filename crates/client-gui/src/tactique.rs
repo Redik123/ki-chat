@@ -327,6 +327,12 @@ fn tourner(p: Pos2, k: u8) -> Pos2 {
 /// La carte tactique : le plan choisi, les traits vivants, et la vue.
 pub struct Tactique {
     pub ouvert: bool,
+    /// La carte vit dans sa propre fenêtre système (`tactique_detache`) et
+    /// non dans celle de ki-chat.
+    pub detachee: bool,
+    /// Compte ce qui arrive du serveur : de quoi savoir, d'une image de
+    /// l'application à l'autre, s'il y a du nouveau à dessiner.
+    revision: u64,
     pub outil: Outil,
     pub camp: Camp,
     /// Les noms des zones, montrés ou cachés.
@@ -365,6 +371,8 @@ impl Default for Tactique {
     fn default() -> Self {
         Self {
             ouvert: false,
+            detachee: false,
+            revision: 0,
             outil: Outil::Fleche,
             camp: Camp::Attaque,
             noms: true,
@@ -389,6 +397,13 @@ impl Default for Tactique {
 }
 
 impl Tactique {
+    /// La carte telle qu'on l'avait laissée : détachée, ou dans la fenêtre
+    /// de ki-chat.
+    pub fn detachee_si(mut self, detachee: bool) -> Self {
+        self.detachee = detachee;
+        self
+    }
+
     /// Le plan choisi parmi ceux proposés ; s'il n'y en a pas encore, le
     /// premier. Celui du salon ne se remplace pas, même absent du
     /// catalogue : la fenêtre le dit.
@@ -421,14 +436,27 @@ impl Tactique {
         std::mem::take(&mut self.envois)
     }
 
+    /// Des gestes attendent de partir : la fenêtre détachée réveille alors
+    /// l'application, qui les envoie.
+    pub fn a_des_envois(&self) -> bool {
+        !self.envois.is_empty()
+    }
+
+    /// Ce qui est arrivé du serveur, compté : voir le champ.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Un geste refusé par le serveur, à montrer quelques secondes.
     pub fn refuser(&mut self, message: String) {
+        self.revision = self.revision.wrapping_add(1);
         self.refus = Some((message, Instant::now()));
     }
 
     /// La carte du salon, tout entière (`TactiqueEtat`) : son plan, puis
     /// ses traits, qui suivent un par un. `None` : plus de carte du salon.
     pub fn recevoir_etat(&mut self, carte: Option<CarteTactique>) {
+        self.revision = self.revision.wrapping_add(1);
         self.traits.clear();
         self.en_cours = None;
         self.ouverture_demandee = false;
@@ -452,6 +480,7 @@ impl Tactique {
     /// reviennent pas ; ceux qui arrivent quand même (mes traits rejoués à
     /// une reconnexion) prennent la place qu'ils disent.
     pub fn recevoir(&mut self, evenement: EvenementTactique, moi: UserId, couleur_de: &dyn Fn(UserId) -> Color32) {
+        self.revision = self.revision.wrapping_add(1);
         let maintenant = Instant::now();
         match evenement {
             EvenementTactique::Plan { carte, par } => {
@@ -781,6 +810,18 @@ impl Tactique {
             }
             if ui::Bouton::icone_seule(Icon::Trash).bulle("Effacer mes traits").show(ui).clicked() {
                 self.effacer_les_miens(moi);
+            }
+            // Dans sa propre fenêtre, sur un second écran — ou de retour
+            // dans celle de ki-chat. L'application le lit à sa prochaine
+            // image : on la réveille.
+            let (icone, bulle) = if self.detachee {
+                (Icon::ChevronLeft, "Rattacher : la carte revient dans la fenêtre de ki-chat")
+            } else {
+                (Icon::Screen, "Détacher : la carte dans sa propre fenêtre, à poser sur un second écran")
+            };
+            if ui::Bouton::icone_seule(icone).bulle(bulle).show(ui).clicked() {
+                self.detachee = !self.detachee;
+                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
             }
         });
         let refus = self.refus.as_ref().filter(|(_, quand)| quand.elapsed() < REFUS_AFFICHE).map(|(m, _)| m.as_str());
@@ -1287,6 +1328,30 @@ mod tests {
         tac.relier(Lien::HorsVocal);
         assert!(!tac.du_salon);
         assert_eq!(tac.choisi(&plans).map(|p| p.nom.as_str()), Some("Ascent"), "seul, on reprend un plan connu");
+    }
+
+    /// Ce qui arrive du serveur se compte : la fenêtre détachée sait alors
+    /// qu'il y a du nouveau à dessiner. Ce que je fais moi-même ne compte
+    /// pas — c'est elle qui vient de le dessiner.
+    #[test]
+    fn ce_qui_arrive_du_serveur_se_compte() {
+        let mut tac = Tactique::default().detachee_si(true);
+        assert!(tac.detachee && !tac.a_des_envois());
+        assert!(!Tactique::default().detachee, "d'origine, dans la fenêtre de ki-chat");
+        let depart = tac.revision();
+        tac.recevoir_etat(Some(CarteTactique { salon: 4, carte: "Ascent".into(), par: 2 }));
+        let etat = tac.revision();
+        assert_ne!(etat, depart, "la carte du salon est arrivée");
+        tac.recevoir(EvenementTactique::Plan { carte: "Bind".into(), par: 3 }, 1, &|_| Color32::RED);
+        let plan = tac.revision();
+        assert_ne!(plan, etat, "quelqu'un a changé de plan");
+        tac.refuser("pas le droit".into());
+        let refus = tac.revision();
+        assert_ne!(refus, plan, "un refus se montre");
+        // Mes propres gestes : rien de neuf à apprendre du serveur.
+        tac.choisir("Haven");
+        tac.recadrer();
+        assert_eq!(tac.revision(), refus);
     }
 
     /// Une image de la carte, sans écran : `evenements` pour seule entrée.

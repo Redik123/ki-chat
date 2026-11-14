@@ -379,8 +379,13 @@ impl KiApp {
                 let _ = d.reponse.send(Reponse::erreur("la page VALORANT n'est pas détachée : pas de seconde fenêtre"));
                 return;
             }
+            Some("tactique") if self.tactique_fenetre.is_some() => crate::tactique_detache::id(),
+            Some("tactique") => {
+                let _ = d.reponse.send(Reponse::erreur("la carte tactique n'est pas détachée : pas de seconde fenêtre"));
+                return;
+            }
             Some(autre) => {
-                let _ = d.reponse.send(Reponse::erreur(format!("fenêtre inconnue « {autre} » : principale ou valorant")));
+                let _ = d.reponse.send(Reponse::erreur(format!("fenêtre inconnue « {autre} » : principale, valorant ou tactique")));
                 return;
             }
         };
@@ -586,6 +591,11 @@ impl KiApp {
             },
             "vocal": { "salon": self.session.voice_channel, "micro_coupe": self.vocal.muted },
             "reduite": ctx.input(|i| i.viewport().minimized == Some(true)),
+            "tactique": {
+                "ouverte": self.tactique.lock().unwrap().ouvert,
+                "detachee": self.tactique.lock().unwrap().detachee,
+                "fenetre": self.tactique_fenetre.is_some(),
+            },
             "valorant": {
                 "ouverte": self.valo.ouvert,
                 "onglet": self.valo.onglet_devant(),

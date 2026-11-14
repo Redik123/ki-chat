@@ -798,14 +798,14 @@ impl KiApp {
             ServerMsg::CartesRefus { message } => {
                 self.cartes.refuser(ki_protocol::safe_display(&message, 200));
             }
-            ServerMsg::TactiqueEtat { carte } => self.tactique.recevoir_etat(carte),
+            ServerMsg::TactiqueEtat { carte } => self.tactique.lock().unwrap().recevoir_etat(carte),
             ServerMsg::Tactique { evenement } => {
                 let membres = &self.session.members;
                 let couleur = |id: UserId| membres.iter().find(|m| m.user_id == id).map_or(TEXT_DIM, couleur_de_membre);
-                self.tactique.recevoir(evenement, self.session.my_id.unwrap_or(0), &couleur);
+                self.tactique.lock().unwrap().recevoir(evenement, self.session.my_id.unwrap_or(0), &couleur);
             }
             ServerMsg::TactiqueRefus { message } => {
-                self.tactique.refuser(ki_protocol::safe_display(&message, 200));
+                self.tactique.lock().unwrap().refuser(ki_protocol::safe_display(&message, 200));
             }
             ServerMsg::MonJournal { jours } => {
                 self.donnees_valo.mon_journal = Some(std::sync::Arc::new(jours));
