@@ -56,7 +56,9 @@ pub enum Fragment<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bloc<'a> {
     Ligne(Vec<Fragment<'a>>),
-    Code(&'a str),
+    /// `langue` : le mot collé à la clôture ouvrante (« ```rust »), quand
+    /// c'est le nom d'un langage — il n'est pas du code.
+    Code { langue: Option<&'a str>, code: &'a str },
     /// `> ` en tête de ligne.
     Citation(Vec<Fragment<'a>>),
     /// `- ` ou `* ` en tête de ligne.
@@ -73,7 +75,7 @@ impl<'a> Bloc<'a> {
     /// cité et rien d'autre.
     pub fn fragments(&self) -> &[Fragment<'a>] {
         match self {
-            Bloc::Code(_) => &[],
+            Bloc::Code { .. } => &[],
             Bloc::Ligne(f) | Bloc::Citation(f) | Bloc::Puce(f) => f,
             Bloc::Numero { ligne, .. } | Bloc::Titre { ligne, .. } => ligne,
         }
@@ -100,7 +102,7 @@ pub fn decouper<'a>(texte: &'a str, membres: &[&str], moi: Option<&str>) -> Vec<
         let apres = &reste[debut + 3..];
         match apres.find("```") {
             Some(fin) => {
-                blocs.push(Bloc::Code(nettoyer_bloc(&apres[..fin])));
+                blocs.push(bloc_de_code(&apres[..fin]));
                 reste = sans_debut_de_ligne(&apres[fin + 3..]);
             }
             None => {
@@ -108,13 +110,35 @@ pub fn decouper<'a>(texte: &'a str, membres: &[&str], moi: Option<&str>) -> Vec<
                 // contraire — traiter les trois accents graves comme du texte
                 // — ferait apparaître un bloc de code puis disparaître au
                 // caractère suivant, pendant qu'on tape.
-                blocs.push(Bloc::Code(nettoyer_bloc(apres)));
+                blocs.push(bloc_de_code(apres));
                 reste = "";
             }
         }
     }
     pousser_lignes(&mut blocs, reste, membres, moi);
     blocs
+}
+
+/// Les langages qu'on reconnaît derrière une clôture ouvrante. Une liste, et
+/// non « n'importe quel mot » : « ```oui » suivi d'une ligne est un bloc qui
+/// commence par « oui », pas un bloc écrit en oui.
+const LANGAGES: &[&str] = &[
+    "bash", "bat", "c", "c#", "c++", "cmd", "cpp", "cs", "csharp", "css", "diff", "go", "html", "ini", "java",
+    "javascript", "js", "json", "kotlin", "kt", "log", "lua", "markdown", "md", "php", "powershell", "ps1", "py",
+    "python", "rb", "rs", "ruby", "rust", "sh", "sql", "swift", "text", "toml", "ts", "txt", "typescript", "xml",
+    "yaml", "yml",
+];
+
+/// Le bloc de code entre deux clôtures : sa langue si la première ligne la
+/// nomme, et le code sans elle.
+fn bloc_de_code(entre: &str) -> Bloc<'_> {
+    if let Some((tete, suite)) = entre.split_once('\n') {
+        let mot = tete.strip_suffix('\r').unwrap_or(tete);
+        if LANGAGES.iter().any(|l| l.eq_ignore_ascii_case(mot)) {
+            return Bloc::Code { langue: Some(mot), code: suite.trim_end_matches(['\n', '\r']) };
+        }
+    }
+    Bloc::Code { langue: None, code: nettoyer_bloc(entre) }
 }
 
 /// Retire le saut de ligne d'ouverture et l'espace de fermeture d'un bloc de
@@ -465,6 +489,23 @@ fn rogner_ponctuation(lien: &str) -> &str {
     &lien[..fin]
 }
 
+/// Les adresses d'un message, dans l'ordre : ses liens nus et ceux qu'il
+/// nomme. Pas celles qui sont citées dans du code, ni cachées dans un
+/// spoiler : qui montre une image sous un lien les lit ici, et une image
+/// sous spoiler ne doit pas s'afficher d'elle-même.
+pub fn liens(texte: &str) -> Vec<&str> {
+    let mut adresses = Vec::new();
+    for bloc in decouper(texte, &[], None) {
+        for fragment in bloc.fragments() {
+            match fragment {
+                Fragment::Lien(url) | Fragment::LienNomme { url, .. } => adresses.push(*url),
+                _ => {}
+            }
+        }
+    }
+    adresses
+}
+
 /// Ce message me mentionne-t-il ?
 ///
 /// Sert à décider d'un son et d'un clignotement dans la barre des tâches : on
@@ -583,7 +624,7 @@ mod tests {
         let blocs = decouper("avant\n```\nligne 1\nligne 2\n```\naprès", &[], None);
         assert_eq!(blocs.len(), 3);
         assert_eq!(blocs[0], Bloc::Ligne(vec![Fragment::Texte("avant")]));
-        assert_eq!(blocs[1], Bloc::Code("ligne 1\nligne 2"));
+        assert_eq!(blocs[1], Bloc::Code { langue: None, code: "ligne 1\nligne 2" });
         assert_eq!(blocs[2], Bloc::Ligne(vec![Fragment::Texte("après")]));
     }
 
@@ -592,7 +633,40 @@ mod tests {
     #[test]
     fn un_bloc_jamais_referme_prend_ce_qui_suit() {
         let blocs = decouper("regarde ```du code", &[], None);
-        assert_eq!(blocs.last(), Some(&Bloc::Code("du code")));
+        assert_eq!(blocs.last(), Some(&Bloc::Code { langue: None, code: "du code" }));
+    }
+
+    #[test]
+    fn un_bloc_de_code_dit_sa_langue() {
+        fn code(texte: &str) -> (Option<&str>, &str) {
+            match decouper(texte, &[], None).pop() {
+                Some(Bloc::Code { langue, code }) => (langue, code),
+                autre => panic!("{autre:?} n'est pas un bloc de code"),
+            }
+        }
+        assert_eq!(code("```rust\nfn main() {}\n```"), (Some("rust"), "fn main() {}"));
+        assert_eq!(code("```JSON\r\n{ \"a\": 1 }\r\n```"), (Some("JSON"), "{ \"a\": 1 }"));
+        assert_eq!(code("```c++\n  int x;\n```"), (Some("c++"), "  int x;"));
+        // Jamais refermé, pendant qu'on tape : la langue est déjà lue.
+        assert_eq!(code("```py\nprint(1)"), (Some("py"), "print(1)"));
+        // Un mot qui n'est pas un langage est la première ligne du code ; et
+        // sans retour à la ligne, rien n'est une langue.
+        assert_eq!(code("```oui\nnon\n```"), (None, "oui\nnon"));
+        assert_eq!(code("```rust```"), (None, "rust"));
+        assert_eq!(code("```\nrust\n```"), (None, "rust"));
+        assert_eq!(code("```rust fn main() {}\n```"), (None, "rust fn main() {}"));
+    }
+
+    #[test]
+    fn les_adresses_d_un_message() {
+        assert_eq!(
+            liens("regarde https://a.fr/x.png. Et [celle-ci](https://b.fr/y.jpg), puis (https://c.fr/z)"),
+            vec!["https://a.fr/x.png", "https://b.fr/y.jpg", "https://c.fr/z"]
+        );
+        assert_eq!(liens("> cité https://a.fr\n- https://b.fr\n# https://c.fr"), vec!["https://a.fr", "https://b.fr", "https://c.fr"]);
+        // Ni dans du code, ni sous un spoiler.
+        assert!(liens("`https://a.fr/x.png` ||https://b.fr/y.png||\n```\nhttps://c.fr/z.png\n```").is_empty());
+        assert!(liens("salut").is_empty());
     }
 
     #[test]
@@ -605,7 +679,7 @@ mod tests {
     /// Remet bout à bout ce que `decouper` a découpé, marques comprises.
     fn recomposer(blocs: &[Bloc<'_>]) -> String {
         let tete = |b: &Bloc<'_>| match b {
-            Bloc::Ligne(_) | Bloc::Code(_) => String::new(),
+            Bloc::Ligne(_) | Bloc::Code { .. } => String::new(),
             Bloc::Citation(_) => "> ".into(),
             Bloc::Puce(_) => "- ".into(),
             Bloc::Numero { numero, .. } => format!("{numero}. "),
@@ -614,7 +688,7 @@ mod tests {
         blocs
             .iter()
             .map(|b| match b {
-                Bloc::Code(c) => (*c).to_string(),
+                Bloc::Code { code, .. } => (*code).to_string(),
                 autre => {
                     let corps: String = autre
                         .fragments()

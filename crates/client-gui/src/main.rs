@@ -119,7 +119,7 @@ use ki_protocol::{
 use ki_ui::jetons::{espace, marge, texte};
 
 use admin_ui::AdminTab;
-use fil::{lecture_effective, split_links, MenuMessage};
+use fil::{lecture_effective, MenuMessage};
 use icons::Icon;
 use lanceur::ServerDraft;
 use membres::{couleur_de_membre, empreinte_compte, est_bot, identite_aux_cartes, palier_de, MemberRow};
@@ -1939,8 +1939,8 @@ impl KiApp {
     fn ouvrir_visionneuse(&mut self, cible: visionneuse::Cible) {
         let mut liste = Vec::new();
         for msg in &self.session.messages {
-            for (is_link, chunk) in split_links(&msg.text) {
-                if !is_link || !self.previews.is_ours(chunk) {
+            for chunk in ki_core::markup::liens(&msg.text) {
+                if !self.previews.is_ours(chunk) {
                     continue;
                 }
                 if images::looks_like_image(chunk) {

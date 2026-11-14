@@ -261,10 +261,7 @@ pub(crate) fn message_block(
                     ui.label(Texte::Minuscule.riche(ui, "(modifié)"));
                 }
                 // Les images partagées s'affichent sous le message.
-                for (is_link, chunk) in split_links(&msg.text) {
-                    if !is_link {
-                        continue;
-                    }
+                for chunk in markup::liens(&msg.text) {
                     if images::looks_like_image(chunk) {
                         if image_preview(ui, chunk, previews) {
                             action =
@@ -520,7 +517,7 @@ pub(crate) fn message_body(
         let mut i = 0;
         while i < blocs.len() {
             match &blocs[i] {
-                markup::Bloc::Code(code) => bloc_de_code(ui, code, (cle, i)),
+                markup::Bloc::Code { langue, code } => bloc_de_code(ui, *langue, code, (cle, i)),
                 markup::Bloc::Ligne(frags) => ligne(ui, frags, Habit::ORDINAIRE, ou(i)),
                 markup::Bloc::Citation(_) => {
                     // Les lignes citées qui se suivent, sous un seul filet.
@@ -691,22 +688,62 @@ pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>, h
 
 /// Un bloc de code : chasse fixe, fond propre, et **pas** de retour à la
 /// ligne automatique — un extrait de code coupé au milieu ne se lit plus. Il
-/// défile horizontalement dans son cadre.
-pub(crate) fn bloc_de_code(ui: &mut egui::Ui, code: &str, cle: ((UserId, u64), usize)) {
+/// défile horizontalement dans son cadre. Sa langue, s'il en dit une, est
+/// rappelée au-dessus ; survolé, il offre de se copier.
+pub(crate) fn bloc_de_code(ui: &mut egui::Ui, langue: Option<&str>, code: &str, cle: ((UserId, u64), usize)) {
+    /// Le côté du bouton « copier », et ce que le bloc lui garde de large.
+    const BOUTON: f32 = 24.0;
     ui.add_space(espace::XS);
-    egui::Frame::NONE
+    let cadre = egui::Frame::NONE
         .fill(theme::BG_RAISED)
         .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
         .corner_radius(egui::CornerRadius::same(rayon::M))
         .inner_margin(marge::symetrique(espace::M, espace::S))
         .show(ui, |ui| {
+            ui.set_min_width((BOUTON * 4.0).min(ui.available_width()));
+            if let Some(langue) = langue {
+                ui.label(Texte::Minuscule.riche_ton(ui, Ton::Pale, langue.to_lowercase()));
+            }
             egui::ScrollArea::horizontal()
                 .id_salt(("bloc-code", cle))
                 .max_height(260.0)
                 .show(ui, |ui| {
                     ui.label(Texte::Corps.riche(ui, code).monospace());
                 });
-        });
+        })
+        .response
+        .rect;
+    // « Copier », tant que la souris est sur le bloc — et un instant après
+    // le clic, le temps de dire que c'est fait. Il ne déplace rien : à
+    // droite du bloc s'il y a la place, sinon dans son coin, par-dessus le
+    // code qu'il couvre.
+    let id = egui::Id::unique(("bloc-code-copie", cle));
+    let maintenant = ui.input(|i| i.time);
+    let copie_le = ui.data(|d| d.get_temp::<f64>(id));
+    let vient_d_etre_copie = copie_le.is_some_and(|t| maintenant - t < 1.5);
+    let dehors = cadre.right() + espace::XS + BOUTON <= ui.max_rect().right();
+    let coin = if dehors {
+        egui::Rect::from_min_size(egui::pos2(cadre.right() + espace::XS, cadre.top()), Vec2::splat(BOUTON))
+    } else {
+        egui::Rect::from_min_size(
+            egui::pos2(cadre.right() - BOUTON - espace::XS, cadre.top() + espace::XS),
+            Vec2::splat(BOUTON),
+        )
+    };
+    if ui.rect_contains_pointer(cadre.union(coin)) || vient_d_etre_copie {
+        if !dehors {
+            ui.painter().rect_filled(coin, egui::CornerRadius::same(rayon::M), theme::BG_RAISED);
+        }
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(coin));
+        let (icone, bulle) = if vient_d_etre_copie { (Icon::Check, "Copié") } else { (Icon::Copy, "Copier le code") };
+        if ui::Bouton::icone_seule(icone).cote(BOUTON).bulle(bulle).show(&mut ui).clicked() {
+            ui.ctx().copy_text(code.to_string());
+            ui.data_mut(|d| d.insert_temp(id, maintenant));
+        }
+        if vient_d_etre_copie {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        }
+    }
     ui.add_space(espace::XS);
 }
 
@@ -727,34 +764,6 @@ pub(crate) fn empty_state(ui: &mut egui::Ui, channel: &str) {
     });
 }
 
-/// Découpe un message en fragments `(est_un_lien, texte)`. Les espaces
-/// restent dans les fragments de texte pour que le retour à la ligne
-/// automatique se fasse au bon endroit.
-pub(crate) fn split_links(text: &str) -> Vec<(bool, &str)> {
-    let mut parts = Vec::new();
-    let (mut cursor, mut start) = (0usize, 0usize);
-    while cursor < text.len() {
-        let is_url = text.is_char_boundary(cursor)
-            && (text[cursor..].starts_with("http://") || text[cursor..].starts_with("https://"));
-        if is_url {
-            if cursor > start {
-                parts.push((false, &text[start..cursor]));
-            }
-            let end = text[cursor..]
-                .find(char::is_whitespace)
-                .map_or(text.len(), |offset| cursor + offset);
-            parts.push((true, &text[cursor..end]));
-            cursor = end;
-            start = end;
-        } else {
-            cursor += 1;
-        }
-    }
-    if start < text.len() || parts.is_empty() {
-        parts.push((false, &text[start..]));
-    }
-    parts
-}
 
 impl KiApp {
     /// Zone centrale : en-tête du salon, conversation, saisie.
@@ -1355,21 +1364,5 @@ impl KiApp {
         if fermer || ailleurs || prendre_echap(ctx) {
             self.menu_message = None;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn links_are_separated_from_the_surrounding_text() {
-        let parts = split_links("regarde http://a.fr/x puis dis-moi");
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], (false, "regarde "));
-        assert_eq!(parts[1], (true, "http://a.fr/x"));
-        assert_eq!(parts[2], (false, " puis dis-moi"));
-        // Un message sans lien reste d'un seul bloc.
-        assert_eq!(split_links("salut"), vec![(false, "salut")]);
     }
 }
