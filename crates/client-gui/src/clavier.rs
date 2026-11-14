@@ -1,8 +1,8 @@
 //! Les raccourcis du chat : mettre en forme ce qu'on écrit, et passer d'un
 //! salon à l'autre sans la souris.
 //!
-//! - Dans la saisie : Ctrl+B (gras), Ctrl+I (italique), Ctrl+E (code)
-//!   emballent la sélection — ou posent la paire de marques, le curseur au
+//! - Dans la saisie : Ctrl+B (gras), Ctrl+I (italique), Ctrl+E (code) et
+//!   Ctrl+Maj+X (barré) emballent la sélection — ou posent la paire de marques, le curseur au
 //!   milieu. Refaits, ils la déballent.
 //! - Partout : Alt+↑ / Alt+↓ vont au salon textuel d'à côté, Alt+Maj+↑ / ↓
 //!   au prochain qui a du non-lu ; Ctrl+F ouvre la recherche, Ctrl+K la
@@ -29,6 +29,7 @@ pub(crate) enum Marque {
     Gras,
     Italique,
     Code,
+    Barre,
 }
 
 impl Marque {
@@ -36,12 +37,13 @@ impl Marque {
         match self {
             Marque::Gras | Marque::Italique => '*',
             Marque::Code => '`',
+            Marque::Barre => '~',
         }
     }
 
     fn longueur(self) -> usize {
         match self {
-            Marque::Gras => 2,
+            Marque::Gras | Marque::Barre => 2,
             Marque::Italique | Marque::Code => 1,
         }
     }
@@ -50,7 +52,7 @@ impl Marque {
     /// étoiles sont du gras **et** de l'italique ; deux, du gras seul.
     fn presente(self, n: usize) -> bool {
         match self {
-            Marque::Gras => n >= 2,
+            Marque::Gras | Marque::Barre => n >= 2,
             Marque::Italique => n % 2 == 1,
             Marque::Code => n >= 1,
         }
@@ -156,7 +158,7 @@ impl KiApp {
             return;
         }
         let marque = ctx.input_mut(|i| {
-            [(Action::Gras, Marque::Gras), (Action::Italique, Marque::Italique), (Action::Code, Marque::Code)]
+            [(Action::Gras, Marque::Gras), (Action::Italique, Marque::Italique), (Action::Code, Marque::Code), (Action::Barre, Marque::Barre)]
                 .into_iter()
                 .find(|(action, _)| self.registre.faite(i, *action))
                 .map(|(_, marque)| marque)
@@ -253,6 +255,7 @@ impl KiApp {
             Action::Gras => self.mettre_en_forme(ctx, Marque::Gras),
             Action::Italique => self.mettre_en_forme(ctx, Marque::Italique),
             Action::Code => self.mettre_en_forme(ctx, Marque::Code),
+            Action::Barre => self.mettre_en_forme(ctx, Marque::Barre),
             Action::Reglages => self.basculer_les_reglages(),
             Action::Raccourcis => self.raccourcis.basculer(),
             Action::Compte => self.show_account = !self.show_account,
@@ -325,6 +328,8 @@ mod tests {
         assert_eq!(emballer("un *mot*", 4, 7, Marque::Italique), ("un mot".to_string(), 3, 6));
         assert_eq!(emballer("cargo run", 0, 9, Marque::Code), ("`cargo run`".to_string(), 1, 10));
         assert_eq!(emballer("`cargo run`", 1, 10, Marque::Code), ("cargo run".to_string(), 0, 9));
+        assert_eq!(emballer("un mot", 3, 6, Marque::Barre), ("un ~~mot~~".to_string(), 5, 8));
+        assert_eq!(emballer("un ~~mot~~", 5, 8, Marque::Barre), ("un mot".to_string(), 3, 6));
         // La sélection à l'envers (du dernier caractère vers le premier).
         assert_eq!(emballer("un mot", 6, 3, Marque::Gras), ("un **mot**".to_string(), 5, 8));
     }

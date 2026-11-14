@@ -27,7 +27,7 @@ pub(crate) const CADENCE_CHAT: std::time::Duration = std::time::Duration::from_m
 /// raccourcis de mise en forme, qu'on ne devine pas — ceux du moment, s'ils
 /// ont été changés.
 fn aide_envoi(registre: &Registre) -> String {
-    let mise_en_forme: Vec<String> = [(Action::Gras, "gras"), (Action::Italique, "italique"), (Action::Code, "code")]
+    let mise_en_forme: Vec<String> = [(Action::Gras, "gras"), (Action::Italique, "italique"), (Action::Code, "code"), (Action::Barre, "barré")]
         .into_iter()
         .filter_map(|(action, nom)| Some(format!("{} {nom}", registre.libelle(action)?)))
         .collect();

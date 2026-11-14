@@ -478,7 +478,8 @@ pub(crate) fn video_card(ui: &mut egui::Ui, url: &str, previews: &mut images::Pr
     response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Lire la vidéo").clicked()
 }
 
-/// Peint le corps d'un message : liens, mentions, gras, italique, code.
+/// Peint le corps d'un message : liens, mentions, gras, italique, barré,
+/// souligné, spoilers, code, citations, listes et titres.
 ///
 /// Le découpage vit dans `markup`, qui se teste sans ouvrir de fenêtre ; ici,
 /// on ne fait que peindre ce qu'il rend.
@@ -513,42 +514,159 @@ pub(crate) fn message_body(
         // Espacement nul : les espaces font partie des fragments de texte,
         // le retour à la ligne tombe donc au bon endroit.
         ui.spacing_mut().item_spacing.x = 0.0;
-        for (i, bloc) in blocs.iter().enumerate() {
-            match bloc {
+        // De quoi retrouver un fragment d'une image à l'autre : un spoiler
+        // dévoilé le reste.
+        let ou = |i: usize| egui::Id::unique(("corps-de-message", cle, i));
+        let mut i = 0;
+        while i < blocs.len() {
+            match &blocs[i] {
                 markup::Bloc::Code(code) => bloc_de_code(ui, code, (cle, i)),
-                markup::Bloc::Ligne(frags) => {
-                    ui.horizontal_wrapped(|ui| {
-                        for frag in frags {
-                            peindre_fragment(ui, frag);
-                        }
-                    });
+                markup::Bloc::Ligne(frags) => ligne(ui, frags, Habit::ORDINAIRE, ou(i)),
+                markup::Bloc::Citation(_) => {
+                    // Les lignes citées qui se suivent, sous un seul filet.
+                    let n = blocs[i..].iter().take_while(|b| matches!(b, markup::Bloc::Citation(_))).count();
+                    citation(ui, &blocs[i..i + n], |k| ou(i + k));
+                    i += n;
+                    continue;
                 }
+                markup::Bloc::Puce(frags) => en_liste(ui, "•", frags, ou(i)),
+                markup::Bloc::Numero { numero, ligne } => en_liste(ui, &format!("{numero}."), ligne, ou(i)),
+                markup::Bloc::Titre { niveau, ligne: frags } => ligne(ui, frags, Habit::titre(*niveau), ou(i)),
             }
+            i += 1;
         }
     });
 }
 
-pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
+/// Ce qu'un bloc impose à tous ses fragments : la taille et le gras d'un
+/// titre, le ton effacé d'une citation.
+#[derive(Clone, Copy)]
+pub(crate) struct Habit {
+    taille: f32,
+    gras: bool,
+    ton: Ton,
+}
+
+impl Habit {
+    pub(crate) const ORDINAIRE: Self = Self { taille: texte::CORPS, gras: false, ton: Ton::Neutre };
+    const CITE: Self = Self { ton: Ton::Discret, ..Self::ORDINAIRE };
+
+    /// Trois niveaux de titre, du plus grand au texte courant en gras : un
+    /// titre de message reste à l'échelle d'un message.
+    fn titre(niveau: u8) -> Self {
+        let taille = match niveau {
+            1 => texte::GRAND,
+            2 => (texte::GRAND + texte::CORPS) / 2.0,
+            _ => texte::TITRE,
+        };
+        Self { taille, gras: true, ton: Ton::Neutre }
+    }
+
+    /// Le texte dans cet habit ; `gras` : celui d'un fragment en gras.
+    fn riche(self, ui: &egui::Ui, t: &str, gras: bool) -> RichText {
+        let riche = if self.gras || gras {
+            Texte::Corps.gras_ton(ui, self.ton, t)
+        } else {
+            Texte::Corps.riche_ton(ui, self.ton, t)
+        };
+        riche.size(self.taille)
+    }
+}
+
+/// Une ligne de fragments, qui revient à la ligne quand elle déborde.
+fn ligne(ui: &mut egui::Ui, frags: &[markup::Fragment<'_>], habit: Habit, ou: egui::Id) {
+    ui.horizontal_wrapped(|ui| {
+        for (k, frag) in frags.iter().enumerate() {
+            peindre_fragment(ui, frag, habit, ou.with(k));
+        }
+    });
+}
+
+/// Un élément de liste : sa marque, puis son texte en retrait — la ligne
+/// qui déborde revient sous le texte, pas sous la marque.
+fn en_liste(ui: &mut egui::Ui, marque: &str, frags: &[markup::Fragment<'_>], ou: egui::Id) {
+    ui.horizontal_top(|ui| {
+        // La marque dans sa propre rangée, haute comme la première ligne du
+        // texte : les deux se centrent à la même hauteur.
+        ui.horizontal(|ui| {
+            ui.add_space(espace::S);
+            ui.label(Texte::Corps.riche_ton(ui, Ton::Discret, marque));
+            ui.add_space(espace::S);
+        });
+        ui.vertical(|ui| ligne(ui, frags, Habit::ORDINAIRE, ou));
+    });
+}
+
+/// Des lignes citées : en retrait, d'un ton effacé, un filet à gauche sur
+/// toute leur hauteur.
+fn citation(ui: &mut egui::Ui, blocs: &[markup::Bloc<'_>], ou: impl Fn(usize) -> egui::Id) {
+    const FILET: f32 = 3.0;
+    let cadre = egui::Frame::NONE
+        .inner_margin(egui::Margin { left: (FILET + espace::M) as i8, ..egui::Margin::ZERO })
+        .show(ui, |ui| {
+            for (k, bloc) in blocs.iter().enumerate() {
+                ligne(ui, bloc.fragments(), Habit::CITE, ou(k));
+            }
+        })
+        .response
+        .rect;
+    let filet = egui::Rect::from_min_size(cadre.min, egui::vec2(FILET, cadre.height()));
+    ui.painter().rect_filled(filet, FILET / 2.0, ki_ui::jetons::couleur::BORDER_STRONG);
+}
+
+/// Un spoiler : un pavé opaque tant qu'on n'a pas cliqué dessus. Le clic le
+/// dévoile, un autre le recouvre. Ce qu'on a dévoilé le reste le temps de la
+/// session, pas d'un lancement à l'autre.
+fn spoiler(ui: &mut egui::Ui, riche: RichText, ou: egui::Id) {
+    let vu = ui.data(|d| d.get_temp::<bool>(ou)).unwrap_or(false);
+    let reponse = if vu {
+        ki_ui::emoji::label_avec(ui, riche.background_color(theme::BG_RAISED), |l| l.sense(Sense::click()))
+    } else {
+        // L'encre de la couleur du pavé : rien ne se lit, et le texte ne se
+        // sélectionne pas — on ne le copie pas sans l'avoir dévoilé.
+        let pave = ki_ui::jetons::couleur::BORDER_STRONG;
+        ui.add(egui::Label::new(riche.color(pave).background_color(pave)).sense(Sense::click()).selectable(false))
+            .on_hover_text("Spoiler : clique pour le voir")
+    };
+    if reponse.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        ui.data_mut(|d| d.insert_temp(ou, !vu));
+    }
+}
+
+/// `ou` : de quoi retrouver ce fragment d'une image à l'autre.
+pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>, habit: Habit, ou: egui::Id) {
     use markup::Fragment as F;
     match frag {
         F::Texte(t) => {
-            ki_ui::emoji::label(ui, Texte::Corps.riche(ui, *t));
+            ki_ui::emoji::label(ui, habit.riche(ui, t, false));
         }
         F::Lien(url) => {
-            ui.hyperlink_to(RichText::new(shorten(url)).size(texte::CORPS), *url)
+            ui.hyperlink_to(RichText::new(shorten(url)).size(habit.taille), *url)
+                .on_hover_text(*url);
+        }
+        F::LienNomme { texte, url } => {
+            // L'adresse vraie au survol : le nom ne dit pas où l'on va.
+            ui.hyperlink_to(RichText::new(*texte).size(habit.taille), *url)
                 .on_hover_text(*url);
         }
         F::Gras(t) => {
-            ki_ui::emoji::label(ui, Texte::Corps.gras(ui, *t));
+            ki_ui::emoji::label(ui, habit.riche(ui, t, true));
         }
         F::Italique(t) => {
-            ki_ui::emoji::label(ui, Texte::Corps.riche(ui, *t).italics());
+            ki_ui::emoji::label(ui, habit.riche(ui, t, false).italics());
         }
+        F::Barre(t) => {
+            ki_ui::emoji::label(ui, habit.riche(ui, t, false).strikethrough());
+        }
+        F::Souligne(t) => {
+            ki_ui::emoji::label(ui, habit.riche(ui, t, false).underline());
+        }
+        F::Spoiler(t) => spoiler(ui, habit.riche(ui, t, false), ou),
         F::Code(t) => {
             // Fond discret : ce qui distingue du code d'une phrase, c'est
             // la chasse fixe et un léger relief, pas une couleur criarde.
             ui.label(
-                Texte::Corps.riche(ui, *t).monospace().background_color(theme::BG_RAISED),
+                habit.riche(ui, t, false).monospace().background_color(theme::BG_RAISED),
             );
         }
         F::Mention { pseudo, moi } => {
@@ -563,7 +681,7 @@ pub(crate) fn peindre_fragment(ui: &mut egui::Ui, frag: &markup::Fragment<'_>) {
             };
             ui.label(
                 RichText::new(format!("@{pseudo}"))
-                    .size(texte::CORPS)
+                    .size(habit.taille)
                     .color(couleur)
                     .background_color(fond),
             );

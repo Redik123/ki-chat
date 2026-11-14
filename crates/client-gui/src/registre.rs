@@ -31,6 +31,7 @@ pub(crate) enum Action {
     Gras,
     Italique,
     Code,
+    Barre,
     Reglages,
     Raccourcis,
     Compte,
@@ -65,7 +66,7 @@ impl Groupe {
 }
 
 impl Action {
-    pub(crate) const TOUTES: [Action; 19] = [
+    pub(crate) const TOUTES: [Action; 20] = [
         Action::AllerA,
         Action::Palette,
         Action::Chercher,
@@ -76,6 +77,7 @@ impl Action {
         Action::Gras,
         Action::Italique,
         Action::Code,
+        Action::Barre,
         Action::Reglages,
         Action::Raccourcis,
         Action::Compte,
@@ -100,6 +102,7 @@ impl Action {
             Action::Gras => "gras",
             Action::Italique => "italique",
             Action::Code => "code",
+            Action::Barre => "barre",
             Action::Reglages => "reglages",
             Action::Raccourcis => "raccourcis",
             Action::Compte => "compte",
@@ -126,6 +129,7 @@ impl Action {
             Action::Gras => "Gras",
             Action::Italique => "Italique",
             Action::Code => "Code",
+            Action::Barre => "Barré",
             Action::Reglages => "Réglages",
             Action::Raccourcis => "Raccourcis clavier",
             Action::Compte => "Mon compte",
@@ -147,7 +151,7 @@ impl Action {
             | Action::SalonPrecedent
             | Action::NonLuSuivant
             | Action::NonLuPrecedent => Groupe::Aller,
-            Action::Gras | Action::Italique | Action::Code => Groupe::Ecrire,
+            Action::Gras | Action::Italique | Action::Code | Action::Barre => Groupe::Ecrire,
             Action::Reglages | Action::Raccourcis | Action::Compte | Action::Valorant | Action::Tableau | Action::Claude => {
                 Groupe::Fenetres
             }
@@ -169,6 +173,7 @@ impl Action {
             Action::Gras => Combinaison::ctrl(Key::B),
             Action::Italique => Combinaison::ctrl(Key::I),
             Action::Code => Combinaison::ctrl(Key::E),
+            Action::Barre => Combinaison::ctrl(Key::X).et_maj(),
             Action::Reglages => Combinaison::ctrl(Key::Comma),
             Action::Raccourcis => Combinaison::ctrl(Key::Slash),
             Action::Compte
@@ -357,7 +362,8 @@ impl Combinaison {
         }
         if self.ctrl && !self.alt {
             let quoi = match t {
-                Key::C | Key::V | Key::X => Some("copier, couper, coller"),
+                // Avec Maj, ce ne sont plus elles : Ctrl+Maj+X reste libre.
+                Key::C | Key::V | Key::X if !self.maj => Some("copier, couper, coller"),
                 Key::A => Some("tout sélectionner"),
                 Key::Z | Key::Y => Some("annuler, refaire"),
                 Key::Plus | Key::Minus | Key::Equals | Key::Num0 => Some("la taille de l'interface"),
@@ -621,6 +627,7 @@ mod tests {
         assert_eq!(Combinaison::ctrl(Key::Enter).acceptable(), Err(Refus::ToucheReservee));
         assert_eq!(seule(Key::Escape).acceptable(), Err(Refus::ToucheReservee));
         assert!(matches!(Combinaison::ctrl(Key::C).acceptable(), Err(Refus::DejaAuSysteme(_))));
+        assert_eq!(Combinaison::ctrl(Key::X).et_maj().acceptable(), Ok(()), "avec Maj, ce n'est plus couper");
         assert!(matches!(Combinaison::ctrl(Key::Z).et_maj().acceptable(), Err(Refus::DejaAuSysteme(_))));
         assert!(matches!(Combinaison::ctrl(Key::Num0).acceptable(), Err(Refus::DejaAuSysteme(_))));
         assert!(matches!(Combinaison::alt(Key::F4).acceptable(), Err(Refus::DejaAuSysteme(_))));
